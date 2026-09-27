@@ -553,6 +553,16 @@ check_boolean_parameters() {
         "            \`enum class ordering_t : bool { ascending_k, descending_k };\`:"
 }
 
+# Triple-chevron launches report nothing at the call: a bad configuration, too much shared memory or a missing
+# image surfaces as a sticky error at whichever call reads it next. `cuda_launch` answers the launch's own status.
+check_chevron_launches() {
+    local chevrons
+    chevrons=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns | grep -E '<<<' || true)
+    [ -z "$chevrons" ] || fail "$chevrons" \
+        "$file launches a kernel with <<<>>> - call cuda_launch from utilities/vram_device.hpp, which returns" \
+        "            the launch's status_t:"
+}
+
 # A function that opens with `auto` and names its result after the signature buries the one thing a
 # reader scans a header for. Spell the type first, qualifying it where an out-of-class definition
 # needs it. Lambdas, deduction guides and `requires` clauses keep their arrows - they have no other
@@ -928,6 +938,18 @@ check_workflow_names() {
         "            the Actions UI and branch protection both reference it by name:"
 }
 
+# The CPython bindings parse arguments and build results by hand: `PyArg_Parse*` and `Py_BuildValue` interpret a
+# format string at runtime, so a wrong specifier is a crash rather than a compile error, and their error paths are
+# the interpreter's rather than ours.
+check_cpython_format_shortcuts() {
+    local shortcuts
+    shortcuts=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+        grep -E '\b(Py_BuildValue|PyArg_Parse[A-Za-z]*|PyArg_UnpackTuple)[[:space:]]*\(' || true)
+    [ -z "$shortcuts" ] || fail "$shortcuts" \
+        "$file calls a format-string shortcut of the C API - walk the arguments by hand and build results with" \
+        "            PyDict_New / PyLong_FromSize_t and usearch_py_dict_steal_item:"
+}
+
 # `sys.version` is a display string whose shape is not contractual; every question about the
 # running interpreter has a structured answer.
 check_python_version_probe() {
@@ -1039,6 +1061,7 @@ for file in "${staged[@]}"; do
     include/*.h | include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh)
         check_stl_dynamic_containers
         check_boolean_parameters
+        check_chevron_launches
         ;;&
     # The shipped library and the GenMC clients that spell its protocols line for line.
     include/*.h | include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh | verification/*.cpp)
@@ -1056,6 +1079,7 @@ for file in "${staged[@]}"; do
         check_banner_rules
         check_python_version_probe
         ;;
+    python/*.c | python/*.h) check_cpython_format_shortcuts ;;
     .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
     esac
     case "$file" in

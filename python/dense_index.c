@@ -836,6 +836,69 @@ static PyObject* DenseIndex_refine(PyObject* self, PyObject* const* args, Py_ssi
     return PyLong_FromSize_t(changed);
 }
 
+static char const doc_DenseIndex_health[] =                                                    //
+    "health(*, executor) -> dict\n"                                                            //
+    "\n"                                                                                       //
+    "Audit how much of the graph a search can reach, sweeping forward reachability from as\n"  //
+    "many landmarks as one search draws. Read-only.\n"                                         //
+    "\n"                                                                                       //
+    "Args:\n"                                                                                  //
+    "  executor (Executor): The workers to fan out over; its residency must match.\n"          //
+    "Returns:\n"                                                                               //
+    "  dict: 'audited' entries published when the audit started, the 'reachable' ones among\n" //
+    "    them, and the 'sweeps' it took to converge.\n"                                        //
+    "\n"                                                                                       //
+    "Example:\n"                                                                               //
+    "  >>> from array import array\n"                                                          //
+    "  >>> index = usearch.DenseIndex.for_ram(dimensions=4)\n"                                 //
+    "  >>> index.reserve(1)\n"                                                                 //
+    "  >>> pool = usearch.Executor.for_ram()\n"                                                //
+    "  >>> _ = index.add([1], array('d', [0.1, 0.2, 0.3, 0.4]), executor=pool)\n"              //
+    "  >>> health = index.health(executor=pool)\n"                                             //
+    "  >>> health['reachable'] == health['audited'] == 1\n"                                    //
+    "  True";
+
+static PyObject* DenseIndex_health(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
+                                   PyObject* args_names_tuple) {
+    DenseIndex* const index = (DenseIndex*)self;
+    if (index_alive(index) != 0) return NULL;
+
+    usearch_executor_t executor = NULL;
+    Py_ssize_t const args_names_count = usearch_py_args_names_count_checked("health", positional_args_count,
+                                                                            args_names_tuple, 0);
+    if (args_names_count < 0) return NULL;
+    for (Py_ssize_t names_progress = 0, args_progress = positional_args_count; names_progress != args_names_count;
+         ++args_progress, ++names_progress) {
+        PyObject* const name = PyTuple_GET_ITEM(args_names_tuple, names_progress);
+        PyObject* const value = args[args_progress];
+        if (PyUnicode_CompareWithASCIIString(name, "executor") == 0) {
+            if (usearch_py_executor_from_object(value, &executor) != 0) return NULL;
+        }
+        else {
+            PyErr_Format(PyExc_TypeError, "Got unexpected keyword argument: %S", name);
+            return NULL;
+        }
+    }
+    if (executor_named(executor, "health") != 0) return NULL;
+
+    usearch_error_t error = {0};
+    usearch_dense_health_t health = {0};
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_dense_health(index->handle, executor, &health, &error);
+    Py_END_ALLOW_THREADS;
+    if (usearch_py_raise_on_error(&error) != 0) return NULL;
+
+    PyObject* const result = PyDict_New();
+    if (!result) return NULL;
+    if (usearch_py_dict_steal_item(result, "audited", PyLong_FromSize_t(health.audited)) != 0 ||
+        usearch_py_dict_steal_item(result, "reachable", PyLong_FromSize_t(health.reachable)) != 0 ||
+        usearch_py_dict_steal_item(result, "sweeps", PyLong_FromSize_t(health.sweeps)) != 0) {
+        Py_DECREF(result);
+        return NULL;
+    }
+    return result;
+}
+
 #pragma endregion Ingest
 
 #pragma region Search
@@ -2151,11 +2214,18 @@ static PyObject* DenseIndex_metadata(PyObject* type, PyObject* source) {
     }
     if (usearch_py_raise_on_error(&error) != 0) return NULL;
 
-    return Py_BuildValue("{s:n,s:s,s:s,s:n}",                                        //
-                         "dimensions", (Py_ssize_t)metadata.dimensions,              //
-                         "metric", usearch_dense_metric_name(metadata.metric),       //
-                         "quantization", usearch_scalar_name(metadata.quantization), //
-                         "connectivity", (Py_ssize_t)metadata.connectivity);
+    PyObject* const result = PyDict_New();
+    if (!result) return NULL;
+    if (usearch_py_dict_steal_item(result, "dimensions", PyLong_FromSize_t(metadata.dimensions)) != 0 ||
+        usearch_py_dict_steal_item(result, "metric",
+                                   PyUnicode_FromString(usearch_dense_metric_name(metadata.metric))) != 0 ||
+        usearch_py_dict_steal_item(result, "quantization",
+                                   PyUnicode_FromString(usearch_scalar_name(metadata.quantization))) != 0 ||
+        usearch_py_dict_steal_item(result, "connectivity", PyLong_FromSize_t(metadata.connectivity)) != 0) {
+        Py_DECREF(result);
+        return NULL;
+    }
+    return result;
 }
 
 #pragma endregion Serialization
@@ -2170,6 +2240,7 @@ static PyMethodDef DenseIndex_methods[] = {
     {"clear", (PyCFunction)DenseIndex_clear, METH_NOARGS, doc_DenseIndex_clear},                                     //
     {"add", (PyCFunction)DenseIndex_add, usearch_py_method_flags_k, doc_DenseIndex_add},                             //
     {"refine", (PyCFunction)DenseIndex_refine, usearch_py_method_flags_k, doc_DenseIndex_refine},                    //
+    {"health", (PyCFunction)DenseIndex_health, usearch_py_method_flags_k, doc_DenseIndex_health},                    //
     {"search", (PyCFunction)DenseIndex_search, usearch_py_method_flags_k, doc_DenseIndex_search},                    //
     {"count", (PyCFunction)DenseIndex_count, METH_O, doc_DenseIndex_count},                                          //
     {"get", (PyCFunction)DenseIndex_get, usearch_py_method_flags_k, doc_DenseIndex_get},                             //

@@ -1076,96 +1076,8 @@ struct dense_ram_index {
         small_size_t expansion_factor = 0;
     };
 
-    /** Telemetry of one @c refine() sweep; a sweep that started never fails. */
-    struct [[nodiscard]] refine_result_t {
-
-        /** Published nodes the sweep re-selected - the progress unit. */
-        std::size_t visited_nodes = 0;
-
-        /** Nodes whose neighbors differ as a set from before - the settling signal. */
-        std::size_t changed_nodes = 0;
-
-        /** Frontier candidates expanded across all per-node walks of the sweep. */
-        std::size_t visited_members = 0;
-
-        /** Total distance computations, with padding lanes of 4-way kernels excluded. */
-        std::size_t computed_distances = 0;
-
-        /** Subset of @c computed_distances spent in the forward diversity selection. */
-        std::size_t computed_distances_in_refines = 0;
-
-        /** Subset of @c computed_distances spent re-selecting a full neighbor set while back-linking. */
-        std::size_t computed_distances_in_reverse_refines = 0;
-
-        /** Starvation restarts across the sweep - a graph-connectivity health signal. */
-        std::size_t restarts = 0;
-
-        /** Walks a scratch refusal ended early; their rows re-selected from a shorter pool. */
-        std::size_t saturated_walks = 0;
-    };
-
-    /**
-     *  @brief Re-selects the neighbors of every published node in @p nodes against the graph as
-     *      it stands and back-links every one kept - an insertion's wiring, replayed over stored
-     *      nodes with each node's own vector as the query.
-     *
-     *  The watermark never moves, so searches run throughout. Threads may sweep disjoint ranges
-     *  concurrently: a peer back-linking into a node between its read and its rewrite loses that
-     *  write, and the next sweep restores it. Insertions may not overlap - the same drop would
-     *  orphan a fresh node. @ref dense_ram_index_concurrency
-     *
-     *  @param[in] nodes The ID range to sweep; IDs at or past the watermark are skipped.
-     *  @param[inout] context The calling thread's scratch & telemetry, reused across sweeps.
-     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
-     */
-    expected<refine_result_t> refine(iota_view<node_id_t> nodes, dense_traversal_context_t& context,
-                                     refine_config_t config = {}) noexcept {
-        geometry_t const frozen = geometry();
-        if (!frozen) return {{}, status_t::uninitialized_k};
-        std::size_t const expansion_factor = non_zero_expansion_factor(config);
-        if (status_t const sized = reserve_traversal(context, insert_config_t {config.expansion_factor}); failed(sized))
-            return {{}, sized};
-
-        // Snapshot the context's running telemetry, to report this sweep's share on return.
-        std::size_t const visited_members_before = context.visited_members;
-        std::size_t const computed_distances_before = context.computed_distances;
-        std::size_t const refines_before = context.computed_distances_in_refines;
-        std::size_t const reverse_refines_before = context.computed_distances_in_reverse_refines;
-        std::size_t const restarts_before = context.restarts;
-        std::size_t const saturated_walks_before = context.saturated_walks;
-
-        // IDs at or past the watermark are unpublished, so the sweep ends at the lower bound.
-        node_id_t const first_invisible_id = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
-        node_id_t const bound = min_of(nodes.bound, first_invisible_id);
-        refine_result_t result;
-        for (node_id_t node_id = nodes.first; node_id < bound; ++node_id) {
-            result.changed_nodes += refine_one_(node_id, first_invisible_id, expansion_factor, context);
-            ++result.visited_nodes;
-        }
-
-        result.visited_members = context.visited_members - visited_members_before;
-        result.computed_distances = context.computed_distances - computed_distances_before;
-        result.computed_distances_in_refines = context.computed_distances_in_refines - refines_before;
-        result.computed_distances_in_reverse_refines = context.computed_distances_in_reverse_refines -
-                                                       reverse_refines_before;
-        result.restarts = context.restarts - restarts_before;
-        result.saturated_walks = context.saturated_walks - saturated_walks_before;
-        return {result, status_t::success_k};
-    }
-
-#pragma endregion Refinement
-
-#pragma region Health
-
-    /** Outcome of one reachability audit. */
-    struct health_result_t {
-
-        /** Nodes forward-reachable from the landmark seeds - the searcher's view. */
-        std::size_t reachable_nodes = 0;
-
-        /** Level-synchronous sweeps to convergence - a diameter proxy. */
-        std::size_t sweeps = 0;
-    };
+    using refine_result_t = dense_refine_result_t;
+    using health_result_t = dense_health_result_t;
 
     /**
      *  @brief One reachability audit in flight: a landmark sweep over the published nodes, one
@@ -1312,6 +1224,7 @@ struct dense_ram_index {
             if (!index_) return {{}, status_t::uninitialized_k};
             if (expanded_in_level_) return {{}, status_t::internal_k};
             health_result_t result;
+            result.audited_nodes = visible;
             for (u64_t const word : reached_) result.reachable_nodes += static_cast<std::size_t>(std::popcount(word));
             result.sweeps = sweeps_;
             return {result, status_t::success_k};
@@ -1365,87 +1278,149 @@ struct dense_ram_index {
                 status_t::success_k};
     }
 
-    /** Outcome of one healing pass. */
-    struct heal_result_t {
-
-        /** The converged audit the pass ended on. */
-        health_result_t health;
-
-        /** Nodes the first audit found unreachable - all re-selected. */
-        std::size_t islands_found = 0;
-
-        /** Nodes the re-selection left unreached, each then reconnected into a reachable pick. */
-        std::size_t islands_reconnected = 0;
-
-        /** Frontier candidates expanded across the islands' re-selection walks. */
-        std::size_t visited_members = 0;
-
-        /** Distances computed across the islands' re-selection. */
-        std::size_t computed_distances = 0;
-    };
-
     /**
-     *  @brief One healing pass in flight over an audit: the islands the sweep leaves are
-     *      re-selected through the refinement, the bitsets restart, and whatever the diversity
-     *      judgment still drops is reconnected into a reachable forward pick, round by round.
+     *  @brief One refinement pass in flight: the planned range is re-selected, reachability swept level by level, and
+     *      the islands re-selected and reconnected round by round while their count shrinks. An empty range heals.
      *
-     *  Every phase fans out over the audit's steps on any threads; @ref reselect_islands and
-     *  @ref reconnect_islands edit under the per-node locks like an insertion. The round
-     *  structure is the caller's, driven while @ref islands_left keeps shrinking. Insertions may
-     *  not overlap.
+     *  Steps of the current phase are disjoint ID ranges, so any number of threads may @ref run them at once;
+     *  @ref advance is the single-caller barrier between phases and answers whether another phase follows.
+     *  Re-selection and grafts edit under the per-node locks like an insertion, so searches run throughout and a pass
+     *  stopped between steps leaves the graph correct. Insertions may not overlap.
      */
-    struct heal_plan_t {
+    struct refine_plan_t {
         using step_t = typename health_plan_t::step_t;
 
-        /** The audit the pass heals against; @ref restart_sweep it between phases. */
+        /** The audit the heal phases sweep. */
         health_plan_t audit;
 
-        /** An unbound pass over @p allocator - what a refused heal answers with. */
-        explicit heal_plan_t(typename health_plan_t::bitset_allocator_t const& allocator) noexcept : audit(allocator) {}
-        heal_plan_t(dense_ram_index& index, health_plan_t&& audit) noexcept : audit(std::move(audit)), index_(&index) {}
-        heal_plan_t(heal_plan_t&& other) noexcept
-            : audit(std::move(other.audit)), index_(std::exchange(other.index_, nullptr)),
-              islands_found_(other.islands_found_), islands_reconnected_(other.islands_reconnected_),
-              visited_members_(other.visited_members_), computed_distances_(other.computed_distances_) {}
-        heal_plan_t(heal_plan_t const&) = delete;
-        heal_plan_t& operator=(heal_plan_t const&) = delete;
+        /** An unbound pass over @p audit - what a refused plan answers with. */
+        explicit refine_plan_t(health_plan_t&& audit) noexcept : audit(std::move(audit)) {}
+        refine_plan_t(dense_ram_index& index, health_plan_t&& audit, iota_view<node_id_t> nodes,
+                      std::size_t expansion_factor) noexcept
+            : audit(std::move(audit)), index_(&index), nodes_(nodes), expansion_factor_(expansion_factor),
+              phase_(nodes.empty() ? phase_t::sweep_k : phase_t::reselect_k) {}
+        refine_plan_t(refine_plan_t&& other) noexcept
+            : audit(std::move(other.audit)), index_(std::exchange(other.index_, nullptr)), nodes_(other.nodes_),
+              expansion_factor_(other.expansion_factor_), phase_(other.phase_), swept_after_(other.swept_after_),
+              islands_before_(other.islands_before_), tally_(other.tally_) {}
+        refine_plan_t(refine_plan_t const&) = delete;
+        refine_plan_t& operator=(refine_plan_t const&) = delete;
 
-        indexed_range<health_plan_t> steps() const noexcept { return audit.steps(); }
-        std::size_t sweep(step_t const& step) noexcept { return audit.sweep(step); }
-        std::size_t advance_level() noexcept { return audit.advance_level(); }
-        void restart_sweep() noexcept { audit.restart_sweep(); }
-
-        /** Re-selects the neighbors of every island in @p step through the refinement's own
-         *  per-node pass. Counts the islands as found on the first call per pass. */
-        expected<refine_result_t> reselect_islands(step_t const& step, dense_traversal_context_t& context) noexcept {
-            if (!index_) return {{}, status_t::uninitialized_k};
-            std::size_t const expansion_factor = index_->non_zero_expansion_factor(refine_config_t {});
-            if (status_t const sized = index_->reserve_traversal(context); failed(sized)) return {{}, sized};
-            refine_result_t result;
-            std::size_t const visited_before = context.visited_members;
-            std::size_t const computed_before = context.computed_distances;
-            for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
-                if (audit.reached(node_id)) continue;
-                result.changed_nodes += index_->refine_one_(node_id, audit.visible, expansion_factor, context);
-                ++result.visited_nodes;
-            }
-            result.visited_members = context.visited_members - visited_before;
-            result.computed_distances = context.computed_distances - computed_before;
-            atomic_ref<std::size_t>(islands_found_).fetch_add(result.visited_nodes, std::memory_order_relaxed);
-            atomic_ref<std::size_t>(visited_members_).fetch_add(result.visited_members, std::memory_order_relaxed);
-            atomic_ref<std::size_t>(computed_distances_)
-                .fetch_add(result.computed_distances, std::memory_order_relaxed);
-            return {result, status_t::success_k};
+        /** Step @p position of the current phase; an empty step past the end. */
+        step_t operator[](std::size_t position) const noexcept {
+            if (phase_ != phase_t::reselect_k) return audit[position];
+            step_t step;
+            if (position >= steps().size()) return step;
+            std::size_t const first = nodes_.first + (position << first_chunk_rows_log2_k);
+            std::size_t const bound = min_of(first + power_of_two<std::size_t>(first_chunk_rows_log2_k),
+                                             static_cast<std::size_t>(nodes_.bound));
+            step.position = position;
+            step.nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
+            return step;
         }
 
-        /**
-         *  @brief Grafts every island in @p step into its nearest reached neighbor - a free slot
-         *      when there is one, otherwise a landing spread across the tail, so island clusters
-         *      sharing one target heal in one round rather than overwriting each other.
-         *  @return The islands this call reconnected.
-         */
-        std::size_t reconnect_islands(step_t const& step, dense_traversal_context_t& context) noexcept {
-            if (!index_) return 0;
+        /** The current phase's steps, positionally; none once the pass is over. */
+        indexed_range<refine_plan_t> steps() const noexcept {
+            if (!index_ || phase_ == phase_t::done_k) return {this, 0u};
+            if (phase_ != phase_t::reselect_k) return {this, audit.steps().size()};
+            return {this,
+                    divide_round_up<std::size_t>(nodes_.size(), power_of_two<std::size_t>(first_chunk_rows_log2_k))};
+        }
+
+        /** Runs @p step of the current phase on the calling thread - safe for disjoint steps of one phase. */
+        status_t run(step_t const& step, dense_traversal_context_t& context) noexcept {
+            if (!index_) return status_t::uninitialized_k;
+            switch (phase_) {
+            case phase_t::reselect_k:
+            case phase_t::reselect_islands_k: return reselect_(step, context);
+            case phase_t::sweep_k: audit.sweep(step); return status_t::success_k;
+            case phase_t::reconnect_k: reconnect_(step, context); return status_t::success_k;
+            default: return status_t::success_k;
+            }
+        }
+
+        /** The barrier between phases, one caller after every step of the current one ran: picks the next phase
+         *  and answers whether one follows. */
+        bool advance() noexcept {
+            if (!index_) return false;
+            if (phase_ == phase_t::sweep_k) {
+                ++tally_.sweeps;
+                if (!audit.advance_level()) converge_();
+            }
+            else if (phase_ != phase_t::done_k) {
+                audit.restart_sweep();
+                swept_after_ = phase_;
+                phase_ = phase_t::sweep_k;
+            }
+            return phase_ != phase_t::done_k;
+        }
+
+        /** Whether the current phase re-selects the planned range - the phase a caller's progress counts. */
+        bool reselecting() const noexcept { return phase_ == phase_t::reselect_k; }
+
+        /** The pass so far: complete once @ref advance answered false, otherwise @c cancelled_k. */
+        expected<refine_result_t> finish() const noexcept {
+            if (!index_) return {{}, status_t::uninitialized_k};
+            return {tally_, phase_ == phase_t::done_k ? status_t::success_k : status_t::cancelled_k};
+        }
+
+      private:
+        enum class phase_t : u8_t { reselect_k, sweep_k, reselect_islands_k, reconnect_k, done_k };
+
+        static void add_(std::size_t& into, std::size_t value) noexcept {
+            atomic_ref<std::size_t>(into).fetch_add(value, std::memory_order_relaxed);
+        }
+
+        /** Picks what follows a converged audit, from the phase the audit followed. */
+        void converge_() noexcept {
+            auto const [health, status] = audit.finish();
+            std::size_t const left = succeeded(status) ? audit.visible - health.reachable_nodes : 0;
+            tally_.reachable_nodes = health.reachable_nodes;
+            if (swept_after_ == phase_t::reselect_k) {
+                tally_.islands_found = left;
+                phase_ = left ? phase_t::reselect_islands_k : phase_t::done_k;
+            }
+            else if (swept_after_ == phase_t::reselect_islands_k) {
+                phase_ = left ? phase_t::reconnect_k : phase_t::done_k;
+            }
+            // A round that frees no island frees none on the next either, since the picks it needs are unreached.
+            else { phase_ = left && left < islands_before_ ? phase_t::reselect_islands_k : phase_t::done_k; }
+            if (swept_after_ != phase_t::reselect_islands_k) islands_before_ = left;
+        }
+
+        /** Re-selects every node of @p step, or only its islands once the heal rounds began. */
+        status_t reselect_(step_t const& step, dense_traversal_context_t& context) noexcept {
+            if (status_t const sized = index_->reserve_traversal(
+                    context, insert_config_t {static_cast<small_size_t>(expansion_factor_)});
+                failed(sized))
+                return sized;
+            std::size_t const visited_members_before = context.visited_members;
+            std::size_t const computed_distances_before = context.computed_distances;
+            std::size_t const refines_before = context.computed_distances_in_refines;
+            std::size_t const reverse_refines_before = context.computed_distances_in_reverse_refines;
+            std::size_t const restarts_before = context.restarts;
+            std::size_t const saturated_walks_before = context.saturated_walks;
+            std::size_t visited = 0, changed = 0;
+            for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
+                if (phase_ == phase_t::reselect_islands_k && audit.reached(node_id)) continue;
+                changed += index_->refine_one_(node_id, audit.visible, expansion_factor_, context);
+                ++visited;
+            }
+            add_(tally_.visited_nodes, visited);
+            add_(tally_.changed_nodes, changed);
+            add_(tally_.visited_members, context.visited_members - visited_members_before);
+            add_(tally_.computed_distances, context.computed_distances - computed_distances_before);
+            add_(tally_.computed_distances_in_refines, context.computed_distances_in_refines - refines_before);
+            add_(tally_.computed_distances_in_reverse_refines,
+                 context.computed_distances_in_reverse_refines - reverse_refines_before);
+            add_(tally_.restarts, context.restarts - restarts_before);
+            add_(tally_.saturated_walks, context.saturated_walks - saturated_walks_before);
+            return status_t::success_k;
+        }
+
+        /** Grafts every island in @p step into its nearest reached neighbor - a free slot when there is one,
+         *  otherwise a landing spread across the tail, so islands sharing one target heal in one round. */
+        void reconnect_(step_t const& step, dense_traversal_context_t& context) noexcept {
             std::size_t reconnected = 0;
             small_size_t const connectivity = static_cast<small_size_t>(index_->connectivity());
             small_size_t const spread = min_of<small_size_t>(16u, connectivity / 2);
@@ -1471,7 +1446,7 @@ struct dense_ram_index {
                     ++reconnected;
                     continue;
                 }
-                small_size_t landing = connectivity - 1 - static_cast<small_size_t>(island % spread);
+                small_size_t landing = connectivity;
                 bool present = displaced == island;
                 for (small_size_t slot = 1; slot != connectivity && !present; ++slot) {
                     node_id_t const resident = target_neighbors.load_slot(slot);
@@ -1481,63 +1456,80 @@ struct dense_ram_index {
                         break;
                     }
                 }
+                // No free slot: a tail slot spread by ID, never one a sibling island landed in this round.
+                for (small_size_t attempt = 0; landing == connectivity && attempt != spread; ++attempt) {
+                    small_size_t const slot = connectivity - 1 - static_cast<small_size_t>((island + attempt) % spread);
+                    node_id_t const resident = target_neighbors.load_slot(slot);
+                    if (resident < audit.visible && audit.reached(resident)) landing = slot;
+                }
+                if (landing == connectivity) {
+                    target_neighbors.unlock(displaced);
+                    continue;
+                }
                 if (!present) {
                     target_neighbors.store_slot(landing, island);
                     ++reconnected;
                 }
                 target_neighbors.unlock(displaced);
             }
-            atomic_ref<std::size_t>(islands_reconnected_).fetch_add(reconnected, std::memory_order_relaxed);
-            return reconnected;
+            add_(tally_.islands_reconnected, reconnected);
         }
 
-        /** Islands left after the last converged sweep - the caller's stopping test. */
-        std::size_t islands_left() const noexcept {
-            auto const [health, status] = audit.finish();
-            return succeeded(status) ? static_cast<std::size_t>(audit.visible) - health.reachable_nodes : 0;
-        }
-
-        /** The report of the whole pass, the converged audit inside it. */
-        expected<heal_result_t> finish() const noexcept {
-            if (!index_) return {{}, status_t::uninitialized_k};
-            auto const [health, status] = audit.finish();
-            if (failed(status)) return {{}, status};
-            heal_result_t result;
-            result.health = health;
-            result.islands_found = islands_found_;
-            result.islands_reconnected = islands_reconnected_;
-            result.visited_members = visited_members_;
-            result.computed_distances = computed_distances_;
-            return {result, status_t::success_k};
-        }
-
-      private:
-
-        /** The healed index; null on a moved-from plan. */
+        /** The refined index; null on a moved-from plan. */
         dense_ram_index* index_ = nullptr;
 
-        /** Islands re-selected across the pass, summed through @c atomic_ref. */
-        std::size_t islands_found_ = 0;
+        /** The IDs the first phase re-selects, clamped to the audit's watermark. */
+        iota_view<node_id_t> nodes_;
 
-        /** Islands reconnected across the pass, summed through @c atomic_ref. */
-        std::size_t islands_reconnected_ = 0;
+        /** Breadth of every re-selection walk. */
+        std::size_t expansion_factor_ = 0;
 
-        /** Frontier candidates the re-selection walks expanded, summed through @c atomic_ref. */
-        std::size_t visited_members_ = 0;
+        /** The phase whose steps run now. */
+        phase_t phase_ = phase_t::done_k;
 
-        /** Distances the re-selection computed, summed through @c atomic_ref. */
-        std::size_t computed_distances_ = 0;
+        /** The phase the current audit follows - what decides the phase after it converges. */
+        phase_t swept_after_ = phase_t::reselect_k;
+
+        /** Islands the last round started from - the shrinking the rounds require. */
+        std::size_t islands_before_ = 0;
+
+        /** Counts summed through @c atomic_ref by the steps, and set by @ref advance. */
+        refine_result_t tally_;
     };
 
-    /** Opens a healing pass over a fresh audit - @ref plan_health with the same seeds. */
-    expected<heal_plan_t> plan_heal(dense_traversal_context_t& context) noexcept {
+    /** Opens a refinement pass over @p nodes, clamped to the published IDs, with a fresh audit seeded like
+     *  @ref plan_health; an empty range heals alone. The bitsets come from @p context 's allocator. */
+    expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, dense_traversal_context_t& context,
+                                        refine_config_t config = {}) noexcept {
         auto [audit, status] = plan_health(context);
-        if (failed(status))
-            return {heal_plan_t {typename health_plan_t::bitset_allocator_t {context.allocator_}}, status};
-        return {heal_plan_t {*this, std::move(audit)}, status_t::success_k};
+        if (failed(status)) return {refine_plan_t {std::move(audit)}, status};
+        if (!geometry()) return {refine_plan_t {std::move(audit)}, status_t::uninitialized_k};
+        node_id_t const bound = min_of(nodes.bound, audit.visible);
+        iota_view<node_id_t> const planned {min_of(nodes.first, bound), bound};
+        return {refine_plan_t {*this, std::move(audit), planned, non_zero_expansion_factor(config)},
+                status_t::success_k};
     }
 
-#pragma endregion Health
+    /**
+     *  @brief Re-selects the neighbors of every published node in @p nodes and heals whatever that strands - one
+     *      @ref refine_plan_t drained on the calling thread. An empty range heals alone.
+     *
+     *  @param[in] nodes The ID range to re-select; IDs at or past the watermark are skipped.
+     *  @param[inout] context The calling thread's scratch & telemetry, reused across passes.
+     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     */
+    expected<refine_result_t> refine(iota_view<node_id_t> nodes, dense_traversal_context_t& context,
+                                     refine_config_t config = {}) noexcept {
+        auto [plan, status] = plan_refine(nodes, context, config);
+        if (failed(status)) return {{}, status};
+        do
+            for (typename refine_plan_t::step_t const step : plan.steps())
+                if (status_t const ran = plan.run(step, context); failed(ran)) return {plan.finish().value, ran};
+        while (plan.advance());
+        return plan.finish();
+    }
+
+#pragma endregion Refinement
 
 #pragma region Search
 

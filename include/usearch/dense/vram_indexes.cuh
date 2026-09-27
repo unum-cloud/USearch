@@ -102,7 +102,6 @@ struct dense_vram_indexes {
     using refine_config_t = typename index_t::refine_config_t;
     using refine_result_t = typename index_t::refine_result_t;
     using health_result_t = typename index_t::health_result_t;
-    using heal_result_t = typename index_t::heal_result_t;
 
     /** One shard: the graph on its device, the keys of its rows on the host, and the batch in
      *  flight on it. Placement is not repeated - the index reports it through @c device_specs. */
@@ -321,7 +320,7 @@ struct dense_vram_indexes {
 #pragma region Refinement
 
     /**
-     *  @brief Re-selects the neighbors of every stored node, one shard at a time.
+     *  @brief Re-selects the neighbors of every stored node and heals whatever that strands, one shard at a time.
      *
      *  A shard's pass owns its device and drains its stream before returning, so the shards run one
      *  after another. A stopped pass leaves the graph correct and merely less improved, and the next
@@ -355,10 +354,9 @@ struct dense_vram_indexes {
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
             if (cudaSetDevice(one.device_specs().ordinal) != cudaSuccess) return {{}, status_t::device_error_k};
-            auto const [part, status] = one.refine({0, static_cast<dense_node_id_t>(one.size())}, traversals[shard],
-                                                   config);
-            if (failed(status)) return {{}, status};
+            auto const [part, status] = one.refine({0, dense_node_id_unknown_k}, traversals[shard], config);
             combine_refinement_(result, part);
+            if (failed(status)) return {result, status};
             if (on_visited(result.visited_nodes, published) == continuation_t::cancel_k)
                 return {result, status_t::cancelled_k};
         }
@@ -389,41 +387,6 @@ struct dense_vram_indexes {
             auto const [shard_health, status] = one.health(traversals[shard]);
             if (failed(status)) return {{}, status};
             combine_health_(result, shard_health);
-        }
-        return {result, status_t::success_k};
-    }
-
-    /**
-     *  @brief Re-links whatever no search can reach, shard by shard on its own device, each pass
-     *      running its rounds until the island population stops shrinking. Insertions and searches
-     *      may not overlap.
-     *  @param[inout] executor The streams and their scratch, one per shard.
-     */
-    expected<heal_result_t> heal(executor_t& executor) noexcept {
-        std::size_t const shards = shards_.size();
-        if (!shards) return {{}, status_t::uninitialized_k};
-        if (status_t const kept = status(); failed(kept)) return {{}, kept};
-        if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
-        auto [claim, claim_status] = executor.claim();
-        if (failed(claim_status)) return {{}, claim_status};
-        if (!mutating_.lock_if_free()) return {{}, status_t::contended_k};
-        std::lock_guard const mutating {mutating_, std::adopt_lock};
-
-        growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
-        if (status_t const ready = reserve_traversals_(traversals, executor, 1, insert_config_t {}); failed(ready))
-            return {{}, ready};
-
-        heal_result_t result;
-        for (std::size_t shard = 0; shard != shards; ++shard) {
-            index_t& one = *shards_[shard].index;
-            if (cudaSetDevice(one.device_specs().ordinal) != cudaSuccess) return {{}, status_t::device_error_k};
-            auto const [repair, status] = one.heal(traversals[shard]);
-            if (failed(status)) return {{}, status};
-            combine_health_(result.health, repair.health);
-            result.islands_found += repair.islands_found;
-            result.islands_reconnected += repair.islands_reconnected;
-            result.visited_members += repair.visited_members;
-            result.computed_distances += repair.computed_distances;
         }
         return {result, status_t::success_k};
     }
@@ -1352,14 +1315,22 @@ struct dense_vram_indexes {
     static void combine_refinement_(refine_result_t& into, refine_result_t const& one) noexcept {
         into.visited_nodes += one.visited_nodes;
         into.changed_nodes += one.changed_nodes;
+        into.islands_found += one.islands_found;
+        into.islands_reconnected += one.islands_reconnected;
+        into.reachable_nodes += one.reachable_nodes;
+        into.sweeps = max_of(into.sweeps, one.sweeps);
         into.visited_members += one.visited_members;
         into.computed_distances += one.computed_distances;
+        into.computed_distances_in_refines += one.computed_distances_in_refines;
+        into.computed_distances_in_reverse_refines += one.computed_distances_in_reverse_refines;
         into.restarts += one.restarts;
+        into.saturated_walks += one.saturated_walks;
     }
 
     /** Folds one shard's audit into the group's: populations add, and the depth is the deepest
      *  shard's, since a searcher waits for the last one. */
     static void combine_health_(health_result_t& into, health_result_t const& one) noexcept {
+        into.audited_nodes += one.audited_nodes;
         into.reachable_nodes += one.reachable_nodes;
         into.sweeps = max_of(into.sweeps, one.sweeps);
     }

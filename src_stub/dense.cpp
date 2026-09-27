@@ -506,6 +506,18 @@ std::size_t usearch_dense_refine(usearch_dense_index_t handle, usearch_executor_
     return 0;
 }
 
+void usearch_dense_health(usearch_dense_index_t handle, usearch_executor_t executor, usearch_dense_health_t* health,
+                          usearch_error_t* error) {
+    propagate_success(error);
+    *health = {};
+    index_t& index = borrowed<index_t>(handle);
+    if (reject_executor(executor, error)) return;
+    std::shared_lock readers(index.mutex);
+    // An exact scan reaches every entry it holds in one level.
+    std::size_t const entries = index.entries.size();
+    *health = {entries, entries, entries ? 1u : 0u};
+}
+
 /** The shared body of both search doors; the unfiltered one admits with a null predicate. */
 void search_matrix(usearch_dense_index_t handle, usearch_executor_t executor, usearch_matrix_view_t const* queries,
                    usearch_matches_span_t const* matches, usearch_dense_search_options_t const* options,

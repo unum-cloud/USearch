@@ -230,6 +230,13 @@ typedef struct Matches {
  */
 int usearch_py_raise_on_error(usearch_error_t const* error);
 
+/**
+ *  @brief Stores @p value under @p key in @p dict and drops the caller's reference to it, whether or not the store
+ *      succeeds - the step a hand-built result dict repeats per field, in place of a @c Py_BuildValue format.
+ *  @return -1 with an exception set when @p value is null or the store failed, 0 otherwise.
+ */
+int usearch_py_dict_steal_item(PyObject* dict, char const* key, PyObject* value);
+
 /** Raises @c ErrorType with @p status and a formatted message; always returns -1. */
 int usearch_py_raise(usearch_status_t status, char const* format, ...);
 

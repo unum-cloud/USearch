@@ -20,16 +20,17 @@ Capability files split beside the residency pairs as they grow - `icelake.hpp`, 
 
 ## Construction
 
-Every residency builds through the same three verbs, in this order:
+Every residency builds through the same two verbs, in this order:
 
 - `insert` wires each node against the graph as it stood, so a narrow `expansion_factor` ingests cheaply and leaves a graph whose picks a wider walk could improve on.
-- `refine` re-selects a node range's neighbors against the finished graph, back-linking as an insertion does.
-It claims no identity and moves no watermark, so searches run throughout and a stopped sweep merely leaves the graph less improved.
+- `refine` re-selects a node range's neighbors against the finished graph, back-linking as an insertion does, then heals whatever no search can reach: the audit's islands re-select from scratch, and whatever the diversity judgment still drops is reconnected into a reached pick, round after round while the island population shrinks.
+It claims no identity and moves no watermark, so a stopped pass merely leaves the graph less improved.
 Call it until a pass re-wires nothing; the first two passes carry most of the gain.
-- `heal` re-links whatever no search can reach: the audit's islands re-select from scratch, and whatever the diversity judgment still drops is reconnected into a reached pick, round after round while the island population shrinks.
+A `refine` over no nodes is the heal alone, which the plural layer names `heal`.
 
-`health` is the read-only half of `heal` - the same landmark sweep, reporting the reachable population and the levels it took, with no edit.
+`health` is the read-only audit the heal starts from - the same landmark sweep, reporting the reachable population and the levels it took, with no edit.
 Use it to judge a graph without changing it.
 
-The plural layer fans all four over one executor.
-The singular layer hands out plans instead - `plan_health` and `plan_heal` return disjoint ID ranges any number of threads may sweep, with the level and round boundaries left to the caller - since one index knows nothing about pools.
+Every layer and residency reports one `dense_refine_result_t`, whose counts mean the same everywhere.
+The plural layer fans the passes over one executor.
+The singular CPU layer hands out plans instead - `plan_refine` and `plan_health` cut each phase into disjoint ID ranges any number of threads may run, with `advance` the one barrier between phases - since one index knows nothing about pools.

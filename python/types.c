@@ -56,6 +56,13 @@ int usearch_py_raise_on_error(usearch_error_t const* error) {
     return usearch_py_raise(error->status, error->message);
 }
 
+int usearch_py_dict_steal_item(PyObject* dict, char const* key, PyObject* value) {
+    if (!value) return -1;
+    int const stored = PyDict_SetItemString(dict, key, value);
+    Py_DECREF(value);
+    return stored;
+}
+
 int usearch_py_raise_from_cause(PyObject* kind, char const* format, ...) {
     PyObject* const cause = PyErr_GetRaisedException();
     va_list arguments;

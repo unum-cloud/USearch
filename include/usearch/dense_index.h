@@ -389,10 +389,16 @@ USEARCH_EXPORT size_t usearch_dense_add(                        //
  *  converges, and a caller loops until the return falls below whatever change rate they consider
  *  settled.
  *
- *  Searches may run throughout. Neighbor re-selection publishes one node at a time and never
- *  removes a node, so a concurrent walk sees either the old neighbors or the new ones and reaches
- *  the same entries by either. Insertions may not: a handle whose checkpoint is read-only refuses
- *  with @c usearch_error_read_only_k, like every other mutating verb.
+ *  Re-selection alone can strand an entry no search reaches, so every call closes by re-linking
+ *  them: unreachable entries re-select from scratch, and whatever the diversity judgment still
+ *  drops is grafted into a reachable one. A cancelled call skips the rest of the re-selection but
+ *  still re-links, so it never leaves entries unreachable.
+ *
+ *  On a RAM handle searches may run throughout: re-selection publishes one node at a time and never
+ *  removes a node, so a concurrent walk sees either the old neighbors or the new ones. On a VRAM
+ *  handle the merge writes neighbors in place, so searches may not overlap. Insertions may not
+ *  overlap either: a handle whose checkpoint is read-only refuses with
+ *  @c usearch_error_read_only_k, like every other mutating verb.
  */
 USEARCH_EXPORT size_t usearch_dense_refine(                     //
     usearch_dense_index_t index, usearch_executor_t executor,   //
@@ -400,6 +406,35 @@ USEARCH_EXPORT size_t usearch_dense_refine(                     //
     usearch_progress_callback_t progress, void* progress_state, //
     usearch_dense_traversal_stats_t* stats,                     //
     usearch_error_t* error);
+
+/** One reachability audit: the population it judged, and how much of it a search reaches. */
+USEARCH_EXPORT typedef struct usearch_dense_health_t {
+
+    /** Entries published when the audit started - the population it judges; entries inserted
+     *  while it ran are not counted, so compare @c reachable against this, never a later size. */
+    size_t audited;
+
+    /** Of those, the entries a search reaches from the landmarks; the rest no search finds until
+     *  a @c usearch_dense_refine re-links them. */
+    size_t reachable;
+
+    /** Levels the sweep took to converge - a diameter proxy; the deepest shard's on a sharded handle. */
+    size_t sweeps;
+} usearch_dense_health_t;
+
+/**
+ *  @brief Audits how much of the graph a search can reach: forward reachability from as many
+ *      landmarks as one search draws, swept level by level. Read-only, so concurrent insertions
+ *      merely leave fresh entries unaudited.
+ *
+ *  @param[in] index The handle to be audited.
+ *  @param[in] executor The executor to fan out over; its kind must match the residency.
+ *  @param[out] health The audit; zeroed on failure.
+ *  @param[out] error Status and a static message; @c usearch_success_k on success.
+ */
+USEARCH_EXPORT void usearch_dense_health(                     //
+    usearch_dense_index_t index, usearch_executor_t executor, //
+    usearch_dense_health_t* health, usearch_error_t* error);
 
 /**
  *  @brief Performs k-Approximate Nearest Neighbors Search for a strided matrix of queries - the

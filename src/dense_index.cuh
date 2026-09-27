@@ -1965,20 +1965,28 @@ USEARCH_EXPORT size_t usearch_dense_refine(                          //
             shard_ticks_t ticks {progress, progress_state, specialized_index {variant}.size()};
             auto const [refined, refined_status] = specialized_index {variant}.refine(*executor, config, ticks);
             accumulate_stats(stats, refined);
-            // A stopped sweep is not a failure: the graph stands, and the next call sweeps again
-            // toward the same fixed point.
+            // A stopped pass is not a failure: it still healed, the graph stands, and the next call
+            // sweeps again toward the same fixed point.
             if (failed(refined_status) && refined_status != status_t::cancelled_k)
                 return propagate_error(refined_status, error), 0ul;
+            return propagate_success(error), refined.changed_nodes;
+        },
+        punned_index->variants);
+}
 
-            // Re-selection alone can strand a node no search reaches, so every sweep closes with
-            // the repair; its reconnections join the count the caller's settling loop watches.
-            auto const [healed, healed_status] = specialized_index {variant}.heal(*executor);
-            if (failed(healed_status)) return propagate_error(healed_status, error), refined.changed_nodes;
-            if (stats) {
-                stats->visited_members += healed.visited_members;
-                stats->computed_distances += healed.computed_distances;
-            }
-            return propagate_success(error), refined.changed_nodes + healed.islands_reconnected;
+USEARCH_EXPORT void usearch_dense_health(                            //
+    usearch_dense_index_t index, usearch_executor_t punned_executor, //
+    usearch_dense_health_t* health, usearch_error_t* error) {
+    auto* punned_index = reinterpret_cast<punned_dense_index_t*>(index);
+    *health = {};
+    std::visit(
+        [&]<typename variant_type_>(variant_type_& variant) {
+            typename variant_type_::executor_t* const executor = executor_of<variant_type_>(punned_executor, error);
+            if (!executor) return;
+            auto const [audit, status] = specialized_index {variant}.health(*executor);
+            if (failed(status)) return void(propagate_error(status, error));
+            *health = {audit.audited_nodes, audit.reachable_nodes, audit.sweeps};
+            propagate_success(error);
         },
         punned_index->variants);
 }

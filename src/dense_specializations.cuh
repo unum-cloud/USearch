@@ -482,7 +482,7 @@ struct specialized_index {
     using search_result_t = typename index_type_::search_result_t;
     using refine_config_t = typename index_type_::refine_config_t;
     using refine_result_t = typename index_type_::refine_result_t;
-    using heal_result_t = typename index_type_::heal_result_t;
+    using health_result_t = typename index_type_::health_result_t;
     using keys_span_t = std::span<key_t>;
     using distances_span_t = std::span<typename index_type_::distance_t>;
     using counts_span_t = std::span<std::size_t>;
@@ -511,7 +511,7 @@ struct specialized_index {
     expected<insert_result_t> add(std::span<key_t const> keys, vectors_view_t rows, executor_t& executor,
                                   insert_config_t config) noexcept;
     expected<refine_result_t> refine(executor_t& executor, refine_config_t config, shard_ticks_t& ticks) noexcept;
-    expected<heal_result_t> heal(executor_t& executor) noexcept;
+    expected<health_result_t> health(executor_t& executor) noexcept;
     expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
                                      std::size_t wanted, keys_span_t keys, distances_span_t distances,
                                      counts_span_t counts, dummy_predicate_t) noexcept;
@@ -613,9 +613,9 @@ expected<typename specialized_index<index_type_>::refine_result_t> specialized_i
                         [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
 }
 template <typename index_type_>
-expected<typename specialized_index<index_type_>::heal_result_t> specialized_index<index_type_>::heal(
+expected<typename specialized_index<index_type_>::health_result_t> specialized_index<index_type_>::health(
     executor_t& executor) noexcept {
-    return index.heal(executor);
+    return index.health(executor);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(

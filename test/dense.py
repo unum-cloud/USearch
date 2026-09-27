@@ -671,6 +671,16 @@ def test_refine_refuses_a_consumed_handle(executor):
     assert raised.value.status == "uninitialized"
 
 
+def test_health_reaches_every_entry_after_a_refine(executor):
+    """A refine re-links whatever it strands, so the audit after it reaches the whole index."""
+    index, _ = build_index(64, 16, executor)
+    index.refine(executor=executor)
+    health = index.health(executor=executor)
+    assert health["audited"] == len(index)
+    assert health["reachable"] == health["audited"]
+    assert health["sweeps"] >= 1
+
+
 # endregion Refinement
 
 # region Late Interaction

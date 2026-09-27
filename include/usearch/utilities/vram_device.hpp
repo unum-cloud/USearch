@@ -566,6 +566,22 @@ cuda_unique_ptr<typename allocator_::value_type, allocator_> cuda_make_unique(al
     return {pointer, cuda_deleter<allocator_> {allocator, count}};
 }
 
+/** Launches @p kernel over @p blocks of @p threads on @p stream - the only launch path, in place of the triple
+ *  chevrons - answering the launch's own error, like a bad configuration, too much shared memory or no image for the
+ *  device, instead of leaving it sticky for whichever call reads it next. */
+template <typename... parameter_types_, typename... argument_types_>
+status_t cuda_launch(void (*kernel)(parameter_types_...), u32_t blocks, u32_t threads, u32_t shared_bytes,
+                     cudaStream_t stream, argument_types_&&... arguments) noexcept {
+    cudaLaunchConfig_t config {};
+    config.gridDim = dim3 {blocks};
+    config.blockDim = dim3 {threads};
+    config.dynamicSmemBytes = shared_bytes;
+    config.stream = stream;
+    return cudaLaunchKernelEx(&config, kernel, std::forward<argument_types_>(arguments)...) == cudaSuccess
+               ? status_t::success_k
+               : status_t::device_error_k;
+}
+
 static_assert(cuda_reservable_allocator<cuda_virtual_memory_allocator<byte_t>>);
 static_assert(cuda_reservable_allocator<cuda_managed_allocator<byte_t>>);
 static_assert(cuda_allocator<cuda_device_allocator_t>);

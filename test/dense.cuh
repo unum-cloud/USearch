@@ -96,6 +96,7 @@ constexpr u64_t dense_seed_indexes_add_k = 0x62009ADDull;
 constexpr u64_t dense_seed_indexes_race_k = 0x62009ACEull;
 constexpr u64_t dense_seed_indexes_products_k = 0x62009D07ull;
 constexpr u64_t dense_seed_indexes_maxsim_k = 0x62009A55ull;
+constexpr u64_t dense_seed_indexes_refine_k = 0x62002EF1ull;
 constexpr u64_t dense_seed_save_race_k = 0x5AFECACEull;
 constexpr u64_t dense_seed_immutable_parity_k = 0x5E771ED0ull;
 constexpr u64_t dense_seed_cursor_k = 0x17E2A702ull;
@@ -1002,30 +1003,6 @@ auto dense_audit_health(index_type_& index, typename index_type_::dense_traversa
     }
 }
 
-/** One shard healed, whichever way its residency spells it: the device runs its own
- *  rounds, the host runs the documented ones - sweep, re-select, sweep, reconnect, sweep,
- *  while the island population shrinks. */
-template <typename index_type_>
-auto dense_repair_islands(index_type_& index, typename index_type_::dense_traversal_context_t& context) {
-    if constexpr (requires { index.heal(context); }) return index.heal(context);
-    else {
-        auto [plan, status] = index.plan_heal(context);
-        if (failed(status)) return expected<typename index_type_::heal_result_t> {{}, status};
-        dense_sweep_reachability(plan);
-        for (std::size_t islands_before = plan.islands_left(); islands_before;) {
-            for (auto const step : plan.steps()) plan.reselect_islands(step, context);
-            dense_sweep_reachability(plan);
-            if (!plan.islands_left()) break;
-            for (auto const step : plan.steps()) plan.reconnect_islands(step, context);
-            dense_sweep_reachability(plan);
-            std::size_t const islands_after = plan.islands_left();
-            if (islands_after >= islands_before) break;
-            islands_before = islands_after;
-        }
-        return plan.finish();
-    }
-}
-
 /**
  *  @brief The settling contract: a graph built under a narrow pool has work for the first sweep,
  *      the second finds far less, and recall never falls for the trouble.
@@ -1057,7 +1034,9 @@ std::size_t dense_expect_refine_settles(make_index_type_ const& make_index, allo
                                         : 0;
     auto const [first_refinement, first_status] = index.refine({0, published}, context);
     failures += expect(first_status == status_t::success_k);
-    failures += expect_eq(first_refinement.visited_nodes, dense_growth_nodes_k);
+    // Every pass heals what it strands, so islands add their re-selections to the range's, and only then.
+    failures += expect(first_refinement.visited_nodes >= dense_growth_nodes_k &&
+                       (first_refinement.visited_nodes == dense_growth_nodes_k) == !first_refinement.islands_found);
     failures += expect(first_refinement.changed_nodes > 0 &&
                        first_refinement.changed_nodes <= first_refinement.visited_nodes);
     failures += expect(first_refinement.computed_distances > 0 && first_refinement.visited_members > 0);
@@ -1068,16 +1047,19 @@ std::size_t dense_expect_refine_settles(make_index_type_ const& make_index, allo
 
     auto const [second_refinement, second_status] = index.refine({0, published}, context);
     failures += expect(second_status == status_t::success_k);
-    failures += expect_eq(second_refinement.visited_nodes, dense_growth_nodes_k);
+    failures += expect(second_refinement.visited_nodes >= dense_growth_nodes_k &&
+                       (second_refinement.visited_nodes == dense_growth_nodes_k) == !second_refinement.islands_found);
     failures += expect(second_refinement.changed_nodes < first_refinement.changed_nodes);
 
-    // A range past the end sweeps nothing, and one straddling it stops at the watermark.
+    // A range past the end re-selects only islands, and one straddling it stops at the watermark.
     auto const [beyond, beyond_status] = index.refine({published, published + 16}, context);
     failures += expect(beyond_status == status_t::success_k);
-    failures += expect_eq(beyond.visited_nodes, 0u);
+    failures += expect((beyond.visited_nodes == 0) == !beyond.islands_found);
     auto const [straddling, straddling_status] = index.refine({published / 2, published * 2}, context);
     failures += expect(straddling_status == status_t::success_k);
-    failures += expect_eq(straddling.visited_nodes, dense_growth_nodes_k - dense_growth_nodes_k / 2);
+    std::size_t const straddled = dense_growth_nodes_k - dense_growth_nodes_k / 2;
+    failures += expect(straddling.visited_nodes >= straddled &&
+                       (straddling.visited_nodes == straddled) == !straddling.islands_found);
 
     // A sweep is a build step, so what it must never do is cost the graph its answers.
     if constexpr (kernel_ != nk_kernel_dot_k)
@@ -1206,9 +1188,9 @@ std::size_t dense_expect_heal_islands(make_index_type_ const& make_index, alloca
     failures += expect(succeeded(before_status));
     failures += expect(before_health.reachable_nodes < nodes_count);
 
-    auto const [repair, repair_status] = dense_repair_islands(islanded, context);
+    auto const [repair, repair_status] = islanded.refine({}, context);
     failures += expect(succeeded(repair_status));
-    failures += expect_eq(repair.health.reachable_nodes, nodes_count);
+    failures += expect_eq(repair.reachable_nodes, nodes_count);
     failures += expect(repair.islands_found > 0);
     failures += expect(repair.islands_reconnected <= repair.islands_found);
 
@@ -1216,7 +1198,7 @@ std::size_t dense_expect_heal_islands(make_index_type_ const& make_index, alloca
     failures += expect(succeeded(after_status));
     failures += expect_eq(after_health.reachable_nodes, nodes_count);
 
-    auto const [settled_repair, settled_status] = dense_repair_islands(islanded, context);
+    auto const [settled_repair, settled_status] = islanded.refine({}, context);
     failures += expect(succeeded(settled_status));
     failures += expect_eq(settled_repair.islands_found, 0u);
     failures += expect_eq(settled_repair.islands_reconnected, 0u);
@@ -1548,6 +1530,50 @@ std::size_t test_dense_indexes_guards() {
                                      .status));
     failures += expect_eq(indexes.size(), 2 * rows + 1);
     failures += expect(indexes.capacity() >= indexes.size());
+    return failures;
+}
+
+/** A sharded pass under a narrow build pool: the first re-wires nodes, the second fewer, each heals what it strands
+ *  without losing reach, and the audit after them counts what the last pass ended on. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+std::size_t test_dense_indexes_refine() {
+    using index_t = typename indexes_type_::index_t;
+    using scalar_t = typename index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    std::size_t failures = 0;
+    std::size_t const rows = dense_growth_nodes_k;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+
+    dense_indexes_executor<indexes_type_> driver;
+    if (failed(driver.status)) return failures + expect(false);
+    auto& executor = driver.executor;
+    indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(indexes)));
+    failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions}).status));
+
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, dense_seed_indexes_refine_k);
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    typename index_t::insert_config_t const narrow {4};
+    failures += expect(
+        succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), executor, narrow).status));
+
+    auto const [first, first_status] = indexes.refine(executor);
+    failures += expect(succeeded(first_status));
+    failures += expect(first.visited_nodes >= rows && first.changed_nodes <= first.visited_nodes);
+    failures += expect(first.changed_nodes > 0);
+    failures += expect(first.islands_reconnected <= first.islands_found);
+    failures += expect(first.reachable_nodes <= rows && first.reachable_nodes + first.islands_found >= rows);
+
+    auto const [second, second_status] = indexes.refine(executor);
+    failures += expect(succeeded(second_status));
+    failures += expect(second.changed_nodes < first.changed_nodes);
+
+    // The audit reads the graph the last pass left, so it counts what that pass ended on.
+    auto const [health, health_status] = indexes.health(executor);
+    failures += expect(succeeded(health_status));
+    failures += expect_eq(health.reachable_nodes, second.reachable_nodes);
+    failures += expect(health.sweeps >= 1);
     return failures;
 }
 

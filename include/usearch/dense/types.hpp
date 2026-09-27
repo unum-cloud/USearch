@@ -53,6 +53,59 @@ struct dense_further_scored_node_t {
     }
 };
 
+/** Outcome of one reachability audit, the same on every dense layer and residency. */
+struct dense_health_result_t {
+
+    /** Nodes published when the audit started - the population it judges; later insertions are not counted. */
+    std::size_t audited_nodes = 0;
+
+    /** Of those, the nodes forward-reachable from the landmark seeds - the searcher's view. */
+    std::size_t reachable_nodes = 0;
+
+    /** Level-synchronous sweeps to convergence - a diameter proxy. */
+    std::size_t sweeps = 0;
+};
+
+/** Outcome of one refinement or heal pass: every count means the same on every dense layer and residency. */
+struct [[nodiscard]] dense_refine_result_t {
+
+    /** Nodes re-selected: the planned range, then the islands of every round. */
+    std::size_t visited_nodes = 0;
+
+    /** Of those, the nodes whose neighbors differ as a set from before - never more than @c visited_nodes. */
+    std::size_t changed_nodes = 0;
+
+    /** Nodes the first audit left unreached, counted once. */
+    std::size_t islands_found = 0;
+
+    /** Grafts actually written into a reached node's neighbors. */
+    std::size_t islands_reconnected = 0;
+
+    /** Nodes the final audit reached. */
+    std::size_t reachable_nodes = 0;
+
+    /** Audit levels swept across the pass. */
+    std::size_t sweeps = 0;
+
+    /** Frontier candidates expanded across all re-selection walks. */
+    std::size_t visited_members = 0;
+
+    /** Total distance computations, with padding lanes of 4-way kernels excluded. */
+    std::size_t computed_distances = 0;
+
+    /** Subset of @c computed_distances spent in the forward diversity selection. */
+    std::size_t computed_distances_in_refines = 0;
+
+    /** Subset of @c computed_distances spent re-selecting a full neighbor set while back-linking. */
+    std::size_t computed_distances_in_reverse_refines = 0;
+
+    /** Starvation restarts across the walks - a graph-connectivity health signal. */
+    std::size_t restarts = 0;
+
+    /** Walks a scratch refusal ended early; their rows re-selected from a shorter pool. */
+    std::size_t saturated_walks = 0;
+};
+
 /** Fixed 32-byte descriptor fronting every serialized dense index payload - volatile
  *  in-RAM snapshots, GPU-resident uploads, and persisted on-NVMe layouts alike. It describes
  *  the graph & its frozen geometry, never the residency: what sections follow and how they

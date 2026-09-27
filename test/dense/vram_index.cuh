@@ -162,6 +162,9 @@ std::size_t test_cuda_configuration(char const* name) {
     failures_count += test_dense_load_append<index_t, kernel_>(make_index);
     failures_count += test_dense_concurrent_build<index_t, kernel_>(make_index);
     failures_count += test_dense_concurrent_search<index_t, kernel_>(make_index);
+    failures_count += test_dense_refine_settles<index_t, kernel_>(make_index);
+    failures_count += test_dense_health_audits<index_t, kernel_>(make_index);
+    failures_count += test_dense_heal_islands<index_t>(make_index);
     failures_count += test_dense_multiply<index_t, kernel_>(make_index);
     return report(name, failures_count);
 }
