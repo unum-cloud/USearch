@@ -165,13 +165,15 @@ int main() {
     if (!visited.contains(42) || visited.contains(43)) return 1;
     if (visited.insert(std::array<dense_node_id_t, 4> {42, 43, 44, 45}) != 0b1110u) return 1;
 
-    growing_multimap<u64_t, u32_t> multimap {global_allocator};
-    if (failed(multimap.reserve(8))) return 1;
-    if (failed(multimap.insert(7, 42)) || failed(multimap.insert(7, 43))) return 1;
+    chunked_multimap<u64_t, u32_t> multimap {global_allocator};
+    auto [seats, seat_status] = multimap.claim(2);
+    if (failed(seat_status)) return 1;
+    multimap.insert(seats, 7, 42);
+    multimap.insert(seats, 7, 43);
     if (multimap.count(7) != 2 || !multimap.contains(7)) return 1;
-    if (failed(multimap.reserve(64)) || multimap.count(7) != 2) return 1; // Rehash keeps entries.
+    if (failed(multimap.reserve(4096)) || multimap.count(7) != 2) return 1; // Growing keeps entries.
     multimap.clear();
-    if (multimap.size() != 0 || multimap.contains(7)) return 1;
+    if (multimap.contains(7)) return 1;
 
     prefetch_query_sse_t const prefetch_query;
     prefetch_query(&random_generator);

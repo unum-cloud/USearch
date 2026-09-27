@@ -51,7 +51,7 @@ verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_unclaim_on
 verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_base_under_claim
 verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_abandon_unlock
 
-section "dense_vram_indexes.pml: the mutation gate, the ceiling, keys before the claim, and a load beside a batch"
+section "dense_vram_indexes.pml: the mutation gate, keys before the claim, and a load beside a batch"
 verify dense_vram_indexes.pml pass -Dmemory=sequential
 verify dense_vram_indexes.pml pass
 verify dense_vram_indexes.pml fail -Dmemory=sequential -Dwithout_gate
@@ -61,7 +61,6 @@ verify dense_vram_indexes.pml fail -Dwithout_claim_release
 verify dense_vram_indexes.pml pass -Dmemory=sequential -Dscenario=loading
 verify dense_vram_indexes.pml pass -Dscenario=loading
 verify dense_vram_indexes.pml fail -Dmemory=sequential -Dscenario=loading -Dwithout_load_gate
-verify dense_vram_indexes.pml fail -Dmemory=sequential -Dscenario=loading -Dwithout_empty_under_gate
 verify dense_vram_indexes.pml fail -Dmemory=sequential -Dscenario=loading -Dwithout_load_key_before_finish
 
 section "executor.pml: the one-caller hold, the arena rewind, and the fan-out"
@@ -108,15 +107,19 @@ verify dense_ram_index_capacity.pml pass -Dscenario=loaders
 verify dense_ram_index_capacity.pml pass -Dmemory=far -Dscenario=loaders
 verify dense_ram_index_capacity.pml fail -Dmemory=sequential -Dscenario=loaders -Dwithout_abandon_release
 
-section "dense_ram_indexes.pml: the shards' claims, keys before the turn, the monolith save's watermark per shard, and the load path's keys"
+section "dense_ram_indexes.pml: the shards' claims, the key columns' cover, keys before the turn, the monolith save's watermark per shard, and the load path's keys"
 verify dense_ram_indexes.pml pass -Dmemory=sequential
 verify dense_ram_indexes.pml pass
-verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_key_column_ceiling
 verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_key_before_watermark
 verify dense_ram_indexes.pml fail -Dwithout_key_before_watermark
 verify dense_ram_indexes.pml fail -Dwithout_watermark_release
 verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_release
 verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_claim_consume
+verify dense_ram_indexes.pml pass -Dmemory=sequential -Dscenario=covering
+verify dense_ram_indexes.pml pass -Dscenario=covering
+verify dense_ram_indexes.pml pass -Dmemory=far -Dscenario=covering
+verify dense_ram_indexes.pml fail -Dmemory=sequential -Dscenario=covering -Dwithout_cover
+verify dense_ram_indexes.pml fail -Dscenario=covering -Dwithout_dispense_acq_rel
 verify dense_ram_indexes.pml pass -Dmemory=sequential -Dscenario=saving
 verify dense_ram_indexes.pml pass -Dscenario=saving
 verify dense_ram_indexes.pml fail -Dmemory=sequential -Dscenario=saving -Dwhole_batches
@@ -148,14 +151,19 @@ verify basic_ram_index.pml fail -Dwithout_row_clear
 verify basic_ram_index.pml fail -Dwithout_map_clear
 verify basic_ram_index.pml fail -Dtwice_finished
 
-section "ram_tables.pml: the multimap's ceiling, its slot claim, and what a prober sees beside a published state"
+section "ram_tables.pml: the multimap's seats, its slot claim, what a prober sees beside a published state, and the chunks it grows"
 verify ram_tables.pml pass -Dmemory=sequential
 verify ram_tables.pml pass
 verify ram_tables.pml pass -Dmemory=far
 verify ram_tables.pml fail -Dwithout_publish_release
 verify ram_tables.pml fail -Dwithout_probe_acquire
-verify ram_tables.pml fail -Dmemory=sequential -Dwithout_bounded_ceiling
-verify ram_tables.pml fail -Dwithout_bounded_ceiling
+verify ram_tables.pml fail -Dmemory=sequential -Dwithout_cover_refusal
+verify ram_tables.pml pass -Dmemory=sequential -Dscenario=growth
+verify ram_tables.pml pass -Dscenario=growth
+verify ram_tables.pml pass -Dmemory=far -Dscenario=growth
+verify ram_tables.pml fail -Dscenario=growth -Dwithout_cover_release
+verify ram_tables.pml fail -Dscenario=growth -Dwithout_directory_acquire
+verify ram_tables.pml fail -Dscenario=growth -Dwithout_walk_acquire
 
 section "GenMC clients over the real headers"
 if genmc_ready; then

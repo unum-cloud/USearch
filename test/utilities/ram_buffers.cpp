@@ -456,6 +456,34 @@ std::size_t check_max_heap_pop_many() noexcept {
 
 #pragma endregion Max Heap
 
+/** Covered rows start zeroed and keep their addresses as the column grows, and a bulk walk visits every row once,
+ *  run by run. */
+std::size_t check_chunked_column() noexcept {
+    using schedule_t = chunk_schedule<4, 6>;
+    std::size_t failures = 0;
+    allocation_ledger_t ledger;
+    {
+        chunked_column<u32_t, schedule_t, 1024, counting_allocator_t> column {counting_allocator_t {ledger}};
+        failures += expect(succeeded(column.cover(20)));
+        failures += expect_eq(column[19], 0u); // A covered chunk starts zeroed.
+        for (u32_t row = 0; row != 20; ++row) column[row] = row;
+        u32_t const* const early = &column[3];
+        failures += expect(succeeded(column.cover(500)));
+        failures += expect(early == &column[3]);
+        for (u32_t row = 20; row != 500; ++row) column[row] = row;
+        std::size_t visited = 0, runs = 0;
+        column.for_each_span({7, 487}, [&](std::span<u32_t> run) noexcept {
+            for (u32_t const value : run) failures += expect_eq(value, static_cast<u32_t>(7 + visited++));
+            ++runs;
+        });
+        failures += expect_eq(visited, 480u);
+        failures += expect(runs > 1);
+        failures += expect_eq(column.cover(2048), status_t::overflow_k);
+    }
+    failures += expect_eq(ledger.live_bytes.load(), 0);
+    return failures;
+}
+
 std::size_t test::utilities::check_ram_buffers() {
     std::size_t failures = 0;
     failures += check_sorted_buffer_single_element();
@@ -493,6 +521,7 @@ std::size_t test::utilities::check_ram_buffers() {
     // pop_many<N> of a known sequence.
     failures += check_max_heap_pop_many<4>();
     failures += check_max_heap_pop_many<8>();
+    failures += check_chunked_column();
 
     return static_cast<std::size_t>(failures);
 }

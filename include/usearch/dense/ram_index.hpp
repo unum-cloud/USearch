@@ -441,28 +441,22 @@ struct dense_ram_index {
     using norms_chunk_t = nk::tensor<vector_norms_t, norms_allocator_t, 1>;
     using neighbors_chunk_t = nk::matrix<u32_t, neighbors_allocator_t>;
 
-    /** Rows in the very first chunk, as a power-of-two exponent. @ref dense_ram_index_malloc */
-    inline static constexpr small_size_t first_chunk_rows_log2_k = 10; // 1'024 rows
+    /** The growth schedule of every chunk directory - 1'024 rows first, doubling up to 1'048'576-row slabs - shared
+     *  with the owner columns that grow beside the index. @ref dense_ram_index_malloc */
+    using chunk_schedule_t = chunk_schedule<10, 20>;
 
-    /** Rows in every mature slab-sized chunk, as a power-of-two exponent. @ref dense_ram_index_malloc */
-    inline static constexpr small_size_t slab_rows_log2_k = 20; // 1'048'576 rows
-
-    /** Chunks in the doubling phase: the first chunk plus one per doubling. */
-    inline static constexpr small_size_t doubling_phase_chunks_k = slab_rows_log2_k - first_chunk_rows_log2_k + 1;
-
-    /** Node IDs covered by the doubling phase: 2^(slab_rows_log2_k + 1) - 2^first_chunk_rows_log2_k. */
-    inline static constexpr node_id_t doubling_phase_capacity_k = power_of_two<node_id_t>(slab_rows_log2_k + 1) -
-                                                                  power_of_two<node_id_t>(first_chunk_rows_log2_k);
-
-    /** Upper bound on the chunk count, addressing the entire 2^32 ID space. @ref dense_ram_index_growth */
-    inline static constexpr small_size_t max_chunks_k =
-        doubling_phase_chunks_k +
-        static_cast<small_size_t>(((u64_t(1) << 32) - doubling_phase_capacity_k) >> slab_rows_log2_k);
+    /** A row's chunk and its offset within that chunk. */
+    using location_t = typename chunk_schedule_t::location_t;
 
     /** Ceiling on dispensable node IDs: the all-ones ID is the sentinel and must never be
      *  claimed, so the final chunk holds one row that stays forever unclaimed.
      *  @ref dense_ram_index_growth */
     inline static constexpr std::size_t max_node_count_k = (u64_t(1) << 32) - 1u;
+
+    /** Upper bound on the chunk count: every chunk before the one the first undispensable ID lands in.
+     *  @ref dense_ram_index_growth */
+    inline static constexpr small_size_t max_chunks_k = static_cast<small_size_t>(
+        chunk_schedule_t::locate(max_node_count_k).chunk);
 
     /** Once-frozen geometry: vector dimensions in the high half, neighbor connectivity in the
      *  low one; zero bits means not reserved yet. Both ride one word so competing first
@@ -569,8 +563,8 @@ struct dense_ram_index {
         if (!frozen) return sizeof(dense_ram_index);
         std::size_t const hosted_rows = capacity();
         small_size_t chunks = 0;
-        while (chunks != max_chunks_k && capacity_of_chunks(chunks) < hosted_rows) ++chunks;
-        std::size_t const rows = capacity_of_chunks(chunks);
+        while (chunks != max_chunks_k && chunk_schedule_t::rows_before(chunks) < hosted_rows) ++chunks;
+        std::size_t const rows = chunk_schedule_t::rows_before(chunks);
         std::size_t bytes = sizeof(dense_ram_index);
         bytes += rows * padded_row_values(frozen) * sizeof(scalar_t);
         if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>) bytes += rows * sizeof(vector_norms_t);
@@ -581,7 +575,7 @@ struct dense_ram_index {
     /** The stored bytes of one node's vector - the ID-addressed read a key lookup or an export
      *  resolves through; IDs at or above @ref size() name unpublished rows. */
     vector_view_t vector(node_id_t node) const noexcept {
-        return vector_view_t {vector_for(chunked_location(node)).data(), dimensions()};
+        return vector_view_t {vector_for(chunk_schedule_t::locate(node)).data(), dimensions()};
     }
 
     /** Storage values per row under the frozen @p geometry - the copy width every caller's
@@ -1001,7 +995,7 @@ struct dense_ram_index {
             // the hosting chunk's growth through the all-RMW dispenser to this thread.
             node_id_t const new_node_id =
                 atomic_ref<node_id_t>(next_dispensed_id_).fetch_add(1, std::memory_order_acq_rel);
-            chunked_location_t const new_location = chunked_location(new_node_id);
+            location_t const new_location = chunk_schedule_t::locate(new_node_id);
             if (report_assigned_ids) assigned_ids[incoming_index] = new_node_id;
             on_assigned(new_node_id);
 
@@ -1134,9 +1128,8 @@ struct dense_ram_index {
         step_t operator[](std::size_t position) const noexcept {
             step_t step;
             if (position >= steps().size()) return step;
-            std::size_t const first = position << first_chunk_rows_log2_k;
-            std::size_t const bound = min_of(first + power_of_two<std::size_t>(first_chunk_rows_log2_k),
-                                             static_cast<std::size_t>(visible));
+            std::size_t const first = position * chunk_schedule_t::rows_in(0);
+            std::size_t const bound = min_of(first + chunk_schedule_t::rows_in(0), static_cast<std::size_t>(visible));
             step.position = position;
             step.nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             return step;
@@ -1144,8 +1137,7 @@ struct dense_ram_index {
 
         /** The plan's steps, positionally; every level sweeps all of them. */
         indexed_range<health_plan_t> steps() const noexcept {
-            std::size_t const count =
-                index_ ? divide_round_up<std::size_t>(visible, power_of_two<std::size_t>(first_chunk_rows_log2_k)) : 0u;
+            std::size_t const count = index_ ? divide_round_up<std::size_t>(visible, chunk_schedule_t::rows_in(0)) : 0u;
             return {this, count};
         }
 
@@ -1173,7 +1165,7 @@ struct dense_ram_index {
                 ++expanded_count;
                 // Slot 0 is the lock word, acquired once and waited out; the tail slots are
                 // relaxed reads, tolerating a re-linker's stale-but-valid mix.
-                node_ids_view_t const row = index_->neighbors_for(index_->chunked_location(node_id));
+                node_ids_view_t const row = index_->neighbors_for(chunk_schedule_t::locate(node_id));
                 node_id_t first_value = atomic_ref<node_id_t const>(row[0]).load(std::memory_order_acquire);
                 while (first_value == dense_node_id_unknown_k) {
                     wait_type_ {}(row.data(), dense_node_id_unknown_k, small_size_t(0), fu::wait_capped_t {});
@@ -1311,8 +1303,8 @@ struct dense_ram_index {
             if (phase_ != phase_t::reselect_k) return audit[position];
             step_t step;
             if (position >= steps().size()) return step;
-            std::size_t const first = nodes_.first + (position << first_chunk_rows_log2_k);
-            std::size_t const bound = min_of(first + power_of_two<std::size_t>(first_chunk_rows_log2_k),
+            std::size_t const first = nodes_.first + (position * chunk_schedule_t::rows_in(0));
+            std::size_t const bound = min_of(first + chunk_schedule_t::rows_in(0),
                                              static_cast<std::size_t>(nodes_.bound));
             step.position = position;
             step.nodes = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
@@ -1323,8 +1315,7 @@ struct dense_ram_index {
         indexed_range<refine_plan_t> steps() const noexcept {
             if (!index_ || phase_ == phase_t::done_k) return {this, 0u};
             if (phase_ != phase_t::reselect_k) return {this, audit.steps().size()};
-            return {this,
-                    divide_round_up<std::size_t>(nodes_.size(), power_of_two<std::size_t>(first_chunk_rows_log2_k))};
+            return {this, divide_round_up<std::size_t>(nodes_.size(), chunk_schedule_t::rows_in(0))};
         }
 
         /** Runs @p step of the current phase on the calling thread - safe for disjoint steps of one phase. */
@@ -1426,7 +1417,7 @@ struct dense_ram_index {
             small_size_t const spread = min_of<small_size_t>(16u, connectivity / 2);
             for (node_id_t island = step.nodes.first; island < step.nodes.bound; ++island) {
                 if (audit.reached(island)) continue;
-                neighbors_ref_t const own_neighbors = index_->neighbors_for(index_->chunked_location(island));
+                neighbors_ref_t const own_neighbors = index_->neighbors_for(chunk_schedule_t::locate(island));
                 small_size_t const staged_count = index_->stage_neighbors_(own_neighbors, island, context);
                 node_id_t target = dense_node_id_unknown_k;
                 for (small_size_t staged = 0; staged != staged_count && target == dense_node_id_unknown_k; ++staged) {
@@ -1439,7 +1430,7 @@ struct dense_ram_index {
                 if (target == dense_node_id_unknown_k || target == island) continue;
 
                 // Under the target's lock: already wired, a free slot, or the spread landing.
-                neighbors_ref_t const target_neighbors = index_->neighbors_for(index_->chunked_location(target));
+                neighbors_ref_t const target_neighbors = index_->neighbors_for(chunk_schedule_t::locate(target));
                 node_id_t const displaced = target_neighbors.lock();
                 if (displaced == target) { // Published with no neighbors: the island becomes the only one.
                     target_neighbors.unlock(island);
@@ -1805,8 +1796,8 @@ struct dense_ram_index {
         step_t operator[](std::size_t position) const noexcept {
             step_t step;
             if (position >= steps().size()) return step;
-            std::size_t const first = capacity_of_chunks(static_cast<small_size_t>(position));
-            std::size_t const bound = min_of(capacity_of_chunks(static_cast<small_size_t>(position + 1)),
+            std::size_t const first = chunk_schedule_t::rows_before(static_cast<small_size_t>(position));
+            std::size_t const bound = min_of(chunk_schedule_t::rows_before(static_cast<small_size_t>(position + 1)),
                                              static_cast<std::size_t>(visible));
             geometry_t const frozen = index_->geometry();
             step.position = position;
@@ -1819,8 +1810,9 @@ struct dense_ram_index {
 
         /** The steps the save spans - one per storage chunk it reaches; none once spent. */
         indexed_range<save_plan_t> steps() const noexcept {
-            std::size_t const count =
-                index_ && visible ? index_->chunked_location(static_cast<node_id_t>(visible - 1)).chunk_index + 1u : 0u;
+            std::size_t const count = index_ && visible
+                                          ? chunk_schedule_t::locate(static_cast<node_id_t>(visible - 1)).chunk + 1u
+                                          : 0u;
             return {this, count};
         }
 
@@ -1855,9 +1847,9 @@ struct dense_ram_index {
             if (scratch.extent(0) < rows.size() || scratch.extent(1) != connectivity || !scratch.is_contiguous())
                 return status_t::config_mismatch_k;
 
-            chunked_location_t const location = index_->chunked_location(rows.first);
-            vectors_view_t const stored = index_->vectors_chunks_[location.chunk_index].view()(
-                nk::range {location.index_in_chunk, location.index_in_chunk + rows.size()}, nk::slice);
+            location_t const location = chunk_schedule_t::locate(rows.first);
+            vectors_view_t const stored = index_->vectors_chunks_[location.chunk].view()(
+                nk::range {location.offset, location.offset + rows.size()}, nk::slice);
             // Chunk rows are padded to whole kit steps, while checkpoints keep logical rows.
             std::size_t const row_bytes = row_values * sizeof(scalar_t);
             for (std::size_t row = 0; row != rows.size(); ++row) {
@@ -1867,8 +1859,7 @@ struct dense_ram_index {
             }
             atomic_ref<std::size_t>(covered_vectors).add(rows.size(), std::memory_order_release);
 
-            node_id_t const* source =
-                index_->neighbors_chunks_[location.chunk_index].view().row(location.index_in_chunk).data();
+            node_id_t const* source = index_->neighbors_chunks_[location.chunk].view().row(location.offset).data();
             node_id_t* staged = scratch.data();
             if (synchronization == synchronization_t::concurrent_k)
                 for (std::size_t word = 0; word != step_slots; ++word)
@@ -2029,11 +2020,13 @@ struct dense_ram_index {
         step_t operator[](std::size_t position) const noexcept {
             step_t step;
             if (position >= steps().size()) return step;
-            small_size_t const first_chunk = index_->chunked_location(base).chunk_index;
-            std::size_t const first = max_of(capacity_of_chunks(static_cast<small_size_t>(first_chunk + position)),
-                                             static_cast<std::size_t>(base));
-            std::size_t const bound = min_of(capacity_of_chunks(static_cast<small_size_t>(first_chunk + position + 1)),
-                                             static_cast<std::size_t>(base) + rows);
+            small_size_t const first_chunk = chunk_schedule_t::locate(base).chunk;
+            std::size_t const first = max_of(
+                chunk_schedule_t::rows_before(static_cast<small_size_t>(first_chunk + position)),
+                static_cast<std::size_t>(base));
+            std::size_t const bound = min_of(
+                chunk_schedule_t::rows_before(static_cast<small_size_t>(first_chunk + position + 1)),
+                static_cast<std::size_t>(base) + rows);
             geometry_t const frozen = index_->geometry();
             step.position = position;
             step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
@@ -2045,10 +2038,10 @@ struct dense_ram_index {
 
         /** The steps the append spans - one per storage chunk it reaches; none once spent. */
         indexed_range<load_plan_t> steps() const noexcept {
-            std::size_t const count =
-                index_ && rows ? index_->chunked_location(static_cast<node_id_t>(base + rows - 1)).chunk_index -
-                                     index_->chunked_location(base).chunk_index + 1u
-                               : 0u;
+            std::size_t const count = index_ && rows
+                                          ? chunk_schedule_t::locate(static_cast<node_id_t>(base + rows - 1)).chunk -
+                                                chunk_schedule_t::locate(base).chunk + 1u
+                                          : 0u;
             return {this, count};
         }
 
@@ -2097,9 +2090,9 @@ struct dense_ram_index {
             if (static_cast<std::size_t>(shift) + source_range.size() > static_cast<std::size_t>(base) + rows)
                 return status_t::config_mismatch_k;
 
-            chunked_location_t const location = index_->chunked_location(range.first);
-            nk::matrix_span<scalar_t> const vectors = index_->vectors_chunks_[location.chunk_index].span()(
-                nk::range {location.index_in_chunk, location.index_in_chunk + range.size()}, nk::slice);
+            location_t const location = chunk_schedule_t::locate(range.first);
+            nk::matrix_span<scalar_t> const vectors = index_->vectors_chunks_[location.chunk].span()(
+                nk::range {location.offset, location.offset + range.size()}, nk::slice);
             // Checkpoints keep logical rows, while chunk rows are padded to whole kit steps.
             std::size_t const row_bytes = row_values * sizeof(scalar_t);
             for (std::size_t row = 0; row != range.size(); ++row) {
@@ -2109,14 +2102,13 @@ struct dense_ram_index {
             }
             if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>)
                 for (std::size_t offset_in_chunk = 0; offset_in_chunk != range.size(); ++offset_in_chunk) {
-                    chunked_location_t const row {location.chunk_index,
-                                                  static_cast<small_size_t>(location.index_in_chunk + offset_in_chunk)};
+                    location_t const row {location.chunk, static_cast<small_size_t>(location.offset + offset_in_chunk)};
                     index_->norm_ref_for(row) = dense_norms(index_->vector_for(row));
                 }
             atomic_ref<std::size_t>(covered_vectors).add(range.size(), std::memory_order_release);
 
-            nk::matrix_span<node_id_t> const neighbors = index_->neighbors_chunks_[location.chunk_index].span()(
-                nk::range {location.index_in_chunk, location.index_in_chunk + range.size()}, nk::slice);
+            nk::matrix_span<node_id_t> const neighbors = index_->neighbors_chunks_[location.chunk].span()(
+                nk::range {location.offset, location.offset + range.size()}, nk::slice);
             [[maybe_unused]] status_t const copied_neighbors = copy_bytes(
                 bytes_of(neighbors.data(), step_slots),
                 columns.neighbors.subspan(neighbors_first, step.neighbors_bytes));
@@ -2266,42 +2258,6 @@ struct dense_ram_index {
         return distances(query, query_norms, lane_vectors, lane_norms);
     }
 
-    /** Describes in which chunk and at which row inside the chunk a certain entry is located. */
-    struct chunked_location_t {
-        small_size_t chunk_index = 0;
-        small_size_t index_in_chunk = 0;
-    };
-
-    /**
-     *  @brief Maps the global @p node_id onto a chunk and a row within it in @b closed form -
-     *      O(1), with no per-chunk metadata to walk or binary-search.
-     *
-     *  Doubling chunk sizes give closed-form prefix sums, so the lookup is one @c lzcnt plus a
-     *  few adds - cheap enough for every traversal hop. @ref dense_ram_index_malloc
-     */
-    inline chunked_location_t chunked_location(node_id_t node_id) const noexcept {
-        assert(node_id != dense_node_id_unknown_k && "The sentinel names no row, and would land past every chunk");
-        if (node_id < doubling_phase_capacity_k) {
-            // Biasing by the first chunk's size makes the leading bit of the ID encode the chunk index.
-            node_id_t const biased_id = node_id + power_of_two<node_id_t>(first_chunk_rows_log2_k);
-            small_size_t const biased_id_log2 = std::bit_width(biased_id) - 1;
-            return {biased_id_log2 - first_chunk_rows_log2_k, biased_id - std::bit_floor(biased_id)};
-        }
-        node_id_t const id_in_flat_phase = node_id - doubling_phase_capacity_k;
-        return {doubling_phase_chunks_k + static_cast<small_size_t>(id_in_flat_phase >> slab_rows_log2_k),
-                static_cast<small_size_t>(id_in_flat_phase & power_of_two_mask<node_id_t>(slab_rows_log2_k))};
-    }
-
-    /** Total rows across the first @p chunks_count chunks of the growth schedule - the same
-     *  closed-form prefix sums that @ref chunked_location inverts. */
-    inline static constexpr std::size_t capacity_of_chunks(small_size_t chunks_count) noexcept {
-        if (chunks_count <= doubling_phase_chunks_k)
-            return power_of_two<std::size_t>(first_chunk_rows_log2_k + chunks_count) -
-                   power_of_two<std::size_t>(first_chunk_rows_log2_k);
-        return static_cast<std::size_t>(doubling_phase_capacity_k) +
-               (static_cast<std::size_t>(chunks_count - doubling_phase_chunks_k) << slab_rows_log2_k);
-    }
-
     /**
      *  @brief Typed view over one node's neighbors - the only legal way to touch slots that
      *      concurrent scanners may be reading. Copyable value type with reference semantics.
@@ -2391,37 +2347,37 @@ struct dense_ram_index {
     using neighbors_ref_t = neighbors_ref<synchronization_t::concurrent_k>;
 
     /** Immutable view of the vector stored at @p location. */
-    inline vector_view_t vector_for(chunked_location_t const& location) const noexcept {
-        return vectors_chunks_[location.chunk_index].row(location.index_in_chunk).as_vector();
+    inline vector_view_t vector_for(location_t const& location) const noexcept {
+        return vectors_chunks_[location.chunk].row(location.offset).as_vector();
     }
 
     /** Mutable span over the vector slot at @p location - only for the slot's unpublished owner. */
-    inline vector_span_t vector_span_for(chunked_location_t const& location) noexcept {
-        return vectors_chunks_[location.chunk_index].row(location.index_in_chunk).as_vector();
+    inline vector_span_t vector_span_for(location_t const& location) noexcept {
+        return vectors_chunks_[location.chunk].row(location.offset).as_vector();
     }
 
     /** Copy of the pre-computed norms of the vector stored at @p location - the empty stand-in,
      *  without touching memory, when the kernel never reads norms. */
-    inline vector_norms_t norm_for(chunked_location_t const& location) const noexcept {
+    inline vector_norms_t norm_for(location_t const& location) const noexcept {
         if constexpr (std::is_same_v<vector_norms_t, no_norms_t>) return {};
-        else return norms_chunks_[location.chunk_index][location.index_in_chunk];
+        else return norms_chunks_[location.chunk][location.offset];
     }
 
     /** Mutable reference to the norms slot at @p location - only for the slot's unpublished owner. */
-    inline vector_norms_t& norm_ref_for(chunked_location_t const& location) noexcept {
-        return norms_chunks_[location.chunk_index][location.index_in_chunk];
+    inline vector_norms_t& norm_ref_for(location_t const& location) noexcept {
+        return norms_chunks_[location.chunk][location.offset];
     }
 
     /** Typed view over the fixed-capacity neighbors at @p location - atomic by default, plain
      *  under a mutation-free contract. @ref dense_ram_index_concurrency */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k>
-    inline neighbors_ref<synchronization_> neighbors_for(chunked_location_t const& location) noexcept {
-        return {neighbors_chunks_[location.chunk_index].row(location.index_in_chunk).as_vector()};
+    inline neighbors_ref<synchronization_> neighbors_for(location_t const& location) noexcept {
+        return {neighbors_chunks_[location.chunk].row(location.offset).as_vector()};
     }
 
     /** Immutable view of the fixed-capacity neighbors at @p location. */
-    inline node_ids_view_t neighbors_for(chunked_location_t const& location) const noexcept {
-        return neighbors_chunks_[location.chunk_index].row(location.index_in_chunk).as_vector();
+    inline node_ids_view_t neighbors_for(location_t const& location) const noexcept {
+        return neighbors_chunks_[location.chunk].row(location.offset).as_vector();
     }
 
     /**
@@ -2453,11 +2409,7 @@ struct dense_ram_index {
         while (added_capacity < minimal_capacity) {
             if (chunks_count_ == max_chunks_k) return {added_capacity, status_t::overflow_k};
 
-            small_size_t const unclamped_rows_log2 = first_chunk_rows_log2_k + chunks_count_;
-            small_size_t const chunk_rows_log2 = unclamped_rows_log2 < slab_rows_log2_k //
-                                                     ? unclamped_rows_log2
-                                                     : slab_rows_log2_k;
-            std::size_t const chunk_rows = power_of_two<std::size_t>(chunk_rows_log2);
+            std::size_t const chunk_rows = chunk_schedule_t::rows_in(chunks_count_);
 
             vectors_chunk_t vectors_chunk = vectors_chunk_t::try_zeros( //
                 {chunk_rows, chunk_dimensions}, vectors_allocator_);
@@ -2607,7 +2559,7 @@ struct dense_ram_index {
         dense_scored_node_t const* candidates_data = candidates.data();
         for (std::size_t index = 0; index != candidates.size() && kept_count != limit; ++index) {
             dense_scored_node_t const candidate = candidates_data[index];
-            chunked_location_t const candidate_location = chunked_location(candidate.node_id);
+            location_t const candidate_location = chunk_schedule_t::locate(candidate.node_id);
             vector_view_t const candidate_vector = vector_for(candidate_location);
             vector_norms_t const candidate_norms = norm_for(candidate_location);
             // 4-way batches over the kept neighbors' cached views; short tails repeat the last
@@ -2664,7 +2616,7 @@ struct dense_ram_index {
         dense_scored_node_t const* candidates_data = candidates.data();
 
         // The packed kept tiles first, then the span's A-tiles, on the tiles' own alignment.
-        std::size_t const dimensions = vector_for(chunked_location(candidates_data[0].node_id)).size();
+        std::size_t const dimensions = vector_for(chunk_schedule_t::locate(candidates_data[0].node_id)).size();
         std::size_t const depth_tiles = tiles_kit_t::depth_tiles(dimensions);
         std::size_t const kept_tiles_capacity = tiles_kit_t::column_tiles(limit);
         typename tiles_kit_t::scratch_t const scratch = tiles_kit_t::scratch_of(context.tiles_scratch.data(),
@@ -2683,7 +2635,7 @@ struct dense_ram_index {
         for (std::size_t span_begin = 0; span_begin < count && kept_count != limit; span_begin += rows_k) {
             std::size_t const span_count = min_of<std::size_t>(count - span_begin, rows_k);
             for (std::size_t row = 0; row != rows_k; ++row) {
-                chunked_location_t const location = chunked_location( //
+                location_t const location = chunk_schedule_t::locate( //
                     candidates_data[min_of(span_begin + row, count - 1)].node_id);
                 span_vectors[row] = vector_for(location);
                 span_norms[row] = norm_for(location);
@@ -2969,7 +2921,7 @@ struct dense_ram_index {
 
         for (small_size_t selected_index = 0; selected_index != selected.size(); ++selected_index) {
             node_id_t const neighbor_id = selected[selected_index].node_id;
-            chunked_location_t const neighbor_location = chunked_location(neighbor_id);
+            location_t const neighbor_location = chunk_schedule_t::locate(neighbor_id);
             neighbors_ref_t const neighbors = neighbors_for(neighbor_location);
 
             // Lock by exchanging the sentinel in; the displaced slot-0 value is ours to restore.
@@ -3015,13 +2967,13 @@ struct dense_ram_index {
                 neighbors.unlock(first_slot_value);
                 continue;
             }
-            chunked_location_t const first_location = chunked_location(first_slot_value);
+            location_t const first_location = chunk_schedule_t::locate(first_slot_value);
             context.staged_ids[0] = first_slot_value;
             context.staged_vectors[0] = vector_for(first_location);
             context.staged_norms[0] = norm_for(first_location);
             for (small_size_t slot = 1; slot != slots_count; ++slot) {
                 node_id_t const existing_id = neighbors.load_slot(slot);
-                chunked_location_t const existing_location = chunked_location(existing_id);
+                location_t const existing_location = chunk_schedule_t::locate(existing_id);
                 context.staged_ids[slot] = existing_id;
                 context.staged_vectors[slot] = vector_for(existing_location);
                 context.staged_norms[slot] = norm_for(existing_location);
@@ -3097,7 +3049,7 @@ struct dense_ram_index {
     bool refine_one_(node_id_t node_id, node_id_t first_invisible_id, std::size_t expansion_factor,
                      dense_traversal_context_t& context) noexcept {
         std::size_t const node_connectivity = connectivity();
-        chunked_location_t const location = chunked_location(node_id);
+        location_t const location = chunk_schedule_t::locate(node_id);
         vector_view_t const own_vector = vector_for(location);
         vector_norms_t const own_norms = norm_for(location);
         neighbors_ref_t const own_neighbors = neighbors_for(location);
@@ -3188,7 +3140,7 @@ struct dense_ram_index {
                     landmark_node_id = landmark_node_id + 1 == first_invisible_id ? 0 : landmark_node_id + 1;
             }
 
-            chunked_location_t const landmark_location = chunked_location(landmark_node_id);
+            location_t const landmark_location = chunk_schedule_t::locate(landmark_node_id);
             // Published nodes may be transiently locked for re-linking - re-roll those. Under a
             // mutation-free contract every sampled node is published & unlocked - no probe needed.
             if constexpr (synchronization_ == synchronization_t::concurrent_k)
@@ -3301,7 +3253,7 @@ struct dense_ram_index {
             if (pool_full && frontier.capacity() - frontier.size() < node_connectivity)
                 frontier.erase_below(pool.top());
 
-            chunked_location_t const candidate_location = chunked_location(candidate.node_id);
+            location_t const candidate_location = chunk_schedule_t::locate(candidate.node_id);
             neighbors_ref<synchronization_> const candidate_neighbors = neighbors_for<synchronization_>( //
                 candidate_location);
 
@@ -3342,7 +3294,7 @@ struct dense_ram_index {
                     // so skip it; a later traversal with a fresher snapshot meets it safely.
                     if (neighbor_id >= first_invisible_id) continue;
                     if (visited.contains(neighbor_id)) continue;
-                    chunked_location_t const neighbor_location = chunked_location(neighbor_id);
+                    location_t const neighbor_location = chunk_schedule_t::locate(neighbor_id);
                     gathered_ids[gathered_count] = neighbor_id;
                     gathered_vectors[gathered_count] = vector_for(neighbor_location);
                     gathered_norms[gathered_count] = norm_for(neighbor_location);
@@ -3475,7 +3427,7 @@ struct dense_ram_cursor {
     using node_id_t = typename index_t::node_id_t;
     using small_size_t = typename index_t::small_size_t;
     using node_ids_view_t = typename index_t::node_ids_view_t;
-    using location_t = typename index_t::chunked_location_t;
+    using location_t = typename index_t::location_t;
 
     using ids_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<node_id_t>;
     using ids_tensor_t = nk::tensor<node_id_t, ids_allocator_t, 1>;
@@ -3558,7 +3510,7 @@ struct dense_ram_cursor {
         if (node >= visible_count_) return status_t::malformed_k;
         if (staged_neighbors_.size() < connectivity_) return status_t::uninitialized_k;
         current_ = node;
-        location_ = index_.chunked_location(node);
+        location_ = index_t::chunk_schedule_t::locate(node);
         node_ids_view_t const row = index_.neighbors_for(location_);
         // Slot 0 is the lock word: acquire it exactly once and never re-read it, so a fresh lock
         // sentinel cannot slip into the staging.

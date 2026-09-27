@@ -228,12 +228,12 @@ auto make_scalar(unsigned value) noexcept {
  *  hundreds of microseconds, stretching the lock & watermark contention windows far beyond
  *  anything hardware timing produces - a poor man's schedule fuzzer. */
 struct flaky_waiter_t {
-    template <typename value_type_, typename thread_index_type_, typename bound_type_>
-    void operator()(std::atomic<value_type_> const&, value_type_, thread_index_type_, bound_type_) const noexcept {
+    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
+    void operator()(std::atomic<value_type_> const&, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
         misbehave_();
     }
-    template <typename value_type_, typename thread_index_type_, typename bound_type_>
-    void operator()(value_type_ const*, value_type_, thread_index_type_, bound_type_) const noexcept {
+    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
+    void operator()(value_type_ const*, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
         misbehave_();
     }
 

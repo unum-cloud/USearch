@@ -31,7 +31,7 @@
 #include "usearch/utilities/blocking_files.hpp"    // `mapped_file_t`, `copy_bytes`
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer`
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator`, `forkunion_executor_t`
-#include "usearch/utilities/ram_tables.hpp"        // `growing_multimap`
+#include "usearch/utilities/ram_tables.hpp"        // `chunked_multimap`
 #include "usearch/utilities/safegraphs_format.hpp" // SafeGraphs monoliths & manifests
 #include "usearch/dense/types.hpp"
 #include "usearch/dense/ram_index.hpp"
@@ -42,14 +42,14 @@ namespace usearch {
 template <typename indexes_type_>
 struct dense_ram_indexes_cursor;
 
-/** Resolves a walked node ID to its key through one shard's key plane, rebound per shard. */
-template <typename key_type_>
+/** Resolves a walked node ID to its key through one shard's key column, rebound per shard. */
+template <typename keys_type_>
 struct dense_keyed_ids {
 
-    /** The key of each node ID in the shard being walked. */
-    std::span<key_type_ const> keys = {};
+    /** The key column of the shard being walked. */
+    keys_type_ const* keys = nullptr;
 
-    key_type_ operator()(dense_node_id_t node_id) const noexcept { return keys[node_id]; }
+    auto operator()(dense_node_id_t node_id) const noexcept { return (*keys)[node_id]; }
 };
 
 /**
@@ -90,15 +90,12 @@ struct dense_ram_indexes {
         dense_node_id_t node = 0;
     };
 
-    /** Keys of one shard's rows, indexed by that shard's own node IDs. */
-    using keys_column_t = growing_buffer<key_t, forkunion_allocator_t>;
-
-    /** Key to every entry stored under it; insert-only, wait-free for readers. */
-    using locators_map_t = growing_multimap<key_t, key_locator_t, key_hash_type_, //
-                                            forkunion_allocator_t>;
+    /** Key to every entry stored under it; insert-only, wait-free for readers, growing in chunks. */
+    using locators_map_t =
+        chunked_multimap<key_t, key_locator_t, key_hash_type_, forkunion_allocator_t, atomic_ref_template_>;
 
     /** The atomic reference owning the plain synchronization words - the shards' and this index's
-     *  own admission word alike. */
+     *  own routing tally alike. */
     template <typename word_type_>
     using atomic_ref = atomic_ref_template_<word_type_>;
 
@@ -109,15 +106,19 @@ struct dense_ram_indexes {
                                     forkunion_allocator_t,                                                      //
                                     arena_allocator<byte_t, forkunion_allocator_t>>;
 
+    /** Keys of one shard's rows, indexed by that shard's own node IDs, growing on the shard's own schedule. */
+    using keys_column_t = chunked_column<key_t, typename index_t::chunk_schedule_t, index_t::max_node_count_k,
+                                         forkunion_allocator_t, atomic_ref_template_>;
+
     /** One shard: the graph, and the keys of its rows. Placement is not repeated - the index's
      *  own allocator carries it. */
     struct shard_t {
 
-        /** The graph; its capacity counter is bounded by the key column, so its claims are the
-         *  only admission a row needs. An index holds atomics and never moves. */
+        /** The graph, growing on demand. An index holds atomics and never moves. */
         std::unique_ptr<index_t> index;
 
-        /** The key of each of this shard's rows, indexed by node ID. */
+        /** The key of each of this shard's rows, indexed by node ID; every claimer covers what the shard hosts
+         *  after its claim, so any row a claim can dispense has a key slot before its key lands. */
         keys_column_t keys;
     };
 
@@ -208,7 +209,6 @@ struct dense_ram_indexes {
             std::unique_ptr<index_t> fresh = build_(one.index->vectors_allocator_.memory_domain);
             if (!fresh) return status_t::bad_alloc_k;
             one.index = std::move(fresh);
-            one.keys.clear();
         }
         locators_of_key_.clear();
         atomic_ref<std::size_t>(routed_rows_).store(0, std::memory_order_relaxed);
@@ -241,10 +241,10 @@ struct dense_ram_indexes {
         return total;
     }
 
-    /** Rows the shards can host - the key columns' total, sized once at @ref reserve. */
+    /** Rows the shards host without growing again; they grow past it on demand. */
     std::size_t capacity() const noexcept {
         std::size_t total = 0;
-        for (shard_t const& one : shards_) total += one.keys.size();
+        for (shard_t const& one : shards_) total += one.index->capacity();
         return total;
     }
 
@@ -261,32 +261,22 @@ struct dense_ram_indexes {
 #pragma region Reservation
 
     /**
-     *  @brief Reserves @p config.capacity rows, split evenly over the shards.
+     *  @brief Grows every shard ahead of @p config.capacity rows, split evenly over them - a hint, since the shards,
+     *      their key columns and the locator map all grow on demand; the first call freezes the geometry.
      *
-     *  Sizes once. A repeat that already fits is a no-op, and a larger one is refused: the key
-     *  columns and the locator map both demand a mutation-free phase to grow, and a search
-     *  resolves a ranking through them while rows are still landing.
+     *  Callable any time, alongside insertions and searches: nothing it grows ever moves.
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
         if (shards_.empty()) return {0, status_t::uninitialized_k};
-        if (std::size_t const held = capacity()) {
-            if (config.dimensions != dimensions() || config.connectivity != connectivity())
-                return {held, status_t::config_mismatch_k};
-            return {held, config.capacity <= held ? status_t::success_k : status_t::config_mismatch_k};
-        }
         reserve_capacity_t per_shard = config;
         per_shard.capacity = divide_round_up(config.capacity, shards_.size());
-
-        // The locator map first: its ceiling is what makes recording a locator infallible, and a
-        // refusal here leaves nothing reserved.
-        if (status_t const indexed = locators_of_key_.reserve(per_shard.capacity * shards_.size()); failed(indexed))
-            return {0, indexed};
-        // A shard rounds up to whole chunks; its key column is sized to what it really holds.
         for (shard_t& one : shards_) {
             auto const [shard_capacity, status] = one.index->reserve(per_shard);
-            if (failed(status)) return {0, status};
-            if (failed(one.keys.resize(shard_capacity))) return {0, status_t::bad_alloc_k};
+            if (failed(status)) return {capacity(), status};
+            if (status_t const covered = one.keys.cover(shard_capacity); failed(covered)) return {capacity(), covered};
         }
+        if (status_t const indexed = locators_of_key_.reserve(config.capacity); failed(indexed))
+            return {capacity(), indexed};
         return {capacity(), status_t::success_k};
     }
 
@@ -313,9 +303,8 @@ struct dense_ram_indexes {
         result.new_size = size();
         if (shards_.empty()) return {result, status_t::uninitialized_k};
 
-        // The claim is all a row needs: a shard's counter is bounded by its key column, so a granted
-        // row always has a key slot. The routing tally only names the first shard to try; a full
-        // one passes the row on to the next, and any other refusal stops the probe.
+        // The routing tally only names the first shard to try; a full one passes the row on to the next,
+        // and any other refusal stops the probe.
         std::size_t const shards = shards_.size();
         std::size_t const routing_base = atomic_ref<std::size_t>(routed_rows_).fetch_add(1, std::memory_order_relaxed);
         shard_capacity_claim_t claim;
@@ -332,6 +321,11 @@ struct dense_ram_indexes {
         std::size_t const shard = (routing_base + probe) % shards;
 
         shard_t& one = shards_[shard];
+        // Covering what the shard hosts after this claim is what lets any later dispense in a fresh chunk find its
+        // keys.
+        if (status_t const covered = one.keys.cover(one.index->capacity()); failed(covered)) return {result, covered};
+        auto [seats, seat_status] = locators_of_key_.claim(1);
+        if (failed(seat_status)) return {result, seat_status};
         if (status_t const sized = one.index->reserve_traversal(traversal, config); failed(sized))
             return {result, sized};
 
@@ -349,8 +343,7 @@ struct dense_ram_indexes {
             assigned = assigned_id;
             one.keys[assigned_id] = key;
         });
-        // The locator map's ceiling covers the reservation, so recording cannot fail.
-        [[maybe_unused]] status_t const recorded = locators_of_key_.insert(key, key_locator_t {shard, assigned});
+        locators_of_key_.insert(seats, key, key_locator_t {shard, assigned});
 
         result.visited_members = traversal.visited_members - visited_before;
         result.computed_distances = traversal.computed_distances - computed_before;
@@ -432,9 +425,9 @@ struct dense_ram_indexes {
      *  @brief Claims storage for @p rows across every shard without assigning any identity - the
      *      step a batch runs before touching any shard.
      *
-     *  Rotating by rows routed keeps a stream of small batches from drifting onto shard zero.
-     *  Each shard's counter is bounded by its key column, so a batch never lands more rows on a shard
-     *  than its key column holds, and a refusal releases whatever was already granted.
+     *  Rotating by rows routed keeps a stream of small batches from drifting onto shard zero. Each shard's key
+     *  column is covered to what the shard hosts after its share, and a refusal releases whatever was already
+     *  granted.
      */
     expected<capacity_claim_t> claim(std::size_t rows) noexcept {
         std::size_t const shards = shards_.size();
@@ -444,9 +437,11 @@ struct dense_ram_indexes {
         if (failed(claimed.claims_.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
         claimed.rotation_ = atomic_ref<std::size_t>(routed_rows_).fetch_add(rows, std::memory_order_relaxed) % shards;
         for (std::size_t shard = 0; shard != shards; ++shard) {
-            auto [shard_claim, status] = shards_[shard].index->claim(share_of_(shard, rows, claimed.rotation_));
+            shard_t& one = shards_[shard];
+            auto [shard_claim, status] = one.index->claim(share_of_(shard, rows, claimed.rotation_));
             if (failed(status)) return {{}, status};
             claimed.claims_.push_back_reserved(std::move(shard_claim));
+            if (status_t const covered = one.keys.cover(one.index->capacity()); failed(covered)) return {{}, covered};
         }
         return {std::move(claimed), status_t::success_k};
     }
@@ -478,11 +473,13 @@ struct dense_ram_indexes {
             return {result, sized};
 
         std::size_t const rotation = claim.rotation_;
+        auto [seats, seat_status] = locators_of_key_.claim(rows);
+        if (failed(seat_status)) return {result, seat_status};
         growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
         if (status_t const ready = reserve_traversals_(traversals, executor, config); failed(ready))
             return {result, ready};
 
-        // The key lands before publication; the locator map's ceiling covers every claimed row.
+        // The key lands before publication, and each row records its locator in its own claimed seat.
         auto insert_row = [&](std::size_t task, std::size_t thread, std::size_t) noexcept {
             std::size_t const shard = (rotation + task) % shards;
             shard_t& one = shards_[shard];
@@ -492,8 +489,8 @@ struct dense_ram_indexes {
                                   assigned = assigned_id;
                                   one.keys[assigned_id] = keys[task];
                               });
-            [[maybe_unused]] status_t const recorded = locators_of_key_.insert(keys[task],
-                                                                               key_locator_t {shard, assigned});
+            typename locators_map_t::seats_t seat {seats.next + task, seats.next + task + 1};
+            locators_of_key_.insert(seat, keys[task], key_locator_t {shard, assigned});
         };
         // ForkUnion runs every task or none, so a refused fan-out releases the claims whole.
         if (status_t const fanned = executor.for_tasks(rows, insert_row); failed(fanned)) return {result, fanned};
@@ -760,12 +757,12 @@ struct dense_ram_indexes {
         if (!rows_count) return {{}, status_t::success_k};
 
         auto multiply_row = [&](std::size_t row, std::size_t, traversal_t& traversal) noexcept {
-            dense_multiply_fold<key_t, dot_result_t, dense_keyed_ids<key_t>> fold {
+            dense_multiply_fold<key_t, dot_result_t, dense_keyed_ids<keys_column_t>> fold {
                 {keys.data() + row * wanted, wanted},
                 {products.data() + row * wanted, wanted}};
             status_t refusal = status_t::success_k;
             for (shard_t const& one : shards_) {
-                fold.resolve.keys = to_span(one.keys);
+                fold.resolve.keys = &one.keys;
                 expected<search_result_t> const walked = one.index->search(left.row(row).as_vector(), fold, traversal,
                                                                            config);
                 if (!walked) {
@@ -974,10 +971,17 @@ struct dense_ram_indexes {
                 bytes_span_t const target = distributed ? mappings_[shard].span() : monolith_;
                 std::size_t const nodes = plans_[shard].visible;
                 std::size_t const base = plans_[shard].id_shift;
-                if (status_t const wrote = copy_bytes(header.rows_of(target, header.key, base, nodes),
-                                                      bytes_of(owner_->shards_[shard].keys.data(), nodes));
-                    failed(wrote))
-                    return wrote;
+                // The key column is chunked, so its rows land run by run.
+                bytes_span_t const key_rows = header.rows_of(target, header.key, base, nodes);
+                std::size_t written = 0;
+                status_t wrote = status_t::success_k;
+                owner_->shards_[shard].keys.for_each_span({0, nodes}, [&](std::span<key_t const> run) noexcept {
+                    if (succeeded(wrote))
+                        wrote = copy_bytes(key_rows.subspan(written, run.size_bytes()),
+                                           bytes_of(run.data(), run.size()));
+                    written += run.size_bytes();
+                });
+                if (failed(wrote)) return wrote;
                 if (distributed) {
                     if (status_t const framed = safegraphs_write_header(target, header, fields); failed(framed))
                         return framed;
@@ -1169,15 +1173,24 @@ struct dense_ram_indexes {
                     if (landing.shard != shard || !rows) continue;
                     part_t const& part = parts_[landing.part];
                     keys_column_t& keys = owner_->shards_[shard].keys;
-                    if (first + rows > keys.size()) return status_t::config_mismatch_k;
-                    if (status_t const read = copy_bytes(
-                            bytes_of(keys.data() + first, rows),
-                            part.header.rows_of(part.monolith, part.header.key, landing.rows.first, rows));
-                        failed(read))
-                        return read;
-                    for (std::size_t row = 0; row != rows; ++row) [[maybe_unused]]
-                        status_t const recorded = owner_->locators_of_key_.insert(
-                            keys[first + row], key_locator_t {shard, static_cast<dense_node_id_t>(first + row)});
+                    if (status_t const covered = keys.cover(first + rows); failed(covered)) return covered;
+                    auto [seats, seat_status] = owner_->locators_of_key_.claim(rows);
+                    if (failed(seat_status)) return seat_status;
+                    // The key column is chunked, so the part's keys land run by run.
+                    bytes_view_t const part_keys = part.header.rows_of(part.monolith, part.header.key,
+                                                                       landing.rows.first, rows);
+                    std::size_t read_bytes = 0;
+                    status_t read = status_t::success_k;
+                    keys.for_each_span({first, first + rows}, [&](std::span<key_t> run) noexcept {
+                        if (succeeded(read))
+                            read = copy_bytes(bytes_of(run.data(), run.size()),
+                                              part_keys.subspan(read_bytes, run.size_bytes()));
+                        read_bytes += run.size_bytes();
+                    });
+                    if (failed(read)) return read;
+                    for (std::size_t row = 0; row != rows; ++row)
+                        owner_->locators_of_key_.insert(
+                            seats, keys[first + row], key_locator_t {shard, static_cast<dense_node_id_t>(first + row)});
                     first += rows;
                 }
                 if (status_t const finished = plans_[shard].finish(); failed(finished)) return finished;
@@ -1628,7 +1641,9 @@ struct dense_ram_indexes {
         auto const steps = plan.steps();
         constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::step_t const& step,
                                            nk::matrix_span<dense_node_id_t> scratch) { planned.save(step, scratch); };
-        std::size_t const scratch_rows = saving_k ? power_of_two<std::size_t>(index_t::slab_rows_log2_k) : 0;
+        std::size_t const scratch_rows = saving_k
+                                             ? power_of_two<std::size_t>(index_t::chunk_schedule_t::slab_rows_log2_k)
+                                             : 0;
 
         auto [executor_claim, claim_status] = executor.claim();
         if (failed(claim_status)) return claim_status;
@@ -1881,26 +1896,17 @@ struct dense_ram_indexes {
         std::size_t widest = 0;
         for (std::size_t const rows : shard_rows) widest = max_of(widest, rows);
 
-        // An unreserved index takes the config's rows or the widest shard times the shard count;
-        // a reserved one must already fit every shard.
+        // Growth ahead of the rows the parts carry - the config's or the widest shard times the shard count - and
+        // the frozen geometry, when there is one, must match the parts'.
         std::size_t const wanted = max_of(config.capacity, widest * shards);
-        if (!capacity()) {
-            if (!wanted) {
-                plan.owner_ = this;
-                return status_t::success_k;
-            }
-            if (status_t const reserved = reserve({wanted, connectivity, dimensions}).status; failed(reserved))
-                return reserved;
+        if (capacity() && (dimensions != this->dimensions() || connectivity != this->connectivity()))
+            return status_t::config_mismatch_k;
+        if (!capacity() && !wanted) {
+            plan.owner_ = this;
+            return status_t::success_k;
         }
-        else {
-            if (dimensions != this->dimensions() || connectivity != this->connectivity() ||
-                capacity() < config.capacity)
-                return status_t::config_mismatch_k;
-            for (std::size_t shard = 0; shard != shards; ++shard)
-                if (shard_rows[shard] > shards_[shard].keys.size()) return status_t::config_mismatch_k;
-            // The load holds the mutation gate, which is the quiet the map's rehash asks for.
-            if (status_t const indexed = locators_of_key_.reserve(wanted); failed(indexed)) return indexed;
-        }
+        if (status_t const reserved = reserve({wanted, connectivity, dimensions}).status; failed(reserved))
+            return reserved;
 
         if (failed(plan.plans_.reserve_exactly(shards))) return status_t::bad_alloc_k;
         std::size_t const vectors_row_bytes = row_values_() * sizeof(scalar_t);

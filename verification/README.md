@@ -8,15 +8,15 @@ The memory models and the runners live in [`forkunion/verification`](../forkunio
 - `basic_shared_mutex.cpp`: the real header under GenMC, one mutator, one prober, the torn pair.
 - `basic_ram_index_rows.pml`: the basic index's rows, the row mutex, what the gate's shared and unique sides carry, the traversal's translation frontier, and the load path's steps, tally and counter order.
 - `basic_ram_index.pml`: `insert`, certified `search`, `plan_save`, `health` and `plan_load` interleaved on one index, sequentially consistent, and a failed load's leftovers, the composition of the models above.
-- `ram_tables.pml`: `growing_multimap`, the ceiling bounding every probe chain, the acquire slot claim, and whether a prober can read a published slot half-written.
+- `ram_tables.pml`: `chunked_multimap`, the seats bounding every probe chain, the acquire slot claim, whether a prober can read a published slot half-written, and `-Dscenario=growth` for the chunks a claim covers.
 - `dense_ram_index_watermark.pml`: the dense index's dispenser, rows, back-link fence, watermark turn, and the concurrent save's settlement probe; `-Dscenario=appender` for the load path's `finish`, `keyed` for the key column and the walk's frontier, `cursor` for `dense_ram_cursor`, `steps` for the load fan-out's tally, `savers` for two saves at once, and `-Dtwice_finished` for a load plan published twice.
 - `dense_ram_index_watermark.cpp`: the same counters under GenMC, spelled over the ForkUnion reference the index binds.
 - `dense_ram_index_capacity.pml`: `claim_capacity`'s grower election, `release_capacity`'s order and its wait for a whole counter, `-Dscenario=regrow` for a second `reserve` above the physical rows, `reserve` against a concurrent `reserve`, and `-Dscenario=loaders` for a load plan that dies before `finish`.
 - `dense_ram_index_capacity.cpp`: the same counters under GenMC, with the race detector on the plain chunk directory.
-- `dense_ram_indexes.pml`: the sharded index, the shards' claims and their release, keys before the watermark turn, the search merge over the key columns, the monolith save's per-shard watermark, and the load path's keys under `finish`.
+- `dense_ram_indexes.pml`: the sharded index, the shards' claims and their release, `-Dscenario=covering` for the key columns' cover after every claim, keys before the watermark turn, the search merge over the key columns, the monolith save's per-shard watermark, and the load path's keys under `finish`.
 - `dense_vram_index_claims.pml`: the CUDA index's host side, the claim under its spin mutex, the planes grown before it, `size()` as a search's sampling bound, the load's claim, and the admission ramp behind a rejected launch; `-Dwithout_abandon_unlock` keeps a dead load plan's mutex.
 - `dense_vram_index_locks.pml`: the CUDA index's rows, publication by one release, the bounded slot-zero lock, the back-link's sweep and append, and a traversal warp whose follower lanes read behind a shuffle.
-- `dense_vram_indexes.pml`: the sharded CUDA index, the mutation gate answering `contended_k`, the admission ceiling, keys written before a shard's claim publishes the row, and a load beside a batch; `-Dscenario=loading` for the load.
+- `dense_vram_indexes.pml`: the sharded CUDA index, the mutation gate answering `contended_k`, keys written before a shard's claim publishes the row, and a load beside a batch; `-Dscenario=loading` for the load.
 - `nvme_ring.pml`: the NVMe index's io_uring words, the submission and completion rings' heads and tails, the entries between them, the wrap, and the deferred posting; `-Dscenario=deferred` for `DEFER_TASKRUN`.
 - `executor.pml`: `forkunion_executor_t`, the one-caller hold through `claim`, the arena rewind in `reserve`, and the fan-out no second caller may rewind under.
 
@@ -56,14 +56,17 @@ The load path's `finish` has its counters in the right order, the claim and iden
 The steps' tally add releases for the finisher's acquire, which is what puts the steps' records behind the watermark; `-Dwithout_covered_release` loses them under the view model and, posted, under far memory.
 
 A failed load left its keys behind.
-`load_plan_t::load` registers keys as it decodes, and a plan that failed kept them until the next `plan_load` wiped the map, so an `insert` in between dispensed ids the failed attempt's keys still named and spent the map's ceiling on the leftovers.
+`load_plan_t::load` registers keys as it decodes, and a plan that failed kept them until the next `plan_load` wiped the map, so an `insert` in between dispensed ids the failed attempt's keys still named and spent the map's seats on the leftovers.
 The plan now wipes the keys it registered when it dies before `finish`, whether its steps fell short or nobody finished it, still under its hold, and `insert` clears its row before wiring; `basic_ram_index.pml` carries both as `-Dwithout_map_clear` and `-Dwithout_row_clear`.
 A successful `finish` spends the plan, so a second call answers a status instead of dropping a hold the plan no longer owns; `-Dtwice_finished` unlocks twice and the gate's assertion names it, or an adder walks in on a loader's hold.
 
-The multimap's counter passed its own ceiling.
-`insert` claimed with an unconditional add and released the seat with a subtract on refusal, so between the two a `size()` read one entry past `capacity()`, and one more per refusal in flight; no caller compares the two today, but the docs promise the bound and the counter is the only one the probe chains have.
-`ram_tables.pml` gives `size()` its own reader now, and the claim is a compare-exchange that never passes the ceiling, so the refusal path writes nothing at all; `-Dwithout_bounded_ceiling` keeps the old claim and the reader sees the overshoot.
-The rest of the multimap's protocol holds as written, under every memory model: two inserters under the ceiling never probe past the second slot, and the one order that carries is the pair the header names, the release on the `published_k` store and the acquire on each probe.
+The multimap had a ceiling, and the sharded index grew past it.
+Its capacity was fixed at `reserve`, while the shards grow on demand, so a sharded index filled past its reservation lost keys to `overflow_k` answers nobody read, and wrote them past the end of a shard's key column.
+The multimap is `chunked_multimap` now: every entry takes a seat with a relaxed add, and the claim covers the seat's chunk before any slot is touched, so `insert` never fails.
+Its tables are two `chunked_column`s - control bytes and slots - published by the same cover as the key columns, so the claimed seats are the one word the map owns.
+`-Dwithout_cover_refusal` inserts although the cover failed, and the seat lands in a chunk never published.
+`-Dscenario=growth` claims from an empty map: a claimer zeroes its fresh chunk and publishes it with a compare-exchange, a peer that published first keeps its own, and the directory loads acquire the zeroing; `-Dwithout_cover_release`, `-Dwithout_directory_acquire` and `-Dwithout_walk_acquire` each read the allocation's garbage.
+The rest of the multimap's protocol holds as written, under every memory model: two inserters on two seats never probe past the second slot, and the one order that carries is the pair the header names, the release on the `published_k` store and the acquire on each probe.
 `-Dwithout_publish_release` and `-Dwithout_probe_acquire` each let the prober read the new key beside the slot's initial value, since the key and the value are plain stores the state alone publishes, and a `building_k` slot is occupied and never the end of a chain, which is what makes a key published before the prober started reachable through it.
 
 Two reservations broke the grower election.
@@ -84,7 +87,9 @@ The monolith save takes one `plan_save` per shard, and a settled plan copies no 
 The load path lands keys before `finish` releases the dispenser and the watermark, and `-Dwithout_keys_before_finish` keeps the counterexample.
 The single-row `insert` did not consume its claim on success, so every landed row released one seat and the shard claimed one row more than it holds; it consumes now, and `-Dwithout_claim_consume` keeps the old header.
 The shards' key columns were a second contended word beside each shard's capacity counter: a `fetch_add_if_at_most` on the key column, then the claim, with two releases to keep aligned.
-The shard's claim is now the only claim a row makes: nothing bounds a shard from outside, and the key column is sized to what the shard really holds after its reservation rounds up to whole chunks.
+The shard's claim is now the only claim a row makes, and a shard refuses only past the rows its ids reach.
+Its key column is a `chunked_column` on the shard's own chunk schedule, and every claimer covers it to what the shard hosts after the claim, before dispensing.
+The id a claimer dispenses may lie past its own rows, in a chunk only a later claimer covered, but that claimer dispensed first, and the dispenser's acquire-release carries its cover along; `dense_ram_indexes.pml -Dscenario=covering` holds three adders on one shard, and `-Dwithout_cover` and `-Dwithout_dispense_acq_rel` each write a key into a chunk never seen published.
 `reserve` called a second time, above the physical rows, spun forever: a deficit that fits in the free rows is granted without a growth, released, and read back unchanged.
 It now claims from the claimed rows up to the request, so the counter crosses and one growth covers it; `dense_ram_index_capacity.pml -Dscenario=regrow` bounds the rounds, and `-Dwithout_deficit_growth` keeps the old deficit and over-runs them.
 
@@ -97,10 +102,10 @@ The planes' committed extent, which `capacity()` reads outside the claim, was a 
 The far model is not run there: the posted add is x86's, and the ramp's add runs on the GPU.
 
 The sharded CUDA index gated its batches and not its load.
-`insert` takes the executor's hold and then `mutating_`, so two batches never interleave their claims on `admitted_rows_`; the load's opening, now `gate_load_`, took only the executor's, so a batch through a second executor passed the gate, its compare-exchange raced the plain total the load stores at its end, and its keys raced the load's.
-`dense_vram_indexes.pml` runs two batches, a searcher and a loader over two shards of two rows, and found three things in the load: the missing gate, an emptiness check made at the entry and not under the hold, so a batch admitted between the two was overwritten by the load's total and the next batch's first node reached the plane, and each shard published before its keys were written, the order the RAM twin had already corrected.
-The load takes the gate now, checks emptiness under it, and writes each shard's keys before its plan finishes; `-Dwithout_load_gate`, `-Dwithout_empty_under_gate` and `-Dwithout_load_key_before_finish` keep the three.
-The relaxed compare-exchange on `admitted_rows_` stays relaxed: every writer is gated, and no reader derives a visibility bound from it, since searches bound on each shard's claim, whose release and acquire `-Dwithout_claim_release` shows to carry the keys.
+`insert` takes the executor's hold and then `mutating_`, so two batches never interleave their claims; the load's opening, now `gate_load_`, took only the executor's, so a batch through a second executor passed the gate, and its keys raced the load's.
+`dense_vram_indexes.pml` runs two batches, a searcher and a loader over two shards, and found three things in the load: the missing gate, an emptiness check made at the entry and not under the hold, and each shard published before its keys were written, the order the RAM twin had already corrected.
+The load takes the gate now, checks emptiness under it, and writes each shard's keys before its plan finishes; `-Dwithout_load_gate` and `-Dwithout_load_key_before_finish` keep the two that race.
+The batches no longer admit rows against the key planes: the shards grow as they claim, the gate serializes the key columns' covers along with the claims, and searches bound on each shard's claim, whose release and acquire `-Dwithout_claim_release` shows to carry the keys.
 
 The NVMe index's ring words carry exactly the orders the io_uring documentation asks for.
 `nvme_ring.pml` runs an engine and a kernel over two rings of depth two and three requests, so each ring wraps once: the tail releases and the tail acquires carry the entries, and `-Dwithout_sq_tail_release` lets the kernel consume an entry before its payload landed while `-Dwithout_cq_tail_acquire` lets the engine reap a completion stale.
@@ -115,7 +120,7 @@ The executor's hold is what keeps a second caller from rewinding the arenas unde
 
 The dense index header compiles and starts under GenMC, but its first chunk is a thousand rows of sentinel stores, more events than GenMC's execution graph holds, so `dense_ram_index_watermark.cpp` and `dense_ram_index_capacity.cpp` spell the counters' lines rather than driving the header.
 GenMC knows RC11 only: the far-memory results are Spin's alone.
-`growing_multimap` crashes GenMC 0.18's interpreter before the first insert, single-threaded, so `ram_tables.pml` stands alone and the multimap has no client.
+`chunked_multimap` crashes GenMC 0.18's interpreter before the first insert, single-threaded, so `ram_tables.pml` stands alone and the multimap has no client.
 The rows model has no client either: the row mutex sits inside `basic_ram_index`, whose allocations and key map are more than GenMC's graph takes.
 The CUDA rows model folds the prior lock holder into one lane and takes `bar.warp.sync`'s ordering among its participants from the ISA text.
 An add overlapping a load of the RAM sharded index is outside that index's contract, which has no mutation gate; the CUDA twin's gate covers its load now.

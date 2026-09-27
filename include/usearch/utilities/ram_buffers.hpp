@@ -17,10 +17,12 @@
 
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `SIZE_MAX`, `std::uint8_t`
-#include <cstring> // `std::memcpy`
+#include <cstring> // `std::memcpy`, `std::memset` - a fresh chunk starts zeroed
 
 #include <algorithm>   // `std::lower_bound`, `std::sort_heap`, `std::min`, `std::max`
-#include <array>       // `std::array` - batch-of-four overloads
+#include <array>       // `std::array` - batch-of-four overloads, the chunk directories
+#include <atomic>      // `std::memory_order` - publishing a chunk to its readers
+#include <bit>         // `std::bit_width`, `std::bit_floor` - the closed-form chunk location
 #include <concepts>    // `std::same_as` - the buffer-allocator concept
 #include <span>        // `std::span` - the sorted-batch insert argument
 #include <functional>  // `std::less`
@@ -963,6 +965,185 @@ class growing_buffer {
         annotate_container(elements_, elements_ + capacity_, elements_ + previous, elements_ + count);
         for (; size_ < count; ++size_) new (elements_ + size_) element_t();
     }
+};
+
+/**
+ *  @brief The one growth schedule every chunked collection follows: chunks double from 2^first_rows_log2_ rows up
+ *      to 2^slab_rows_log2_, then stay slab-sized, so a row's chunk and its offset in it are closed-form and never
+ * move.
+ *
+ *  Doubling chunks give closed-form prefix sums, so @ref locate is one @c bit_width plus a few adds - cheap enough
+ *  for every traversal hop.
+ */
+template <std::size_t first_rows_log2_, std::size_t slab_rows_log2_>
+struct chunk_schedule {
+    static_assert(first_rows_log2_ <= slab_rows_log2_ && slab_rows_log2_ < 48);
+
+    /** Rows in every mature slab-sized chunk, as a power-of-two exponent. */
+    inline static constexpr std::size_t slab_rows_log2_k = slab_rows_log2_;
+
+    /** Chunks in the doubling phase: the first chunk plus one per doubling. */
+    inline static constexpr std::size_t doubling_chunks_k = slab_rows_log2_ - first_rows_log2_ + 1;
+
+    /** Rows the doubling phase covers: 2^(slab_rows_log2_ + 1) - 2^first_rows_log2_. */
+    inline static constexpr std::size_t doubling_rows_k = (std::size_t {1} << (slab_rows_log2_ + 1)) -
+                                                          (std::size_t {1} << first_rows_log2_);
+
+    /** Where a row lives: its chunk, and its offset within that chunk. */
+    struct location_t {
+        std::size_t chunk = 0;
+        std::size_t offset = 0;
+    };
+
+    /** The chunk and offset of @p row. */
+    static constexpr location_t locate(std::size_t row) noexcept {
+        if (row < doubling_rows_k) {
+            // Biasing by the first chunk's size makes the leading bit of the row encode the chunk.
+            std::size_t const biased = row + (std::size_t {1} << first_rows_log2_);
+            return {static_cast<std::size_t>(std::bit_width(biased)) - 1 - first_rows_log2_,
+                    biased - std::bit_floor(biased)};
+        }
+        std::size_t const flat = row - doubling_rows_k;
+        return {doubling_chunks_k + (flat >> slab_rows_log2_), flat & ((std::size_t {1} << slab_rows_log2_) - 1)};
+    }
+
+    /** Rows across the first @p chunks chunks - the prefix sums @ref locate inverts. */
+    static constexpr std::size_t rows_before(std::size_t chunks) noexcept {
+        if (chunks <= doubling_chunks_k)
+            return (std::size_t {1} << (first_rows_log2_ + chunks)) - (std::size_t {1} << first_rows_log2_);
+        return doubling_rows_k + ((chunks - doubling_chunks_k) << slab_rows_log2_);
+    }
+
+    /** Rows in chunk @p chunk. */
+    static constexpr std::size_t rows_in(std::size_t chunk) noexcept {
+        return std::size_t {1} << (chunk < doubling_chunks_k ? first_rows_log2_ + chunk : slab_rows_log2_);
+    }
+
+    /** Chunks that hold the first @p rows rows. */
+    static constexpr std::size_t chunks_for(std::size_t rows) noexcept { return rows ? locate(rows - 1).chunk + 1 : 0; }
+};
+
+/**
+ *  @brief Rows addressed by ID that never move: chunks on @p schedule_type_, a missing one allocated, zeroed and
+ *      published by whichever thread asks for it first, so readers index while writers grow the column.
+ *
+ *  @ref cover is the only fallible call, and it may run on any thread. Covers publish chunks in order, so the
+ *  published ones are always a prefix. A reader indexes only rows some cover already reached, and learns of them
+ *  through the owner's own publication, which orders the chunk before the read. The directory entries are plain
+ *  pointers owned through @p atomic_ref_template_.
+ */
+template <typename value_type_, typename schedule_type_, std::size_t max_rows_, typename allocator_type_,
+          template <typename> class atomic_ref_template_ = standard_atomic_ref>
+class chunked_column {
+    static_assert(std::is_trivially_copyable_v<value_type_>, "Rows are written in place, never constructed");
+
+  public:
+    using value_t = value_type_;
+    using schedule_t = schedule_type_;
+    using allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<value_t>;
+    template <typename word_type_>
+    using atomic_ref = atomic_ref_template_<word_type_>;
+
+    /** Chunks the directory holds - enough for @p max_rows_ rows. */
+    inline static constexpr std::size_t max_chunks_k = schedule_t::chunks_for(max_rows_);
+
+    explicit chunked_column(allocator_t allocator) noexcept : allocator_(std::move(allocator)) {}
+    chunked_column(chunked_column&& other) noexcept : chunks_(other.chunks_), allocator_(std::move(other.allocator_)) {
+        other.chunks_.fill(nullptr);
+    }
+    chunked_column& operator=(chunked_column&& other) noexcept {
+        std::swap(chunks_, other.chunks_);
+        std::swap(allocator_, other.allocator_);
+        return *this;
+    }
+    chunked_column(chunked_column const&) = delete;
+    chunked_column& operator=(chunked_column const&) = delete;
+    ~chunked_column() noexcept { reset(); }
+
+    /** Allocates, zeroes and publishes every chunk the first @p rows rows need and is missing - safe on any thread. */
+    status_t cover(std::size_t rows) noexcept {
+        if (rows > max_rows_) return status_t::overflow_k;
+        for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(rows); chunk != chunks; ++chunk) {
+            atomic_ref<value_t*> slot {chunks_[chunk]};
+            if (slot.load(std::memory_order_acquire)) continue;
+            value_t* const fresh = allocator_.allocate(schedule_t::rows_in(chunk));
+            if (!fresh) return status_t::bad_alloc_k;
+            std::memset(static_cast<void*>(fresh), 0, schedule_t::rows_in(chunk) * sizeof(value_t));
+            value_t* expected_empty = nullptr;
+            // A peer covering the same chunk first keeps its own; this one goes back.
+            if (!slot.compare_exchange_strong(expected_empty, fresh, std::memory_order_release,
+                                              std::memory_order_acquire))
+                allocator_.deallocate(fresh, schedule_t::rows_in(chunk));
+        }
+        return status_t::success_k;
+    }
+
+    /** Row @p row, which a @ref cover already reached. */
+    value_t& operator[](std::size_t row) noexcept {
+        auto const at = schedule_t::locate(row);
+        value_t* const rows = atomic_ref<value_t*>(chunks_[at.chunk]).load(std::memory_order_relaxed);
+        return rows[at.offset];
+    }
+    value_t const& operator[](std::size_t row) const noexcept {
+        auto const at = schedule_t::locate(row);
+        value_t* const rows = atomic_ref<value_t* const>(chunks_[at.chunk]).load(std::memory_order_relaxed);
+        return rows[at.offset];
+    }
+
+    /** The rows of chunk @p index, acquired with its contents; empty until a cover publishes it. */
+    std::span<value_t> chunk(std::size_t index) noexcept {
+        value_t* const rows = atomic_ref<value_t*>(chunks_[index]).load(std::memory_order_acquire);
+        return {rows, rows ? schedule_t::rows_in(index) : 0};
+    }
+    std::span<value_t const> chunk(std::size_t index) const noexcept {
+        value_t* const rows = atomic_ref<value_t* const>(chunks_[index]).load(std::memory_order_acquire);
+        return {rows, rows ? schedule_t::rows_in(index) : 0};
+    }
+
+    /** Rows the published chunks hold. */
+    std::size_t capacity() const noexcept {
+        std::size_t chunks = 0;
+        while (chunks != max_chunks_k && !chunk(chunks).empty()) ++chunks;
+        return schedule_t::rows_before(chunks);
+    }
+
+    /** Hands @p callback the @p rows as contiguous spans, one per chunk they cross - the shape a bulk copy in or out
+     *  takes. */
+    template <typename callback_type_>
+    void for_each_span(iota_view<std::size_t> rows, callback_type_&& callback) {
+        for (std::size_t row = rows.first; row != rows.bound;) {
+            auto const at = schedule_t::locate(row);
+            std::size_t const run = min_of(rows.bound - row, schedule_t::rows_in(at.chunk) - at.offset);
+            callback(chunk(at.chunk).subspan(at.offset, run));
+            row += run;
+        }
+    }
+    template <typename callback_type_>
+    void for_each_span(iota_view<std::size_t> rows, callback_type_&& callback) const {
+        for (std::size_t row = rows.first; row != rows.bound;) {
+            auto const at = schedule_t::locate(row);
+            std::size_t const run = min_of(rows.bound - row, schedule_t::rows_in(at.chunk) - at.offset);
+            callback(chunk(at.chunk).subspan(at.offset, run));
+            row += run;
+        }
+    }
+
+    /** Bytes the published chunks span. */
+    std::size_t memory_usage() const noexcept { return capacity() * sizeof(value_t); }
+
+    /** Frees every chunk - single-threaded: the caller certifies no concurrent readers or writers. */
+    void reset() noexcept {
+        for (std::size_t index = 0; index != max_chunks_k; ++index)
+            if (value_t* const rows = std::exchange(chunks_[index], nullptr))
+                allocator_.deallocate(rows, schedule_t::rows_in(index));
+    }
+
+  private:
+
+    /** One pointer per chunk, sized once and never reallocated; a null entry is a chunk no cover reached yet. */
+    std::array<value_t*, max_chunks_k> chunks_ {};
+
+    [[no_unique_address]] allocator_t allocator_;
 };
 
 /** Per-thread bump arena: reservations bump inside the newest chunk, and one that cannot

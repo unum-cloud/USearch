@@ -825,14 +825,36 @@ struct wait_capped_t {};
  *  currency.
  */
 struct dummy_waiter_t {
-    template <typename value_type_, typename thread_index_type_, typename bound_type_>
-    void operator()(std::atomic<value_type_> const&, value_type_, thread_index_type_, bound_type_) const noexcept {
+    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
+    void operator()(std::atomic<value_type_> const&, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
         std::this_thread::yield();
     }
-    template <typename value_type_, typename thread_index_type_, typename bound_type_>
-    void operator()(value_type_ const*, value_type_, thread_index_type_, bound_type_) const noexcept {
+    template <typename value_type_, typename thread_index_type_, typename bound_type_ = wait_capped_t>
+    void operator()(value_type_ const*, value_type_, thread_index_type_, bound_type_ = {}) const noexcept {
         std::this_thread::yield();
     }
+};
+
+/**
+ *  @brief The standard's @c std::atomic_ref, extended to bind a const word for loads - the one place a const reader of
+ *      a plain synchronization word casts its constness away, so no owner has to declare that word @c mutable.
+ *
+ *  The standard binds const words only from C++26 on, per P3323; ForkUnion's references already do, and this is the
+ *  analog for code that must build on the standard library alone. A const word only ever loads.
+ */
+template <typename value_type_>
+struct standard_atomic_ref : std::atomic_ref<value_type_> {
+    using std::atomic_ref<value_type_>::atomic_ref;
+    using std::atomic_ref<value_type_>::operator=;
+};
+
+template <typename value_type_>
+struct standard_atomic_ref<value_type_ const> {
+    explicit standard_atomic_ref(value_type_ const& word) noexcept : word_(const_cast<value_type_&>(word)) {}
+    value_type_ load(std::memory_order order = std::memory_order_seq_cst) const noexcept { return word_.load(order); }
+
+  private:
+    std::atomic_ref<value_type_> word_;
 };
 
 /** The compiled-out default for optional callbacks, like an insertion's assigned-id

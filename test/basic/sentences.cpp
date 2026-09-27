@@ -93,7 +93,7 @@ struct sentences_handmade_t {
     std::array<std::array<u64_t, 3>, 3> distances;
 };
 
-template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = std::atomic_ref>
+template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = standard_atomic_ref>
 struct sentences_fixture {
     using index_t =
         basic_ram_index<std::string, u64_t, u32_t, u64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;

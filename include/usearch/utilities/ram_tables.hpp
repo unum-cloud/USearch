@@ -7,7 +7,7 @@
  *  Standalone header providing baseline associative structures, like:
  *
  *  - Exact per-thread visited @b hash-sets
- *  - Concurrent insert-only @b hash-multimaps
+ *  - Concurrent insert-only @b hash-multimaps, growing in chunks
  */
 #pragma once
 
@@ -17,7 +17,7 @@
 #include <cstring> // `std::memset` - the all-ones sentinel fill
 
 #include <array>       // `std::array` - batched membership inserts
-#include <atomic>      // `std::atomic`, `std::atomic_ref`
+#include <atomic>      // `std::memory_order` - the slot states and the claimed seats
 #include <bit>         // `std::countr_zero` - the first matching lane of a group scan
 #include <functional>  // `std::hash`
 #include <limits>      // `std::numeric_limits` - the all-ones sentinel
@@ -288,24 +288,27 @@ class growing_hash_set {
 };
 
 /**
- *  @brief Insert-only, linear-probe hash multimap. Duplicate keys coexist as separate
- *      slots, which is what makes concurrent insertion CAS-once instead of lock-and-chain:
- *      a slot's state advances @c empty_k → @c building_k → @c published_k exactly once.
+ *  @brief Insert-only, linear-probe hash multimap that grows without moving an entry: its chunks are fixed tables
+ *      appended on a doubling @ref chunk_schedule, so inserts and lookups run while it grows.
  *
- *  Slot states live in a parallel control-byte array the probes scan - 64 states per cache
- *  line - so a slot's key & value are touched only on a published candidate, and no key or
- *  value bit-pattern is ever reserved. Readers are wait-free: they probe with acquire
- *  loads, stop at @c empty_k, and treat @c building_k as occupied-but-mismatched - never
- *  as end-of-chain - so a half-published entry is merely invisible, never wrong. Growth is
- *  explicit: @c reserve may be called repeatedly to rehash into a larger array, but it
- *  demands a mutation-free phase - concurrent inserts never trigger a hidden migration,
- *  they fail with @c overflow_k when the ceiling is spent. The slot count stays at least
- *  twice the entry ceiling, so every probe chain terminates.
+ *  Duplicate keys coexist as separate slots, which is what makes concurrent insertion CAS-once instead of
+ *  lock-and-chain: a slot's state advances @c empty_k → @c building_k → @c published_k exactly once.
+ *
+ *  Every entry takes one seat, a global index a @ref claim hands out and covers before the entry exists, so
+ *  recording it never fails; seat @c s lands in the chunk the schedule locates it in, whose slots are twice its
+ *  seats, so every probe chain terminates. The chunks are two @ref chunked_column s - control bytes and slots - that
+ *  cover publishes like any other column, so the claimed seats are the one word the map owns.
+ *
+ *  Slot states live in the control-byte column the probes scan - 64 states per cache line - so a slot's key & value
+ *  are touched only on a published candidate, and no key or value bit-pattern is ever reserved. Readers are
+ *  wait-free: they probe every published chunk with acquire loads, stop at @c empty_k, and treat @c building_k as
+ *  occupied-but-mismatched - never as end-of-chain - so a half-published entry is merely invisible, never wrong.
  */
-template <typename key_type_, typename value_type_,          //
-          typename hash_type_ = std::hash<key_type_>,        //
-          typename allocator_type_ = std::allocator<byte_t>> //
-class growing_multimap {
+template <typename key_type_, typename value_type_,                             //
+          typename hash_type_ = std::hash<key_type_>,                           //
+          typename allocator_type_ = std::allocator<byte_t>,                    //
+          template <typename> class atomic_ref_template_ = standard_atomic_ref> //
+class chunked_multimap {
     static_assert(std::is_trivially_copyable_v<key_type_> && std::is_trivially_copyable_v<value_type_>);
 
   public:
@@ -313,11 +316,19 @@ class growing_multimap {
     using value_t = value_type_;
     using hash_t = hash_type_;
     using allocator_t = allocator_type_;
+    template <typename word_type_>
+    using atomic_ref = atomic_ref_template_<word_type_>;
+
+    /** Seats per chunk, doubling from 1'024; the slab phase lies past any table a machine holds. */
+    using seats_schedule_t = chunk_schedule<10, 40>;
+
+    /** Slots per chunk, twice its seats. */
+    using slots_schedule_t = chunk_schedule<11, 41>;
 
     /** Lifecycle of one slot, advanced monotonically by its one claiming inserter. */
     enum class slot_state_t : u8_t {
 
-        /** Never claimed - the probe chain terminator. */
+        /** Never claimed - the probe chain terminator, and what a fresh chunk starts as. */
         empty_k = 0,
 
         /** Claimed; the key & value stores have not been released yet. */
@@ -327,147 +338,114 @@ class growing_multimap {
         published_k,
     };
 
-    growing_multimap(growing_multimap const&) noexcept = delete;
-    growing_multimap& operator=(growing_multimap const&) noexcept = delete;
+    /** Seats one @ref claim handed out: the next to fill and the bound past the last. */
+    struct seats_t {
+        std::size_t next = 0;
+        std::size_t bound = 0;
+    };
+
+    chunked_multimap(chunked_multimap const&) noexcept = delete;
+    chunked_multimap& operator=(chunked_multimap const&) noexcept = delete;
 
     /** Every map names its allocator; nothing is placed by default. */
-    growing_multimap() = delete;
+    chunked_multimap() = delete;
 
     /** The process-wide allocator, for a map no arena or domain owns. */
-    explicit growing_multimap(global_allocator_t) noexcept
+    explicit chunked_multimap(global_allocator_t) noexcept
         requires std::default_initializable<allocator_t>
-        : growing_multimap(allocator_t {}) {}
-    explicit growing_multimap(allocator_t allocator) noexcept : allocator_(std::move(allocator)) {}
-    ~growing_multimap() noexcept { reset(); }
+        : chunked_multimap(allocator_t {}) {}
+    explicit chunked_multimap(allocator_t const& allocator) noexcept : states_(allocator), slots_(allocator) {}
 
-    growing_multimap(growing_multimap&& other) noexcept
-        : slots_(exchange(other.slots_, nullptr)), states_(exchange(other.states_, nullptr)),
-          slots_count_(exchange(other.slots_count_, 0)), entries_ceiling_(exchange(other.entries_ceiling_, 0)),
-          inserted_count_(other.inserted_count_.load(std::memory_order_relaxed)), hash_(std::move(other.hash_)),
-          allocator_(std::move(other.allocator_)) {
-        other.inserted_count_.store(0, std::memory_order_relaxed);
-    }
+    chunked_multimap(chunked_multimap&& other) noexcept
+        : states_(std::move(other.states_)), slots_(std::move(other.slots_)),
+          claimed_seats_(std::exchange(other.claimed_seats_, 0)) {}
 
-    /** Swap-based, so the displaced table dies with @p other rather than here; the count is
-     *  moved by hand, since an atomic is not swappable. Single-threaded, like @ref clear. */
-    growing_multimap& operator=(growing_multimap&& other) noexcept {
-        std::swap(slots_, other.slots_);
-        std::swap(states_, other.states_);
-        std::swap(slots_count_, other.slots_count_);
-        std::swap(entries_ceiling_, other.entries_ceiling_);
-        std::size_t const inserted = inserted_count_.load(std::memory_order_relaxed);
-        inserted_count_.store(other.inserted_count_.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        other.inserted_count_.store(inserted, std::memory_order_relaxed);
-        std::swap(hash_, other.hash_);
-        std::swap(allocator_, other.allocator_);
+    /** Swap-based, so the displaced chunks die with @p other rather than here. Single-threaded, like @ref clear. */
+    chunked_multimap& operator=(chunked_multimap&& other) noexcept {
+        states_ = std::move(other.states_);
+        slots_ = std::move(other.slots_);
+        std::swap(claimed_seats_, other.claimed_seats_);
         return *this;
     }
 
-    /** Forgets every entry, keeping the slot array & ceiling - single-threaded, like
-     *  @c reserve: the caller certifies no concurrent readers or writers for the call. */
+    /** Forgets every entry and seat, keeping the chunks - single-threaded: the caller certifies no concurrent
+     *  readers or writers for the call. */
     void clear() noexcept {
-        for (std::size_t position = 0; position != slots_count_; ++position) states_[position] = slot_state_t::empty_k;
-        inserted_count_.store(0, std::memory_order_relaxed);
-    }
-
-    /** Bytes @p slots_count slots occupy - one allocation carrying both arrays: the
-     *  slots, then the control bytes. */
-    static std::size_t memory_usage(std::size_t slots_count) noexcept {
-        return slots_count * (sizeof(slot_t) + sizeof(slot_state_t));
-    }
-
-    /** Bytes this multimap currently occupies. */
-    std::size_t memory_usage() const noexcept { return memory_usage(slots_count_); }
-
-    void reset() noexcept {
-        if (slots_)
-            bytes_allocator_t(allocator_).deallocate(reinterpret_cast<std::byte*>(slots_), memory_usage(slots_count_));
-        slots_ = nullptr;
-        states_ = nullptr;
-        slots_count_ = 0;
-        entries_ceiling_ = 0;
-        inserted_count_.store(0, std::memory_order_relaxed);
-    }
-
-    /** Sizes the slot array for @p capacity entries at a load factor of at most one
-     *  half. Repeatable: a larger @p capacity rehashes into a fresh array, single-
-     *  threaded - the caller certifies no concurrent readers or writers for the call. */
-    status_t reserve(std::size_t capacity) noexcept {
-        if (capacity <= entries_ceiling_) return status_t::success_k;
-
-        std::size_t const new_slots_count = ceil2(max_of<std::size_t>(capacity * 2u, 16u));
-        std::byte* const new_bytes = bytes_allocator_t(allocator_).allocate(memory_usage(new_slots_count));
-        if (!new_bytes) return status_t::bad_alloc_k;
-        slot_t* const new_slots = reinterpret_cast<slot_t*>(new_bytes);
-        slot_state_t* const new_states = reinterpret_cast<slot_state_t*>(new_bytes + //
-                                                                         new_slots_count * sizeof(slot_t));
-        for (std::size_t position = 0; position != new_slots_count; ++position)
-            new_states[position] = slot_state_t::empty_k;
-
-        // Re-place settled entries through the same probe walk `insert` uses; the phase is
-        // mutation-free, so no building slots can exist and plain stores suffice.
-        for (std::size_t position = 0; position != slots_count_; ++position) {
-            if (states_[position] != slot_state_t::published_k) continue;
-            std::size_t chain = first_probe_of(slots_[position].key, new_slots_count);
-            while (new_states[chain] != slot_state_t::empty_k) chain = (chain + 1) & (new_slots_count - 1);
-            new_slots[chain] = slots_[position];
-            new_states[chain] = slot_state_t::published_k;
+        for (std::size_t index = 0; index != max_chunks_k; ++index) {
+            std::span<slot_state_t> const states = states_.chunk(index);
+            if (states.empty()) break;
+            std::memset(states.data(), 0, states.size_bytes());
         }
-
-        if (slots_)
-            bytes_allocator_t(allocator_).deallocate(reinterpret_cast<std::byte*>(slots_), memory_usage(slots_count_));
-        slots_ = new_slots;
-        states_ = new_states;
-        slots_count_ = new_slots_count;
-        entries_ceiling_ = capacity;
-        return status_t::success_k;
+        claimed_seats_ = 0;
     }
 
-    /** Claims one slot along the probe path of @p key - safe under arbitrary
-     *  concurrent inserts & lookups; fails with @c overflow_k once the ceiling is spent. */
-    status_t insert(key_t const& key, value_t value) noexcept {
-        if (!slots_count_) return status_t::uninitialized_k;
-        // Claim a seat under the ceiling before touching any slot, so probe chains stay bounded by construction
-        // and `size()` never passes `capacity()`, not even while a refusal is in flight.
-        std::size_t inserted = inserted_count_.load(std::memory_order_relaxed);
-        while (inserted < entries_ceiling_ &&
-               !inserted_count_.compare_exchange_weak(inserted, inserted + 1, std::memory_order_relaxed)) {}
-        if (inserted >= entries_ceiling_) return status_t::overflow_k;
-        std::size_t chain = first_probe_of(key, slots_count_);
+    /** Frees every chunk - single-threaded, like @ref clear. */
+    void reset() noexcept {
+        states_.reset();
+        slots_.reset();
+        claimed_seats_ = 0;
+    }
+
+    /** Bytes the published chunks span. */
+    std::size_t memory_usage() const noexcept { return states_.memory_usage() + slots_.memory_usage(); }
+
+    /** Publishes chunks for @p capacity seats - a hint, callable any time, alongside inserts. */
+    status_t reserve(std::size_t capacity) noexcept { return cover_(capacity); }
+
+    /** Seats for @p count later inserts, covering their chunks - the only fallible step, so the inserts that consume
+     *  the seats never fail. A refused cover strands its seats, which only leaves their chunks emptier. */
+    expected<seats_t> claim(std::size_t count) noexcept {
+        std::size_t const first = atomic_ref<std::size_t>(claimed_seats_).fetch_add(count, std::memory_order_relaxed);
+        if (status_t const covered = cover_(first + count); failed(covered)) return {seats_t {}, covered};
+        return {seats_t {first, first + count}, status_t::success_k};
+    }
+
+    /** Records @p value under @p key in the next of @p seats - safe under arbitrary concurrent inserts & lookups,
+     *  and never fails, never waits. */
+    void insert(seats_t& seats, key_t const& key, value_t value) noexcept {
+        assert(seats.next != seats.bound && "Every insert consumes a claimed seat");
+        std::size_t const index = seats_schedule_t::locate(seats.next++).chunk;
+        std::span<slot_state_t> const states = states_.chunk(index);
+        std::span<slot_t> const slots = slots_.chunk(index);
+        std::size_t position = first_probe_of(key, states.size());
         while (true) {
-            std::atomic_ref<slot_state_t> state(states_[chain]);
+            atomic_ref<slot_state_t> state(states[position]);
             slot_state_t expected_empty = slot_state_t::empty_k;
             if (state.load(std::memory_order_relaxed) == slot_state_t::empty_k &&
                 state.compare_exchange_strong(expected_empty, slot_state_t::building_k, std::memory_order_acquire,
                                               std::memory_order_relaxed)) {
-                slots_[chain].key = key;
-                slots_[chain].value = value;
+                slots[position] = {key, value};
                 state.store(slot_state_t::published_k, std::memory_order_release);
-                return status_t::success_k;
+                return;
             }
-            chain = (chain + 1) & (slots_count_ - 1);
+            position = (position + 1) & (states.size() - 1);
         }
     }
 
-    /** One value stored under @p key, or @c malformed_k when absent. Duplicates
-     *  surface in an unspecified order - use @c find_each to see them all. */
+    /** One value stored under @p key, or @c malformed_k when absent. Duplicates surface in an unspecified order -
+     *  use @c find_each to see them all. */
     expected<value_t> find(key_t const& key) const noexcept {
         expected<value_t> result {value_t {}, status_t::malformed_k};
         find_each(key, [&](value_t value) noexcept { result = {value, status_t::success_k}; });
         return result;
     }
 
-    /** Invokes @p callback for every value stored under @p key - wait-free. */
+    /** Invokes @p callback for every value stored under @p key, across every published chunk - wait-free. A chunk
+     *  whose slots are not published yet holds no entry, and neither does any after it. */
     template <typename callback_type_>
     void find_each(key_t const& key, callback_type_&& callback) const noexcept {
-        if (!slots_count_) return;
-        std::size_t chain = first_probe_of(key, slots_count_);
-        while (true) {
-            slot_state_t const state = std::atomic_ref<slot_state_t>(states_[chain]).load(std::memory_order_acquire);
-            if (state == slot_state_t::empty_k) return;
-            // A building slot's key is still in flight - occupied, but never a match.
-            if (state == slot_state_t::published_k && slots_[chain].key == key) callback(slots_[chain].value);
-            chain = (chain + 1) & (slots_count_ - 1);
+        for (std::size_t index = 0; index != max_chunks_k; ++index) {
+            std::span<slot_state_t const> const states = states_.chunk(index);
+            std::span<slot_t const> const slots = slots_.chunk(index);
+            if (slots.empty()) return;
+            for (std::size_t position = first_probe_of(key, states.size());;
+                 position = (position + 1) & (states.size() - 1)) {
+                slot_state_t const state =
+                    atomic_ref<slot_state_t const>(states[position]).load(std::memory_order_acquire);
+                if (state == slot_state_t::empty_k) break;
+                // A building slot's key is still in flight - occupied, but never a match.
+                if (state == slot_state_t::published_k && slots[position].key == key) callback(slots[position].value);
+            }
         }
     }
 
@@ -481,37 +459,42 @@ class growing_multimap {
     /** Whether at least one value is stored under @p key. */
     bool contains(key_t const& key) const noexcept { return static_cast<bool>(find(key)); }
 
-    /** Total inserted entries across all keys. */
-    std::size_t size() const noexcept { return inserted_count_.load(std::memory_order_relaxed); }
-
-    /** Total entries the current slot array can host. */
-    std::size_t capacity() const noexcept { return entries_ceiling_; }
+    /** Seats the published chunks hold. */
+    std::size_t capacity() const noexcept { return slots_.capacity() / 2; }
 
   private:
 
-    /** One probe slot: the key beside its value; its lifecycle lives in the
-     *  parallel control-byte array, so no payload bit-pattern is ever reserved. */
+    /** One probe slot: the key beside its value; its lifecycle lives in the control-byte column, so no payload
+     *  bit-pattern is ever reserved. */
     struct slot_t {
         key_t key;
         value_t value;
     };
 
-    using bytes_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<std::byte>;
+    /** Slots the columns hold - every chunk of the doubling phase, past any table a machine holds. */
+    inline static constexpr std::size_t max_slots_k = slots_schedule_t::doubling_rows_k;
+    inline static constexpr std::size_t max_chunks_k = slots_schedule_t::chunks_for(max_slots_k);
 
-    /** Avalanches the hash through @ref mix_bits before masking, so the identity
-     *  hashes of sequential integer keys still scatter across the table. */
+    status_t cover_(std::size_t seats) noexcept {
+        if (seats > max_slots_k / 2) return status_t::overflow_k;
+        // The control bytes first: a reader stops at the first chunk whose slots are missing.
+        if (status_t const covered = states_.cover(seats * 2); failed(covered)) return covered;
+        return slots_.cover(seats * 2);
+    }
+
+    /** Avalanches the hash through @ref mix_bits before masking, so the identity hashes of sequential integer keys
+     *  still scatter across the table. */
     std::size_t first_probe_of(key_t const& key, std::size_t slots_count) const noexcept {
         return static_cast<std::size_t>(mix_bits(static_cast<u64_t>(hash_(key)))) & (slots_count - 1);
     }
 
-    slot_t* slots_ = nullptr;
-    slot_state_t* states_ = nullptr;
-    std::size_t slots_count_ = 0;
-    std::size_t entries_ceiling_ = 0;
-    std::atomic<std::size_t> inserted_count_ {0};
+    chunked_column<slot_state_t, slots_schedule_t, max_slots_k, allocator_t, atomic_ref_template_> states_;
+    chunked_column<slot_t, slots_schedule_t, max_slots_k, allocator_t, atomic_ref_template_> slots_;
+
+    /** Seats every @ref claim so far handed out. */
+    std::size_t claimed_seats_ = 0;
 
     [[no_unique_address]] hash_t hash_;
-    [[no_unique_address]] allocator_t allocator_;
 };
 
 } // namespace usearch

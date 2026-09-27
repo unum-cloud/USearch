@@ -97,6 +97,7 @@ constexpr u64_t dense_seed_indexes_race_k = 0x62009ACEull;
 constexpr u64_t dense_seed_indexes_products_k = 0x62009D07ull;
 constexpr u64_t dense_seed_indexes_maxsim_k = 0x62009A55ull;
 constexpr u64_t dense_seed_indexes_refine_k = 0x62002EF1ull;
+constexpr u64_t dense_seed_indexes_growth_k = 0x62006E07ull;
 constexpr u64_t dense_seed_save_race_k = 0x5AFECACEull;
 constexpr u64_t dense_seed_immutable_parity_k = 0x5E771ED0ull;
 constexpr u64_t dense_seed_cursor_k = 0x17E2A702ull;
@@ -1530,6 +1531,48 @@ std::size_t test_dense_indexes_guards() {
                                      .status));
     failures += expect_eq(indexes.size(), 2 * rows + 1);
     failures += expect(indexes.capacity() >= indexes.size());
+    return failures;
+}
+
+/** A composition grows past any reservation: rows well beyond it land one at a time and batched, every key stays
+ *  findable, and a second, larger reservation is a hint rather than a refusal. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+std::size_t test_dense_indexes_growth() {
+    using index_t = typename indexes_type_::index_t;
+    using scalar_t = typename index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    std::size_t failures = 0;
+    std::size_t const reserved = 8, singles = 1100, batched = 1100, rows = singles + batched;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_tiny_values_k);
+
+    dense_indexes_executor<indexes_type_> driver;
+    if (failed(driver.status)) return failures + expect(false);
+    indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(indexes)));
+    failures += expect(succeeded(indexes.reserve({reserved, connectivity_16_k, dimensions}).status));
+
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, dense_seed_indexes_growth_k);
+    std::vector<key_t> keys(rows);
+    for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
+    dense_indexes_row_driver<indexes_type_> rows_driver {indexes, driver};
+    if (failed(rows_driver.status)) return failures + expect(false);
+    for (std::size_t row = 0; row != singles; ++row)
+        failures += expect(
+            succeeded(indexes.insert(keys[row], vectors.view().row(row).as_vector(), rows_driver.handle()).status));
+    failures += expect(succeeded(indexes
+                                     .insert(std::span<key_t const> {keys.data() + singles, batched},
+                                             vectors.view()(nk::range(singles, rows), nk::slice), driver.executor)
+                                     .status));
+
+    failures += expect_eq(indexes.size(), rows);
+    failures += expect(indexes.capacity() >= rows);
+    std::size_t found = 0;
+    for (key_t const key : keys) found += indexes.contains(key);
+    failures += expect_eq(found, rows);
+    auto fetched = make_vectors<scalar_t>(1, dimensions, dense_seed_indexes_growth_k + 1);
+    failures += expect_eq(indexes.get(keys[rows - 1], fetched.span(), 1), 1u);
+    failures += expect(succeeded(indexes.reserve({rows * 2, connectivity_16_k, dimensions}).status));
+    failures += expect(indexes.capacity() >= rows * 2);
     return failures;
 }
 

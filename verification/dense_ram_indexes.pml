@@ -1,33 +1,38 @@
 /**
  *  The sharded dense index from `include/usearch/dense/ram_indexes.hpp`: each row claimed from
- *  its shard's own capacity counter, whose ceiling is the shard's key column, a refusal past the
- *  claim releasing it with a release subtract, each landed row's key stored before its shard's
- *  watermark turn, and the readers that rest on the watermark - the search merge reading
- *  `keys[node]`, the monolith save taking one `plan_save` per shard, and the load path landing
- *  keys under one `finish`.
+ *  its shard's own capacity counter, a refusal past the claim releasing it with a release
+ *  subtract, each shard's key column covered to what the shard hosts after every claim, each
+ *  landed row's key stored before its shard's watermark turn, and the readers that rest on the
+ *  watermark - the search merge reading `keys[node]`, the monolith save taking one `plan_save`
+ *  per shard, and the load path landing keys under one `finish`.
  *
- *  Two shards with key columns of two rows. `-Dscenario=adding`, the default: two batch adders
- *  each bringing one row per shard, one single-row adder probing the shards from its routing
- *  base, and a searcher; the dispenser is a ghost, a row's publication is its watermark turn.
- *  The batch adder claims shard by shard, releases every shard claimed so far on a refusal, and
- *  may have its fan-out refused after the claims, which releases them all. A checker outside the
- *  memory model compares each shard's claim word with its dispenser once every adder is done.
- *  `-Dscenario=saving`: one batch adder, a saver running `plan_save` per shard, `finish`, then
- *  the plain key copy of `keys[0..visible)`, and a searcher; the dispenser is a word, since the
- *  watermark compares it. `-Dscenario=loading`: a loader running `plan_load` per shard, the keys
- *  at the base, then `finish`, against a searcher on the still-empty index.
+ *  `-Dscenario=adding`, the default: two shards of two rows each, two batch adders each bringing
+ *  one row per shard, one single-row adder probing the shards from its routing base, and a
+ *  searcher; the dispenser is a ghost, a row's publication is its watermark turn. The batch
+ *  adder claims shard by shard, releases every shard claimed so far on a refusal, and may have
+ *  its fan-out refused after the claims, which releases them all. A checker outside the memory
+ *  model compares each shard's claim word with its dispenser once every adder is done.
+ *  `-Dscenario=covering`: one shard whose rows and key chunks hold one row apiece, three adders
+ *  claiming a row each, covering the key column to the shard's capacity, then dispensing, and a
+ *  searcher. `-Dscenario=saving`: one batch adder, a saver running `plan_save` per shard,
+ *  `finish`, then the plain key copy of `keys[0..visible)`, and a searcher; the dispenser is a
+ *  word, since the watermark compares it. `-Dscenario=loading`: a loader running `plan_load` per
+ *  shard, the keys at the base, then `finish`, against a searcher on the still-empty index.
  *
- *  The shard's claim is `claim_capacity` seen from outside, with the key column as a ceiling the
- *  header no longer has: its counter grows on demand, and nothing refuses a claim past the column
- *  sized once at `reserve`. `-Dwithout_key_column_ceiling` spells the claim as the header does,
- *  a subtract that grows instead of refusing, and a dispensed id passes the column.
+ *  The shard's claim is `claim_capacity` seen from outside: it grows the shard on demand and
+ *  refuses only past the rows one shard's ids reach, the model's row limit.
  *  `dense_ram_index_capacity.pml` covers the counter itself: the subtract, the election, the
  *  deficit handed back and waited out.
  *
  *  Invariants:
- *  - the ceiling: a dispensed id is below its shard's key column, and once every adder is done
+ *  - the row limit: a dispensed id is below its shard's row limit, and once every adder is done
  *    each shard's claim word equals its dispenser. `-Dwithout_release` skips the release after a
  *    refused fan-out, and the claim word stays above the dispenser;
+ *  - the cover: every key slot an insert writes or a searcher reads lies in a chunk the key
+ *    column published. The id an adder dispenses may lie past its own claim, in a chunk only a
+ *    later claimer covered, but that claimer dispensed first, and the dispenser's acquire-release
+ *    carries its cover along: `-Dwithout_cover` skips the cover, `-Dwithout_dispense_acq_rel`
+ *    makes the dispense relaxed, and each writes a key into a chunk it never saw published;
  *  - publication: every id below a watermark a reader acquired has its key. The key lands before
  *    the watermark turn; `-Dwithout_key_before_watermark` moves it after, and a searcher reads an
  *    unset key under every model; `-Dwithout_watermark_release` drops the release from the
@@ -43,14 +48,16 @@
  *  `-Dwithout_claim_consume` drops the `claim.consume()` the shard's `insert` makes once the
  *  row is dispensed against: the landed row is released and the claim word falls below the
  *  dispenser; with two batches behind it the shard claims one row more than it holds, and the
- *  next dispensed id names a key slot past the column.
+ *  next dispensed id passes the row limit.
  */
 #include "weak_memory.pml"
 
-// The scenarios: the adders against the shards, the monolith save's watermark, or the load path.
+// The scenarios: the adders against the shards, the key column's cover, the monolith save's
+// watermark, or the load path.
 #define adding 1
-#define saving 2
-#define loading 3
+#define covering 2
+#define saving 3
+#define loading 4
 #ifndef scenario
 #define scenario adding
 #endif
@@ -58,6 +65,8 @@
 // The threads, by role, apart from the processes that play them; the batch adders name themselves as they start.
 #if scenario == adding
 #define single_adder_thread 2
+#define searcher_thread 3
+#elif scenario == covering
 #define searcher_thread 3
 #elif scenario == saving
 #define batch_adder_thread 0
@@ -68,9 +77,14 @@
 #define searcher_thread 1
 #endif
 
-// The sizes: two shards, each with a key column of two rows - each shard's ceiling.
+// The sizes: the shards, and the rows one shard's ids reach - its row limit.
+#if scenario == covering
+#define shards 1
+#define row_limit 3
+#else
 #define shards 2
-#define ceiling 2
+#define row_limit 2
+#endif
 
 // The words, by the index member each stands for, per shard.
 #if scenario == adding
@@ -78,6 +92,12 @@
 #define claimed(shard) (1 + (shard))
 #define last_visible_id(shard) (3 + (shard))
 #define key(shard, id) (5 + (shard) * 2 + (id))
+#elif scenario == covering
+#define last_visible_id(shard) 0
+#define next_dispensed_id(shard) 1
+#define key(shard, id) (2 + (id))
+#define claimed_rows 5
+#define key_chunk(id) (6 + (id))
 #else
 #define last_visible_id(shard) (0 + (shard))
 #define next_dispensed_id(shard) (2 + (shard))
@@ -103,8 +123,8 @@ byte adders_done; // the checker waits on it
 #endif
 byte dispensed[shards]; // each shard's `next_dispensed_id_`, a ghost where no plan reads it
 byte in_flight[shards]; // rows dispensed and not yet published, per shard
-bool locators_of_key[shards * ceiling]; // the reverse ceiling: which rows were recorded
-#define locator(shard, id) ((shard) * ceiling + (id))
+bool locators_of_key[shards * row_limit]; // which rows the locator map recorded
+#define locator(shard, id) ((shard) * row_limit + (id))
 
 #if scenario == adding
 inline dispense(t, shard, id) {
@@ -112,13 +132,18 @@ inline dispense(t, shard, id) {
         id = dispensed[shard];
         dispensed[shard]++;
         in_flight[shard]++;
-        assert(id < ceiling) // the claim is what keeps an id inside the key ceiling
+        assert(id < row_limit) // the claim is what keeps an id inside the row limit
     }
 }
 #else
+#ifdef without_dispense_acq_rel
+#define dispense_order order_relaxed
+#else
+#define dispense_order order_acq_rel
+#endif
 inline dispense(t, shard, id) {
     atomic {
-        read_modify_write(t, next_dispensed_id(shard), order_acq_rel, id, id + 1);
+        read_modify_write(t, next_dispensed_id(shard), dispense_order, id, id + 1);
         in_flight[shard]++
     }
 }
@@ -130,6 +155,11 @@ inline land_row(t, shard, id) {
     // on_assigned fires right after the dispense: one step for the two
     atomic {
         dispense(t, shard, id);
+#if scenario == covering
+        // the slot's chunk, loaded relaxed as `chunked_column::operator[]` does
+        load(t, key_chunk(id), order_relaxed, chunk);
+        assert(chunk != 0);
+#endif
 #ifndef without_key_before_watermark
         store(t, key(shard, id), order_relaxed, key_of(t))
 #endif
@@ -154,21 +184,17 @@ inline land_row(t, shard, id) {
 #endif
 }
 
-// the shard's own row claim with the key column as its ceiling - `claim_capacity` seen from
-// outside: one unconditional add whose value says what happened - a fit; the crossing, which
-// elects this claimer and the ceiling then refuses; or a peer's refusal still in flight, handed
-// back and waited out. `before + 1 <= ceiling` afterwards names a fit
+// the shard's own row claim up to its row limit - `claim_capacity` seen from outside: one
+// unconditional add whose value says what happened - a fit; the crossing, which elects this
+// claimer and the row limit then refuses; or a peer's refusal still in flight, handed back and
+// waited out. `before + 1 <= row_limit` afterwards names a fit
 inline claim(t, shard, before) {
     do
     :: read_modify_write(t, claimed(shard), order_acquire, before, before + 1);
        if
-       :: before + 1 <= ceiling -> break
-#ifdef without_key_column_ceiling
-       :: else -> break // the header as it stands: the shard grows a chunk and grants the row
-#else
-       :: before == ceiling -> add_no_return(t, claimed(shard), order_release, 0 - 1); break
-       :: else -> add_no_return(t, claimed(shard), order_release, 0 - 1); (newest_value(claimed(shard)) <= ceiling)
-#endif
+       :: before + 1 <= row_limit -> break
+       :: before == row_limit -> add_no_return(t, claimed(shard), order_release, 0 - 1); break
+       :: else -> add_no_return(t, claimed(shard), order_release, 0 - 1); (newest_value(claimed(shard)) <= row_limit)
        fi
     od
 }
@@ -196,7 +222,7 @@ active [2] proctype batch_adder() {
     :: else ->
         claim(me, shard, before);
         if
-        :: before + 1 <= ceiling -> shard++
+        :: before + 1 <= row_limit -> shard++
         :: else -> release_up_to(me, shard); goto refused
         fi
     od;
@@ -227,7 +253,7 @@ active proctype single_adder() {
         shard = (routed + probe) % shards;
         claim(single_adder_thread, shard, before);
         if
-        :: before + 1 <= ceiling -> break
+        :: before + 1 <= row_limit -> break
         :: else -> probe++
         fi
     od;
@@ -255,6 +281,39 @@ active proctype checker() {
     }
 }
 #endif
+#endif
+
+#if scenario == covering
+// `chunked_column::cover`: every chunk below @p rows, published with a release unless a peer did
+inline cover(t, rows) {
+    covered = 0;
+    do
+    :: covered == rows -> break
+    :: else ->
+        load(t, key_chunk(covered), order_acquire, chunk);
+        if
+        :: chunk == 0 ->
+            chunk = 0;
+            compare_exchange(t, key_chunk(covered), order_release, chunk, 1, published)
+        :: else
+        fi;
+        covered++
+    od
+}
+
+// the single-row insert: the claim, the cover to what the shard hosts after it, then the row
+active [3] proctype adder() {
+    byte me;
+    int first, hosted, covered, chunk, id, watermark;
+    bool published;
+    atomic { me = adders_started; adders_started++ };
+    read_modify_write(me, claimed_rows, order_acquire, first, first + 1);
+    load(me, claimed_rows, order_acquire, hosted);
+#ifndef without_cover
+    cover(me, hosted);
+#endif
+    land_row(me, 0, id)
+}
 #endif
 
 #if scenario == saving
@@ -320,15 +379,15 @@ active proctype loader() {
         assert(visible == dispensed_now);
         // the keys at the base and the locator map, then the publication
 #ifndef without_keys_before_finish
-        for (row : 0 .. ceiling - 1) {
+        for (row : 0 .. row_limit - 1) {
             store(loader_thread, key(shard, visible + row), order_relaxed, key_of(loader_thread));
             locators_of_key[locator(shard, visible + row)] = true
         };
 #endif
-        add_no_return(loader_thread, next_dispensed_id(shard), order_release, ceiling);
-        store(loader_thread, last_visible_id(shard), watermark_order, visible + ceiling);
+        add_no_return(loader_thread, next_dispensed_id(shard), order_release, row_limit);
+        store(loader_thread, last_visible_id(shard), watermark_order, visible + row_limit);
 #ifdef without_keys_before_finish
-        for (row : 0 .. ceiling - 1) {
+        for (row : 0 .. row_limit - 1) {
             store(loader_thread, key(shard, visible + row), order_relaxed, key_of(loader_thread));
             locators_of_key[locator(shard, visible + row)] = true
         };
@@ -347,7 +406,14 @@ active proctype searcher() {
         id = 0;
         do
         :: id == watermark -> break
-        :: else -> load(searcher_thread, key(shard, id), order_relaxed, seen); assert(seen != unset); id++
+        :: else ->
+#if scenario == covering
+            load(searcher_thread, key_chunk(id), order_relaxed, seen);
+            assert(seen != 0);
+#endif
+            load(searcher_thread, key(shard, id), order_relaxed, seen);
+            assert(seen != unset);
+            id++
         od
     }
 }
