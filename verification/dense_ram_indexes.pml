@@ -17,9 +17,12 @@
  *  watermark compares it. `-Dscenario=loading`: a loader running `plan_load` per shard, the keys
  *  at the base, then `finish`, against a searcher on the still-empty index.
  *
- *  The shard's claim is `claim_capacity` seen from outside - `dense_ram_index_capacity.pml` under
- *  `-Dceiling` covers the counter itself: one unconditional add, a fit or the crossing that the
- *  ceiling refuses, and a peer's refusal in flight released and waited out.
+ *  The shard's claim is `claim_capacity` seen from outside, with the key column as a ceiling the
+ *  header no longer has: its counter grows on demand, and nothing refuses a claim past the column
+ *  sized once at `reserve`. `-Dwithout_key_column_ceiling` spells the claim as the header does,
+ *  a subtract that grows instead of refusing, and a dispensed id passes the column.
+ *  `dense_ram_index_capacity.pml` covers the counter itself: the subtract, the election, the
+ *  deficit handed back and waited out.
  *
  *  Invariants:
  *  - the ceiling: a dispensed id is below its shard's key column, and once every adder is done
@@ -37,7 +40,7 @@
  *  - the load path: keys land before `finish` publishes the rows. `-Dwithout_keys_before_finish`
  *    moves them after, and the searcher reads an unset key under the sequential and view models.
  *
- *  `-Dwithout_claim_consume` drops the `claim.consume()` the single-row `insert` makes once the
+ *  `-Dwithout_claim_consume` drops the `claim.consume()` the shard's `insert` makes once the
  *  row is dispensed against: the landed row is released and the claim word falls below the
  *  dispenser; with two batches behind it the shard claims one row more than it holds, and the
  *  next dispensed id names a key slot past the column.
@@ -121,7 +124,7 @@ inline dispense(t, shard, id) {
 }
 #endif
 
-// insert_reserved's tail, for one row of one shard: the key before the turn, the turn strictly
+// `insert`'s tail, for one row of one shard: the key before the turn, the turn strictly
 // in dispensed order, the watermark released, then the locator map's entry
 inline land_row(t, shard, id) {
     // on_assigned fires right after the dispense: one step for the two
@@ -160,8 +163,12 @@ inline claim(t, shard, before) {
     :: read_modify_write(t, claimed(shard), order_acquire, before, before + 1);
        if
        :: before + 1 <= ceiling -> break
+#ifdef without_key_column_ceiling
+       :: else -> break // the header as it stands: the shard grows a chunk and grants the row
+#else
        :: before == ceiling -> add_no_return(t, claimed(shard), order_release, 0 - 1); break
        :: else -> add_no_return(t, claimed(shard), order_release, 0 - 1); (newest_value(claimed(shard)) <= ceiling)
+#endif
        fi
     od
 }
@@ -182,7 +189,7 @@ active [2] proctype batch_adder() {
     atomic { me = adders_started; adders_started++ };
     read_modify_write(me, routed_rows, order_relaxed, routed, routed + shards);
     rotation = routed % shards;
-    // claim_: shard by shard, or into none
+    // claim: shard by shard, or into none
     shard = 0;
     do
     :: shard == shards -> break

@@ -1,13 +1,8 @@
 /**
- *  Storage capacity in the dense index from `include/usearch/dense/ram_index.hpp`, once the
- *  ceiling is deleted and every index grows on demand.
- *
- *  Derived from `verification/dense_ram_index_capacity.pml` by three edits:
- *  - the `ceiling` knob, `past_ceiling` and `without_ceiling_refusal` are gone - nothing bounds
- *    a shard from outside any more;
- *  - `create_next_chunk` adds chunks until the deficit is covered, the way the header's loop
- *    does, instead of exactly one chunk per election;
- *  - `-Dscenario=regrow` models `reserve` called twice, the second time above the physical rows.
+ *  Storage capacity in the dense index from `include/usearch/dense/ram_index.hpp`: the ceiling
+ *  is gone and every index grows on demand, `create_next_chunk` adds chunks until the deficit
+ *  is covered, and `-Dscenario=regrow` models `reserve` called twice, the second time above the
+ *  physical rows.
  *
  *  `claim_capacity` is one unconditional subtract on `remaining_capacity_` whose sign says what
  *  happened: the thread that took it from non-negative to negative is elected to grow alone,
@@ -28,13 +23,13 @@
  *  - `-Dwithout_whole_release` lets a release lift a negative counter, and a second grower is
  *    elected into the plain chunk directory;
  *  - progress: `-Dscenario=regrow` reserves two rows, then three. The second reservation's
- *    deficit is one row and two free rows are sitting on the counter, so the header's
- *    deficit-sized claim is granted without growing anything, releases it, and re-reads the same
- *    capacity forever - the verified hang. A reservation claims `capacity - last_allocated_id_`
- *    instead: strictly more than the counter holds, so the subtract crosses zero, elects a
- *    grower, and the loop ends in one round. `reserve_rounds_k` bounds the rounds and the
- *    assertion names an over-run; `-Dwithout_deficit_growth` restores the header's deficit and
- *    that assertion fires.
+ *    deficit is one row and two free rows are sitting on the counter, so the deficit-sized
+ *    claim the header had was granted without growing anything, released, and the same
+ *    capacity re-read forever - the verified hang. `reserve` now claims
+ *    `capacity - last_allocated_id_`: strictly more than the counter holds, so the subtract
+ *    crosses zero, elects a grower, and the loop ends in one round. `reserve_rounds_k` bounds
+ *    the rounds and the assertion names an over-run; `-Dwithout_deficit_growth` restores the
+ *    deficit-sized claim and that assertion fires.
  */
 #include "weak_memory.pml"
 
@@ -89,7 +84,7 @@ byte claims;     // claims the reservers made between them
 #endif
 
 // the release: the deflation, then an add that lands only on a whole counter; the guard stands in
-// for the header's acquire loads before the wait: ram_index.hpp:834-846
+// for the header's acquire loads before the wait: `release_capacity`
 inline release_capacity(t, count) {
     add_no_return(t, last_allocated_id, deflation_order, 0 - count);
 #ifdef without_whole_release
@@ -217,7 +212,7 @@ active proctype retrier() {
 }
 #elif scenario == regrow
 // `reserve` twice over one index: two rows, then three. The second call's deficit is one row and
-// two free rows are sitting on the counter - the shape that hangs today
+// two free rows are sitting on the counter - the shape that hung while `reserve` claimed the deficit
 active proctype regrower() {
     int old_remaining, reverted, seen_chunks, first, whole, added;
     int unclaimed, total, claimed_rows, deficit, rounds;

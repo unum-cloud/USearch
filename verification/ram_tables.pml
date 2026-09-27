@@ -89,7 +89,7 @@ active [3] proctype inserter() {
     :: else
     fi;
 #else
-    // the ceiling, claimed before any slot is touched and never passed: ram_tables.hpp:417-420
+    // the ceiling, claimed before any slot is touched and never passed: the seat claim in `growing_multimap::insert`
     atomic {
         read_modify_write_if(me, inserted_count, order_relaxed, observed < ceiling, observed, observed + 1);
         if :: observed < ceiling -> claimed++ :: else fi;
@@ -98,7 +98,7 @@ active [3] proctype inserter() {
     if :: observed >= ceiling -> goto refused :: else fi;
 #endif
 probe:
-    // the chain: a relaxed peek, then the acquire claim of an empty slot: ram_tables.hpp:421-427, 433
+    // the chain: a relaxed peek, then the acquire claim of an empty slot: `insert`'s probe loop and chain step
     assert(chain < terminator);
     load(me, state(chain), order_relaxed, seen);
     if
@@ -111,7 +111,7 @@ probe:
     chain++;
     goto probe;
 claimed_slot:
-    // the payload relaxed, then the publication with the release: ram_tables.hpp:428-430
+    // the payload relaxed, then the publication with the release: `insert`'s tail
     store(me, key(chain), order_relaxed, key_carried(me));
     store(me, value(chain), order_relaxed, value_for(key_carried(me)));
     atomic {
@@ -131,7 +131,7 @@ probe:
     :: chain == terminator -> goto done
     :: else
     fi;
-    // the walk: one acquire load per control byte, the terminator ends it: ram_tables.hpp:450-452
+    // the walk: one acquire load per control byte, the terminator ends it: `find_each`
     atomic {
         load(prober_thread, state(chain), probe_order, seen);
         probing = true
@@ -139,7 +139,7 @@ probe:
     if
     :: seen == empty -> goto done
     :: seen == published ->
-        // the payload, plain reads beside the published state: ram_tables.hpp:454
+        // the payload, plain reads beside the published state: `find_each`'s callback
         load(prober_thread, key(chain), order_relaxed, seen_key);
         if
         :: seen_key == key_a ->
@@ -160,7 +160,7 @@ done:
 #endif
 }
 
-// size(): one relaxed load of the counter, which never reads past the ceiling: ram_tables.hpp:470
+// size(): one relaxed load of the counter, which never reads past the ceiling: `size()`
 active proctype sizer() {
     int seen;
     load(sizer_thread, inserted_count, order_relaxed, seen);

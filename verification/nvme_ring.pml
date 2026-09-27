@@ -1,7 +1,8 @@
 /**
- *  The io_uring words of `dense_nvme_index` from `include/usearch/dense/nvme_index.hpp`: the
- *  submission ring's head and tail, the completion ring's head and tail, and the entries
- *  between them, shared with the kernel through the orders the ring documentation asks for.
+ *  The io_uring words of `dense_uring_ring_t` behind `dense_nvme_index`, from
+ *  `include/usearch/dense/nvme_index.hpp`: the submission ring's head and tail, the completion
+ *  ring's head and tail, and the entries between them, shared with the kernel through the
+ *  orders the ring documentation asks for.
  *
  *  An engine and a kernel over two rings of depth two, and three requests, so each ring wraps
  *  once. The engine claims a submission slot after an acquire load of the submission head,
@@ -69,7 +70,7 @@
 
 bool entering; // the engine is inside a blocking enter, which is when a deferred ring posts
 
-// pump and pop: the wait on the completion tail, then every completion up to the tail: nvme_index.hpp:872-879, 894-898
+// pump and pop: the wait on the completion tail, then every completion up to the tail: `pump` and `pop`
 inline reap() {
     entering = true;
     (newest_value(cq_tail) != reaped);
@@ -90,7 +91,7 @@ active proctype engine() {
     byte posted, reaped;
     do
     :: posted < requests ->
-        // next_submission: the head with acquire, then the entry in place; enter publishes the tail: nvme_index.hpp:838-843, 849-851
+        // next_submission: the head with acquire, then the entry in place; `enter` publishes the tail
         load(engine_thread, sq_head, order_acquire, head);
         if
         :: posted - head < depth ->

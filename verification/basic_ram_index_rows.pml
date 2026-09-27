@@ -269,7 +269,7 @@ proctype reader() {
         load(reader_thread, last_visible_id, order_acquire, watermark);
         snapshot_keyed = key_stored
     };
-    // key_of: the same watermark shared_mutex, then a plain read
+    // key_of: the same watermark gate, then a plain read
     if
     :: watermark > 1 -> load(reader_thread, key(1), order_relaxed, seen); assert(seen == keyed(1))
     :: else

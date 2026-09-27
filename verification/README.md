@@ -18,7 +18,7 @@ The memory models and the runners live in [`forkunion/verification`](../forkunio
 - `dense_vram_index_locks.pml`: the CUDA index's rows, publication by one release, the bounded slot-zero lock, the back-link's sweep and append, and a traversal warp whose follower lanes read behind a shuffle.
 - `dense_vram_indexes.pml`: the sharded CUDA index, the mutation gate answering `contended_k`, the admission ceiling, keys written before a shard's claim publishes the row, and a load beside a batch; `-Dscenario=loading` for the load.
 - `nvme_ring.pml`: the NVMe index's io_uring words, the submission and completion rings' heads and tails, the entries between them, the wrap, and the deferred posting; `-Dscenario=deferred` for `DEFER_TASKRUN`.
-- `executor.pml`: `executor_t`, the one-caller hold through `claim`, the arena rewind in `reserve`, and the fan-out no second caller may rewind under.
+- `executor.pml`: `forkunion_executor_t`, the one-caller hold through `claim`, the arena rewind in `reserve`, and the fan-out no second caller may rewind under.
 
 ## What the models found, and what changed for it
 
@@ -82,7 +82,7 @@ The sharded index claims on one shard at a time, and its watermark is per shard.
 A key lands in `on_assigned` before the watermark turn, so every id below a watermark a searcher acquired resolves through the key column; `-Dwithout_key_before_watermark` moves it after and fails under every model, `-Dwithout_watermark_release` fails under the view model.
 The monolith save takes one `plan_save` per shard, and a settled plan copies no unset key below its watermark; `-Dwhole_batches`, which asks the watermark to capture a batch's rows on shard zero and shard one together, fails under every model, since nothing joins the two watermarks, and the README says so rather than the code.
 The load path lands keys before `finish` releases the dispenser and the watermark, and `-Dwithout_keys_before_finish` keeps the counterexample.
-The single-row `add` did not consume its claim on success, so every landed row released one seat and the shard claimed one row more than it holds; it consumes now, and `-Dwithout_claim_consume` keeps the old header.
+The single-row `insert` did not consume its claim on success, so every landed row released one seat and the shard claimed one row more than it holds; it consumes now, and `-Dwithout_claim_consume` keeps the old header.
 The shards' key columns were a second contended word beside each shard's capacity counter: a `fetch_add_if_at_most` on the key column, then the claim, with two releases to keep aligned.
 The shard's claim is now the only claim a row makes: nothing bounds a shard from outside, and the key column is sized to what the shard really holds after its reservation rounds up to whole chunks.
 `reserve` called a second time, above the physical rows, spun forever: a deficit that fits in the free rows is granted without a growth, released, and read back unchanged.
@@ -97,7 +97,7 @@ The planes' committed extent, which `capacity()` reads outside the claim, was a 
 The far model is not run there: the posted add is x86's, and the ramp's add runs on the GPU.
 
 The sharded CUDA index gated its batches and not its load.
-`add` takes the executor's hold and then `mutating_`, so two batches never interleave their claims on `admitted_rows_`; `load_parts_` took only the executor's, so a batch through a second executor passed the gate, its compare-exchange raced the plain total the load stores at its end, and its keys raced the load's.
+`insert` takes the executor's hold and then `mutating_`, so two batches never interleave their claims on `admitted_rows_`; the load's opening, now `gate_load_`, took only the executor's, so a batch through a second executor passed the gate, its compare-exchange raced the plain total the load stores at its end, and its keys raced the load's.
 `dense_vram_indexes.pml` runs two batches, a searcher and a loader over two shards of two rows, and found three things in the load: the missing gate, an emptiness check made at the entry and not under the hold, so a batch admitted between the two was overwritten by the load's total and the next batch's first node reached the plane, and each shard published before its keys were written, the order the RAM twin had already corrected.
 The load takes the gate now, checks emptiness under it, and writes each shard's keys before its plan finishes; `-Dwithout_load_gate`, `-Dwithout_empty_under_gate` and `-Dwithout_load_key_before_finish` keep the three.
 The relaxed compare-exchange on `admitted_rows_` stays relaxed: every writer is gated, and no reader derives a visibility bound from it, since searches bound on each shard's claim, whose release and acquire `-Dwithout_claim_release` shows to carry the keys.
@@ -131,4 +131,4 @@ GENMC=~/genmc/build/bin/genmc ./check.sh     # both
 ```
 
 Every `verify` line names a model, the expected verdict and the defines, so a new variant is one line.
-The suite's 120 verdicts take about four minutes serially and about a minute four at a time, which is the default; a client that runs past `GENMC_SECONDS` is a client to shrink.
+The suite's 129 verdicts take about four minutes serially and about a minute four at a time, which is the default; a client that runs past `GENMC_SECONDS` is a client to shrink.

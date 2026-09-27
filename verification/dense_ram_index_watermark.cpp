@@ -6,9 +6,9 @@
  *      `include/usearch/dense/ram_index.hpp`.
  *
  *  The dispenser, the rows, the back-link's release fence, the watermark turn, and the save under
- *  `concurrent_k` with its settlement probe, spelled line for line over the ForkUnion reference the
- *  index binds; the header's chunk fills are beyond GenMC's graph, see
- *  `dense_ram_index_capacity.cpp`.
+ *  `concurrent_k` with its settlement probe, spelled over the ForkUnion reference the index binds,
+ *  without the claim counter the header's save also reads, since nothing grows here; the header's
+ *  chunk fills are beyond GenMC's graph, see `dense_ram_index_capacity.cpp`.
  *
  *  Two inserters dispense IDs 0 and 1, publish their rows, and the second back-links into row
  *  0. A saver plans, copies the rows relaxed, and re-checks the counters after an acquire fence.

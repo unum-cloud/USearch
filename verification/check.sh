@@ -111,6 +111,7 @@ verify dense_ram_index_capacity.pml fail -Dmemory=sequential -Dscenario=loaders 
 section "dense_ram_indexes.pml: the shards' claims, keys before the turn, the monolith save's watermark per shard, and the load path's keys"
 verify dense_ram_indexes.pml pass -Dmemory=sequential
 verify dense_ram_indexes.pml pass
+verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_key_column_ceiling
 verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_key_before_watermark
 verify dense_ram_indexes.pml fail -Dwithout_key_before_watermark
 verify dense_ram_indexes.pml fail -Dwithout_watermark_release

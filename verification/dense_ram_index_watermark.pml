@@ -26,7 +26,7 @@
  *    past the watermark for good;
  *  - `-Dscenario=keyed`: the sharded index's key column, written in `on_assigned` right after the
  *    dispense, before the walk and the publication, so every row a reader locates carries its
- *    key. The searcher then walks: one relaxed read of row 0's tail, and the id it holds is
+ *    key. The searcher then walks: one relaxed read of row 0's tail, whose dispensed id is
  *    located only below the snapshot - the traversal's `neighbor_id >= first_invisible_id`
  *    filter. `-Dwithout_key_before_turn` moves the key store after the watermark turn, and a
  *    reader finds a row without one; `-Dwithout_watermark_filter` follows the fresher id, whose
@@ -40,10 +40,11 @@
  *    back-link fence into even a relaxed watermark store, so the follower itself reads a
  *    followed row stale only when `-Dwithout_release_fence` drops that fence as well;
  *  - `-Dscenario=steps`: the load path's fan-out: two steps land one row each and tally it
- *    on `covered` with a release add, as `load_vectors` and `load_neighbors` do; the finisher
- *    acquires the tally and, when whole, bumps the dispenser and releases the watermark. The
- *    tally's release is what carries the rows into the watermark: `-Dwithout_covered_release`
- *    makes it relaxed, and the searcher finds a row below the watermark unpublished;
+ *    on `covered` with a release add, the one word standing for the `covered_vectors` and
+ *    `covered_neighbors` each `load_plan_t::load` step adds to; the finisher acquires the
+ *    tally and, when whole, bumps the dispenser and releases the watermark. The tally's
+ *    release is what carries the rows into the watermark: `-Dwithout_covered_release` makes
+ *    it relaxed, and the searcher finds a row below the watermark unpublished;
  *  - `-Dscenario=savers`: two concurrent saves on the searcher's and the saver's threads, each
  *    with its own plan and its own covered tallies; `-Dwithout_release_fence` fails for either.
  */
@@ -265,6 +266,7 @@ active proctype searcher() {
     if
     :: watermark > 0 ->
         load(searcher_thread, row_tail(0), order_relaxed, found);
+        assert(id_of(found) < newest_value(next_dispensed_id)); // a row names dispensed ids alone
         if
         :: admitted(id_of(found), watermark) ->
 #if memory == sequential

@@ -1,6 +1,6 @@
 /**
- *  `executor_t` from `include/usearch/utilities/ram_device.hpp`: one caller at a time, held
- *  through `claim`, which is a `lock_if_free` on a spin mutex that answers `contended_k`
+ *  `forkunion_executor_t` from `include/usearch/utilities/ram_device.hpp`: one caller at a time,
+ *  held through `claim`, which is a `lock_if_free` on a spin mutex that answers `contended_k`
  *  rather than waiting; the holder rewinds every thread's arena in `reserve` and fans out over
  *  the pool in `for_tasks`, and a second caller must never rewind an arena under a live fan-out.
  *
@@ -39,14 +39,14 @@ active [2] proctype caller() {
     atomic { me = callers_started; callers_started++ };
     generation = me + 1;
 #ifndef without_hold
-    // claim: the hold or a contended answer, never a wait: ram_device.hpp:176-179
+    // claim: the hold or a contended answer, never a wait: `claim`
     read_modify_write(me, held, order_acquire, seen, 1);
     if :: seen == 1 -> goto refused :: else fi;
 #endif
-    // reserve: every arena rewound and seeded, which no live fan-out may be reading: ram_device.hpp:184-191
+    // reserve: every arena rewound and seeded, which no live fan-out may be reading: `reserve`
     assert(fanouts_active == 0);
     for (worker : 0 .. workers - 1) { store(me, arena(worker), order_relaxed, generation) };
-    // for_tasks: the fan-out, the pool's release on its epoch and the countdown: ram_device.hpp:225-235
+    // for_tasks: the fan-out, the pool's release on its epoch and the countdown: `for_tasks`
     store(me, pending, order_relaxed, workers);
     atomic { fanouts_active++; store(me, epoch, order_release, generation) };
     (newest_value(pending) == 0);

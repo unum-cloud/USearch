@@ -1,6 +1,6 @@
 /**
  *  The CUDA index's host side from `include/usearch/dense/vram_index.cuh`: one claim per batch
- *  under `claiming_`, a `fu::spin_mutex`, ids dense from `claimed_rows_`, the planes grown under
+ *  under `claiming_`, a `fu::spin_mutex_t`, ids dense from `claimed_rows_`, the planes grown under
  *  the mutex and sentinel-filled before any launch, the claim stored only once the launch is
  *  accepted, and the device's admission ramp on `published_rows`, a counter in device memory
  *  no host thread dereferences.

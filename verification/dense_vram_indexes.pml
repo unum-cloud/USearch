@@ -72,11 +72,12 @@ byte claimers_done; // mutators and the loader that returned, whatever they answ
 byte owner[shards * plane]; // one past the thread that claimed the row; zero while unclaimed
 #define owner_of(shard, id) owner[(shard) * plane + (id)]
 
-// the gate: an acquire exchange, and a contended answer when it was held: vram_indexes.cuh:287-288, 1181-1182
+// the gate: an acquire exchange, and a contended answer when it was held: `insert` and `gate_load_`
 inline take_gate(t, seen) { read_modify_write(t, mutating, order_acquire, seen, 1) }
 inline drop_gate(t) { store(t, mutating, order_release, 0) }
 
-// the shard's insert: the claim read relaxed, the row's key by the plane's owner, the claim stored past it: vram_index.cuh:2840, 2879
+// the shard's insert: the claim read relaxed, the row's key by the plane's owner, the claim stored
+// past it: `dense_vram_index::insert`
 inline claim_row(t, shard, first_id) {
     load(t, claimed_rows(shard), order_relaxed, first_id);
     atomic {
@@ -94,7 +95,7 @@ active [2] proctype mutator() {
     take_gate(me, seen);
     if :: seen == 1 -> goto contended :: else fi;
 #endif
-    // admission against the ceiling, a relaxed compare-exchange: vram_indexes.cuh:694-699
+    // admission against the ceiling, a relaxed compare-exchange: `insert_gated_`
     load(me, admitted_rows, order_relaxed, base);
     do
     :: capacity - base < batch_rows -> goto refused
@@ -103,7 +104,7 @@ active [2] proctype mutator() {
         if :: admitted -> break :: else fi
     od;
     for (shard : 0 .. shards - 1) {
-        // the first node from the shard's claim, then the key, then the shard's insert: vram_indexes.cuh:712-726
+        // the first node from the shard's claim, then the key, then the shard's insert: `insert_gated_`
         load(me, claimed_rows(shard), order_acquire, first_node);
         assert(first_node < plane);
 #ifdef without_key_before_claim
@@ -128,7 +129,7 @@ active proctype searcher() {
     byte shard, id;
     int bound, seen;
     for (shard : 0 .. shards - 1) {
-        // the shard's claim is the search's bound: vram_index.cuh:1946, 2971
+        // the shard's claim is the search's bound: `size()`, the node count `stage_walk_` hands the kernel
         load(searcher_thread, claimed_rows(shard), order_acquire, bound);
         id = 0;
         do
@@ -150,12 +151,12 @@ active proctype loader() {
     if :: seen == 1 -> goto contended :: else fi;
 #endif
 #ifndef without_empty_under_gate
-    // empty under the hold, since the total stored at the end would overwrite a batch admitted before it: vram_indexes.cuh:1185
+    // empty under the hold, since the total stored at the end would overwrite a batch admitted before it: `gate_load_`
     load(loader_thread, claimed_rows(0), order_acquire, seen);
     load(loader_thread, claimed_rows(1), order_acquire, total);
     if :: seen + total != 0 -> goto refused :: else fi;
 #endif
-    // each shard: the key at the append base, then the plan's finish publishing the claim: vram_indexes.cuh:1153-1166
+    // each shard: the key at the append base, then the plan's finish publishing the claim: `load_plan_t::finish`
     for (shard : 0 .. shards - 1) {
 #ifdef without_load_key_before_finish
         claim_row(loader_thread, shard, first_id);
@@ -166,7 +167,7 @@ active proctype loader() {
         claim_row(loader_thread, shard, first_id);
 #endif
     };
-    // the total, stored relaxed once every shard landed: vram_indexes.cuh:1242
+    // the total, stored relaxed once every shard landed: the store `load_plan_t::finish` ends with
     total = shards;
     store(loader_thread, admitted_rows, order_relaxed, total);
 refused:

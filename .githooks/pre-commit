@@ -40,6 +40,37 @@ added_line_numbers() { # added_line_numbers <path>
         }'
 }
 
+# Blanks C-family comments to spaces, keeping every line and column in place, so a code check never fires
+# on a comment that merely names the construct it bans. String and character literals pass through.
+blank_c_comments_preserving_columns() { # blank_c_comments_preserving_columns < source
+    awk '
+        {
+            output = ""
+            for (position = 1; position <= length($0); ++position) {
+                character = substr($0, position, 1)
+                pair = substr($0, position, 2)
+                if (state == "block") {
+                    if (pair == "*/") { state = ""; output = output "  "; ++position }
+                    else output = output " "
+                    continue
+                }
+                if (state == "string" || state == "character") {
+                    output = output character
+                    if (character == "\\") { output = output substr($0, position + 1, 1); ++position }
+                    else if ((state == "string" && character == "\"") || (state == "character" && character == "\047")) state = ""
+                    continue
+                }
+                if (pair == "//") { tail = substr($0, position); gsub(/./, " ", tail); output = output tail; break }
+                if (pair == "/*") { state = "block"; output = output "  "; ++position; continue }
+                if (character == "\"") state = "string"
+                else if (character == "\047") state = "character"
+                output = output character
+            }
+            if (state != "block") state = ""
+            print output
+        }'
+}
+
 # region Comments and Prose
 
 # ASCII "->" arrows inside comments & docstrings - prose uses the Unicode arrow (→). The pattern
@@ -145,6 +176,25 @@ check_sibling_justification() {
 # endregion Comments and Prose
 
 # region Doxygen Blocks
+
+# @copydoc belongs to the family header, where each backend is declared once beside the verb it copies
+# from. In a backend's own file it duplicates that link at the definition, so the same sentence arrives
+# twice and a reader learns nothing about the backend in front of them. Say what this backend does
+# differently, or say nothing and let the declaration speak.
+check_copydoc_in_backend() {
+    case "${file##*/}" in
+    serial.* | westmere.* | goldmont.* | haswell.* | skylake.* | icelake.* | \
+        neon.* | neonaes.* | neonsha.* | sve.* | sve2.* | sve2aes.* | \
+        cuda.* | kepler.* | hopper.* | blackwell.* | rocm.* | cdna.* | \
+        lasx.* | powervsx.* | rvv.* | rvvcrypto.* | v128.* | v128relaxed.*) ;;
+    *) return ;;
+    esac
+    local copied
+    copied=$(printf '%s\n' "$added" | grep -n '@copydoc' || true)
+    [ -z "$copied" ] || fail "$copied" \
+        "$file is a backend file carrying @copydoc - document the declaration in the family header," \
+        "            and leave this one a note on what this backend does differently, or nothing:"
+}
 
 # Every @param declares its direction - [in]/[out]/[inout] - so a reader knows whether the callee
 # reads, writes, or mutates the argument. A bare @param and the comma form @param[in,out] are both
@@ -386,20 +436,73 @@ check_bare_member_docs() {
 
 # region Naming and Vocabulary
 
-# The full `unum::usearch::` spelling belongs to two places: the alias and `using` lines, and the
-# specializations of foreign templates - `std::hash<unum::usearch::uuid_t>`, `fmt::formatter<...>` -
-# which have to name the type from outside. Everywhere else the name is already in scope - through the
-# `us::` alias, the directive a translation unit opened with, or the enclosing namespace itself.
+# The full `unum::usearch::` spelling belongs to three places: the alias and `using` lines, the lines
+# opening and closing a nested namespace, and the specializations of foreign templates -
+# `std::hash<unum::usearch::uuid_t>`, `fmt::formatter<...>` - which have to name the type from outside.
+# Everywhere else the name is already in scope - through the `us::` alias, the directive a translation
+# unit opened with, or the enclosing namespace itself.
 check_qualified_namespace() {
     local spelled
     spelled=$(printf '%s\n' "$added" |
         grep -vE '^\+[[:space:]]*(\*|//|/\*)' |
-        grep -vE 'namespace us = unum::usearch;|using namespace unum::usearch;' |
+        grep -vE 'namespace us = unum::usearch;|(using )?namespace unum::usearch(::[a-z_]+)*( \{|;)$|^\+\} // namespace unum::usearch' |
         grep -vE 'struct (std|fmt)::[A-Za-z_]+<unum::usearch::' |
         grep -E 'unum::usearch::' || true)
     [ -z "$spelled" ] || fail "$spelled" \
         "$file spells unum::usearch:: in full - the name is already in scope through the \`us\` alias," \
         "            a \`using\` directive, or the enclosing namespace; only std::hash<unum::usearch::uuid_t> earns it:"
+}
+
+# The namespaces a C++ source opens at file scope, as `line:name`, reading past comments, literals, and
+# preprocessor lines; an anonymous namespace prints as `<anonymous>`.
+top_level_namespaces() { # top_level_namespaces < source
+    awk '
+        continued { continued = ($0 ~ /\\$/); next }
+        {
+            code = ""
+            for (i = 1; i <= length($0); ++i) {
+                c = substr($0, i, 1)
+                pair = substr($0, i, 2)
+                if (state == "block") { if (pair == "*/") { state = ""; ++i } continue }
+                if (state != "") {
+                    if (c == "\\") ++i
+                    else if (c == state) state = ""
+                    continue
+                }
+                if (pair == "//") break
+                if (pair == "/*") { state = "block"; ++i; continue }
+                if (c == "\"" || c == "'\''") { state = c; continue }
+                code = code c
+            }
+            if (state != "block") state = ""
+            if (code ~ /^[[:space:]]*#/) { continued = ($0 ~ /\\$/); next }
+            if (depth == 0 && match(code, /(^|[^A-Za-z0-9_])namespace([[:space:]]+[A-Za-z_][A-Za-z0-9_:]*)?[[:space:]]*\{/)) {
+                name = substr(code, RSTART, RLENGTH)
+                sub(/^.*namespace[[:space:]]*/, "", name)
+                sub(/[[:space:]]*\{$/, "", name)
+                print NR ":" (name == "" ? "<anonymous>" : name)
+            }
+            depth += gsub(/\{/, "{", code) - gsub(/\}/, "}", code)
+        }'
+}
+
+# A test or benchmark harness header lives in the namespace its directory spells - `test/dense/*.hpp`
+# in `unum::usearch::test::dense` - and opens no other at file scope. The whole staged file, since the
+# namespace is context.
+check_harness_namespace() {
+    case "$file" in
+    *.h) git show ":$file" | grep -qE '(^|[^A-Za-z0-9_])(namespace|template|class)[[:space:]]' || return ;;
+    esac
+    local expected="unum::usearch::${file%/*}"
+    expected=${expected//\//::}
+    local misplaced
+    misplaced=$(git show ":$file" | top_level_namespaces |
+        awk -F: -v expected="$expected" '
+            { ++opened; if (substr($0, index($0, ":") + 1) != expected) print "line " $0 }
+            END { if (!opened) print "line 1: no namespace" }')
+    [ -z "$misplaced" ] || fail "$misplaced" \
+        "$file is a harness header outside \`namespace $expected\` - its directory names the namespace," \
+        "            and no other opens at file scope:"
 }
 
 # Template type parameters carry a trailing underscore - `typename variant_type_`, never
@@ -547,6 +650,18 @@ check_partial_prints() {
     partial=$(printf '%s\n' "$added" | grep -E 'fmt::print\(' | grep -vE '\\n"' | grep -vE 'fmt::print\("\\r' || true)
     [ -z "$partial" ] || fail "$partial" \
         "$file prints half a line - fold it into one fmt::println, with fmt::styled or fmt::join:"
+}
+
+# Rejects a print to stdout in a test body: the harness owns stdout, and a test only reports failures to
+# stderr, so a passing run reads the same in every sibling.
+check_test_bodies_quiet() {
+    local prints
+    prints=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns |
+        grep -nE '\b(print_line|fmt::println|fmt::print|printf|puts)[[:space:]]*\(|\bstd::cout\b|\bfprintf[[:space:]]*\([[:space:]]*stdout\b' |
+        grep -vE '\([[:space:]]*stderr\b' || true)
+    [ -z "$prints" ] || fail "$prints" \
+        "$file prints to stdout from a test body; report failures to stderr and leave progress" \
+        "            to the harness:"
 }
 
 # C++ iostreams - `std::cout`, `std::ifstream`, `std::ostringstream`, and the rest of the
@@ -878,6 +993,7 @@ for file in "${staged[@]}"; do
         check_rulers
         check_region_labels
         check_param_directions
+        check_copydoc_in_backend
         check_markdown_doxygen
         check_doxygen_glued
         check_section_spacing
@@ -915,6 +1031,10 @@ for file in "${staged[@]}"; do
     *.cu | *.cuh)
         check_host_threads
         ;;&
+    # The test and benchmark harness headers, whose directories name their namespaces.
+    test/*.hpp | test/*.cuh | test/*.h | bench/*.hpp | bench/*.cuh | bench/*.h)
+        check_harness_namespace
+        ;;&
     # The shipped library: public headers under include/ and the ABI sources under src/.
     include/*.h | include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh)
         check_stl_dynamic_containers
@@ -937,6 +1057,10 @@ for file in "${staged[@]}"; do
         check_python_version_probe
         ;;
     .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
+    esac
+    case "$file" in
+    test/harness.hpp | test/main.cpp | test/dense.cu) ;;
+    test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh) check_test_bodies_quiet ;;
     esac
 done
 
