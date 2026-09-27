@@ -18,10 +18,11 @@
 #include <cstring> // `std::memset` - the scribble over a freed block
 
 #include <algorithm> // `std::sort`, `std::unique` - the dispensed-id density check
+#include <array>     // `std::array` - one latent point of the sign sketches
 #include <atomic>    // `std::atomic`
 #include <chrono>    // `std::chrono::microseconds` - the flaky waiter's oversleep
 #include <thread>    // `std::this_thread::yield`, `std::this_thread::sleep_for`
-#include <vector>    // `std::vector` - the dispensed-id density check
+#include <vector>    // `std::vector` - the dispensed-id density check, the sketches' hyperplanes
 
 #include <fmt/format.h>
 
@@ -249,49 +250,39 @@ struct flaky_waiter_t {
     }
 };
 
-/** Builds vectors with planted cluster structure: a few random centroid rows, each
- *  emitted row a centroid copy with a small share of dimensions redrawn. Uniform
- *  random data concentrates pairwise distances into one narrow band - a flat landscape
- *  no graph can navigate, at its worst for binary vectors - while planting bimodalizes
- *  them: within a cluster only the redrawn dimensions differ, across clusters most do,
- *  so self-recall measures navigation instead of fighting near-equidistance. Both
- *  constants derive from the shape: eight centroids keep every cluster deep at the
- *  scenarios' row counts, and redrawing dimensions/16 keeps cluster members distinct
- *  while preserving a several-fold within-to-across distance margin. */
+/** Builds binary vectors as sign sketches of points in a small latent space: bit @c b of a row is the side of the
+ *  @c b-th random hyperplane its point falls on, the way binary embeddings arise. Hamming distance then tracks the
+ *  angle between points, so the landscape stays graded, where independent bits - or clusters of independently
+ *  flipped ones - leave every pair near-equidistant and no walk can navigate. Eight latent dimensions keep
+ *  neighboring rows distinct at the scenarios' row counts. */
 template <typename scalar_>
-nk::matrix<scalar_> make_clustered_vectors(std::size_t count, std::size_t dimensions, u64_t seed) {
-    constexpr std::size_t centroids_count_k = 8;
-    std::size_t const redrawn_dimensions = divide_round_up<std::size_t>(dimensions, 16);
-    auto centroids = nk::matrix<scalar_>::try_zeros({centroids_count_k, dimensions});
-    auto vectors = nk::matrix<scalar_>::try_zeros({count, dimensions});
+nk::matrix<scalar_> make_sketched_vectors(std::size_t count, std::size_t dimensions, u64_t seed) {
+    constexpr std::size_t latent_dimensions_k = 8;
     splitmix64_t random_generator {seed};
-    uniform_below<u32_t> component_distribution {random_component_levels<scalar_>()};
-    uniform_below<u32_t> centroid_distribution {centroids_count_k};
-    uniform_below<u32_t> dimension_distribution {static_cast<u32_t>(dimensions)};
-    for (std::size_t centroid = 0; centroid != centroids_count_k; ++centroid) {
-        auto centroid_span = centroids.row(centroid).as_vector();
-        for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
-            centroid_span[dimension] = make_scalar<scalar_>(component_distribution(random_generator));
-    }
+    auto centered = [&]() noexcept { return static_cast<f64_t>(random_generator() >> 11) * 0x1p-52 - 1.0; };
+    std::vector<f64_t> hyperplanes(dimensions * latent_dimensions_k);
+    for (f64_t& weight : hyperplanes) weight = centered();
+    auto vectors = nk::matrix<scalar_>::try_zeros({count, dimensions});
+    std::array<f64_t, latent_dimensions_k> point;
     for (std::size_t row = 0; row != count; ++row) {
+        for (f64_t& coordinate : point) coordinate = centered();
         auto row_span = vectors.row(row).as_vector();
-        auto centroid_span = centroids.row(centroid_distribution(random_generator)).as_vector();
-        for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
-            row_span[dimension] = centroid_span[dimension];
-        for (std::size_t redraw = 0; redraw != redrawn_dimensions; ++redraw)
-            row_span[dimension_distribution(random_generator)] = make_scalar<scalar_>(
-                component_distribution(random_generator));
+        for (std::size_t dimension = 0; dimension != dimensions; ++dimension) {
+            f64_t side = 0;
+            for (std::size_t latent = 0; latent != latent_dimensions_k; ++latent)
+                side += hyperplanes[dimension * latent_dimensions_k + latent] * point[latent];
+            row_span[dimension] = make_scalar<scalar_>(side > 0);
+        }
     }
     return vectors;
 }
 
 /** Fills a row-major matrix with pseudo-random small values from {0..7}, exactly
  *  representable in every supported scalar type down to i4 nibbles. Binary vectors
- *  route through the planted-cluster generator: their flat draw has no navigable
- *  structure, and each bit keeps a fair coin either way. */
+ *  route through the sign-sketch generator: their flat draw has no navigable structure. */
 template <typename scalar_>
 nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, u64_t seed) {
-    if constexpr (std::is_same_v<scalar_, nk::u1x8_t>) return make_clustered_vectors<scalar_>(count, dimensions, seed);
+    if constexpr (std::is_same_v<scalar_, nk::u1x8_t>) return make_sketched_vectors<scalar_>(count, dimensions, seed);
     auto vectors = nk::matrix<scalar_>::try_zeros({count, dimensions});
     splitmix64_t random_generator {seed};
     uniform_below<u32_t> component_distribution {random_component_levels<scalar_>()};

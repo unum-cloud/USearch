@@ -2396,7 +2396,8 @@ std::size_t test_dense_indexes_maxsim() {
         return static_cast<std::size_t>(found_keys[query * wanted + rank]) - 1;
     };
 
-    // A walk as wide as the index ranks every token, so the best documents land at their exact scores.
+    // A walk as wide as the index ranks every token, so the best documents land at their exact scores, up to the
+    // rounding of a device that sums its dots in another order.
     search_config_t const exhaustive {static_cast<typename indexes_type_::index_t::small_size_t>(rows_count)};
     failures += expect(succeeded(maxsim(queries, exhaustive).status));
     for (std::size_t query = 0; query != queries_count; ++query) {
@@ -2407,8 +2408,8 @@ std::size_t test_dense_indexes_maxsim() {
             std::size_t const document = document_of(query, rank);
             failures += expect(document < documents_count);
             if (document >= documents_count) continue;
-            failures += expect_eq(found_scores[query * wanted + rank], ranked[rank]) +
-                        expect_eq(found_scores[query * wanted + rank], exact[query][document]);
+            failures += expect_near(found_scores[query * wanted + rank], ranked[rank]) +
+                        expect_near(found_scores[query * wanted + rank], exact[query][document]);
         }
     }
 
@@ -2419,7 +2420,9 @@ std::size_t test_dense_indexes_maxsim() {
             std::size_t const document = document_of(query, rank);
             failures += expect(document < documents_count);
             if (document >= documents_count) continue;
-            failures += expect(found_scores[query * wanted + rank] <= exact[query][document]);
+            // Above its exact value only by rounding.
+            if (found_scores[query * wanted + rank] > exact[query][document])
+                failures += expect_near(found_scores[query * wanted + rank], exact[query][document]);
         }
 
     failures += expect(maxsim(queries(nk::range {std::size_t {0}, rows_per_query + 1}, nk::slice), {}).status ==
