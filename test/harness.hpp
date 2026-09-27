@@ -203,16 +203,6 @@ struct counting_allocator {
 /** The byte specialization every fixture places its index through. */
 using counting_allocator_t = counting_allocator<byte_t>;
 
-/** The largest magnitude one stored dimension can carry - per component for the
- *  packed types, the finite maximum for the plain ones. The conditional papers over a
- *  NumKong asymmetry: plain scalars name their @c component_t but only the packed ones
- *  expose @c component_max. */
-template <typename scalar_>
-constexpr float dimension_amplitude() noexcept {
-    if constexpr (requires { scalar_::component_max(); }) return float(scalar_::component_max());
-    else return float(scalar_::finite_max());
-}
-
 /**
  *  @brief Distinct levels one component of @p scalar_ draws from: a packed bit has two, since
  *      its proxy sets the bit for any nonzero and a wider draw would bias it toward ones; every

@@ -240,12 +240,11 @@ bool run_refinement(streamed_dataset_type_& streamed) {
     if (!max_refines || !nodes) return true;
 
     typename index_t::refine_config_t config;
-    config.expansion_factor = static_cast<small_size_t>(bench.options.expansion_refine ? bench.options.expansion_refine
-                                                                                       : bench.options.expansion_add);
+    config.expansion_factor = static_cast<small_size_t>(bench.options.expansion_refine);
 
     refinement_report_t report;
     report.nodes = nodes;
-    report.expansion = config.expansion_factor;
+    report.expansion = bench.index->non_zero_expansion_factor(config);
     report.threads = 1;
     std::vector<std::size_t> changed_per_pass;
     changed_per_pass.reserve(max_refines);
@@ -262,24 +261,17 @@ bool run_refinement(streamed_dataset_type_& streamed) {
         report.sums.visited_members += refinement.visited_members;
         report.sums.computed_distances += refinement.computed_distances;
         report.sums.restarts += refinement.restarts;
+        report.islands_found += refinement.islands_found;
+        report.islands_reconnected += refinement.islands_reconnected;
+        report.reachable_nodes = refinement.reachable_nodes;
+        report.sweeps = refinement.sweeps;
         progress.tick(pass + 1);
         if (!refinement.changed_nodes) break;
     }
     progress.finish();
+    // Every pass heals what it strands, so the passes' wall time holds the healing too.
     report.refining_seconds = stdc::duration<double>(clock_t::now() - started).count();
     report.changed_per_pass = changed_per_pass;
-
-    started = clock_t::now();
-    auto const [repair, heal_status] = bench.index->heal(*bench.traversal);
-    if (failed(heal_status)) {
-        fmt::println("Healing failed: status {}", int(heal_status));
-        return false;
-    }
-    report.healing_seconds = stdc::duration<double>(clock_t::now() - started).count();
-    report.islands_found = repair.islands_found;
-    report.islands_reconnected = repair.islands_reconnected;
-    report.reachable_nodes = repair.health.reachable_nodes;
-    report.sweeps = repair.health.sweeps;
     report_refinement_metrics(report);
     return true;
 }

@@ -505,6 +505,25 @@ check_harness_namespace() {
         "            and no other opens at file scope:"
 }
 
+# A class template never takes the `_t` suffix: `_t` marks a concrete type or the alias a template materializes, so
+# `template <...> struct fold_run_t` reads as a type the reader could name without arguments. Name the template bare -
+# `humanized<value_type_>` - and keep `_t` for the aliases it produces.
+check_template_type_suffixes() {
+    local suffixed
+    suffixed=$(printf '%s\n' "$added" | awk '
+        /^\+[[:space:]]*template[[:space:]]*</ {
+            if ($0 ~ /(struct|class)[[:space:]]+[A-Za-z0-9_]+_t([^A-Za-z0-9_]|$)/) print
+            pending = 1
+            next
+        }
+        pending && /^\+[[:space:]]*requires/ { next }
+        pending && /^\+[[:space:]]*(struct|class)[[:space:]]+[A-Za-z0-9_]+_t([^A-Za-z0-9_]|$)/ { print }
+        { pending = 0 }' || true)
+    [ -z "$suffixed" ] || fail "$suffixed" \
+        "$file names a class template with the _t suffix - name the template bare, as in" \
+        "            \`template <typename value_type_> struct humanized\`, and keep _t for its aliases:"
+}
+
 # Template type parameters carry a trailing underscore - `typename variant_type_`, never
 # `typename multi_t` - a special case of the underscore marking internal symbols: a
 # parameter is internal to its template, exists only to be materialized, and must never
@@ -1035,6 +1054,7 @@ for file in "${staged[@]}"; do
     *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh)
         check_qualified_namespace
         check_template_parameter_underscores
+        check_template_type_suffixes
         check_function_like_macros
         check_spelled_byte_spans
         check_redundant_nodiscard

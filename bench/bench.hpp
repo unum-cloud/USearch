@@ -60,6 +60,14 @@ namespace unum::usearch::bench {
 
 namespace stdc = std::chrono;
 
+/** NumKong's @c component_max of @p scalar_type_ - the largest magnitude one stored dimension carries - extended to
+ *  the plain scalars, each its own component, whose largest is their @c finite_max. */
+template <typename scalar_type_>
+constexpr float component_max() noexcept {
+    if constexpr (requires { scalar_type_::component_max(); }) return float(scalar_type_::component_max());
+    else return float(scalar_type_::finite_max());
+}
+
 /** Whether stdout is a TTY, probed once: a progress tick asks on every call. */
 inline bool stdout_is_terminal() noexcept {
 #if defined(_WIN32)

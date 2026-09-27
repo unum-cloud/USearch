@@ -240,7 +240,7 @@ int main(int argc, char** argv) {
         (clipp::option("--max-refines") & clipp::value("passes", options.max_refines)) %
             "upper bound on whole-graph refinement passes after ingestion; 0 by default",
         (clipp::option("--expansion-refine") & clipp::value("breadth", options.expansion_refine)) %
-            "refinement candidate pool; inherits --expansion-add by default",
+            "refinement candidate pool; twice the connectivity by default",
         (clipp::option("--max-compute") & clipp::value("name", max_compute_name)) %
             "compute ceiling by GPU generation, like `hopper`, or `ampere`; newest by default",
         clipp::option("--managed-memory").set(plane_space, cuda_address_space_t::managed_k) % //

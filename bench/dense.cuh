@@ -38,7 +38,6 @@
 
 #include "bench.hpp"
 #include "utilities/persisted_dataset.hpp" // `mapped_file_t`, `parse_matrix_header`, `matrix_save`
-#include "harness.hpp"
 
 namespace unum::usearch::bench {
 
@@ -310,7 +309,7 @@ struct bench_options_t {
      *  nothing ends the phase early, and zero skips it outright. */
     std::size_t max_refines = 0;
 
-    /** Refinement candidate pool; zero inherits `--expansion-add`. */
+    /** Refinement candidate pool; zero takes the index's default, twice the connectivity. */
     std::size_t expansion_refine = 0;
 
     /** Print the manual and exit. */
@@ -729,7 +728,7 @@ struct streamed_dataset {
             nk::reduce_minmax(payload, &min_value, &min_index, &max_value, &max_index);
             float const max_amplitude = std::max(std::abs(float(min_value)), std::abs(float(max_value)));
             // The stored dtype's largest magnitude; not a constant expression for nvcc's byte floats.
-            float const target_amplitude = test::dimension_amplitude<scalar_t>();
+            float const target_amplitude = component_max<scalar_t>();
             if (max_amplitude > 0) scale = target_amplitude / max_amplitude;
             fmt::println("Rescaling {} → {} by ×{:.4f} before the downcast", dataset_scalar_type_::dtype_name(),
                          scalar_t::dtype_name(), scale);

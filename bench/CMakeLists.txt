@@ -17,7 +17,7 @@ add_executable(
     dense/ram_index_u1.cpp
 )
 usearch_setup_target(usearch_bench_dense_ram_index HOST)
-target_include_directories(usearch_bench_dense_ram_index PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test)
+target_include_directories(usearch_bench_dense_ram_index PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_bench_dense_ram_index PRIVATE clipp fmt::fmt yyjson forkunion::static stringzilla::header)
 
 add_executable(
@@ -38,7 +38,7 @@ add_executable(
 )
 usearch_setup_target(usearch_bench_dense_ram_indexes HOST)
 target_include_directories(
-    usearch_bench_dense_ram_indexes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test
+    usearch_bench_dense_ram_indexes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
 target_link_libraries(
     usearch_bench_dense_ram_indexes PRIVATE clipp fmt::fmt yyjson forkunion::static stringzilla::header
@@ -67,7 +67,7 @@ if (USEARCH_BUILD_CUDA)
     )
     target_include_directories(
         usearch_bench_dense_vram_index PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
-                                               ${CMAKE_CURRENT_SOURCE_DIR} ${PROJECT_SOURCE_DIR}/test
+                                               ${CMAKE_CURRENT_SOURCE_DIR}
     )
     set_target_properties(
         usearch_bench_dense_vram_index

@@ -132,6 +132,9 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
     return failures;
 }
 
+/** The host overloads - the dot kernel's and every other kernel's empty one - pick alongside the device one below. */
+using test::test_dense_multiply;
+
 /** @ref dense_expect_multiply, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
     requires(kernel_ == nk_kernel_dot_k && dense_device_resident_k<index_type_>)

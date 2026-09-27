@@ -158,7 +158,7 @@ int main(int argc, char** argv) {
         (clipp::option("--max-refines") & clipp::value("passes", options.max_refines)) %
             "upper bound on whole-graph refinement passes after ingestion; 0 by default",
         (clipp::option("--expansion-refine") & clipp::value("breadth", options.expansion_refine)) %
-            "refinement candidate pool; inherits --expansion-add by default",
+            "refinement candidate pool; twice the connectivity by default",
         (clipp::option("--top-k") & clipp::value("count", options.top_k)) % "matches per query to judge",
         (clipp::option("--max-vectors") & clipp::value("count", options.max_vectors)) % "cap on ingested rows",
         (clipp::option("--first-vector") & clipp::value("row", options.first_vector)) %
