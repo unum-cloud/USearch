@@ -189,6 +189,9 @@ extern template int us::bench::dense::run_with_stored_dtype<nk::i8_t, nk_u1_k>( 
 extern template int us::bench::dense::run_with_stored_dtype<nk::u8_t, nk_u1_k>( //
     utilities::persisted_dataset<nk::u8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
+extern template int us::bench::dense::run_with_stored_dtype<nk::u1x8_t, nk_u1_k>( //
+    utilities::persisted_dataset<nk::u1x8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);
 
 /** Opens the dataset with the file-native scalar and lowers the stored dtype onto
  *  the shard-carried cascade - or reports the dtypes that carry device kits. */
@@ -201,8 +204,8 @@ static int open_and_run(bench_options_t const& options, int device, cuda_arch_t 
         fmt::println("Failed to open the dataset: {}", options.vectors_path);
         return 1;
     }
-    return dispatch_value<nk_bf16_k, nk_f16_k, nk_e5m2_k, nk_e4m3_k, nk_e3m2_k, nk_e2m3_k, nk_i8_k, nk_i4_k, nk_u8_k,
-                          nk_u4_k, nk_u1_k>(
+    return dispatch_stored_value<dataset_scalar_type_, nk_bf16_k, nk_f16_k, nk_e5m2_k, nk_e4m3_k, nk_e3m2_k, nk_e2m3_k,
+                                 nk_i8_k, nk_i4_k, nk_u8_k, nk_u4_k, nk_u1_k>(
         options.stored_dtype,
         [&](auto dtype) {
             return run_with_stored_dtype<dataset_scalar_type_, dtype.value>(opened.value, options, device, max_compute,

@@ -90,6 +90,7 @@ extern template int us::bench::dense::run_with_stored_dtype<nk::bf16_t, nk_u1_k>
 extern template int us::bench::dense::run_with_stored_dtype<nk::f16_t, nk_u1_k>(bench_launch<nk::f16_t> const&);
 extern template int us::bench::dense::run_with_stored_dtype<nk::i8_t, nk_u1_k>(bench_launch<nk::i8_t> const&);
 extern template int us::bench::dense::run_with_stored_dtype<nk::u8_t, nk_u1_k>(bench_launch<nk::u8_t> const&);
+extern template int us::bench::dense::run_with_stored_dtype<nk::u1x8_t, nk_u1_k>(bench_launch<nk::u1x8_t> const&);
 
 /** Opens the dataset with the file-native scalar and enters the typed cascade. */
 template <typename dataset_scalar_type_>
@@ -100,7 +101,7 @@ int open_and_run(bench_options_t const& options, fu_topology_t topology) {
         fmt::println("Failed to open the dataset: {}", options.vectors_path);
         return 1;
     }
-    return dispatch_stored_dtype(
+    return dispatch_stored_dtype<dataset_scalar_type_>(
         options.stored_dtype,
         [&](auto dtype) {
             return run_with_stored_dtype<dataset_scalar_type_, dtype.value>(

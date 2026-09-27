@@ -15,3 +15,4 @@ template int us::bench::dense::run_with_stored_dtype<nk::bf16_t, nk_u1_k>(bench_
 template int us::bench::dense::run_with_stored_dtype<nk::f16_t, nk_u1_k>(bench_launch<nk::f16_t> const&);
 template int us::bench::dense::run_with_stored_dtype<nk::i8_t, nk_u1_k>(bench_launch<nk::i8_t> const&);
 template int us::bench::dense::run_with_stored_dtype<nk::u8_t, nk_u1_k>(bench_launch<nk::u8_t> const&);
+template int us::bench::dense::run_with_stored_dtype<nk::u1x8_t, nk_u1_k>(bench_launch<nk::u1x8_t> const&);

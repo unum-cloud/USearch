@@ -415,6 +415,9 @@ struct dense_ram_index {
     /** The tile kit behind the tiled refinement paths; @c no_tiles_kit_t when none compiled. */
     using tiles_kit_t = typename dense_tiles_chain<kernel_kind_, scalar_t, capability_>::kit_t;
 
+    /** The distance kit the chain picked; its step is the row pitch the chunks round to. */
+    using quads_kit_t = typename dense_quads_chain<kernel_kind_, scalar_t, capability_>::kit_t;
+
     /** Whether a tile engine is compiled in for this kernel & dtype pair. */
     inline static constexpr bool has_tiles_k = dense_tiles_chain<kernel_kind_, scalar_t, capability_>::has_tiles_k;
     static_assert( //
@@ -569,7 +572,7 @@ struct dense_ram_index {
         while (chunks != max_chunks_k && capacity_of_chunks(chunks) < hosted_rows) ++chunks;
         std::size_t const rows = capacity_of_chunks(chunks);
         std::size_t bytes = sizeof(dense_ram_index);
-        bytes += rows * stored_row_values(frozen) * sizeof(scalar_t);
+        bytes += rows * padded_row_values(frozen) * sizeof(scalar_t);
         if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>) bytes += rows * sizeof(vector_norms_t);
         bytes += rows * frozen.connectivity() * sizeof(node_id_t);
         return bytes;
@@ -577,12 +580,21 @@ struct dense_ram_index {
 
     /** The stored bytes of one node's vector - the ID-addressed read a key lookup or an export
      *  resolves through; IDs at or above @ref size() name unpublished rows. */
-    vector_view_t vector(node_id_t node) const noexcept { return vector_for(chunked_location(node)); }
+    vector_view_t vector(node_id_t node) const noexcept {
+        return vector_view_t {vector_for(chunked_location(node)).data(), dimensions()};
+    }
 
     /** Storage values per row under the frozen @p geometry - the copy width every caller's
      *  matrix must be as wide as. */
     static std::size_t stored_row_values(geometry_t geometry) noexcept {
         return divide_round_up<std::size_t>(geometry.dimensions(), nk::dimensions_per_value<scalar_t>());
+    }
+
+    /** Storage values per row as the chunks hold it: whole steps of the picked quads kit, zero-tailed like the GPU's
+     *  fragments, so every step load stays aligned. Checkpoints and copies keep the logical @ref stored_row_values. */
+    static std::size_t padded_row_values(geometry_t geometry) noexcept {
+        std::size_t const step_values = quads_kit_t::step_dimensions / nk::dimensions_per_value<scalar_t>();
+        return round_up_to_multiple(stored_row_values(geometry), step_values);
     }
 
     /** The matrix shapes @c save() fills. Every extent is logical - the tensors' own strides
@@ -659,12 +671,15 @@ struct dense_ram_index {
      *  Safe to call concurrently with insertions, searches and other reservations: growth runs
      *  the same grower-election protocol as @c insert, and the geometry freezes exactly once
      *  through a single cold-path compare-exchange. A later call naming a different geometry
-     *  receives @c status_t::config_mismatch_k, as does a geometry with no dimensions or with a
-     *  connectivity that is not a power of two. Constructors allocate nothing, so every storage
+     *  receives @c status_t::config_mismatch_k, as does a geometry with no dimensions, with sub-byte
+     *  dimensions that leave a storage value partly filled, or with a connectivity that is not a
+     *  power of two. Constructors allocate nothing, so every storage
      *  failure surfaces here, in the returned status.
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
-        if (!config.dimensions || !std::has_single_bit(static_cast<u32_t>(config.connectivity)))
+        // Sub-byte rows fill whole storage values: a ragged tail would be dropped by the kernels' tail loads.
+        if (!config.dimensions || config.dimensions % nk::dimensions_per_value<scalar_t>() ||
+            !std::has_single_bit(static_cast<u32_t>(config.connectivity)))
             return {0, status_t::config_mismatch_k};
 
         // Freeze the geometry exactly once; competing first-reservations are decided by one CAS.
@@ -1851,8 +1866,13 @@ struct dense_ram_index {
             chunked_location_t const location = index_->chunked_location(rows.first);
             vectors_view_t const stored = index_->vectors_chunks_[location.chunk_index].view()(
                 nk::range {location.index_in_chunk, location.index_in_chunk + rows.size()}, nk::slice);
-            [[maybe_unused]] status_t const copied_vectors = copy_bytes(
-                columns.vectors.subspan(vectors_first, step.vectors_bytes), bytes_of(stored.data(), step_scalars));
+            // Chunk rows are padded to whole kit steps, while checkpoints keep logical rows.
+            std::size_t const row_bytes = row_values * sizeof(scalar_t);
+            for (std::size_t row = 0; row != rows.size(); ++row) {
+                [[maybe_unused]] status_t const copied = copy_bytes(
+                    columns.vectors.subspan(vectors_first + row * row_bytes, row_bytes),
+                    bytes_of(stored.row(row).data(), row_values));
+            }
             atomic_ref<std::size_t>(covered_vectors).add(rows.size(), std::memory_order_release);
 
             node_id_t const* source =
@@ -2088,8 +2108,13 @@ struct dense_ram_index {
             chunked_location_t const location = index_->chunked_location(range.first);
             nk::matrix_span<scalar_t> const vectors = index_->vectors_chunks_[location.chunk_index].span()(
                 nk::range {location.index_in_chunk, location.index_in_chunk + range.size()}, nk::slice);
-            [[maybe_unused]] status_t const copied_vectors = copy_bytes(
-                bytes_of(vectors.data(), step_scalars), columns.vectors.subspan(vectors_first, step.vectors_bytes));
+            // Checkpoints keep logical rows, while chunk rows are padded to whole kit steps.
+            std::size_t const row_bytes = row_values * sizeof(scalar_t);
+            for (std::size_t row = 0; row != range.size(); ++row) {
+                [[maybe_unused]] status_t const copied = copy_bytes(
+                    bytes_of(vectors.row(row).data(), row_values),
+                    columns.vectors.subspan(vectors_first + row * row_bytes, row_bytes));
+            }
             if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>)
                 for (std::size_t offset_in_chunk = 0; offset_in_chunk != range.size(); ++offset_in_chunk) {
                     chunked_location_t const row {location.chunk_index,
@@ -2422,7 +2447,7 @@ struct dense_ram_index {
         // Growing before the geometry is frozen is a usage error, not an allocation failure.
         geometry_t const frozen = geometry();
         if (!frozen) return {0, status_t::uninitialized_k};
-        std::size_t const chunk_dimensions = frozen.dimensions();
+        std::size_t const chunk_dimensions = padded_row_values(frozen) * nk::dimensions_per_value<scalar_t>();
         std::size_t const chunk_connectivity = frozen.connectivity();
 
         // Size the never-reallocating chunk directories ahead of the very first chunk - safe

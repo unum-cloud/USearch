@@ -25,3 +25,6 @@ template int us::bench::dense::run_with_stored_dtype<nk::i8_t, nk_u1_k>( //
 template int us::bench::dense::run_with_stored_dtype<nk::u8_t, nk_u1_k>( //
     utilities::persisted_dataset<nk::u8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
     us::cuda_address_space_t);
+template int us::bench::dense::run_with_stored_dtype<nk::u1x8_t, nk_u1_k>( //
+    utilities::persisted_dataset<nk::u1x8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
+    us::cuda_address_space_t);

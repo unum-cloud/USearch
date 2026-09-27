@@ -184,13 +184,25 @@ int dispatch_value(decltype(value_) runtime, auto on_value, auto on_unknown) {
 
 /** The file scalars the harness opens: what the RetriEval extensions name. */
 int dispatch_file_dtype(nk_dtype_t dtype, auto on_dtype, auto on_unknown) {
-    return dispatch_value<nk_f32_k, nk_bf16_k, nk_f16_k, nk_i8_k, nk_u8_k>(dtype, on_dtype, on_unknown);
+    return dispatch_value<nk_f32_k, nk_bf16_k, nk_f16_k, nk_i8_k, nk_u8_k, nk_u1_k>(dtype, on_dtype, on_unknown);
 }
 
-/** The stored dtypes every benchmark carries, by shrinking dynamic range. */
+/** Packed bits cast into no other storage: a bit file reaches the u1 shard when @p stored_dtypes_ lists one, and
+ *  every other file dispatches over @p stored_dtypes_ in full. */
+template <typename dataset_scalar_type_, nk_dtype_t... stored_dtypes_>
+int dispatch_stored_value(nk_dtype_t dtype, auto on_dtype, auto on_unknown) {
+    if constexpr (!std::is_same_v<dataset_scalar_type_, nk::u1x8_t>)
+        return dispatch_value<stored_dtypes_...>(dtype, on_dtype, on_unknown);
+    else if constexpr (((stored_dtypes_ == nk_u1_k) || ...))
+        return dispatch_value<nk_u1_k>(dtype, on_dtype, on_unknown);
+    else return on_unknown(dtype);
+}
+
+/** The stored dtypes the CPU benchmarks carry, by shrinking dynamic range. */
+template <typename dataset_scalar_type_>
 int dispatch_stored_dtype(nk_dtype_t dtype, auto on_dtype, auto on_unknown) {
-    return dispatch_value<nk_f32_k, nk_bf16_k, nk_f16_k, nk_e5m2_k, nk_e4m3_k, nk_e3m2_k, nk_e2m3_k, nk_i8_k, nk_i4_k,
-                          nk_u8_k, nk_u4_k, nk_u1_k>(dtype, on_dtype, on_unknown);
+    return dispatch_stored_value<dataset_scalar_type_, nk_f32_k, nk_bf16_k, nk_f16_k, nk_e5m2_k, nk_e4m3_k, nk_e3m2_k,
+                                 nk_e2m3_k, nk_i8_k, nk_i4_k, nk_u8_k, nk_u4_k, nk_u1_k>(dtype, on_dtype, on_unknown);
 }
 
 /** The kernels one stored dtype adapts: bit-packed vectors take the bit kernels. */

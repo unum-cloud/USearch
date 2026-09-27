@@ -198,8 +198,9 @@ USEARCH_EXPORT typedef usearch_distance_t (*usearch_dense_metric_callback_t)( //
  *  @brief Construction & loading options of a dense index. The @c residency field tags
  *      which union member is read; zeroed optional fields derive from the geometry.
  *
- *  Stored rows always round up to the SIMD step quantum, so rows stay cache-line aligned and
- *  every kernel runs tail-free; the arena is slightly larger for it, and that is not a knob.
+ *  Stored rows round up to whole steps of the distance kit the build picked, zero-tailed, so no
+ *  step load straddles a row's alignment; the memory is slightly larger for it, and that is not a
+ *  knob. Saved payloads keep logical rows, so they move between builds with different kits.
  */
 USEARCH_EXPORT typedef struct usearch_dense_options_t {
 
