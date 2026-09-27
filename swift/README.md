@@ -12,7 +12,7 @@ dependencies: [
 
 The package compiles the Swift surface only, and depends on NumKong for the matrix views and the low-precision scalars.
 The engine itself is `libusearch_static`, built by CMake and linked by the package.
-Swift 6.3 or newer is required: the streaming and checkpoint verbs take `MutableSpan` and `RawSpan`, which the standard library gained in 6.2.
+Swift 6.4 or newer is required.
 
 ## Quickstart
 
@@ -61,7 +61,7 @@ The width of the key buffer against the count buffer _is_ the "k" in "kANN", so 
 
 A matrix borrows and never owns, so it stays valid only for as long as the storage it points into — which is why every call site above sits inside a `withUnsafeBufferPointer`.
 `MatchesSpan` borrows the same way and is checked the same way — by the closure it sits inside, not by the compiler.
-Making it `~Escapable` needs a lifetime annotation that is still behind an experimental feature flag as of Swift 6.3, so the verbs that could take a span already do: `next(into:)` and the buffer forms of `save`, `load` and `metadata`.
+Making it `~Escapable` needs a lifetime annotation that is still behind an experimental feature flag as of Swift 6.4, so the verbs that could take a span already do: `next(into:)` and the buffer forms of `save`, `load` and `metadata`.
 
 ## Errors
 

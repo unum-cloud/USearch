@@ -358,9 +358,9 @@ int main(int argc, char* argv[]) {
     (void)argv;
     install_crash_handlers();
 
-    printf("USearch C ABI tests: %s\n", usearch_version());
-    printf("  compiled: %s\n", usearch_capabilities_compiled());
-    printf("  available: %s\n", usearch_capabilities_available());
+    printf("USearch %s\n", usearch_version());
+    printf("- Compiled for: %s\n", usearch_capabilities_compiled());
+    printf("- This machine: %s\n", usearch_capabilities_available());
 
     test_library_probes();
     test_error_contract(64);

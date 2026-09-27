@@ -40,10 +40,9 @@ option(USEARCH_INSTALL "Install CMake targets" OFF)
 
 option(USEARCH_USE_JEMALLOC "Use JeMalloc for faster memory allocations" OFF)
 
-option(USEARCH_BUILD_TEST_CPP "Compile a native unit test in C++" ${USEARCH_IS_MAIN_PROJECT})
-option(USEARCH_BUILD_BENCH_CPP "Compile a native benchmark in C++" ${USEARCH_IS_MAIN_PROJECT})
+option(USEARCH_BUILD_TEST "Compile test/, and c/test.c alongside USEARCH_BUILD_LIB_C" ${USEARCH_IS_MAIN_PROJECT})
+option(USEARCH_BUILD_BENCH "Compile the benchmarks in bench/" ${USEARCH_IS_MAIN_PROJECT})
 option(USEARCH_BUILD_LIB_C "Compile a native library for the C 99 interface" OFF)
-option(USEARCH_BUILD_TEST_C "Compile a test for the C 99 interface" OFF)
 option(USEARCH_BUILD_LIB_C_STUB "Compile a brute-force stand-in for the C 99 interface" OFF)
 option(USEARCH_BUILD_LIB_WOLFRAM "Compile a native library for the Wolfram Language bindings" OFF)
 option(USEARCH_BUILD_LIB_PYTHON "Compile the CPython extension; `scikit-build-core` switches it on" OFF)
@@ -468,10 +467,9 @@ set_target_properties(numkong_shared PROPERTIES EXCLUDE_FROM_ALL ON)
 
 # Only `safegraphs_format.hpp` reaches for yyjson, and only a compiled target ever includes it - so it is acquired under
 # the same condition as `src/`, leaving the header-only target consumable without it.
-if (USEARCH_BUILD_TEST_CPP
-    OR USEARCH_BUILD_BENCH_CPP
+if (USEARCH_BUILD_TEST
+    OR USEARCH_BUILD_BENCH
     OR USEARCH_BUILD_LIB_C
-    OR USEARCH_BUILD_TEST_C
 )
     # Its objects go inside our own libraries, so a packager installing this tree must not publish yyjson's header,
     # archive and CMake config beside ours.
@@ -491,7 +489,7 @@ endif ()
 # toolchain) and clipp for the benchmark CLIs. `FIND_PACKAGE_ARGS` lets a system-provided {fmt} satisfy the dependency
 # without touching the network, but only from the pinned version up - the copies distributions ship predate
 # `fmt::println` and would fail deep in the suites rather than here.
-if (USEARCH_BUILD_TEST_CPP OR USEARCH_BUILD_BENCH_CPP)
+if (USEARCH_BUILD_TEST OR USEARCH_BUILD_BENCH)
     FetchContent_Declare(
         fmt
         GIT_REPOSITORY https://github.com/fmtlib/fmt.git
@@ -522,10 +520,9 @@ endif ()
 
 # Every consumer of the pre-instantiated library needs this, the C interface included - its implementation is
 # `src/dense_index.cpp` and the per-dtype shards beside it.
-if (${USEARCH_BUILD_TEST_CPP}
-    OR ${USEARCH_BUILD_BENCH_CPP}
+if (${USEARCH_BUILD_TEST}
+    OR ${USEARCH_BUILD_BENCH}
     OR ${USEARCH_BUILD_LIB_C}
-    OR ${USEARCH_BUILD_TEST_C}
 )
     add_subdirectory(src)
 endif ()
@@ -534,11 +531,11 @@ if (${USEARCH_BUILD_LIB_C_STUB})
     add_subdirectory(src_stub)
 endif ()
 
-if (${USEARCH_BUILD_TEST_CPP})
+if (${USEARCH_BUILD_TEST})
     add_subdirectory(test)
 endif ()
 
-if (${USEARCH_BUILD_BENCH_CPP})
+if (${USEARCH_BUILD_BENCH})
     add_subdirectory(bench)
 endif ()
 
@@ -546,7 +543,7 @@ if (${USEARCH_BUILD_LIB_WOLFRAM})
     add_subdirectory(wolfram)
 endif ()
 
-if (${USEARCH_BUILD_LIB_C} OR ${USEARCH_BUILD_TEST_C})
+if (${USEARCH_BUILD_LIB_C})
     add_subdirectory(c)
 endif ()
 

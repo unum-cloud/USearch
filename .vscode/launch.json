@@ -132,7 +132,8 @@
         "--queries",
         "data/deep-1b/query.public.10K.fbin",
         "--neighbors",
-        "data/deep-1b/groundtruth.public.10K.ibin"
+        "data/deep-1b/groundtruth.public.10K.ibin",
+        "--bf16"
       ],
       "stopAtEntry": false,
       "breakOnLaunch": false,

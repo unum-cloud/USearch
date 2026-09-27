@@ -154,8 +154,8 @@ tasks.register("configureNativeLibrary", Exec) {
     outputs.file("${project.ext.usearchLibraryPath}/CMakeCache.txt")
     commandLine "cmake", "-B", project.ext.usearchLibraryPath, "-S", rootDir.toString(),
         "-DUSEARCH_BUILD_LIB_C=1",
-        "-DUSEARCH_BUILD_TEST_CPP=0",
-        "-DUSEARCH_BUILD_BENCH_CPP=0"
+        "-DUSEARCH_BUILD_TEST=0",
+        "-DUSEARCH_BUILD_BENCH=0"
 }
 
 tasks.register("compileNativeLibrary", Exec) {

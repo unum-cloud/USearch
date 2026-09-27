@@ -2,7 +2,7 @@
 # smoke test that proves the two agree. Both library flavors take the punned objects rather than compiling a boundary of
 # their own.
 
-if (USEARCH_BUILD_TEST_C)
+if (USEARCH_BUILD_TEST)
     add_executable(usearch_test_c test.c)
     usearch_setup_target(usearch_test_c)
     target_link_libraries(usearch_test_c PRIVATE ${USEARCH_PUNNED_LIBRARIES})

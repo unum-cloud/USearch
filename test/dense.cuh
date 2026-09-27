@@ -40,7 +40,7 @@
 #include <numkong/numkong.h>
 #include <numkong/numkong.hpp>
 
-#include "test.hpp"
+#include "harness.hpp"
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_executor_t` - the RAM residency's executor
 #include "usearch/utilities/sanitizers.hpp"        // `assert_no_locks_held` - the racing threads' tail check
@@ -82,7 +82,7 @@ constexpr float dense_self_match_tolerance_k = 1e-3f;
 constexpr std::size_t dense_reader_minimal_searches_k = 16;
 
 /** Data seeds, one named hex constant per scenario family; derived draws follow
- *  the salt rule documented beside @c salt_queries_k in @c test.hpp. */
+ *  the salt rule documented beside @c salt_queries_k in @c harness.hpp. */
 constexpr u64_t dense_seed_guards_k = 0x6A24D5D0ull;
 constexpr u64_t dense_seed_three_vectors_k = 0x3FEC0003ull;
 constexpr u64_t dense_seed_growth_k = 0x62047F00ull;

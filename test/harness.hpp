@@ -1,5 +1,5 @@
 /**
- *  @file test/test.hpp
+ *  @file test/harness.hpp
  *  @author Ash Vardanian
  *  @date July 17, 2026
  *  @brief Shared helpers for the C++ test suites: failure counting, ledgered allocators, and
@@ -15,6 +15,7 @@
 #include <cmath>   // `std::fabs`, `std::fmax` - the relative tolerance of `expect_near`
 #include <cstdint> // `PTRDIFF_MAX` - the unbounded allocation budget
 #include <cstdlib> // `std::malloc`, `std::free`, `std::abort`
+#include <cstring> // `std::memset` - the scribble over a freed block
 
 #include <algorithm> // `std::sort`, `std::unique` - the dispensed-id density check
 #include <atomic>    // `std::atomic`
@@ -27,6 +28,7 @@
 #include <numkong/tensor.hpp>
 #include <numkong/vector.hpp>
 
+#include "usearch/types.h" // `usearch_version`, `usearch_capabilities_compiled`, `usearch_capabilities_available`
 #include "usearch/utilities/types.hpp"
 
 /** The short spelling every test reaches the library through where its `using` directive is
@@ -72,6 +74,13 @@ inline std::size_t report(char const* name, std::size_t failures) {
 inline std::size_t report(char const* name, char const* skip_reason) {
     fmt::println("skipped  {:<20} : {}", name, skip_reason);
     return 0;
+}
+
+/** Opens the run with the names the C interface reports, so the suite checks the strings users see. */
+inline void log_environment() {
+    fmt::println("USearch {}", usearch_version());
+    fmt::println("- Compiled for: {}", usearch_capabilities_compiled());
+    fmt::println("- This machine: {}", usearch_capabilities_available());
 }
 
 /** Ids dispensed to racing lanes must land dense & duplicate-free: sorted in
@@ -184,6 +193,8 @@ struct counting_allocator {
     }
     void deallocate(value_type_* pointer, std::size_t count) noexcept {
         if (ledger_) ledger_->live_bytes.fetch_sub(static_cast<std::ptrdiff_t>(count * sizeof(value_type_)));
+        // Scribbled first, so a read after free sees garbage in every build rather than stale bytes.
+        if (pointer) std::memset(static_cast<void*>(pointer), 0xA5, count * sizeof(value_type_));
         std::free(pointer);
     }
     bool operator==(counting_allocator const& other) const noexcept { return ledger_ == other.ledger_; }

@@ -27,7 +27,7 @@ permissions:
 jobs:
   versioning:
     name: Update Version
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -63,7 +63,7 @@ jobs:
   rebase:
     name: Rebase Dev Branch
     needs: versioning
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Checkout the latest code
         uses: actions/checkout@v7
@@ -126,18 +126,13 @@ jobs:
       - name: Build C/C++
         run: |
           # Configure and build the project
-          cmake -B build_release \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_EXPORT_COMPILE_COMMANDS=1 \
-            -DCMAKE_C_COMPILER_TARGET=${{ matrix.target }} \
-            -DCMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
-            -DCMAKE_SYSTEM_NAME=Linux \
-            -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.arch }} \
-            -DUSEARCH_BUILD_LIB_C=1 \
-            -DUSEARCH_BUILD_TEST_CPP=0 \
-            -DUSEARCH_BUILD_BENCH_CPP=0
+          cmake --preset release_lib -B build_release \
+            -D CMAKE_C_COMPILER_TARGET=${{ matrix.target }} \
+            -D CMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
+            -D CMAKE_SYSTEM_NAME=Linux \
+            -D CMAKE_SYSTEM_PROCESSOR=${{ matrix.arch }}
 
-          cmake --build build_release --config Release
+          cmake --build build_release
 
           cp build_release/libusearch_shared.so "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.so"
 
@@ -208,20 +203,20 @@ jobs:
           version=$(cat VERSION)
           echo "version=$version" >> $GITHUB_OUTPUT
 
-      - name: Build library (MinGW)
+      - name: Build library with MinGW
         if: matrix.arch != 'arm64'
         run: |
-          cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
+          cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=0 -DUSEARCH_BUILD_BENCH=0 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_shared.dll pkg\
           xcopy /E /I .\include\usearch pkg\usearch
           tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_shared.dll usearch
 
-      - name: Build library (MSVC ARM64)
+      - name: Build library with MSVC for Arm64
         if: matrix.arch == 'arm64'
         run: |
-          cmake -G "Visual Studio 17 2022" -A ARM64 -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_BENCH_CPP=0 -B ./build_release
+          cmake --preset msvc_arm64 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_shared.dll pkg\
@@ -273,13 +268,8 @@ jobs:
 
       - name: Build library
         run: |
-          cmake -DCMAKE_BUILD_TYPE=Release \
-                -DUSEARCH_BUILD_LIB_C=1 \
-                -DUSEARCH_BUILD_TEST_CPP=0 \
-                -DUSEARCH_BUILD_BENCH_CPP=0 \
-                -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch }} \
-                -B ./build_release
-          cmake --build ./build_release --config Release
+          cmake --preset release_lib -B ./build_release -D CMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+          cmake --build ./build_release
           mkdir pkg
           cp build_release/libusearch_shared.dylib pkg/
           cp -r include/usearch pkg/
@@ -320,10 +310,12 @@ jobs:
             abi: armeabi-v7a
             target: armv7-linux-androideabi
             arch: arm32
+            preset: android_armv7
           - processor: aarch64
             abi: arm64-v8a
             target: aarch64-linux-android
             arch: arm64
+            preset: android_arm64
 
     steps:
       - name: Check out refreshed version
@@ -345,16 +337,9 @@ jobs:
 
       - name: Build C/C++
         run: |
-          cmake -B build_artifacts \
-            -D CMAKE_BUILD_TYPE=Release \
-            -D CMAKE_TOOLCHAIN_FILE=${ANDROID_HOME}/ndk/${{ env.ANDROID_NDK_VERSION }}/build/cmake/android.toolchain.cmake \
-            -D CMAKE_ANDROID_STL_TYPE=c++_static \
-            -D ANDROID_PLATFORM=${{ env.ANDROID_SDK_VERSION }} \
-            -D ANDROID_ABI=${{ matrix.abi }} \
-            -D USEARCH_BUILD_LIB_C=1 \
-            -D USEARCH_BUILD_TEST_CPP=0 \
-            -D USEARCH_BUILD_BENCH_CPP=0
-          cmake --build build_artifacts --config Release
+          export ANDROID_NDK_ROOT="${ANDROID_HOME}/ndk/${{ env.ANDROID_NDK_VERSION }}"
+          cmake --preset ${{ matrix.preset }} -B build_artifacts -D ANDROID_PLATFORM=${{ env.ANDROID_SDK_VERSION }}
+          cmake --build build_artifacts
 
       - name: Package library
         run: |
@@ -431,11 +416,9 @@ jobs:
             -DCMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
             -DCMAKE_SYSTEM_NAME=Linux \
             -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_processor }} \
-            -DUSEARCH_BUILD_LIB_JAVA=1 \
-            -DUSEARCH_BUILD_TEST_CPP=0 \
-            -DUSEARCH_BUILD_BENCH_CPP=0 \
-            -DUSEARCH_BUILD_LIB_C=1 \
-            -DNK_RUNTIME_DISPATCH=1
+            -DUSEARCH_BUILD_TEST=0 \
+            -DUSEARCH_BUILD_BENCH=0 \
+            -DUSEARCH_BUILD_LIB_C=1
 
           cmake --build build_artifacts --config Release -j
 
@@ -484,11 +467,9 @@ jobs:
         run: |
           cmake -B build_artifacts -A ${{ matrix.cmake_arch }} `
             -DCMAKE_BUILD_TYPE=Release `
-            -DUSEARCH_BUILD_LIB_JAVA=1 `
-            -DUSEARCH_BUILD_TEST_CPP=0 `
-            -DUSEARCH_BUILD_BENCH_CPP=0 `
-            -DUSEARCH_BUILD_LIB_C=1 `
-            -DNK_RUNTIME_DISPATCH=1
+            -DUSEARCH_BUILD_TEST=0 `
+            -DUSEARCH_BUILD_BENCH=0 `
+            -DUSEARCH_BUILD_LIB_C=1
 
           cmake --build build_artifacts --config Release
 
@@ -533,11 +514,9 @@ jobs:
             -DCMAKE_OSX_ARCHITECTURES=${{ matrix.cmake_arch }} \
             -DCMAKE_SYSTEM_NAME=Darwin \
             -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_arch }} \
-            -DUSEARCH_BUILD_LIB_JAVA=1 \
-            -DUSEARCH_BUILD_TEST_CPP=0 \
-            -DUSEARCH_BUILD_BENCH_CPP=0 \
-            -DUSEARCH_BUILD_LIB_C=1 \
-            -DNK_RUNTIME_DISPATCH=1
+            -DUSEARCH_BUILD_TEST=0 \
+            -DUSEARCH_BUILD_BENCH=0 \
+            -DUSEARCH_BUILD_LIB_C=1
 
           cmake --build build_artifacts --config Release
 
@@ -593,15 +572,9 @@ jobs:
             -DCMAKE_ANDROID_STL_TYPE=c++_static \
             -DANDROID_PLATFORM=${{ env.ANDROID_SDK_VERSION }} \
             -DANDROID_ABI=${{ matrix.abi }} \
-            -DUSEARCH_BUILD_LIB_JAVA=1 \
-            -DUSEARCH_BUILD_TEST_CPP=0 \
-            -DUSEARCH_BUILD_BENCH_CPP=0 \
-            -DUSEARCH_BUILD_LIB_C=1 \
-            -DNK_TARGET_NEON=1 \
-            -DNK_TARGET_NEONBFDOT=1 \
-            -DNK_TARGET_NEONHALF=1 \
-            -DNK_TARGET_NEONSDOT=1 \
-            -DNK_RUNTIME_DISPATCH=1
+            -DUSEARCH_BUILD_TEST=0 \
+            -DUSEARCH_BUILD_BENCH=0 \
+            -DUSEARCH_BUILD_LIB_C=1
 
           cmake --build build_artifacts --config Release
 
@@ -615,15 +588,15 @@ jobs:
   # One archive per checked-in Emscripten toolchain: a WebAssembly module carries one SIMD tier, width and threads
   # choice, so each row is a whole build, and its C test runs under Node before anything is packed.
   create_wasm_library:
-    name: Build WASM Library (${{ matrix.toolchain }})
-    runs-on: ubuntu-24.04
+    name: Build WASM Library for ${{ matrix.archive }}
+    runs-on: ubuntu-26.04
     needs: versioning
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { toolchain: wasm32-emscripten, archive: wasm32_emscripten, node: 22 }
-          - { toolchain: wasm64-emscripten, archive: wasm64_emscripten, node: 24 }
+          - { archive: wasm32_emscripten, node: 22 }
+          - { archive: wasm64_emscripten, node: 24 }
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v7
@@ -649,18 +622,10 @@ jobs:
 
       - name: Build and test WASM with CMake
         run: |
-          emcmake cmake -B build_wasm \
-            -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-${{ matrix.toolchain }}.cmake \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DUSEARCH_BUILD_LIB_C=ON \
-            -DUSEARCH_BUILD_TEST_C=ON \
-            -DUSEARCH_BUILD_TEST_CPP=OFF \
-            -DUSEARCH_BUILD_BENCH_CPP=OFF \
-            -DUSEARCH_USE_JEMALLOC=OFF
-          cmake --build build_wasm --config Release --target usearch_static usearch_test_c
-          ctest --test-dir build_wasm -C Release -R '^usearch_test_c$' --output-on-failure
+          # The archive name is also the preset name
+          cmake --workflow --preset ${{ matrix.archive }}
 
-          cd build_wasm
+          cd build_${{ matrix.archive }}
           cp -r ../include/usearch .
           tar -czf ../usearch_${{ matrix.archive }}_${{ steps.set_version.outputs.version }}.tar.gz libusearch_static.a usearch
           zip -r ../usearch_${{ matrix.archive }}_${{ steps.set_version.outputs.version }}.zip libusearch_static.a usearch
@@ -675,7 +640,7 @@ jobs:
 
   publish_checksums:
     name: Compute Assets Checksums
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs:
       [
         versioning,
@@ -770,7 +735,7 @@ jobs:
   publish_python:
     name: Publish Python
     needs: build_wheels
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     environment:
       name: pypi
       url: https://pypi.org/p/usearch
@@ -871,7 +836,7 @@ jobs:
   publish_javascript:
     name: Publish JavaScript
     needs: build_javascript
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     environment:
       name: npm-usearch
       url: https://www.npmjs.com/package/usearch
@@ -923,7 +888,7 @@ jobs:
   publish_rust:
     name: Publish Rust
     needs: versioning
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v7
@@ -946,7 +911,7 @@ jobs:
         build_jni_macos,
         build_jni_android,
       ]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
       packages: write
@@ -1045,7 +1010,7 @@ jobs:
   publish_swift:
     name: Publish Objective-C & Swift
     needs: versioning
-    runs-on: macos-15
+    runs-on: xcode-27
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v7
@@ -1053,17 +1018,19 @@ jobs:
           ref: "main"
       - name: Pull Git submodules
         run: git submodule update --init --recursive
-      - name: Build
-        run: swift build
-      - name: Run tests
-        run: swift test
+      - name: Build C Library
+        run: |
+          cmake --preset release_lib
+          cmake --build --preset release_lib --target usearch_static
+      - name: Test Swift
+        run: swift test -Xlinker -L${{ github.workspace }}/build_release_lib
 
   # Publishes to both Docker Hub and GitHub Container Registry
   # https://docs.github.com/en/actions/publishing-packages/publishing-docker-images#publishing-images-to-docker-hub-and-github-packages
   publish_docker:
     name: Publish Docker Image
     needs: versioning
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       packages: write
@@ -1126,9 +1093,9 @@ jobs:
         if: matrix.os == 'ubuntu-24.04'
         run: |
           sudo apt update
-          sudo apt install -y cmake build-essential libjemalloc-dev libomp-dev
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_JEMALLOC=1
-          cmake --build build_artifacts --config Release
+          sudo apt install -y build-essential libjemalloc-dev libomp-dev
+          cmake --preset release_lib -B build_artifacts -D USEARCH_USE_JEMALLOC=1
+          cmake --build build_artifacts
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_shared.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
 
@@ -1137,8 +1104,8 @@ jobs:
         run: |
           brew update
           brew reinstall cmake
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_JEMALLOC=0
-          cmake --build build_artifacts --config Release
+          cmake --preset release_lib -B build_artifacts -D USEARCH_USE_JEMALLOC=0
+          cmake --build build_artifacts
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_shared.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
 
@@ -1146,7 +1113,7 @@ jobs:
         if: matrix.os == 'windows-2022'
         run: |
           choco install cmake
-          cmake -B build_artifacts -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_TEST_CPP=0 -DUSEARCH_BUILD_TEST_C=0 -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_USE_JEMALLOC=0
+          cmake --preset msvc_x64 -B build_artifacts -D USEARCH_BUILD_TEST=0 -D USEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
           cp "${{ github.workspace }}\build_artifacts\libusearch_shared.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
@@ -1159,7 +1126,7 @@ jobs:
 
   publish_csharp:
     name: Publish C#
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     needs: [build_csharp]
     env:
       SOLUTION: ${{ github.workspace }}/csharp
@@ -1204,7 +1171,7 @@ jobs:
 
   build_docs:
     name: Build Docs
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     if: ${{ always() }}
     needs:
       [
@@ -1256,7 +1223,7 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     if: ${{ always() }}
     needs: build_docs
     steps:
@@ -1279,7 +1246,7 @@ jobs:
 
   deploy_docs_vercel:
     name: Deploy Vercel
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     if: ${{ always() }}
     needs: build_docs
     steps:

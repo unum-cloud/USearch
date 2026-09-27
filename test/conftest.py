@@ -16,9 +16,13 @@ import pytest
 
 import usearch
 
-# A seed drawn once per run and logged in the banner, so a failure that only appears sometimes
-# still names the draw that produced it. `USEARCH_TESTS_SEED` pins it for a rerun.
-_RUN_SEED = int(os.environ.get("USEARCH_TESTS_SEED", int.from_bytes(os.urandom(4), "little")))
+# Fixed at 42 unless `USEARCH_SEED` names another, or `random` to draw one; the banner logs it, so
+# a failure that only appears sometimes still names the draw that produced it.
+_REQUESTED_SEED = os.environ.get("USEARCH_SEED", "42")
+try:
+    _RUN_SEED = int.from_bytes(os.urandom(4), "little") if _REQUESTED_SEED == "random" else int(_REQUESTED_SEED)
+except ValueError:
+    raise SystemExit(f'USEARCH_SEED="{_REQUESTED_SEED}" does not parse') from None
 
 
 def pytest_report_header() -> list[str]:
@@ -33,16 +37,17 @@ def pytest_report_header() -> list[str]:
         f"usearch: {usearch.version()} from {usearch.DenseIndex.__module__}",
         f"capabilities compiled: {usearch.capabilities_compiled()}",
         f"capabilities available: {usearch.capabilities_available()}",
-        f"seed: {_RUN_SEED}, pin with USEARCH_TESTS_SEED",
+        f"seed: {_RUN_SEED}, pin with USEARCH_SEED",
     ]
 
 
 @pytest.fixture
-def seed(__pytest_repeat_step_number: int = 0) -> int:
+def seed(__pytest_repeat_step_number: int | None) -> int:
     """A per-test seed that moves with the repeat step, so repetitions differ but reproduce.
 
-    Consumes pytest-repeat's own step counter, so `@pytest.mark.repeat` varies the draw
-    instead of running the identical one N times.
+    The step counter carries no default on purpose: pytest injects only the parameters without
+    one, so a default would replay the first step's draw on every repeat. pytest-repeat hands
+    `None` to a test that is not repeated.
     """
     return _RUN_SEED + (__pytest_repeat_step_number or 0)
 

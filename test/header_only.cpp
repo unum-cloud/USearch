@@ -1,5 +1,5 @@
 /**
- *  @file test/test_header_only.cpp
+ *  @file test/header_only.cpp
  *  @author Ash Vardanian
  *  @date September 7, 2026
  *  @brief The header-only suite's entry point: the basic graph index and the utilities under it, on
@@ -7,7 +7,7 @@
  */
 #include <fmt/format.h>
 
-#include "test.hpp"
+#include "harness.hpp"
 
 using namespace unum::usearch;
 using namespace unum::usearch::test;

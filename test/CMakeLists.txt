@@ -1,8 +1,8 @@
 # The header-only suite: the basic graph index and the utilities under it. ForkUnion, NumKong and yyjson appear as the
 # tests' own tools - the ISA-specific atomic references, the tensors, the checkpoint files - never through the library.
 add_executable(
-    usearch_test_header_only test_header_only.cpp utilities/ram_buffers.cpp utilities/ram_tables.cpp
-                             basic/sentences.cpp basic/bioinformatics.cpp basic/meshes.cpp
+    usearch_test_header_only header_only.cpp utilities/ram_buffers.cpp utilities/ram_tables.cpp basic/sentences.cpp
+                             basic/bioinformatics.cpp basic/meshes.cpp
 )
 usearch_setup_target(usearch_test_header_only HOST)
 target_include_directories(usearch_test_header_only PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -14,7 +14,7 @@ add_test(NAME usearch_test_header_only COMMAND usearch_test_header_only)
 # suite down.
 add_executable(
     usearch_test
-    test.cpp
+    main.cpp
     dense.cpp
     utilities/safegraphs_format.cpp
     dense/ram_metric_f64.cpp
@@ -41,6 +41,8 @@ add_executable(
     dense/ram_index_u1.cpp
 )
 usearch_setup_target(usearch_test HOST)
+# The capability names come from the C interface's own probes, compiled in rather than linking the whole library.
+target_sources(usearch_test PRIVATE ${PROJECT_SOURCE_DIR}/src/types.cpp)
 target_include_directories(usearch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_test PRIVATE fmt::fmt yyjson forkunion::static)
 add_test(NAME usearch_test COMMAND usearch_test)
@@ -84,9 +86,13 @@ if (USEARCH_BUILD_CUDA)
                    CUDA_STANDARD 20
                    CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}"
     )
-    # A generation's kits join the suite only when every listed architecture runs them.
+    # The capability probes answer from NumKong's archive as in `usearch_test`; the device units keep the inline tier,
+    # which tests a generation's kits only when every listed architecture runs them.
     usearch_cuda_tiers(test_cuda_tiers_ "${USEARCH_CUDA_ARCHITECTURES}")
-    target_compile_definitions(usearch_test_cuda PRIVATE ${test_cuda_tiers_})
+    target_sources(usearch_test_cuda PRIVATE ${PROJECT_SOURCE_DIR}/src/types.cpp)
+    target_compile_definitions(
+        usearch_test_cuda PRIVATE $<$<COMPILE_LANGUAGE:CXX>:NUMKONG_RUNTIME_DISPATCH=1> ${test_cuda_tiers_}
+    )
     target_compile_options(usearch_test_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-    target_link_libraries(usearch_test_cuda PRIVATE fmt::fmt yyjson CUDA::cuda_driver forkunion::static)
+    target_link_libraries(usearch_test_cuda PRIVATE fmt::fmt yyjson CUDA::cuda_driver forkunion::static numkong::static)
 endif ()

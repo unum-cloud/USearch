@@ -10,6 +10,7 @@ Run:
 from __future__ import annotations
 
 import os
+from itertools import pairwise
 from threading import Thread
 
 import numpy as np
@@ -266,7 +267,7 @@ def test_add_reports_progress(executor):
 
     assert index.add(np.arange(64), random_vectors(64, 16), executor=executor, progress=watch) == 64
     assert seen, "a watched batch reports at least once"
-    assert all(earlier[0] <= later[0] for earlier, later in zip(seen, seen[1:], strict=True)), "counts never decrease"
+    assert all(earlier[0] <= later[0] for earlier, later in pairwise(seen)), "counts never decrease"
     assert {total for _, total in seen} == {64}, "every report names the same total"
     assert seen[-1] == (64, 64)
 

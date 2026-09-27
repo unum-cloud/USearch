@@ -9,105 +9,167 @@
     {
       "name": "base",
       "hidden": true,
-      "description": "Ninja, LLVM, a build tree named after the preset, and a compilation database for the language server. `lld` links the template-heavy targets several times faster than `bfd`. Export CMAKE_CXX_COMPILER_LAUNCHER=ccache to cache objects; point CC/CXX elsewhere for GCC.",
+      "description": "Ninja, a build tree named after the preset, and a compilation database for the language server. No compiler is pinned here: the developer presets inherit `clang`, and CI rows override with -D CMAKE_CXX_COMPILER. Export CMAKE_CXX_COMPILER_LAUNCHER=ccache and CMAKE_CUDA_COMPILER_LAUNCHER=ccache to cache objects, the `.cu` units included.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build_${presetName}",
       "cacheVariables": {
         "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
-        "CMAKE_C_COMPILER": "clang",
-        "CMAKE_CXX_COMPILER": "clang++",
-        "CMAKE_EXE_LINKER_FLAGS": "-fuse-ld=lld",
-        "CMAKE_SHARED_LINKER_FLAGS": "-fuse-ld=lld",
         "CMAKE_OPTIMIZE_DEPENDENCIES": "ON"
       }
     },
     {
+      "name": "clang",
+      "hidden": true,
+      "description": "Clang, and `lld`, which links the template-heavy targets several times faster than `bfd`.",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_EXE_LINKER_FLAGS": "-fuse-ld=lld",
+        "CMAKE_SHARED_LINKER_FLAGS": "-fuse-ld=lld"
+      }
+    },
+    {
+      "name": "gcc",
+      "hidden": true,
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "gcc",
+        "CMAKE_CXX_COMPILER": "g++"
+      }
+    },
+    {
+      "name": "windows",
+      "hidden": true,
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "library",
+      "hidden": true,
+      "description": "The C 99 library alone - what the language bindings and packages consume.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "USEARCH_BUILD_TEST": "OFF",
+        "USEARCH_BUILD_BENCH": "OFF",
+        "USEARCH_BUILD_LIB_C": "ON"
+      }
+    },
+    {
+      "name": "wasm",
+      "hidden": true,
+      "description": "The C library and its test under a WebAssembly toolchain; the C++ suite and benchmarks stay native.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "USEARCH_BUILD_TEST": "ON",
+        "USEARCH_BUILD_BENCH": "OFF",
+        "USEARCH_BUILD_LIB_C": "ON",
+        "USEARCH_USE_JEMALLOC": "OFF"
+      }
+    },
+    {
       "name": "debug",
-      "inherits": "base",
+      "inherits": [
+        "base",
+        "clang"
+      ],
       "displayName": "Debug - unit tests with sanitizers",
       "description": "Unoptimized C++ and C suites; the compiler wiring arms the leak sanitizer here.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
-        "USEARCH_BUILD_TEST_CPP": "ON",
-        "USEARCH_BUILD_BENCH_CPP": "OFF",
-        "USEARCH_BUILD_LIB_C": "ON",
-        "USEARCH_BUILD_TEST_C": "ON"
+        "USEARCH_BUILD_TEST": "ON",
+        "USEARCH_BUILD_BENCH": "OFF",
+        "USEARCH_BUILD_LIB_C": "ON"
       }
     },
     {
       "name": "check",
-      "inherits": "base",
+      "inherits": [
+        "base",
+        "clang"
+      ],
       "displayName": "Check - fastest compile cycle",
-      "description": "Does it still compile, nothing more. `-O0` is the one flag that moves the needle on these instantiation grids: measured per shard, -O3 and -O1 both cost ~9.8s while -O0 costs 3.5s, against a 2.8s front-end floor.",
+      "description": "Does it still compile, nothing more. `-O0` is the one flag that moves the needle on these instantiation grids: measured per shard, -O3 and -O1 both cost ~9.8s while -O0 costs 3.5s, against a 2.8s front-end floor. The `.cu` units join wherever a CUDA toolkit is found, with `ptxas` at `-O0` too, since optimizing each class unit's kernels is what dominates their build.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
-        "USEARCH_BUILD_TEST_CPP": "ON",
-        "USEARCH_BUILD_BENCH_CPP": "ON",
-        "USEARCH_BUILD_LIB_C": "ON",
-        "USEARCH_BUILD_TEST_C": "ON"
+        "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O0 -Xptxas -O0 -DNDEBUG",
+        "USEARCH_BUILD_TEST": "ON",
+        "USEARCH_BUILD_BENCH": "ON",
+        "USEARCH_BUILD_LIB_C": "ON"
       }
     },
     {
       "name": "relwithdebinfo",
-      "inherits": "base",
+      "inherits": [
+        "base",
+        "clang"
+      ],
       "displayName": "RelWithDebInfo - optimized tests with symbols",
       "description": "Optimized, with full DWARF for stepping through the suites.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "USEARCH_BUILD_TEST_CPP": "ON",
-        "USEARCH_BUILD_BENCH_CPP": "OFF"
+        "USEARCH_BUILD_TEST": "ON",
+        "USEARCH_BUILD_BENCH": "OFF"
       }
     },
     {
       "name": "release",
-      "inherits": "base",
+      "inherits": [
+        "base",
+        "clang"
+      ],
       "displayName": "Release - every CPU target",
       "description": "The full CPU matrix: C++ suite, benchmarks, the C 99 library and its test.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "USEARCH_BUILD_TEST_CPP": "ON",
-        "USEARCH_BUILD_BENCH_CPP": "ON",
-        "USEARCH_BUILD_LIB_C": "ON",
-        "USEARCH_BUILD_TEST_C": "ON"
+        "USEARCH_BUILD_TEST": "ON",
+        "USEARCH_BUILD_BENCH": "ON",
+        "USEARCH_BUILD_LIB_C": "ON"
       }
     },
     {
       "name": "profile",
-      "inherits": "base",
+      "inherits": [
+        "base",
+        "clang"
+      ],
       "displayName": "Profile - benchmarks under perf",
       "description": "The profiling tree behind bench/README.md: full optimization, plus the symbols `perf` needs to attribute samples.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
-        "USEARCH_BUILD_TEST_CPP": "OFF",
-        "USEARCH_BUILD_BENCH_CPP": "ON",
-        "USEARCH_BUILD_LIB_C": "ON",
-        "USEARCH_BUILD_TEST_C": "ON"
+        "USEARCH_BUILD_TEST": "OFF",
+        "USEARCH_BUILD_BENCH": "ON",
+        "USEARCH_BUILD_LIB_C": "ON"
       }
     },
     {
       "name": "tsan",
-      "inherits": "base",
+      "inherits": [
+        "base",
+        "gcc"
+      ],
       "displayName": "TSan - concurrency suites under ThreadSanitizer",
       "description": "GCC & -fsanitize=thread over RelWithDebInfo - the Debug wiring arms ASan & LSan, which TSan cannot share a process with. -O1 keeps the instrumented suites tolerable, and the mutex annotations in sanitizers.hpp light up under this preset alone. Built with GCC: Clang here ships no compiler-rt.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
-        "CMAKE_C_COMPILER": "gcc",
-        "CMAKE_CXX_COMPILER": "g++",
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O1 -g -DNDEBUG -fsanitize=thread -fno-omit-frame-pointer",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O1 -g -DNDEBUG -fsanitize=thread -fno-omit-frame-pointer",
-        "USEARCH_BUILD_TEST_CPP": "ON",
-        "USEARCH_BUILD_BENCH_CPP": "OFF",
-        "USEARCH_BUILD_LIB_C": "OFF",
-        "USEARCH_BUILD_TEST_C": "OFF"
+        "USEARCH_BUILD_TEST": "ON",
+        "USEARCH_BUILD_BENCH": "OFF",
+        "USEARCH_BUILD_LIB_C": "OFF"
       }
     },
     {
       "name": "dev",
-      "inherits": "base",
+      "inherits": [
+        "base",
+        "clang"
+      ],
       "displayName": "Dev - everything, CUDA included",
       "description": "The iteration tree, and the only one covering the `.cu` units - so `.clangd` reads its database. Optimized enough to run, with line tables instead of full DWARF and the fat binary narrowed to the host GPU.",
       "cacheVariables": {
@@ -115,10 +177,9 @@
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
         "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O2 -lineinfo -DNDEBUG",
-        "USEARCH_BUILD_TEST_CPP": "ON",
-        "USEARCH_BUILD_BENCH_CPP": "ON",
+        "USEARCH_BUILD_TEST": "ON",
+        "USEARCH_BUILD_BENCH": "ON",
         "USEARCH_BUILD_LIB_C": "ON",
-        "USEARCH_BUILD_TEST_C": "ON",
         "USEARCH_BUILD_CUDA": "ON",
         "USEARCH_CUDA_ARCHITECTURES": "native"
       }
@@ -141,6 +202,103 @@
         "CMAKE_BUILD_TYPE": "Release",
         "USEARCH_CUDA_ARCHITECTURES": "80;90a;100f;120f"
       }
+    },
+    {
+      "name": "release_lib",
+      "inherits": [
+        "base",
+        "library"
+      ],
+      "displayName": "Release - the C 99 library alone, for packaging"
+    },
+    {
+      "name": "linux_aarch64",
+      "inherits": [
+        "base",
+        "library"
+      ],
+      "displayName": "Linux AArch64 - the C 99 library through Clang and LLD",
+      "toolchainFile": "${sourceDir}/cmake/toolchain-aarch64-llvm.cmake"
+    },
+    {
+      "name": "android_arm64",
+      "inherits": [
+        "base",
+        "library"
+      ],
+      "toolchainFile": "$env{ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake",
+      "cacheVariables": {
+        "CMAKE_ANDROID_STL_TYPE": "c++_static",
+        "ANDROID_PLATFORM": "21",
+        "ANDROID_ABI": "arm64-v8a"
+      }
+    },
+    {
+      "name": "android_armv7",
+      "inherits": [
+        "base",
+        "library"
+      ],
+      "toolchainFile": "$env{ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake",
+      "cacheVariables": {
+        "CMAKE_ANDROID_STL_TYPE": "c++_static",
+        "ANDROID_PLATFORM": "21",
+        "ANDROID_ABI": "armeabi-v7a"
+      }
+    },
+    {
+      "name": "wasm32_emscripten",
+      "inherits": [
+        "base",
+        "wasm"
+      ],
+      "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-emscripten.cmake",
+      "cacheVariables": {
+        "CMAKE_CROSSCOMPILING_EMULATOR": "node"
+      }
+    },
+    {
+      "name": "wasm64_emscripten",
+      "inherits": [
+        "base",
+        "wasm"
+      ],
+      "toolchainFile": "${sourceDir}/cmake/toolchain-wasm64-emscripten.cmake",
+      "cacheVariables": {
+        "CMAKE_CROSSCOMPILING_EMULATOR": "node"
+      }
+    },
+    {
+      "name": "wasm32_wasi",
+      "inherits": [
+        "base",
+        "wasm"
+      ],
+      "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-wasi.cmake"
+    },
+    {
+      "name": "msvc_x64",
+      "inherits": [
+        "base",
+        "windows"
+      ],
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "cacheVariables": {
+        "USEARCH_BUILD_TEST": "ON",
+        "USEARCH_BUILD_BENCH": "OFF",
+        "USEARCH_BUILD_LIB_C": "ON"
+      }
+    },
+    {
+      "name": "msvc_arm64",
+      "inherits": [
+        "base",
+        "windows",
+        "library"
+      ],
+      "generator": "Visual Studio 17 2022",
+      "architecture": "ARM64"
     }
   ],
   "buildPresets": [
@@ -188,6 +346,65 @@
       "name": "release_cuda",
       "configurePreset": "release_cuda",
       "jobs": 0
+    },
+    {
+      "name": "release_lib",
+      "configurePreset": "release_lib",
+      "jobs": 0
+    },
+    {
+      "name": "linux_aarch64",
+      "configurePreset": "linux_aarch64",
+      "jobs": 0
+    },
+    {
+      "name": "android_arm64",
+      "configurePreset": "android_arm64",
+      "jobs": 0
+    },
+    {
+      "name": "android_armv7",
+      "configurePreset": "android_armv7",
+      "jobs": 0
+    },
+    {
+      "name": "wasm32_emscripten",
+      "configurePreset": "wasm32_emscripten",
+      "jobs": 0,
+      "targets": [
+        "usearch_static",
+        "usearch_test_c"
+      ]
+    },
+    {
+      "name": "wasm64_emscripten",
+      "configurePreset": "wasm64_emscripten",
+      "jobs": 0,
+      "targets": [
+        "usearch_static",
+        "usearch_test_c"
+      ]
+    },
+    {
+      "name": "wasm32_wasi",
+      "configurePreset": "wasm32_wasi",
+      "jobs": 0,
+      "targets": [
+        "usearch_static",
+        "usearch_test_c"
+      ]
+    },
+    {
+      "name": "msvc_x64",
+      "configurePreset": "msvc_x64",
+      "jobs": 0,
+      "configuration": "Release"
+    },
+    {
+      "name": "msvc_arm64",
+      "configurePreset": "msvc_arm64",
+      "jobs": 0,
+      "configuration": "Release"
     }
   ],
   "testPresets": [
@@ -228,9 +445,62 @@
       "name": "dev",
       "inherits": "base",
       "configurePreset": "dev"
+    },
+    {
+      "name": "wasm32_emscripten",
+      "inherits": "base",
+      "configurePreset": "wasm32_emscripten",
+      "filter": {
+        "include": {
+          "name": "^usearch_test_c$"
+        }
+      }
+    },
+    {
+      "name": "wasm64_emscripten",
+      "inherits": "base",
+      "configurePreset": "wasm64_emscripten",
+      "filter": {
+        "include": {
+          "name": "^usearch_test_c$"
+        }
+      }
+    },
+    {
+      "name": "wasm32_wasi",
+      "inherits": "base",
+      "configurePreset": "wasm32_wasi",
+      "filter": {
+        "include": {
+          "name": "^usearch_test_c$"
+        }
+      }
+    },
+    {
+      "name": "msvc_x64",
+      "inherits": "base",
+      "configurePreset": "msvc_x64",
+      "configuration": "Release"
     }
   ],
   "workflowPresets": [
+    {
+      "name": "debug",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "debug"
+        },
+        {
+          "type": "build",
+          "name": "debug"
+        },
+        {
+          "type": "test",
+          "name": "debug"
+        }
+      ]
+    },
     {
       "name": "release",
       "steps": [
@@ -249,6 +519,23 @@
       ]
     },
     {
+      "name": "tsan",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "tsan"
+        },
+        {
+          "type": "build",
+          "name": "tsan"
+        },
+        {
+          "type": "test",
+          "name": "tsan"
+        }
+      ]
+    },
+    {
       "name": "dev",
       "steps": [
         {
@@ -262,6 +549,57 @@
         {
           "type": "test",
           "name": "dev"
+        }
+      ]
+    },
+    {
+      "name": "wasm32_emscripten",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "wasm32_emscripten"
+        },
+        {
+          "type": "build",
+          "name": "wasm32_emscripten"
+        },
+        {
+          "type": "test",
+          "name": "wasm32_emscripten"
+        }
+      ]
+    },
+    {
+      "name": "wasm64_emscripten",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "wasm64_emscripten"
+        },
+        {
+          "type": "build",
+          "name": "wasm64_emscripten"
+        },
+        {
+          "type": "test",
+          "name": "wasm64_emscripten"
+        }
+      ]
+    },
+    {
+      "name": "wasm32_wasi",
+      "steps": [
+        {
+          "type": "configure",
+          "name": "wasm32_wasi"
+        },
+        {
+          "type": "build",
+          "name": "wasm32_wasi"
+        },
+        {
+          "type": "test",
+          "name": "wasm32_wasi"
         }
       ]
     }

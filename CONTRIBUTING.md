@@ -39,7 +39,7 @@ brew install libomp llvm # macOS
 Using modern syntax, this is how you build and run the test suite:
 
 ```sh
-cmake -D USEARCH_BUILD_TEST_CPP=1 -D CMAKE_BUILD_TYPE=Debug -B build_debug
+cmake -D USEARCH_BUILD_TEST=1 -D CMAKE_BUILD_TYPE=Debug -B build_debug
 cmake --build build_debug --config Debug
 build_debug/usearch_test
 ```
@@ -47,7 +47,7 @@ build_debug/usearch_test
 If the build mode is not specified, the default is `Release`.
 
 ```sh
-cmake -D USEARCH_BUILD_TEST_CPP=1 -B build_release
+cmake -D USEARCH_BUILD_TEST=1 -B build_release
 cmake --build build_release --config Release
 build_release/usearch_test
 ```
@@ -55,21 +55,36 @@ build_release/usearch_test
 For development purposes, you may want to include symbols information in the build:
 
 ```sh
-cmake -D USEARCH_BUILD_TEST_CPP=1 -D CMAKE_BUILD_TYPE=RelWithDebInfo -B build_relwithdebinfo
+cmake -D USEARCH_BUILD_TEST=1 -D CMAKE_BUILD_TYPE=RelWithDebInfo -B build_relwithdebinfo
 cmake --build build_relwithdebinfo --config RelWithDebInfo
 build_relwithdebinfo/usearch_test
 ```
 
+`usearch_test` and `usearch_test_c` open by naming the build and the machine it runs on:
+
+```text
+USearch 3.0.0
+- Compiled for: serial,neon,neonsdot,neonbfdot,neonfhm,neonfp8
+- This machine: serial,neon,neonsdot,neonbfdot,neonfhm
+```
+
+Both lists come from the C interface, the same strings the bindings report.
+"Compiled for" is `usearch_capabilities_compiled()`, the NumKong capability levels this build carries kernels for, and "This machine" is `usearch_capabilities_available()`, those of them this processor can also run.
+`usearch_test_cuda` opens with `- CUDA: <device> sm_<major><minor>` for the first visible device.
+Without one it prints `- CUDA: no device` and exits 0, skipping every GPU test.
+
 Those three configurations, and the benchmarking one from [bench/README.md](bench/README.md), are also packaged as CMake presets, so the flag soup below is optional:
 
 ```sh
-cmake --list-presets              # debug, relwithdebinfo, release, profile, dev, trace, release_cuda
+cmake --list-presets              # the ones this host can build, from `debug` to `wasm32_wasi` and `msvc_x64`
 cmake --preset release            # configures into `build_release`
 cmake --build --preset release    # builds it
 ctest --preset release            # runs the suites
 ```
 
-Every preset writes into `build_<preset name>`, exports a `compile_commands.json` for the language server, links with `lld`, and builds with LLVM through Ninja.
+Every preset writes into `build_<preset name>` and exports a `compile_commands.json` for the language server.
+The development ones build with LLVM through Ninja and link with `lld`; `tsan` uses GCC, and CI rows override the compiler with `-D CMAKE_CXX_COMPILER`.
+The rest match CI: `release_lib` for the C library alone, `linux_aarch64`, `android_arm64`, `android_armv7`, the three WASM toolchains, and `msvc_x64` / `msvc_arm64`.
 Two of them are about GPUs: `dev` compiles the CUDA suites for the host GPU alone, which is the fastest way to iterate and the tree the repo's `.clangd` reads, while `release_cuda` emits a fat binary spanning every architecture from the Ampere floor through both Blackwell lines.
 `trace` adds `-ftime-trace`, dropping a profile beside every object for when a translation unit starts dominating the build.
 Machine-specific overrides - a different compiler, `ccache`, a CUDA toolkit outside the default prefix - belong in an untracked `CMakeUserPresets.json` beside it:
@@ -97,15 +112,16 @@ Ubuntu's own package predates the former, so [Kitware's repository](https://apt.
 The CMakeLists.txt file has a number of options you can pass:
 
 - What to build:
-  - `USEARCH_BUILD_TEST_CPP` - build the C++ test suite
-  - `USEARCH_BUILD_BENCH_CPP` - build the C++ benchmark suite
+  - `USEARCH_BUILD_TEST` - build the C++ test suite, and the C one alongside `USEARCH_BUILD_LIB_C`
+  - `USEARCH_BUILD_BENCH` - build the C++ benchmark suite
   - `USEARCH_BUILD_LIB_C` - build the C library
-  - `USEARCH_BUILD_TEST_C` - build the C test suite
   - `USEARCH_BUILD_LIB_C_STUB` - a brute-force stand-in answering the same verbs over the standard library alone, for isolating a binding from the engine while bisecting one.
     It carries the same library names in a `stub/` subdirectory, so pointing a binding at it is a search path rather than a different link line.
   - `USEARCH_BUILD_CUDA` - build the CUDA test & benchmark suites
 - Which GPUs to target:
-  - `USEARCH_CUDA_ARCHITECTURES` - the architectures baked into the CUDA targets, `80;90a;100a;120a` by default: the Ampere floor, whose cubins stay loadable on every later 8.x part, then Hopper and both Blackwell lines, each architecture-specific because the kernels reach for instructions with no forward-compatible PTX. Set it to `native` while iterating on one machine.
+  - `USEARCH_CUDA_ARCHITECTURES` - the architectures the CUDA tests, benchmarks and the C interface's dispatch unit compile for, `80;90a;100f;120f` by default: the Ampere floor, then Hopper, architecture-specific, and both Blackwell lines, family-specific so they carry the fp6 and fp4 conversions.
+    The library itself ignores the list and compiles one unit per GPU class, each for its own code alone - `80` with its PTX for every GPU outside the other classes, `89`, `90a`, `100f`, which B300 runs as well, and `120f` - and picks the unit by the device's generation at runtime.
+    A NumKong GPU tier turns on in those targets only when every listed architecture runs it, so the default list exercises the Ampere kits alone; iterate on one GPU with its family code, like `100f`, to test that generation's kits.
 - Which other dependencies to use:
   - `USEARCH_USE_JEMALLOC` - use Jemalloc for memory management
 
@@ -116,7 +132,7 @@ The language bindings take their headers from `numkong/include`, `forkunion/incl
 Putting all of this together, compiling all targets on most platforms should work with the following snippet:
 
 ```sh
-cmake -D CMAKE_BUILD_TYPE=Release -D USEARCH_USE_JEMALLOC=1 -D USEARCH_BUILD_TEST_CPP=1 -D USEARCH_BUILD_BENCH_CPP=1 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1 -B build_release
+cmake -D CMAKE_BUILD_TYPE=Release -D USEARCH_USE_JEMALLOC=1 -D USEARCH_BUILD_TEST=1 -D USEARCH_BUILD_BENCH=1 -D USEARCH_BUILD_LIB_C=1 -B build_release
 
 cmake --build build_release --config Release
 build_release/usearch_test
@@ -132,10 +148,9 @@ cmake \
     -D CMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" \
     -D CMAKE_CXX_COMPILER="$(brew --prefix llvm)/bin/clang++" \
     -D USEARCH_USE_JEMALLOC=1 \
-    -D USEARCH_BUILD_TEST_CPP=1 \
-    -D USEARCH_BUILD_BENCH_CPP=1 \
+    -D USEARCH_BUILD_TEST=1 \
+    -D USEARCH_BUILD_BENCH=1 \
     -D USEARCH_BUILD_LIB_C=1 \
-    -D USEARCH_BUILD_TEST_C=1 \
     -B build_release
 
 cmake --build build_release --config Release
@@ -219,8 +234,8 @@ cmake -B build_artifacts \
   -D CMAKE_CXX_FLAGS="--target=armv7-linux-gnueabihf -march=armv7-a" \
   -D CMAKE_BUILD_TYPE=RelWithDebInfo \
   -D USEARCH_BUILD_LIB_C=1 \
-  -D USEARCH_BUILD_TEST_CPP=0 \
-  -D USEARCH_BUILD_BENCH_CPP=0
+  -D USEARCH_BUILD_TEST=0 \
+  -D USEARCH_BUILD_BENCH=0
 
 cmake --build build_artifacts --config RelWithDebInfo
 file build_artifacts/libusearch_shared.so # Verify the output
@@ -258,6 +273,16 @@ Following options are enabled:
 uv pip install -e . --group tests             # for repeated fuzzy tests
 python -m pytest                                      # if you trust the default settings
 python -m pytest python/scripts/ -s -x -p no:warnings # to overwrite the default settings
+```
+
+The `seed` fixture hands a test 42, unless `USEARCH_SEED` names another seed or is `random`, which draws a fresh one per run.
+pytest prints the seed in its header as `seed: <n>, pin with USEARCH_SEED`, so a failure under a drawn seed reruns with that number.
+Under pytest-repeat, the fixture adds the repeat step to the seed, so repetitions differ and each one still reproduces.
+A value that is neither an integer nor `random` stops the run with `USEARCH_SEED="<value>" does not parse`.
+
+```sh
+USEARCH_SEED=random python -m pytest test/               # draws a seed and prints it in the header
+USEARCH_SEED=1528003704 python -m pytest test/ --count 3 # replays that seed, then the next two
 ```
 
 Linting:
@@ -344,7 +369,7 @@ There is no WebAssembly target of its own — the C library is what crosses, and
 - `cmake/toolchain-wasm32-wasi.cmake` builds `wasm32_v128_k` against the WASI SDK, for Wasmtime, Wasmer and the Rust crate.
 
 ```sh
-emcmake cmake -B build_wasm32_emscripten -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST_C=1
+emcmake cmake -B build_wasm32_emscripten -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=1
 cmake --build build_wasm32_emscripten --target usearch_static usearch_test_c
 ctest --test-dir build_wasm32_emscripten -R '^usearch_test_c$'
 ```
@@ -461,7 +486,7 @@ USearch provides Go bindings, that depend on the C library that must be installe
 So one should first compile the C library, link it with Go, and only then run tests.
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1
 cmake --build build_release --config Release -j
 
 cp build_release/libusearch_static.a golang/         # the archive the cgo directives link
@@ -526,7 +551,7 @@ dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org
 USearch provides CSharp bindings on .NET 10, reaching the C interface through source-generated `LibraryImport`.
 The project drives no CMake of its own, so the shared library is built first and dropped where the runtime probes for it.
 ```sh
-cmake -B build_artifacts -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_TEST_C=1
+cmake -B build_artifacts -D USEARCH_BUILD_LIB_C=1
 cmake --build build_artifacts --config Release -j
 ```
 
@@ -608,7 +633,7 @@ Unpack a [WASI SDK release](https://github.com/WebAssembly/wasi-sdk/releases) an
 
 ```sh
 export WASI_SDK_PATH=/opt/wasi-sdk-34.0-x86_64-linux
-cmake -B build_wasm32_wasi -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST_C=1
+cmake -B build_wasm32_wasi -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=1
 cmake --build build_wasm32_wasi --target usearch_static usearch_test_c
 ctest --test-dir build_wasm32_wasi -R '^usearch_test_c$'
 ```

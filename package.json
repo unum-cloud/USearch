@@ -44,11 +44,11 @@
   },
   "scripts": {
     "build-js": "tsc -p javascript/tsconfig-esm.json && tsc -p javascript/tsconfig-cjs.json && cp javascript/dist-package-esm.json javascript/dist/esm/package.json && cp javascript/dist-package-cjs.json javascript/dist/cjs/package.json",
-    "build-native": "cmake-js compile --out build_node --CDUSEARCH_BUILD_LIB_C=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST_CPP=OFF --CDUSEARCH_BUILD_BENCH_CPP=OFF --target usearch_node",
-    "build-native-stub": "cmake-js compile --out build_node_stub --CDUSEARCH_BUILD_LIB_C_STUB=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST_CPP=OFF --CDUSEARCH_BUILD_BENCH_CPP=OFF --target usearch_node",
+    "build-native": "cmake-js compile --out build_node --CDUSEARCH_BUILD_LIB_C=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST=OFF --CDUSEARCH_BUILD_BENCH=OFF --target usearch_node",
+    "build-native-stub": "cmake-js compile --out build_node_stub --CDUSEARCH_BUILD_LIB_C_STUB=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST=OFF --CDUSEARCH_BUILD_BENCH=OFF --target usearch_node",
     "install": "node-gyp-build",
     "prebuild": "npm run build-native && node javascript/stage-prebuild.js build_node",
-    "prebuild-arm64": "cmake-js compile --out build_node_arm64 --arch arm64 --CDUSEARCH_BUILD_LIB_C=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST_CPP=OFF --CDUSEARCH_BUILD_BENCH_CPP=OFF --target usearch_node && node javascript/stage-prebuild.js build_node_arm64 arm64",
+    "prebuild-arm64": "cmake-js compile --out build_node_arm64 --arch arm64 --CDUSEARCH_BUILD_LIB_C=ON --CDUSEARCH_BUILD_LIB_NODE=ON --CDUSEARCH_BUILD_TEST=OFF --CDUSEARCH_BUILD_BENCH=OFF --target usearch_node && node javascript/stage-prebuild.js build_node_arm64 arm64",
     "test": "node --test ./javascript/usearch.test.js"
   },
   "devDependencies": {

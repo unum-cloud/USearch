@@ -33,7 +33,7 @@
 #include "usearch/utilities/ram_sorts.hpp"
 #include "usearch/utilities/ram_tables.hpp"
 
-#include "test.hpp"
+#include "harness.hpp"
 
 using namespace unum::usearch;
 using namespace unum::usearch::test;

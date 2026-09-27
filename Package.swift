@@ -1,4 +1,4 @@
-// swift-tools-version:6.3
+// swift-tools-version:6.4
 
 import PackageDescription
 
@@ -16,8 +16,9 @@ let package = Package(
     platforms: [
         .macOS(.v12),
         .iOS(.v15),
-        .watchOS(.v8),
+        .watchOS(.v9),
         .tvOS(.v15),
+        .visionOS(.v1),
     ],
     products: [
         .library(
@@ -42,7 +43,12 @@ let package = Package(
             path: "swift",
             exclude: ["README.md", "Test.swift", "shim.c"],
             sources: ["Types.swift", "DenseIndex.swift"],
-            linkerSettings: [.linkedLibrary("usearch_static"), .linkedLibrary("stdc++")]
+            linkerSettings: [
+                .linkedLibrary("usearch_static"),
+                // The engine is C++, and Apple SDKs ship only libc++ - there is no libstdc++ to name.
+                .linkedLibrary("c++", .when(platforms: [.macOS, .iOS, .tvOS, .watchOS, .visionOS])),
+                .linkedLibrary("stdc++", .when(platforms: [.linux])),
+            ]
         ),
         .testTarget(
             name: "USearchTestsSwift",

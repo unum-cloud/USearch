@@ -33,12 +33,20 @@ static_assert(std::is_move_constructible_v<witnessed_index_t::load_plan_t> &&
               !std::is_copy_assignable_v<witnessed_index_t::load_plan_t> &&
               !std::is_move_assignable_v<witnessed_index_t::load_plan_t>);
 
-int main() {
+/** Ends the environment banner with the first visible device; false when there is none to test on. */
+static bool log_cuda_device() {
     int devices_count = 0;
-    cudaError_t const probed = cudaGetDeviceCount(&devices_count);
-    if (probed != cudaSuccess || !devices_count)
-        return static_cast<int>(us::test::report("cuda", "no CUDA device reachable"));
-    fmt::println("CUDA devices: {}", devices_count);
+    cudaDeviceProp properties {};
+    bool const reachable = cudaGetDeviceCount(&devices_count) == cudaSuccess && devices_count &&
+                           cudaGetDeviceProperties(&properties, 0) == cudaSuccess;
+    if (reachable) fmt::println("- CUDA: {} sm_{}{}", properties.name, properties.major, properties.minor);
+    else fmt::println("- CUDA: no device");
+    return reachable;
+}
+
+int main() {
+    log_environment();
+    if (!log_cuda_device()) return 0;
     std::size_t failures_count = 0;
     failures_count += dense::check_vram_index_bf16();
     failures_count += dense::check_vram_index_f16();
@@ -52,5 +60,5 @@ int main() {
     failures_count += dense::check_vram_index_u4();
     failures_count += dense::check_vram_index_u1();
     failures_count += dense::check_vram_indexes();
-    return failures_count ? 1 : 0;
+    return report("total", failures_count) ? 1 : 0;
 }

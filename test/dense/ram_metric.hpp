@@ -46,7 +46,7 @@
 #include <numkong/spatial.hpp>
 #include <numkong/vector.hpp>
 
-#include "test.hpp"
+#include "harness.hpp"
 #include "usearch/dense/ram_metric.hpp"
 
 namespace unum::usearch::test::dense {

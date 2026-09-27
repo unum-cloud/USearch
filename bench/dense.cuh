@@ -38,7 +38,7 @@
 
 #include "bench.hpp"
 #include "utilities/persisted_dataset.hpp" // `mapped_file_t`, `parse_matrix_header`, `matrix_save`
-#include "test.hpp"
+#include "harness.hpp"
 
 namespace unum::usearch::bench {
 

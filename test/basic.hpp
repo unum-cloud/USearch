@@ -35,7 +35,7 @@
 #include <fmt/format.h>
 #include <forkunion.hpp>
 
-#include "test.hpp"
+#include "harness.hpp"
 #include "usearch/basic/ram_index.hpp"
 #include "usearch/utilities/safegraphs_format.hpp"
 

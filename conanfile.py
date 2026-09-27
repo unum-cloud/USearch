@@ -58,9 +58,8 @@ class USearchConan(ConanFile):
         toolchain.cache_variables["USEARCH_INSTALL"] = True
         toolchain.cache_variables["USEARCH_BUILD_LIB_C"] = True
         toolchain.cache_variables["USEARCH_BUILD_CUDA"] = self.options.with_cuda
-        toolchain.cache_variables["USEARCH_BUILD_TEST_CPP"] = False
-        toolchain.cache_variables["USEARCH_BUILD_BENCH_CPP"] = False
-        toolchain.cache_variables["USEARCH_BUILD_TEST_C"] = False
+        toolchain.cache_variables["USEARCH_BUILD_TEST"] = False
+        toolchain.cache_variables["USEARCH_BUILD_BENCH"] = False
         toolchain.generate()
         CMakeDeps(self).generate()
 

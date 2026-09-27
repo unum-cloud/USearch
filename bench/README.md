@@ -24,12 +24,13 @@ The `Queries` block reports the throughput in QPS, the latency, the distances an
 
 ### Building
 
-Every number below comes from a Release build: the `release` preset for the two CPU binaries, and `release_cuda` for the CUDA one, narrowed to the host GPU with `-DUSEARCH_CUDA_ARCHITECTURES=native` when iterating on one machine.
+Every number below comes from a Release build: the `release` preset for the two CPU binaries, and `release_cuda` for the CUDA one, narrowed to the host GPU's family code, like `-DUSEARCH_CUDA_ARCHITECTURES=100f` on a B200 or B300.
+The CUDA bench compiles a generation's kits only when every listed architecture runs them, so the preset's own list measures the Ampere kits alone, whatever the GPU.
 The `profile` preset keeps the same optimization and adds the symbols `perf` needs; `dev` is the `-O2` iteration tree and measures nothing.
 
 ```sh
 cmake --preset release && cmake --build --preset release --target usearch_bench_dense_ram_index usearch_bench_dense_ram_indexes
-cmake --preset release_cuda -DUSEARCH_CUDA_ARCHITECTURES=native && cmake --build build_release_cuda --target usearch_bench_dense_vram_index
+cmake --preset release_cuda -DUSEARCH_CUDA_ARCHITECTURES=100f && cmake --build build_release_cuda --target usearch_bench_dense_vram_index
 ```
 
 Every binary lands at the top of its build tree, so the CPU ones are in `build_release/` and the CUDA one in `build_release_cuda/`.
@@ -54,7 +55,7 @@ build_release/usearch_bench_dense_ram_indexes \
 | Flag                                                          | Meaning                                                                                            |
 | :------------------------------------------------------------ | :------------------------------------------------------------------------------------------------- |
 | `--vectors`, `--queries`, `--neighbors`                       | base vectors, query vectors and ground truth in the RetriEval layout                               |
-| `--f32`, `--bf16`, `--f16`, `--i8`, `--i4`, `--u8`, `--u1`    | the stored dtype; a file of another dtype is cast on ingest                                        |
+| `--f32`, `--bf16`, `--f16`, `--i8`, `--i4`, `--u8`, `--u1`    | the stored dtype, `--f32` on the CPU alone; a file of another dtype is cast on ingest              |
 | `--dot`, `--angular`, `--euclidean`, `--hamming`, `--jaccard` | the metric; angular by default                                                                     |
 | `--connectivity`, `--expansion-add`, `--expansion-search`     | graph degree and the two candidate pools; 32, 256 and 96 by default                                |
 | `--max-refines`, `--expansion-refine`                         | refinement passes after ingestion and the pool they re-select under; skipped by default            |

@@ -6,7 +6,7 @@ The RAM residency is the portable default every platform owns; the VRAM and NVMe
 ## Residencies
 
 - `ram_metric.hpp` + `ram_index.hpp` - the CPU baseline: compile-time-dispatched NumKong kernel kits chained per capability tier, and the concurrent, watermark-published in-memory index over them.
-- `vram_metric.cuh` + `vram_index.cuh` - the CUDA sibling: per-generation device kits - `ampere` through `blackwell` ceilings - under one index whose geometry is frozen at the first `reserve`.
+- `vram_metric.cuh` + `vram_index.cuh` - the CUDA sibling: per-generation device kits - `ampere` through `blackwellrtx` ceilings - under one index whose geometry is frozen at the first `reserve`.
 - `nvme_index.hpp` - the persisted sibling: a pure traversal state machine pumped by pluggable I/O engines, from the portable POSIX floor through `io_uring` rings to NVMe passthrough; its engine kits ride here until a second modality needs them.
 
 ## The Plural Layer
