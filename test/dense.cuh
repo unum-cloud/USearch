@@ -304,6 +304,13 @@ std::size_t dense_expect_guards(make_index_type_ const& make_index, allocation_l
     auto const [search_result, search_status] = index.search(vectors.view().row(0).as_vector(), context);
     failures += expect(search_status == status_t::success_k && search_result.count == 0);
 
+    // Geometries no row can take are refused before the freeze, so the valid one below still wins it.
+    auto [dimensionless_capacity, dimensionless_status] = index.reserve({64, connectivity_16_k, 0});
+    failures += expect(dimensionless_status == status_t::config_mismatch_k);
+    auto [uneven_capacity, uneven_status] = index.reserve( //
+        {64, static_cast<connectivity_t>(24), dense_dimensions_for<scalar_t>(dense_tiny_values_k)});
+    failures += expect(uneven_status == status_t::config_mismatch_k);
+
     auto [capacity, reserve_status] = index.reserve( //
         {64, connectivity_16_k, dense_dimensions_for<scalar_t>(dense_tiny_values_k)});
     failures += expect(reserve_status == status_t::success_k && capacity >= 64);
@@ -325,9 +332,9 @@ std::size_t test_dense_guards(make_index_type_ const& make_index) {
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
-/** The classic smoke scenario: three vectors in, each finds itself first. The dot kernel
- *  maximizes similarity instead of minimizing distance, so self-nearest is only asserted
- *  for the symmetric kernels. */
+/** The classic smoke scenario: three vectors in, each finds itself first, and a narrower
+ *  query is refused. The dot kernel maximizes similarity instead of minimizing distance, so
+ *  self-nearest is only asserted for the symmetric kernels. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t dense_expect_three_vectors(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
     using scalar_t = typename index_type_::scalar_t;
@@ -355,6 +362,12 @@ std::size_t dense_expect_three_vectors(make_index_type_ const& make_index, alloc
             failures += expect(nearest.distance < dense_self_match_tolerance_k && //
                                nearest.distance > -dense_self_match_tolerance_k);
         }
+
+        // A query narrower than the frozen width is refused, never read past its end.
+        auto narrower = make_vectors<scalar_t>(1, dense_dimensions_for<scalar_t>(dense_tiny_values_k / 2),
+                                               dense_seed_three_vectors_k);
+        failures += expect_eq(index.search(narrower.view().row(0).as_vector(), context).status,
+                              status_t::config_mismatch_k);
     }
     return failures;
 }
@@ -869,8 +882,9 @@ std::size_t test_dense_load_hostile(make_index_type_ const& make_index) {
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
-/** Loads append: the same payload landed twice doubles the index, the second copy's ids
- *  shift by the first copy's rows with sentinels intact, and a self-query lands on either copy. */
+/** Loads append: an ID space past the source's rows lands nothing, the same payload landed twice
+ *  doubles the index, the second copy's ids shift by the first copy's rows with sentinels intact,
+ *  and a self-query lands on either copy. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
     using scalar_t = typename index_type_::scalar_t;
@@ -897,6 +911,10 @@ std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocat
     iota_view<node_id_t> const local {0, static_cast<node_id_t>(nodes_count)};
     index_type_ doubled = make_index(ledger);
     failures += expect(doubled.reserve({2 * nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
+    // An ID space past the source's rows would rebase ids beyond the landed ones, so nothing lands.
+    iota_view<node_id_t> const overreaching {0, static_cast<node_id_t>(nodes_count + 1)};
+    failures += expect_eq(doubled.load(source, nodes_count, overreaching), status_t::config_mismatch_k);
+    failures += expect_eq(doubled.size(), 0u);
     failures += expect_eq(doubled.load(source, nodes_count, local), status_t::success_k);
     failures += expect_eq(doubled.size(), nodes_count);
     failures += expect_eq(doubled.load(source, nodes_count, local), status_t::success_k);
