@@ -159,7 +159,7 @@ struct dense_cuda_neighbors_ref_t {
     u32_t* row_; // Non-const even for readers: `cuda::atomic_ref` cannot bind const words pre-P3323.
     u32_t capacity_;
 
-    using word_ref_t = cuda::atomic_ref<u32_t, cuda::thread_scope_device>;
+    using word_ref_t = cuda_atomic_ref<u32_t>;
 
     __device__ __forceinline__ u32_t capacity() const noexcept { return capacity_; }
 
@@ -236,29 +236,28 @@ struct dense_cuda_telemetry_t {
      *  reselection atomics it never touches. */
     template <bool inserting_>
     __device__ __forceinline__ void flush(dense_cuda_telemetry_block_t* counters, int lane) noexcept {
-        // @c atomicAdd spells 64-bit as `unsigned long long`; @c u64_t is layout-identical.
-        static_assert(sizeof(u64_t) == sizeof(unsigned long long));
         if (lane != 0) return;
-        using wide_t = unsigned long long;
-        atomicAdd(reinterpret_cast<wide_t*>(&counters->hops), static_cast<wide_t>(hops));
-        atomicAdd(reinterpret_cast<wide_t*>(&counters->scored), static_cast<wide_t>(scored));
-        atomicAdd(reinterpret_cast<wide_t*>(&counters->restarts), static_cast<wide_t>(restarts));
-        atomicAdd(reinterpret_cast<wide_t*>(&counters->locked_drops), static_cast<wide_t>(locked_drops));
-        if (changed_nodes)
-            atomicAdd(reinterpret_cast<wide_t*>(&counters->changed_nodes), static_cast<wide_t>(changed_nodes));
+        // Tallies alone: the drain after the launch publishes them, so every add is relaxed.
+        auto const add = [](u64_t& counter, u32_t value) noexcept {
+            cuda_atomic_ref<u64_t>(counter).fetch_add(value, cuda::memory_order_relaxed);
+        };
+        add(counters->hops, hops);
+        add(counters->scored, scored);
+        add(counters->restarts, restarts);
+        add(counters->locked_drops, locked_drops);
+        if (changed_nodes) add(counters->changed_nodes, changed_nodes);
         if (local_scored | remote_scored) {
-            atomicAdd(reinterpret_cast<wide_t*>(&counters->local_scored), static_cast<wide_t>(local_scored));
-            atomicAdd(reinterpret_cast<wide_t*>(&counters->remote_scored), static_cast<wide_t>(remote_scored));
+            add(counters->local_scored, local_scored);
+            add(counters->remote_scored, remote_scored);
         }
         if (tail_drops | visited_saturations) {
-            atomicAdd(reinterpret_cast<wide_t*>(&counters->tail_drops), static_cast<wide_t>(tail_drops));
-            atomicAdd(reinterpret_cast<wide_t*>(&counters->visited_saturations),
-                      static_cast<wide_t>(visited_saturations));
+            add(counters->tail_drops, tail_drops);
+            add(counters->visited_saturations, visited_saturations);
         }
         if constexpr (!inserting_) return;
-        atomicAdd(reinterpret_cast<wide_t*>(&counters->lock_attempts), static_cast<wide_t>(lock_attempts));
-        atomicAdd(reinterpret_cast<wide_t*>(&counters->lock_skips), static_cast<wide_t>(lock_skips));
-        atomicAdd(reinterpret_cast<wide_t*>(&counters->reselections), static_cast<wide_t>(reselections));
+        add(counters->lock_attempts, lock_attempts);
+        add(counters->lock_skips, lock_skips);
+        add(counters->reselections, reselections);
     }
 };
 
@@ -688,6 +687,19 @@ __device__ __forceinline__ u32_t dense_cuda_select_diverse( //
             __syncwarp();
         }
     }
+    // The slots diversity leaves empty take the nearest rejected candidates, as the CPU's `select_diverse` does:
+    // on a dot graph, whose hubs reject one another, a row of diverse picks alone is a handful of links.
+    u32_t const diverse_count = selected_count;
+    for (u32_t candidate_index = 0, matched = 0;
+         candidate_index < candidates_count && selected_count < planes.connectivity; ++candidate_index) {
+        if (matched != diverse_count && selected_ids[matched] == candidate_index) {
+            ++matched;
+            continue;
+        }
+        if (lane == 0) selected_ids[selected_count] = candidate_index;
+        ++selected_count;
+        __syncwarp();
+    }
     // Rewrite the kept positions as node IDs in place - the caller links to nodes, not cache rows.
     __syncwarp();
     for (u32_t slot = lane; slot < selected_count; slot += 32) selected_ids[slot] = candidate_ids[selected_ids[slot]];
@@ -804,19 +816,27 @@ __device__ __forceinline__ void dense_cuda_back_link_neighbors( //
         if (lane == 0) cache_norms[newcomer_row_k] = new_norms;
         __syncwarp();
 
+        // The merge walk: the sorted neighbors and the newcomer, ascending by distance to the target, as cache rows.
+        constexpr u32_t walked_out_k = ~0u;
         u32_t existing_index = 0;
         bool newcomer_pending = true;
-        u32_t refined_count = 0;
-        for (u32_t merge_index = 0; merge_index != connectivity + 1 && refined_count != connectivity; ++merge_index) {
+        f32_t candidate_distance = 0;
+        auto next_candidate = [&]() noexcept {
             dense_cuda_scored_node_t const next_link = existing_index < sorted_candidates.size_
                                                            ? sorted_candidates.at(existing_index)
                                                            : dense_cuda_scored_node_t::sentinel();
             bool const take_newcomer = newcomer_pending && newcomer_distance < next_link.distance();
-            f32_t const candidate_distance = take_newcomer ? newcomer_distance : next_link.distance();
-            u32_t const candidate_position = take_newcomer ? newcomer_row_k : next_link.id();
-            if (!take_newcomer && existing_index >= sorted_candidates.size_) break;
+            if (!take_newcomer && existing_index >= sorted_candidates.size_) return walked_out_k;
+            candidate_distance = take_newcomer ? newcomer_distance : next_link.distance();
             if (take_newcomer) newcomer_pending = false;
             else ++existing_index;
+            return take_newcomer ? newcomer_row_k : next_link.id();
+        };
+
+        u32_t refined_count = 0;
+        while (refined_count != connectivity) {
+            u32_t const candidate_position = next_candidate();
+            if (candidate_position == walked_out_k) break;
 
             bool diverse = true;
             for (u32_t base = 0; base < refined_count && diverse; base += 32) { // Warp-uniform bounds.
@@ -839,6 +859,23 @@ __device__ __forceinline__ void dense_cuda_back_link_neighbors( //
                 ++refined_count;
                 __syncwarp();
             }
+        }
+
+        // The slots diversity leaves empty take the nearest rejected candidates, as the CPU's and the refine merge's
+        // do: a row that only shrinks drops links its neighbors may be reached through, and on a dot graph, whose
+        // hubs reject one another, it strands half the nodes. The kept prefix is a subsequence of the same walk.
+        u32_t const diverse_count = refined_count;
+        existing_index = 0, newcomer_pending = true;
+        for (u32_t matched = 0; refined_count != connectivity;) {
+            u32_t const candidate_position = next_candidate();
+            if (candidate_position == walked_out_k) break;
+            if (matched != diverse_count && selection.kept_positions[matched] == candidate_position) {
+                ++matched;
+                continue;
+            }
+            if (lane == 0) selection.kept_positions[refined_count] = candidate_position;
+            ++refined_count;
+            __syncwarp();
         }
 
         // Rewrite the neighbors: tail slots relaxed, shrink sentinel-terminated, head unlocks.
@@ -1045,8 +1082,9 @@ __device__ __forceinline__ void dense_cuda_insert_one( //
     __syncwarp();
     dense_node_id_t const first_link = selected_count ? selection.selected_ids[0] : new_node_id;
     if (lane == 0) {
-        own_neighbors.unlock(first_link);   // A self-loop encodes published-empty.
-        atomicAdd(view.published_rows, 1u); // Fire-and-forget reduction.
+        own_neighbors.unlock(first_link); // A self-loop encodes published-empty.
+        // A tally for the admission ramp; the slot-0 release above is what publishes the row.
+        cuda_atomic_ref<u32_t>(*view.published_rows).fetch_add(1u, cuda::memory_order_relaxed);
     }
 
     // Only now - published, no locks held - back-link the neighbors.
@@ -1090,13 +1128,14 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
             dense_cuda_cache_rows_k);
     while (true) {
         u32_t new_node_id;
-        if (lane == 0) new_node_id = view.first_id + atomicAdd(view.assigned_rows, 1u);
+        if (lane == 0)
+            new_node_id = view.first_id +
+                          cuda_atomic_ref<u32_t>(*view.assigned_rows).fetch_add(1u, cuda::memory_order_relaxed);
         new_node_id = __shfl_sync(0xFFFFFFFFu, new_node_id, 0);
         if (new_node_id >= view.end_id) return;
 
         while (true) { // Admission ramp - the only bootstrap throttle.
-            u32_t published;
-            asm volatile("ld.relaxed.gpu.u32 %0, [%1];" : "=r"(published) : "l"(view.published_rows));
+            u32_t const published = cuda_atomic_ref<u32_t>(*view.published_rows).load(cuda::memory_order_relaxed);
             u32_t const window = max_of(published, admission_ramp_floor_k);
             if (new_node_id < published + window) break;
             __nanosleep(2048);
@@ -1236,7 +1275,7 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
             dense_cuda_cache_rows_k);
     while (true) {
         u32_t offset;
-        if (lane == 0) offset = atomicAdd(view.assigned_rows, 1u);
+        if (lane == 0) offset = cuda_atomic_ref<u32_t>(*view.assigned_rows).fetch_add(1u, cuda::memory_order_relaxed);
         offset = __shfl_sync(0xFFFFFFFFu, offset, 0);
         // Under an ID array, end_id bounds it; the assigned offset indexes it.
         if (view.first_id + offset >= view.end_id) return;
@@ -1254,24 +1293,39 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
     }
 }
 
-/** Scatters the shadow neighbors in reverse: every forward pick @b u → @b v lands @b u in @b v's
- *  reverse bucket. Appends past @p bucket_width are counted, never written. */
-static __global__ void dense_cuda_scatter_links_kernel(u32_t const* shadow_neighbors, u32_t rows_count,
-                                                       u32_t connectivity, u32_t bucket_width, u32_t* bucket_ids,
-                                                       u32_t* bucket_counts) {
+/** Hands @p callback every neighbor of @p row the calling lane owns - its lane-strided slots, past sentinels,
+ *  self-loops and IDs at or past @p rows_count. */
+template <typename callback_type_>
+__device__ __forceinline__ void dense_cuda_for_each_link(u32_t const* neighbors, u32_t connectivity, u32_t rows_count,
+                                                         u32_t row, int lane, callback_type_&& callback) noexcept {
+    u32_t const* const slots = neighbors + static_cast<std::size_t>(row) * connectivity;
+    for (u32_t slot = static_cast<u32_t>(lane); slot < connectivity; slot += 32)
+        if (u32_t const target = slots[slot]; target != dense_node_id_unknown_k && target != row && target < rows_count)
+            callback(target);
+}
+
+/** Scatters the walked rows' shadow neighbors in reverse: every forward pick @b u → @b v lands @b u in @b v's
+ *  reverse bucket, and marks both rows in @p touched - the rows the merge re-selects. The walked rows are the range
+ *  from @p first_id, or a heal round's islands listed in @p node_ids, which mark only themselves and land in no bucket;
+ *  appends past @p bucket_width are counted, never written. */
+static __global__ void dense_cuda_scatter_links_kernel(u32_t const* shadow_neighbors, u32_t rows_count, u32_t first_id,
+                                                       u32_t walk_count, u32_t const* node_ids, u32_t connectivity,
+                                                       u32_t bucket_width, u32_t* bucket_ids, u32_t* bucket_counts,
+                                                       dense_cuda_bitset_t touched) {
     std::size_t const warp_index = (blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x) / 32;
     int const lane = threadIdx.x % 32;
     std::size_t const warps = gridDim.x * static_cast<std::size_t>(blockDim.x) / 32;
-    for (std::size_t row = warp_index; row < rows_count; row += warps)
-        for (u32_t slot_base = 0; slot_base < connectivity; slot_base += 32) {
-            u32_t const slot = slot_base + lane;
-            u32_t const target = slot < connectivity ? shadow_neighbors[row * connectivity + slot]
-                                                     : dense_node_id_unknown_k;
-            if (target == dense_node_id_unknown_k || target == static_cast<u32_t>(row)) continue;
-            u32_t const landing = atomicAdd(&bucket_counts[target], 1u);
-            if (landing < bucket_width)
-                bucket_ids[static_cast<std::size_t>(target) * bucket_width + landing] = static_cast<u32_t>(row);
-        }
+    for (std::size_t offset = warp_index; offset < walk_count; offset += warps) {
+        u32_t const row = node_ids ? node_ids[offset] : first_id + static_cast<u32_t>(offset);
+        if (lane == 0) touched.insert(row);
+        if (node_ids) continue;
+        dense_cuda_for_each_link(shadow_neighbors, connectivity, rows_count, row, lane, [&](u32_t target) noexcept {
+            touched.insert(target);
+            u32_t const landing =
+                cuda_atomic_ref<u32_t>(bucket_counts[target]).fetch_add(1u, cuda::memory_order_relaxed);
+            if (landing < bucket_width) bucket_ids[static_cast<std::size_t>(target) * bucket_width + landing] = row;
+        });
+    }
 }
 
 /** Selects one node's final neighbors from its forward picks and its reverse bucket, the diversity
@@ -1421,7 +1475,7 @@ __device__ __forceinline__ void dense_cuda_merge_links_one( //
 template <dense_cuda_kit kit_>
 __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_resident_blocks_per_multiprocessor_k)
     dense_cuda_merge_links_kernel(dense_cuda_refine_view<kit_> view, u32_t const* bucket_ids,
-                                  u32_t const* bucket_counts, u32_t bucket_width) {
+                                  u32_t const* bucket_counts, u32_t bucket_width, dense_cuda_bitset_t touched) {
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ typename kit_::norms_t cache_norms[dense_cuda_warps_per_block_k][dense_cuda_cache_rows_k];
     __shared__ dense_cuda_gathered<typename kit_::dot_t> gathered[dense_cuda_warps_per_block_k];
@@ -1439,9 +1493,13 @@ __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_
                                                            sizeof(dense_cuda_scored_node_t) * dense_cuda_cache_rows_k);
     while (true) {
         u32_t node_id;
-        if (lane == 0) node_id = view.first_id + atomicAdd(view.assigned_rows, 1u);
+        if (lane == 0)
+            node_id = view.first_id +
+                      cuda_atomic_ref<u32_t>(*view.assigned_rows).fetch_add(1u, cuda::memory_order_relaxed);
         node_id = __shfl_sync(0xFFFFFFFFu, node_id, 0);
         if (node_id >= view.end_id) return;
+        // A row the walk neither re-selected nor picked keeps its neighbors: re-judging it could only drop links.
+        if (!touched.contains(node_id)) continue;
 
         dense_cuda_telemetry_t telemetry;
         dense_cuda_merge_links_one<kit_>( //
@@ -1647,95 +1705,126 @@ static __global__ void dense_cuda_invariant_kernel(u32_t const* neighbors, u32_t
             }
         }
         if (__ballot_sync(0xFFFFFFFFu, bad) && lane == 0)
-            atomicAdd(reinterpret_cast<unsigned long long*>(violations), 1ull);
+            cuda_atomic_ref<u64_t>(*violations).fetch_add(1u, cuda::memory_order_relaxed);
     }
 }
 
-/** Marks @p seed_count stride-spread row bits in the visited bitset - the audit's landmark set,
- *  spread over the ID space like the traversal samplers. */
-static __global__ void dense_cuda_mark_seeds_kernel(u32_t* visited_words, u32_t rows_count, u32_t seed_count) {
+/** Marks @p seed_count stride-spread rows reached and in the first frontier - the audit's landmark set, spread over
+ *  the ID space like the traversal samplers. */
+static __global__ void dense_cuda_mark_seeds_kernel(dense_cuda_bitset_t reached, dense_cuda_bitset_t frontier,
+                                                    u32_t rows_count, u32_t seed_count) {
     u32_t const seed = blockIdx.x * blockDim.x + threadIdx.x;
     if (seed >= seed_count) return;
     u32_t const row = static_cast<u32_t>(static_cast<u64_t>(seed) * rows_count / seed_count);
-    atomicOr(&visited_words[row >> 5], 1u << (row & 31u));
+    reached.insert(row);
+    frontier.insert(row);
 }
 
-/** One level-synchronous sweep of forward reachability: every visited-but-unexpanded row marks its
- *  targets visited. Bits only turn on and a row expands once, so re-sweeping until the change
- *  counter stays zero converges to the exact reachable set. */
+/** One level of forward reachability: every row of @p frontier marks its targets reached, and the ones it reaches
+ *  first join @p next_frontier. Only the frontier expands, so a level is the same set of rows however the warps
+ *  interleave, and sweeping until a level expands nothing takes the landmarks' eccentricity in levels. */
 static __global__ void dense_cuda_reachability_sweep_kernel(u32_t const* neighbors, u32_t rows_count,
-                                                            u32_t connectivity, u32_t* visited_words,
-                                                            u32_t* expanded_words, u32_t* changed) {
+                                                            u32_t connectivity, dense_cuda_bitset_t reached,
+                                                            dense_cuda_bitset_t frontier,
+                                                            dense_cuda_bitset_t next_frontier, u32_t* expanded) {
     std::size_t const warp_index = (blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x) / 32;
     int const lane = threadIdx.x % 32;
     std::size_t const warps = gridDim.x * static_cast<std::size_t>(blockDim.x) / 32;
     for (std::size_t row = warp_index; row < rows_count; row += warps) {
-        u32_t const bit = 1u << (row & 31u);
-        if (!(visited_words[row >> 5] & bit) || (expanded_words[row >> 5] & bit)) continue;
-        if (lane == 0) {
-            atomicOr(&expanded_words[row >> 5], bit);
-            atomicAdd(changed, 1u);
-        }
-        for (u32_t slot_base = 0; slot_base < connectivity; slot_base += 32) {
-            u32_t const slot = slot_base + lane;
-            u32_t const target = slot < connectivity ? neighbors[row * connectivity + slot] : dense_node_id_unknown_k;
-            if (target != dense_node_id_unknown_k && target != static_cast<u32_t>(row) && target < rows_count)
-                atomicOr(&visited_words[target >> 5], 1u << (target & 31u));
-        }
+        if (!frontier.contains(static_cast<u32_t>(row))) continue;
+        if (lane == 0) cuda_atomic_ref<u32_t>(*expanded).fetch_add(1u, cuda::memory_order_relaxed);
+        dense_cuda_for_each_link(neighbors, connectivity, rows_count, static_cast<u32_t>(row), lane,
+                                 [&](u32_t target) noexcept {
+                                     if (reached.insert(target)) next_frontier.insert(target);
+                                 });
     }
 }
 
-/** Counts the rows whose visited bit stayed clear - the island population - in @p islands_cursor, collecting their
- *  IDs into @p island_ids when it is given. */
-static __global__ void dense_cuda_reachability_islands_kernel(u32_t const* visited_words, u32_t rows_count,
+/** Counts the rows @p reached lacks - the island population - in @p islands_cursor, collecting their IDs into
+ *  @p island_ids when it is given. */
+static __global__ void dense_cuda_reachability_islands_kernel(dense_cuda_bitset_t reached, u32_t rows_count,
                                                               u32_t* island_ids, u32_t* islands_cursor) {
     u32_t const row = blockIdx.x * blockDim.x + threadIdx.x;
-    if (row >= rows_count || (visited_words[row >> 5] & (1u << (row & 31u)))) return;
-    u32_t const slot = atomicAdd(islands_cursor, 1u);
+    if (row >= rows_count || reached.contains(row)) return;
+    u32_t const slot = cuda_atomic_ref<u32_t>(*islands_cursor).fetch_add(1u, cuda::memory_order_relaxed);
     if (island_ids) island_ids[slot] = row;
 }
 
-/** Grafts each island into its nearest reachable forward pick, or into the landmark covering its ID when it picks only
- *  its own, bypassing the diversity judgment that dropped it: a free slot when one is left, otherwise a landing spread
+/** Counts, for every row, the reached rows that point at it - the links a reconnection may take from a reached
+ *  resident only while another one remains. */
+static __global__ void dense_cuda_reached_in_links_kernel(u32_t const* neighbors, u32_t rows_count, u32_t connectivity,
+                                                          dense_cuda_bitset_t reached, u32_t* in_links) {
+    std::size_t const warp_index = (blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x) / 32;
+    int const lane = threadIdx.x % 32;
+    std::size_t const warps = gridDim.x * static_cast<std::size_t>(blockDim.x) / 32;
+    for (std::size_t row = warp_index; row < rows_count; row += warps) {
+        if (!reached.contains(static_cast<u32_t>(row))) continue;
+        dense_cuda_for_each_link(neighbors, connectivity, rows_count, static_cast<u32_t>(row), lane,
+                                 [&](u32_t target) noexcept {
+                                     cuda_atomic_ref<u32_t>(in_links[target]).fetch_add(1u, cuda::memory_order_relaxed);
+                                 });
+    }
+}
+
+/** Reconnects each island into the first of its reached forward picks with room for it, or into the landmark covering
+ *  its ID, bypassing the diversity judgment that dropped it: a free slot when one is left, otherwise a landing spread
  *  across the tail. Every landing is a compare-and-swap that never displaces an unreached sibling, so islands sharing
- *  one target all land, and @p reconnected counts the grafts actually written. Exclusive pass. */
+ *  one target all land, nor a reached resident whose @p in_links would drop to zero, so no reconnection strands
+ *  another node; @p reconnected counts the links actually written. Exclusive pass: the launch boundary publishes every
+ *  write, so each access is relaxed. */
 static __global__ void dense_cuda_reconnect_island_kernel(u32_t* neighbors, u32_t connectivity, u32_t const* island_ids,
-                                                          u32_t islands_count, u32_t const* visited_words,
-                                                          u32_t rows_count, u32_t seed_count, u32_t* reconnected) {
+                                                          u32_t islands_count, dense_cuda_bitset_t reached,
+                                                          u32_t rows_count, u32_t seed_count, u32_t* in_links,
+                                                          u32_t* reconnected) {
     u32_t const island_index = blockIdx.x * blockDim.x + threadIdx.x;
     if (island_index >= islands_count) return;
-    auto const reached = [&](u32_t row) noexcept { return (visited_words[row >> 5] >> (row & 31u)) & 1u; };
     u32_t const island = island_ids[island_index];
+    u32_t const spread = min_of(16u, connectivity / 2);
+    constexpr cuda::memory_order relaxed_k = cuda::memory_order_relaxed;
+
+    // Whether the island now sits in the target's row, landing it there when a slot allows.
+    auto const land = [&](u32_t target) noexcept {
+        u32_t* const target_row = neighbors + static_cast<std::size_t>(target) * connectivity;
+        auto const claim = [&](u32_t slot, u32_t resident) noexcept {
+            if (!cuda_atomic_ref<u32_t>(target_row[slot]).compare_exchange_strong(resident, island, relaxed_k))
+                return false;
+            cuda_atomic_ref<u32_t>(*reconnected).fetch_add(1u, relaxed_k);
+            return true;
+        };
+        for (u32_t slot = 0; slot != connectivity; ++slot) {
+            u32_t const resident = cuda_atomic_ref<u32_t>(target_row[slot]).load(relaxed_k);
+            if (resident == island) return true; // Already wired; the audit raced a heal.
+            if (resident != dense_node_id_unknown_k && resident != target) continue;
+            if (claim(slot, resident)) return true;
+        }
+        for (u32_t attempt = 0; attempt != spread; ++attempt) {
+            u32_t const landing = connectivity - 1 - (island_index + attempt) % spread;
+            u32_t const resident = cuda_atomic_ref<u32_t>(target_row[landing]).load(relaxed_k);
+            if (resident == island) return true;
+            if (resident != dense_node_id_unknown_k && !reached.contains(resident))
+                continue; // A sibling island landed first.
+            // A reached resident gives this link up only while another reached row still points at it.
+            bool const evicting = resident != dense_node_id_unknown_k && resident != target;
+            if (evicting && cuda_atomic_ref<u32_t>(in_links[resident]).fetch_sub(1u, relaxed_k) <= 1u) {
+                cuda_atomic_ref<u32_t>(in_links[resident]).fetch_add(1u, relaxed_k);
+                continue;
+            }
+            if (claim(landing, resident)) return true;
+            if (evicting) cuda_atomic_ref<u32_t>(in_links[resident]).fetch_add(1u, relaxed_k);
+        }
+        return false;
+    };
+
     u32_t const* const island_row = neighbors + static_cast<std::size_t>(island) * connectivity;
-    u32_t target = dense_node_id_unknown_k;
-    for (u32_t slot = 0; slot != connectivity && target == dense_node_id_unknown_k; ++slot) {
+    for (u32_t slot = 0; slot != connectivity; ++slot) {
         u32_t const pick = island_row[slot];
-        if (pick != dense_node_id_unknown_k && pick != island && reached(pick)) target = pick;
+        if (pick != dense_node_id_unknown_k && pick != island && reached.contains(pick) && land(pick)) return;
     }
     // A walk starts at the landmark covering this ID by definition, which is what makes it reached.
-    if (target == dense_node_id_unknown_k && seed_count) {
-        u32_t const seed = static_cast<u32_t>(static_cast<u64_t>(island) * seed_count / rows_count);
-        target = static_cast<u32_t>(static_cast<u64_t>(seed) * rows_count / seed_count);
-    }
-    if (target == dense_node_id_unknown_k || target == island) return;
-
-    u32_t* const target_row = neighbors + static_cast<std::size_t>(target) * connectivity;
-    for (u32_t slot = 0; slot != connectivity; ++slot) {
-        u32_t const resident =
-            cuda::atomic_ref<u32_t, cuda::thread_scope_device>(target_row[slot]).load(cuda::memory_order_relaxed);
-        if (resident == island) return; // Already wired; the audit raced a heal.
-        if (resident != dense_node_id_unknown_k && resident != target) continue;
-        if (atomicCAS(&target_row[slot], resident, island) == resident) return void(atomicAdd(reconnected, 1u));
-    }
-    u32_t const spread = min_of(16u, connectivity / 2);
-    for (u32_t attempt = 0; attempt != spread; ++attempt) {
-        u32_t const landing = connectivity - 1 - (island_index + attempt) % spread;
-        u32_t const resident =
-            cuda::atomic_ref<u32_t, cuda::thread_scope_device>(target_row[landing]).load(cuda::memory_order_relaxed);
-        if (resident == island) return;
-        if (resident != dense_node_id_unknown_k && !reached(resident)) continue; // A sibling island landed first.
-        if (atomicCAS(&target_row[landing], resident, island) == resident) return void(atomicAdd(reconnected, 1u));
-    }
+    if (!seed_count) return;
+    u32_t const seed = static_cast<u32_t>(static_cast<u64_t>(island) * seed_count / rows_count);
+    u32_t const landmark = static_cast<u32_t>(static_cast<u64_t>(seed) * rows_count / seed_count);
+    if (landmark != island) land(landmark);
 }
 
 #endif // defined(__CUDACC__)
@@ -2432,8 +2521,8 @@ struct dense_vram_index {
      *
      *  The walk lands shadow neighbors, the scatter buckets every pick under its target, and the merge re-judges
      *  forward and reverse candidates together, backfilling what diversity leaves empty. The heal then sweeps
-     *  reachability and, round by round while the islands shrink, re-selects them and grafts whatever stays unreached
-     *  into a reached pick or the landmark covering it.
+     *  reachability and, round by round while the islands shrink, re-selects them and reconnects whatever stays
+     * unreached into a reached pick or the landmark covering it.
      *
      *  Demands an exclusive caller: the merge writes live neighbors with plain stores. A stopped sequence of passes
      *  leaves the graph correct and merely less improved.
@@ -2479,12 +2568,22 @@ struct dense_vram_index {
             add_walks(healed);
             if (status_t const audited = survey(); failed(audited)) return {result, audited};
             if (!islands) break;
+            // The reached in-links first, so no reconnection takes the last link a reached node is found through.
+            u32_t* const neighbors = reinterpret_cast<u32_t*>(neighbors_plane_.base());
+            if (cudaMemsetAsync(audit.in_links, 0, rows * sizeof(u32_t), context.stream()) != cudaSuccess)
+                return {result, status_t::device_error_k};
+            if (status_t const counted = cuda_launch(
+                    dense_cuda_reached_in_links_kernel,
+                    static_cast<u32_t>(device_.multiprocessor_count) * search_blocks_per_multiprocessor_k,
+                    block_threads_k, 0, context.stream(), static_cast<u32_t const*>(neighbors),
+                    static_cast<u32_t>(rows), static_cast<u32_t>(connectivity()), audit.reached, audit.in_links);
+                failed(counted))
+                return {result, counted};
             if (status_t const launched = cuda_launch(
                     dense_cuda_reconnect_island_kernel, divide_round_up<u32_t>(islands, block_threads_k),
-                    block_threads_k, 0, context.stream(), reinterpret_cast<u32_t*>(neighbors_plane_.base()),
-                    static_cast<u32_t>(connectivity()), audit.island_ids, islands, audit.reached_words,
-                    static_cast<u32_t>(rows), static_cast<u32_t>(min_of<std::size_t>(connectivity(), rows)),
-                    audit.grafts);
+                    block_threads_k, 0, context.stream(), neighbors, static_cast<u32_t>(connectivity()),
+                    audit.island_ids, islands, audit.reached, static_cast<u32_t>(rows),
+                    static_cast<u32_t>(min_of<std::size_t>(connectivity(), rows)), audit.in_links, audit.reconnected);
                 failed(launched))
                 return {result, launched};
             if (status_t const audited = survey(); failed(audited)) return {result, audited};
@@ -2492,9 +2591,9 @@ struct dense_vram_index {
             if (islands >= islands_before) break;
             islands_before = islands;
         }
-        auto const [grafts, read_status] = read_counter_(audit.grafts, context.stream());
+        auto const [reconnected, read_status] = read_counter_(audit.reconnected, context.stream());
         if (failed(read_status)) return {result, read_status};
-        result.islands_reconnected = grafts;
+        result.islands_reconnected = reconnected;
         result.reachable_nodes = rows - islands;
         return {result, status_t::success_k};
     }
@@ -3279,9 +3378,9 @@ struct dense_vram_index {
 
 #pragma region Refinement
 
-    /** The three-pass refinement engine behind @c refine() and @c heal(): the walk covers @p nodes,
-     *  or under a device-resident @p node_ids the listed IDs with @p nodes spanning the array's
-     *  offsets; the reverse passes always sweep every node. */
+    /** The three-pass refinement engine behind @c refine(): the walk covers @p nodes, or under a device-resident
+     *  @p node_ids the listed IDs with @p nodes spanning the array's offsets; the reverse passes re-select the walked
+     *  rows and the rows they pick, and leave every other row as it was. */
     expected<refine_result_t> refine_pass_(dense_traversal_context_t& context, refine_config_t config,
                                            iota_view<dense_node_id_t> nodes, u32_t const* node_ids) noexcept {
         std::size_t const nodes_count = size();
@@ -3295,16 +3394,19 @@ struct dense_vram_index {
         if (nodes.first >= nodes.bound) return {{}, status_t::success_k};
         std::size_t const walk_count = nodes.size();
         cudaStream_t const stream = context.stream();
-        // Pass-local planes no reader observes: the shadow neighbors, the reverse buckets, and
-        // their counters; the bucket width is the connectivity.
+        // Pass-local planes no reader observes: the shadow neighbors, the reverse buckets, their counters, and the
+        // bitset of rows the merge re-selects; the bucket width is the connectivity.
         std::size_t const shadow_bytes = nodes_count * connectivity() * sizeof(u32_t);
+        std::size_t const counters_bytes = (nodes_count + divide_round_up<std::size_t>(nodes_count, 32)) *
+                                           sizeof(u32_t);
         u32_t const bucket_width = static_cast<u32_t>(connectivity());
-        auto shadow = cuda_make_unique(context.allocator_, shadow_bytes * 2 + nodes_count * sizeof(u32_t));
+        auto shadow = cuda_make_unique(context.allocator_, shadow_bytes * 2 + counters_bytes);
         if (!shadow) return {{}, status_t::bad_alloc_k};
         u32_t* const shadow_neighbors = reinterpret_cast<u32_t*>(shadow.get());
         u32_t* const bucket_ids = reinterpret_cast<u32_t*>(shadow.get() + shadow_bytes);
         u32_t* const bucket_counts = reinterpret_cast<u32_t*>(shadow.get() + shadow_bytes * 2);
-        if (cudaMemsetAsync(bucket_counts, 0, nodes_count * sizeof(u32_t), stream) != cudaSuccess)
+        dense_cuda_bitset_t const touched {bucket_counts + nodes_count};
+        if (cudaMemsetAsync(bucket_counts, 0, counters_bytes, stream) != cudaSuccess)
             return {{}, status_t::device_error_k};
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the pool sizes the kernel carries.
@@ -3338,8 +3440,8 @@ struct dense_vram_index {
                                             context.assigned_rows_.get(),
                                             node_ids,
                                             static_cast<u32_t>(nodes_count)};
-        // A walk short of the whole graph starts from the live neighbors copied into the shadow
-        // verbatim, so the nodes it never rewrites still feed the reverse passes.
+        // A walk short of the whole graph starts from the live neighbors copied into the shadow verbatim, so a row
+        // it never rewrites but one of its picks lands in merges its own neighbors with the new reverse links.
         if (node_ids || walk_count != nodes_count)
             if (cudaMemcpyAsync(shadow_neighbors, neighbors_plane_.base(), shadow_bytes, cudaMemcpyDeviceToDevice,
                                 stream) != cudaSuccess)
@@ -3352,23 +3454,25 @@ struct dense_vram_index {
             assigned < walk_count)
             return {{}, status_t::device_error_k};
 
-        // Scatter the shadow neighbors in reverse, then merge each node's forward & reverse
-        // candidates into its final live row.
+        // Scatter the walked rows' shadow neighbors in reverse, then merge each touched node's forward & reverse
+        // candidates into its final live row. A heal round over island IDs re-selects the islands' own rows alone:
+        // re-judging the rows they pick would drop the links that reconnected earlier islands.
         cudaMemsetAsync(context.assigned_rows_.get(), 0, sizeof(u32_t), stream);
         if (status_t const launched = cuda_launch(
                 dense_cuda_scatter_links_kernel, device_.multiprocessor_count * insert_blocks_per_multiprocessor_k,
                 block_threads_k, 0, stream, static_cast<u32_t const*>(shadow_neighbors),
-                static_cast<u32_t>(nodes_count), static_cast<u32_t>(connectivity()), bucket_width, bucket_ids,
-                bucket_counts);
+                static_cast<u32_t>(nodes_count), static_cast<u32_t>(nodes.first), static_cast<u32_t>(walk_count),
+                node_ids, static_cast<u32_t>(connectivity()), bucket_width, bucket_ids, bucket_counts, touched);
             failed(launched))
             return {{}, launched};
         dense_cuda_refine_view<kit_t> merge_view = view;
         merge_view.scratch_bytes_per_warp = merge_scratch_bytes_per_warp();
-        // The reverse passes always sweep the whole graph, whatever the walk covered.
+        // The merge sweeps the whole ID space and skips the rows the scatter left untouched.
         merge_view.node_ids = nullptr;
         merge_view.first_id = 0;
         merge_view.end_id = static_cast<u32_t>(nodes_count);
-        if (status_t const launched = launch_merge_(merge_view, bucket_ids, bucket_counts, bucket_width, stream);
+        if (status_t const launched = launch_merge_(merge_view, bucket_ids, bucket_counts, bucket_width, touched,
+                                                    stream);
             failed(launched))
             return {{}, launched};
         if (cudaStreamSynchronize(stream) != cudaSuccess) return {{}, status_t::device_error_k};
@@ -3387,39 +3491,41 @@ struct dense_vram_index {
     }
 
     /** Device scratch one reachability audit sweeps in, reused across a heal's rounds - one allocation carved into
-     *  the reached and expanded bitsets, the change, unreached and grafts counters, and the unreached rows' IDs when a
-     *  caller collects them. */
+     *  the reached set and two frontiers, the expanded, unreached and reconnected counters, and the unreached rows' IDs
+     *  and their in-link counts when a caller collects them. */
     struct audit_t {
         typename dense_traversal_context_t::bytes_ptr_t bytes;
-        u32_t* reached_words = nullptr;
-        u32_t* expanded_words = nullptr;
-        u32_t* changed = nullptr;
+        dense_cuda_bitset_t reached, frontier, next_frontier;
+        u32_t* expanded = nullptr;
         u32_t* unreached = nullptr;
-        u32_t* grafts = nullptr;
+        u32_t* reconnected = nullptr;
         u32_t* island_ids = nullptr;
+        u32_t* in_links = nullptr;
         std::size_t words = 0;
 
         /** Levels the last audit swept to convergence. */
         std::size_t sweeps = 0;
     };
 
-    /** Allocates an audit over the rows published now, with room for @p island_slots unreached IDs, the grafts
-     *  counter zeroed. */
+    /** Allocates an audit over the rows published now, with room for @p island_slots unreached IDs and as many
+     *  in-link counts, the reconnected counter zeroed. */
     expected<audit_t> reserve_audit_(dense_traversal_context_t& context, std::size_t island_slots) noexcept {
         audit_t audit {typename dense_traversal_context_t::bytes_ptr_t {
             nullptr, cuda_deleter<typename dense_traversal_context_t::allocator_t> {context.allocator_, 0}}};
         audit.words = divide_round_up<std::size_t>(size(), 32);
-        std::size_t const bytes = (audit.words * 2 + 3 + island_slots) * sizeof(u32_t);
+        std::size_t const bytes = (audit.words * 3 + 3 + island_slots * 2) * sizeof(u32_t);
         audit.bytes.reset(context.allocator_.allocate(bytes));
         audit.bytes.get_deleter().count = bytes;
         if (!audit.bytes) return {std::move(audit), status_t::bad_alloc_k};
-        audit.reached_words = reinterpret_cast<u32_t*>(audit.bytes.get());
-        audit.expanded_words = audit.reached_words + audit.words;
-        audit.changed = audit.expanded_words + audit.words;
-        audit.unreached = audit.changed + 1;
-        audit.grafts = audit.unreached + 1;
-        audit.island_ids = island_slots ? audit.grafts + 1 : nullptr;
-        if (cudaMemsetAsync(audit.grafts, 0, sizeof(u32_t), context.stream()) != cudaSuccess)
+        audit.reached.words = reinterpret_cast<u32_t*>(audit.bytes.get());
+        audit.frontier.words = audit.reached.words + audit.words;
+        audit.next_frontier.words = audit.frontier.words + audit.words;
+        audit.expanded = audit.next_frontier.words + audit.words;
+        audit.unreached = audit.expanded + 1;
+        audit.reconnected = audit.unreached + 1;
+        audit.island_ids = island_slots ? audit.reconnected + 1 : nullptr;
+        audit.in_links = island_slots ? audit.island_ids + island_slots : nullptr;
+        if (cudaMemsetAsync(audit.reconnected, 0, sizeof(u32_t), context.stream()) != cudaSuccess)
             return {std::move(audit), status_t::device_error_k};
         return {std::move(audit), status_t::success_k};
     }
@@ -3432,37 +3538,40 @@ struct dense_vram_index {
         if (context.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
         cudaStream_t const stream = context.stream();
         std::size_t const seed_count = min_of<std::size_t>(connectivity(), rows);
-        // The bitsets, the change counter and the unreached counter lie back to back.
-        if (cudaMemsetAsync(audit.reached_words, 0, (audit.words * 2 + 2) * sizeof(u32_t), stream) != cudaSuccess)
+        // The bitsets, the expanded counter and the unreached counter lie back to back.
+        if (cudaMemsetAsync(audit.reached.words, 0, (audit.words * 3 + 2) * sizeof(u32_t), stream) != cudaSuccess)
             return {0, status_t::device_error_k};
+        dense_cuda_bitset_t frontier = audit.frontier, next_frontier = audit.next_frontier;
         if (status_t const launched = cuda_launch(
                 dense_cuda_mark_seeds_kernel, divide_round_up<u32_t>(static_cast<u32_t>(seed_count), block_threads_k),
-                block_threads_k, 0, stream, audit.reached_words, static_cast<u32_t>(rows),
+                block_threads_k, 0, stream, audit.reached, frontier, static_cast<u32_t>(rows),
                 static_cast<u32_t>(seed_count));
             failed(launched))
             return {0, launched};
 
-        // Bits only turn on and rows expand once, so the levels are bounded by the landmarks' eccentricity,
-        // capped defensively.
+        // Every row joins one frontier at most, so the levels are bounded by the landmarks' eccentricity, capped
+        // defensively.
         constexpr std::size_t sweeps_cap_k = 256;
         u32_t const grid = static_cast<u32_t>(device_.multiprocessor_count) * search_blocks_per_multiprocessor_k;
         for (audit.sweeps = 1; audit.sweeps != sweeps_cap_k; ++audit.sweeps) {
-            if (cudaMemsetAsync(audit.changed, 0, sizeof(u32_t), stream) != cudaSuccess)
+            if (cudaMemsetAsync(audit.expanded, 0, sizeof(u32_t), stream) != cudaSuccess ||
+                cudaMemsetAsync(next_frontier.words, 0, audit.words * sizeof(u32_t), stream) != cudaSuccess)
                 return {0, status_t::device_error_k};
             if (status_t const launched = cuda_launch(dense_cuda_reachability_sweep_kernel, grid, block_threads_k, 0,
                                                       stream, reinterpret_cast<u32_t const*>(neighbors_plane_.base()),
                                                       static_cast<u32_t>(rows), static_cast<u32_t>(connectivity()),
-                                                      audit.reached_words, audit.expanded_words, audit.changed);
+                                                      audit.reached, frontier, next_frontier, audit.expanded);
                 failed(launched))
                 return {0, launched};
-            auto const [changed_rows, read_status] = read_counter_(audit.changed, stream);
+            auto const [expanded_rows, read_status] = read_counter_(audit.expanded, stream);
             if (failed(read_status)) return {0, read_status};
-            if (!changed_rows) break;
+            if (!expanded_rows) break;
+            std::swap(frontier, next_frontier);
         }
         if (status_t const launched = cuda_launch(dense_cuda_reachability_islands_kernel,
                                                   divide_round_up<u32_t>(static_cast<u32_t>(rows), block_threads_k),
-                                                  block_threads_k, 0, stream, audit.reached_words,
-                                                  static_cast<u32_t>(rows), audit.island_ids, audit.unreached);
+                                                  block_threads_k, 0, stream, audit.reached, static_cast<u32_t>(rows),
+                                                  audit.island_ids, audit.unreached);
             failed(launched))
             return {0, launched};
         return read_counter_(audit.unreached, stream);
@@ -3545,10 +3654,10 @@ struct dense_vram_index {
         return launched;
     }
     status_t launch_merge_(dense_cuda_refine_view<kit_t> view, u32_t const* bucket_ids, u32_t const* bucket_counts,
-                           u32_t bucket_width, cudaStream_t stream) noexcept {
+                           u32_t bucket_width, dense_cuda_bitset_t touched, cudaStream_t stream) noexcept {
         return dense_cuda_launch<dense_cuda_merge_links_kernel<kit_t>>( //
             view, device_.multiprocessor_count * insert_blocks_per_multiprocessor_k, stream, bucket_ids, bucket_counts,
-            bucket_width);
+            bucket_width, touched);
     }
 
     /** Launches one walk per query of @p launch, each written out through @p sink, and reports the

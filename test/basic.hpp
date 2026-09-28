@@ -670,7 +670,7 @@ std::size_t test_basic_keys(fixture_type_ const& fixture) {
             all_found_ids.insert(all_found_ids.end(), holders.begin(), holders.end());
         }
         failures += expect_eq(all_found_ids.size(), nodes_k);
-        failures += expect_contiguous_ids(all_found_ids, 0);
+        failures += expect_contiguous_ids(std::span {all_found_ids}, 0);
 
         key_t const absent = fixture.make_key(5000);
         failures += expect_eq(index.find(absent).status, status_t::malformed_k);
@@ -1909,7 +1909,7 @@ std::size_t test_basic_concurrent_build(fixture_type_ const& fixture) {
         failures += expect_eq(index.size(), nodes_count);
         // Ids are dense & unique across threads - the watermark's dispensed-order turn.
         std::vector<node_id_t> sorted_ids = assigned_ids;
-        failures += expect_contiguous_ids(sorted_ids, 0);
+        failures += expect_contiguous_ids(std::span {sorted_ids}, 0);
 
         // Every thread's keys & values landed on the IDs that thread was assigned; the values
         // compare against a fresh identically-seeded draw - the insert moved the originals.
@@ -2210,7 +2210,7 @@ std::size_t test_basic_overflow_race(fixture_type_ const& fixture) {
         }
         failures += expect_eq(admitted_threads, capacity_k / per_thread_k);
         failures += expect_eq(index.size(), capacity_k);
-        failures += expect_contiguous_ids(admitted_ids, 0);
+        failures += expect_contiguous_ids(std::span {admitted_ids}, 0);
 
         auto one_more = fixture.make_values(1, basic_seed_overflow_race_k ^ salt_extras_k);
         key_t const one_more_key = fixture.make_key(1000);

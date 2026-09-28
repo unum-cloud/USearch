@@ -21,8 +21,8 @@
 #include <array>     // `std::array` - one latent point of the sign sketches
 #include <atomic>    // `std::atomic`
 #include <chrono>    // `std::chrono::microseconds` - the flaky waiter's oversleep
+#include <span>      // `std::span` - the dispensed-id density check
 #include <thread>    // `std::this_thread::yield`, `std::this_thread::sleep_for`
-#include <vector>    // `std::vector` - the dispensed-id density check, the sketches' hyperplanes
 
 #include <fmt/format.h>
 
@@ -88,7 +88,7 @@ inline void log_environment() {
  *  place, unique, and running from @p first_id through the half-open bound
  *  @p first_id plus the ID count. */
 template <typename node_id_type_>
-inline std::size_t expect_contiguous_ids(std::vector<node_id_type_>& ids, std::size_t first_id) {
+inline std::size_t expect_contiguous_ids(std::span<node_id_type_> ids, std::size_t first_id) {
     std::sort(ids.begin(), ids.end());
     std::size_t failures = expect(std::unique(ids.begin(), ids.end()) == ids.end());
     failures += expect(!ids.empty() && static_cast<std::size_t>(ids.front()) == first_id &&
@@ -250,28 +250,50 @@ struct flaky_waiter_t {
     }
 };
 
+/** A uniform real in @b [lower,upper) - the real-valued sibling of @ref uniform_below, identical on every standard
+ *  library, where @c std::uniform_real_distribution is implementation-defined and would draw different test data on
+ *  each. */
+template <typename real_type_>
+struct uniform_between;
+
+template <>
+struct uniform_between<f64_t> {
+    f64_t lower = 0, upper = 1;
+
+    /** One draw from the top 53 random bits, the double's whole mantissa. */
+    template <typename generator_type_>
+    constexpr f64_t operator()(generator_type_& generator) const noexcept {
+        return lower + static_cast<f64_t>(generator() >> 11) * 0x1p-53 * (upper - lower);
+    }
+};
+
 /** Builds binary vectors as sign sketches of points in a small latent space: bit @c b of a row is the side of the
  *  @c b-th random hyperplane its point falls on, the way binary embeddings arise. Hamming distance then tracks the
  *  angle between points, so the landscape stays graded, where independent bits - or clusters of independently
  *  flipped ones - leave every pair near-equidistant and no walk can navigate. Eight latent dimensions keep
  *  neighboring rows distinct at the scenarios' row counts. */
-template <typename scalar_>
-nk::matrix<scalar_> make_sketched_vectors(std::size_t count, std::size_t dimensions, u64_t seed) {
+template <typename scalar_, typename allocator_type_ = nk::aligned_allocator<scalar_>>
+nk::matrix<scalar_, allocator_type_> make_sketched_vectors(std::size_t count, std::size_t dimensions, u64_t seed,
+                                                           allocator_type_ allocator = {}) {
     constexpr std::size_t latent_dimensions_k = 8;
-    splitmix64_t random_generator {seed};
-    auto centered = [&]() noexcept { return static_cast<f64_t>(random_generator() >> 11) * 0x1p-52 - 1.0; };
-    std::vector<f64_t> hyperplanes(dimensions * latent_dimensions_k);
-    for (f64_t& weight : hyperplanes) weight = centered();
-    auto vectors = nk::matrix<scalar_>::try_zeros({count, dimensions});
+    // One set of hyperplanes for every call, as one embedding model serves every batch: slices drawn under
+    // different seeds, like the concurrent builds', still land in one sketch space.
+    splitmix64_t hyperplanes_generator {0x5E7C4ull}, points_generator {seed};
+    uniform_between<f64_t> const centered {-1, 1};
+    auto hyperplanes = nk::matrix<f64_t>::try_zeros({dimensions, latent_dimensions_k});
+    for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
+        for (std::size_t latent = 0; latent != latent_dimensions_k; ++latent)
+            hyperplanes(dimension, latent) = centered(hyperplanes_generator);
+    auto vectors = nk::matrix<scalar_, allocator_type_>::try_zeros({count, dimensions}, allocator);
     std::array<f64_t, latent_dimensions_k> point;
-    for (std::size_t row = 0; row != count; ++row) {
-        for (f64_t& coordinate : point) coordinate = centered();
-        auto row_span = vectors.row(row).as_vector();
+    for (auto row : vectors.rows()) {
+        for (f64_t& coordinate : point) coordinate = centered(points_generator);
+        auto bits = row.as_vector();
         for (std::size_t dimension = 0; dimension != dimensions; ++dimension) {
             f64_t side = 0;
             for (std::size_t latent = 0; latent != latent_dimensions_k; ++latent)
-                side += hyperplanes[dimension * latent_dimensions_k + latent] * point[latent];
-            row_span[dimension] = make_scalar<scalar_>(side > 0);
+                side += hyperplanes(dimension, latent) * point[latent];
+            bits[dimension] = make_scalar<scalar_>(side > 0);
         }
     }
     return vectors;
@@ -280,16 +302,18 @@ nk::matrix<scalar_> make_sketched_vectors(std::size_t count, std::size_t dimensi
 /** Fills a row-major matrix with pseudo-random small values from {0..7}, exactly
  *  representable in every supported scalar type down to i4 nibbles. Binary vectors
  *  route through the sign-sketch generator: their flat draw has no navigable structure. */
-template <typename scalar_>
-nk::matrix<scalar_> make_vectors(std::size_t count, std::size_t dimensions, u64_t seed) {
-    if constexpr (std::is_same_v<scalar_, nk::u1x8_t>) return make_sketched_vectors<scalar_>(count, dimensions, seed);
-    auto vectors = nk::matrix<scalar_>::try_zeros({count, dimensions});
+template <typename scalar_, typename allocator_type_ = nk::aligned_allocator<scalar_>>
+nk::matrix<scalar_, allocator_type_> make_vectors(std::size_t count, std::size_t dimensions, u64_t seed,
+                                                  allocator_type_ allocator = {}) {
+    if constexpr (std::is_same_v<scalar_, nk::u1x8_t>)
+        return make_sketched_vectors<scalar_>(count, dimensions, seed, allocator);
+    auto vectors = nk::matrix<scalar_, allocator_type_>::try_zeros({count, dimensions}, allocator);
     splitmix64_t random_generator {seed};
     uniform_below<u32_t> component_distribution {random_component_levels<scalar_>()};
-    for (std::size_t row = 0; row != count; ++row) {
-        auto row_span = vectors.row(row).as_vector();
+    for (auto row : vectors.rows()) {
+        auto values = row.as_vector();
         for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
-            row_span[dimension] = make_scalar<scalar_>(component_distribution(random_generator));
+            values[dimension] = make_scalar<scalar_>(component_distribution(random_generator));
     }
     return vectors;
 }

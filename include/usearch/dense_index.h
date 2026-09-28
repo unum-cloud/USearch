@@ -391,7 +391,7 @@ USEARCH_EXPORT size_t usearch_dense_add(                        //
  *
  *  Re-selection alone can strand an entry no search reaches, so every call closes by re-linking
  *  them: unreachable entries re-select from scratch, and whatever the diversity judgment still
- *  drops is grafted into a reachable one. A cancelled call skips the rest of the re-selection but
+ *  drops is reconnected to a reachable one. A cancelled call skips the rest of the re-selection but
  *  still re-links, so it never leaves entries unreachable.
  *
  *  On a RAM handle searches may run throughout: re-selection publishes one node at a time and never

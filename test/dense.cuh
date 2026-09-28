@@ -1193,7 +1193,6 @@ std::size_t dense_expect_heal_islands(make_index_type_ const& make_index, alloca
     failures += expect(succeeded(repair_status));
     failures += expect_eq(repair.reachable_nodes, nodes_count);
     failures += expect(repair.islands_found > 0);
-    failures += expect(repair.islands_reconnected <= repair.islands_found);
 
     auto const [after_health, after_status] = dense_audit_health(islanded, context);
     failures += expect(succeeded(after_status));
@@ -1350,7 +1349,7 @@ std::size_t dense_expect_concurrent_build(make_index_type_ const& make_index, al
 
     failures += expect_eq(thread_failures.load(), 0u);
     failures += expect_eq(index.size(), nodes_count);
-    failures += expect_contiguous_ids(assigned_ids, 0);
+    failures += expect_contiguous_ids(std::span {assigned_ids}, 0);
 
     if constexpr (kernel_ != nk_kernel_dot_k)
         for (std::size_t thread = 0; thread != writer_threads_count; ++thread)
@@ -1605,7 +1604,6 @@ std::size_t test_dense_indexes_refine() {
     failures += expect(succeeded(first_status));
     failures += expect(first.visited_nodes >= rows && first.changed_nodes <= first.visited_nodes);
     failures += expect(first.changed_nodes > 0);
-    failures += expect(first.islands_reconnected <= first.islands_found);
     failures += expect(first.reachable_nodes <= rows && first.reachable_nodes + first.islands_found >= rows);
 
     auto const [second, second_status] = indexes.refine(executor);
@@ -3025,7 +3023,7 @@ std::size_t dense_expect_overflow_race(make_index_type_ const& make_index, alloc
     }
     failures += expect_eq(winners_count, 2u);
     failures += expect_eq(index.size(), capacity);
-    failures += expect_contiguous_ids(winner_ids, prefill_rows_count);
+    failures += expect_contiguous_ids(std::span {winner_ids}, prefill_rows_count);
 
     // The genuine overflow_k belongs to the ID-space ceiling alone, refused before any
     // counter dance or allocation - a probe only a 32-bit ID space can express.

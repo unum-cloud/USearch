@@ -233,6 +233,16 @@ check_doxygen_glued() {
         "            never \`(@c foo)\`; a highlighter only sees a command that follows whitespace:"
 }
 
+# Doxygen never parses a `//` comment, so a command there - `@p count`, `@c select_diverse` - prints literally and
+# reads as noise. Plain comments name code in backticks, or in prose; the commands belong in `/** */` docblocks.
+check_doxygen_in_line_comments() {
+    local tagged
+    tagged=$(printf '%s\n' "$added" | grep -E '(^\+|[^:])//[^/!]' |
+        grep -E '//[^/!].*[[:space:]]@(brief|param|tparam|returns?|ref|see|note|c|p|b)\b' || true)
+    [ -z "$tagged" ] || fail "$tagged" \
+        "$file uses a Doxygen command in a // comment, which Doxygen never parses - quote code in backticks:"
+}
+
 # An `@section` line reads as a heading only when air surrounds it: the comment lines directly
 # above and below must be empty (`*` alone). Spacing is context, not a line, so this reads the
 # whole staged file and reports only the headings the commit itself added.
@@ -781,6 +791,17 @@ check_call_chained_subscript() {
         "            never results.data()[index]:"
 }
 
+# CUDA's `atomicAdd`-family intrinsics never name their memory order - they are relaxed at device scope, and a reader
+# cannot tell whether that was chosen. Every shared word goes through `cuda_atomic_ref` with an explicit order,
+# as weak as the protocol allows.
+check_cuda_raw_atomics() {
+    local raw
+    raw=$(printf '%s\n' "$added" |
+        grep -E '(^|[^A-Za-z0-9_])atomic(Add|Sub|Or|And|Xor|CAS|Exch|Min|Max|Inc|Dec)(_block|_system)?\(' || true)
+    [ -z "$raw" ] || fail "$raw" \
+        "$file calls a CUDA atomic intrinsic - use cuda_atomic_ref with an explicit memory order:"
+}
+
 # Calling a call's result the same way: `vectors.view()(range, slice)` reads as a typo and hides which object
 # the second call lands on. NumKong's owning tensors slice themselves - `vectors(range, slice)` - and any other
 # first result takes a name before it is called.
@@ -1047,6 +1068,7 @@ for file in "${staged[@]}"; do
         check_copydoc_in_backend
         check_markdown_doxygen
         check_doxygen_glued
+        check_doxygen_in_line_comments
         check_section_spacing
         check_docblock_spacing
         check_lone_brief
@@ -1083,6 +1105,7 @@ for file in "${staged[@]}"; do
     # CUDA translation units and the headers they compile into.
     *.cu | *.cuh)
         check_host_threads
+        check_cuda_raw_atomics
         ;;&
     # The test and benchmark harness headers, whose directories name their namespaces.
     test/*.hpp | test/*.cuh | test/*.h | bench/*.hpp | bench/*.cuh | bench/*.h)

@@ -10,8 +10,11 @@
  *  - Packed scored-node @b candidates ordered by raw distance bits
  *  - Register-resident and arena-backed @b frontiers with append-only tail pools
  *  - Exact epoch-tagged @b visited-sets probed warp-cooperatively
+ *  - Row @b bitsets marked concurrently by whole grids, like reachability audits
  */
 #pragma once
+
+#include <cuda/atomic> // `cuda::atomic_ref` - the device twin of `std::atomic_ref`
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/dense/types.hpp"
@@ -459,6 +462,28 @@ struct dense_cuda_visited_set_t {
         if (probing) fresh = false;
         __syncwarp();
         return fresh;
+    }
+};
+
+/** The device-scope atomic reference every kernel reaches a shared word through, so each access names its memory
+ *  order - relaxed wherever the launch boundary is what publishes the result. */
+template <typename value_type_>
+using cuda_atomic_ref = cuda::atomic_ref<value_type_, cuda::thread_scope_device>;
+
+/** One bit per row over device-resident words, marked concurrently by a whole grid - a reachability audit's reached
+ *  set and frontiers, a refinement pass's touched rows. Every access is relaxed: the launch boundary orders the marks
+ *  before any later launch or host copy reads them. */
+struct dense_cuda_bitset_t {
+    u32_t* words = nullptr;
+
+    __device__ __forceinline__ bool contains(u32_t row) const noexcept {
+        return (cuda_atomic_ref<u32_t>(words[row >> 5]).load(cuda::memory_order_relaxed) >> (row & 31u)) & 1u;
+    }
+
+    /** Sets the bit of @p row, answering whether this call was the one that set it. */
+    __device__ __forceinline__ bool insert(u32_t row) const noexcept {
+        u32_t const bit = 1u << (row & 31u);
+        return !(cuda_atomic_ref<u32_t>(words[row >> 5]).fetch_or(bit, cuda::memory_order_relaxed) & bit);
     }
 };
 

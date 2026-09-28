@@ -1276,8 +1276,8 @@ struct dense_ram_index {
      *
      *  Steps of the current phase are disjoint ID ranges, so any number of threads may @ref run them at once;
      *  @ref advance is the single-caller barrier between phases and answers whether another phase follows.
-     *  Re-selection and grafts edit under the per-node locks like an insertion, so searches run throughout and a pass
-     *  stopped between steps leaves the graph correct. Insertions may not overlap.
+     *  Re-selection and reconnection edit under the per-node locks like an insertion, so searches run throughout and a
+     * pass stopped between steps leaves the graph correct. Insertions may not overlap.
      */
     struct refine_plan_t {
         using step_t = typename health_plan_t::step_t;
@@ -1409,7 +1409,7 @@ struct dense_ram_index {
             return status_t::success_k;
         }
 
-        /** Grafts every island in @p step into its nearest reached neighbor - a free slot when there is one,
+        /** Reconnects every island in @p step to its nearest reached neighbor - a free slot when there is one,
          *  otherwise a landing spread across the tail, so islands sharing one target heal in one round. */
         void reconnect_(step_t const& step, dense_traversal_context_t& context) noexcept {
             std::size_t reconnected = 0;

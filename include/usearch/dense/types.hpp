@@ -78,7 +78,7 @@ struct [[nodiscard]] dense_refine_result_t {
     /** Nodes the first audit left unreached, counted once. */
     std::size_t islands_found = 0;
 
-    /** Grafts actually written into a reached node's neighbors. */
+    /** Links actually written from a reached node to an island. */
     std::size_t islands_reconnected = 0;
 
     /** Nodes the final audit reached. */
