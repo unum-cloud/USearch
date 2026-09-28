@@ -554,14 +554,17 @@ struct dense_ram_indexes {
         }
 
         std::size_t const published = size();
-        std::atomic<std::size_t> swept {0};
+        // Every step bumps it, so it takes its own line, away from the locals every worker reads.
+        alignas(default_alignment_k) std::size_t swept = 0;
         bool cancelled = false;
         auto run_step = [&](std::size_t shard, typename index_t::refine_plan_t::step_t const& step, std::size_t thread,
                             nk::matrix_span<dense_node_id_t>) noexcept -> status_t {
             bool const reselecting = plans[shard].reselecting();
             if (status_t const ran = plans[shard].run(step, traversals[thread]); failed(ran)) return ran;
             if (!reselecting) return status_t::success_k;
-            std::size_t const done = swept.fetch_add(step.nodes.size(), std::memory_order_relaxed) + step.nodes.size();
+            std::size_t const done = atomic_ref<std::size_t>(swept).fetch_add(step.nodes.size(),
+                                                                              std::memory_order_relaxed) +
+                                     step.nodes.size();
             return on_visited(done, published) == continuation_t::cancel_k ? status_t::cancelled_k
                                                                            : status_t::success_k;
         };
@@ -1496,12 +1499,14 @@ struct dense_ram_indexes {
             failed(ready))
             return {{}, ready};
 
-        std::atomic<status_t> first_refusal {status_t::success_k};
+        status_t first_refusal = status_t::success_k;
         auto each_row = [&](std::size_t row, std::size_t thread, std::size_t) noexcept {
             status_t const refusal = per_row(row, thread, traversals[thread]);
             if (succeeded(refusal)) return;
             status_t expected_status = status_t::success_k;
-            first_refusal.compare_exchange_strong(expected_status, refusal, std::memory_order_relaxed);
+            atomic_ref<status_t>(first_refusal)
+                .compare_exchange_strong(expected_status, refusal, std::memory_order_relaxed,
+                                         std::memory_order_relaxed);
         };
         if (status_t const fanned = executor.for_tasks(rows_count, each_row); failed(fanned)) return {{}, fanned};
 
@@ -1513,7 +1518,7 @@ struct dense_ram_indexes {
             merged.restarts += traversal.restarts;
             merged.saturated_walks += traversal.saturated_walks;
         }
-        return {merged, first_refusal.load(std::memory_order_relaxed)};
+        return {merged, first_refusal};
     }
 
 #pragma endregion Search
@@ -1600,14 +1605,15 @@ struct dense_ram_indexes {
                           executor_t& executor, std::size_t scratch_rows, per_step_type_& per_step) noexcept {
         std::size_t const shards = plans.size();
         if (cursors.size() != shards) return status_t::config_mismatch_k;
-        std::atomic<status_t> outcome {status_t::success_k};
+        status_t outcome = status_t::success_k;
         auto drain = [&](std::size_t thread, std::size_t) noexcept {
             nk::matrix_span<dense_node_id_t> scratch;
             if (scratch_rows) {
                 scratch = scratch_of_(executor.arena(thread), scratch_rows);
                 if (scratch.empty()) {
                     status_t expected_status = status_t::success_k;
-                    outcome.compare_exchange_strong(expected_status, status_t::bad_alloc_k, std::memory_order_relaxed);
+                    atomic_ref<status_t>(outcome).compare_exchange_strong(
+                        expected_status, status_t::bad_alloc_k, std::memory_order_relaxed, std::memory_order_relaxed);
                     return;
                 }
             }
@@ -1618,17 +1624,18 @@ struct dense_ram_indexes {
                 auto const steps = plans[shard].steps();
                 for (std::size_t position = cursor.fetch_add(1, std::memory_order_relaxed); position < steps.size();
                      position = cursor.fetch_add(1, std::memory_order_relaxed)) {
-                    if (failed(outcome.load(std::memory_order_relaxed))) return;
+                    if (failed(atomic_ref<status_t>(outcome).load(std::memory_order_relaxed))) return;
                     status_t const landed = per_step(shard, steps[position], thread, scratch);
                     if (succeeded(landed)) continue;
                     status_t expected_status = status_t::success_k;
-                    outcome.compare_exchange_strong(expected_status, landed, std::memory_order_relaxed);
+                    atomic_ref<status_t>(outcome).compare_exchange_strong(
+                        expected_status, landed, std::memory_order_relaxed, std::memory_order_relaxed);
                     return;
                 }
             }
         };
         if (status_t const fanned = executor.for_threads(drain); failed(fanned)) return fanned;
-        return outcome.load(std::memory_order_relaxed);
+        return atomic_ref<status_t>(outcome).load(std::memory_order_relaxed);
     }
 
     /** Fans @p plan 's steps out over the executor's threads: each thread drains its home shard's
@@ -1653,14 +1660,15 @@ struct dense_ram_indexes {
                 return sized;
         growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
         if (failed(cursors.resize(shards))) return status_t::bad_alloc_k;
-        std::atomic<status_t> outcome {status_t::success_k};
+        status_t outcome = status_t::success_k;
         auto drain = [&](std::size_t thread, std::size_t) noexcept {
             nk::matrix_span<dense_node_id_t> scratch;
             if (scratch_rows) {
                 scratch = scratch_of_(executor.arena(thread), scratch_rows);
                 if (scratch.empty()) {
                     status_t expected_status = status_t::success_k;
-                    outcome.compare_exchange_strong(expected_status, status_t::bad_alloc_k, std::memory_order_relaxed);
+                    atomic_ref<status_t>(outcome).compare_exchange_strong(
+                        expected_status, status_t::bad_alloc_k, std::memory_order_relaxed, std::memory_order_relaxed);
                     return;
                 }
             }
@@ -1671,19 +1679,20 @@ struct dense_ram_indexes {
                 atomic_ref<std::size_t> const cursor {cursors[shard]};
                 for (std::size_t taken = cursor.fetch_add(1, std::memory_order_relaxed); taken < own.size();
                      taken = cursor.fetch_add(1, std::memory_order_relaxed)) {
-                    if (failed(outcome.load(std::memory_order_relaxed))) return;
+                    if (failed(atomic_ref<status_t>(outcome).load(std::memory_order_relaxed))) return;
                     status_t landed = status_t::success_k;
                     if constexpr (saving_k) landed = plan.save(steps[own.first + taken], scratch);
                     else landed = plan.load(steps[own.first + taken]);
                     if (succeeded(landed)) continue;
                     status_t expected_status = status_t::success_k;
-                    outcome.compare_exchange_strong(expected_status, landed, std::memory_order_relaxed);
+                    atomic_ref<status_t>(outcome).compare_exchange_strong(
+                        expected_status, landed, std::memory_order_relaxed, std::memory_order_relaxed);
                     return;
                 }
             }
         };
         if (status_t const fanned = executor.for_threads(drain); failed(fanned)) return fanned;
-        return outcome.load(std::memory_order_relaxed);
+        return atomic_ref<status_t>(outcome).load(std::memory_order_relaxed);
     }
 
     /** @brief Copies @p path into @p buffer, so a plan outlives the caller's view of it. */

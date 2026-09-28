@@ -77,7 +77,8 @@ class sequence_tape {
 
   private:
     growing_buffer<char, allocator_t> bytes_;
-    std::atomic<std::size_t> taken_ {0};
+    // Every append bumps it, so it takes its own line, away from the buffer every append and reader loads.
+    alignas(default_alignment_k) std::size_t taken_ = 0;
 
   public:
     sequence_tape(allocator_t const& allocator = {}) noexcept : bytes_(allocator) {}
@@ -86,25 +87,27 @@ class sequence_tape {
 
     /** @note Moving keeps every handed-out view valid - the buffer's address travels with it. */
     sequence_tape(sequence_tape&& other) noexcept
-        : bytes_(std::move(other.bytes_)), taken_(other.taken_.exchange(0, std::memory_order_acq_rel)) {}
+        : bytes_(std::move(other.bytes_)), taken_(std::exchange(other.taken_, 0)) {}
 
     sequence_tape& operator=(sequence_tape&& other) noexcept {
         bytes_ = std::move(other.bytes_);
-        taken_.store(other.taken_.exchange(0, std::memory_order_acq_rel), std::memory_order_release);
+        taken_ = std::exchange(other.taken_, 0);
         return *this;
     }
 
     /** Sizes the tape's single allocation; legal only before the first @ref append. */
     status_t reserve(std::size_t bytes) noexcept {
-        if (taken_.load(std::memory_order_acquire)) return status_t::config_mismatch_k;
+        if (standard_atomic_ref<std::size_t>(taken_).load(std::memory_order_acquire))
+            return status_t::config_mismatch_k;
         return bytes_.resize_uninitialized(bytes);
     }
 
     /** Copies @p length bytes from @p data into the tape, answering a stable view. */
     append_result_t append(char const* data, std::size_t length) noexcept {
-        std::size_t const offset = taken_.fetch_add(length, std::memory_order_acq_rel);
+        std::size_t const offset = standard_atomic_ref<std::size_t>(taken_).fetch_add(length,
+                                                                                      std::memory_order_acq_rel);
         if (offset + length > bytes_.size()) {
-            taken_.fetch_sub(length, std::memory_order_release);
+            standard_atomic_ref<std::size_t>(taken_).fetch_sub(length, std::memory_order_release);
             return {status_t::overflow_k, {}};
         }
         char* const destination = bytes_.data() + offset;
@@ -116,7 +119,9 @@ class sequence_tape {
     append_result_t append(sz_string_view_t view) noexcept { return append(view.start, view.length); }
 
     /** Bytes handed out so far. */
-    std::size_t used_bytes() const noexcept { return taken_.load(std::memory_order_acquire); }
+    std::size_t used_bytes() const noexcept {
+        return standard_atomic_ref<std::size_t const>(taken_).load(std::memory_order_acquire);
+    }
 
     /** Bytes the single reservation covers. */
     std::size_t reserved_bytes() const noexcept { return bytes_.size(); }
@@ -272,7 +277,7 @@ inline expected<safegraphs_index_metadata_t> sequence_metadata(std::string_view 
  *  chosen per call - so a graph built under one kernel is queried under another without
  *  rebuilding. */
 template <typename key_type_ = uuid_t, typename node_id_type_ = u32_t, typename wait_type_ = dummy_waiter_t,
-          template <typename> class atomic_ref_template_ = std::atomic_ref,
+          template <typename> class atomic_ref_template_ = standard_atomic_ref,
           typename allocator_type_ = std::allocator<byte_t>>
 using sequence_ram_index = basic_ram_index<sz_string_view_t, key_type_, node_id_type_, i64_t, wait_type_,
                                            atomic_ref_template_, allocator_type_>;

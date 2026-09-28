@@ -439,26 +439,30 @@ struct shard_ticks_t {
     usearch_progress_callback_t progress;
     void* state;
     std::size_t total;
-    std::atomic<std::size_t> done {0};
+    std::size_t done = 0; // Counted under the mutex that already serializes the handler.
     fu::spin_mutex_t mutex;
 
     shard_ticks_t(usearch_progress_callback_t progress, void* state, std::size_t total) noexcept
         : progress(progress), state(state), total(total) {}
 
     continuation_t operator()(std::size_t) noexcept {
-        return report_(done.fetch_add(1, std::memory_order_relaxed) + 1, total);
+        if (!progress) return continuation_t::continue_k;
+        std::lock_guard guard {mutex};
+        return forward_(++done, total);
     }
 
     /** The sibling for verbs that count their own units and know their own population - a
      *  refinement ticks the nodes visited so far, which no counter here could derive. */
     continuation_t operator()(std::size_t finished, std::size_t population) noexcept {
-        return report_(finished, population);
+        if (!progress) return continuation_t::continue_k;
+        std::lock_guard guard {mutex};
+        return forward_(finished, population);
     }
 
   private:
-    continuation_t report_(std::size_t finished, std::size_t population) noexcept {
-        if (!progress) return continuation_t::continue_k;
-        std::lock_guard guard {mutex};
+
+    /** Hands one tick to the C handler; the caller holds the mutex. */
+    continuation_t forward_(std::size_t finished, std::size_t population) noexcept {
         return progress(finished, population, state) == usearch_cancel_k ? continuation_t::cancel_k
                                                                          : continuation_t::continue_k;
     }

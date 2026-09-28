@@ -153,9 +153,7 @@ struct dense_vram_indexes {
         std::swap(shards_, other.shards_);
         std::swap(locators_of_key_, other.locators_of_key_);
         std::swap(allocator_, other.allocator_);
-        std::size_t const routed = routed_rows_.load(std::memory_order_relaxed);
-        routed_rows_.store(other.routed_rows_.load(std::memory_order_relaxed), std::memory_order_relaxed);
-        other.routed_rows_.store(routed, std::memory_order_relaxed);
+        std::swap(routed_rows_, other.routed_rows_);
     }
 
     /** Appends one shard built here on @p device, for callers with none to hand over. */
@@ -189,7 +187,7 @@ struct dense_vram_indexes {
             one.index = std::move(fresh);
         }
         locators_of_key_.clear();
-        routed_rows_.store(0, std::memory_order_relaxed);
+        routed_rows_ = 0;
         return geometry.capacity ? reserve(geometry).status : status_t::success_k;
     }
 
@@ -1012,7 +1010,7 @@ struct dense_vram_indexes {
             }
             for (std::size_t shard = 0; shard != plans_.size(); ++shard)
                 if (on_loaded(shard) == continuation_t::cancel_k) return status_t::cancelled_k;
-            owner_->routed_rows_.store(rows(), std::memory_order_relaxed);
+            owner_->routed_rows_ = rows();
             owner_ = nullptr;
             return status_t::success_k;
         }
@@ -1260,7 +1258,8 @@ struct dense_vram_indexes {
         auto [seats, seat_status] = locators_of_key_.claim(rows);
         if (failed(seat_status)) return {result, seat_status};
         // Rotating by rows routed keeps a stream of small batches from drifting onto shard zero.
-        std::size_t const rotation = routed_rows_.fetch_add(rows, std::memory_order_relaxed) % shards;
+        std::size_t const rotation =
+            standard_atomic_ref<std::size_t>(routed_rows_).fetch_add(rows, std::memory_order_relaxed) % shards;
 
         // Claim and launch on every device before awaiting any. Keys are written before the
         // claim publishes, so a search that can rank a row reads its key fully written.
@@ -1779,7 +1778,7 @@ struct dense_vram_indexes {
     forkunion_allocator_t allocator_;
 
     /** Rows routed so far - the next batch's rotation base. */
-    std::atomic<std::size_t> routed_rows_ {0};
+    std::size_t routed_rows_ = 0;
 
     /** Held by the one batch of mutating work at a time; a refused hold is @c contended_k. */
     fu::spin_mutex_t mutating_;

@@ -2044,11 +2044,15 @@ struct dense_vram_index {
 
     /** Claimed rows, the only dense bound under unordered publication; the sampler probes past
      *  unpublished IDs by protocol. */
-    std::size_t size() const noexcept { return claimed_rows_.load(std::memory_order_acquire); }
+    std::size_t size() const noexcept {
+        return standard_atomic_ref<std::size_t const>(claimed_rows_).load(std::memory_order_acquire);
+    }
 
     /** The first failure that left claimed rows unpublished, kept for the index's lifetime; it
      *  refuses every later mutation while searches keep running. */
-    status_t status() const noexcept { return status_.load(std::memory_order_acquire); }
+    status_t status() const noexcept {
+        return standard_atomic_ref<status_t const>(status_).load(std::memory_order_acquire);
+    }
 
     /** Rows mapped across all three planes, the smallest of the three, since slabs are a fixed byte
      *  size and each plane maps a different row count per slab. */
@@ -2062,9 +2066,13 @@ struct dense_vram_index {
         return min_of(by_vectors, min_of(by_norms, by_neighbors));
     }
     std::size_t connectivity() const noexcept {
-        return geometry_connectivity(geometry_.load(std::memory_order_acquire));
+        return geometry_connectivity(
+            standard_atomic_ref<packed_geometry_id_t const>(geometry_).load(std::memory_order_acquire));
     }
-    std::size_t dimensions() const noexcept { return geometry_dimensions(geometry_.load(std::memory_order_acquire)); }
+    std::size_t dimensions() const noexcept {
+        return geometry_dimensions(
+            standard_atomic_ref<packed_geometry_id_t const>(geometry_).load(std::memory_order_acquire));
+    }
 
     /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
     template <typename config_type_>
@@ -2241,7 +2249,9 @@ struct dense_vram_index {
         packed_geometry_id_t const requested = pack_geometry(config.dimensions,
                                                              static_cast<std::size_t>(config.connectivity));
         packed_geometry_id_t observed = 0;
-        if (!geometry_.compare_exchange_strong(observed, requested, std::memory_order_acq_rel) && observed != requested)
+        if (!standard_atomic_ref<packed_geometry_id_t>(geometry_).compare_exchange_strong(
+                observed, requested, std::memory_order_acq_rel, std::memory_order_acquire) &&
+            observed != requested)
             return {capacity(), status_t::config_mismatch_k};
         connectivity_t const connectivity = config.connectivity;
         if (config.capacity > max_node_count_k) return {capacity(), status_t::overflow_k};
@@ -2746,7 +2756,7 @@ struct dense_vram_index {
             [[maybe_unused]] status_t const copied_vectors = copy_bytes(
                 columns.vectors.subspan(vectors_first, step.vectors_bytes),
                 bytes_of(bounce.data(), step.vectors_bytes));
-            std::atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
+            standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
 
             byte_t* const bounce_neighbors = bounce.data() + batch_rows * scalar_row_bytes;
             if (cudaMemcpyAsync(
@@ -2761,7 +2771,7 @@ struct dense_vram_index {
                                                       : dense_node_id_unknown_k;
             [[maybe_unused]] status_t const copied_neighbors = copy_bytes(
                 columns.neighbors.subspan(neighbors_first, step.neighbors_bytes), bytes_of(landed, step_slots));
-            std::atomic_ref<std::size_t> {covered_neighbors}.fetch_add(rows.size(), std::memory_order_acq_rel);
+            standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(rows.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -2770,8 +2780,8 @@ struct dense_vram_index {
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             std::size_t const nodes = static_cast<std::size_t>(visible);
-            if (std::atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != nodes ||
-                std::atomic_ref<std::size_t> {covered_neighbors}.load(std::memory_order_acquire) != nodes)
+            if (standard_atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != nodes ||
+                standard_atomic_ref<std::size_t> {covered_neighbors}.load(std::memory_order_acquire) != nodes)
                 return status_t::config_mismatch_k;
             index_ = nullptr;
             return status_t::success_k;
@@ -2974,7 +2984,7 @@ struct dense_vram_index {
                     cudaMemcpyHostToDevice, stream) != cudaSuccess)
                 return index_->fail_(status_t::device_error_k);
             if (cudaStreamSynchronize(stream) != cudaSuccess) return index_->fail_(status_t::device_error_k);
-            std::atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
+            standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
 
             byte_t* const bounce_neighbors = bounce.data() + batch_rows * scalar_row_bytes;
             [[maybe_unused]] status_t const staged_neighbors = copy_bytes(
@@ -2990,7 +3000,7 @@ struct dense_vram_index {
                     stream) != cudaSuccess)
                 return index_->fail_(status_t::device_error_k);
             if (cudaStreamSynchronize(stream) != cudaSuccess) return index_->fail_(status_t::device_error_k);
-            std::atomic_ref<std::size_t> {covered_neighbors}.fetch_add(range.size(), std::memory_order_acq_rel);
+            standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -3000,8 +3010,8 @@ struct dense_vram_index {
          *  refusal leaves it whole, so the missing steps can still land. */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
-            if (std::atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != rows ||
-                std::atomic_ref<std::size_t> {covered_neighbors}.load(std::memory_order_acquire) != rows)
+            if (standard_atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != rows ||
+                standard_atomic_ref<std::size_t> {covered_neighbors}.load(std::memory_order_acquire) != rows)
                 return status_t::config_mismatch_k;
             if (rows) {
                 u32_t const blocks = static_cast<u32_t>(index_->device_.multiprocessor_count) *
@@ -3014,7 +3024,7 @@ struct dense_vram_index {
                                     stream) != cudaSuccess ||
                     cudaStreamSynchronize(stream) != cudaSuccess)
                     return index_->fail_(status_t::device_error_k);
-                index_->claimed_rows_.store(base + rows, std::memory_order_release);
+                standard_atomic_ref<std::size_t>(index_->claimed_rows_).store(base + rows, std::memory_order_release);
                 claiming_.unlock();
             }
             index_ = nullptr;
@@ -3134,7 +3144,7 @@ struct dense_vram_index {
         // Grow, claim and launch while holding the claiming mutex: the claim is stored only once
         // the launch is accepted, so a rejected grid, which publishes nothing, is un-claimed exactly.
         std::unique_lock claiming {claiming_};
-        std::size_t const first_id = claimed_rows_.load(std::memory_order_relaxed);
+        std::size_t const first_id = standard_atomic_ref<std::size_t>(claimed_rows_).load(std::memory_order_relaxed);
         std::size_t const total_rows = first_id + rows;
         status_t claimed = grow_rows_(total_rows, stream);
         if (claimed == status_t::success_k) {
@@ -3168,7 +3178,8 @@ struct dense_vram_index {
                 // The launch is the last fallible step; reading its verdict here keeps the claim reversible.
                 if (failed(launch_insert_(view, pool_slots, stream))) claimed = status_t::device_error_k;
             }
-            if (claimed == status_t::success_k) claimed_rows_.store(total_rows, std::memory_order_release);
+            if (claimed == status_t::success_k)
+                standard_atomic_ref<std::size_t>(claimed_rows_).store(total_rows, std::memory_order_release);
         }
         claiming.unlock();
         if (claimed != status_t::success_k) return {{}, claimed};
@@ -3604,7 +3615,8 @@ struct dense_vram_index {
      *  report. */
     status_t fail_(status_t failure) noexcept {
         status_t expected = status_t::success_k;
-        status_.compare_exchange_strong(expected, failure, std::memory_order_acq_rel);
+        standard_atomic_ref<status_t>(status_).compare_exchange_strong(expected, failure, std::memory_order_acq_rel,
+                                                                       std::memory_order_acquire);
         return failure;
     }
 
@@ -3691,7 +3703,7 @@ struct dense_vram_index {
     cuda_device_specs_t device_;
 
     /** The frozen geometry word: dimensions high, connectivity low, zero when unreserved. */
-    std::atomic<packed_geometry_id_t> geometry_ {0};
+    packed_geometry_id_t geometry_ = 0;
 
     /** The vector and norm planes; each allocator is its plane, owning the base and the committed
      *  extent, so capacities are derived, never cached. */
@@ -3708,10 +3720,10 @@ struct dense_vram_index {
     fu::spin_mutex_t claiming_;
 
     /** Each batch's dense id range, release-published once its launch is accepted. */
-    std::atomic<std::size_t> claimed_rows_ {0};
+    std::size_t claimed_rows_ = 0;
 
     /** The first post-claim device failure: ids past it may be unpublished or unfilled. */
-    std::atomic<status_t> status_ {status_t::success_k};
+    status_t status_ = status_t::success_k;
 };
 
 #endif // defined(__CUDACC__)

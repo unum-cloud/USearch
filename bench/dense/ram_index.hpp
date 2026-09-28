@@ -258,7 +258,7 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
     auto const [result, status] = bench.index->insert(one_row, {&local_id, std::size_t {1}}, *bench.traversals[thread],
                                                       config);
     if (failed(status)) {
-        bench.results.failed_tasks.fetch_add(1, std::memory_order_relaxed);
+        standard_atomic_ref<std::size_t>(bench.results.failed_tasks).fetch_add(1, std::memory_order_relaxed);
         return;
     }
 
@@ -289,7 +289,7 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     fu_pool_for_n_dynamic(pool, inserted_rows, &insertion_callback<streamed_dataset_type_>, &streamed);
     double const seconds = stdc::duration<double>(clock_t::now() - started).count();
 
-    if (std::size_t failures = bench.results.failed_tasks.load(); failures) {
+    if (std::size_t failures = bench.results.failed_tasks; failures) {
         fmt::println("Insertion failed on {} vectors", failures);
         return false;
     }
@@ -341,7 +341,7 @@ struct refinement_fanout {
     typename index_t::refine_plan_t& plan;
 
     /** Tasks that returned an error; any non-zero fails the run. */
-    std::atomic<std::size_t> failures {0};
+    std::size_t failures = 0;
 };
 
 /** One step of the plan's current phase per task, on the thread that pulled it. */
@@ -349,7 +349,7 @@ template <typename bench_type_>
 void refinement_callback(fu_lambda_context_t punned, std::size_t task, std::size_t thread, std::size_t) noexcept {
     auto& fanout = *static_cast<refinement_fanout<bench_type_>*>(punned);
     if (failed(fanout.plan.run(fanout.plan[task], *fanout.bench.traversals[thread])))
-        fanout.failures.fetch_add(1, std::memory_order_relaxed);
+        standard_atomic_ref<std::size_t>(fanout.failures).fetch_add(1, std::memory_order_relaxed);
 }
 
 /** Refines every node, pass after pass - each pass re-selects the graph, then heals whatever that strands - and
@@ -393,7 +393,7 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
                          : report.healing_seconds) += stdc::duration<double>(clock_t::now() - started).count();
             started = clock_t::now();
         } while (plan.advance());
-        if (std::size_t failures = fanout.failures.load(std::memory_order_relaxed); failures) {
+        if (std::size_t failures = fanout.failures; failures) {
             fmt::println("Refinement failed on {} steps", failures);
             return false;
         }
@@ -467,7 +467,7 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     auto started = clock_t::now();
     auto const [result, status] = bench.index->search(query_vector, traversal, config);
     if (failed(status)) {
-        bench.results.failed_tasks.fetch_add(1, std::memory_order_relaxed);
+        standard_atomic_ref<std::size_t>(bench.results.failed_tasks).fetch_add(1, std::memory_order_relaxed);
         return;
     }
     lane.visited_members += result.visited_members;
@@ -491,7 +491,7 @@ bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
     fu_pool_for_n(pool, query_count, &search_callback<streamed_dataset_type_>, &streamed);
     double const seconds = stdc::duration<double>(clock_t::now() - started).count();
 
-    if (std::size_t failures = bench.results.failed_tasks.load(); failures) {
+    if (std::size_t failures = bench.results.failed_tasks; failures) {
         fmt::println("Search failed on {} queries", failures);
         return false;
     }

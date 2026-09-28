@@ -1171,19 +1171,23 @@ status_t safegraphs_write_index(bytes_span_t monolith, index_type_ const& index,
     // One region per thread, so nothing allocates and the fan-out needs no scratch.
     std::size_t const regions = max_of<std::size_t>(executor.size(), 1);
     std::size_t const per_region = divide_round_up(nodes, regions);
-    std::atomic<status_t> outcome {status_t::success_k};
+    status_t outcome = status_t::success_k;
     auto save_region = [&](std::size_t region, std::size_t, std::size_t) noexcept {
-        if (failed(outcome.load(std::memory_order_relaxed))) return;
+        if (failed(standard_atomic_ref<status_t>(outcome).load(std::memory_order_relaxed))) return;
         std::size_t const first = min_of(region * per_region, nodes);
         std::size_t const bound = min_of(first + per_region, nodes);
         status_t saved = planned.value.save(
             iota_view<node_id_t> {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)}, codec);
         if (succeeded(saved) && progress(region) == continuation_t::cancel_k) saved = status_t::cancelled_k;
         status_t expected_status = status_t::success_k;
-        if (failed(saved)) outcome.compare_exchange_strong(expected_status, saved, std::memory_order_relaxed);
+        if (failed(saved))
+            standard_atomic_ref<status_t>(outcome).compare_exchange_strong(
+                expected_status, saved, std::memory_order_relaxed, std::memory_order_relaxed);
     };
     if (status_t const fanned = executor.for_tasks(regions, save_region); failed(fanned)) return fanned;
-    if (status_t const settled = outcome.load(std::memory_order_relaxed); failed(settled)) return settled;
+    if (status_t const settled = standard_atomic_ref<status_t>(outcome).load(std::memory_order_relaxed);
+        failed(settled))
+        return settled;
     if (status_t const finished = planned.value.finish(); failed(finished)) return finished;
 
     // A fixed shape holds every value to its width; a wider ragged element scales the staged sums.
@@ -1371,19 +1375,23 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
 
     std::size_t const regions = max_of<std::size_t>(executor.size(), 1);
     std::size_t const per_region = divide_round_up(nodes, regions);
-    std::atomic<status_t> outcome {status_t::success_k};
+    status_t outcome = status_t::success_k;
     auto load_region = [&](std::size_t region, std::size_t, std::size_t) noexcept {
-        if (failed(outcome.load(std::memory_order_relaxed))) return;
+        if (failed(standard_atomic_ref<status_t>(outcome).load(std::memory_order_relaxed))) return;
         std::size_t const first = min_of(region * per_region, nodes);
         std::size_t const bound = min_of(first + per_region, nodes);
         status_t loaded = planned.value.load(
             iota_view<node_id_t> {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)}, codec);
         if (succeeded(loaded) && progress(region) == continuation_t::cancel_k) loaded = status_t::cancelled_k;
         status_t expected_status = status_t::success_k;
-        if (failed(loaded)) outcome.compare_exchange_strong(expected_status, loaded, std::memory_order_relaxed);
+        if (failed(loaded))
+            standard_atomic_ref<status_t>(outcome).compare_exchange_strong(
+                expected_status, loaded, std::memory_order_relaxed, std::memory_order_relaxed);
     };
     if (status_t const fanned = executor.for_tasks(regions, load_region); failed(fanned)) return fanned;
-    if (status_t const settled = outcome.load(std::memory_order_relaxed); failed(settled)) return settled;
+    if (status_t const settled = standard_atomic_ref<status_t>(outcome).load(std::memory_order_relaxed);
+        failed(settled))
+        return settled;
     return planned.value.finish();
 }
 

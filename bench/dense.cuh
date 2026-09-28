@@ -533,7 +533,7 @@ struct bench_results_t {
     std::vector<float> latencies_us;
 
     /** Tasks that returned an error in either phase; any non-zero fails the run. */
-    std::atomic<std::size_t> failed_tasks {0};
+    std::size_t failed_tasks = 0;
 };
 
 /** What the refinement phase measured, whichever backend ran it: the passes, the audit that
