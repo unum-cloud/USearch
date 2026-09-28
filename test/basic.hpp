@@ -804,6 +804,27 @@ std::size_t test_basic_allocation_budget(fixture_type_ const& fixture) {
     return failures;
 }
 
+/** The staging a warm @c {8, 1} walk leaves in a fresh context on a graph of @p nodes_count rows built like the starved
+ *  scenario's - what its over-wired row must outgrow, decided by the growth policy and the fixture's rows rather than a
+ *  constant. */
+template <typename fixture_type_>
+std::size_t basic_warm_staging_capacity(fixture_type_ const& fixture, std::size_t nodes_count,
+                                        allocation_ledger_t& ledger, std::size_t& failures) {
+    using index_t = typename fixture_type_::index_t;
+    using context_t = typename index_t::traversal_context_t;
+    index_t index = fixture.make_index(ledger);
+    auto metric = fixture.make_metric();
+    context_t context {basic_seed_starved_k, counting_allocator_t {ledger}};
+    auto values = fixture.make_values(nodes_count, basic_seed_starved_k);
+    std::vector<typename index_t::node_id_t> assigned_ids;
+    failures += expect(bool(index.reserve(nodes_count)));
+    failures += basic_build(fixture, index, metric, values, assigned_ids, context, basic_keep_closest_t {4});
+    auto query = fixture.make_values(1, basic_seed_starved_k ^ salt_queries_k);
+    context_t small_context {basic_seed_starved_k + 1, counting_allocator_t {ledger}};
+    failures += expect_eq(index.search(query[0], metric, small_context, {8, 1}).status, status_t::success_k);
+    return small_context.staged_ids.capacity();
+}
+
 /** The mid-flight allocation-failure battery: every fallible allocation inside a
  *  running operation keeps its stated consistency story - thinner nodes publish,
  *  refused staging saturates, cold scratch refuses all-or-nothing, and a starved
@@ -815,21 +836,23 @@ std::size_t test_basic_starved(fixture_type_ const& fixture) {
     using node_id_t = typename index_t::node_id_t;
     using key_t = typename index_t::key_t;
     using context_t = typename index_t::traversal_context_t;
-    constexpr std::size_t nodes_k = 96;
+    constexpr std::size_t base_nodes_k = 96;
     std::size_t failures = 0;
     allocation_ledger_t ledger;
+    std::size_t const nodes_count = max_of(base_nodes_k,
+                                           basic_warm_staging_capacity(fixture, base_nodes_k, ledger, failures) + 2);
     {
         index_t index = fixture.make_index(ledger);
         auto metric = fixture.make_metric();
         auto const codec = fixture.make_codec();
         context_t warm_context {basic_seed_starved_k, counting_allocator_t {ledger}};
-        auto values = fixture.make_values(nodes_k, basic_seed_starved_k);
-        failures += expect(bool(index.reserve(nodes_k + 2)));
+        auto values = fixture.make_values(nodes_count, basic_seed_starved_k);
+        failures += expect(bool(index.reserve(nodes_count + 2)));
         std::vector<node_id_t> assigned_ids;
         failures += basic_build(fixture, index, metric, values, assigned_ids, warm_context, basic_keep_closest_t {4});
 
         auto extras = fixture.make_values(2, basic_seed_starved_k ^ salt_extras_k);
-        std::array<key_t, 2> const extra_keys {fixture.make_key(nodes_k), fixture.make_key(nodes_k + 1)};
+        std::array<key_t, 2> const extra_keys {fixture.make_key(nodes_count), fixture.make_key(nodes_count + 1)};
         auto query = fixture.make_values(1, basic_seed_starved_k ^ salt_queries_k);
 
         // Warm a small round shape, then over-wire node 0 past its staging capacity, so
@@ -838,10 +861,12 @@ std::size_t test_basic_starved(fixture_type_ const& fixture) {
         // it can only expand what some other row points at.
         context_t small_context {basic_seed_starved_k + 1, counting_allocator_t {ledger}};
         failures += expect_eq(index.search(query[0], metric, small_context, {8, 1}).status, status_t::success_k);
-        for (std::size_t target = 1; target != nodes_k; ++target) {
+        for (std::size_t target = 1; target != nodes_count; ++target) {
             [[maybe_unused]] auto const outward = index.link(0, static_cast<node_id_t>(target));
             [[maybe_unused]] auto const inward = index.link(static_cast<node_id_t>(target), 0);
         }
+        // The premise: the fat row outgrows the staging the warm walk left behind, whatever its growth rounds to.
+        failures += expect(index.degree_of(0).value > small_context.staged_ids.capacity());
 
         // Cold scratch under a frozen budget: all-or-nothing refusals, nothing moves.
         context_t cold_context {basic_seed_starved_k + 2, counting_allocator_t {ledger}};
@@ -849,7 +874,7 @@ std::size_t test_basic_starved(fixture_type_ const& fixture) {
         failures += expect_eq(index.search(query[0], metric, cold_context).status, status_t::bad_alloc_k);
         failures += expect_eq(index.insert({extras.data(), 1}, {extra_keys.data(), 1}, metric, {}, cold_context).status,
                               status_t::bad_alloc_k);
-        failures += expect_eq(index.size(), nodes_k);
+        failures += expect_eq(index.size(), nodes_count);
         failures += expect_eq(index.health(cold_context).status, status_t::bad_alloc_k);
 
         // Warm scratch under the same budget: the claimed ID must still publish, only
@@ -858,15 +883,16 @@ std::size_t test_basic_starved(fixture_type_ const& fixture) {
             index.insert({extras.data(), 1}, {extra_keys.data(), 1}, metric, {}, warm_context, basic_keep_closest_t {4})
                 .status,
             status_t::success_k);
-        failures += expect_eq(index.size(), nodes_k + 1);
-        failures += expect_eq(index.degree_of(static_cast<node_id_t>(nodes_k)).value, 0u);
+        failures += expect_eq(index.size(), nodes_count + 1);
+        failures += expect_eq(index.degree_of(static_cast<node_id_t>(nodes_count)).value, 0u);
 
-        // The saturated walk: every query is a walk that may cross the over-wired row, which
-        // cannot stage under the frozen budget. Which row one walk expands is the graph's
-        // business, so the receipt is asserted across the batch and every answer stays ranked.
+        // The saturated walk: each query is a node's own stored value, and every row points at the
+        // over-wired one, so at least the walk for node 0 must expand it, which cannot stage under
+        // the frozen budget. The receipt is asserted across the batch and every answer stays ranked.
         std::size_t saturations = 0;
-        for (std::size_t sample = 0; sample != nodes_k; ++sample) {
-            auto const [result, status] = index.search(values[sample], metric, small_context, {8, 1});
+        for (std::size_t sample = 0; sample != nodes_count; ++sample) {
+            auto const [result, status] = index.search(index.published_value_of(static_cast<node_id_t>(sample)), metric,
+                                                       small_context, {8, 1});
             failures += expect_eq(status, status_t::success_k);
             failures += basic_expect_ascending(small_context);
             saturations += result.telemetry.saturated_walks;
@@ -879,13 +905,13 @@ std::size_t test_basic_starved(fixture_type_ const& fixture) {
         failures += expect_eq(
             index.insert({extras.data() + 1, 1}, {extra_keys.data() + 1, 1}, metric, {}, cold_context).status,
             status_t::success_k);
-        failures += expect_eq(index.size(), nodes_k + 2);
+        failures += expect_eq(index.size(), nodes_count + 2);
 
         // A starved load fails mid-decode with the watermark unpublished, then retries.
         auto const [columns, status] = basic_saved_columns(index, codec);
         failures += expect(succeeded(status));
         index_t restored = fixture.make_index(ledger);
-        failures += expect(bool(restored.reserve(nodes_k + 2)));
+        failures += expect(bool(restored.reserve(nodes_count + 2)));
         ledger.byte_budget.store(ledger.live_bytes.load());
         failures += expect_eq(restored.load(columns.view(), codec), status_t::bad_alloc_k);
         failures += expect_eq(restored.size(), 0u);

@@ -556,7 +556,8 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
     }
     std::size_t rows = total_rows - first_row;
     if (launch.options.max_vectors) rows = std::min(rows, launch.options.max_vectors);
-    nk::matrix_view<dataset_scalar_type_> const sliced_vectors = dataset.vectors()(
+    nk::matrix_view<dataset_scalar_type_> const dataset_vectors = dataset.vectors();
+    nk::matrix_view<dataset_scalar_type_> const sliced_vectors = dataset_vectors(
         nk::range {first_row, first_row + rows}, nk::slice);
 
     // Self-queries keep the harness usable on a lone vectors file, without recall.

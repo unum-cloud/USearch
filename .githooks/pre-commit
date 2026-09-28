@@ -781,6 +781,16 @@ check_call_chained_subscript() {
         "            never results.data()[index]:"
 }
 
+# Calling a call's result the same way: `vectors.view()(range, slice)` reads as a typo and hides which object
+# the second call lands on. NumKong's owning tensors slice themselves - `vectors(range, slice)` - and any other
+# first result takes a name before it is called.
+check_call_chained_call() {
+    local chained
+    chained=$(printf '%s\n' "$added" | grep -E '[A-Za-z0-9_>]\(\)\(' | grep -v 'operator()(' || true)
+    [ -z "$chained" ] || fail "$chained" \
+        "$file calls a call result - slice an owning tensor directly, or name the first result:"
+}
+
 # The `&*iterator` antipattern - laundering an iterator through a reference into a pointer. Take the
 # container's `data()`, or address the element itself.
 check_iterator_laundering() {
@@ -1066,6 +1076,7 @@ for file in "${staged[@]}"; do
         check_range_reconstruction
         check_data_null_probe
         check_call_chained_subscript
+        check_call_chained_call
         check_gcc_atomics
         check_annotate_release_before_unlock
         ;;&

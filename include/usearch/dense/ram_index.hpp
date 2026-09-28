@@ -1848,14 +1848,14 @@ struct dense_ram_index {
                 return status_t::config_mismatch_k;
 
             location_t const location = chunk_schedule_t::locate(rows.first);
-            vectors_view_t const stored = index_->vectors_chunks_[location.chunk].view()(
+            vectors_view_t const vectors = index_->vectors_chunks_[location.chunk](
                 nk::range {location.offset, location.offset + rows.size()}, nk::slice);
             // Chunk rows are padded to whole kit steps, while checkpoints keep logical rows.
             std::size_t const row_bytes = row_values * sizeof(scalar_t);
             for (std::size_t row = 0; row != rows.size(); ++row) {
                 [[maybe_unused]] status_t const copied = copy_bytes(
                     columns.vectors.subspan(vectors_first + row * row_bytes, row_bytes),
-                    bytes_of(stored.row(row).data(), row_values));
+                    bytes_of(vectors.row(row).data(), row_values));
             }
             atomic_ref<std::size_t>(covered_vectors).add(rows.size(), std::memory_order_release);
 
@@ -2091,7 +2091,7 @@ struct dense_ram_index {
                 return status_t::config_mismatch_k;
 
             location_t const location = chunk_schedule_t::locate(range.first);
-            nk::matrix_span<scalar_t> const vectors = index_->vectors_chunks_[location.chunk].span()(
+            nk::matrix_span<scalar_t> const vectors = index_->vectors_chunks_[location.chunk](
                 nk::range {location.offset, location.offset + range.size()}, nk::slice);
             // Checkpoints keep logical rows, while chunk rows are padded to whole kit steps.
             std::size_t const row_bytes = row_values * sizeof(scalar_t);
@@ -2102,12 +2102,12 @@ struct dense_ram_index {
             }
             if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>)
                 for (std::size_t offset_in_chunk = 0; offset_in_chunk != range.size(); ++offset_in_chunk) {
-                    location_t const row {location.chunk, static_cast<small_size_t>(location.offset + offset_in_chunk)};
+                    location_t const row {location.chunk, location.offset + offset_in_chunk};
                     index_->norm_ref_for(row) = dense_norms(index_->vector_for(row));
                 }
             atomic_ref<std::size_t>(covered_vectors).add(range.size(), std::memory_order_release);
 
-            nk::matrix_span<node_id_t> const neighbors = index_->neighbors_chunks_[location.chunk].span()(
+            nk::matrix_span<node_id_t> const neighbors = index_->neighbors_chunks_[location.chunk](
                 nk::range {location.offset, location.offset + range.size()}, nk::slice);
             [[maybe_unused]] status_t const copied_neighbors = copy_bytes(
                 bytes_of(neighbors.data(), step_slots),

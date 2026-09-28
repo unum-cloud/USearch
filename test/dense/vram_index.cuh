@@ -88,8 +88,8 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
     failures += expect(index.reserve({rows_count, connectivity_16_k, dimensions}).status == status_t::success_k);
-    auto vectors = make_vectors<scalar_t>(rows_count, dimensions, dense_seed_multiply_k);
-    auto const left = vectors.view()(nk::range {std::size_t {0}, left_count}, nk::slice);
+    auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, dense_seed_multiply_k);
+    auto const left = vectors(nk::range {std::size_t {0}, left_count}, nk::slice);
 
     std::array<dense_node_id_t, left_count * rows_count> node_ids;
     std::array<dot_result_t, left_count * rows_count> products;

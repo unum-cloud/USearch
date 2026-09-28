@@ -1561,7 +1561,7 @@ std::size_t test_dense_indexes_growth() {
             succeeded(indexes.insert(keys[row], vectors.view().row(row).as_vector(), rows_driver.handle()).status));
     failures += expect(succeeded(indexes
                                      .insert(std::span<key_t const> {keys.data() + singles, batched},
-                                             vectors.view()(nk::range(singles, rows), nk::slice), driver.executor)
+                                             vectors(nk::range(singles, rows), nk::slice), driver.executor)
                                      .status));
 
     failures += expect_eq(indexes.size(), rows);
@@ -1647,7 +1647,7 @@ std::size_t test_dense_indexes_arena_growth() {
     std::vector<key_t> keys(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
     auto const [insert_result, insert_status] = indexes.insert(std::span<key_t const> {keys},
-                                                               vectors.view()(nk::range(0, rows), nk::slice), //
+                                                               vectors(nk::range(0, rows), nk::slice), //
                                                                executor);
     failures += expect(succeeded(insert_status));
     failures += expect_eq(insert_result.saturated_walks, 0u);
@@ -1660,8 +1660,8 @@ std::size_t test_dense_indexes_arena_growth() {
     std::vector<typename indexes_type_::distance_t> found_distances(queries * wanted);
     std::vector<std::size_t> counts(queries);
     auto const [search_result, search_status] = indexes.search_if(
-        vectors.view()(nk::range(rows, rows + queries), nk::slice), executor, exhaustive, wanted,
-        std::span {found_keys}, std::span {found_distances}, std::span {counts}, sparse);
+        vectors(nk::range(rows, rows + queries), nk::slice), executor, exhaustive, wanted, std::span {found_keys},
+        std::span {found_distances}, std::span {counts}, sparse);
     failures += expect(succeeded(search_status));
     failures += expect_eq(search_result.saturated_walks, 0u);
     for (std::size_t const count : counts) failures += expect_eq(count, wanted);
@@ -2305,13 +2305,13 @@ std::size_t test_dense_indexes_products() {
     indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(indexes)));
     failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
-    auto vectors = make_vectors<scalar_t>(rows_count, dimensions, dense_seed_indexes_products_k);
+    auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, dense_seed_indexes_products_k);
     std::array<key_t, rows_count> keys;
     for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(1 + row);
     failures += expect(
         succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
 
-    auto const left = vectors.view()(nk::range {std::size_t {0}, left_count}, nk::slice);
+    auto const left = vectors(nk::range {std::size_t {0}, left_count}, nk::slice);
     std::array<key_t, left_count * rows_count> found_keys;
     std::array<typename indexes_type_::dot_result_t, left_count * rows_count> found_products;
     std::array<std::size_t, left_count> counts;
@@ -2365,7 +2365,7 @@ std::size_t test_dense_indexes_maxsim() {
     indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(indexes)));
     failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
-    auto vectors = make_vectors<scalar_t>(rows_count, dimensions, dense_seed_indexes_maxsim_k);
+    auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, dense_seed_indexes_maxsim_k);
     std::array<key_t, rows_count> keys;
     for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(1 + row / tokens_per_document);
     failures += expect(
@@ -2373,7 +2373,7 @@ std::size_t test_dense_indexes_maxsim() {
 
     // Each document's exact score per query: every query row's best dot among its tokens, summed. Test rows
     // are non-negative, so every dot is too, and a row that misses a document only lowers its score.
-    auto const queries = vectors.view()(nk::range {std::size_t {0}, queries_count * rows_per_query}, nk::slice);
+    auto const queries = vectors(nk::range {std::size_t {0}, queries_count * rows_per_query}, nk::slice);
     std::array<std::array<f64_t, documents_count>, queries_count> exact {};
     for (std::size_t row = 0; row != queries_count * rows_per_query; ++row)
         for (std::size_t document = 0; document != documents_count; ++document) {
@@ -2385,15 +2385,16 @@ std::size_t test_dense_indexes_maxsim() {
             exact[row / rows_per_query][document] += best;
         }
 
-    std::array<key_t, queries_count * wanted> found_keys;
-    std::array<f64_t, queries_count * wanted> found_scores;
+    std::array<std::array<key_t, wanted>, queries_count> found_keys;
+    std::array<std::array<f64_t, wanted>, queries_count> found_scores;
     std::array<std::size_t, queries_count> counts;
     auto maxsim = [&](nk::matrix_view<scalar_t> rows, search_config_t config) noexcept {
-        return indexes.maxsim(rows, rows_per_query, driver.executor, config, wanted, std::span {found_keys},
-                              std::span {found_scores}, std::span {counts});
+        return indexes.maxsim(rows, rows_per_query, driver.executor, config, wanted,
+                              std::span {found_keys.front().data(), queries_count * wanted},
+                              std::span {found_scores.front().data(), queries_count * wanted}, std::span {counts});
     };
     auto document_of = [&](std::size_t query, std::size_t rank) noexcept {
-        return static_cast<std::size_t>(found_keys[query * wanted + rank]) - 1;
+        return static_cast<std::size_t>(found_keys[query][rank]) - 1;
     };
 
     // A walk as wide as the index ranks every token, so the best documents land at their exact scores, up to the
@@ -2408,8 +2409,8 @@ std::size_t test_dense_indexes_maxsim() {
             std::size_t const document = document_of(query, rank);
             failures += expect(document < documents_count);
             if (document >= documents_count) continue;
-            failures += expect_near(found_scores[query * wanted + rank], ranked[rank]) +
-                        expect_near(found_scores[query * wanted + rank], exact[query][document]);
+            failures += expect_near(found_scores[query][rank], ranked[rank]) +
+                        expect_near(found_scores[query][rank], exact[query][document]);
         }
     }
 
@@ -2421,8 +2422,8 @@ std::size_t test_dense_indexes_maxsim() {
             failures += expect(document < documents_count);
             if (document >= documents_count) continue;
             // Above its exact value only by rounding.
-            if (found_scores[query * wanted + rank] > exact[query][document])
-                failures += expect_near(found_scores[query * wanted + rank], exact[query][document]);
+            if (found_scores[query][rank] > exact[query][document])
+                failures += expect_near(found_scores[query][rank], exact[query][document]);
         }
 
     failures += expect(maxsim(queries(nk::range {std::size_t {0}, rows_per_query + 1}, nk::slice), {}).status ==
@@ -2667,7 +2668,7 @@ std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_l
     auto vectors = make_vectors<scalar_t>(nodes_count + 1 + racing_inserts_count, dimensions, dense_seed_cursor_k);
     failures += expect(index.reserve({nodes_count + 1 + racing_inserts_count, connectivity_16_k, dimensions}).status ==
                        status_t::success_k);
-    auto main_rows = vectors.view()(nk::range(0, nodes_count), nk::slice);
+    auto main_rows = vectors(nk::range(0, nodes_count), nk::slice);
     failures += expect(index.insert(main_rows, {}, context).status == status_t::success_k);
     std::size_t const row_bytes = dense_rows_bytes(vectors.view(), 1);
 
@@ -2706,7 +2707,7 @@ std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_l
     failures += expect_eq(cursor.seek(static_cast<node_id_t>(nodes_count)), status_t::malformed_k);
 
     // The snapshot is sticky until refreshed; a past-the-end cursor never resurrects.
-    auto late_row = vectors.view()(nk::range(nodes_count, nodes_count + 1), nk::slice);
+    auto late_row = vectors(nk::range(nodes_count, nodes_count + 1), nk::slice);
     failures += expect(index.insert(late_row, {}, context).status == status_t::success_k);
     failures += expect_eq(static_cast<std::size_t>(cursor.visible_count()), nodes_count);
     failures += expect_eq(cursor.seek(static_cast<node_id_t>(nodes_count)), status_t::malformed_k);
@@ -2726,8 +2727,7 @@ std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_l
         if (thread == 0) {
             typename index_type_::dense_traversal_context_t lane_context {{}};
             for (std::size_t ordinal = 0; ordinal != racing_inserts_count; ++ordinal) {
-                auto racing_row = vectors.view()(nk::range(nodes_count + 1 + ordinal, nodes_count + 2 + ordinal),
-                                                 nk::slice);
+                auto racing_row = vectors(nk::range(nodes_count + 1 + ordinal, nodes_count + 2 + ordinal), nk::slice);
                 if (index.insert(racing_row, {}, lane_context).status != status_t::success_k)
                     thread_failures.fetch_add(1);
                 std::this_thread::yield();
@@ -2824,8 +2824,8 @@ std::size_t dense_expect_allocation_budget(make_index_type_ const& make_index, a
     std::size_t const fill_rows_count = capacity; // Fill to the brim, so one more row must grow.
     auto vectors = make_vectors<scalar_t>(fill_rows_count + extra_rows_count, dimensions,
                                           dense_seed_allocation_budget_k);
-    auto fill_rows = vectors.view()(nk::range(0, fill_rows_count), nk::slice);
-    auto extra_rows = vectors.view()(nk::range(fill_rows_count, fill_rows_count + extra_rows_count), nk::slice);
+    auto fill_rows = vectors(nk::range(0, fill_rows_count), nk::slice);
+    auto extra_rows = vectors(nk::range(fill_rows_count, fill_rows_count + extra_rows_count), nk::slice);
     failures += expect(index.insert(fill_rows, {}, context).status == status_t::success_k);
 
     // Freeze the budget: the growth election must refuse, all-or-nothing.
@@ -2881,7 +2881,7 @@ std::size_t dense_expect_frontier_shedding(make_index_type_ const& make_index, a
     typename index_type_::dense_traversal_context_t context {{}};
     failures += expect(succeeded(index.reserve({dense_growth_nodes_k, connectivity_16_k, dimensions}).status));
     auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k + 1, dimensions, dense_seed_shedding_k);
-    auto rows = vectors.view()(nk::range(0, dense_growth_nodes_k), nk::slice);
+    auto rows = vectors(nk::range(0, dense_growth_nodes_k), nk::slice);
     failures += expect(succeeded(index.insert(rows, {}, context).status));
 
     // Same query, same seeds, two contexts: one sheds within `4 × ef`, the other holds every
@@ -2929,7 +2929,7 @@ std::size_t dense_expect_saturated(make_index_type_ const& make_index, allocatio
     failures += expect(succeeded(index.reserve({dense_growth_nodes_k + 1, connectivity_16_k, dimensions}).status));
     auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k + 2, dimensions, dense_seed_saturated_k);
     typename index_type_::dense_traversal_context_t warm {counting_allocator_t(ledger)};
-    auto rows = vectors.view()(nk::range(0, dense_growth_nodes_k), nk::slice);
+    auto rows = vectors(nk::range(0, dense_growth_nodes_k), nk::slice);
     failures += expect(succeeded(index.insert(rows, {}, warm).status));
 
     typename index_type_::insert_config_t narrow;
@@ -2947,7 +2947,7 @@ std::size_t dense_expect_saturated(make_index_type_ const& make_index, allocatio
     failures += expect_eq(search_result.saturated_walks, 1u);
     failures += dense_expect_ascending(starved);
 
-    auto extra = vectors.view()(nk::range(dense_growth_nodes_k, dense_growth_nodes_k + 1), nk::slice);
+    auto extra = vectors(nk::range(dense_growth_nodes_k, dense_growth_nodes_k + 1), nk::slice);
     auto const [insert_result, insert_status] = index.insert(extra, {}, starved, narrow);
     failures += expect_eq(insert_status, status_t::success_k);
     failures += expect_eq(insert_result.saturated_walks, 1u);
