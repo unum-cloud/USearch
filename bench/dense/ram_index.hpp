@@ -8,9 +8,10 @@
  *  The backend-neutral surface - options, checkpoints, dataset streaming, telemetry, result
  *  judgment, and the machine report - lives in @c dense.cuh; this header owns everything CPU:
  *  the ForkUnion run loops streaming one row or query per task, the NUMA-domain placement,
- *  the waiter dispatch, and the compile-time cascade resolving the CLI into one concrete
- *  @c dense_ram_index instantiation, sharded per stored dtype. A ready-made playground is
- *  the Unum Wiki 1M dataset:
+ *  the waiter dispatch, the compile-time cascade resolving the CLI into one concrete
+ *  @c dense_ram_index instantiation, sharded per stored dtype, and the process setup every
+ *  CPU single-index binary shares. The cascade ends in the workload its entry hop names, the
+ *  timed search for this binary. A ready-made playground is the Unum Wiki 1M dataset:
  *
  *  @code{.sh}
  *  mkdir -p ~/datasets/wiki_1M && cd ~/datasets/wiki_1M &&
@@ -54,7 +55,8 @@
  */
 #pragma once
 
-#include <cmath> // `std::abs`
+#include <cmath>   // `std::abs`
+#include <cstdlib> // `std::strtol` - the `--memory-domain` ordinal
 
 #include <algorithm> // `std::max`, `std::min`, `std::copy_n`
 #include <chrono>    // `std::chrono::steady_clock`
@@ -504,6 +506,20 @@ bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
     return true;
 }
 
+/** The retrieval workload the cascade ends in: the timed search phase and its judgment, under whichever
+ *  kernel the CLI picked. */
+struct retrieval_workload_t {
+
+    /** Whether the workload is defined over the dot kernel alone, so the cascade pins it instead of
+     *  dispatching the CLI's metric. */
+    static constexpr bool dot_only_k = false;
+
+    template <typename streamed_dataset_type_>
+    bool run(streamed_dataset_type_& streamed, fu_pool_t pool) const {
+        return run_search(streamed, pool);
+    }
+};
+
 #pragma endregion
 
 #pragma region Dispatch Cascade
@@ -526,19 +542,20 @@ concept ram_kit_adapted = requires {
 
 /** No-op sibling picked when the cell's CPU kit chain is not adapted yet. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
-          nk_capability_t capability_, typename wait_type_>
+          nk_capability_t capability_, typename wait_type_, typename workload_type_>
     requires(!ram_kit_adapted<stored_dtype_, kernel_, capability_>)
-int stage_and_run(bench_launch<dataset_scalar_type_> const&) {
+int stage_and_run(bench_launch<dataset_scalar_type_> const&, workload_type_ const&) {
     fmt::println("skipped: no CPU kit adapted for {} · {}", dtype_name(stored_dtype_), nk_kernel_name(kernel_));
     return 0;
 }
 
 /** The innermost hop: binds the concrete volatile-index instantiation, wires the typed source
- *  views and the bounded staging trampoline into a @c streamed_dataset, and runs both phases. */
+ *  views and the bounded staging trampoline into a @c streamed_dataset, builds the index, and
+ *  hands it to @p workload. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
-          nk_capability_t capability_, typename wait_type_>
+          nk_capability_t capability_, typename wait_type_, typename workload_type_>
     requires(ram_kit_adapted<stored_dtype_, kernel_, capability_>)
-int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
+int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, workload_type_ const& workload) {
     using allocator_t = forkunion_allocator<std::byte>;
     using index_t = dense_ram_index<stored_dtype_, kernel_, capability_, wait_type_, fu::preferred_atomic_ref,
                                     allocator_t, allocator_t, allocator_t>;
@@ -610,59 +627,301 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
     if (!run_insertion(streamed, launch.pool)) return 1;
     if (!run_refinement(streamed, launch.pool)) return 1;
     if (!launch.options.save_name.empty() && !save_index(streamed)) return 1;
-    if (!run_search(streamed, launch.pool)) return 1;
-    return 0;
+    return workload.run(streamed, launch.pool) ? 0 : 1;
 }
 
 /** Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal hop into
- *  @ref stage_and_run. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_>
-int run_with_metric(bench_launch<dataset_scalar_type_> const& launch) {
-    return dispatch_kernel<stored_dtype_>(
-        launch.options.kernel,
-        [&](auto kernel) {
-            return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, capability_, wait_type_>(launch);
-        },
-        [&](auto metric) {
-            fmt::println("Unsupported metric {} for {} vectors", nk_kernel_name(metric), dtype_name(stored_dtype_));
-            return 1;
-        });
+ *  @ref stage_and_run; a dot-only workload pins the dot kernel instead. */
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_,
+          typename workload_type_>
+int run_with_metric(bench_launch<dataset_scalar_type_> const& launch, workload_type_ const& workload) {
+    if constexpr (workload_type_::dot_only_k)
+        return stage_and_run<dataset_scalar_type_, stored_dtype_, nk_kernel_dot_k, capability_, wait_type_>(launch,
+                                                                                                            workload);
+    else
+        return dispatch_kernel<stored_dtype_>(
+            launch.options.kernel,
+            [&](auto kernel) {
+                return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, capability_, wait_type_>(
+                    launch, workload);
+            },
+            [&](auto metric) {
+                fmt::println("Unsupported metric {} for {} vectors", nk_kernel_name(metric), dtype_name(stored_dtype_));
+                return 1;
+            });
 }
 
 /** Schedule axis: the newest schedule row the allow-mask admits, intersected with what this
  *  machine offers, picks the waiter from @ref schedule_waiters_t; past the tail sits the yield
  *  floor. The same mask already reached @c fu_pool_new, so the pool waits the same way. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_>
-int run_with_schedule(bench_launch<dataset_scalar_type_> const& launch) {
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
+int run_with_schedule(bench_launch<dataset_scalar_type_> const& launch, workload_type_ const& workload) {
     return dispatch_index<std::size(schedule_choices_k)>(
         highest_index(schedule_choices_k, effective_schedule(launch.options.max_schedule)),
         [&](auto row) {
             using wait_type_ = std::tuple_element_t<row.value, schedule_waiters_t>;
-            return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, wait_type_>(launch);
+            return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, wait_type_>(launch, workload);
         },
-        [&] { return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, yield_waiter_t>(launch); });
+        [&] {
+            return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, yield_waiter_t>(launch, workload);
+        });
 }
 
 /** Compute axis: the allow-mask intersected with the runtime detection picks the newest table
  *  row, whose @ref prefix_mask ceiling instantiates @ref run_with_schedule; past the tail sit the
  *  serial kernels every machine owns. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
-int run_with_compute(bench_launch<dataset_scalar_type_> const& launch) {
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename workload_type_>
+int run_with_compute(bench_launch<dataset_scalar_type_> const& launch, workload_type_ const& workload) {
     nk_capability_t const effective = launch.options.max_compute & nk_capabilities_available();
     return dispatch_index<std::size(compute_choices_k)>(
         highest_index(compute_choices_k, effective),
         [&](auto row) {
             return run_with_schedule<dataset_scalar_type_, stored_dtype_, prefix_mask(compute_choices_k, row.value)>(
-                launch);
+                launch, workload);
         },
-        [&] { return run_with_schedule<dataset_scalar_type_, stored_dtype_, nk_cap_serial_k>(launch); });
+        [&] { return run_with_schedule<dataset_scalar_type_, stored_dtype_, nk_cap_serial_k>(launch, workload); });
 }
 
 /** The shard hop: everything below one stored dtype, so a per-dtype shard translation unit
  *  carries the whole instantiation grid of its dtype. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_with_stored_dtype(bench_launch<dataset_scalar_type_> const& launch) {
-    return run_with_compute<dataset_scalar_type_, stored_dtype_>(launch);
+    return run_with_compute<dataset_scalar_type_, stored_dtype_>(launch, retrieval_workload_t {});
+}
+
+#pragma endregion
+
+#pragma region Process Setup
+
+/** The CLI names resolved only once the machine is known: the two capability ceilings and the pinned
+ *  memory domain. */
+struct bench_names_t {
+    std::string max_compute;
+    std::string max_schedule;
+    std::string memory_domain;
+};
+
+/** The flags every CPU single-index binary takes: the dataset, the stored dtype, the ceilings, the executor, the
+ *  graph and its refinement, the judged depth, the view, and the checkpoints. */
+inline clipp::group common_cli(bench_options_t& options, bench_names_t& names) {
+    return ( //
+        (clipp::option("--vectors") & clipp::value("path", options.vectors_path)) % "base vectors, `.fbin` family",
+        (clipp::option("--queries") & clipp::value("path", options.queries_path)) % "query vectors, same dtype",
+        (clipp::option("--f32").set(options.stored_dtype, nk_f32_k) |
+         clipp::option("--bf16").set(options.stored_dtype, nk_bf16_k) |
+         clipp::option("--f16").set(options.stored_dtype, nk_f16_k) |
+         clipp::option("--e5m2").set(options.stored_dtype, nk_e5m2_k) |
+         clipp::option("--e4m3").set(options.stored_dtype, nk_e4m3_k) |
+         clipp::option("--e3m2").set(options.stored_dtype, nk_e3m2_k) |
+         clipp::option("--e2m3").set(options.stored_dtype, nk_e2m3_k) |
+         clipp::option("--i8").set(options.stored_dtype, nk_i8_k) |
+         clipp::option("--i4").set(options.stored_dtype, nk_i4_k) |
+         clipp::option("--u8").set(options.stored_dtype, nk_u8_k) |
+         clipp::option("--u4").set(options.stored_dtype, nk_u4_k) |
+         clipp::option("--u1").set(options.stored_dtype, nk_u1_k)) %
+            "stored dtype override, staging `nk::cast` on ingest",
+        (clipp::option("--max-compute") & clipp::value("name", names.max_compute)) %
+            "compute ceiling by microarchitecture, like `icelake`, or `serial`; newest detected by default",
+        (clipp::option("--max-schedule") & clipp::value("name", names.max_schedule)) %
+            "scheduling ceiling by wait instruction, like `tpause`, or `standard`; newest offered by default",
+        (clipp::option("--threads") & clipp::value("count", options.threads)) %
+            "threads; 7/8 of the logical cores by default",
+        (clipp::option("--memory-domain") & clipp::value("id", names.memory_domain)) %
+            "pin memory & threads to one NUMA domain; the heap otherwise",
+        (clipp::option("--batch") & clipp::value("rows", options.batch)) %
+            "staging trampoline rows shared by all threads; 4 × threads by default",
+        (clipp::option("--connectivity") & clipp::value("degree", options.connectivity)) % "16, 32, or 128",
+        (clipp::option("--expansion-add") & clipp::value("breadth", options.expansion_add)) %
+            "insertion candidate pool; 256 by default",
+        (clipp::option("--expansion-search") & clipp::value("breadth", options.expansion_search)) %
+            "search candidate pool; 96 by default",
+        (clipp::option("--max-refines") & clipp::value("passes", options.max_refines)) %
+            "upper bound on whole-graph refinement passes after ingestion; 0 by default",
+        (clipp::option("--expansion-refine") & clipp::value("breadth", options.expansion_refine)) %
+            "refinement candidate pool; twice the connectivity by default",
+        (clipp::option("--top-k") & clipp::value("count", options.top_k)) % "matches per query to judge",
+        (clipp::option("--max-vectors") & clipp::value("count", options.max_vectors)) % "cap on ingested rows",
+        (clipp::option("--first-vector") & clipp::value("row", options.first_vector)) %
+            "first dataset row to view; slices one file across independent runs",
+        clipp::option("--self-recall").set(options.self_recall, true) % //
+            "query every stored vector for itself instead of the query file",
+        (clipp::option("--save") & clipp::value("name", options.save_name)) % //
+            "checkpoint name to serialize every domain index into after ingestion",
+        (clipp::option("--load") & clipp::value("name", options.load_name)) % //
+            "checkpoint name to restore domain indexes from instead of building",
+        (clipp::option("--checkpoints-dir") & clipp::value("dir", options.checkpoints_dir)) % //
+            "directory for checkpoint blobs; /tmp by default",
+        (clipp::option("--skip-vectors") & clipp::value("count", options.skip_vectors)) % //
+            "rows the loaded indexes already cover",
+        (clipp::option("--huge-pages") & clipp::value("count", options.huge_pages)) %
+            "huge pages provisioned before launch; enforced, so base-page fallbacks fail fast");
+}
+
+/** The process every CPU single-index binary runs around its workload: parses @p cli into @p options and
+ *  @p names, resolves them against the machine, spawns the pool titled @p binary_name, prints the machine,
+ *  then opens the dataset in its own scalar and exits with what @p on_launch makes of its @ref bench_launch. */
+template <typename on_launch_type_>
+int bench_main(int argc, char** argv, char const* binary_name, clipp::group const& cli, bench_options_t& options,
+               bench_names_t const& names, on_launch_type_&& on_launch) {
+    if (!clipp::parse(argc, argv, cli) || options.help || options.vectors_path.empty()) {
+        for (auto const& section : clipp::make_man_page(cli, binary_name))
+            fmt::println("{}\n{}\n", section.title(), section.content());
+        return options.help ? 0 : 1;
+    }
+
+    nk_dtype_t const file_dtype = utilities::dtype_of_extension(options.vectors_path.c_str());
+    if (file_dtype == nk_dtype_unknown_k || file_dtype == nk_u32_k) {
+        fmt::println("Unrecognized vectors extension: {}", options.vectors_path);
+        return 1;
+    }
+    if (options.stored_dtype == nk_dtype_unknown_k) options.stored_dtype = file_dtype;
+
+    // Ceiling names resolve into allow-masks - the native capability currency on both
+    // sides. A named compute ceiling keeps its table prefix plus serial; "serial" alone
+    // keeps just the fallback bit. Capping above the detection is harmless: the dispatch
+    // intersects with the runtime bits anyway.
+    if (names.max_compute == "serial") { options.max_compute = nk_cap_serial_k; }
+    else if (!names.max_compute.empty()) {
+        std::size_t const named = index_of_name(compute_choices_k, names.max_compute);
+        if (named == std::size(compute_choices_k)) {
+            fmt::println("Unknown --max-compute {}; this table offers: {}", names.max_compute,
+                         fmt::join(named_choices("serial", compute_choices_k, //
+                                                 prefix_mask(compute_choices_k, std::size(compute_choices_k))),
+                                   " "));
+            return 1;
+        }
+        options.max_compute = nk_cap_serial_k | prefix_mask(compute_choices_k, named);
+    }
+
+    // A schedule ceiling caps only the waiter bits; the pool-management bits - topology,
+    // placement, huge pages - stay allowed, so `fu_pool_new` keeps its full toolbox. The
+    // floor keyword is "standard", after `fu::standard_yield_t` - Arm's own YIELD hint
+    // legitimately owns the "yield" row.
+    if (names.max_schedule == "standard") { options.max_schedule = schedule_floor_k; }
+    else if (!names.max_schedule.empty()) {
+        std::size_t const named = index_of_name(schedule_choices_k, names.max_schedule);
+        if (named == std::size(schedule_choices_k)) {
+            fmt::println("Unknown --max-schedule {}; this table offers: {}", names.max_schedule,
+                         fmt::join(named_choices("standard", schedule_choices_k, //
+                                                 prefix_mask(schedule_choices_k, std::size(schedule_choices_k))),
+                                   " "));
+            return 1;
+        }
+        options.max_schedule = static_cast<fu_capabilities_t>(schedule_floor_k |
+                                                              prefix_mask(schedule_choices_k, named));
+    }
+
+    fu_topology_t topology = nullptr;
+    fu_fabric_t fabric = nullptr;
+    fu_pool_t pool = nullptr;
+    if (fu_topology_new(&topology) != fu_success_k || fu_fabric_new(&fabric) != fu_success_k ||
+        fu_pool_new(binary_name, options.max_schedule, &pool) != fu_success_k) {
+        fmt::println("Failed to inspect the topology or create the pool");
+        return 1;
+    }
+
+    std::size_t memory_domains = 0;
+    if (fu_memory_domains_count(topology, &memory_domains) != fu_success_k) {
+        fmt::println("Failed to count the memory domains");
+        return 1;
+    }
+
+    // Resolve `--memory-domain`: empty means one machine-wide heap index, and a single ID
+    // pins memory & threads to that domain. This benchmark measures exactly one index - the
+    // multi-domain arrangement is `usearch_bench_dense_ram_indexes`, driving the sharded index.
+    if (!names.memory_domain.empty()) {
+        fu_memory_domain_id_t const domain = static_cast<fu_memory_domain_id_t>(
+            std::strtol(names.memory_domain.c_str(), nullptr, 10));
+        if (domain < 0 || static_cast<std::size_t>(domain) >= memory_domains) {
+            fmt::println("Unknown --memory-domain {}; this machine has {} memory domains", names.memory_domain,
+                         memory_domains);
+            return 1;
+        }
+        options.memory_domains.push_back(domain);
+    }
+
+    // Default to 7/8 of the available logical cores: at full occupancy the strictly-ordered
+    // publication convoy serializes on scheduler latency, and throughput collapses by an order
+    // of magnitude. A single pinned domain carves the core budget from every compute domain
+    // whose local memory it is - several clusters can share one NUMA node.
+    bool spawned = false;
+    std::size_t threads = options.threads;
+    if (options.memory_domains.size() == 1) {
+        std::size_t compute_domains = 0;
+        if (fu_compute_domains_count(topology, &compute_domains) != fu_success_k) {
+            fmt::println("Failed to count the compute domains");
+            return 1;
+        }
+        if (!threads) {
+            std::size_t local_cores = 0;
+            for (std::size_t compute_domain = 0; compute_domain != compute_domains; ++compute_domain) {
+                std::size_t local_memory = 0, domain_cores = 0;
+                if (fu_local_memory_of(topology, compute_domain, &local_memory) != fu_success_k) continue;
+                if (local_memory != static_cast<std::size_t>(options.memory_domains.front())) continue;
+                if (fu_logical_cores_count_in(topology, compute_domain, &domain_cores) != fu_success_k) continue;
+                local_cores += domain_cores;
+            }
+            threads = std::max<std::size_t>(1, local_cores * 7 / 8);
+        }
+        spawned = fu_pool_spawn_near_memory_domain(topology, pool, options.memory_domains.front(), threads,
+                                                   fu_caller_inclusive_k) == fu_success_k;
+    }
+    else {
+        if (!threads) {
+            std::size_t logical_cores = 0;
+            if (fu_logical_cores_count(topology, &logical_cores) != fu_success_k) {
+                fmt::println("Failed to count the logical cores");
+                return 1;
+            }
+            threads = std::max<std::size_t>(1, logical_cores * 7 / 8);
+        }
+        spawned = fu_pool_spawn(topology, pool, threads, fu_caller_inclusive_k) == fu_success_k;
+    }
+    if (!spawned) {
+        fmt::println("Failed to spawn {} threads", threads);
+        return 1;
+    }
+    print_machine(topology, fabric, options, threads);
+
+    // Huge pages are provisioned outside the process - see the header's shell snippet - and
+    // `--huge-pages` declares the expectation, enforced against what the domains report.
+    if (options.huge_pages) {
+        std::size_t volume = 0;
+        for (std::size_t domain = 0; domain != memory_domains; ++domain) {
+            std::size_t domain_volume = 0;
+            if (fu_volume_huge_pages_in(topology, domain, &domain_volume) != fu_success_k) continue;
+            volume += domain_volume;
+        }
+        fmt::println("  huge pages expected: {}, available: {:.2f} GB", options.huge_pages, double(volume) / 1e9);
+        if (!volume) {
+            fmt::println("--huge-pages expects {}, but the domains report none", options.huge_pages);
+            return 1;
+        }
+    }
+
+    // File-scalar axis: the newest hop of the compile-time cascade, lowering the file's dtype
+    // to the C++ wrapper the whole run is instantiated over through NumKong's own `type_for`.
+    int const exit_code = dispatch_file_dtype(
+        file_dtype,
+        [&](auto dtype) {
+            using dataset_scalar_t = typename nk::type_for<dtype.value>::type;
+            auto opened = utilities::persisted_dataset<dataset_scalar_t>::open(
+                options.vectors_path, options.queries_path, options.neighbors_path);
+            if (opened.status != status_t::success_k) {
+                fmt::println("Failed to open the dataset: {}", options.vectors_path);
+                return 1;
+            }
+            return on_launch(bench_launch<dataset_scalar_t> {opened.value, options, pool, topology});
+        },
+        [&](auto dtype) {
+            fmt::println("Unsupported dataset dtype {}", dtype_name(dtype));
+            return 1;
+        });
+
+    fu_pool_delete(pool);
+    fu_fabric_delete(fabric);
+    fu_topology_delete(topology);
+    return exit_code;
 }
 
 #pragma endregion

@@ -2,14 +2,15 @@
  *  @file bench/dense/vram_index.cuh
  *  @author Ash Vardanian
  *  @date July 22, 2026
- *  @brief The CUDA pipeline of the dense-index benchmark, shared by the per-dtype shards: the
- *      single-device phases and the compile-time cascade below the stored dtype.
+ *  @brief The CUDA pipeline both dense-index benchmark families share: the single-device phases,
+ *      the compile-time cascade below the stored dtype, and the process setup of both entries.
  *
  *  The backend-neutral surface - options, checkpoints, dataset streaming, telemetry, result
- *  judgment - lives in @c dense_index.cuh; this header owns everything CUDA: one device, one
+ *  judgment - lives in @c dense.cuh; this header owns everything CUDA: one device, one
  *  @c dense_vram_index instantiation, batch-shaped run loops, and the compile-time cascade
  *  lowering memory space, generation ceiling, and metric below the stored dtype - the axis the
- *  shard translation units split.
+ *  shard translation units split. The cascade ends in a workload, so one pipeline serves both
+ *  families; the retrieval one lives here.
  */
 #pragma once
 
@@ -21,6 +22,7 @@
 #include <string>    // `std::string`
 #include <vector>    // `std::vector`
 
+#include <clipp.h>
 #include <cuda_runtime.h>
 #include <fmt/format.h>
 
@@ -32,6 +34,15 @@
 namespace unum::usearch::bench::dense {
 
 #pragma region CUDA Pipeline
+
+/** Compute ceilings the device kit chains adapt, ascending and named by NumKong's GPU tiers; the floor
+ *  the table never lists is the Ampere kits. */
+inline constexpr capability_choice<cuda_arch_t> cuda_compute_choices_k[] = {
+    {"ada", cuda_arch_ada_k},
+    {"hopper", cuda_arch_hopper_k},
+    {"blackwell", cuda_arch_blackwell_k},
+    {"blackwellrtx", cuda_arch_blackwellrtx_k},
+};
 
 /**
  *  @brief The GPU-side state one fully-typed benchmark run shares between its phases: the single
@@ -365,16 +376,28 @@ bool run_search(streamed_dataset_type_& streamed) {
     return true;
 }
 
+/** The retrieval workload the cascade ends in: batched search over the built index, judged against
+ *  the ground truth. A workload says whether it pins the dot kernel and runs once the index is
+ *  built. */
+struct retrieval_workload_t {
+    static constexpr bool dot_only_k = false;
+
+    template <typename streamed_dataset_type_>
+    bool run(streamed_dataset_type_& streamed) const {
+        return run_search(streamed);
+    }
+};
+
 #pragma endregion
 
 #pragma region Dispatch Cascade
 
 /** The innermost hop: binds the concrete CUDA-index instantiation, wires the typed source views
- *  and the staging trampoline, and runs the phases in checkpoint order. */
+ *  and the staging trampoline, builds the index in checkpoint order, then runs @p workload. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t capability_,
-          typename plane_allocator_>
+          typename plane_allocator_, typename workload_type_>
 int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
-                  int device) {
+                  int device, workload_type_ const& workload) {
     using index_t = dense_vram_index<stored_dtype_, kernel_, capability_, plane_allocator_, plane_allocator_,
                                      cuda_device_allocator_t>;
     using bench_context_t = cuda_bench_context<index_t>;
@@ -429,51 +452,46 @@ int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& data
     if (!run_insertion(streamed)) return 1;
     if (!run_refinement(streamed)) return 1;
     if (!options.save_name.empty() && !save_index(streamed)) return 1;
-    if (!run_search(streamed)) return 1;
-    return 0;
+    return workload.run(streamed) ? 0 : 1;
 }
 
 /** Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal hop into
- *  @ref stage_and_run. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, cuda_arch_t capability_, typename plane_allocator_>
+ *  @ref stage_and_run; a dot-only workload pins the dot kernel instead. */
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, cuda_arch_t capability_, typename plane_allocator_,
+          typename workload_type_>
 int run_with_metric(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
-                    int device) {
-    return dispatch_kernel<stored_dtype_>(
-        options.kernel,
-        [&](auto kernel) {
-            return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, capability_, plane_allocator_>(
-                dataset, options, device);
-        },
-        [&](auto metric) {
-            fmt::println("Unsupported metric {} for {} vectors", nk_kernel_name(metric), dtype_name(stored_dtype_));
-            return 1;
-        });
+                    int device, workload_type_ const& workload) {
+    if constexpr (workload_type_::dot_only_k)
+        return stage_and_run<dataset_scalar_type_, stored_dtype_, nk_kernel_dot_k, capability_, plane_allocator_>(
+            dataset, options, device, workload);
+    else
+        return dispatch_kernel<stored_dtype_>(
+            options.kernel,
+            [&](auto kernel) {
+                return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, capability_, plane_allocator_>(
+                    dataset, options, device, workload);
+            },
+            [&](auto metric) {
+                fmt::println("Unsupported metric {} for {} vectors", nk_kernel_name(metric), dtype_name(stored_dtype_));
+                return 1;
+            });
 }
-
-/** Compute ceilings the device kit chains adapt, ascending and named by NumKong's GPU tiers; the floor
- *  the table never lists is the Ampere kits. */
-inline constexpr capability_choice<cuda_arch_t> cuda_compute_choices_k[] = {
-    {"ada", cuda_arch_ada_k},
-    {"hopper", cuda_arch_hopper_k},
-    {"blackwell", cuda_arch_blackwell_k},
-    {"blackwellrtx", cuda_arch_blackwellrtx_k},
-};
 
 /** Compute axis: the named table row's ceiling instantiates every cell below, so two runs on one device
  *  compare generations side by side; past the tail sit the Ampere kits every GPU runs. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename plane_allocator_>
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename plane_allocator_, typename workload_type_>
 int run_with_compute(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, bench_options_t const& options,
-                     int device, cuda_arch_t max_compute) {
+                     int device, cuda_arch_t max_compute, workload_type_ const& workload) {
     auto const named = std::ranges::find(cuda_compute_choices_k, max_compute, &capability_choice<cuda_arch_t>::bit);
     return dispatch_index<std::size(cuda_compute_choices_k)>(
         static_cast<std::size_t>(named - std::begin(cuda_compute_choices_k)),
         [&](auto row) {
             return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_compute_choices_k[row.value].bit,
-                                   plane_allocator_>(dataset, options, device);
+                                   plane_allocator_>(dataset, options, device, workload);
         },
         [&] {
             return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_arch_ampere_k, plane_allocator_>(
-                dataset, options, device);
+                dataset, options, device, workload);
         });
 }
 
@@ -483,7 +501,8 @@ int run_with_compute(utilities::persisted_dataset<dataset_scalar_type_> const& d
  *      units carry the whole device instantiation grid of their dtype.
  *
  *  Device-space planes stay in VRAM through the virtual-memory backend; managed-space planes
- *  oversubscribe it through the pager, the bigger-than-VRAM build path.
+ *  oversubscribe it through the pager, the bigger-than-VRAM build path. The cascade ends in the
+ *  retrieval workload.
  */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_with_stored_dtype(utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
@@ -491,9 +510,155 @@ int run_with_stored_dtype(utilities::persisted_dataset<dataset_scalar_type_> con
                           cuda_address_space_t plane_space) {
     return plane_space == cuda_address_space_t::managed_k
                ? run_with_compute<dataset_scalar_type_, stored_dtype_, cuda_managed_allocator<std::byte>>( //
-                     dataset, options, device, max_compute)
+                     dataset, options, device, max_compute, retrieval_workload_t {})
                : run_with_compute<dataset_scalar_type_, stored_dtype_, cuda_virtual_memory_allocator<std::byte>>( //
-                     dataset, options, device, max_compute);
+                     dataset, options, device, max_compute, retrieval_workload_t {});
 }
+
+#pragma endregion
+
+#pragma region Command Line
+
+/** The device knobs both CUDA benchmark families parse beside @c bench_options_t, before any
+ *  dtype is known. */
+struct cuda_cli_t {
+
+    /** The CUDA ordinal every plane and launch lands on. */
+    int device = 0;
+
+    /** The raw `--devices` list, split into @c bench_options_t::devices once parsed. */
+    std::string devices_list;
+
+    /** The raw `--max-compute` name, resolved against @ref cuda_compute_choices_k once parsed. */
+    std::string max_compute_name;
+
+    /** Where the index planes live: VRAM, or managed memory oversubscribing it. */
+    cuda_address_space_t plane_space = cuda_address_space_t::device_k;
+};
+
+/** The options both CUDA benchmark families share: the dataset, the device and its memory, the
+ *  stored dtype, the graph shape and search breadth, and the checkpoints. */
+inline clipp::group shared_cuda_cli(bench_options_t& options, cuda_cli_t& device_cli) {
+    return ( //
+        (clipp::option("--vectors") & clipp::value("path", options.vectors_path)) % "base vectors, `.fbin` family",
+        (clipp::option("--queries") & clipp::value("path", options.queries_path)) % "query vectors, same dtype",
+        (clipp::option("--device") & clipp::value("id", device_cli.device)) % "CUDA device ordinal; 0 by default",
+        (clipp::option("--devices") & clipp::value("list", device_cli.devices_list)) %
+            "comma-separated ordinals for the multi-index pipeline: one shard per device",
+        clipp::option("--merge").set(options.merge, true) % //
+            "stitch the shards into ONE graph after ingest; single-walk queries",
+        (clipp::option("--expansion-merge") & clipp::value("breadth", options.expansion_merge)) %
+            "merge candidate pool; inherits --expansion-add by default",
+        (clipp::option("--max-refines") & clipp::value("passes", options.max_refines)) %
+            "upper bound on whole-graph refinement passes after ingestion; 0 by default",
+        (clipp::option("--expansion-refine") & clipp::value("breadth", options.expansion_refine)) %
+            "refinement candidate pool; twice the connectivity by default",
+        (clipp::option("--max-compute") & clipp::value("name", device_cli.max_compute_name)) %
+            "compute ceiling by GPU generation, like `hopper`, or `ampere`; newest by default",
+        clipp::option("--managed-memory").set(device_cli.plane_space, cuda_address_space_t::managed_k) % //
+            "managed-memory planes: oversubscribe VRAM through the pager, host-RAM ceiling",
+        (clipp::option("--bf16").set(options.stored_dtype, nk_bf16_k) |
+         clipp::option("--f16").set(options.stored_dtype, nk_f16_k) |
+         clipp::option("--e5m2").set(options.stored_dtype, nk_e5m2_k) |
+         clipp::option("--e4m3").set(options.stored_dtype, nk_e4m3_k) |
+         clipp::option("--e3m2").set(options.stored_dtype, nk_e3m2_k) |
+         clipp::option("--e2m3").set(options.stored_dtype, nk_e2m3_k) |
+         clipp::option("--i8").set(options.stored_dtype, nk_i8_k) |
+         clipp::option("--i4").set(options.stored_dtype, nk_i4_k) |
+         clipp::option("--u8").set(options.stored_dtype, nk_u8_k) |
+         clipp::option("--u4").set(options.stored_dtype, nk_u4_k) |
+         clipp::option("--u1").set(options.stored_dtype, nk_u1_k)) %
+            "stored dtype override, staging `nk::cast` on ingest",
+        (clipp::option("--batch") & clipp::value("rows", options.batch)) %
+            "rows & queries per launch; 65536 by default",
+        (clipp::option("--connectivity") & clipp::value("degree", options.connectivity)) % "16, 32, or 128",
+        (clipp::option("--expansion-add") & clipp::value("breadth", options.expansion_add)) %
+            "insertion candidate pool; 256 by default",
+        (clipp::option("--expansion-search") & clipp::value("breadth", options.expansion_search)) %
+            "search candidate pool; 96 by default",
+        (clipp::option("--top-k") & clipp::value("count", options.top_k)) % "matches per query to judge",
+        (clipp::option("--max-vectors") & clipp::value("count", options.max_vectors)) % "cap on ingested rows",
+        clipp::option("--self-recall").set(options.self_recall, true) % //
+            "query every stored vector for itself instead of the query file",
+        (clipp::option("--save") & clipp::value("name", options.save_name)) % //
+            "checkpoint name to serialize the index into after ingestion",
+        (clipp::option("--load") & clipp::value("name", options.load_name)) % //
+            "checkpoint name to restore the index from instead of building",
+        (clipp::option("--checkpoints-dir") & clipp::value("dir", options.checkpoints_dir)) % //
+            "directory for checkpoint blobs; /tmp by default",
+        (clipp::option("--skip-vectors") & clipp::value("count", options.skip_vectors)) % //
+            "rows the loaded index already covers");
+}
+
+/** The process setup both CUDA benchmark mains run: parses @p cli or prints its manual under
+ *  @p program, probes the device into the Machine section, resolves the compute ceiling, and opens
+ *  the dataset with its file-native scalar for @p on_dataset - handed the dataset, the device, the
+ *  ceiling, and the plane space. */
+int run_cuda_bench(int argc, char** argv, clipp::group const& cli, char const* program, bench_options_t& options,
+                   cuda_cli_t const& device_cli, auto on_dataset) {
+    if (!clipp::parse(argc, argv, cli) || options.help || options.vectors_path.empty()) {
+        for (auto const& section : clipp::make_man_page(cli, program))
+            fmt::println("{}\n{}\n", section.title(), section.content());
+        return options.help ? 0 : 1;
+    }
+
+    for (std::size_t begin = 0; begin < device_cli.devices_list.size();) {
+        std::size_t end = device_cli.devices_list.find(',', begin);
+        if (end == std::string::npos) end = device_cli.devices_list.size();
+        options.devices.push_back(std::stoi(device_cli.devices_list.substr(begin, end - begin)));
+        begin = end + 1;
+    }
+    int devices_count = 0;
+    if (cudaGetDeviceCount(&devices_count) != cudaSuccess || device_cli.device >= devices_count) {
+        fmt::println("CUDA device {} unreachable; {} devices visible", device_cli.device, devices_count);
+        return 1;
+    }
+    cudaSetDevice(device_cli.device);
+    cudaDeviceProp properties = {};
+    cudaGetDeviceProperties(&properties, device_cli.device);
+    fmt::print(header_style(), "Machine\n");
+    fmt::println("  device {}: {} · {} SMs · {:.0f} GB", device_cli.device, properties.name,
+                 properties.multiProcessorCount, double(properties.totalGlobalMem) / 1e9);
+    nk_dtype_t const file_dtype = utilities::dtype_of_extension(options.vectors_path.c_str());
+    if (options.stored_dtype == nk_dtype_unknown_k) options.stored_dtype = file_dtype;
+
+    // A named ceiling caps which kit-chain rows the cascade may select; "ampere" keeps just the floor.
+    // Capping above what this binary compiled is harmless: a row also needs its tier compiled in.
+    cuda_arch_t max_compute = cuda_compute_choices_k[std::size(cuda_compute_choices_k) - 1].bit;
+    if (device_cli.max_compute_name == "ampere") max_compute = cuda_arch_ampere_k;
+    else if (!device_cli.max_compute_name.empty()) {
+        std::size_t const named = index_of_name(cuda_compute_choices_k, device_cli.max_compute_name);
+        if (named == std::size(cuda_compute_choices_k)) {
+            fmt::println(
+                "Unknown --max-compute {}; this table offers: ampere {}", device_cli.max_compute_name,
+                fmt::join(cuda_compute_choices_k | std::views::transform(&capability_choice<cuda_arch_t>::name), " "));
+            return 1;
+        }
+        max_compute = cuda_compute_choices_k[named].bit;
+    }
+    fmt::println("  compute ceiling: {}", bit_name(cuda_compute_choices_k, max_compute, "ampere"));
+    fmt::println("  kernels requested: {} · {}", dtype_name(options.stored_dtype), nk_kernel_name(options.kernel));
+
+    // File-scalar axis: lower the file's dtype to the C++ wrapper the run is instantiated over,
+    // through NumKong's own `type_for` - the same paradigm the typed cascade rides.
+    return dispatch_file_dtype(
+        file_dtype,
+        [&](auto dtype) {
+            using dataset_scalar_t = typename nk::type_for<dtype.value>::type;
+            auto opened = utilities::persisted_dataset<dataset_scalar_t>::open(
+                options.vectors_path, options.queries_path, options.neighbors_path);
+            if (opened.status != status_t::success_k) {
+                fmt::println("Failed to open the dataset: {}", options.vectors_path);
+                return 1;
+            }
+            return on_dataset(opened.value, device_cli.device, max_compute, device_cli.plane_space);
+        },
+        [&](auto dtype) {
+            fmt::println("Unsupported dataset dtype {} for the CUDA kits", dtype_name(dtype));
+            return 1;
+        });
+}
+
+#pragma endregion
 
 } // namespace unum::usearch::bench::dense

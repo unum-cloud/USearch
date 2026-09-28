@@ -692,8 +692,9 @@ struct streamed_dataset {
     using vector_view_t = typename bench_context_type_::vector_view_t;
     static constexpr bool zero_copy_k = std::is_same_v<dataset_scalar_type_, scalar_t>;
 
-    /** Float sources downcast into integer targets only after a global symmetric rescale into
-     *  the target's range; a raw saturating cast collapses the value distribution. */
+    /** Float sources downcast into integer or byte-sized float targets only after a global
+     *  symmetric rescale into the target's range; a raw cast collapses the value distribution,
+     *  saturating it in integers and flushing most of an embedding to zero in fp8 and fp6. */
     static constexpr bool scaled_k = !zero_copy_k && !nk::is_integral_dtype<dataset_scalar_type_>() &&
                                      (nk::is_integral_dtype<scalar_t>() || sizeof(scalar_t) == 1);
 

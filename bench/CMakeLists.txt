@@ -37,9 +37,7 @@ add_executable(
     dense/ram_indexes_u1.cpp
 )
 usearch_setup_target(usearch_bench_dense_ram_indexes HOST)
-target_include_directories(
-    usearch_bench_dense_ram_indexes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-)
+target_include_directories(usearch_bench_dense_ram_indexes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(
     usearch_bench_dense_ram_indexes PRIVATE clipp fmt::fmt yyjson forkunion::static stringzilla::header
 )
