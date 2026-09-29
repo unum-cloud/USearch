@@ -43,7 +43,7 @@ use usearch::{Index, IndexOptions, MetricKind, ScalarKind, new_index};
 let options = IndexOptions {
     dimensions: 3, // necessary for most metric kinds
     metric: MetricKind::IP, // or ::L2sq, ::Cos ...
-    quantization: ScalarKind::BF16, // or ::F32, ::F16, ::E5M2, ::E4M3, ::E3M2, ::E2M3, ::U8, ::I8, ::B1x8 ...
+    quantization: ScalarKind::BF16, // or ::F32, ::F16, ::E5M2, ::E4M3, ::E3M2, ::E2M3, ::U8, ::I8, ::B1 ...
     connectivity: 0, // zero for auto
     expansion_add: 0, // zero for auto
     expansion_search: 0, // zero for auto
@@ -194,14 +194,14 @@ index.add(43, buffer_b);
 ### Binary Vectors
 
 USearch also implements binary distance functions and natively supports bit-vectors.
-If you initialize the index with `quantization: ScalarKind::B1x8`, you can add floating-point vectors and they will be quantized mapping positive values to `1` and negative and zero values to `0`.
+If you initialize the index with `quantization: ScalarKind::B1`, you can add floating-point vectors and they will be quantized mapping positive values to `1` and negative and zero values to `0`.
 Alternatively, you can use the `b1x8` type to represent packed binary vectors directly.
 
 ```rs
 let index = Index::new(&IndexOptions {
     dimensions: 8,
     metric: MetricKind::Hamming,
-    quantization: ScalarKind::B1x8,
+    quantization: ScalarKind::B1,
     ..Default::default()
 })
 .unwrap();
