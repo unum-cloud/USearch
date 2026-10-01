@@ -1,65 +1,48 @@
 {
   "[c]": {
     "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
-    "editor.formatOnSave": true
-  },
-  "[cmake]": {
-    "editor.formatOnSave": false
+    "editor.formatOnSave": true,
+    "editor.rulers": [120]
   },
   "[cpp]": {
     "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
-    "editor.formatOnSave": true
+    "editor.formatOnSave": true,
+    "editor.rulers": [120]
   },
   "[cuda-cpp]": {
     "editor.defaultFormatter": "llvm-vs-code-extensions.vscode-clangd",
-    "editor.formatOnSave": true
-  },
-  "[go]": {
-    "editor.defaultFormatter": "golang.go",
-    "editor.formatOnSave": true
-  },
-  "[java]": {
-    "editor.codeActionsOnSave": {
-      "source.organizeImports": "never"
-    },
-    "editor.defaultFormatter": "Oracle.oracle-java",
-    "editor.formatOnSave": false,
-    "editor.insertSpaces": true,
-    "editor.tabSize": 4
-  },
-  "[js]": {
-    "editor.defaultFormatter": "esbenp.prettier-vscode",
-    "editor.tabSize": 4
+    "editor.formatOnSave": true,
+    "editor.rulers": [120]
   },
   "[json]": {
-    "editor.defaultFormatter": "dprint.dprint"
+    "editor.defaultFormatter": "dprint.dprint",
+    "editor.formatOnSave": true,
+    "editor.rulers": [120]
   },
   "[jsonc]": {
-    "editor.defaultFormatter": "dprint.dprint"
+    "editor.defaultFormatter": "dprint.dprint",
+    "editor.formatOnSave": true,
+    "editor.rulers": [120]
+  },
+  "[markdown]": {
+    "editor.defaultFormatter": "yzhang.markdown-all-in-one",
+    "editor.formatOnSave": false,
+    "editor.rulers": [120]
   },
   "[python]": {
     "editor.defaultFormatter": "charliermarsh.ruff",
-    "editor.formatOnSave": true
+    "editor.formatOnSave": true,
+    "editor.rulers": [120]
   },
   "[yaml]": {
-    "editor.defaultFormatter": "dprint.dprint"
+    "editor.defaultFormatter": "dprint.dprint",
+    "editor.formatOnSave": true,
+    "editor.rulers": [120]
   },
-  "autoDocstring.docstringFormat": "sphinx",
-  "C_Cpp.autocomplete": "disabled",
-  "C_Cpp.errorSquiggles": "disabled",
-  "C_Cpp.formatting": "disabled",
-  "C_Cpp.intelliSenseEngine": "disabled",
   "clangd.arguments": [
     "--background-index",
-    "--clang-tidy",
-    "--completion-style=detailed",
-    "--header-insertion=never",
-    "--pch-storage=memory"
+    "--header-insertion=never"
   ],
-  "clangd.checkUpdates": false,
-  "clangd.onConfigChanged": "restart",
-  "cmake.options.statusBarVisibility": "compact",
-  "cmake.useCMakePresets": "always",
   "cSpell.words": [
     "allclose",
     "arange",
@@ -156,15 +139,10 @@
     "Xunit",
     "Yuga"
   ],
-  "dotnet.defaultSolution": "csharp/Cloud.Unum.USearch.sln",
-  "editor.insertSpaces": true,
-  "editor.tabSize": 4,
-  "extensions.experimental.affinity": {
-    "ms-python.vscode-pylance": 3,
-    "ms-vscode.cpptools": 2,
-    "rust-lang.rust-analyzer": 1
-  },
   "files.associations": {
+    "*.cu": "cpp",
+    "*.cuh": "cpp",
+    "*.tcc": "cpp",
     "__availability": "cpp",
     "__bit_reference": "cpp",
     "__bits": "cpp",
@@ -184,9 +162,6 @@
     "__tree": "cpp",
     "__tuple": "cpp",
     "__verbose_abort": "cpp",
-    "*.cu": "cpp",
-    "*.cuh": "cpp",
-    "*.tcc": "cpp",
     "algorithm": "cpp",
     "any": "cpp",
     "array": "cpp",
@@ -301,17 +276,9 @@
     "**/stringzilla/**": true,
     "**/target/**": true
   },
-  "java.configuration.updateBuildConfiguration": "automatic",
-  "java.format.enabled": false,
-  "prettier.singleQuote": true,
-  "prettier.useTabs": false,
-  "python.analysis.diagnosticSeverityOverrides": {
-    "reportMissingImports": "none"
-  },
   "python.testing.pytestArgs": ["python"],
   "python.testing.pytestEnabled": true,
   "python.testing.unittestEnabled": false,
-  "rust-analyzer.cargo.features": [],
   "search.exclude": {
     "**/build_*/**": true,
     "**/datasets/**": true,

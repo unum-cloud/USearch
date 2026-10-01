@@ -14,30 +14,19 @@
 # Bypass knowingly (you almost never should) with: git commit --no-verify
 
 set -u
-LC_ALL=C # ? Byte-wise regexes, immune to the committer's locale
+export LC_ALL=C # Byte-wise regexes, immune to the committer's locale
 
-failed=0
+rejection_count=0
+project_include_prefix="usearch"
 
-# Prints the reason and the first offending lines, and marks the commit rejected.
+# Prints the reason and the first offending lines, and counts the rejection.
 fail() { # fail <matches> <message-line>...
     local matches=$1
     shift
     local line
     for line in "$@"; do echo "pre-commit: $line"; done
     printf '%s\n' "$matches" | head -5
-    failed=1
-}
-
-# The line numbers a staged file gained, read off the `@@ -a,b +c,d @@` headers of a zero-context
-# diff: the hunk adds lines `c` through `c + d - 1`, and a missing `,d` adds exactly one.
-added_line_numbers() { # added_line_numbers <path>
-    git diff --cached --unified=0 -- "$1" | awk '
-        /^@@/ {
-            split($3, range, ",")
-            start = substr(range[1], 2) + 0
-            count = (range[2] == "") ? 1 : range[2] + 0
-            for (line = start; line < start + count; ++line) print line
-        }'
+    rejection_count=$((rejection_count + 1))
 }
 
 # Blanks C-family comments to spaces, keeping every line and column in place, so a code check never fires
@@ -127,25 +116,37 @@ check_backward_references() {
         "            history belongs in commit messages and design docs:"
 }
 
-# Decorative comment separators - runs of three or more `-` or `=` used purely as visual dividers
-# inside a comment. Sections are named by `#pragma region`, and a paragraph that needs a heading gets
-# a sentence. A ruler carries no information that the sentence beneath it does not already carry.
-check_rulers() {
+# Rejects an added banner ruler outside Markdown: a comment that opens or closes on a run of `---`, `===`, `####`,
+# `////`, `***` or horizontal box-drawing strokes, a line of such runs around an optional label, or a string literal
+# that prints one. Box corners and verticals stay free for diagrams, a `|` line for Markdown tables, and YAML keeps
+# its `---` document marker. Reads `+` lines, or a whole diff, from stdin.
+check_banners() { # check_banners <path> < added-lines
+    case "$1" in
+    *.c | *.h | *.cc | *.cpp | *.cxx | *.hpp | *.hxx | *.cu | *.cuh | *.hip | *.metal | *.pml | *.py | *.pyi | *.pyx | \
+        *.rs | *.go | *.zig | *.mojo | *.js | *.mjs | *.cjs | *.ts | *.mts | *.tsx | *.swift | *.java | *.kt | *.cs | \
+        *.toml | *.yml | *.yaml | *.cmake | *CMakeLists.txt | *.sh) ;;
+    *) return 0 ;;
+    esac
     local rulers
-    rulers=$(printf '%s\n' "$added" | grep -E '^\+(.*(//|/\*)|[[:space:]]*\*).*[-=]{3,}' || true)
-    [ -z "$rulers" ] || fail "$rulers" \
-        "$file adds a decorative comment separator - write \`#pragma region Traversal Scratch\`" \
-        "            where a section starts, or a plain sentence where a paragraph does:"
-}
-
-# Boxed and ruled banners are not section markers here: code uses `#pragma region` / `# region`,
-# and printed output uses plain lines.
-check_banner_rules() {
-    local banners
-    banners=$(printf '%s\n' "$added" | grep -nE '(^\+|["'"'"'])[[:space:]]*(={4,}|-{4,}|#{4,})|(={3,}|-{3,}|#{3,})[[:space:]]*["'"'"']' || true)
-    [ -z "$banners" ] || fail "$banners" \
-        "$file draws a ===/---/### banner - sections are \`#pragma region\` or \`# region\`," \
-        "            and printed output takes a plain line:"
+    rulers=$(awk -v path="$1" -v quote="'" '
+        BEGIN {
+            stroke = "(─|━|┄|┅|┈|┉|╌|╍|═)"
+            run = "(---+|===+|####+|////+|\\*\\*\\*+|" stroke stroke stroke "+)"
+            marker = "^(#|//|/\\*|\\*|--|;)[!/*<]?[ \t]*"
+            printed = "(----+|====+|####+|" stroke stroke stroke "+)"
+            literal = "[\"" quote "][ \t]*" printed "|" printed "[ \t]*[\"" quote "]"
+        }
+        /^\+/ {
+            text = substr($0, 2); sub(/^[ \t]+/, "", text); sub(/[ \t\r]+$/, "", text)
+            if (text == "---" && path ~ /\.ya?ml$/) next
+            if (text ~ ("^" run "([ \t].*[ \t]" run ")?$") || text ~ (marker run "[ \t]*(\\*/)?([ \t]|$)") ||
+                (text ~ marker && text ~ ("[ \t]" run "[ \t]*(\\*/)?$")) || (text ~ literal && text !~ /\|/))
+                print
+        }')
+    [ -z "$rulers" ] && return 0
+    echo "pre-commit: $1 adds a banner ruler; name a section with #pragma region or # region, or a plain sentence:"
+    printf '%s\n' "$rulers" | head -5
+    return 1
 }
 
 # A `#pragma region` label must be letters, digits & spaces only. clang-format tokenises the label
@@ -171,6 +172,16 @@ check_sibling_justification() {
     [ -z "$borrowed" ] || fail "$borrowed" \
         "$file justifies a design by a sibling project - say what this code does and why," \
         "            not which repository it was copied from:"
+}
+
+# Rejects a pipe-table row in a comment of a code file, because a header table is plain columns aligned with
+# spaces, which reads the same in an editor, a terminal and a diff; pipe tables belong only in Markdown files.
+check_tables_aligned_not_piped() {
+    local piped
+    piped=$(printf '%s\n' "$added" | grep -E '^\+[[:space:]]*(\*|//[/!]?|#)[[:space:]]+\|.*\|[[:space:]]*$' || true)
+    [ -z "$piped" ] || fail "$piped" \
+        "$file draws a pipe table in a comment; pipe tables belong only in Markdown, so align plain" \
+        "            columns with spaces, indented 4 past the prose, as in \`*      Instruction   Notes\`:"
 }
 
 # endregion Comments and Prose
@@ -247,7 +258,7 @@ check_doxygen_in_line_comments() {
 # above and below must be empty (`*` alone). Spacing is context, not a line, so this reads the
 # whole staged file and reports only the headings the commit itself added.
 check_section_spacing() {
-    git show ":$file" | grep -q '@section' || return 0
+    grep -q '@section' "$staged_blob" || return 0
     local cramped
     cramped=$(awk '
         NR == FNR { added[$1 + 0]; next }
@@ -258,7 +269,7 @@ check_section_spacing() {
                     if (lines[i - 1] !~ /^[[:space:]]*\*[[:space:]]*$/) printf "line %d: no empty comment line above the @section\n", i
                     if (lines[i + 1] !~ /^[[:space:]]*\*[[:space:]]*$/) printf "line %d: no empty comment line below the @section\n", i
                 }
-        }' <(printf '%s\n' "$added_lines") <(git show ":$file"))
+        }' "$staged_lines_path" "$staged_blob")
     [ -z "$cramped" ] || fail "$cramped" \
         "$file crams an @section against its neighbors - keep one empty comment line" \
         "            above and below every @section heading:"
@@ -276,7 +287,7 @@ check_docblock_spacing() {
             for (i = 2; i <= last; ++i)
                 if (lines[i] ~ /^[[:space:]]*\/\*\*/ && (i in added) && lines[i - 1] !~ /^[[:space:]]*$/)
                     printf "line %d: no empty line above the docblock\n", i
-        }' <(printf '%s\n' "$added_lines") <(git show ":$file"))
+        }' "$staged_lines_path" "$staged_blob")
     [ -z "$cramped" ] || fail "$cramped" \
         "$file opens a docblock against the line above - every /** takes an empty line above it," \
         "            an opening brace and an access specifier included:"
@@ -306,7 +317,7 @@ check_lone_brief() {
                     printf "line %d: @brief with nothing to separate it from\n", i
                 i = j
             }
-        }' <(printf '%s\n' "$added_lines") <(git show ":$file"))
+        }' "$staged_lines_path" "$staged_blob")
     [ -z "$lone" ] || fail "$lone" \
         "$file tags a docblock that is one unstructured paragraph - drop the @brief," \
         "            it earns its place only above a body paragraph or a tag section:"
@@ -330,7 +341,7 @@ check_brief_length() {
                 }
                 if (span > 3 && (i in added)) printf "line %d: @brief runs %d lines\n", i, span
             }
-        }' <(printf '%s\n' "$added_lines") <(git show ":$file"))
+        }' "$staged_lines_path" "$staged_blob")
     [ -z "$sprawling" ] || fail "$sprawling" \
         "$file lets a @brief summary run past three lines - keep the summary short and move" \
         "            the rest into an unindented body paragraph below a blank comment line:"
@@ -363,7 +374,7 @@ check_file_header() {
                 if (lines[j] ~ /\*\//) break
             }
             if (touched && seen < 4) printf "line %d: the header names only %d of @file, @author, @date, @brief\n", i, seen
-        }' <(printf '%s\n' "$added_lines") <(git show ":$file"))
+        }' "$staged_lines_path" "$staged_blob")
     [ -z "$header" ] || fail "$header" \
         "$file misorders its file header - name the file, then the author, the date, and the summary," \
         "            contiguously, with any prose below them:"
@@ -392,7 +403,7 @@ check_docblock_brackets() {
                 }
                 i = j
             }
-        }' <(printf '%s\n' "$added_lines") <(git show ":$file"))
+        }' "$staged_lines_path" "$staged_blob")
     [ -z "$shape" ] || fail "$shape" \
         "$file mismatches a docblock's brackets to its content - prose opens on the /** and closes" \
         "            on its last line, a tagged block takes dedicated /** and */ lines:"
@@ -436,7 +447,7 @@ check_bare_member_docs() {
                 } else if (character == "}") { if (depth > 0) delete kind[depth--]; statement = "" }
                 else if (character == ";") statement = ""
             }
-        }' <(printf '%s\n' "$added_lines") <(git show ":$file") || true)
+        }' "$staged_lines_path" "$staged_blob" || true)
     [ -z "$member_docs" ] || fail "$member_docs" \
         "$file documents a declaration with a bare \`//\` comment - docs are" \
         "            /** @brief ... */ blocks; \`//\` is for implementation notes inside bodies:"
@@ -501,12 +512,12 @@ top_level_namespaces() { # top_level_namespaces < source
 # namespace is context.
 check_harness_namespace() {
     case "$file" in
-    *.h) git show ":$file" | grep -qE '(^|[^A-Za-z0-9_])(namespace|template|class)[[:space:]]' || return ;;
+    *.h) grep -qE '(^|[^A-Za-z0-9_])(namespace|template|class)[[:space:]]' "$staged_blob" || return ;;
     esac
     local expected="unum::usearch::${file%/*}"
     expected=${expected//\//::}
     local misplaced
-    misplaced=$(git show ":$file" | top_level_namespaces |
+    misplaced=$(top_level_namespaces < "$staged_blob" |
         awk -F: -v expected="$expected" '
             { ++opened; if (substr($0, index($0, ":") + 1) != expected) print "line " $0 }
             END { if (!opened) print "line 1: no namespace" }')
@@ -515,11 +526,12 @@ check_harness_namespace() {
         "            and no other opens at file scope:"
 }
 
-# A class template never takes the `_t` suffix: `_t` marks a concrete type or the alias a template materializes, so
-# `template <...> struct fold_run_t` reads as a type the reader could name without arguments. Name the template bare -
-# `humanized<value_type_>` - and keep `_t` for the aliases it produces.
+# A class template never takes the `_t` suffix, nor a variable template `_k`: `_t` marks a concrete type or the alias a
+# template materializes, and `_k` a concrete constant, so `template <...> struct fold_run_t` reads as a type the reader
+# could name without arguments. Name the template bare - `humanized<value_type_>`, `device_resident<index_type_>` - and
+# keep the suffixes for what it produces.
 check_template_type_suffixes() {
-    local suffixed
+    local suffixed variables
     suffixed=$(printf '%s\n' "$added" | awk '
         /^\+[[:space:]]*template[[:space:]]*</ {
             if ($0 ~ /(struct|class)[[:space:]]+[A-Za-z0-9_]+_t([^A-Za-z0-9_]|$)/) print
@@ -532,6 +544,15 @@ check_template_type_suffixes() {
     [ -z "$suffixed" ] || fail "$suffixed" \
         "$file names a class template with the _t suffix - name the template bare, as in" \
         "            \`template <typename value_type_> struct humanized\`, and keep _t for its aliases:"
+    variables=$(printf '%s\n' "$added" | awk '
+        function suffixed(line) { return line ~ /constexpr[[:space:]][^=(]*[[:space:]][A-Za-z0-9_]*_[kt][[:space:]]*=/ }
+        /^\+[[:space:]]*template[[:space:]]*</ { if (suffixed($0)) print; else pending = 1; next }
+        pending && /^\+[[:space:]]*requires/ { next }
+        pending && suffixed($0) { print }
+        { pending = 0 }' || true)
+    [ -z "$variables" ] || fail "$variables" \
+        "$file names a variable template with the _k or _t suffix - name the template bare, as in" \
+        "            \`template <typename index_type_> constexpr bool device_resident\`:"
 }
 
 # Template type parameters carry a trailing underscore - `typename variant_type_`, never
@@ -647,7 +668,7 @@ check_hand_minmax() {
 # `fu::spin_mutex_t`; a class's waiter and reference come from `waiter_of` and `atomic_ref_for_cpu_class`.
 check_preferred_aliases() {
     local hits
-    hits=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(//|/?\*)' |
+    hits=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(//|/\*|\*( |/|$))' |
         grep -E '\bfu::preferred_(yield_t|atomic_ref)\b' || true)
     [ -z "$hits" ] || fail "$hits" \
         "$file names a ForkUnion alias meant for units that dispatch nothing - a lock takes fu::spin_mutex_t," \
@@ -659,10 +680,10 @@ check_preferred_aliases() {
 # carries the suffix. A `std::pair` binds under the same rule; `[first, second]` says nothing either.
 check_expected_bindings() {
     local participle suffixed
-    participle=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(//|/?\*)' |
+    participle=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(//|/\*|\*( |/|$))' |
         grep -E 'auto( const)?&? \[[a-z_]+, [a-z_]+\] =' |
         grep -vE 'auto( const)?&? \[[a-z_]+, (status|[a-z]+(_[a-z]+)*_status)\] =' || true)
-    suffixed=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(//|/?\*)' |
+    suffixed=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(//|/\*|\*( |/|$))' |
         grep -E 'auto( const)?&? \[[a-z_]+_status, ' || true)
     [ -z "$participle$suffixed" ] || fail "$participle$suffixed" \
         "$file binds an expected as [payload, participle] - the status half is \`status\` or \`<verb>_status\`:"
@@ -752,16 +773,18 @@ check_memcpy() {
         "$file reinterprets one object through memcpy - write \`auto bits = std::bit_cast<u64_t>(value);\`:"
 }
 
-# A range rebuilt from its own parts - `{x.data(), x.size()}` - means a conversion or an
-# accessor is missing: `std::vector` converts to `std::span`, NumKong spans convert to views,
-# and containers can grow `begin()`/`end()`. Pass the range itself.
+# A range rebuilt from its own parts - `{x.data(), x.size()}`, `{index->path().data(), index->path().size()}`
+# or `std::span<T const>(x.data(), x.size())` - means a conversion or an accessor is missing: `std::vector`
+# converts to `std::span`, NumKong spans convert to views, and containers can grow `begin()`/`end()`.
+# Pass the range itself.
 check_range_reconstruction() {
     # `types.hpp` hosts `to_span` - the very conversion this check points everyone to - so its
     # own definition is the one legitimate `.data()/.size()` reconstruction site.
     [ "$file" = "include/usearch/utilities/types.hpp" ] && return 0
     local rebuilt
+    # The range may be reached through calls and arrows, and rebuilt in braces or in a view's parentheses
     rebuilt=$(printf '%s\n' "$added" |
-        grep -E '\{ *([A-Za-z_][A-Za-z0-9_.]*)\.data\(\), *\1\.size\(\) *\}' || true)
+        grep -E '(\{|(span|string_view|_view_t|_span_t)(<.*>)?( const)?( [a-z_]+)? *\() *([A-Za-z_][A-Za-z0-9_.()>-]*)(\.|->)data\(\), *\6(\.|->)size\(\) *[})]' || true)
     [ -z "$rebuilt" ] || fail "$rebuilt" \
         "$file rebuilds a range from its own .data()/.size() - pass the range itself," \
         "            or add the missing accessor or conversion:"
@@ -821,36 +844,72 @@ check_iterator_laundering() {
         "$file launders an iterator through &* - write \`values.data() + offset\`, or address the element:"
 }
 
-# The `<c*>` trampolines of LibC are their own group, a blank line away from the pure C++ headers.
-# Spelled as a list because `<chrono>`, `<concepts>`, `<compare>` and `<coroutine>` merely start with a c.
+# Includes form groups in a fixed order with a blank line between them: the C library, the platform's own
+# headers, the C++ standard library, external libraries, sibling projects, then this project's own headers.
+# Only headers in this repository are quoted, found beside the including file or anywhere in the index, and
+# public ones under `include/` always with the `project_include_prefix`. Includes under an `#if` keep their
+# quoting but sit outside the grouping; an include guard is not such an `#if`.
 check_include_groups() {
-    local mixed
-    mixed=$(awk '
+    local misgrouped
+    misgrouped=$(awk -v project="$project_include_prefix" -v file="$file" '
         BEGIN {
-            split("cassert cctype cerrno cfenv cfloat cinttypes climits clocale cmath csetjmp csignal " \
-                  "cstdarg cstddef cstdint cstdio cstdlib cstring ctime cuchar cwchar cwctype", names, " ")
-            for (n in names) trampoline[names[n]] = 1
+            split("cassert cctype cerrno cfenv cfloat cinttypes climits clocale cmath csetjmp csignal cstdarg " \
+                  "cstddef cstdint cstdio cstdlib cstring ctime cuchar cwchar cwctype", names, " ")
+            for (n in names) clibrary[names[n]] = 1
+            split("dirent.h dlfcn.h errno.h fcntl.h ftw.h poll.h pthread.h sched.h signal.h stdio.h stdlib.h " \
+                  "string.h time.h unistd.h io.h windows.h bcrypt.h malloc.h", names, " ")
+            for (n in names) platform[names[n]] = 1
+            split("forkunion numkong smashtable stringzilla uform usearch ustore", names, " ")
+            for (n in names) sibling[names[n]] = 1
+            split("C-library platform C++-standard external sibling own", labels, " ")
         }
         NR == FNR { added[$1 + 0]; next }
-        {
-            if ($0 ~ /^[[:space:]]*#[[:space:]]*include[[:space:]]*</) {
-                header = $0
-                sub(/^[^<]*</, "", header); sub(/>.*$/, "", header)
-                if (header in trampoline) sawc = 1
-                else if (header !~ /\// && header !~ /\.h$/) sawcpp = 1
-                if (FNR in added) touched = 1
-                first = first ? first : FNR
-            }
-            else if ($0 !~ /[^[:space:]]/) {
-                if (sawc && sawcpp && touched) printf "line %d: a <c*> header shares its group with a C++ one\n", first
-                sawc = 0; sawcpp = 0; touched = 0; first = 0
-            }
+        guard != "" && NF {
+            if ($1 == "#define" && $2 == guard) { --depth; counted[level] = 0 }
+            guard = ""
         }
-        END { if (sawc && sawcpp && touched) printf "line %d: a <c*> header shares its group with a C++ one\n", first }
-        ' <(printf '%s\n' "$added_lines") <(git show ":$file"))
-    [ -z "$mixed" ] || fail "$mixed" \
-        "$file mixes the <c*> trampolines of LibC with pure C++ headers - they are separate groups," \
-        "            a blank line apart, each sorted alphabetically:"
+        /^[[:space:]]*#[[:space:]]*if/ { ++depth; counted[++level] = 1; guard = ($1 == "#ifndef") ? $2 : "" }
+        /^[[:space:]]*#[[:space:]]*endif/ { depth -= counted[level--] }
+        {
+            if ($0 ~ /^[[:space:]]*#[[:space:]]*include[[:space:]]*[<"]/) {
+                header = $0
+                quoted = ($0 ~ /include[[:space:]]*"/)
+                sub(/^[^<"]*[<"]/, "", header); sub(/[>"].*$/, "", header)
+                root = header; sub(/[\/.].*$/, "", root)
+                touched = (FNR in added)
+                if (root == project) rank = 6
+                else if (header in clibrary) rank = 1
+                else if ((header in platform) || header ~ /^(sys|linux|arpa|netinet|asm)\//) rank = 2
+                else if (header !~ /[\/.]/) rank = 3
+                else if (root in sibling) rank = 5
+                else rank = 4
+                if (quoted && rank != 5 && rank != 6) {
+                    directory = file; sub(/[^\/]*$/, "", directory); found = ""
+                    search = "git ls-files \":(glob)**/" header "\""
+                    if (touched && !system("git cat-file -e \":" directory header "\" 2>/dev/null")) found = directory header
+                    else if (touched) { search | getline found; close(search) }
+                    if (touched && found == "")
+                        printf "line %d: \"%s\" is not in this repository - write <%s>\n", FNR, header, header
+                    if (index(found, "include/" project "/") == 1)
+                        printf "line %d: \"%s\" is a public header - write \"%s\"\n", FNR, header, substr(found, 9)
+                    rank = 6
+                }
+                if (touched && quoted && rank != 6)
+                    printf "line %d: \"%s\" is a %s header - write <%s>\n", FNR, header, labels[rank], header
+                if (touched && !quoted && rank == 6)
+                    printf "line %d: <%s> is an own header - write \"%s\"\n", FNR, header, header
+                if (depth) next
+                if (touched && block && rank != block)
+                    printf "line %d: a %s header shares its group with %s ones\n", FNR, labels[rank], labels[block]
+                if (touched && !block && rank < previous)
+                    printf "line %d: a %s group follows a %s group\n", FNR, labels[rank], labels[previous]
+                if (!block) block = rank
+            }
+            else if ($0 !~ /^[[:space:]]*#/) { if (block) previous = block; block = 0 }
+        }' "$staged_lines_path" "$staged_blob")
+    [ -z "$misgrouped" ] || fail "$misgrouped" \
+        "$file misgroups its includes - C library, platform, C++ standard, external, <sibling/...>," \
+        "            then \"$project_include_prefix/...\", each group separated by a blank line:"
 }
 
 # endregion C++ Surface and Containers
@@ -957,7 +1016,7 @@ check_dependency_free_core() {
 check_workflow_names() {
     local nameless
     nameless=$(
-        git show ":$file" | awk '
+        < "$staged_blob" awk '
             # Jobs: two-space keys under the top-level `jobs:` section, named by a four-space `name:`.
             /^jobs:[[:space:]]*$/ { in_jobs = 1; next }
             in_jobs && /^[^ #]/ { in_jobs = 0 }
@@ -1014,15 +1073,11 @@ check_python_version_probe() {
 
 # region Dispatch
 
-# The staged list is read once, NUL-delimited so a filename with spaces can never split, and every
-# loop below filters this array rather than asking git again.
-staged=()
-while IFS= read -r -d '' file; do staged+=("$file"); done < <(git diff --cached --name-only --diff-filter=ACM -z)
 
 # The staged paths matching any of the given globs, NUL-delimited for the readers below.
 staged_matching() { # staged_matching <glob>...
     local path pattern
-    for path in "${staged[@]}"; do
+    for path in "${staged_paths[@]}"; do
         for pattern in "$@"; do
             case "$path" in
             $pattern)
@@ -1037,7 +1092,7 @@ staged_matching() { # staged_matching <glob>...
 # Whether at least one staged path matches one of the given globs.
 staged_any() { # staged_any <glob>...
     local path pattern
-    for path in "${staged[@]}"; do
+    for path in "${staged_paths[@]}"; do
         for pattern in "$@"; do
             case "$path" in
             $pattern) return 0 ;;
@@ -1047,12 +1102,94 @@ staged_any() { # staged_any <glob>...
     return 1
 }
 
-# Four tiers, each a superset test rather than a hand-kept file list: a path falls through every tier
-# it belongs to, so a new directory is covered the day it appears and no check runs twice.
-core_files=$(dependency_free_core_files)
-for file in "${staged[@]}"; do
-    added=$(git diff --cached --unified=0 -- "$file" | grep '^+' | grep -v '^+++' || true)
-    added_lines=$(added_line_numbers "$file")
+# Rejects Rust imports out of the standard library, external crates, own crate order, or without a blank line
+# between those groups and after the last one, which rustfmt leaves alone. It reads the whole source from stdin.
+check_rust_use_groups() { # check_rust_use_groups <own-crate> <path> < source
+    local findings
+    findings=$(awk -v own="$1" -v path="$2" -v quote="'" '
+        BEGIN { literal = "r#*\"|\"|" quote "(\\\\.|[^" quote "\\\\])" quote "|//|/\\*" }
+        function blanks(width) { return sprintf("%" width "s", "") }
+        function count(text, bracket) { return gsub(bracket, "", text) }
+        function group(root) {
+            if (root == "std" || root == "core" || root == "alloc") return 0
+            return root == own || root == "crate" || root == "self" || root == "super" ? 2 : 1
+        }
+        function blank(from, to,   line) {
+            for (line = from; line < to; ++line) if (source[line] ~ /[^[:space:]]/) return 0
+            return 1
+        }
+        {
+            source[NR] = $0
+            text = $0; masked = ""; plain = 0
+            while (text != "") {
+                if (depth) {
+                    if (!match(text, /\/\*|\*\//)) break
+                    depth += substr(text, RSTART, 2) == "/*" ? 1 : -1
+                    taken = RSTART + 1
+                } else if (closer != "" && !raw) {
+                    if (!match(text, /^([^"\\]|\\.)*"/)) break
+                    closer = ""; taken = RLENGTH
+                } else if (closer != "") {
+                    if (!(taken = index(text, closer))) break
+                    taken += length(closer) - 1; closer = ""
+                } else if (match(text, literal)) {
+                    masked = masked substr(text, 1, RSTART - 1)
+                    token = substr(text, RSTART, RLENGTH); text = substr(text, RSTART); taken = RLENGTH
+                    if (token == "//") break
+                    if (token == "/*") depth = 1
+                    else if (token ~ /"$/) { raw = token ~ /^r/; closer = "\"" substr(token, 2, RLENGTH - 2) }
+                } else { plain = 1; break }
+                masked = masked blanks(taken); text = substr(text, taken + 1)
+            }
+            code[NR] = masked (plain ? text : blanks(length(text)))
+        }
+        END {
+            for (line = 1; line <= NR; ++line) {
+                if (!match(code[line], /^ *(pub(\([^)]*\))? +)?use +(::)?[A-Za-z0-9_]+/)) continue
+                head = substr(code[line], 1, RLENGTH); rest = substr(code[line], RLENGTH + 1)
+                root = head; sub(/^.*[ :]/, "", root)
+                for (end = line; !index(rest, ";") && end < NR; rest = code[++end]) {}
+                start = line
+                while (start > 1 && code[start - 1] ~ /\][[:space:]]*$/) {
+                    candidate = start; nesting = 0
+                    while (candidate > 1) {
+                        --candidate
+                        nesting += count(code[candidate], "]") - count(code[candidate], "\\[")
+                        if (nesting == 0) break
+                    }
+                    if (code[candidate] !~ /^[[:space:]]*#\[/) break
+                    start = candidate
+                }
+                match(head, /^ */)
+                ++uses; starts[uses] = start; ends[uses] = end; indents[uses] = RLENGTH; roots[uses] = root
+            }
+            for (use = 1; use <= uses; ++use) {
+                category = group(roots[use]); after = source[ends[use] + 1]; gsub(/^[[:space:]]+|[[:space:]]+$/, "", after)
+                if (use < uses && indents[use + 1] == indents[use] && blank(ends[use] + 1, starts[use + 1])) {
+                    if (group(roots[use + 1]) < category)
+                        printf "%s:%d: order imports as standard library, external crates, own crate\n", path, starts[use]
+                    if (group(roots[use + 1]) != category && ends[use] + 1 == starts[use + 1])
+                        printf "%s:%d: separate import groups with a blank line\n", path, ends[use]
+                } else if (ends[use] < NR && after != "" && after != "}")
+                    printf "%s:%d: add a blank line after the last import\n", path, ends[use]
+            }
+        }')
+    [ -z "$findings" ] && return 0
+    echo "pre-commit: $2 breaks the Rust import groups - standard library, external crates, then the own crate," \
+        "a blank line apart:"
+    printf '%s\n' "$findings" | head -5
+    return 1
+}
+
+# Judges one staged path through tiers, each a superset test rather than a hand-kept file list: a path falls
+# through every tier it belongs to, so a new directory is covered the day it appears and no check runs twice.
+judge_path() {
+    local file=$staged_path staged_blob=$results_directory/index/$staged_path
+    local staged_lines_path=$results_directory/$ordinal.lines
+    added=
+    [ ! -f "$results_directory/$ordinal.added" ] || added=$(< "$results_directory/$ordinal.added")
+    [ -s "$staged_lines_path" ] || echo > "$staged_lines_path"
+    added_lines=$(< "$staged_lines_path")
     case " $core_files " in
     *" $file "*) check_dependency_free_core ;;
     esac
@@ -1062,7 +1199,6 @@ for file in "${staged[@]}"; do
         check_ascii_arrows
         check_glued_arrows
         check_backward_references
-        check_rulers
         check_region_labels
         check_param_directions
         check_copydoc_in_backend
@@ -1130,7 +1266,6 @@ for file in "${staged[@]}"; do
         ;;
     *.py | *.pyi)
         check_sibling_justification
-        check_banner_rules
         check_python_version_probe
         ;;
     python/*.c | python/*.h) check_cpython_format_shortcuts ;;
@@ -1140,268 +1275,378 @@ for file in "${staged[@]}"; do
     test/harness.hpp | test/main.cpp | test/dense.cu) ;;
     test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh) check_test_bodies_quiet ;;
     esac
-done
+    case "$file" in
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh | *.hip | *.metal | *.py | *.pyi | *.rs | *.go | *.swift | \
+        *.zig | *.mojo | *.js | *.mjs | *.cjs | *.ts | *.mts | *.java | *.kt | *.cs | *.sh | *.cmake | CMakeLists.txt)
+        check_tables_aligned_not_piped
+        ;;
+    esac
+    check_banners "$file" <<< "$added" || rejection_count=$((rejection_count + 1))
+
+    # Each gate runs whole-file, the way its formatter does, and only when that tool and its profile are
+    # present. Every one takes explicit paths: `ruff format` on a directory also rewrites README examples.
+    case "$file" in
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh)
+        if command -v clang-format > /dev/null 2>&1 && [ -f .clang-format ] &&
+            ! clang-format --dry-run -Werror "$file" > /dev/null 2>&1; then
+            echo "pre-commit: $file is not clang-format clean - run \`clang-format -i $file\` (the pip-installed 22.x)"
+            rejection_count=$((rejection_count + 1))
+        fi
+        ;;
+    *.py | *.pyi)
+        if command -v ruff > /dev/null 2>&1 && [ -f pyproject.toml ]; then
+            if ! ruff format --check "$file" > /dev/null 2>&1; then
+                echo "pre-commit: $file is not ruff-format clean - run \`ruff format $file\`"
+                rejection_count=$((rejection_count + 1))
+            fi
+            if ! ruff check --quiet "$file" > /dev/null 2>&1; then
+                echo "pre-commit: $file fails ruff's lints - run \`ruff check --fix $file\`"
+                rejection_count=$((rejection_count + 1))
+            fi
+        fi
+        ;;
+    *.rs) check_rust_use_groups usearch "$file" < "$staged_blob" || rejection_count=$((rejection_count + 1)) ;;
+    esac
+
+    # An integer quotient compared against zero says `a < b` the long way round, and it reads as a
+    # second divisibility test beside the `%` it usually sits next to. Every source language, added
+    # lines only, with line comments stripped so prose about a quotient does not trip it.
+    case "$file" in
+    *.c | *.h | *.hpp | *.cpp | *.cu | *.cuh | *.rs | *.zig | *.go | *.cs | *.java | *.swift | *.ts | *.js | *.mojo | *.py)
+        quotients=$(awk '
+            NR == FNR { added[$1 + 0]; next }
+            FNR in added {
+                line = $0
+                sub(/\/\/.*/, "", line)
+                sub(/#.*/, "", line)
+                if (line ~ /\/[[:space:]]*[A-Za-z_][A-Za-z0-9_.()]*[[:space:]]*[=!]=+[[:space:]]*0([^.0-9]|$)/)
+                    printf "%d:%s\n", FNR, $0
+            }' "$staged_lines_path" "$staged_blob")
+        if [ -n "$quotients" ]; then
+            echo "pre-commit: $file compares an integer quotient against zero - write \`numerator < denominator\`:"
+            printf '%s\n' "$quotients" | head -3
+            rejection_count=$((rejection_count + 1))
+        fi
+        ;;
+    esac
+
+    # Abbreviated identifiers are banned in favor of whole words: lo/hi/bot must be low/high/bottom.
+    # Word-boundary match on the staged content, added lines only.
+    case "$file" in
+    *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh)
+        abbreviations=$(awk '
+            NR == FNR { added[$1 + 0]; next }
+            (FNR in added) && $0 !~ /@/ && $0 ~ /(^|[^A-Za-z0-9_])(lo|hi|bot)([^A-Za-z0-9_]|$)/ { printf "%d:%s\n", FNR, $0 }' \
+            "$staged_lines_path" "$staged_blob")
+        if [ -n "$abbreviations" ]; then
+            echo "pre-commit: $file uses an abbreviated identifier - write low, high, bottom, never lo, hi, bot:"
+            printf '%s\n' "$abbreviations" | head -3
+            rejection_count=$((rejection_count + 1))
+        fi
+        ;;
+    esac
+}
+
+# Runs the gates that judge the commit as a whole, or one formatter over a batch of paths.
+run_tree_checks() {
+    # `cargo fmt` reads the crate's edition, so it runs once over the crate rather than per file.
+    if command -v cargo > /dev/null 2>&1 && [ -f Cargo.toml ] && staged_any '*.rs'; then
+        if ! cargo fmt --check > /dev/null 2>&1; then
+            echo "pre-commit: a Rust source is not rustfmt clean - run \`cargo fmt\`"
+            rejection_count=$((rejection_count + 1))
+        fi
+    fi
+
+    if command -v zig > /dev/null 2>&1; then
+        while IFS= read -r -d '' file; do
+            if ! zig fmt --check "$file" > /dev/null 2>&1; then
+                echo "pre-commit: $file is not zig-fmt clean - run \`zig fmt $file\`"
+                rejection_count=$((rejection_count + 1))
+            fi
+        done < <(staged_matching '*.zig')
+    fi
+
+    if command -v gofmt > /dev/null 2>&1; then
+        while IFS= read -r -d '' file; do
+            if [ -n "$(gofmt -l "$file" 2> /dev/null)" ]; then
+                echo "pre-commit: $file is not gofmt clean - run \`gofmt -w $file\`"
+                rejection_count=$((rejection_count + 1))
+            fi
+        done < <(staged_matching '*.go')
+    fi
+
+    # `swift format lint` reports through warnings alone; only `--strict` turns them into an exit code.
+    if command -v swift > /dev/null 2>&1 && [ -f .swift-format ]; then
+        while IFS= read -r -d '' file; do
+            if ! swift format lint --strict --configuration .swift-format "$file" > /dev/null 2>&1; then
+                echo "pre-commit: $file fails swift-format - run \`swift format --in-place --configuration .swift-format $file\`"
+                rejection_count=$((rejection_count + 1))
+            fi
+        done < <(staged_matching '*.swift')
+    fi
+
+    # `mojo format` has no check mode, so the gate formats a copy and compares.
+    if command -v pixi > /dev/null 2>&1 && [ -f pixi.toml ]; then
+        while IFS= read -r -d '' file; do
+            formatted_directory=$(mktemp -d) && formatted="$formatted_directory/copy.mojo"
+            cp "$file" "$formatted"
+            pixi run --quiet mojo format --quiet -l 120 "$formatted" > /dev/null 2>&1
+            if ! cmp -s "$file" "$formatted"; then
+                echo "pre-commit: $file is not mojo-format clean - run \`pixi run mojo format -l 120 $file\`"
+                rejection_count=$((rejection_count + 1))
+            fi
+            rm -rf "$formatted_directory"
+        done < <(staged_matching '*.mojo')
+    fi
+
+    # taplo rather than dprint, which reorders keys and collapses the aligned comment columns.
+    if command -v taplo > /dev/null 2>&1 && [ -f .taplo.toml ]; then
+        while IFS= read -r -d '' file; do
+            if ! taplo fmt --check "$file" > /dev/null 2>&1; then
+                echo "pre-commit: $file is not taplo clean - run \`taplo fmt $file\`"
+                rejection_count=$((rejection_count + 1))
+            fi
+        done < <(staged_matching '*.toml')
+    fi
+
+    # JSON and YAML must satisfy the checked-in .dprint.json. Skips without dprint, installed from https://dprint.dev/install.
+    if command -v dprint > /dev/null 2>&1; then
+        dprint_staged=()
+        while IFS= read -r -d '' file; do dprint_staged+=("$file"); done \
+            < <(staged_matching '*.json' '*.jsonc' '*.yml' '*.yaml')
+        if [ ${#dprint_staged[@]} -gt 0 ] && ! dprint check "${dprint_staged[@]}" > /dev/null 2>&1; then
+            echo "pre-commit: staged JSON or YAML is not dprint clean - run \`dprint fmt\`"
+            rejection_count=$((rejection_count + 1))
+        fi
+    fi
+
+    # Spotless needs a Gradle far newer than some distributions ship, so the gate calls the same
+    # formatter Spotless would, out of the Gradle cache.
+    palantir_jar=$(ls "$HOME"/.gradle/caches/modules-2/files-2.1/com.palantir.javaformat/palantir-java-format/*/*/palantir-java-format-*.jar 2> /dev/null | tail -1)
+    if [ -n "$palantir_jar" ] && command -v java > /dev/null 2>&1; then
+        palantir_exports="--add-exports jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED"
+        palantir_exports="$palantir_exports --add-exports jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED"
+        palantir_exports="$palantir_exports --add-exports jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED"
+        palantir_exports="$palantir_exports --add-exports jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED"
+        palantir_exports="$palantir_exports --add-exports jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED"
+        while IFS= read -r -d '' file; do
+            # A formatter that cannot parse the file says nothing about its formatting - 2.97.0 rejects
+            # Java 21's `case X x when ...` guards - so only a clean run that disagrees is a failure.
+            formatted=$(mktemp)
+            # shellcheck disable=SC2086
+            if java $palantir_exports -cp "$palantir_jar" com.palantir.javaformat.java.Main "$file" \
+                > "$formatted" 2> /dev/null && ! cmp -s "$formatted" "$file"; then
+                echo "pre-commit: $file is not palantir-java-format clean - run \`gradle spotlessApply\`"
+                rejection_count=$((rejection_count + 1))
+            fi
+            rm -f "$formatted"
+        done < <(staged_matching '*.java')
+    fi
+
+    # Markdown is deliberately absent: prose here is one sentence per line and never wrapped, which
+    # prettier reflows into paragraphs.
+    if [ -x node_modules/.bin/prettier ]; then
+        while IFS= read -r -d '' file; do
+            if ! node_modules/.bin/prettier --check "$file" > /dev/null 2>&1; then
+                echo "pre-commit: $file is not prettier clean - run \`npx prettier --write $file\`"
+                rejection_count=$((rejection_count + 1))
+            fi
+        done < <(staged_matching '*.ts' '*.js' '*.mjs' '*.cjs')
+    fi
+
+    # Kotlin and Scala go through the same Gradle `spotless` that formats Java, since all three share
+    # one build. It resolves ktfmt and scalafmt itself, so the hook needs no tool of its own.
+    if command -v gradle > /dev/null 2>&1 && [ -f build.gradle ] && staged_any '*.kt' '*.scala'; then
+        if ! gradle --quiet --offline spotlessCheck > /dev/null 2>&1; then
+            echo "pre-commit: Kotlin or Scala is not spotless clean - run \`gradle spotlessApply\`"
+            rejection_count=$((rejection_count + 1))
+        fi
+    fi
+
+    # `dotnet format` takes a project, so the staged files are an `--include` filter over the solution.
+    # Whitespace only: the analyzer passes want a restore, which would turn a commit hook into a build.
+    if command -v dotnet > /dev/null 2>&1 && [ -f csharp/Cloud.Unum.USearch.sln ]; then
+        staged_csharp=""
+        while IFS= read -r -d '' file; do staged_csharp="$staged_csharp $file"; done < <(staged_matching '*.cs')
+        if [ -n "$staged_csharp" ]; then
+            # shellcheck disable=SC2086
+            if ! dotnet format whitespace csharp/Cloud.Unum.USearch.sln --verify-no-changes --no-restore \
+                --include $staged_csharp > /dev/null 2>&1; then
+                echo "pre-commit: C# is not \`dotnet format\` clean - run \`dotnet format whitespace csharp/Cloud.Unum.USearch.sln\`"
+                rejection_count=$((rejection_count + 1))
+            fi
+        fi
+    fi
+
+    if command -v cmake-format > /dev/null 2>&1 && [ -f .cmake-format.py ]; then
+        while IFS= read -r -d '' file; do
+            if ! cmake-format --check "$file" > /dev/null 2>&1; then
+                echo "pre-commit: $file is not cmake-format clean - run \`cmake-format -i $file\` with the repo profile"
+                rejection_count=$((rejection_count + 1))
+            fi
+            # A bare `CMakeLists.txt` pattern matches the whole path, so every SDK's own list needs its prefix.
+        done < <(staged_matching 'CMakeLists.txt' '*/CMakeLists.txt' '*.cmake')
+    fi
+    # A `usearch_sibling` pin and the submodule's gitlink name the same commit, or a recursive clone and a plain one
+    # build different code - the pin is what `FetchContent` uses when the submodule is absent. Both sides are read from
+    # the index, so the comparison is against what this commit will actually record.
+    if ! git diff --cached --quiet -- CMakeLists.txt numkong forkunion stringzilla smashtable 2> /dev/null; then
+        while read -r sibling pinned; do
+            recorded=$(git ls-files --stage -- "$sibling" | awk '$1 == "160000" { print $2 }')
+            [ -n "$recorded" ] || continue
+            if [ "$recorded" != "$pinned" ]; then
+                echo "pre-commit: $sibling pin has drifted - CMakeLists.txt says ${pinned:0:12}, the submodule records ${recorded:0:12}"
+                rejection_count=$((rejection_count + 1))
+            fi
+        done < <(git show :CMakeLists.txt 2> /dev/null | awk '
+            /usearch_sibling\(/ { inside = 1; record = ""; sub(/.*usearch_sibling\(/, "") }
+            inside { record = record " " $0 }
+            inside && /\)/ {
+                sub(/\).*/, "", record)
+                count = split(record, fields, /[ \t]+/)
+                name = ""; pin = ""
+                for (i = 1; i <= count; ++i) {
+                    if (fields[i] == "") continue
+                    if (name == "") name = fields[i]
+                    if (fields[i] ~ /^[0-9a-f]{40}$/) pin = fields[i]
+                }
+                if (name != "" && pin != "") print name, pin
+                inside = 0
+            }')
+    fi
+
+    # Editor settings and extension lists stay sorted case-insensitively, so every addition has one place to go.
+    editor_lists=$(staged_matching '.vscode/settings.json' '.vscode/extensions.json' '.zed/settings.json' | tr '\0' '\n')
+    if [ -n "$editor_lists" ]; then
+        unsorted=$(for path in $editor_lists; do
+            git show ":$path" | LC_ALL=C awk -v path="$path" '
+                { text = text $0 "\n" }
+                END {
+                    while (text != "") {
+                        if (match(text, /^"([^"\\]|\\.)*"/)) {
+                            string = substr(text, 2, RLENGTH - 2)
+                            if (list && depth == 2 && tolower(string) < previous) unsorted = 1
+                            if (list && depth == 2) previous = tolower(string)
+                        } else if (!match(text, /^\/\/[^\n]*/) && !match(text, /^\/\*([^*]|\*+[^*\/])*\*+\//) &&
+                                   !match(text, /^[^"\/{}\[\]:,]+/)) {
+                            RLENGTH = 1
+                            token = substr(text, 1, 1)
+                            if (token == ":" && depth == 1) {
+                                key = string
+                                if (path ~ /settings\.json$/ && !(key in seen) && tolower(key) < last_key) unsorted = 1
+                                if (!(key in seen)) last_key = tolower(key)
+                                seen[key]
+                            }
+                            if (token == "{" || token == "[") ++depth
+                            if (token == "[" && depth == 2 &&
+                                key ~ /^(cSpell\.words|recommendations|unwantedRecommendations)$/) {
+                                list = 1
+                                previous = ""
+                            }
+                            if (token == "}" || token == "]") --depth
+                            if (depth < 2) list = 0
+                        }
+                        text = substr(text, RLENGTH + 1)
+                    }
+                    if (unsorted) print path
+                }'
+        done)
+        if [ -n "$unsorted" ]; then
+            echo "pre-commit: sort top-level settings keys, cSpell.words and extension recommendations case-insensitively in:"
+            printf '    %s\n' $unsorted
+            rejection_count=$((rejection_count + 1))
+        fi
+    fi
+}
 
 # endregion Dispatch
 
-# region Formatter Gates
+# region Parallel Judging
 
-# Each gate runs whole-file, the way its formatter does, and only when that tool and its profile are
-# present. Every one takes explicit paths: `ruff format` on a directory also rewrites README examples.
-if command -v clang-format > /dev/null 2>&1 && [ -f .clang-format ]; then
-    while IFS= read -r -d '' file; do
-        if ! clang-format --dry-run -Werror "$file" > /dev/null 2>&1; then
-            echo "pre-commit: $file is not clang-format clean - run \`clang-format -i $file\` (the pip-installed 22.x)"
-            failed=1
-        fi
-    done < <(staged_matching '*.c' '*.h' '*.hpp' '*.cpp' '*.cc' '*.cu' '*.cuh')
-fi
+# This region is identical in every hook that judges staged files one at a time; edit them all together.
 
-if command -v ruff > /dev/null 2>&1 && [ -f pyproject.toml ]; then
-    while IFS= read -r -d '' file; do
-        if ! ruff format --check "$file" > /dev/null 2>&1; then
-            echo "pre-commit: $file is not ruff-format clean - run \`ruff format $file\`"
-            failed=1
-        fi
-        if ! ruff check --quiet "$file" > /dev/null 2>&1; then
-            echo "pre-commit: $file fails ruff's lints - run \`ruff check --fix $file\`"
-            failed=1
-        fi
-    done < <(staged_matching '*.py' '*.pyi')
-fi
+git rev-parse --verify HEAD > /dev/null 2>&1 || exit 0
 
-# `cargo fmt` reads the crate's edition, so it runs once over the crate rather than per file.
-if command -v cargo > /dev/null 2>&1 && [ -f Cargo.toml ] && staged_any '*.rs'; then
-    if ! cargo fmt --check > /dev/null 2>&1; then
-        echo "pre-commit: a Rust source is not rustfmt clean - run \`cargo fmt\`"
-        failed=1
-    fi
-fi
+results_directory=$(mktemp -d)
+trap 'rm -rf "$results_directory"' EXIT
 
-if command -v zig > /dev/null 2>&1; then
-    while IFS= read -r -d '' file; do
-        if ! zig fmt --check "$file" > /dev/null 2>&1; then
-            echo "pre-commit: $file is not zig-fmt clean - run \`zig fmt $file\`"
-            failed=1
-        fi
-    done < <(staged_matching '*.zig')
-fi
+# Splits a zero-context diff into files numbered in diff order from `ordinal + 1`: its hunks, its added lines,
+# their numbers, and the `--lines` ranges clang-format takes, where a hunk that only deletes covers one line.
+split_diff_by_path='
+    /^diff --git / {
+        close(diff); close(added); close(lines); close(ranges); ++ordinal; hunk = 0
+        diff = directory ordinal ".diff"; added = directory ordinal ".added"
+        lines = directory ordinal ".lines"; ranges = directory ordinal ".ranges"
+        next
+    }
+    /^@@/ {
+        hunk = 1
+        split($3, range, ",")
+        start = substr(range[1], 2) + 0
+        count = (range[2] == "") ? 1 : range[2] + 0
+        for (line = start; line < start + count; ++line) print line > lines
+        printf "--lines=%d:%d\n", start, start + (count ? count : 1) - 1 > ranges
+    }
+    hunk { print > diff }
+    hunk && /^\+/ { print > added }'
 
-if command -v gofmt > /dev/null 2>&1; then
-    while IFS= read -r -d '' file; do
-        if [ -n "$(gofmt -l "$file" 2> /dev/null)" ]; then
-            echo "pre-commit: $file is not gofmt clean - run \`gofmt -w $file\`"
-            failed=1
-        fi
-    done < <(staged_matching '*.go')
-fi
+# Lists the staged paths, writes their blobs under `index/` and splits their diff, one git process each, so
+# no check asks git again; `git diff` lists paths in the same order whether it prints names or hunks.
+read_staged_paths() {
+    staged_paths=()
+    while IFS= read -r -d '' staged_path; do staged_paths+=("$staged_path"); done \
+        < <(git diff --cached --name-only -z --diff-filter=ACM)
+    [ ${#staged_paths[@]} -eq 0 ] || printf '%s\0' "${staged_paths[@]}" |
+        git checkout-index --prefix="$results_directory/index/" -z --stdin
+    git diff --cached --unified=0 --diff-filter=ACM | awk -v directory="$results_directory/" "$split_diff_by_path"
+}
 
-# `swift format lint` reports through warnings alone; only `--strict` turns them into an exit code.
-if command -v swift > /dev/null 2>&1 && [ -f .swift-format ]; then
-    while IFS= read -r -d '' file; do
-        if ! swift format lint --strict --configuration .swift-format "$file" > /dev/null 2>&1; then
-            echo "pre-commit: $file fails swift-format - run \`swift format --in-place --configuration .swift-format $file\`"
-            failed=1
-        fi
-    done < <(staged_matching '*.swift')
-fi
+# Deals the paths round-robin to one worker per core, each running `judge_path` into a numbered report, then
+# prints the reports in path order, so the output reads exactly as a serial run's would.
+judge_paths_in_parallel() { # judge_paths_in_parallel <path>...
+    local worker worker_count ordinal
+    worker_count=$(getconf _NPROCESSORS_ONLN 2> /dev/null || echo 4)
+    [ "$worker_count" -le $# ] || worker_count=$#
+    for ((worker = 0; worker < worker_count; ++worker)); do
+        (
+            ordinal=0
+            for staged_path in "$@"; do
+                ordinal=$((ordinal + 1))
+                [ $(((ordinal - 1) % worker_count)) -eq "$worker" ] || continue
+                # A selftest carries one violation per rule by design.
+                [ "$staged_path" = .githooks/selftest ] || judge_path > "$results_directory/$ordinal"
+            done
+            echo "$rejection_count" > "$results_directory/count-$worker"
+        ) &
+    done
+    wait
+    for ((ordinal = 1; ordinal <= $#; ++ordinal)); do
+        [ ! -f "$results_directory/$ordinal" ] || cat "$results_directory/$ordinal"
+    done
+    for ((worker = 0; worker < worker_count; ++worker)); do
+        rejection_count=$((rejection_count + $(cat "$results_directory/count-$worker")))
+    done
+}
 
-# `mojo format` has no check mode, so the gate formats a copy and compares.
-if command -v pixi > /dev/null 2>&1 && [ -f pixi.toml ]; then
-    while IFS= read -r -d '' file; do
-        formatted=$(mktemp --suffix=.mojo)
-        cp "$file" "$formatted"
-        pixi run --quiet mojo format --quiet -l 120 "$formatted" > /dev/null 2>&1
-        if ! cmp -s "$file" "$formatted"; then
-            echo "pre-commit: $file is not mojo-format clean - run \`pixi run mojo format -l 120 $file\`"
-            failed=1
-        fi
-        rm -f "$formatted"
-    done < <(staged_matching '*.mojo')
-fi
+# Runs the staged-mode judging: the checks over the whole commit start first and overlap the per-path
+# workers, and still report after them.
+judge_staged_paths() {
+    read_staged_paths
+    (
+        run_tree_checks > "$results_directory/tree"
+        echo "$rejection_count" > "$results_directory/count-tree"
+    ) &
+    judge_paths_in_parallel ${staged_paths[@]+"${staged_paths[@]}"}
+    cat "$results_directory/tree"
+    rejection_count=$((rejection_count + $(cat "$results_directory/count-tree")))
+}
 
-# taplo rather than dprint, which reorders keys and collapses the aligned comment columns.
-if command -v taplo > /dev/null 2>&1 && [ -f .taplo.toml ]; then
-    while IFS= read -r -d '' file; do
-        if ! taplo fmt --check "$file" > /dev/null 2>&1; then
-            echo "pre-commit: $file is not taplo clean - run \`taplo fmt $file\`"
-            failed=1
-        fi
-    done < <(staged_matching '*.toml')
-fi
+# endregion Parallel Judging
 
-# JSON and YAML must satisfy the checked-in .dprint.json. Skips without dprint, installed from https://dprint.dev/install.
-if command -v dprint > /dev/null 2>&1; then
-    dprint_staged=()
-    while IFS= read -r -d '' file; do dprint_staged+=("$file"); done \
-        < <(staged_matching '*.json' '*.jsonc' '*.yml' '*.yaml')
-    if [ ${#dprint_staged[@]} -gt 0 ] && ! dprint check "${dprint_staged[@]}" > /dev/null 2>&1; then
-        echo "pre-commit: staged JSON or YAML is not dprint clean - run \`dprint fmt\`"
-        failed=1
-    fi
-fi
+core_files=$(dependency_free_core_files)
+judge_staged_paths
 
-# Spotless needs a Gradle far newer than some distributions ship, so the gate calls the same
-# formatter Spotless would, out of the Gradle cache.
-palantir_jar=$(ls "$HOME"/.gradle/caches/modules-2/files-2.1/com.palantir.javaformat/palantir-java-format/*/*/palantir-java-format-*.jar 2> /dev/null | tail -1)
-if [ -n "$palantir_jar" ] && command -v java > /dev/null 2>&1; then
-    palantir_exports="--add-exports jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED"
-    palantir_exports="$palantir_exports --add-exports jdk.compiler/com.sun.tools.javac.file=ALL-UNNAMED"
-    palantir_exports="$palantir_exports --add-exports jdk.compiler/com.sun.tools.javac.parser=ALL-UNNAMED"
-    palantir_exports="$palantir_exports --add-exports jdk.compiler/com.sun.tools.javac.tree=ALL-UNNAMED"
-    palantir_exports="$palantir_exports --add-exports jdk.compiler/com.sun.tools.javac.util=ALL-UNNAMED"
-    while IFS= read -r -d '' file; do
-        # A formatter that cannot parse the file says nothing about its formatting - 2.97.0 rejects
-        # Java 21's `case X x when ...` guards - so only a clean run that disagrees is a failure.
-        formatted=$(mktemp)
-        # shellcheck disable=SC2086
-        if java $palantir_exports -cp "$palantir_jar" com.palantir.javaformat.java.Main "$file" \
-            > "$formatted" 2> /dev/null && ! cmp -s "$formatted" "$file"; then
-            echo "pre-commit: $file is not palantir-java-format clean - run \`gradle spotlessApply\`"
-            failed=1
-        fi
-        rm -f "$formatted"
-    done < <(staged_matching '*.java')
-fi
-
-# Markdown is deliberately absent: prose here is one sentence per line and never wrapped, which
-# prettier reflows into paragraphs.
-if [ -x node_modules/.bin/prettier ]; then
-    while IFS= read -r -d '' file; do
-        if ! node_modules/.bin/prettier --check "$file" > /dev/null 2>&1; then
-            echo "pre-commit: $file is not prettier clean - run \`npx prettier --write $file\`"
-            failed=1
-        fi
-    done < <(staged_matching '*.ts' '*.js' '*.mjs' '*.cjs')
-fi
-
-# Kotlin and Scala go through the same Gradle `spotless` that formats Java, since all three share
-# one build. It resolves ktfmt and scalafmt itself, so the hook needs no tool of its own.
-if command -v gradle > /dev/null 2>&1 && [ -f build.gradle ] && staged_any '*.kt' '*.scala'; then
-    if ! gradle --quiet --offline spotlessCheck > /dev/null 2>&1; then
-        echo "pre-commit: Kotlin or Scala is not spotless clean - run \`gradle spotlessApply\`"
-        failed=1
-    fi
-fi
-
-# `dotnet format` takes a project, so the staged files are an `--include` filter over the solution.
-# Whitespace only: the analyzer passes want a restore, which would turn a commit hook into a build.
-if command -v dotnet > /dev/null 2>&1 && [ -f csharp/Cloud.Unum.USearch.sln ]; then
-    staged_csharp=""
-    while IFS= read -r -d '' file; do staged_csharp="$staged_csharp $file"; done < <(staged_matching '*.cs')
-    if [ -n "$staged_csharp" ]; then
-        # shellcheck disable=SC2086
-        if ! dotnet format whitespace csharp/Cloud.Unum.USearch.sln --verify-no-changes --no-restore \
-            --include $staged_csharp > /dev/null 2>&1; then
-            echo "pre-commit: C# is not \`dotnet format\` clean - run \`dotnet format whitespace csharp/Cloud.Unum.USearch.sln\`"
-            failed=1
-        fi
-    fi
-fi
-
-if command -v cmake-format > /dev/null 2>&1 && [ -f .cmake-format.py ]; then
-    while IFS= read -r -d '' file; do
-        if ! cmake-format --check "$file" > /dev/null 2>&1; then
-            echo "pre-commit: $file is not cmake-format clean - run \`cmake-format -i $file\` with the repo profile"
-            failed=1
-        fi
-        # A bare `CMakeLists.txt` pattern matches the whole path, so every SDK's own list needs its prefix.
-    done < <(staged_matching 'CMakeLists.txt' '*/CMakeLists.txt' '*.cmake')
-fi
-
-# endregion Formatter Gates
-
-# region Whole Tree Gates
-
-# An integer quotient compared against zero says `a < b` the long way round, and it reads as a
-# second divisibility test beside the `%` it usually sits next to. Every source language, added
-# lines only, with line comments stripped so prose about a quotient does not trip it.
-while IFS= read -r -d '' file; do
-    quotients=$(awk '
-        NR == FNR { added[$1 + 0]; next }
-        FNR in added {
-            line = $0
-            sub(/\/\/.*/, "", line)
-            sub(/#.*/, "", line)
-            if (line ~ /\/[[:space:]]*[A-Za-z_][A-Za-z0-9_.()]*[[:space:]]*[=!]=+[[:space:]]*0([^.0-9]|$)/)
-                printf "%d:%s\n", FNR, $0
-        }' <(added_line_numbers "$file") <(git show ":$file"))
-    if [ -n "$quotients" ]; then
-        echo "pre-commit: $file compares an integer quotient against zero - write \`numerator < denominator\`:"
-        printf '%s\n' "$quotients" | head -3
-        failed=1
-    fi
-done < <(staged_matching '*.c' '*.h' '*.hpp' '*.cpp' '*.cu' '*.cuh' '*.rs' '*.zig' '*.go' '*.cs' '*.java' '*.swift' '*.ts' '*.js' '*.mojo' '*.py')
-
-# Abbreviated identifiers are banned in favor of whole words: lo/hi/bot must be low/high/bottom.
-# Word-boundary match on the staged content, added lines only.
-while IFS= read -r -d '' file; do
-    added_lines=$(added_line_numbers "$file")
-    abbreviations=$(awk '
-        NR == FNR { added[$1 + 0]; next }
-        (FNR in added) && $0 !~ /@/ && $0 ~ /(^|[^A-Za-z0-9_])(lo|hi|bot)([^A-Za-z0-9_]|$)/ { printf "%d:%s\n", FNR, $0 }' \
-        <(printf '%s\n' "$added_lines") <(git show ":$file"))
-    if [ -n "$abbreviations" ]; then
-        echo "pre-commit: $file uses an abbreviated identifier - write low, high, bottom, never lo, hi, bot:"
-        printf '%s\n' "$abbreviations" | head -3
-        failed=1
-    fi
-done < <(staged_matching '*.c' '*.h' '*.hpp' '*.cpp' '*.cc' '*.cu' '*.cuh')
-
-# A `usearch_sibling` pin and the submodule's gitlink name the same commit, or a recursive clone and a plain one
-# build different code - the pin is what `FetchContent` uses when the submodule is absent. Both sides are read from
-# the index, so the comparison is against what this commit will actually record.
-if ! git diff --cached --quiet -- CMakeLists.txt numkong forkunion stringzilla smashtable 2> /dev/null; then
-    while read -r sibling pinned; do
-        recorded=$(git ls-files --stage -- "$sibling" | awk '$1 == "160000" { print $2 }')
-        [ -n "$recorded" ] || continue
-        if [ "$recorded" != "$pinned" ]; then
-            echo "pre-commit: $sibling pin has drifted - CMakeLists.txt says ${pinned:0:12}, the submodule records ${recorded:0:12}"
-            failed=1
-        fi
-    done < <(git show :CMakeLists.txt 2> /dev/null | awk '
-        /usearch_sibling\(/ { inside = 1; record = ""; sub(/.*usearch_sibling\(/, "") }
-        inside { record = record " " $0 }
-        inside && /\)/ {
-            sub(/\).*/, "", record)
-            count = split(record, fields, /[ \t]+/)
-            name = ""; pin = ""
-            for (i = 1; i <= count; ++i) {
-                if (fields[i] == "") continue
-                if (name == "") name = fields[i]
-                if (fields[i] ~ /^[0-9a-f]{40}$/) pin = fields[i]
-            }
-            if (name != "" && pin != "") print name, pin
-            inside = 0
-        }')
-fi
-
-# Editor settings and extension lists stay sorted case-insensitively, so every addition has one place to go.
-editor_lists=$(staged_matching '.vscode/settings.json' '.vscode/extensions.json' '.zed/settings.json' | tr '\0' '\n')
-if [ -n "$editor_lists" ]; then
-    unsorted=$(printf '%s\n' "$editor_lists" | python3 -c '
-import json, re, subprocess, sys
-def load(path):
-    text = subprocess.run(["git", "show", ":" + path], capture_output=True, text=True).stdout
-    text = re.sub(r"\"(?:\\.|[^\"\\])*\"|//[^\n]*|/\*.*?\*/", lambda match: match.group(0) if match.group(0)[0] == "\"" else "", text, flags=re.S)
-    return json.loads(re.sub(r",(\s*[}\]])", r"\1", text))
-for path in sys.stdin.read().split():
-    data = load(path)
-    lists = [list(data)] if path.endswith("settings.json") else []
-    lists += [data.get(key, []) for key in ("cSpell.words", "recommendations", "unwantedRecommendations")]
-    if any(list(items) != sorted(items, key=str.lower) for items in lists):
-        print(path)
-')
-    if [ -n "$unsorted" ]; then
-        echo "pre-commit: sort top-level settings keys, cSpell.words and extension recommendations case-insensitively in:"
-        printf '    %s\n' $unsorted
-        failed=1
-    fi
-fi
-
-# endregion Whole Tree Gates
-
-if [ "$failed" -ne 0 ]; then
+if [ "$rejection_count" -ne 0 ]; then
     echo ""
     echo "Fix the staged changes and commit again. Bypass knowingly with: git commit --no-verify"
     exit 1

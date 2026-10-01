@@ -1,52 +1,72 @@
 #!/usr/bin/env bash
-# USearch commit-msg: enforce the commit-message contract.
 #
-#   1. The subject starts with an approved verb prefix - Add / Break / Build / Chore / Docs / Fix /
-#      Improve / Make / Release - followed by a capitalized summary, so the history reads as a
-#      consistent changelog. Merge commits are exempt (Git writes their subject).
-#   2. No AI-assistant attribution: no `Co-authored-by` bot trailer, no "Generated with/by <assistant>",
-#      no assistant name / vendor URL, no robot emoji. Authorship is the human who committed.
+# commit-msg: enforce the commit-message contract, identical in every repository that carries it.
 #
-# Bypass knowingly (you almost never should) with: git commit --no-verify
+# The subject is `<Verb>: <Summary>`, so the history reads as a changelog. A refactor is an Improve, Chore
+# rearranges without changing behaviour, Make touches only the build or the environment, Docs fixes
+# documentation that drifted on its own, and Break marks an incompatible interface change. Git writes merge,
+# `fixup!` and `squash!` subjects and TinySemVer writes `Release:` ones, so those are exempt. Authorship is
+# the human who committed, so the message carries no assistant attribution.
+#
+# Bypass knowingly, which you almost never should, with: git commit --no-verify
 
 set -u
+export LC_ALL=C
 
-message_file="$1"
+approved_verbs='Add|Break|Build|Chore|Docs|Fix|Improve|Make'
 
-# Comment lines (git's `#` scissors and helptext) never reach the final message - ignore them.
-payload=$(grep -v '^#' "$message_file")
-# The subject is the first non-blank line of what remains.
-subject=$(printf '%s\n' "$payload" | grep -vE '^[[:space:]]*$' | head -1)
-
+payload=$(grep -v '^#' "$1")
+subject=$(grep -m 1 -v '^[[:space:]]*$' <<< "$payload")
 failed=0
 
-# 1. Verb prefix. Merge commits carry Git's own subject and are the only exemption.
 case "$subject" in
-Merge*) ;;
+Merge* | Release:* | "fixup!"* | "squash!"*) ;;
 *)
-    if ! printf '%s\n' "$subject" |
-        grep -qE '^(Add|Break|Build|Chore|Docs|Fix|Improve|Make|Release): [A-Z]'; then
-        echo "commit-msg: the subject must be '<Verb>: <Capitalized summary>' with an approved verb -"
-        echo "            Add Break Build Chore Docs Fix Improve Make Release."
+    # A summary may open with a code identifier, as in `update()` or `snake_case`, which keeps its own case.
+    if ! [[ $subject =~ ^($approved_verbs):\ \`?([A-Z]|[a-z_][a-z0-9_]*(\(\)|_[a-z0-9_]+)) ]]; then
+        echo "commit-msg: the subject must be '<Verb>: <Capitalized summary>' with an approved verb:"
+        echo "            ${approved_verbs//|/ }. A leading code identifier keeps its own case."
         echo "            Got: ${subject:-<empty>}"
+        failed=1
+    fi
+    # A predicate that compares to other code needs the diff to mean anything; say what the code now does.
+    if grep -qiE '\b(the way|as|like) [^,]+ (does|did|would|says)\b' <<< "$subject"; then
+        echo "commit-msg: the subject compares to something else rather than naming what changed;"
+        echo "            say what the code now does. Got: $subject"
         failed=1
     fi
     ;;
 esac
 
-# 2. AI-assistant attribution - matched generically across assistants and vendors, not one product.
-offenders=$(printf '%s\n' "$payload" | grep -inE \
-    'co-authored-by:.*(\[bot\]|\bbot\b|claude|chatgpt|gpt-[0-9]|openai|copilot|gemini|\bbard\b|cursor|codeium|devin)|generated (with|by).*\b(ai|llm|claude|chatgpt|gpt|copilot|gemini|cursor|anthropic|openai)\b|\b(anthropic|openai)\.com|claude\.ai|chatgpt\.com|claude-session|🤖' || true)
+# Widths count characters, not bytes, so an arrow or a multiplication sign takes one column. The title stays
+# readable wherever it is truncated; a body line may run long only for a URL or an indented code line.
+widths=$(awk '
+    function columns(text) { gsub(/[\200-\277]/, "", text); return length(text) }
+    !subject_seen && /[^[:space:]]/ {
+        subject_seen = 1
+        if ($0 !~ /^(Merge|Release:|fixup!|squash!)/ && columns($0) > 80) printf "title: %d characters, over 80\n", columns($0)
+        next
+    }
+    subject_seen && !/https?:\/\// && !/^(    |\t)/ && columns($0) > 100 { printf "line %d: %d columns, over 100\n", NR, columns($0) }' \
+    <<< "$payload")
+if [ -n "$widths" ]; then
+    echo "commit-msg: a title runs to at most 80 characters and a body line to 100 columns, unless it holds a URL"
+    echo "            or is indented code:"
+    head -5 <<< "$widths"
+    failed=1
+fi
+
+offenders=$(grep -inE 'co-authored-by:.*(\[bot\]|\bbot\b|claude|chatgpt|gpt-[0-9]|openai|copilot|gemini|\bbard\b|cursor|codeium|devin)|generated (with|by).*\b(ai|llm|claude|chatgpt|gpt|copilot|gemini|cursor|anthropic|openai)\b|\b(anthropic|openai)\.com|claude\.ai|chatgpt\.com|claude-session|🤖' \
+    <<< "$payload")
 if [ -n "$offenders" ]; then
-    echo "commit-msg: this message carries AI-assistant attribution - USearch history stays human-authored."
-    echo "            Offending lines:"
-    printf '%s\n' "$offenders" | head -8
+    echo "commit-msg: the message carries AI-assistant attribution; authorship is the human who committed:"
+    head -5 <<< "$offenders"
     failed=1
 fi
 
 if [ "$failed" -ne 0 ]; then
     echo ""
-    echo "Fix the subject / trailer and commit again. Bypass knowingly with: git commit --no-verify"
+    echo "Amend the message and commit again. Bypass knowingly with: git commit --no-verify"
     exit 1
 fi
 exit 0
