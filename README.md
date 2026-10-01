@@ -48,10 +48,10 @@ x86 • Arm • WASM • RISC-V • LoongArch • Power • CUDA • ROCm • Me
 
 ---
 
-- ✅ __[10-100x faster][faster-than-faiss]__ indexing & search than [FAISS][faiss].
+- ✅ __[10-100× faster][faster-than-faiss]__ indexing & search than [FAISS][faiss].
 - ✅ Powers SpGEMM and Sparse Attention for billion-scale transformer LLM context lengths.
 - ✅ Simple and extensible [C++20][usearch-header] __library__, with one C ABI under all twelve bindings.
-- ✅ [Trusted](#integrations) by most dabases like [ClickHouse][clickhouse-docs] & [DuckDB][duckdb-docs] & AI Frontier labs.
+- ✅ [Trusted](#integrations--users) by most dabases like [ClickHouse][clickhouse-docs] & [DuckDB][duckdb-docs] & AI Frontier labs.
 - ✅ [SIMD][simd]- and [GPU][gpgpu]-optimized and [user-defined metrics](#user-defined-functions) with JIT compilation.
 - ✅ Hardware-agnostic `bf16`, `e5m2`, & `i8` - [half-precision & quarter-precision support](#memory-efficiency-downcasting-and-quantization).
 - ✅ [Stored in RAM, on a GPU, or on NVMe](#serialization--serving-an-index-from-disk) - one checkpoint, three residencies.
@@ -72,7 +72,7 @@ x86 • Arm • WASM • RISC-V • LoongArch • Power • CUDA • ROCm • Me
 __Technical Insights__ and related articles:
 
 - [Uses Arm SVE and x86 AVX-512's masked loads to eliminate tail `for`-loops](https://ashvardanian.com/posts/simsimd-faster-scipy/#tails-of-the-past-the-significance-of-masked-loads).
-- [Uses Horner's method for polynomial approximations, beating GCC 12 by 119x](https://ashvardanian.com/posts/gcc-12-vs-avx512fp16/).
+- [Uses Horner's method for polynomial approximations, beating GCC 12 by 119×](https://ashvardanian.com/posts/gcc-12-vs-avx512fp16/).
 - [For every language implements a custom separate binding](https://ashvardanian.com/posts/porting-cpp-library-to-ten-languages/).
 
 ## Comparison with FAISS
@@ -189,7 +189,7 @@ queries = np.random.rand(10, 1024).astype(np.float32)
 distances = nk.cdist(queries, vectors, "angular")
 ```
 
-When compared to FAISS's `IndexFlatL2` in Google Colab, __[those kernels may offer up to a 20x performance improvement](https://github.com/unum-cloud/USearch/issues/176#issuecomment-1666650778)__:
+When compared to FAISS's `IndexFlatL2` in Google Colab, __[those kernels may offer up to a 20× performance improvement](https://github.com/unum-cloud/USearch/issues/176#issuecomment-1666650778)__:
 
 - `faiss.IndexFlatL2`: __55.3 ms__.
 - NumKong's `cdist`: __2.54 ms__.
@@ -266,20 +266,20 @@ For such cases we provide a custom `uint40_t` type, that will still be 37.5% mor
 Every verb crosses one C interface, so a binding either exposes it or has not been asked to yet.
 Kotlin and Scala consume the Java surface directly and match its row.
 
-|                             |  C++  | C 99  | Python | Rust  |  Go   | Java  |  JS   | Swift |  C#   |  Zig  | Mojo  | Wolfram |
-| :-------------------------- | :---: | :---: | :----: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :-----: |
-| Add, search, remove         |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ✅    |
-| Save, load, metadata        |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ✅    |
-| Batch operations            |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ✅    |
-| Residency: RAM, VRAM, NVMe  |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ✅    |
-| Filter predicates           |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ❌   |   ❌   |   ✅   |   ✅   |   ✅   |   ✅   |    ❌    |
-| Refinement                  |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ❌    |
-| Late interaction: `maxsim`  |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ❌    |
-| Sparse products: `multiply` |   ✅   |   ✅   |   ✅    |   ✅   |   ❌   |   ❌   |   ✅   |   ✅   |   ❌   |   ✅   |   ✅   |    ❌    |
-| Attention: `attend`         |   ✅   |   ✅   |   ✅    |   ✅   |   ❌   |   ❌   |   ✅   |   ✅   |   ❌   |   ✅   |   ✅   |    ❌    |
-| Streaming cursors           |   ✅   |   ✅   |   ✅    |   ✅   |   ❌   |   ❌   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ❌    |
-| Resumable `find`            |   ✅   |   ✅   |   ✅    |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |   ✅   |    ❌    |
-| Index merging               |   ✅   |   ✅   |   ✅    |   ✅   |   ❌   |   ❌   |   ❌   |   ❌   |   ❌   |   ❌   |   ❌   |    ❌    |
+|                             | C++ | C 99 | Python | Rust | Go  | Java | JS  | Swift | C#  | Zig | Mojo | Wolfram |
+| :-------------------------- | :-: | :--: | :----: | :--: | :-: | :--: | :-: | :---: | :-: | :-: | :--: | :-----: |
+| Add, search, remove         | ✅  |  ✅  |   ✅   |  ✅  | ✅  |  ✅  | ✅  |  ✅   | ✅  | ✅  |  ✅  |   ✅    |
+| Save, load, metadata        | ✅  |  ✅  |   ✅   |  ✅  | ✅  |  ✅  | ✅  |  ✅   | ✅  | ✅  |  ✅  |   ✅    |
+| Batch operations            | ✅  |  ✅  |   ✅   |  ✅  | ✅  |  ✅  | ✅  |  ✅   | ✅  | ✅  |  ✅  |   ✅    |
+| Residency: RAM, VRAM, NVMe  | ✅  |  ✅  |   ✅   |  ✅  | ✅  |  ✅  | ✅  |  ✅   | ✅  | ✅  |  ✅  |   ✅    |
+| Filter predicates           | ✅  |  ✅  |   ✅   |  ✅  | ✅  |  ❌  | ❌  |  ✅   | ✅  | ✅  |  ✅  |   ❌    |
+| Refinement                  | ✅  |  ✅  |   ✅   |  ✅  | ✅  |  ✅  | ✅  |  ✅   | ✅  | ✅  |  ✅  |   ❌    |
+| Late interaction: `maxsim`  | ✅  |  ✅  |   ✅   |  ✅  | ✅  |  ✅  | ✅  |  ✅   | ✅  | ✅  |  ✅  |   ❌    |
+| Sparse products: `multiply` | ✅  |  ✅  |   ✅   |  ✅  | ❌  |  ❌  | ✅  |  ✅   | ❌  | ✅  |  ✅  |   ❌    |
+| Attention: `attend`         | ✅  |  ✅  |   ✅   |  ✅  | ❌  |  ❌  | ✅  |  ✅   | ❌  | ✅  |  ✅  |   ❌    |
+| Streaming cursors           | ✅  |  ✅  |   ✅   |  ✅  | ❌  |  ❌  | ✅  |  ✅   | ✅  | ✅  |  ✅  |   ❌    |
+| Resumable `find`            | ✅  |  ✅  |   ✅   |  ✅  | ✅  |  ✅  | ✅  |  ✅   | ✅  | ✅  |  ✅  |   ❌    |
+| Index merging               | ✅  |  ✅  |   ✅   |  ✅  | ❌  |  ❌  | ❌  |  ❌   | ❌  | ❌  |  ❌  |   ❌    |
 
 ## Application Examples
 

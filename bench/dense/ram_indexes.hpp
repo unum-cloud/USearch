@@ -22,7 +22,6 @@
 #include <tuple>     // `std::tuple`, `std::tuple_element_t` for the schedule waiter list
 #include <vector>    // `std::vector`
 
-#include <clipp.h>
 #include <fmt/format.h>
 
 #include <usearch/dense/ram_indexes.hpp>
@@ -85,7 +84,7 @@ struct bench_indexes_context {
     static constexpr nk_kernel_kind_t kernel_kind_k = index_t::kernel_kind_k;
 
     /** The parsed CLI, borrowed for the run's lifetime. */
-    bench_options_t const& options;
+    settings_t const& settings;
 
     /** The sharded index under measurement: one shard per engaged memory domain. */
     indexes_t indexes;
@@ -97,44 +96,44 @@ struct bench_indexes_context {
     bench_results_t results;
 
     /** The host tables follow the first named memory domain, or the heap when none is named. */
-    bench_indexes_context(bench_options_t const& options) noexcept
-        : options(options),
-          indexes(forkunion_allocator_t {options.memory_domains.empty() ? no_memory_domain_k
-                                                                        : options.memory_domains.front()}) {}
+    bench_indexes_context(settings_t const& settings) noexcept
+        : settings(settings),
+          indexes(forkunion_allocator_t {settings.memory_domains.empty() ? no_memory_domain_k
+                                                                         : settings.memory_domains.front()}) {}
 };
 
 /** The checkpoint manifest path: dtype, kernel and connectivity stamped into the name, so a
  *  geometry-mismatched run finds nothing rather than restoring the wrong graph. */
 template <typename indexes_type_>
-std::string checkpoint_path_of(bench_options_t const& options, std::string const& name) {
+std::string checkpoint_path_of(settings_t const& settings, std::string_view name) {
     using index_t = typename indexes_type_::index_t;
-    return fmt::format("{}/{}-{}-{}-c{}.safegraphs.json", options.checkpoints_dir, name,
-                       index_t::scalar_t::dtype_name(), nk_kernel_name(index_t::kernel_kind_k), options.connectivity);
+    return fmt::format("{}/{}-{}-{}-c{}.safegraphs.json", settings.checkpoints_dir, name,
+                       index_t::scalar_t::dtype_name(), nk_kernel_name(index_t::kernel_kind_k),
+                       settings.connectivity.value);
 }
 
 /** Serializes the sharded index as one SafeGraphs checkpoint - a monolith per shard and the
  *  manifest committed last - so later runs @c --load it instead of rebuilding. */
 template <typename streamed_dataset_type_>
 bool save_indexes(streamed_dataset_type_& streamed) {
-    using clock_t = stdc::steady_clock;
     using bench_t = typename streamed_dataset_type_::bench_t;
     auto& bench = streamed.bench;
-    std::string const path = checkpoint_path_of<typename bench_t::indexes_t>(bench.options, bench.options.save_name);
+    std::string const path = checkpoint_path_of<typename bench_t::indexes_t>(bench.settings, bench.settings.save_name);
     save_config_t config;
     config.layout = checkpoint_layout_t::distributed_k;
-    auto started = clock_t::now();
+    auto started = steady_clock_t::now();
     if (status_t const saved = bench.indexes.save(path, config, bench.executor); failed(saved)) {
         fmt::println("Failed to save {}: {}", path, status_to_string(saved));
         return false;
     }
-    double const seconds = stdc::duration<double>(clock_t::now() - started).count();
+    double const seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
     fmt::println("Saved {} shards: {:.2f} GB in {:.2f} s", bench.indexes.shards_count(),
-                 double(bench.indexes.storage_requirements(config).value) / 1e9, seconds);
+                 gigabytes(bench.indexes.storage_requirements(config).value), seconds);
     return true;
 }
 
-/** Places one shard per engaged memory domain, restores a checkpoint or reserves for the viewed
- *  rows, and spawns and warms the executor - everything fallible, before any clock. */
+/** Places one shard per engaged memory domain, restores a checkpoint, reserves for the viewed rows it
+ *  lacks, and spawns and warms the executor - everything fallible, before any clock. */
 template <typename streamed_dataset_type_>
 bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
     using bench_t = typename streamed_dataset_type_::bench_t;
@@ -144,27 +143,32 @@ bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
     std::size_t const rows = streamed.vectors.extent(0);
     std::size_t const dimensions = streamed.vectors.extent(1);
 
-    connectivity_t const connectivity = connectivity_of(bench.options.connectivity);
+    connectivity_t const connectivity = connectivity_of(bench.settings.connectivity.value);
     if (connectivity == connectivity_unknown_k) {
-        fmt::println("Unsupported --connectivity {}; pick 16, 32, or 128", bench.options.connectivity);
+        fmt::println("Unsupported --connectivity {}; pick 16, 32, or 128", bench.settings.connectivity.value);
+        return false;
+    }
+
+    if (bench.settings.skip_vectors.value > rows) {
+        fmt::println("--skip-vectors {} exceeds the {} viewed rows", bench.settings.skip_vectors.value, rows);
         return false;
     }
 
     // The reservation splits evenly and never grows later, so the full row count goes in here.
-    if (bench.options.memory_domains.empty()) {
+    if (bench.settings.memory_domains.empty()) {
         if (failed(bench.indexes.emplace(fu_memory_domain_id_t {-1}))) {
             fmt::println("Failed to place the heap shard");
             return false;
         }
     }
     else
-        for (fu_memory_domain_id_t const domain : bench.options.memory_domains)
+        for (fu_memory_domain_id_t const domain : bench.settings.memory_domains)
             if (failed(bench.indexes.emplace(domain))) {
                 fmt::println("Failed to place the shard on memory domain {}", domain);
                 return false;
             }
     // The executor spawns machine-wide and owns its pool outright.
-    auto [executor, status] = forkunion_executor_t::spawn(topology, bench.options.threads);
+    auto [executor, status] = forkunion_executor_t::spawn(topology, bench.settings.threads.value);
     if (failed(status)) {
         fmt::println("Failed to spawn the executor's worker threads");
         return false;
@@ -179,36 +183,40 @@ bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
     }
 
     // The checkpoint's own summary sizes the reservation inside @c load, so shards reach it bare.
-    if (!bench.options.load_name.empty()) {
-        std::string const path = checkpoint_path_of<typename bench_t::indexes_t>(bench.options,
-                                                                                 bench.options.load_name);
+    if (!bench.settings.load_name.empty()) {
+        std::string const path = checkpoint_path_of<typename bench_t::indexes_t>(bench.settings,
+                                                                                 bench.settings.load_name);
         if (status_t const restored = bench.indexes.load(path, load_config_t {}, bench.executor); failed(restored)) {
             fmt::println("Failed to load {}: {}", path, status_to_string(restored));
             return false;
         }
-        if (bench.indexes.size() != rows) {
-            fmt::println("Loaded checkpoint covers {} rows, but the view holds {}", bench.indexes.size(), rows);
-            return false;
-        }
     }
-    else if (failed(bench.indexes.reserve({rows, connectivity, dimensions}).status)) {
+
+    // A base that misses the skipped prefix would judge recall against rows the graph never saw.
+    if (bench.indexes.size() != bench.settings.skip_vectors.value) {
+        fmt::println("Loaded index covers {} rows, but --skip-vectors says {}", bench.indexes.size(),
+                     bench.settings.skip_vectors.value);
+        return false;
+    }
+    if (rows != bench.settings.skip_vectors.value &&
+        failed(bench.indexes.reserve({rows, connectivity, dimensions}).status)) {
         fmt::println("Failed to reserve {} × {}d over {} shards", rows, dimensions, bench.indexes.shards_count());
         return false;
     }
 
     // Warming the arenas here moves every allocation ahead of the clocks.
     typename index_t::insert_config_t warm_config;
-    warm_config.expansion_factor = static_cast<small_size_t>(bench.options.expansion_add);
+    warm_config.expansion_factor = static_cast<small_size_t>(bench.settings.expansion_add.value);
     if (failed(bench.executor.reserve(bench.indexes.shard(0).traversal_memory_usage(warm_config)))) {
         fmt::println("Failed to reserve the executor's per-thread arenas");
         return false;
     }
 
     // Self-recall probes every ingested row, so the per-query buffers follow the larger count.
-    std::size_t const search_count = bench.options.self_recall ? streamed.vectors.extent(0)
-                                                               : streamed.queries.extent(0);
-    bench.results.hit_rows = nk::matrix<u32_t>::try_zeros({search_count, bench.options.top_k});
-    bench.results.hit_distances = nk::matrix<dense_distance_t>::try_zeros({search_count, bench.options.top_k});
+    std::size_t const search_count = bench.settings.self_recall == switch_t::present_k ? streamed.vectors.extent(0)
+                                                                                       : streamed.queries.extent(0);
+    bench.results.hit_rows = nk::matrix<u32_t>::try_zeros({search_count, bench.settings.top_k.value});
+    bench.results.hit_distances = nk::matrix<dense_distance_t>::try_zeros({search_count, bench.settings.top_k.value});
     if (bench.results.hit_rows.empty() || bench.results.hit_distances.empty()) {
         fmt::println("Failed to allocate the per-query hit matrices");
         return false;
@@ -217,11 +225,10 @@ bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
     return true;
 }
 
-/** Streams the whole dataset through batched @c add calls: a zero-copy dataset goes in as one
- *  call, a casting one in staging-bounded batches, each cast fanned out before its call. */
+/** Streams the viewed rows past the loaded base through batched @c add calls: a zero-copy dataset goes in as
+ *  one call, a casting one in staging-bounded batches, each cast fanned out before its call. */
 template <typename streamed_dataset_type_>
 bool run_insertion(streamed_dataset_type_& streamed) {
-    using clock_t = stdc::steady_clock;
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
     using key_t = typename bench_t::key_t;
@@ -232,15 +239,21 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     std::size_t const rows = streamed.vectors.extent(0);
     std::size_t const dimensions = streamed.vectors.extent(1);
 
+    std::size_t const inserted_rows = rows - bench.settings.skip_vectors.value;
+    if (!inserted_rows) {
+        fmt::println("\nInsertions");
+        fmt::println("  skipped: the loaded base already covers all {} rows", rows);
+        return true;
+    }
+
     typename index_t::insert_config_t config;
-    config.expansion_factor = static_cast<small_size_t>(bench.options.expansion_add);
-    std::size_t const batch_ceiling = streamed_dataset_type_::zero_copy_k ? rows : streamed.staging.extent(1);
-    std::size_t const batch_rows = bench.options.batch ? std::min(batch_ceiling, bench.options.batch) : batch_ceiling;
+    config.expansion_factor = static_cast<small_size_t>(bench.settings.expansion_add.value);
+    std::size_t const batch_rows = streamed_dataset_type_::zero_copy_k ? rows : streamed.staging.extent(1);
     std::vector<key_t> keys(std::min(batch_rows, rows));
     typename index_t::insert_result_t sums;
 
-    auto started = clock_t::now();
-    for (std::size_t base = 0; base != rows;) {
+    auto started = steady_clock_t::now();
+    for (std::size_t base = bench.settings.skip_vectors.value; base != rows;) {
         std::size_t const count = std::min(batch_rows, rows - base);
         for (std::size_t row = 0; row != count; ++row) keys[row] = static_cast<key_t>(base + row);
 
@@ -273,7 +286,7 @@ bool run_insertion(streamed_dataset_type_& streamed) {
         sums.saturated_walks += result.saturated_walks;
         base += count;
     }
-    double const seconds = stdc::duration<double>(clock_t::now() - started).count();
+    double const seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
 
     double const refine_share = sums.computed_distances ? 100.0 * double(sums.computed_distances_in_refines) /
                                                               double(sums.computed_distances)
@@ -281,8 +294,9 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     double const reverse_share = sums.computed_distances ? 100.0 * double(sums.computed_distances_in_reverse_refines) /
                                                                double(sums.computed_distances)
                                                          : 0.0;
-    fmt::print(header_style(), "\nInsertions\n");
-    fmt::println("  shape: {} × {}d", rows, dimensions);
+    fmt::println("\nInsertions");
+    fmt::println("  shape: {} × {}d", inserted_rows, dimensions);
+    if (bench.settings.skip_vectors.value) fmt::println("  topping: {} loaded rows", bench.settings.skip_vectors.value);
     fmt::println("  quads: {} · {} · {} kit", scalar_t::dtype_name(),
                  nk_kernel_name(streamed_dataset_type_::bench_t::kernel_kind_k),
                  bit_name(compute_choices_k, index_t::picked_quads_capability_k, "serial"));
@@ -290,22 +304,22 @@ bool run_insertion(streamed_dataset_type_& streamed) {
         fmt::println("  tiles: {} · reverse refinement",
                      bit_name(compute_choices_k, index_t::picked_tiles_capability_k, "none"));
     if (index_t::picked_quads_capability_k == nk_cap_serial_k &&
-        (bench.options.max_compute & nk_capabilities_available() & ~nk_cap_serial_k))
-        fmt::print(verdict_style(false), "  ⚠ scalar fallback: no SIMD kit is adapted for this dtype & metric\n");
+        (bench.settings.max_compute & nk_capabilities_available() & ~nk_cap_serial_k))
+        fmt::println("  ⚠ scalar fallback: no SIMD kit is adapted for this dtype & metric");
     fmt::println("  threads: {}", bench.executor.size());
     auto shard_sizes = std::views::iota(std::size_t {0}, bench.indexes.shards_count()) |
                        std::views::transform([&](std::size_t shard) { return bench.indexes.shard(shard).size(); });
     fmt::println("  shards: {}, one per memory domain, filled {}", bench.indexes.shards_count(),
                  fmt::join(shard_sizes, " "));
     fmt::println("  wall: {:.2f} s", seconds);
-    fmt::println("  throughput: {} IPS", humanized(double(rows) / seconds));
+    fmt::println("  throughput: {} IPS", humanized(double(inserted_rows) / seconds));
     fmt::println("  distances: {} ({:.1f}% refines, {:.1f}% reverse)", humanized(sums.computed_distances), refine_share,
                  reverse_share);
     fmt::println("  visited: {}", humanized(sums.visited_members));
-    fmt::println("  restarts: {}", fmt::styled(sums.restarts, verdict_style(sums.restarts < rows / 100 + 1)));
-    fmt::println("  saturated: {}", fmt::styled(sums.saturated_walks, verdict_style(sums.saturated_walks == 0)));
+    fmt::println("  restarts: {}", sums.restarts);
+    fmt::println("  saturated: {}", sums.saturated_walks);
     if (std::size_t resident = peak_resident_bytes(); resident)
-        fmt::println("  peak resident: {:.2f} GB", double(resident) / 1e9);
+        fmt::println("  peak resident: {:.2f} GB", gigabytes(resident));
     return true;
 }
 
@@ -313,17 +327,16 @@ bool run_insertion(streamed_dataset_type_& streamed) {
  *  no search can reach; a pass that re-wires nothing ends the phase. */
 template <typename streamed_dataset_type_>
 bool run_refinement(streamed_dataset_type_& streamed) {
-    using clock_t = stdc::steady_clock;
     using bench_t = typename streamed_dataset_type_::bench_t;
     using indexes_t = typename bench_t::indexes_t;
     using small_size_t = typename bench_t::small_size_t;
     auto& bench = streamed.bench;
-    std::size_t const max_refines = bench.options.max_refines;
+    std::size_t const max_refines = bench.settings.max_refines.value;
     std::size_t const nodes = bench.indexes.size();
     if (!max_refines || !nodes) return true;
 
     typename indexes_t::refine_config_t config;
-    config.expansion_factor = static_cast<small_size_t>(bench.options.expansion_refine);
+    config.expansion_factor = static_cast<small_size_t>(bench.settings.expansion_refine.value);
 
     refinement_report_t report;
     report.nodes = nodes;
@@ -332,8 +345,8 @@ bool run_refinement(streamed_dataset_type_& streamed) {
 
     std::vector<std::size_t> changed_per_pass;
     changed_per_pass.reserve(max_refines);
-    progress_bar_t progress {"refining", nodes * max_refines};
-    auto started = clock_t::now();
+    progress_bar_t progress {"refining", nodes * max_refines, bench.settings.terminal};
+    auto started = steady_clock_t::now();
     for (std::size_t pass = 0; pass != max_refines; ++pass) {
         std::size_t const swept_before = pass * nodes;
         auto const [refined, refined_status] = bench.indexes.refine(
@@ -356,7 +369,7 @@ bool run_refinement(streamed_dataset_type_& streamed) {
     }
     progress.finish();
     // Every pass heals what it strands, so the passes' wall time holds the healing too.
-    report.refining_seconds = stdc::duration<double>(clock_t::now() - started).count();
+    report.refining_seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
     report.changed_per_pass = changed_per_pass;
     report_refinement_metrics(report);
     return true;
@@ -367,7 +380,6 @@ bool run_refinement(streamed_dataset_type_& streamed) {
  *  mean. */
 template <typename streamed_dataset_type_>
 bool run_search(streamed_dataset_type_& streamed) {
-    using clock_t = stdc::steady_clock;
     using bench_t = typename streamed_dataset_type_::bench_t;
     using index_t = typename bench_t::index_t;
     using key_t = typename bench_t::key_t;
@@ -375,12 +387,12 @@ bool run_search(streamed_dataset_type_& streamed) {
     using vectors_view_t = typename bench_t::vectors_view_t;
     auto& bench = streamed.bench;
     std::size_t const dimensions = streamed.vectors.extent(1);
-    std::size_t const search_count = bench.options.self_recall ? streamed.vectors.extent(0)
-                                                               : streamed.queries.extent(0);
-    std::size_t const wanted = bench.options.top_k;
+    std::size_t const search_count = bench.settings.self_recall == switch_t::present_k ? streamed.vectors.extent(0)
+                                                                                       : streamed.queries.extent(0);
+    std::size_t const wanted = bench.settings.top_k.value;
 
     typename index_t::search_config_t config;
-    config.expansion_factor = static_cast<small_size_t>(bench.options.expansion_search);
+    config.expansion_factor = static_cast<small_size_t>(bench.settings.expansion_search.value);
     // The search phase runs strictly after ingestion, so the mutation-free contract holds.
     config.synchronization = synchronization_t::immutable_k;
 
@@ -388,10 +400,10 @@ bool run_search(streamed_dataset_type_& streamed) {
     std::vector<std::size_t> counts(std::min(batch_rows, search_count));
     telemetry_lane_t sums;
 
-    auto started = clock_t::now();
+    auto started = steady_clock_t::now();
     for (std::size_t base = 0; base != search_count;) {
         std::size_t const count = std::min(batch_rows, search_count - base);
-        auto const source = bench.options.self_recall ? streamed.vectors : streamed.queries;
+        auto const source = bench.settings.self_recall == switch_t::present_k ? streamed.vectors : streamed.queries;
 
         vectors_view_t batch;
         if constexpr (streamed_dataset_type_::zero_copy_k) batch = source(nk::range {base, base + count}, nk::slice);
@@ -423,10 +435,10 @@ bool run_search(streamed_dataset_type_& streamed) {
             bench.results.hit_counts[base + query] = static_cast<u32_t>(counts[query]);
         base += count;
     }
-    double const seconds = stdc::duration<double>(clock_t::now() - started).count();
+    double const seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
 
-    report_search_metrics(bench.options, search_count, seconds, bench.executor.size(), sums, {});
-    judge_hits(bench.options, bench.results, search_count);
+    report_search_metrics(bench.settings, search_count, seconds, bench.executor.size(), sums, {});
+    judge_hits(bench.settings, bench.results, streamed.ground_truth, search_count);
     return true;
 }
 
@@ -439,7 +451,7 @@ bool run_search(streamed_dataset_type_& streamed) {
 template <typename dataset_scalar_type_>
 struct bench_launch {
     utilities::persisted_dataset<dataset_scalar_type_> const& dataset;
-    bench_options_t const& options;
+    settings_t const& settings;
     fu_topology_t topology;
 };
 
@@ -474,17 +486,26 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
 
     utilities::persisted_dataset<dataset_scalar_type_> const& dataset = launch.dataset;
     std::size_t const dimensions = dataset.dimensions();
-    std::size_t rows = dataset.vectors().extent(0);
-    if (launch.options.max_vectors) rows = std::min(rows, launch.options.max_vectors);
+    std::size_t const total_rows = dataset.vectors().extent(0);
+    std::size_t const first_row = launch.settings.first_vector.value;
+    if (first_row >= total_rows) {
+        fmt::println("--first-vector {} exceeds the {} dataset rows", first_row, total_rows);
+        return 1;
+    }
+    std::size_t rows = total_rows - first_row;
+    if (launch.settings.max_vectors.value) rows = std::min(rows, launch.settings.max_vectors.value);
+    nk::matrix_view<dataset_scalar_type_> const dataset_vectors = dataset.vectors();
+    nk::matrix_view<dataset_scalar_type_> const sliced_vectors = dataset_vectors(
+        nk::range {first_row, first_row + rows}, nk::slice);
 
     // Self-queries keep the harness usable on a lone vectors file, without recall.
     nk::matrix_view<dataset_scalar_type_> const source_queries =
-        dataset.has_queries() ? dataset.queries()
-                              : nk::matrix_view<dataset_scalar_type_> {dataset.vectors().data(),
-                                                                       std::min<std::size_t>(1000, rows), dimensions};
+        dataset.has_queries()
+            ? dataset.queries()
+            : sliced_vectors(nk::range {std::size_t {0}, std::min<std::size_t>(1000, rows)}, nk::slice);
 
-    bench_context_type_ bench {launch.options};
-    streamed_t streamed {bench, {dataset.vectors().data(), rows, dimensions}, source_queries};
+    bench_context_type_ bench {launch.settings};
+    streamed_t streamed {bench, sliced_vectors, source_queries};
     if (!prepare(streamed, launch.topology)) return 1;
 
     // Owns the one staging plane both batched phases view.
@@ -493,7 +514,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
     nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_plane;
     if constexpr (!streamed_t::zero_copy_k) {
         std::size_t const threads = bench.executor.size();
-        std::size_t const batch_rows = launch.options.batch ? std::max(launch.options.batch, threads) : 4 * threads;
+        std::size_t const batch_rows = launch.settings.batch_per_core.value * threads;
         staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::try_zeros({1, batch_rows, dimensions});
         if (staging.empty()) {
             fmt::println("Failed to allocate {} staging rows of {}d {}", batch_rows, dimensions,
@@ -514,14 +535,14 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
         }
     }
 
-    if (dataset.has_ground_truth() && !launch.options.max_vectors) bench.results.ground_truth = dataset.neighbors();
+    if (dataset.has_ground_truth() && !launch.settings.max_vectors.value && !first_row)
+        streamed.ground_truth = dataset.neighbors();
     else if (dataset.has_ground_truth())
-        fmt::println("Ground truth ignored: --max-vectors truncates the graph it was computed for");
+        fmt::println("Ground truth ignored: --max-vectors or --first-vector reshapes the graph it was computed for");
 
-    // A restored checkpoint replaces ingestion outright; the search phase runs either way.
-    if (launch.options.load_name.empty() && !run_insertion(streamed)) return 1;
+    if (!run_insertion(streamed)) return 1;
     if (!run_refinement(streamed)) return 1;
-    if (!launch.options.save_name.empty() && !save_indexes(streamed)) return 1;
+    if (!launch.settings.save_name.empty() && !save_indexes(streamed)) return 1;
     if (!run_search(streamed)) return 1;
     return 0;
 }
@@ -531,7 +552,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch) {
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_>
 int run_with_metric(bench_launch<dataset_scalar_type_> const& launch) {
     return dispatch_kernel<stored_dtype_>(
-        launch.options.kernel,
+        launch.settings.kernel,
         [&](auto kernel) {
             return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, capability_, wait_type_>(launch);
         },
@@ -547,7 +568,7 @@ int run_with_metric(bench_launch<dataset_scalar_type_> const& launch) {
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_>
 int run_with_schedule(bench_launch<dataset_scalar_type_> const& launch) {
     return dispatch_index<std::size(schedule_choices_k)>(
-        highest_index(schedule_choices_k, effective_schedule(launch.options.max_schedule)),
+        highest_index(schedule_choices_k, effective_schedule(launch.settings.max_schedule)),
         [&](auto row) {
             using wait_type_ = std::tuple_element_t<row.value, schedule_waiters_t>;
             return run_with_metric<dataset_scalar_type_, stored_dtype_, capability_, wait_type_>(launch);
@@ -560,7 +581,7 @@ int run_with_schedule(bench_launch<dataset_scalar_type_> const& launch) {
  *  serial kernels every machine owns. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_with_compute(bench_launch<dataset_scalar_type_> const& launch) {
-    nk_capability_t const effective = launch.options.max_compute & nk_capabilities_available();
+    nk_capability_t const effective = launch.settings.max_compute & nk_capabilities_available();
     return dispatch_index<std::size(compute_choices_k)>(
         highest_index(compute_choices_k, effective),
         [&](auto row) {

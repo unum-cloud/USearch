@@ -377,7 +377,7 @@ USEARCH_EXPORT typedef enum usearch_cpu_class_t {
     usearch_cpu_class_wasm32_v128_k,
 
     /** WebAssembly with relaxed SIMD, shared memory for real thread pools, and the 64-bit
-     *  addressing that alone lets one module's memory pass 4 GiB. */
+     *  addressing that alone lets one module's memory pass 4 GB. */
     usearch_cpu_class_wasm64_extended_k,
 } usearch_cpu_class_t;
 

@@ -49,22 +49,43 @@ build_release/usearch_bench_dense_ram_indexes \
     --vectors data/sift-10m/base.10M.u8bin \
     --queries data/sift-10m/query.public.10K.u8bin \
     --neighbors data/sift-10m/groundtruth.public.10K.ibin \
-    --u8 --euclidean --connectivity 32 --expansion-add 256 --expansion-search 96
+    --stored-dtype u8 --metric euclidean --connectivity 32 --expansion-add 256 --expansion-search 96
 ```
 
-| Flag                                                          | Meaning                                                                                            |
-| :------------------------------------------------------------ | :------------------------------------------------------------------------------------------------- |
-| `--vectors`, `--queries`, `--neighbors`                       | base vectors, query vectors and ground truth in the RetriEval layout                               |
-| `--f32`, `--bf16`, `--f16`, `--i8`, `--i4`, `--u8`, `--u1`    | the stored dtype, `--f32` on the CPU alone; a file of another dtype is cast on ingest              |
-| `--dot`, `--angular`, `--euclidean`, `--hamming`, `--jaccard` | the metric; angular by default                                                                     |
-| `--connectivity`, `--expansion-add`, `--expansion-search`     | graph degree and the two candidate pools; 32, 256 and 96 by default                                |
-| `--max-refines`, `--expansion-refine`                         | refinement passes after ingestion and the pool they re-select under; skipped by default            |
-| `--max-compute`, `--max-schedule`, `--max-arch`               | cap the kernel kit, the wait instruction, or the GPU generation below what the machine offers      |
-| `--threads`, `--memory-domain`                                | the executor's threads and the NUMA domain to pin, or `all` on the multi-index                     |
-| `--batch`                                                     | rows per batched call or per launch                                                                |
-| `--max-vectors`, `--top-k`, `--self-recall`                   | cap the ingested rows, the matches judged per query, or judge every stored vector as its own query |
-| `--save`, `--load`, `--checkpoints-dir`                       | checkpoint after ingestion, or restore instead of building                                         |
-| `--huge-pages`                                                | the huge pages provisioned before launch; the run fails rather than measuring base pages           |
+| Flag                 | Default                  | Meaning                                                                                                                                       |
+| :------------------- | :----------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--vectors`          | required                 | Base vectors in the RetriEval layout: `.fbin`, `.bf16bin`, `.f16bin`, `.i8bin`, `.u8bin`, `.u1x8bin`                                          |
+| `--queries`          | the first 1000 vectors   | Query vectors of the same dtype                                                                                                               |
+| `--neighbors`        | none                     | Ground truth, `.ibin`; recall is skipped without it                                                                                           |
+| `--stored-dtype`     | the file's dtype         | `f32`, `bf16`, `f16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`, `i8`, `i4`, `u8`, `u4` or `u1`, cast on ingest; `f32` skips, as no CPU kit takes it yet |
+| `--metric`           | `angular`                | `dot`, `angular`, `euclidean`, `hamming` or `jaccard`; the last two for `u1`                                                                  |
+| `--connectivity`     | `32`                     | Graph degree: 16, 32 or 128                                                                                                                   |
+| `--expansion-add`    | `256`                    | Candidate pool while inserting                                                                                                                |
+| `--expansion-search` | `96`                     | Candidate pool while searching                                                                                                                |
+| `--max-refines`      | `0`                      | Upper bound on refinement passes after ingestion                                                                                              |
+| `--expansion-refine` | twice the connectivity   | Candidate pool while refining                                                                                                                 |
+| `--top-k`            | `10`                     | Matches judged per query                                                                                                                      |
+| `--max-vectors`      | the whole file           | Cap on ingested rows                                                                                                                          |
+| `--self-recall`      | off                      | Judge every stored vector as its own query                                                                                                    |
+| `--save`             | none                     | Checkpoint name to write after ingestion                                                                                                      |
+| `--load`             | none                     | Checkpoint name to restore, then insert only the rows past `--skip-vectors`                                                                   |
+| `--checkpoints-dir`  | `/tmp`                   | Directory for checkpoint blobs                                                                                                                |
+| `--skip-vectors`     | `0`                      | Rows the loaded checkpoint already covers                                                                                                     |
+| `--max-compute`      | the newest detected      | Kernel kit ceiling by microarchitecture, or `serial`; on the GPU by generation, or `ampere`                                                   |
+| `--max-schedule`     | the newest offered       | Wait instruction ceiling, or `standard`; CPU only                                                                                             |
+| `--threads`          | 7/8 of the logical cores | Executor threads; CPU only                                                                                                                    |
+| `--memory-domain`    | the heap                 | NUMA domain to pin, or `all` on the multi-index; CPU only                                                                                     |
+| `--batch-per-core`   | `4`                      | Staging rows per thread for a file cast on ingest; CPU only                                                                                   |
+| `--first-vector`     | `0`                      | First dataset row viewed, to slice one file across runs; CPU only                                                                             |
+| `--huge-pages`       | `0`                      | Huge pages provisioned before launch; the run fails rather than measuring base pages; CPU only                                                |
+| `--device`           | `0`                      | CUDA device ordinal; GPU only                                                                                                                 |
+| `--devices`          | none                     | Ordinals for the multi-device pipeline, like `0,1`; GPU only                                                                                  |
+| `--merge`            | off                      | Stitch the device shards into one graph after ingest; GPU only                                                                                |
+| `--expansion-merge`  | `--expansion-add`        | Candidate pool while merging; GPU only                                                                                                        |
+| `--managed-memory`   | off                      | Managed-memory planes oversubscribing VRAM; GPU only                                                                                          |
+| `--batch`            | `65536`                  | Rows and queries per launch; GPU only                                                                                                         |
+
+A bad value prints one line, like `--top-k="0" does not parse, expected a positive count`, and exits with status 1.
 
 Recall is judged against `--neighbors` as recall@1, recall@k, overlap@k and ndcg@k.
 A ground truth is computed for the whole file, so `--max-vectors` reshapes the graph it describes and the harness drops it, printing a notice; `--self-recall` judges connectivity instead and needs no ground truth at all.
@@ -80,7 +101,7 @@ This is what a cheap ingestion pays for - a narrow `--expansion-add` topped with
 ```sh
 build_release_cuda/usearch_bench_dense_vram_index \
     --vectors data/sift-10m/base.10M.u8bin --queries data/sift-10m/query.public.10K.u8bin \
-    --neighbors data/sift-10m/groundtruth.public.10K.ibin --u8 --euclidean \
+    --neighbors data/sift-10m/groundtruth.public.10K.ibin --stored-dtype u8 --metric euclidean \
     --connectivity 16 --expansion-add 32 --expansion-search 64 --max-refines 2 --expansion-refine 128
 ```
 
@@ -92,12 +113,29 @@ A checkpoint is a name under `--checkpoints-dir`, stamped with the dtype, the me
 The GPU builds a base an order of magnitude faster than the CPU, so the fast way to a large CPU graph is a GPU base topped up on the CPU: build the first rows on the device, save, then reload on the CPU and insert the rest.
 
 ```sh
-build_release_cuda/usearch_bench_dense_vram_index --vectors data/sift-100m/base.100M.u8bin --u8 --euclidean --max-vectors 90000000 --save sift90m
-build_release/usearch_bench_dense_ram_index --vectors data/sift-100m/base.100M.u8bin --queries ... --neighbors ... --u8 --euclidean --load sift90m --skip-vectors 90000000
+build_release_cuda/usearch_bench_dense_vram_index --vectors data/sift-100m/base.100M.u8bin --metric euclidean --max-vectors 90000000 --save sift90m
+build_release/usearch_bench_dense_ram_index --vectors data/sift-100m/base.100M.u8bin --queries ... --neighbors ... --metric euclidean --load sift90m --skip-vectors 90000000
 ```
 
 The second run reports `topping: 90000000 loaded rows`, inserts the remaining ten million, and judges the full graph against the 100M ground truth.
 Today this crosses only between `usearch_bench_dense_vram_index` and `usearch_bench_dense_ram_index`, which share one checkpoint layout; `usearch_bench_dense_ram_indexes` writes SafeGraphs and restores a checkpoint only when it covers every row of the view.
+
+### Kernels
+
+`usearch_bench_dense_ram_metric` times the distance kits alone, outside any index: USearch's 1-to-1 `distance` and 1-to-4 `distances`, the tile engine where the machine offers one, and NumKong's own kernel as the baseline, for every dtype, kernel and capability tier the build holds.
+Candidates are drawn at random from a 256 MB pool, so they stream from RAM, and each row prints calls, distances, bytes and scalar operations per second.
+Rows are named `kernel/scalar/caps/shape/dimensions`, like `dot/bf16/neon/1to4/768d`, with `numkong` as the baseline's tier.
+
+```sh
+build_release/usearch_bench_dense_ram_metric --filter 'dot/bf16/.*/1to[14]/768d' --time-limit 2s
+```
+
+| Flag           | Default | Meaning                                                             |
+| :------------- | :------ | :------------------------------------------------------------------ |
+| `--seed`       | `42`    | Seed the row picks and the adjacency noise derive from, or `random` |
+| `--filter`     | none    | Rows to run, as an ECMAScript regex or else a substring             |
+| `--warmup`     | `1s`    | Untimed run ahead of each row, like `200ms`                         |
+| `--time-limit` | `10s`   | Timed run of each row, like `200ms`                                 |
 
 ## Datasets
 

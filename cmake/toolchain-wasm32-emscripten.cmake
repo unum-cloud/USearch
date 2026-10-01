@@ -25,4 +25,4 @@ set(CMAKE_CXX_FLAGS
 set(EMSCRIPTEN_SYSTEM_PROCESSOR wasm32)
 include("$ENV{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake")
 
-set(CMAKE_EXE_LINKER_FLAGS_INIT "-sALLOW_MEMORY_GROWTH")
+set(CMAKE_EXE_LINKER_FLAGS_INIT "-sALLOW_MEMORY_GROWTH -sNODE_HOST_ENV")

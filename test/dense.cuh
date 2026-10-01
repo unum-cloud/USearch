@@ -49,7 +49,7 @@
 
 namespace unum::usearch::test {
 
-#pragma region Constants and Seeds
+#pragma region Constants
 
 /** Storage values per vector in the larger scenarios - NumKong's unit of one
  *  scalar object; small enough to keep serial kernels fast. */
@@ -81,36 +81,7 @@ constexpr float dense_self_match_tolerance_k = 1e-3f;
 /** The reader thread performs at least this many searches, even if writers finish first. */
 constexpr std::size_t dense_reader_minimal_searches_k = 16;
 
-/** Data seeds, one named hex constant per scenario family; derived draws follow
- *  the salt rule documented beside @c salt_queries_k in @c harness.hpp. */
-constexpr u64_t dense_seed_guards_k = 0x6A24D5D0ull;
-constexpr u64_t dense_seed_three_vectors_k = 0x3FEC0003ull;
-constexpr u64_t dense_seed_growth_k = 0x62047F00ull;
-constexpr u64_t dense_seed_predicated_k = 0xF117E2EDull;
-constexpr u64_t dense_seed_roundtrip_k = 0x5AFE10ADull;
-constexpr u64_t dense_seed_load_hostile_k = 0x10ADBADDull;
-constexpr u64_t dense_seed_concurrent_build_k = 0xB111DACEull;
-constexpr u64_t dense_seed_concurrent_search_k = 0x5EA2CACEull;
-constexpr u64_t dense_seed_multiply_k = 0x0D07D07Eull;
-constexpr u64_t dense_seed_indexes_add_k = 0x62009ADDull;
-constexpr u64_t dense_seed_indexes_race_k = 0x62009ACEull;
-constexpr u64_t dense_seed_indexes_products_k = 0x62009D07ull;
-constexpr u64_t dense_seed_indexes_maxsim_k = 0x62009A55ull;
-constexpr u64_t dense_seed_indexes_refine_k = 0x62002EF1ull;
-constexpr u64_t dense_seed_indexes_growth_k = 0x62006E07ull;
-constexpr u64_t dense_seed_save_race_k = 0x5AFECACEull;
-constexpr u64_t dense_seed_immutable_parity_k = 0x5E771ED0ull;
-constexpr u64_t dense_seed_cursor_k = 0x17E2A702ull;
-constexpr u64_t dense_seed_allocation_budget_k = 0xB0D6E7EDull;
-constexpr u64_t dense_seed_overflow_race_k = 0xF100DED0ull;
-constexpr u64_t dense_seed_shedding_k = 0x5EDD1EF0ull;
-constexpr u64_t dense_seed_saturated_k = 0x5A7A7EDDull;
-constexpr u64_t dense_seed_upstream_k = 0x0957EA30ull;
-constexpr u64_t dense_seed_refine_k = 0x2EF1BE00ull;
-constexpr u64_t dense_seed_health_k = 0x4EA17400ull;
-constexpr u64_t dense_seed_heal_k = 0x4EA1D000ull;
-
-#pragma endregion Constants and Seeds
+#pragma endregion Constants
 
 #pragma region Shared Helpers
 
@@ -294,12 +265,13 @@ struct dense_indexes_row_driver<indexes_type_> {
 
 /** Guards: pre-reserve misuse and geometry freezing, on a fresh index per scenario. */
 template <typename index_type_, typename make_index_type_>
-std::size_t dense_expect_guards(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_guards(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures = 0;
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
-    auto vectors = make_vectors<scalar_t>(3, dense_dimensions_for<scalar_t>(dense_tiny_values_k), dense_seed_guards_k);
+    auto vectors = make_vectors<scalar_t>(3, dense_dimensions_for<scalar_t>(dense_tiny_values_k),
+                                          stream_key(seed, "guards"));
 
     auto const [insert_result, insert_status] = index.insert(vectors.view(), {}, context);
     failures += expect(insert_status == status_t::uninitialized_k);
@@ -328,9 +300,9 @@ std::size_t dense_expect_guards(make_index_type_ const& make_index, allocation_l
 
 /** @ref dense_expect_guards, then the ledger it left must balance. */
 template <typename index_type_, typename make_index_type_>
-std::size_t test_dense_guards(make_index_type_ const& make_index) {
+std::size_t test_dense_guards(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_guards<index_type_>(make_index, ledger);
+    std::size_t const failures = dense_expect_guards<index_type_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -338,13 +310,13 @@ std::size_t test_dense_guards(make_index_type_ const& make_index) {
  *  query is refused. The dot kernel maximizes similarity instead of minimizing distance, so
  *  self-nearest is only asserted for the symmetric kernels. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t dense_expect_three_vectors(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_three_vectors(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures = 0;
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
     auto vectors = make_vectors<scalar_t>(3, dense_dimensions_for<scalar_t>(dense_tiny_values_k),
-                                          dense_seed_three_vectors_k);
+                                          stream_key(seed, "three_vectors"));
 
     failures += expect(
         index.reserve({8, connectivity_16_k, dense_dimensions_for<scalar_t>(dense_tiny_values_k)}).status ==
@@ -367,7 +339,7 @@ std::size_t dense_expect_three_vectors(make_index_type_ const& make_index, alloc
 
         // A query narrower than the frozen width is refused, never read past its end.
         auto narrower = make_vectors<scalar_t>(1, dense_dimensions_for<scalar_t>(dense_tiny_values_k / 2),
-                                               dense_seed_three_vectors_k);
+                                               stream_key(seed, "three_vectors"));
         failures += expect_eq(index.search(narrower.view().row(0).as_vector(), context).status,
                               status_t::config_mismatch_k);
     }
@@ -376,22 +348,23 @@ std::size_t dense_expect_three_vectors(make_index_type_ const& make_index, alloc
 
 /** @ref dense_expect_three_vectors, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t test_dense_three_vectors(make_index_type_ const& make_index) {
+std::size_t test_dense_three_vectors(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_three_vectors<index_type_, kernel_>(make_index, ledger);
+    std::size_t const failures = dense_expect_three_vectors<index_type_, kernel_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
 /** Growth across several doubling chunks, then sampled self-recall on the big graph,
  *  with telemetry accounting sanity checks along the way. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t dense_expect_growth_and_recall(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_growth_and_recall(make_index_type_ const& make_index, allocation_ledger_t& ledger,
+                                           u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures = 0;
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
     auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k, dense_dimensions_for<scalar_t>(dense_values_k),
-                                          dense_seed_growth_k);
+                                          stream_key(seed, "growth"));
 
     failures += expect(index.reserve({16, connectivity_16_k, dense_dimensions_for<scalar_t>(dense_values_k)}).status ==
                        status_t::success_k);
@@ -414,9 +387,9 @@ std::size_t dense_expect_growth_and_recall(make_index_type_ const& make_index, a
 
 /** @ref dense_expect_growth_and_recall, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t test_dense_growth_and_recall(make_index_type_ const& make_index) {
+std::size_t test_dense_growth_and_recall(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_growth_and_recall<index_type_, kernel_>(make_index, ledger);
+    std::size_t const failures = dense_expect_growth_and_recall<index_type_, kernel_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -433,14 +406,15 @@ std::size_t test_dense_growth_and_recall(make_index_type_ const& make_index) {
  *  other node, one in 16, and one in 64; and an impossible predicate drains legally.
  */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, allocation_ledger_t& ledger,
+                                           u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     constexpr nk_capability_t caps_k = index_type_::picked_quads_capability_k;
     std::size_t failures = 0;
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
     auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k, dense_dimensions_for<scalar_t>(dense_values_k),
-                                          dense_seed_predicated_k);
+                                          stream_key(seed, "predicated"));
 
     failures += expect(
         index.reserve({dense_growth_nodes_k, connectivity_16_k, dense_dimensions_for<scalar_t>(dense_values_k)})
@@ -552,9 +526,9 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
 
 /** @ref dense_expect_predicated_search, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t test_dense_predicated_search(make_index_type_ const& make_index) {
+std::size_t test_dense_predicated_search(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_predicated_search<index_type_, kernel_>(make_index, ledger);
+    std::size_t const failures = dense_expect_predicated_search<index_type_, kernel_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -640,14 +614,15 @@ std::size_t dense_expect_pooled_save(index_type_& index, typename index_type_::s
  *  load and are never serialized. On RAM a pool of lanes then takes chunks from one plan
  *  by a shared cursor and must land the same bytes. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t dense_expect_save_load_roundtrip(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_save_load_roundtrip(make_index_type_ const& make_index, allocation_ledger_t& ledger,
+                                             u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     std::size_t failures = 0;
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
     auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k, dense_dimensions_for<scalar_t>(dense_values_k),
-                                          dense_seed_roundtrip_k);
+                                          stream_key(seed, "roundtrip"));
 
     failures += expect(
         index.reserve({dense_growth_nodes_k, connectivity_16_k, dense_dimensions_for<scalar_t>(dense_values_k)})
@@ -703,9 +678,9 @@ std::size_t dense_expect_save_load_roundtrip(make_index_type_ const& make_index,
 
 /** @ref dense_expect_save_load_roundtrip, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t test_dense_save_load_roundtrip(make_index_type_ const& make_index) {
+std::size_t test_dense_save_load_roundtrip(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_save_load_roundtrip<index_type_, kernel_>(make_index, ledger);
+    std::size_t const failures = dense_expect_save_load_roundtrip<index_type_, kernel_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -808,7 +783,7 @@ std::size_t dense_expect_save_plan_misuse(index_type_ const& index, nk::matrix<s
  *  reservation grows by design, and an out-of-range neighbor ID rides the sentinel
  *  convention - stored, but never surfaced by any search. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t dense_expect_load_hostile(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_load_hostile(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     std::size_t failures = 0;
@@ -817,7 +792,7 @@ std::size_t dense_expect_load_hostile(make_index_type_ const& make_index, alloca
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
-    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, dense_seed_load_hostile_k);
+    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "load_hostile"));
     failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     failures += expect(index.insert(vectors.view(), {}, context).status == status_t::success_k);
 
@@ -878,9 +853,9 @@ std::size_t dense_expect_load_hostile(make_index_type_ const& make_index, alloca
 
 /** @ref dense_expect_load_hostile, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t test_dense_load_hostile(make_index_type_ const& make_index) {
+std::size_t test_dense_load_hostile(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_load_hostile<index_type_, kernel_>(make_index, ledger);
+    std::size_t const failures = dense_expect_load_hostile<index_type_, kernel_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -888,7 +863,7 @@ std::size_t test_dense_load_hostile(make_index_type_ const& make_index) {
  *  doubles the index, the second copy's ids shift by the first copy's rows with sentinels intact,
  *  and a self-query lands on either copy. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     std::size_t failures = 0;
@@ -896,7 +871,7 @@ std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocat
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
-    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, dense_seed_load_hostile_k + 1);
+    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "load_hostile", 1));
     failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     failures += expect(index.insert(vectors.view(), {}, context).status == status_t::success_k);
 
@@ -969,9 +944,9 @@ std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocat
 
 /** @ref dense_expect_load_append, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t test_dense_load_append(make_index_type_ const& make_index) {
+std::size_t test_dense_load_append(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_load_append<index_type_, kernel_>(make_index, ledger);
+    std::size_t const failures = dense_expect_load_append<index_type_, kernel_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -1012,14 +987,14 @@ auto dense_audit_health(index_type_& index, typename index_type_::dense_traversa
  *  landmarks and a later back-link can still disturb a row a earlier step already settled.
  */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t dense_expect_refine_settles(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_refine_settles(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     std::size_t failures = 0;
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
     auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k, dense_dimensions_for<scalar_t>(dense_values_k),
-                                          dense_seed_refine_k);
+                                          stream_key(seed, "refine"));
     failures += expect(index.reserve({16, connectivity_16_k, dense_dimensions_for<scalar_t>(dense_values_k)}).status ==
                        status_t::success_k);
 
@@ -1070,9 +1045,9 @@ std::size_t dense_expect_refine_settles(make_index_type_ const& make_index, allo
 
 /** @ref dense_expect_refine_settles, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t test_dense_refine_settles(make_index_type_ const& make_index) {
+std::size_t test_dense_refine_settles(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_refine_settles<index_type_, kernel_>(make_index, ledger);
+    std::size_t const failures = dense_expect_refine_settles<index_type_, kernel_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -1080,7 +1055,7 @@ std::size_t test_dense_refine_settles(make_index_type_ const& make_index) {
  *  healthy one reaches everything, and two audits of one graph agree - the landmarks are
  *  stride-spread, so the answer is a property of the graph rather than of the draw. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t dense_expect_health_audits(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_health_audits(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures = 0;
     index_type_ index = make_index(ledger);
@@ -1093,7 +1068,7 @@ std::size_t dense_expect_health_audits(make_index_type_ const& make_index, alloc
     failures += expect_eq(empty_health.reachable_nodes, 0u);
 
     auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k, dense_dimensions_for<scalar_t>(dense_values_k),
-                                          dense_seed_health_k);
+                                          stream_key(seed, "health"));
     failures += expect(index.insert(vectors.view(), {}, context).status == status_t::success_k);
 
     // An insertion wires each node against the graph as it stood, so a few can end up with no
@@ -1116,9 +1091,9 @@ std::size_t dense_expect_health_audits(make_index_type_ const& make_index, alloc
 
 /** @ref dense_expect_health_audits, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t test_dense_health_audits(make_index_type_ const& make_index) {
+std::size_t test_dense_health_audits(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_health_audits<index_type_, kernel_>(make_index, ledger);
+    std::size_t const failures = dense_expect_health_audits<index_type_, kernel_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -1147,13 +1122,13 @@ void dense_strand_islands(nk::matrix_span<node_id_type_> neighbors, node_id_type
  *  Healing must then reach every node, and a second pass must find nothing left to do.
  */
 template <typename index_type_, typename make_index_type_>
-std::size_t dense_expect_heal_islands(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_heal_islands(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     std::size_t failures = 0;
     constexpr std::size_t nodes_count = 512, islands_count = 32;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
-    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, dense_seed_heal_k);
+    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "heal"));
 
     // Build every node, then strand the tail: its rows become self-loops, the "published with
     // no neighbors" encoding, so nothing points into them and they point nowhere.
@@ -1207,9 +1182,9 @@ std::size_t dense_expect_heal_islands(make_index_type_ const& make_index, alloca
 
 /** @ref dense_expect_heal_islands, then the ledger it left must balance. */
 template <typename index_type_, typename make_index_type_>
-std::size_t test_dense_heal_islands(make_index_type_ const& make_index) {
+std::size_t test_dense_heal_islands(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_heal_islands<index_type_>(make_index, ledger);
+    std::size_t const failures = dense_expect_heal_islands<index_type_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -1252,7 +1227,7 @@ std::size_t dense_expect_product_row(nk::vector_view<scalar_type_> left, nk::mat
  *  spans refuse. */
 template <typename index_type_, typename make_index_type_>
     requires(!dense_device_resident_k<index_type_>)
-std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     constexpr std::size_t rows_count = dense_thread_nodes_k, left_count = 4;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
@@ -1260,7 +1235,7 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
     failures += expect(index.reserve({rows_count, connectivity_16_k, dimensions}).status == status_t::success_k);
-    auto vectors = make_vectors<scalar_t>(rows_count, dimensions, dense_seed_multiply_k);
+    auto vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "multiply"));
 
     // An empty index scores nothing and writes nothing.
     std::array<dense_node_id_t, rows_count> node_ids;
@@ -1298,16 +1273,16 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
 /** Graph products are a dot-kernel verb, so every other kernel has nothing to check. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
     requires(kernel_ != nk_kernel_dot_k)
-std::size_t test_dense_multiply(make_index_type_ const&) {
+std::size_t test_dense_multiply(make_index_type_ const&, u64_t) {
     return 0;
 }
 
 /** @ref dense_expect_multiply, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
     requires(kernel_ == nk_kernel_dot_k && !dense_device_resident_k<index_type_>)
-std::size_t test_dense_multiply(make_index_type_ const& make_index) {
+std::size_t test_dense_multiply(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_multiply<index_type_>(make_index, ledger);
+    std::size_t const failures = dense_expect_multiply<index_type_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -1318,7 +1293,7 @@ std::size_t test_dense_multiply(make_index_type_ const& make_index) {
 /** Concurrent construction on ForkUnion's default flat pool: distinct slices per thread,
  *  one traversal context each, then ID-uniqueness and sampled self-recall checks. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t dense_expect_concurrent_build(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_concurrent_build(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures = 0;
     std::size_t const writer_threads_count = 4;
@@ -1334,7 +1309,7 @@ std::size_t dense_expect_concurrent_build(make_index_type_ const& make_index, al
 
     auto threads = dense_make_threads<index_type_>(writer_threads_count, dense_thread_nodes_k,
                                                    dense_dimensions_for<scalar_t>(dense_values_k),
-                                                   dense_seed_concurrent_build_k);
+                                                   stream_key(seed, "concurrent_build"));
     std::vector<dense_node_id_t> assigned_ids(nodes_count);
     std::atomic<std::size_t> thread_failures {0};
 
@@ -1359,9 +1334,9 @@ std::size_t dense_expect_concurrent_build(make_index_type_ const& make_index, al
 
 /** @ref dense_expect_concurrent_build, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t test_dense_concurrent_build(make_index_type_ const& make_index) {
+std::size_t test_dense_concurrent_build(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_concurrent_build<index_type_, kernel_>(make_index, ledger);
+    std::size_t const failures = dense_expect_concurrent_build<index_type_, kernel_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -1378,7 +1353,8 @@ std::size_t test_dense_concurrent_build(make_index_type_ const& make_index) {
  *  rather than test-harness noise.
  */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t dense_expect_concurrent_search(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_concurrent_search(make_index_type_ const& make_index, allocation_ledger_t& ledger,
+                                           u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures = 0;
     std::size_t const writer_threads_count = 3, queries_count = 64;
@@ -1395,9 +1371,9 @@ std::size_t dense_expect_concurrent_search(make_index_type_ const& make_index, a
 
     auto threads = dense_make_threads<index_type_>(writer_threads_count + 1, dense_thread_nodes_k,
                                                    dense_dimensions_for<scalar_t>(dense_values_k),
-                                                   dense_seed_concurrent_search_k);
+                                                   stream_key(seed, "concurrent_search"));
     auto query_vectors = make_vectors<scalar_t>(queries_count, dense_dimensions_for<scalar_t>(dense_values_k),
-                                                dense_seed_concurrent_search_k ^ salt_queries_k);
+                                                stream_key(seed, "concurrent_search", 1));
 
     std::atomic<std::size_t> writer_lanes_remaining {writer_threads_count};
     std::atomic<std::size_t> thread_failures {0};
@@ -1451,9 +1427,9 @@ std::size_t dense_expect_concurrent_search(make_index_type_ const& make_index, a
 
 /** @ref dense_expect_concurrent_search, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t test_dense_concurrent_search(make_index_type_ const& make_index) {
+std::size_t test_dense_concurrent_search(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_concurrent_search<index_type_, kernel_>(make_index, ledger);
+    std::size_t const failures = dense_expect_concurrent_search<index_type_, kernel_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -1461,7 +1437,7 @@ std::size_t test_dense_concurrent_search(make_index_type_ const& make_index) {
  *  placement after reservation, geometry drift, mismatched spans, and a doubly-claimed
  *  executor - every misuse answers with a status, never with a write. */
 template <typename indexes_type_>
-std::size_t test_dense_indexes_guards() {
+std::size_t test_dense_indexes_guards(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -1472,8 +1448,8 @@ std::size_t test_dense_indexes_guards() {
     dense_indexes_executor<indexes_type_> driver;
     if (failed(driver.status)) return failures + expect(false);
     auto& executor = driver.executor;
-    auto vectors = make_vectors<scalar_t>(rows, dimensions, dense_seed_guards_k);
-    auto oversized = make_vectors<scalar_t>(rows + 1, dimensions, dense_seed_guards_k + 1);
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "guards"));
+    auto oversized = make_vectors<scalar_t>(rows + 1, dimensions, stream_key(seed, "guards", 1));
     std::vector<key_t> keys(rows + 1);
     for (std::size_t row = 0; row != rows + 1; ++row) keys[row] = static_cast<key_t>(1 + row);
 
@@ -1536,7 +1512,7 @@ std::size_t test_dense_indexes_guards() {
 /** A composition grows past any reservation: rows well beyond it land one at a time and batched, every key stays
  *  findable, and a second, larger reservation is a hint rather than a refusal. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_indexes_growth() {
+std::size_t test_dense_indexes_growth(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -1550,7 +1526,7 @@ std::size_t test_dense_indexes_growth() {
     failures += expect(succeeded(place_shards(indexes)));
     failures += expect(succeeded(indexes.reserve({reserved, connectivity_16_k, dimensions}).status));
 
-    auto vectors = make_vectors<scalar_t>(rows, dimensions, dense_seed_indexes_growth_k);
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_growth"));
     std::vector<key_t> keys(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
     dense_indexes_row_driver<indexes_type_> rows_driver {indexes, driver};
@@ -1568,7 +1544,7 @@ std::size_t test_dense_indexes_growth() {
     std::size_t found = 0;
     for (key_t const key : keys) found += indexes.contains(key);
     failures += expect_eq(found, rows);
-    auto fetched = make_vectors<scalar_t>(1, dimensions, dense_seed_indexes_growth_k + 1);
+    auto fetched = make_vectors<scalar_t>(1, dimensions, stream_key(seed, "indexes_growth", 1));
     failures += expect_eq(indexes.get(keys[rows - 1], fetched.span(), 1), 1u);
     failures += expect(succeeded(indexes.reserve({rows * 2, connectivity_16_k, dimensions}).status));
     failures += expect(indexes.capacity() >= rows * 2);
@@ -1578,7 +1554,7 @@ std::size_t test_dense_indexes_growth() {
 /** A sharded pass under a narrow build pool: the first re-wires nodes, the second fewer, each heals what it strands
  *  without losing reach, and the audit after them counts what the last pass ended on. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_indexes_refine() {
+std::size_t test_dense_indexes_refine(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -1593,7 +1569,7 @@ std::size_t test_dense_indexes_refine() {
     failures += expect(succeeded(place_shards(indexes)));
     failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions}).status));
 
-    auto vectors = make_vectors<scalar_t>(rows, dimensions, dense_seed_indexes_refine_k);
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "indexes_refine"));
     std::vector<key_t> keys(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
     typename index_t::insert_config_t const narrow {4};
@@ -1624,7 +1600,7 @@ std::size_t test_dense_indexes_refine() {
  *  construction - approximate search promises nothing narrower - so every thread's visited set
  *  outgrows its first size, and every key a sparse predicate admits surfaces. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_indexes_arena_growth() {
+std::size_t test_dense_indexes_arena_growth(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -1641,7 +1617,7 @@ std::size_t test_dense_indexes_arena_growth() {
     failures += expect(succeeded(place_shards(indexes)));
     failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions}).status));
 
-    auto vectors = make_vectors<scalar_t>(rows + queries, dimensions, dense_seed_upstream_k);
+    auto vectors = make_vectors<scalar_t>(rows + queries, dimensions, stream_key(seed, "upstream"));
     std::vector<key_t> keys(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
     auto const [insert_result, insert_status] = indexes.insert(std::span<key_t const> {keys},
@@ -1671,7 +1647,7 @@ std::size_t test_dense_indexes_arena_growth() {
 /** One key, several rows: the locator map's whole reason to exist, driven through
  *  the single-row @c insert with a caller-built arena context. */
 template <typename indexes_type_>
-std::size_t test_dense_indexes_duplicate_keys() {
+std::size_t test_dense_indexes_duplicate_keys(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -1685,7 +1661,7 @@ std::size_t test_dense_indexes_duplicate_keys() {
     failures += expect(succeeded(place_shards(indexes)));
     failures += expect(succeeded(indexes.reserve({rows, connectivity_16_k, dimensions}).status));
 
-    auto vectors = make_vectors<scalar_t>(rows, dimensions, dense_seed_guards_k + 2);
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "guards", 2));
     dense_indexes_row_driver<indexes_type_> rows_driver {indexes, driver};
     if (failed(rows_driver.status)) return failures + expect(false);
 
@@ -1704,7 +1680,7 @@ std::size_t test_dense_indexes_duplicate_keys() {
 
     // The probe-then-fetch contract of `get`: the true total returns even when the copy
     // truncates, and an absent key answers zero without touching the output.
-    auto fetched = make_vectors<scalar_t>(2, dimensions, dense_seed_guards_k + 3);
+    auto fetched = make_vectors<scalar_t>(2, dimensions, stream_key(seed, "guards", 3));
     failures += expect_eq(indexes.get(shared, fetched.span(), 2), rows / 2);
     failures += expect_eq(indexes.get(static_cast<key_t>(2), fetched.span(), 2), 0u);
     return failures;
@@ -1728,10 +1704,8 @@ struct dense_checkpoint_paths_t {
     char monolith[64] = {};
 
     explicit dense_checkpoint_paths_t(std::uintptr_t salt) noexcept {
-        std::snprintf(manifest, sizeof(manifest), "/tmp/usearch-%08x.safegraphs.json",
-                      static_cast<unsigned>(dense_seed_roundtrip_k ^ salt));
-        std::snprintf(monolith, sizeof(monolith), "/tmp/usearch-%08x.safegraphs",
-                      static_cast<unsigned>(dense_seed_roundtrip_k ^ salt));
+        std::snprintf(manifest, sizeof(manifest), "/tmp/usearch-%08x.safegraphs.json", static_cast<unsigned>(salt));
+        std::snprintf(monolith, sizeof(monolith), "/tmp/usearch-%08x.safegraphs", static_cast<unsigned>(salt));
     }
 
     /** Removes the manifest, its @p parts part files, and the monolith. */
@@ -1766,7 +1740,7 @@ std::size_t dense_indexes_build(indexes_type_& indexes, executor_type_& executor
  *  back byte-identical to @p vectors. */
 template <typename indexes_type_, typename vectors_type_, typename keys_type_>
 std::size_t dense_indexes_expect_restored(indexes_type_& indexes, vectors_type_ const& vectors, keys_type_ const& keys,
-                                          std::size_t dimensions) {
+                                          std::size_t dimensions, u64_t seed) {
     using scalar_t = typename indexes_type_::index_t::scalar_t;
     std::size_t failures = 0;
     std::size_t const rows = keys.size();
@@ -1775,7 +1749,7 @@ std::size_t dense_indexes_expect_restored(indexes_type_& indexes, vectors_type_ 
     for (std::size_t row = 0; row != rows; ++row) miscounted += indexes.count(keys[row]) != 1;
     failures += expect_eq(miscounted, 0u);
 
-    auto fetched = make_vectors<scalar_t>(1, dimensions, dense_seed_roundtrip_k + 2);
+    auto fetched = make_vectors<scalar_t>(1, dimensions, stream_key(seed, "roundtrip", 2));
     std::size_t const row_bytes = static_cast<std::size_t>(vectors.view().stride_bytes(0));
     std::size_t mismatched = 0;
     for (std::size_t sample = 0; sample != 8; ++sample) {
@@ -1795,7 +1769,7 @@ std::size_t dense_indexes_expect_restored(indexes_type_& indexes, vectors_type_ 
  *  fetched back by key - with a cancelled save leaving no manifest and no header, so the
  *  failed checkpoint reads as absent. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_indexes_save_load() {
+std::size_t test_dense_indexes_save_load(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -1806,7 +1780,7 @@ std::size_t test_dense_indexes_save_load() {
     dense_indexes_executor<indexes_type_> driver;
     if (failed(driver.status)) return failures + expect(false);
     auto& executor = driver.executor;
-    auto vectors = make_vectors<scalar_t>(rows, dimensions, dense_seed_roundtrip_k + 1);
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "roundtrip", 1));
     std::vector<key_t> keys(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
 
@@ -1838,7 +1812,7 @@ std::size_t test_dense_indexes_save_load() {
     indexes_type_ restored {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(restored)));
     failures += expect(succeeded(restored.load(paths.manifest, load_config_t {}, executor)));
-    failures += dense_indexes_expect_restored(restored, vectors, keys, dimensions);
+    failures += dense_indexes_expect_restored(restored, vectors, keys, dimensions, seed);
 
     if constexpr (kernel_ != nk_kernel_dot_k) {
         dense_indexes_row_driver<indexes_type_> rows_driver {restored, driver};
@@ -1891,7 +1865,7 @@ std::size_t test_dense_indexes_save_load() {
     indexes_type_ whole {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(whole)));
     failures += expect(succeeded(whole.load(paths.monolith, load_config_t {}, executor)));
-    failures += dense_indexes_expect_restored(whole, vectors, keys, dimensions);
+    failures += dense_indexes_expect_restored(whole, vectors, keys, dimensions, seed);
     failures += expect_eq(whole.shard(0).size(), rows);
 
     paths.remove(indexes.shards_count());
@@ -1903,7 +1877,7 @@ std::size_t test_dense_indexes_save_load() {
  *  a manifest splits the same way; a reservation too small for the widest shard refuses, as
  *  does a second load into a populated index. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_indexes_split_load() {
+std::size_t test_dense_indexes_split_load(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -1914,7 +1888,7 @@ std::size_t test_dense_indexes_split_load() {
     dense_indexes_executor<indexes_type_> driver;
     if (failed(driver.status)) return failures + expect(false);
     auto& executor = driver.executor;
-    auto vectors = make_vectors<scalar_t>(rows, dimensions, dense_seed_roundtrip_k + 3);
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "roundtrip", 3));
     std::vector<key_t> keys(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
 
@@ -1933,7 +1907,7 @@ std::size_t test_dense_indexes_split_load() {
     indexes_type_ striped {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(striped)));
     failures += expect(succeeded(striped.load(paths.monolith, split, executor)));
-    failures += dense_indexes_expect_restored(striped, vectors, keys, dimensions);
+    failures += dense_indexes_expect_restored(striped, vectors, keys, dimensions, seed);
     for (std::size_t shard = 0; shard != shards; ++shard)
         failures += expect_eq(striped.shard(shard).size(), indexes.shard(shard).size());
 
@@ -1941,7 +1915,7 @@ std::size_t test_dense_indexes_split_load() {
     indexes_type_ whole {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(whole)));
     failures += expect(succeeded(whole.load(paths.monolith, load_config_t {}, executor)));
-    failures += dense_indexes_expect_restored(whole, vectors, keys, dimensions);
+    failures += dense_indexes_expect_restored(whole, vectors, keys, dimensions, seed);
     failures += expect_eq(whole.shard(0).size(), rows);
     for (std::size_t shard = 1; shard < shards; ++shard) failures += expect_eq(whole.shard(shard).size(), 0u);
 
@@ -1949,7 +1923,7 @@ std::size_t test_dense_indexes_split_load() {
     indexes_type_ restriped {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(restriped)));
     failures += expect(succeeded(restriped.load(paths.manifest, split, executor)));
-    failures += dense_indexes_expect_restored(restriped, vectors, keys, dimensions);
+    failures += dense_indexes_expect_restored(restriped, vectors, keys, dimensions, seed);
     for (std::size_t shard = 0; shard != shards; ++shard)
         failures += expect_eq(restriped.shard(shard).size(), indexes.shard(shard).size());
 
@@ -1959,7 +1933,7 @@ std::size_t test_dense_indexes_split_load() {
     failures += expect(succeeded(place_shards(cramped)));
     failures += expect(succeeded(cramped.reserve({shards, connectivity_16_k, dimensions}).status));
     failures += expect(succeeded(cramped.load(paths.monolith, split, executor)));
-    failures += dense_indexes_expect_restored(cramped, vectors, keys, dimensions);
+    failures += dense_indexes_expect_restored(cramped, vectors, keys, dimensions, seed);
     failures += expect_eq(striped.load(paths.monolith, split, executor), status_t::config_mismatch_k);
     failures += expect_eq(striped.size(), rows);
 
@@ -1971,7 +1945,7 @@ std::size_t test_dense_indexes_split_load() {
  *  out regardless of which shard they read, the plan finishes once, and the monolith they
  *  wrote restores into the same graph the one-shot save writes. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_indexes_pooled_save() {
+std::size_t test_dense_indexes_pooled_save(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using node_id_t = typename index_t::node_id_t;
@@ -1983,7 +1957,7 @@ std::size_t test_dense_indexes_pooled_save() {
     dense_indexes_executor<indexes_type_> driver;
     if (failed(driver.status)) return failures + expect(false);
     auto& executor = driver.executor;
-    auto vectors = make_vectors<scalar_t>(rows, dimensions, dense_seed_roundtrip_k + 5);
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "roundtrip", 5));
     std::vector<key_t> keys(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
 
@@ -2015,7 +1989,7 @@ std::size_t test_dense_indexes_pooled_save() {
     indexes_type_ restored {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(restored)));
     failures += expect(succeeded(restored.load(bytes_view_t {buffer}, load_config_t {}, executor)));
-    failures += dense_indexes_expect_restored(restored, vectors, keys, dimensions);
+    failures += dense_indexes_expect_restored(restored, vectors, keys, dimensions, seed);
     return failures;
 }
 
@@ -2023,7 +1997,7 @@ std::size_t test_dense_indexes_pooled_save() {
  *  it, a fresh index restores from it, and a short buffer, a distributed layout, or a
  *  cancelled save leave nothing a reader accepts. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_indexes_buffer_roundtrip() {
+std::size_t test_dense_indexes_buffer_roundtrip(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -2034,7 +2008,7 @@ std::size_t test_dense_indexes_buffer_roundtrip() {
     dense_indexes_executor<indexes_type_> driver;
     if (failed(driver.status)) return failures + expect(false);
     auto& executor = driver.executor;
-    auto vectors = make_vectors<scalar_t>(rows, dimensions, dense_seed_roundtrip_k + 4);
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "roundtrip", 4));
     std::vector<key_t> keys(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
 
@@ -2056,7 +2030,7 @@ std::size_t test_dense_indexes_buffer_roundtrip() {
     indexes_type_ restored {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(restored)));
     failures += expect(succeeded(restored.load(bytes_view_t {buffer}, load_config_t {}, executor)));
-    failures += dense_indexes_expect_restored(restored, vectors, keys, dimensions);
+    failures += dense_indexes_expect_restored(restored, vectors, keys, dimensions, seed);
 
     // A buffer one byte short, a distributed layout, and a cancelled save all leave no monolith.
     std::vector<std::byte> shorter(bytes - 1);
@@ -2074,7 +2048,7 @@ std::size_t test_dense_indexes_buffer_roundtrip() {
 /** A cancelled load publishes nothing: cancelling at every shard boundary answers
  *  @c cancelled_k, leaves the index empty, and the next plain load restores it whole. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_indexes_cancelled_load() {
+std::size_t test_dense_indexes_cancelled_load(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -2085,7 +2059,7 @@ std::size_t test_dense_indexes_cancelled_load() {
     dense_indexes_executor<indexes_type_> driver;
     if (failed(driver.status)) return failures + expect(false);
     auto& executor = driver.executor;
-    auto vectors = make_vectors<scalar_t>(rows, dimensions, dense_seed_roundtrip_k + 5);
+    auto vectors = make_vectors<scalar_t>(rows, dimensions, stream_key(seed, "roundtrip", 5));
     std::vector<key_t> keys(rows);
     for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
 
@@ -2107,7 +2081,7 @@ std::size_t test_dense_indexes_cancelled_load() {
         failures += expect_eq(restored.size(), 0u);
         failures += expect_eq(restored.count(keys[0]), 0u);
         failures += expect(succeeded(restored.load(paths.manifest, load_config_t {}, executor)));
-        failures += dense_indexes_expect_restored(restored, vectors, keys, dimensions);
+        failures += dense_indexes_expect_restored(restored, vectors, keys, dimensions, seed);
     }
 
     paths.remove(shards);
@@ -2124,7 +2098,7 @@ std::size_t test_dense_indexes_cancelled_load() {
  *  threads join; either way every row lands exactly once.
  */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_indexes_concurrent_add() {
+std::size_t test_dense_indexes_concurrent_add(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -2144,7 +2118,7 @@ std::size_t test_dense_indexes_concurrent_add() {
     std::vector<std::vector<key_t>> keys;
     for (std::size_t which = 0; which != executors_count; ++which) {
         if (failed(drivers[which].status)) return failures + expect(false);
-        slices.push_back(make_vectors<scalar_t>(rows_per_executor, dimensions, dense_seed_indexes_add_k + which));
+        slices.push_back(make_vectors<scalar_t>(rows_per_executor, dimensions, stream_key(seed, "indexes_add", which)));
         // Keys never take the value zero, so a stale read of a zero-filled key column can
         // never masquerade as a legitimate identity.
         std::vector<key_t> range(rows_per_executor);
@@ -2217,7 +2191,7 @@ std::size_t test_dense_indexes_concurrent_add() {
  *  outside the assigned range. RAM only: a VRAM index admits no search during a mutation. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
     requires ram_indexes<indexes_type_>
-std::size_t test_dense_indexes_search_race() {
+std::size_t test_dense_indexes_search_race(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -2234,7 +2208,7 @@ std::size_t test_dense_indexes_search_race() {
     if (failed(driver.status)) return failures + expect(false);
     auto& executor = driver.executor;
 
-    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, dense_seed_indexes_race_k);
+    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexes_race"));
     std::vector<key_t> keys(nodes_count);
     for (std::size_t row = 0; row != nodes_count; ++row) keys[row] = static_cast<key_t>(1 + row);
 
@@ -2282,7 +2256,7 @@ std::size_t test_dense_indexes_search_race() {
 /** Sharded graph products are a dot-kernel verb, so every other kernel has nothing to check. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
     requires(kernel_ != nk_kernel_dot_k)
-std::size_t test_dense_indexes_products() {
+std::size_t test_dense_indexes_products(u64_t) {
     return 0;
 }
 
@@ -2291,7 +2265,7 @@ std::size_t test_dense_indexes_products() {
  *  mismatched spans refuse. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
     requires(kernel_ == nk_kernel_dot_k)
-std::size_t test_dense_indexes_products() {
+std::size_t test_dense_indexes_products(u64_t seed) {
     using scalar_t = typename indexes_type_::scalar_t;
     using key_t = typename indexes_type_::key_t;
     constexpr std::size_t rows_count = dense_thread_nodes_k, left_count = 4;
@@ -2303,7 +2277,7 @@ std::size_t test_dense_indexes_products() {
     indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(indexes)));
     failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
-    auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, dense_seed_indexes_products_k);
+    auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_products"));
     std::array<key_t, rows_count> keys;
     for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(1 + row);
     failures += expect(
@@ -2339,7 +2313,7 @@ std::size_t test_dense_indexes_products() {
 /** Sharded MaxSim is a dot-kernel verb, so every other kernel has nothing to check. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
     requires(kernel_ != nk_kernel_dot_k)
-std::size_t test_dense_indexes_maxsim() {
+std::size_t test_dense_indexes_maxsim(u64_t) {
     return 0;
 }
 
@@ -2348,7 +2322,7 @@ std::size_t test_dense_indexes_maxsim() {
  *  key above its own, and a ragged batch refuses. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
     requires(kernel_ == nk_kernel_dot_k)
-std::size_t test_dense_indexes_maxsim() {
+std::size_t test_dense_indexes_maxsim(u64_t seed) {
     using scalar_t = typename indexes_type_::scalar_t;
     using key_t = typename indexes_type_::key_t;
     using search_config_t = typename indexes_type_::search_config_t;
@@ -2363,7 +2337,7 @@ std::size_t test_dense_indexes_maxsim() {
     indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(indexes)));
     failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
-    auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, dense_seed_indexes_maxsim_k);
+    auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_maxsim"));
     std::array<key_t, rows_count> keys;
     for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(1 + row / tokens_per_document);
     failures += expect(
@@ -2436,7 +2410,7 @@ std::size_t test_dense_indexes_maxsim() {
  *  the saver has provably contended at least once, and a settle phase after the race
  *  demands a deterministic success. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     std::size_t failures = 0;
@@ -2453,9 +2427,8 @@ std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocatio
     failures += expect(index.reserve({nodes_ceiling, connectivity_16_k, dimensions}).status == status_t::success_k);
 
     auto threads = dense_make_threads<index_type_>(inserter_threads_count + 2, dense_thread_nodes_k + spare_rows_count,
-                                                   dimensions, dense_seed_save_race_k);
-    auto prefill_vectors = make_vectors<scalar_t>(prefill_rows_count, dimensions,
-                                                  dense_seed_save_race_k ^ salt_extras_k);
+                                                   dimensions, stream_key(seed, "save_race"));
+    auto prefill_vectors = make_vectors<scalar_t>(prefill_rows_count, dimensions, stream_key(seed, "save_race", 1));
     typename index_type_::dense_traversal_context_t prefill_context {{}};
     failures += expect(index.insert(prefill_vectors.view(), {}, prefill_context).status == status_t::success_k);
 
@@ -2589,9 +2562,9 @@ std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocatio
 
 /** @ref dense_expect_save_race, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t test_dense_save_race(make_index_type_ const& make_index) {
+std::size_t test_dense_save_race(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_save_race<index_type_, kernel_>(make_index, ledger);
+    std::size_t const failures = dense_expect_save_race<index_type_, kernel_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -2603,18 +2576,18 @@ std::size_t test_dense_save_race(make_index_type_ const& make_index) {
  *  bit for bit - fresh identically-seeded contexts, so the landmark draws align - at
  *  the default expansion and at an explicit one. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t dense_expect_immutable_parity(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_immutable_parity(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures = 0;
     std::size_t const nodes_count = 512, stored_queries_count = 16, novel_queries_count = 8;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t build_context {{}};
-    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, dense_seed_immutable_parity_k);
+    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "immutable_parity"));
     failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     failures += expect(index.insert(vectors.view(), {}, build_context).status == status_t::success_k);
     auto novel_queries = make_vectors<scalar_t>(novel_queries_count, dimensions,
-                                                dense_seed_immutable_parity_k ^ salt_queries_k);
+                                                stream_key(seed, "immutable_parity", 1));
 
     auto compare_arms = [&](auto query, std::size_t expansion_factor) noexcept {
         typename index_type_::dense_traversal_context_t concurrent_context {{}}, immutable_context {{}};
@@ -2643,9 +2616,9 @@ std::size_t dense_expect_immutable_parity(make_index_type_ const& make_index, al
 
 /** @ref dense_expect_immutable_parity, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t test_dense_immutable_parity(make_index_type_ const& make_index) {
+std::size_t test_dense_immutable_parity(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_immutable_parity<index_type_, kernel_>(make_index, ledger);
+    std::size_t const failures = dense_expect_immutable_parity<index_type_, kernel_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -2655,7 +2628,7 @@ std::size_t test_dense_immutable_parity(make_index_type_ const& make_index) {
  *  arm agreeing with the concurrent one on the settled graph. */
 template <typename index_type_, typename concurrent_cursor_type_, typename immutable_cursor_type_,
           typename make_index_type_>
-std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     std::size_t failures = 0;
@@ -2663,7 +2636,8 @@ std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_l
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
-    auto vectors = make_vectors<scalar_t>(nodes_count + 1 + racing_inserts_count, dimensions, dense_seed_cursor_k);
+    auto vectors = make_vectors<scalar_t>(nodes_count + 1 + racing_inserts_count, dimensions,
+                                          stream_key(seed, "cursor"));
     failures += expect(index.reserve({nodes_count + 1 + racing_inserts_count, connectivity_16_k, dimensions}).status ==
                        status_t::success_k);
     auto main_rows = vectors(nk::range(0, nodes_count), nk::slice);
@@ -2777,10 +2751,10 @@ std::size_t dense_expect_cursor(make_index_type_ const& make_index, allocation_l
 /** @ref dense_expect_cursor, then the ledger it left must balance. */
 template <typename index_type_, typename concurrent_cursor_type_, typename immutable_cursor_type_,
           typename make_index_type_>
-std::size_t test_dense_cursor(make_index_type_ const& make_index) {
+std::size_t test_dense_cursor(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_cursor<index_type_, concurrent_cursor_type_, immutable_cursor_type_>(
-        make_index, ledger);
+        make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -2809,7 +2783,8 @@ std::size_t dense_expect_starved_load(make_index_type_ const& make_index, alloca
  *  refused mid-insert growth is all-or-nothing & retryable, and a starved load
  *  publishes nothing - the fresh-index retry then succeeds with recall intact. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t dense_expect_allocation_budget(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_allocation_budget(make_index_type_ const& make_index, allocation_ledger_t& ledger,
+                                           u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     std::size_t failures = 0;
@@ -2821,7 +2796,7 @@ std::size_t dense_expect_allocation_budget(make_index_type_ const& make_index, a
     failures += expect(reserve_status == status_t::success_k);
     std::size_t const fill_rows_count = capacity; // Fill to the brim, so one more row must grow.
     auto vectors = make_vectors<scalar_t>(fill_rows_count + extra_rows_count, dimensions,
-                                          dense_seed_allocation_budget_k);
+                                          stream_key(seed, "allocation_budget"));
     auto fill_rows = vectors(nk::range(0, fill_rows_count), nk::slice);
     auto extra_rows = vectors(nk::range(fill_rows_count, fill_rows_count + extra_rows_count), nk::slice);
     failures += expect(index.insert(fill_rows, {}, context).status == status_t::success_k);
@@ -2862,23 +2837,24 @@ std::size_t dense_expect_allocation_budget(make_index_type_ const& make_index, a
 
 /** @ref dense_expect_allocation_budget, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t test_dense_allocation_budget(make_index_type_ const& make_index) {
+std::size_t test_dense_allocation_budget(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_allocation_budget<index_type_, kernel_>(make_index, ledger);
+    std::size_t const failures = dense_expect_allocation_budget<index_type_, kernel_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
 /** Shedding the frontier past a full pool's radius is lossless: a walk whose frontier
  *  never fills ranks the same nodes, and the shedding frontier never outgrows its reservation. */
 template <typename index_type_, typename make_index_type_>
-std::size_t dense_expect_frontier_shedding(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_frontier_shedding(make_index_type_ const& make_index, allocation_ledger_t& ledger,
+                                           u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures = 0;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
     failures += expect(succeeded(index.reserve({dense_growth_nodes_k, connectivity_16_k, dimensions}).status));
-    auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k + 1, dimensions, dense_seed_shedding_k);
+    auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k + 1, dimensions, stream_key(seed, "shedding"));
     auto rows = vectors(nk::range(0, dense_growth_nodes_k), nk::slice);
     failures += expect(succeeded(index.insert(rows, {}, context).status));
 
@@ -2908,9 +2884,9 @@ std::size_t dense_expect_frontier_shedding(make_index_type_ const& make_index, a
 
 /** @ref dense_expect_frontier_shedding, then the ledger it left must balance. */
 template <typename index_type_, typename make_index_type_>
-std::size_t test_dense_frontier_shedding(make_index_type_ const& make_index) {
+std::size_t test_dense_frontier_shedding(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_frontier_shedding<index_type_>(make_index, ledger);
+    std::size_t const failures = dense_expect_frontier_shedding<index_type_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -2919,13 +2895,13 @@ std::size_t test_dense_frontier_shedding(make_index_type_ const& make_index) {
  *  an insertion still publishes its row, wired thinner. The one-wide pool makes the first
  *  expansion's quad the re-table that is refused. */
 template <typename index_type_, typename make_index_type_>
-std::size_t dense_expect_saturated(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_saturated(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures = 0;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     index_type_ index = make_index(ledger);
     failures += expect(succeeded(index.reserve({dense_growth_nodes_k + 1, connectivity_16_k, dimensions}).status));
-    auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k + 2, dimensions, dense_seed_saturated_k);
+    auto vectors = make_vectors<scalar_t>(dense_growth_nodes_k + 2, dimensions, stream_key(seed, "saturated"));
     typename index_type_::dense_traversal_context_t warm {counting_allocator_t(ledger)};
     auto rows = vectors(nk::range(0, dense_growth_nodes_k), nk::slice);
     failures += expect(succeeded(index.insert(rows, {}, warm).status));
@@ -2956,9 +2932,9 @@ std::size_t dense_expect_saturated(make_index_type_ const& make_index, allocatio
 
 /** @ref dense_expect_saturated, then the ledger it left must balance. */
 template <typename index_type_, typename make_index_type_>
-std::size_t test_dense_saturated(make_index_type_ const& make_index) {
+std::size_t test_dense_saturated(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_saturated<index_type_>(make_index, ledger);
+    std::size_t const failures = dense_expect_saturated<index_type_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -2967,7 +2943,7 @@ std::size_t test_dense_saturated(make_index_type_ const& make_index) {
  *  refusals, the winners' IDs land dense & duplicate-free, the ID-space ceiling still
  *  answers @c overflow_k, and a lifted budget makes a refused batch retryable. */
 template <typename index_type_, typename make_index_type_>
-std::size_t dense_expect_overflow_race(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_overflow_race(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures = 0;
     std::size_t const racing_threads_count = 4, batch_rows_count = 512;
@@ -2987,12 +2963,12 @@ std::size_t dense_expect_overflow_race(make_index_type_ const& make_index, alloc
     typename index_type_::dense_traversal_context_t context {{}};
     if (prefill_rows_count) {
         auto prefill_vectors = make_vectors<scalar_t>(prefill_rows_count, dimensions,
-                                                      dense_seed_overflow_race_k ^ salt_extras_k);
+                                                      stream_key(seed, "overflow_race", 1));
         failures += expect(index.insert(prefill_vectors.view(), {}, context).status == status_t::success_k);
     }
 
     auto threads = dense_make_threads<index_type_>(racing_threads_count, batch_rows_count, dimensions,
-                                                   dense_seed_overflow_race_k);
+                                                   stream_key(seed, "overflow_race"));
     std::vector<dense_node_id_t> assigned_ids(racing_threads_count * batch_rows_count, dense_node_id_unknown_k);
     std::array<status_t, 4> thread_statuses {};
     ledger.byte_budget.store(ledger.live_bytes.load()); // No growth: the arena is the arena.
@@ -3045,9 +3021,9 @@ std::size_t dense_expect_overflow_race(make_index_type_ const& make_index, alloc
 
 /** @ref dense_expect_overflow_race, then the ledger it left must balance. */
 template <typename index_type_, typename make_index_type_>
-std::size_t test_dense_overflow_race(make_index_type_ const& make_index) {
+std::size_t test_dense_overflow_race(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_overflow_race<index_type_>(make_index, ledger);
+    std::size_t const failures = dense_expect_overflow_race<index_type_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 

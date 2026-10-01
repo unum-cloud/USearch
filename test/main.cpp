@@ -11,11 +11,13 @@ using namespace unum::usearch;
 using namespace unum::usearch::test;
 
 int main() {
-    log_environment();
+    settings_t const settings = read_settings();
+    print(probe_machine());
+    print(settings);
     std::size_t failures_count = 0;
 
-    failures_count += utilities::check_safegraphs_format();
-    failures_count += check_dense();
+    if (settings.selects("safegraphs_format")) failures_count += utilities::check_safegraphs_format(settings);
+    failures_count += check_dense(settings);
 
     return report("total", failures_count) ? 1 : 0;
 }

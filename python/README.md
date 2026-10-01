@@ -230,7 +230,7 @@ Searches may run throughout, and a stopped sweep resumes where it left off, whic
 Three verbs read the same walk as arithmetic rather than as retrieval.
 All of them need an inner-product index, since a product, a softmax, and a maximum over logits are all things only those kinds score.
 
-`multiply` reports __every__ pair the traversal scored rather than only the nearest - an approximate `A × Bᵀ`, dense in and sparse out.
+`multiply` reports __every__ pair the traversal scored rather than only the nearest - an approximate A × Bᵀ, dense in and sparse out.
 A walk computes many times the products it reports and each of them is exact, so the caller stops recomputing what the index already knew.
 The width of the emitted pattern is the caller's to choose, and the verb returns how many rows truncated, which makes the retry loop a `while`:
 

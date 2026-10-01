@@ -9,20 +9,33 @@
  *  state. Four verbs cover every case: @c expect for a condition, @c expect_eq and
  *  @c expect_near when diagnosis needs the values, and @c report for the verdict column.
  *  A status becomes a condition through @c succeeded(), so no fifth verb is needed.
+ *
+ *  Both suites read their settings once, at the top of @c main, into one @c settings_t:
+ *
+ *  @verbatim
+ *  USEARCH_SEED    42    Seed every scenario's data derives from, an unsigned integer or random
+ *  USEARCH_FILTER  none  Checks to run, by name, as an ECMAScript regex or else as a substring
+ *  @endverbatim
  */
 #pragma once
 
 #include <cmath>   // `std::fabs`, `std::fmax` - the relative tolerance of `expect_near`
 #include <cstdint> // `PTRDIFF_MAX` - the unbounded allocation budget
-#include <cstdlib> // `std::malloc`, `std::free`, `std::abort`
+#include <cstdlib> // `std::malloc`, `std::free`, `std::abort`, `std::getenv`, `std::exit`
 #include <cstring> // `std::memset` - the scribble over a freed block
 
-#include <algorithm> // `std::sort`, `std::unique` - the dispensed-id density check
-#include <array>     // `std::array` - one latent point of the sign sketches
-#include <atomic>    // `std::atomic`
-#include <chrono>    // `std::chrono::microseconds` - the flaky waiter's oversleep
-#include <span>      // `std::span` - the dispensed-id density check
-#include <thread>    // `std::this_thread::yield`, `std::this_thread::sleep_for`
+#include <algorithm>    // `std::sort`, `std::unique` - the dispensed-id density check
+#include <array>        // `std::array` - one latent point of the sign sketches
+#include <atomic>       // `std::atomic`
+#include <charconv>     // `std::from_chars` - the seed
+#include <chrono>       // `std::chrono::microseconds` - the flaky waiter's oversleep
+#include <optional>     // `std::optional` - the settings readers
+#include <random>       // `std::random_device` - a drawn seed
+#include <regex>        // `std::regex`, `std::regex_search` - the filter
+#include <span>         // `std::span` - the dispensed-id density check
+#include <string_view>  // `std::string_view` - the settings readers
+#include <system_error> // `std::errc`
+#include <thread>       // `std::this_thread::yield`, `std::this_thread::sleep_for`
 
 #include <fmt/format.h>
 
@@ -77,12 +90,116 @@ inline std::size_t report(char const* name, char const* skip_reason) {
     return 0;
 }
 
-/** Opens the run with the names the C interface reports, so the suite checks the strings users see. */
-inline void log_environment() {
-    fmt::println("USearch {}", usearch_version());
-    fmt::println("- Compiled for: {}", usearch_capabilities_compiled());
-    fmt::println("- This machine: {}", usearch_capabilities_available());
+#pragma region Settings
+
+/** The text of the environment variable @p name, or nothing when it is unset or empty. */
+inline std::optional<std::string_view> env_text(char const* name) noexcept {
+    char const* const text = std::getenv(name);
+    if (!text || !*text) return std::nullopt;
+    return std::string_view(text);
 }
+
+/** Parses the environment variable @p name with @p parse, or returns @p fallback when it is unset
+ *  or empty. Text that does not parse prints `NAME="text" does not parse, expected <expected>` and
+ *  exits with status 1, which leaves crash handlers quiet. */
+template <typename value_type_, typename parse_type_>
+[[nodiscard]] value_type_ env_parsed(char const* name, value_type_ fallback, parse_type_&& parse,
+                                     char const* expected) noexcept {
+    std::optional<std::string_view> const text = env_text(name);
+    if (!text) return fallback;
+    if (std::optional<value_type_> value = parse(*text)) return *std::move(value);
+    fmt::println(stderr, "{}=\"{}\" does not parse, expected {}", name, *text, expected);
+    std::exit(1);
+}
+
+/** A 32-bit seed, or "random" for a fresh draw from @c std::random_device. */
+inline std::optional<std::uint32_t> parse_seed(std::string_view text) noexcept {
+    if (text == "random") return static_cast<std::uint32_t>(std::random_device {}());
+    std::uint32_t seed = 0;
+    auto const [end, parse_status] = std::from_chars(text.data(), text.data() + text.size(), seed);
+    if (parse_status != std::errc {} || end != text.data() + text.size()) return std::nullopt;
+    return seed;
+}
+
+inline std::uint32_t env_seed(char const* name, std::uint32_t fallback) noexcept {
+    return env_parsed(name, fallback, parse_seed, "an unsigned integer or random");
+}
+
+/** Every setting the suites read, its default as the initializer, filled once by @c read_settings. */
+struct settings_t {
+
+    /** Checks to run, by ECMAScript regex or else substring. Override: @c USEARCH_FILTER. */
+    std::string_view filter;
+    std::optional<std::regex> filter_regex;
+
+    /** Seed every scenario family derives its streams from. Override: @c USEARCH_SEED, where random draws one. */
+    std::uint32_t seed = 42;
+
+    /** Whether @p name passes the filter. */
+    bool selects(std::string_view name) const {
+        if (filter.empty()) return true;
+        if (filter_regex) return std::regex_search(name.begin(), name.end(), *filter_regex);
+        return name.find(filter) != std::string_view::npos;
+    }
+};
+
+/** Reads every @c settings_t variable, exiting with status 1 on the first that does not parse. */
+inline settings_t read_settings() noexcept {
+    settings_t settings;
+    settings.filter = env_text("USEARCH_FILTER").value_or("");
+    if (!settings.filter.empty()) {
+#if defined(__cpp_exceptions) && __cpp_exceptions
+        try {
+            settings.filter_regex.emplace(settings.filter.begin(), settings.filter.end());
+        }
+        catch (std::regex_error const&) {
+        }
+#else
+        settings.filter_regex.emplace(settings.filter.begin(), settings.filter.end());
+#endif
+    }
+    settings.seed = env_seed("USEARCH_SEED", settings.seed);
+    return settings;
+}
+
+/** Prints each setting as "- Name: value", in the grammar it parses from. */
+inline void print(settings_t const& settings) {
+    fmt::println("- Seed: {}", settings.seed);
+    fmt::println("- Filter: {}", settings.filter.empty() ? std::string_view("none") : settings.filter);
+}
+
+/** The names the C interface reports for this build and this machine, so the suite checks the strings users see. */
+struct machine_t {
+    char const* version = nullptr;
+    char const* compiled = nullptr;
+    char const* available = nullptr;
+};
+
+/** Probes the names @c machine_t reports. */
+inline machine_t probe_machine() noexcept {
+    return {usearch_version(), usearch_capabilities_compiled(), usearch_capabilities_available()};
+}
+
+/** Prints the version line, then the capabilities as "- Compiled for:" and "- This machine:". */
+inline void print(machine_t const& machine) {
+    fmt::println("USearch {}", machine.version);
+    fmt::println("- Compiled for: {}", machine.compiled);
+    fmt::println("- This machine: {}", machine.available);
+}
+
+/** The 64-bit FNV-1a hash of @p text, folding stream names into @ref stream_key. */
+constexpr u64_t fnv1a64(std::string_view text) noexcept {
+    u64_t hash = 0xCBF29CE484222325ull;
+    for (char const character : text) hash = (hash ^ static_cast<u8_t>(character)) * 0x100000001B3ull;
+    return hash;
+}
+
+/** The @p index-th stream of the family @p name under the run's @p seed, identical in C++, Rust and Python. */
+constexpr u64_t stream_key(u64_t seed, std::string_view name, u64_t index = 0) noexcept {
+    return mix_bits(mix_bits(seed ^ fnv1a64(name)) + index);
+}
+
+#pragma endregion Settings
 
 /** Ids dispensed to racing lanes must land dense & duplicate-free: sorted in
  *  place, unique, and running from @p first_id through the half-open bound
@@ -95,17 +212,6 @@ inline std::size_t expect_contiguous_ids(std::span<node_id_type_> ids, std::size
                        static_cast<std::size_t>(ids.back()) == first_id + ids.size() - 1);
     return failures;
 }
-
-/** Derived-draw salts shared by both scenario libraries. Every scenario family
- *  owns exactly one named hex-leet seed and never reuses it verbatim: query draws
- *  XOR @c salt_queries_k, auxiliary value draws - extras, prefills, pairs - XOR
- *  @c salt_extras_k, per-lane draws add the lane index, and per-context re-seeds add
- *  small literal offsets. Two salts, disjoint from every lane index and offset, keep
- *  a family's draws distinct without per-site magic. */
-constexpr u64_t salt_queries_k = 0xFFull;
-
-/** The auxiliary-draw twin of @ref salt_queries_k. */
-constexpr u64_t salt_extras_k = 0xAAull;
 
 /** Spin ceiling for waits on prompt flags - flags a peer sets within bounded
  *  work: a gate entry, a hold acquisition, a refusal confirmation. Expiry proves a
@@ -320,18 +426,18 @@ nk::matrix<scalar_, allocator_type_> make_vectors(std::size_t count, std::size_t
 
 #pragma region Suite Entry Points
 
-std::size_t check_dense();
+std::size_t check_dense(settings_t const& settings);
 
 namespace utilities {
-std::size_t check_ram_buffers();
-std::size_t check_ram_tables();
-std::size_t check_safegraphs_format();
+std::size_t check_ram_buffers(settings_t const& settings);
+std::size_t check_ram_tables(settings_t const& settings);
+std::size_t check_safegraphs_format(settings_t const& settings);
 } // namespace utilities
 
 namespace basic {
-std::size_t check_sentences();
-std::size_t check_bioinformatics();
-std::size_t check_meshes();
+std::size_t check_sentences(settings_t const& settings);
+std::size_t check_bioinformatics(settings_t const& settings);
+std::size_t check_meshes(settings_t const& settings);
 } // namespace basic
 
 #pragma endregion Suite Entry Points

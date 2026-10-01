@@ -4,7 +4,7 @@ Mirrors nothing in C++: `usearch/types.h` has no test unit of its own, because i
 plain structs. In Python they are types with protocols to honor, so they get one here.
 
 Run:
-    python -m pytest test/types.py -v
+    python -m pytest test/dtypes.py -v
 """
 
 from __future__ import annotations
@@ -13,12 +13,11 @@ import uuid
 
 import numpy as np
 import pytest
+from base import batch_sizes, matches_outputs
 
 import usearch
 from usearch import Error, Key, Matches, Stats
 from usearch.keys import integers_to_keys, keys_to_integers
-
-from .base import batch_sizes, matches_outputs
 
 # region Library
 

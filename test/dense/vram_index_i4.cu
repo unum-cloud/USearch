@@ -8,10 +8,10 @@
 
 using namespace unum::usearch;
 
-std::size_t test::dense::check_vram_index_i4() {
+std::size_t test::dense::check_vram_index_i4(settings_t const& settings) {
     std::size_t failures_count = 0;
-    failures_count += test_cuda_configuration<nk_kernel_dot_k, nk_i4_k>("cuda-i4+dot");
-    failures_count += test_cuda_configuration<nk_kernel_angular_k, nk_i4_k>("cuda-i4+angular");
-    failures_count += test_cuda_configuration<nk_kernel_euclidean_k, nk_i4_k>("cuda-i4+euclidean");
+    failures_count += test_cuda_configuration<nk_kernel_dot_k, nk_i4_k>("cuda-i4+dot", settings.seed);
+    failures_count += test_cuda_configuration<nk_kernel_angular_k, nk_i4_k>("cuda-i4+angular", settings.seed);
+    failures_count += test_cuda_configuration<nk_kernel_euclidean_k, nk_i4_k>("cuda-i4+euclidean", settings.seed);
     return failures_count;
 }

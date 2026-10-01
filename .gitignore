@@ -115,3 +115,7 @@ csharp/packages
 .claude/
 data/*
 !data/.gitkeep
+
+# Datasets live under data/, which only tracks its .gitkeep
+/data/*
+!/data/.gitkeep

@@ -9,15 +9,16 @@
 
 using namespace unum::usearch;
 
-std::size_t test::dense::check_ram_index_i8() {
+std::size_t test::dense::check_ram_index_i8(settings_t const& settings) {
     std::size_t failures_count = 0;
-    failures_count += test_configuration<nk_i8_k, nk_kernel_dot_k>("i8+dot");
-    failures_count += test_configuration<nk_i8_k, nk_kernel_euclidean_k>("i8+euclidean");
-    failures_count += test_configuration<nk_i8_k, nk_kernel_euclidean_k, flaky_waiter_t>("i8+euclidean+flaky");
+    failures_count += test_configuration<nk_i8_k, nk_kernel_dot_k>("i8+dot", settings.seed);
+    failures_count += test_configuration<nk_i8_k, nk_kernel_euclidean_k>("i8+euclidean", settings.seed);
+    failures_count += test_configuration<nk_i8_k, nk_kernel_euclidean_k, flaky_waiter_t>("i8+euclidean+flaky",
+                                                                                         settings.seed);
     failures_count +=
         test_configuration<nk_i8_k, nk_kernel_euclidean_k, dummy_waiter_t, nk_cap_serial_k, fu::preferred_atomic_ref>(
-            "i8+euclidean+preferred-atomics");
+            "i8+euclidean+preferred-atomics", settings.seed);
     failures_count += test_configuration<nk_i8_k, nk_kernel_euclidean_k, dummy_waiter_t, nk_cap_neonsdot_k>( //
-        "i8+euclidean+neonsdot");
+        "i8+euclidean+neonsdot", settings.seed);
     return failures_count;
 }

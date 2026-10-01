@@ -42,7 +42,7 @@ template <                                       //
     nk_capability_t caps_ = nk_cap_serial_k,     //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
     requires(!index_combo_supported<dtype_, kernel_> || !dense_cell_compiled<dtype_, kernel_, caps_>)
-static std::size_t test_configuration(char const* name) {
+static std::size_t test_configuration(char const* name, u64_t) {
     if constexpr (!index_combo_supported<dtype_, kernel_>) return report(name, "serial kernels not adapted yet");
     else return report(name, "kit not compiled for this target");
 }
@@ -53,7 +53,7 @@ template <                                       //
     nk_capability_t caps_ = nk_cap_serial_k,     //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
     requires(index_combo_supported<dtype_, kernel_> && dense_cell_compiled<dtype_, kernel_, caps_>)
-static std::size_t test_configuration(char const* name) {
+static std::size_t test_configuration(char const* name, u64_t seed) {
 
     using index_t = dense_ram_index<dtype_, kernel_, caps_, waiter_type_, atomic_ref_, counting_allocator_t,
                                     counting_allocator_t, std::allocator<byte_t>>;
@@ -67,29 +67,29 @@ static std::size_t test_configuration(char const* name) {
     // The suite is composed here, not reflected: every call below is a capability claim
     // this fully-concurrent, serializable category makes about itself.
     std::size_t failures_count = 0;
-    failures_count += test_dense_guards<index_t>(make_index);
-    failures_count += test_dense_three_vectors<index_t, kernel_>(make_index);
-    failures_count += test_dense_growth_and_recall<index_t, kernel_>(make_index);
-    failures_count += test_dense_refine_settles<index_t, kernel_>(make_index);
-    failures_count += test_dense_health_audits<index_t, kernel_>(make_index);
-    failures_count += test_dense_heal_islands<index_t>(make_index);
-    failures_count += test_dense_predicated_search<index_t, kernel_>(make_index);
-    failures_count += test_dense_multiply<index_t, kernel_>(make_index);
-    failures_count += test_dense_save_load_roundtrip<index_t, kernel_>(make_index);
-    failures_count += test_dense_load_hostile<index_t, kernel_>(make_index);
-    failures_count += test_dense_load_append<index_t, kernel_>(make_index);
-    failures_count += test_dense_concurrent_build<index_t, kernel_>(make_index);
-    failures_count += test_dense_concurrent_search<index_t, kernel_>(make_index);
-    failures_count += test_dense_save_race<index_t, kernel_>(make_index);
-    failures_count += test_dense_immutable_parity<index_t, kernel_>(make_index);
+    failures_count += test_dense_guards<index_t>(make_index, seed);
+    failures_count += test_dense_three_vectors<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_growth_and_recall<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_refine_settles<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_health_audits<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_heal_islands<index_t>(make_index, seed);
+    failures_count += test_dense_predicated_search<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_multiply<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_save_load_roundtrip<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_load_hostile<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_load_append<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_concurrent_build<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_concurrent_search<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_save_race<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_immutable_parity<index_t, kernel_>(make_index, seed);
     using concurrent_cursor_t = dense_ram_cursor<index_t, synchronization_t::concurrent_k, //
                                                  counting_allocator_t>;
     using immutable_cursor_t = dense_ram_cursor<index_t, synchronization_t::immutable_k, //
                                                 counting_allocator_t>;
-    failures_count += test_dense_cursor<index_t, concurrent_cursor_t, immutable_cursor_t>(make_index);
-    failures_count += test_dense_allocation_budget<index_t, kernel_>(make_index);
-    failures_count += test_dense_frontier_shedding<index_t>(make_index);
-    failures_count += test_dense_overflow_race<index_t>(make_index);
+    failures_count += test_dense_cursor<index_t, concurrent_cursor_t, immutable_cursor_t>(make_index, seed);
+    failures_count += test_dense_allocation_budget<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_frontier_shedding<index_t>(make_index, seed);
+    failures_count += test_dense_overflow_race<index_t>(make_index, seed);
     return report(name, failures_count);
 }
 
@@ -97,27 +97,27 @@ static std::size_t test_configuration(char const* name) {
  *  has somewhere to come from, walked by the saturation scenario alone. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
     requires(index_combo_supported<dtype_, kernel_>)
-static std::size_t test_starved_configuration(char const* name) {
+static std::size_t test_starved_configuration(char const* name, u64_t seed) {
     using index_t = dense_ram_index<dtype_, kernel_, nk_cap_serial_k, dummy_waiter_t, fu::standard_atomic_ref,
                                     counting_allocator_t, counting_allocator_t, counting_allocator_t>;
     auto make_index = [](allocation_ledger_t& ledger) {
         return index_t {counting_allocator_t(ledger), counting_allocator_t(ledger)};
     };
-    return report(name, test_dense_saturated<index_t>(make_index));
+    return report(name, test_dense_saturated<index_t>(make_index, seed));
 }
 
 #pragma region Suite Entry Points
 
 /** Per-dtype CPU index suite entries the shard translation units define and
  *  @c dense.cpp composes explicitly; each returns its shard's failure count. */
-std::size_t check_ram_index_f32();
-std::size_t check_ram_index_bf16();
-std::size_t check_ram_index_f16();
-std::size_t check_ram_index_e5m2();
-std::size_t check_ram_index_i8();
-std::size_t check_ram_index_i4();
-std::size_t check_ram_index_u8();
-std::size_t check_ram_index_u1();
+std::size_t check_ram_index_f32(settings_t const& settings);
+std::size_t check_ram_index_bf16(settings_t const& settings);
+std::size_t check_ram_index_f16(settings_t const& settings);
+std::size_t check_ram_index_e5m2(settings_t const& settings);
+std::size_t check_ram_index_i8(settings_t const& settings);
+std::size_t check_ram_index_i4(settings_t const& settings);
+std::size_t check_ram_index_u8(settings_t const& settings);
+std::size_t check_ram_index_u1(settings_t const& settings);
 
 #pragma endregion Suite Entry Points
 

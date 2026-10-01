@@ -78,7 +78,7 @@ static_assert(cuda_reservable_allocator<counting_cuda_allocator_t>);
  *  exact dot, and mismatched spans refuse. */
 template <typename index_type_, typename make_index_type_>
     requires dense_device_resident_k<index_type_>
-std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation_ledger_t& ledger) {
+std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using dot_result_t = typename index_type_::dot_result_t;
     using search_config_t = typename index_type_::search_config_t;
@@ -88,7 +88,7 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
     failures += expect(index.reserve({rows_count, connectivity_16_k, dimensions}).status == status_t::success_k);
-    auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, dense_seed_multiply_k);
+    auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "multiply"));
     auto const left = vectors(nk::range {std::size_t {0}, left_count}, nk::slice);
 
     std::array<dense_node_id_t, left_count * rows_count> node_ids;
@@ -138,9 +138,9 @@ using test::test_dense_multiply;
 /** @ref dense_expect_multiply, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
     requires(kernel_ == nk_kernel_dot_k && dense_device_resident_k<index_type_>)
-std::size_t test_dense_multiply(make_index_type_ const& make_index) {
+std::size_t test_dense_multiply(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_multiply<index_type_>(make_index, ledger);
+    std::size_t const failures = dense_expect_multiply<index_type_>(make_index, ledger, seed);
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
@@ -148,7 +148,7 @@ std::size_t test_dense_multiply(make_index_type_ const& make_index) {
 
 /** Composes one (dtype, kernel) cell's suite over the ledgered device allocator. */
 template <nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>
-std::size_t test_cuda_configuration(char const* name) {
+std::size_t test_cuda_configuration(char const* name, u64_t seed) {
     using allocator_t = counting_cuda_allocator_t;
     using index_t =
         dense_vram_index<dtype_, kernel_, cuda_arch_blackwellrtx_k, allocator_t, allocator_t, cuda_device_allocator_t>;
@@ -158,17 +158,17 @@ std::size_t test_cuda_configuration(char const* name) {
     // The suite is composed here, not reflected: every call below is a capability claim
     // this fully-concurrent, serializable category makes about itself.
     std::size_t failures_count = 0;
-    failures_count += test_dense_guards<index_t>(make_index);
-    failures_count += test_dense_three_vectors<index_t, kernel_>(make_index);
-    failures_count += test_dense_growth_and_recall<index_t, kernel_>(make_index);
-    failures_count += test_dense_save_load_roundtrip<index_t, kernel_>(make_index);
-    failures_count += test_dense_load_append<index_t, kernel_>(make_index);
-    failures_count += test_dense_concurrent_build<index_t, kernel_>(make_index);
-    failures_count += test_dense_concurrent_search<index_t, kernel_>(make_index);
-    failures_count += test_dense_refine_settles<index_t, kernel_>(make_index);
-    failures_count += test_dense_health_audits<index_t, kernel_>(make_index);
-    failures_count += test_dense_heal_islands<index_t>(make_index);
-    failures_count += test_dense_multiply<index_t, kernel_>(make_index);
+    failures_count += test_dense_guards<index_t>(make_index, seed);
+    failures_count += test_dense_three_vectors<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_growth_and_recall<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_save_load_roundtrip<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_load_append<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_concurrent_build<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_concurrent_search<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_refine_settles<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_health_audits<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_heal_islands<index_t>(make_index, seed);
+    failures_count += test_dense_multiply<index_t, kernel_>(make_index, seed);
     return report(name, failures_count);
 }
 
@@ -176,17 +176,17 @@ std::size_t test_cuda_configuration(char const* name) {
 
 /** Per-dtype CUDA suite entries the shard translation units define and the suite's
  *  @c main composes explicitly; each returns its shard's failure count. */
-std::size_t check_vram_index_bf16();
-std::size_t check_vram_index_f16();
-std::size_t check_vram_index_e5m2();
-std::size_t check_vram_index_e4m3();
-std::size_t check_vram_index_e3m2();
-std::size_t check_vram_index_e2m3();
-std::size_t check_vram_index_i8();
-std::size_t check_vram_index_i4();
-std::size_t check_vram_index_u8();
-std::size_t check_vram_index_u4();
-std::size_t check_vram_index_u1();
+std::size_t check_vram_index_bf16(settings_t const& settings);
+std::size_t check_vram_index_f16(settings_t const& settings);
+std::size_t check_vram_index_e5m2(settings_t const& settings);
+std::size_t check_vram_index_e4m3(settings_t const& settings);
+std::size_t check_vram_index_e3m2(settings_t const& settings);
+std::size_t check_vram_index_e2m3(settings_t const& settings);
+std::size_t check_vram_index_i8(settings_t const& settings);
+std::size_t check_vram_index_i4(settings_t const& settings);
+std::size_t check_vram_index_u8(settings_t const& settings);
+std::size_t check_vram_index_u4(settings_t const& settings);
+std::size_t check_vram_index_u1(settings_t const& settings);
 
 #pragma endregion Suite Entry Points
 

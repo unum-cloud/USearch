@@ -22,8 +22,7 @@
 
 #include "harness.hpp"
 
-using namespace unum::usearch;
-using namespace unum::usearch::test;
+namespace unum::usearch::test::utilities {
 
 /** Sends every key to one bucket, so probe chains reach their worst case. */
 struct colliding_hash_t {
@@ -136,7 +135,7 @@ std::size_t check_multimap_clear_retry() noexcept {
 /** Randomized parity against @c std::unordered_multimap across repeated growth
  *  cycles: every pair ever inserted must stay findable after every chunk it grows, with
  *  matching multiplicities - the grown-into-unreachable audit. */
-std::size_t check_multimap_growth_parity(unsigned seed) noexcept {
+std::size_t check_multimap_growth_parity(u64_t seed) noexcept {
     constexpr std::size_t growth_cycles_k = 4;
     constexpr std::size_t inserts_per_cycle_k = 200;
     constexpr unsigned keys_alphabet_k = 64;
@@ -320,14 +319,14 @@ std::size_t check_multimap_move() noexcept {
     return failures;
 }
 
-std::size_t test::utilities::check_ram_tables() {
+std::size_t check_ram_tables(settings_t const& settings) {
     std::size_t failures = 0;
     failures += check_multimap_uninitialized();
     failures += check_multimap_single_key();
     failures += check_multimap_duplicate_keys();
     failures += check_multimap_growth_past_capacity();
     failures += check_multimap_clear_retry();
-    failures += check_multimap_growth_parity(0x600D5EEDu);
+    failures += check_multimap_growth_parity(stream_key(settings.seed, "multimap_growth_parity"));
     failures += check_multimap_probe_termination();
     failures += check_multimap_concurrent_insert();
     failures += check_multimap_reader_during_writers();
@@ -335,3 +334,5 @@ std::size_t test::utilities::check_ram_tables() {
     failures += check_multimap_move();
     return failures;
 }
+
+} // namespace unum::usearch::test::utilities

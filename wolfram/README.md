@@ -93,7 +93,7 @@ ExecutorDestroy[executor];
   `ConstantArray` yields the packed arrays `"Shared"` passing needs, and the verb writes into them in place, so the symbols you handed it hold the answer once it returns.
 - Keys are USearch's 128-bit identities, spanning sixteen integer cells apiece, most significant byte first.
   That is what `IntegerDigits[key, 256, 16]` renders and `FromDigits[cells, 256]` reads back, so an identity crosses at full precision whether it started as a machine integer, a UUID, or a number too wide for either.
-  An integer identity is the encoding of a number below `2^64`, so it parks in the low eight bytes with the rest zeroed.
+  An integer identity is the encoding of a number below 2⁶⁴, so it parks in the low eight bytes with the rest zeroed.
 - Metrics are `inner`, `angular`, `euclidean`, `hamming`, and `jaccard`; quantizations are `f64`, `f32`, `bf16`, `f16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`, `i8`, `i4x2`, `u8`, `u4x2`, and `u1x8`; residencies are `ram`, `vram`, and `nvme`.
 - The candidate-pool breadth rides each call in the C interface rather than the handle, so it is no argument here and every verb derives it.
 - Checkpoint paths carry the SafeGraphs extensions: `.safegraphs` for one monolith, `.safegraphs.json` for a manifest beside its shards.

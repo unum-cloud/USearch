@@ -7,21 +7,17 @@
  */
 #include "dense/vram_index.cuh"
 
-namespace us = unum::usearch;
-namespace nk = ashvardanian::numkong;
+namespace unum::usearch::bench::dense {
 
-template int us::bench::dense::run_with_stored_dtype<nk::f32_t, nk_u8_k>( //
-    utilities::persisted_dataset<nk::f32_t> const&, bench_options_t const&, int, us::cuda_arch_t,
-    us::cuda_address_space_t);
-template int us::bench::dense::run_with_stored_dtype<nk::bf16_t, nk_u8_k>( //
-    utilities::persisted_dataset<nk::bf16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
-    us::cuda_address_space_t);
-template int us::bench::dense::run_with_stored_dtype<nk::f16_t, nk_u8_k>( //
-    utilities::persisted_dataset<nk::f16_t> const&, bench_options_t const&, int, us::cuda_arch_t,
-    us::cuda_address_space_t);
-template int us::bench::dense::run_with_stored_dtype<nk::i8_t, nk_u8_k>( //
-    utilities::persisted_dataset<nk::i8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
-    us::cuda_address_space_t);
-template int us::bench::dense::run_with_stored_dtype<nk::u8_t, nk_u8_k>( //
-    utilities::persisted_dataset<nk::u8_t> const&, bench_options_t const&, int, us::cuda_arch_t,
-    us::cuda_address_space_t);
+template int run_with_stored_dtype<nk::f32_t, nk_u8_k>( //
+    utilities::persisted_dataset<nk::f32_t> const&, settings_t const&, int, cuda_arch_t, cuda_address_space_t);
+template int run_with_stored_dtype<nk::bf16_t, nk_u8_k>( //
+    utilities::persisted_dataset<nk::bf16_t> const&, settings_t const&, int, cuda_arch_t, cuda_address_space_t);
+template int run_with_stored_dtype<nk::f16_t, nk_u8_k>( //
+    utilities::persisted_dataset<nk::f16_t> const&, settings_t const&, int, cuda_arch_t, cuda_address_space_t);
+template int run_with_stored_dtype<nk::i8_t, nk_u8_k>( //
+    utilities::persisted_dataset<nk::i8_t> const&, settings_t const&, int, cuda_arch_t, cuda_address_space_t);
+template int run_with_stored_dtype<nk::u8_t, nk_u8_k>( //
+    utilities::persisted_dataset<nk::u8_t> const&, settings_t const&, int, cuda_arch_t, cuda_address_space_t);
+
+} // namespace unum::usearch::bench::dense

@@ -9,10 +9,13 @@
 
 using namespace unum::usearch;
 
-std::size_t test::dense::check_vram_indexes() {
+std::size_t test::dense::check_vram_indexes(settings_t const& settings) {
     std::size_t failures_count = 0;
-    failures_count += test_cuda_indexes_configuration<nk_bf16_k, nk_kernel_dot_k>("cuda-sharded bf16+dot");
-    failures_count += test_cuda_indexes_configuration<nk_bf16_k, nk_kernel_angular_k>("cuda-sharded bf16+angular");
-    failures_count += test_cuda_indexes_configuration<nk_i8_k, nk_kernel_euclidean_k>("cuda-sharded i8+euclidean");
+    failures_count += test_cuda_indexes_configuration<nk_bf16_k, nk_kernel_dot_k>("cuda-sharded bf16+dot",
+                                                                                  settings.seed);
+    failures_count += test_cuda_indexes_configuration<nk_bf16_k, nk_kernel_angular_k>("cuda-sharded bf16+angular",
+                                                                                      settings.seed);
+    failures_count += test_cuda_indexes_configuration<nk_i8_k, nk_kernel_euclidean_k>("cuda-sharded i8+euclidean",
+                                                                                      settings.seed);
     return failures_count;
 }

@@ -30,5 +30,5 @@ set(CMAKE_EXE_LINKER_FLAGS_INIT "-lwasi-emulated-signal")
 
 find_program(USEARCH_WASMTIME_ wasmtime PATHS "$ENV{HOME}/.wasmtime/bin")
 if (USEARCH_WASMTIME_)
-    set(CMAKE_CROSSCOMPILING_EMULATOR "${USEARCH_WASMTIME_};run;--dir;.")
+    set(CMAKE_CROSSCOMPILING_EMULATOR "${USEARCH_WASMTIME_};run;-S;inherit-env=y;--dir;.")
 endif ()

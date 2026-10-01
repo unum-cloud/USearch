@@ -7,7 +7,7 @@
 # ~~~
 #
 # Relaxed SIMD, shared memory and 64-bit addressing are whole-module choices, so one file fixes all three: the pools
-# spawn Web Workers, and the memory passes 4 GiB. A page loads it only when cross-origin isolated; Node runs it from
+# spawn Web Workers, and the memory passes 4 GB. A page loads it only when cross-origin isolated; Node runs it from
 # 24.21, newer than emsdk's bundled 24.19. `emcmake` recognises the toolchain file only as the single argument
 # `-DCMAKE_TOOLCHAIN_FILE=…`; written with a space it appends its own file, which then wins. Emscripten's own file reads
 # the width off `CMAKE_C_FLAGS` as it loads, so the flags precede the include.
@@ -26,4 +26,6 @@ set(CMAKE_CXX_FLAGS
 set(EMSCRIPTEN_SYSTEM_PROCESSOR wasm64)
 include("$ENV{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake")
 
-set(CMAKE_EXE_LINKER_FLAGS_INIT "-pthread -sMEMORY64 -sPROXY_TO_PTHREAD -sALLOW_MEMORY_GROWTH -sEXIT_RUNTIME=1")
+set(CMAKE_EXE_LINKER_FLAGS_INIT
+    "-pthread -sMEMORY64 -sPROXY_TO_PTHREAD -sALLOW_MEMORY_GROWTH -sEXIT_RUNTIME=1 -sNODE_HOST_ENV"
+)

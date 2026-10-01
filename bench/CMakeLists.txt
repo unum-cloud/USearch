@@ -18,7 +18,7 @@ add_executable(
 )
 usearch_setup_target(usearch_bench_dense_ram_index HOST)
 target_include_directories(usearch_bench_dense_ram_index PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(usearch_bench_dense_ram_index PRIVATE clipp fmt::fmt yyjson forkunion::static stringzilla::header)
+target_link_libraries(usearch_bench_dense_ram_index PRIVATE fmt::fmt yyjson forkunion::static stringzilla::static)
 
 add_executable(
     usearch_bench_dense_ram_indexes
@@ -38,9 +38,13 @@ add_executable(
 )
 usearch_setup_target(usearch_bench_dense_ram_indexes HOST)
 target_include_directories(usearch_bench_dense_ram_indexes PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(
-    usearch_bench_dense_ram_indexes PRIVATE clipp fmt::fmt yyjson forkunion::static stringzilla::header
-)
+target_link_libraries(usearch_bench_dense_ram_indexes PRIVATE fmt::fmt yyjson forkunion::static stringzilla::static)
+
+# The kernel microbench times the distance kits alone, one row per kernel, dtype, capability tier and shape.
+add_executable(usearch_bench_dense_ram_metric dense/ram_metric.cpp)
+usearch_setup_target(usearch_bench_dense_ram_metric HOST)
+target_include_directories(usearch_bench_dense_ram_metric PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(usearch_bench_dense_ram_metric PRIVATE fmt::fmt)
 
 # The CUDA bench skips `usearch_setup_target`: its host-compiler flags don't survive the CUDA driver, so the target
 # wires the interface includes directly.
@@ -78,7 +82,6 @@ if (USEARCH_BUILD_CUDA)
     usearch_cuda_tiers(bench_cuda_tiers_ "${USEARCH_CUDA_ARCHITECTURES}")
     target_compile_definitions(usearch_bench_dense_vram_index PRIVATE ${bench_cuda_tiers_})
     target_link_libraries(
-        usearch_bench_dense_vram_index PRIVATE clipp fmt::fmt yyjson CUDA::cuda_driver forkunion::static
-                                               stringzilla::header
+        usearch_bench_dense_vram_index PRIVATE fmt::fmt yyjson CUDA::cuda_driver forkunion::static stringzilla::static
     )
 endif ()

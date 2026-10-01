@@ -263,26 +263,23 @@ pip install -e . --force-reinstall
 ```
 
 For testing USearch uses PyTest, which is pre-configured in `pyproject.toml`.
-Following options are enabled:
-
-- The `-s` option will disable capturing the logs.
-- The `-x` option will exit after first failure to simplify debugging.
-- The `-p no:warnings` option will suppress and allow warnings.
+The CI runs it with `-x`, stopping at the first failure.
 
 ```sh
-uv pip install -e . --group tests             # for repeated fuzzy tests
-python -m pytest                                      # if you trust the default settings
-python -m pytest python/scripts/ -s -x -p no:warnings # to overwrite the default settings
+uv pip install -e . --group test              # the suite and everything it imports
+python -X faulthandler -m pytest -x           # how the CI runs it
 ```
 
 The `seed` fixture hands a test 42, unless `USEARCH_SEED` names another seed or is `random`, which draws a fresh one per run.
-pytest prints the seed in its header as `seed: <n>, pin with USEARCH_SEED`, so a failure under a drawn seed reruns with that number.
+pytest prints every setting in its header, as `- Seed: <n>`, so a failure under a drawn seed reruns with that number.
 Under pytest-repeat, the fixture adds the repeat step to the seed, so repetitions differ and each one still reproduces.
-A value that is neither an integer nor `random` stops the run with `USEARCH_SEED="<value>" does not parse`.
+`USEARCH_DIMS` replaces the swept dimension counts, and `USEARCH_FILTER` keeps the tests whose node id matches it, as a regex or else as a substring.
+A value that does not parse stops the run with `USEARCH_SEED="<value>" does not parse, expected an unsigned integer or random`.
 
 ```sh
 USEARCH_SEED=random python -m pytest test/               # draws a seed and prints it in the header
 USEARCH_SEED=1528003704 python -m pytest test/ --count 3 # replays that seed, then the next two
+USEARCH_FILTER=quantization python -m pytest test/       # only the tests whose node id mentions it
 ```
 
 Linting:
@@ -525,6 +522,7 @@ gradle spotlessApply                    # format Java, Kotlin and Scala
 ```
 
 `-PusearchPrebuilt=<directory>` points every suite at a library that is already built and skips the CMake tasks, which is how CI builds the engine once and tests it from three languages.
+
 ```sh
 cmake -B build_release -D USEARCH_BUILD_LIB_C=1
 cmake --build build_release --target usearch_static usearch_shared
@@ -550,6 +548,7 @@ dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org
 
 USearch provides CSharp bindings on .NET 10, reaching the C interface through source-generated `LibraryImport`.
 The project drives no CMake of its own, so the shared library is built first and dropped where the runtime probes for it.
+
 ```sh
 cmake -B build_artifacts -D USEARCH_BUILD_LIB_C=1
 cmake --build build_artifacts --config Release -j

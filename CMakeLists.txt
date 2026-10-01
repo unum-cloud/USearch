@@ -422,17 +422,17 @@ set(NUMKONG_BUILD_SHARED
 )
 
 usearch_sibling(
-    numkong numkong::header https://github.com/ashvardanian/NumKong 4cf519f02a04f280d0399e528b46a0085ead2bc5
+    numkong numkong::header https://github.com/ashvardanian/NumKong 5dbdcbc6617c7158e0615bc6ba139d2e86c99c4a
 )
 usearch_sibling(
-    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion dcad1d684b6f17cad8ab11059922c9ba9834d3bc
+    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion a1cf2eca59914af322846b89f563170486676e75
 )
 usearch_sibling(
     stringzilla stringzilla::header https://github.com/ashvardanian/StringZilla
-    493e4c0c138a50e6ad9c2d05101cb097ea070d5a
+    9635aa893cab3130a0c95734be9a2911b17a3377
 )
 usearch_sibling(
-    smashtable smashtable::header https://github.com/ashvardanian/SmashTable 5e65aa63c80086fa3ff54f20ed634d23dca4975f
+    smashtable smashtable::header https://github.com/ashvardanian/SmashTable add0dcc3a845bbe743bdd2cb4a1d842c08c57703
 )
 
 # The siblings' compile verdicts, one list: every unit that admits rungs at runtime takes it whole, so the class units,
@@ -485,10 +485,10 @@ if (USEARCH_BUILD_TEST
     FetchContent_MakeAvailable(yyjson)
 endif ()
 
-# Pins for what only the suites link: {fmt} for the C++ smoke tests (libstdc++ doesn't ship `std::print` yet on our
-# toolchain) and clipp for the benchmark CLIs. `FIND_PACKAGE_ARGS` lets a system-provided {fmt} satisfy the dependency
-# without touching the network, but only from the pinned version up - the copies distributions ship predate
-# `fmt::println` and would fail deep in the suites rather than here.
+# The pin for what only the suites link: {fmt} for the C++ smoke tests and benchmarks, as libstdc++ doesn't ship
+# `std::print` yet on our toolchain. `FIND_PACKAGE_ARGS` lets a system-provided {fmt} satisfy the dependency without
+# touching the network, but only from the pinned version up - the copies distributions ship predate `fmt::println` and
+# would fail deep in the suites rather than here.
 if (USEARCH_BUILD_TEST OR USEARCH_BUILD_BENCH)
     FetchContent_Declare(
         fmt
@@ -496,20 +496,7 @@ if (USEARCH_BUILD_TEST OR USEARCH_BUILD_BENCH)
         GIT_TAG 12.2.0
         FIND_PACKAGE_ARGS 12.2.0
     )
-    FetchContent_Declare(
-        clipp
-        GIT_REPOSITORY https://github.com/muellan/clipp
-        GIT_TAG v1.2.3
-    )
-    FetchContent_MakeAvailable(fmt clipp)
-
-    # Upstream clipp ships no usable CMake target — just a single header — so wrap it in one.
-    if (NOT TARGET clipp)
-        add_library(clipp INTERFACE)
-        target_include_directories(clipp INTERFACE "$<BUILD_INTERFACE:${clipp_SOURCE_DIR}/include>")
-        # clipp still spells `std::result_of`, gone from libc++ in C++20 mode.
-        target_compile_definitions(clipp INTERFACE _LIBCPP_ENABLE_CXX20_REMOVED_TYPE_TRAITS)
-    endif ()
+    FetchContent_MakeAvailable(fmt)
 endif ()
 
 # Must be called before "add_subdirectory()", and only when USearch runs the show - a parent project decides its own

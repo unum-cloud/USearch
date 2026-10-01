@@ -7,7 +7,7 @@ on:
 env:
   GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
   PYTHONUTF8: 1
-  PYTHON_VERSION: 3.11
+  PYTHON_VERSION: 3.12
   DOTNET_VERSION: 8.0.x
   NODE_VERSION: 20
   JAVA_VERSION: 25
@@ -701,7 +701,7 @@ jobs:
       matrix:
         os: [ubuntu-24.04, macos-14, windows-2022]
         python-version:
-          ["310", "311", "312", "313", "313t", "314", "314t"]
+          ["312", "313", "313t", "314", "314t"]
     steps:
       - name: Check out refreshed version
         uses: actions/checkout@v7

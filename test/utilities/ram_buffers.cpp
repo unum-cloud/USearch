@@ -22,8 +22,7 @@
 
 #include <algorithm>
 #include <array>
-#include <memory> // `std::allocator` - every container names its allocator
-#include <random>
+#include <memory>        // `std::allocator` - every container names its allocator
 #include <unordered_set> // The reference oracle of the hash-set growth-parity audit
 #include <vector>
 
@@ -35,8 +34,7 @@
 
 #include "harness.hpp"
 
-using namespace unum::usearch;
-using namespace unum::usearch::test;
+namespace unum::usearch::test::utilities {
 
 #pragma region Sorted Buffer
 
@@ -66,15 +64,15 @@ std::size_t check_sorted_buffer_single_element() noexcept {
  *  (existing ∪ batch) truncated to the limit. Quad-sized batches pre-sort through
  *  @c network_sort - auditing the network itself - wider ones through the library sort. */
 template <std::size_t batch_size_>
-std::size_t check_sorted_buffer_batch_parity(unsigned seed) noexcept {
+std::size_t check_sorted_buffer_batch_parity(u64_t seed) noexcept {
     constexpr std::size_t limit_k = 64;
     constexpr int steps_k = 400;
     sorted_buffer<u32_t> tested {global_allocator};
     std::vector<u32_t> oracle_flat;
     oracle_flat.reserve(2 * limit_k);
 
-    std::mt19937 random_generator {seed};
-    std::uniform_int_distribution<u32_t> distribution(0, 1'000'000);
+    splitmix64_t random_generator {seed};
+    uniform_below<u32_t> distribution {1'000'000 + 1};
 
     std::size_t failures = expect(succeeded(tested.reserve(2 * limit_k)));
     for (int step = 0; step < steps_k; ++step) {
@@ -133,8 +131,8 @@ std::size_t check_radix_group(std::vector<key_type_> const& keys) noexcept {
 }
 
 /** Radix groupings of words differing in two of their bytes, and of UUIDs differing in one middle byte. */
-std::size_t check_radix_groups(unsigned seed) noexcept {
-    std::mt19937 random_generator {seed};
+std::size_t check_radix_groups(u64_t seed) noexcept {
+    splitmix64_t random_generator {seed};
     std::vector<u64_t> words(1000);
     for (u64_t& word : words) word = (random_generator() % 8) | (u64_t {random_generator() % 4} << 32);
     std::vector<uuid_t> uuids(1000);
@@ -160,13 +158,13 @@ std::size_t check_hash_set_single_element() noexcept {
 /** Randomized membership parity against @c std::unordered_set across repeated growth
  *  cycles - the audit for the grown-into-unreachable bug class: a rehash placing
  *  elements through any probe walk other than the reader's strands them invisible. */
-std::size_t check_hash_set_growth_parity(unsigned seed) noexcept {
+std::size_t check_hash_set_growth_parity(u64_t seed) noexcept {
     constexpr int rounds_k = 12, inserts_per_round_k = 700;
     growing_hash_set<u32_t> tested {global_allocator};
     std::unordered_set<u32_t> oracle;
 
-    std::mt19937 random_generator {seed};
-    std::uniform_int_distribution<u32_t> distribution(0, 100'000);
+    splitmix64_t random_generator {seed};
+    uniform_below<u32_t> distribution {100'000 + 1};
 
     // Start tiny, so the rounds force many rehashes through every size.
     std::size_t failures = expect(succeeded(tested.reserve(16)));
@@ -202,15 +200,15 @@ std::size_t check_hash_set_growth_parity(unsigned seed) noexcept {
 }
 
 template <std::size_t batch_size_>
-std::size_t check_hash_set_batch_parity(unsigned seed) noexcept {
+std::size_t check_hash_set_batch_parity(u64_t seed) noexcept {
     constexpr int steps_k = 200;
     growing_hash_set<u32_t> tested {global_allocator};
     growing_hash_set<u32_t> oracle {global_allocator};
     std::size_t reserve_failures = expect(succeeded(tested.reserve(1024)));
     reserve_failures += expect(succeeded(oracle.reserve(1024)));
 
-    std::mt19937 random_generator {seed};
-    std::uniform_int_distribution<u32_t> distribution(0, 500);
+    splitmix64_t random_generator {seed};
+    uniform_below<u32_t> distribution {500 + 1};
     auto draw_key = [&](void) noexcept {
         u32_t candidate;
         do candidate = distribution(random_generator);
@@ -298,11 +296,11 @@ std::size_t check_max_heap_push_pop() noexcept {
 
 /** D-ary heap pops in descending order, parameterised by arity. */
 template <std::size_t arity_>
-std::size_t check_max_heap_dary_push_pop(unsigned seed, std::size_t element_count) noexcept {
+std::size_t check_max_heap_dary_push_pop(u64_t seed, std::size_t element_count) noexcept {
     max_heap_dary<arity_, u32_t> heap {global_allocator};
     std::size_t failures = expect(succeeded(heap.reserve(element_count)));
-    std::mt19937 random_generator {seed};
-    std::uniform_int_distribution<u32_t> distribution(0, 1'000'000);
+    splitmix64_t random_generator {seed};
+    uniform_below<u32_t> distribution {1'000'000 + 1};
     std::vector<u32_t> inputs;
     inputs.reserve(element_count);
     for (std::size_t i = 0; i < element_count; ++i) {
@@ -323,11 +321,11 @@ std::size_t check_max_heap_dary_push_pop(unsigned seed, std::size_t element_coun
 
 /** `erase_below` sheds exactly the entries under the bar; what remains still pops in order. */
 template <std::size_t arity_>
-std::size_t check_max_heap_dary_erase_below(unsigned seed, std::size_t element_count) noexcept {
+std::size_t check_max_heap_dary_erase_below(u64_t seed, std::size_t element_count) noexcept {
     max_heap_dary<arity_, u32_t> heap {global_allocator};
     std::size_t failures = expect(succeeded(heap.reserve(element_count)));
-    std::mt19937 random_generator {seed};
-    std::uniform_int_distribution<u32_t> distribution(0, 1'000'000);
+    splitmix64_t random_generator {seed};
+    uniform_below<u32_t> distribution {1'000'000 + 1};
     u32_t const bar = 500'000;
     std::vector<u32_t> kept;
     kept.reserve(element_count);
@@ -346,13 +344,13 @@ std::size_t check_max_heap_dary_erase_below(unsigned seed, std::size_t element_c
 }
 
 /** D=2 d-ary heap must agree with the binary heap pop-by-pop on the same input. */
-std::size_t check_max_heap_dary_parity_with_binary(unsigned seed, std::size_t element_count) noexcept {
+std::size_t check_max_heap_dary_parity_with_binary(u64_t seed, std::size_t element_count) noexcept {
     max_heap<u32_t> binary {global_allocator};
     max_heap_dary<2, u32_t> dary {global_allocator};
     std::size_t failures = expect(succeeded(binary.reserve(element_count)));
     failures += expect(succeeded(dary.reserve(element_count)));
-    std::mt19937 random_generator {seed};
-    std::uniform_int_distribution<u32_t> distribution(0, 1'000'000);
+    splitmix64_t random_generator {seed};
+    uniform_below<u32_t> distribution {1'000'000 + 1};
     for (std::size_t i = 0; i < element_count; ++i) {
         u32_t const value = distribution(random_generator);
         failures += expect(succeeded(binary.insert(u32_t(value))));
@@ -371,14 +369,13 @@ std::size_t check_max_heap_dary_parity_with_binary(unsigned seed, std::size_t el
 
 /** D-ary @c insert_many (Floyd vs @c shift_up paths) must match descending-pop order from individual inserts. */
 template <std::size_t arity_>
-std::size_t check_max_heap_dary_insert_many(unsigned seed, std::size_t initial_count,
-                                            std::size_t batch_count) noexcept {
+std::size_t check_max_heap_dary_insert_many(u64_t seed, std::size_t initial_count, std::size_t batch_count) noexcept {
     max_heap_dary<arity_, u32_t> bulk {global_allocator};
     max_heap_dary<arity_, u32_t> sequential {global_allocator};
     std::size_t failures = expect(succeeded(bulk.reserve(initial_count + batch_count)));
     failures += expect(succeeded(sequential.reserve(initial_count + batch_count)));
-    std::mt19937 random_generator {seed};
-    std::uniform_int_distribution<u32_t> distribution(0, 1'000'000);
+    splitmix64_t random_generator {seed};
+    uniform_below<u32_t> distribution {1'000'000 + 1};
     for (std::size_t i = 0; i < initial_count; ++i) {
         u32_t const value = distribution(random_generator);
         failures += expect(succeeded(bulk.insert(u32_t(value))));
@@ -402,14 +399,14 @@ std::size_t check_max_heap_dary_insert_many(unsigned seed, std::size_t initial_c
 
 /** Bulk @c insert_many(std::array) must pop in the same descending order as single inserts. */
 template <std::size_t batch_size_>
-std::size_t check_max_heap_insert_many(unsigned seed, std::size_t initial_size) noexcept {
+std::size_t check_max_heap_insert_many(u64_t seed, std::size_t initial_size) noexcept {
     max_heap<u32_t> bulk {global_allocator};
     max_heap<u32_t> sequential {global_allocator};
     std::size_t failures = expect(succeeded(bulk.reserve(initial_size + batch_size_)));
     failures += expect(succeeded(sequential.reserve(initial_size + batch_size_)));
 
-    std::mt19937 random_generator {seed};
-    std::uniform_int_distribution<u32_t> distribution(0, 1'000'000);
+    splitmix64_t random_generator {seed};
+    uniform_below<u32_t> distribution {1'000'000 + 1};
 
     for (std::size_t i = 0; i < initial_size; ++i) {
         u32_t const value = distribution(random_generator);
@@ -484,40 +481,43 @@ std::size_t check_chunked_column() noexcept {
     return failures;
 }
 
-std::size_t test::utilities::check_ram_buffers() {
+std::size_t check_ram_buffers(settings_t const& settings) {
     std::size_t failures = 0;
     failures += check_sorted_buffer_single_element();
-    failures += check_sorted_buffer_batch_parity<4>(0xABCD1234u);
-    failures += check_sorted_buffer_batch_parity<16>(0x13572468u);
-    failures += check_radix_groups(0x5A7D1C00u);
+    failures += check_sorted_buffer_batch_parity<4>(stream_key(settings.seed, "sorted_buffer_batch_parity"));
+    failures += check_sorted_buffer_batch_parity<16>(stream_key(settings.seed, "sorted_buffer_batch_parity", 1));
+    failures += check_radix_groups(stream_key(settings.seed, "radix_groups"));
 
     failures += check_hash_set_single_element();
-    failures += check_hash_set_growth_parity(0xAB5EEDEDu);
-    failures += check_hash_set_batch_parity<4>(0xFEEDFACEu);
-    failures += check_hash_set_batch_parity<16>(0x01234567u);
+    failures += check_hash_set_growth_parity(stream_key(settings.seed, "hash_set_growth_parity"));
+    failures += check_hash_set_batch_parity<4>(stream_key(settings.seed, "hash_set_batch_parity"));
+    failures += check_hash_set_batch_parity<16>(stream_key(settings.seed, "hash_set_batch_parity", 1));
     failures += check_hash_set_arena_growth();
 
     failures += check_max_heap_push_pop();
-    failures += check_max_heap_dary_parity_with_binary(0xD2U, 256);
-    failures += check_max_heap_dary_push_pop<4>(0xD4U, 256);
-    failures += check_max_heap_dary_push_pop<8>(0xD8U, 256);
-    failures += check_max_heap_dary_push_pop<16>(0xD16U, 256);
-    failures += check_max_heap_dary_erase_below<4>(0xE4U, 256);
-    failures += check_max_heap_dary_erase_below<8>(0xE8U, 256);
-    failures += check_max_heap_dary_insert_many<4>(0xDA10U, 0, 32);   // Floyd path
-    failures += check_max_heap_dary_insert_many<4>(0xDA11U, 128, 32); // shift_up path
-    failures += check_max_heap_dary_insert_many<8>(0xDA20U, 0, 32);
-    failures += check_max_heap_dary_insert_many<8>(0xDA21U, 128, 32);
-    failures += check_max_heap_dary_insert_many<16>(0xDA30U, 0, 32);
-    failures += check_max_heap_dary_insert_many<16>(0xDA31U, 128, 32);
+    failures += check_max_heap_dary_parity_with_binary(stream_key(settings.seed, "max_heap_dary_parity_with_binary"),
+                                                       256);
+    failures += check_max_heap_dary_push_pop<4>(stream_key(settings.seed, "max_heap_dary_push_pop"), 256);
+    failures += check_max_heap_dary_push_pop<8>(stream_key(settings.seed, "max_heap_dary_push_pop", 1), 256);
+    failures += check_max_heap_dary_push_pop<16>(stream_key(settings.seed, "max_heap_dary_push_pop", 2), 256);
+    failures += check_max_heap_dary_erase_below<4>(stream_key(settings.seed, "max_heap_dary_erase_below"), 256);
+    failures += check_max_heap_dary_erase_below<8>(stream_key(settings.seed, "max_heap_dary_erase_below", 1), 256);
+    failures += check_max_heap_dary_insert_many<4>(stream_key(settings.seed, "max_heap_dary_insert_many"), 0,
+                                                   32); // Floyd path
+    failures += check_max_heap_dary_insert_many<4>(stream_key(settings.seed, "max_heap_dary_insert_many", 1), 128,
+                                                   32); // shift_up path
+    failures += check_max_heap_dary_insert_many<8>(stream_key(settings.seed, "max_heap_dary_insert_many", 2), 0, 32);
+    failures += check_max_heap_dary_insert_many<8>(stream_key(settings.seed, "max_heap_dary_insert_many", 3), 128, 32);
+    failures += check_max_heap_dary_insert_many<16>(stream_key(settings.seed, "max_heap_dary_insert_many", 4), 0, 32);
+    failures += check_max_heap_dary_insert_many<16>(stream_key(settings.seed, "max_heap_dary_insert_many", 5), 128, 32);
     // insert_many on empty heap exercises Floyd bulk rebuild (batch ≥ size/2 trivially).
-    failures += check_max_heap_insert_many<4>(0xBEEF0001u, 0);
-    failures += check_max_heap_insert_many<16>(0xBEEF0002u, 0);
-    failures += check_max_heap_insert_many<32>(0xBEEF0003u, 0);
+    failures += check_max_heap_insert_many<4>(stream_key(settings.seed, "max_heap_insert_many"), 0);
+    failures += check_max_heap_insert_many<16>(stream_key(settings.seed, "max_heap_insert_many", 1), 0);
+    failures += check_max_heap_insert_many<32>(stream_key(settings.seed, "max_heap_insert_many", 2), 0);
     // insert_many on a pre-populated heap exercises the incremental shift_up branch.
-    failures += check_max_heap_insert_many<4>(0xBEEF0004u, 64);
-    failures += check_max_heap_insert_many<16>(0xBEEF0005u, 128);
-    failures += check_max_heap_insert_many<32>(0xBEEF0006u, 256);
+    failures += check_max_heap_insert_many<4>(stream_key(settings.seed, "max_heap_insert_many", 3), 64);
+    failures += check_max_heap_insert_many<16>(stream_key(settings.seed, "max_heap_insert_many", 4), 128);
+    failures += check_max_heap_insert_many<32>(stream_key(settings.seed, "max_heap_insert_many", 5), 256);
     // pop_many<N> of a known sequence.
     failures += check_max_heap_pop_many<4>();
     failures += check_max_heap_pop_many<8>();
@@ -525,3 +525,5 @@ std::size_t test::utilities::check_ram_buffers() {
 
     return static_cast<std::size_t>(failures);
 }
+
+} // namespace unum::usearch::test::utilities

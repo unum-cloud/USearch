@@ -13,13 +13,15 @@ using namespace unum::usearch;
 using namespace unum::usearch::test;
 
 int main() {
+    settings_t const settings = read_settings();
+    print(settings);
     std::size_t failures_count = 0;
 
-    failures_count += utilities::check_ram_buffers();
-    failures_count += utilities::check_ram_tables();
-    failures_count += basic::check_sentences();
-    failures_count += basic::check_bioinformatics();
-    failures_count += basic::check_meshes();
+    if (settings.selects("ram_buffers")) failures_count += utilities::check_ram_buffers(settings);
+    if (settings.selects("ram_tables")) failures_count += utilities::check_ram_tables(settings);
+    if (settings.selects("sentences")) failures_count += basic::check_sentences(settings);
+    if (settings.selects("bioinformatics")) failures_count += basic::check_bioinformatics(settings);
+    if (settings.selects("meshes")) failures_count += basic::check_meshes(settings);
 
     return report("total", failures_count) ? 1 : 0;
 }

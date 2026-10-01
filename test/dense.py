@@ -15,16 +15,10 @@ from threading import Thread
 
 import numpy as np
 import pytest
-
-import numkong as nk
-from usearch import DenseIndex, Error, Executor, Key, Match, Matches, Stats
-from usearch.eval import random_vectors, self_recall
-from usearch.keys import integers_to_keys, keys_to_integers
-
-from .base import (
+from base import (
+    SETTINGS,
     batch_sizes,
     build_index,
-    dense_dimensions,
     distance_tolerances,
     input_dtypes,
     matches_outputs,
@@ -35,10 +29,15 @@ from .base import (
     spatial_metrics,
 )
 
+import numkong as nk
+from usearch import DenseIndex, Error, Executor, Key, Match, Matches, Stats
+from usearch.eval import random_vectors, self_recall
+from usearch.keys import integers_to_keys, keys_to_integers
+
 # region Construction
 
 
-@pytest.mark.parametrize("dimensions", dense_dimensions)
+@pytest.mark.parametrize("dimensions", SETTINGS.dims)
 @pytest.mark.parametrize("metric", spatial_metrics)
 def test_construction_reports_its_geometry(dimensions: int, metric: str):
     """Every setting the factory took reads back off the handle."""
@@ -174,7 +173,7 @@ def test_concurrent_searches_take_one_executor_apiece(executor, spawn_executor):
 
 
 @pytest.mark.parametrize("count", batch_sizes)
-@pytest.mark.parametrize("dimensions", dense_dimensions)
+@pytest.mark.parametrize("dimensions", SETTINGS.dims)
 def test_add_publishes_every_row(executor, count: int, dimensions: int):
     """A batch is all-or-nothing, so every row of an accepted batch is visible afterwards."""
     index, _ = build_index(count, dimensions, executor)
@@ -284,7 +283,7 @@ def test_add_before_reserve_is_refused(executor):
 # region Search
 
 
-@pytest.mark.parametrize("dimensions", dense_dimensions)
+@pytest.mark.parametrize("dimensions", SETTINGS.dims)
 def test_search_shapes(executor, dimensions: int):
     """The three outputs are shaped by the batch and the "k" that was asked for."""
     index, vectors = build_index(64, dimensions, executor)

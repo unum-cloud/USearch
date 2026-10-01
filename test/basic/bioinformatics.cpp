@@ -227,10 +227,10 @@ static u64_t exhaustive_alignment_distance(std::string_view first, std::string_v
 
 /** The independent-oracle audit: sampled read prefixes short enough for the
  *  exhaustive search, plus the handmade triple at full length. */
-static std::size_t check_bioinformatics_independent_oracle() {
+static std::size_t check_bioinformatics_independent_oracle(u64_t seed) {
     std::size_t failures = 0;
     std::vector<u64_t> previous_row, current_row;
-    auto values = bioinformatics_fixture_t::make_values(16, basic_seed_contract_k ^ 0x0Cull);
+    auto values = bioinformatics_fixture_t::make_values(16, stream_key(seed, "independent_oracle"));
     for (std::size_t pair = 0; pair + 1 < values.size(); pair += 2) {
         std::string_view const first = std::string_view {values[pair]}.substr(0, 6);
         std::string_view const second = std::string_view {values[pair + 1]}.substr(0, 6);
@@ -245,16 +245,16 @@ static std::size_t check_bioinformatics_independent_oracle() {
     return failures;
 }
 
-std::size_t test::basic::check_bioinformatics() {
-    bioinformatics_fixture_t const fixture;
+std::size_t test::basic::check_bioinformatics(settings_t const& settings) {
     std::size_t failures = 0;
-    failures += test_basic_scenarios(fixture);
-    failures += test_basic_scenarios(bioinformatics_fixture<flaky_waiter_t> {});
-    failures += test_basic_scenarios(bioinformatics_fixture<dummy_waiter_t, fu::preferred_atomic_ref> {});
+    failures += test_basic_scenarios<bioinformatics_fixture_t>(settings.seed);
+    failures += test_basic_scenarios<bioinformatics_fixture<flaky_waiter_t>>(settings.seed);
+    failures += test_basic_scenarios<bioinformatics_fixture<dummy_waiter_t, fu::preferred_atomic_ref>>(settings.seed);
     failures += check_bioinformatics_codec();
-    failures += check_bioinformatics_independent_oracle();
-    failures += test_basic_safegraphs_roundtrip(fixture, "uuid", "needleman-wunsch"); // The uuid key column.
-    failures += test_basic_safegraphs_hostile(fixture, "needleman-wunsch");
-    failures += test_basic_safegraphs_distributed(fixture, "needleman-wunsch");
+    failures += check_bioinformatics_independent_oracle(settings.seed);
+    // The uuid key column.
+    failures += test_basic_safegraphs_roundtrip<bioinformatics_fixture_t>(settings.seed, "uuid", "needleman-wunsch");
+    failures += test_basic_safegraphs_hostile<bioinformatics_fixture_t>(settings.seed, "needleman-wunsch");
+    failures += test_basic_safegraphs_distributed<bioinformatics_fixture_t>(settings.seed, "needleman-wunsch");
     return report("bioinformatics", failures);
 }

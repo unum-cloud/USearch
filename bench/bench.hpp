@@ -2,28 +2,21 @@
  *  @file bench/bench.hpp
  *  @author Ash Vardanian
  *  @date July 17, 2026
- *  @brief Logging & styling helpers shared by the benchmarking harnesses.
+ *  @brief Logging helpers shared by the benchmarking harnesses.
  *
- *  Everything here is presentation-only: TTY-aware {fmt} styles that degrade to plain text
- *  when piped, human-readable count formatting, enum pretty-printers, and process-level
- *  memory telemetry. No benchmark logic belongs in this header.
+ *  Everything here is presentation-only: progress that redraws one line on a terminal and prints deciles when
+ *  piped, human-readable count formatting, enum pretty-printers, and process-level memory telemetry. No benchmark
+ *  logic belongs in this header.
  */
 #pragma once
 
-#include <cmath>   // `std::log2` for ranking gains
 #include <cstddef> // `std::size_t`
-#include <cstdio>  // `std::fopen` for `/proc/self/status`, `stdout` for the TTY probe
+#include <cstdio>  // `std::fopen` for `/proc/self/status`
 #include <cstdlib> // `std::strtoull`
 #include <cstring> // `std::strncmp`
 
 #include <chrono> // `std::chrono::steady_clock` for progress rates
-#include <span>   // `std::span`
 
-#if !defined(_WIN32)
-#include <unistd.h> // `isatty`
-#endif
-
-#include <fmt/color.h>
 #include <fmt/format.h>
 
 #include <numkong/types.h>
@@ -42,6 +35,7 @@ struct humanized {
 } // namespace unum::usearch::bench
 
 namespace us = unum::usearch;
+namespace nk = ashvardanian::numkong;
 
 /** Renders straight into the output, so a progress tick allocates nothing. */
 template <typename value_type_>
@@ -59,35 +53,11 @@ struct fmt::formatter<unum::usearch::bench::humanized<value_type_>> {
 namespace unum::usearch::bench {
 
 namespace stdc = std::chrono;
+using steady_clock_t = stdc::steady_clock;
+using time_point_t = steady_clock_t::time_point;
 
-/** NumKong's @c component_max of @p scalar_type_ - the largest magnitude one stored dimension carries - extended to
- *  the plain scalars, each its own component, whose largest is their @c finite_max. */
-template <typename scalar_type_>
-constexpr float component_max() noexcept {
-    if constexpr (requires { scalar_type_::component_max(); }) return float(scalar_type_::component_max());
-    else return float(scalar_type_::finite_max());
-}
-
-/** Whether stdout is a TTY, probed once: a progress tick asks on every call. */
-inline bool stdout_is_terminal() noexcept {
-#if defined(_WIN32)
-    return false;
-#else
-    static bool const terminal = isatty(fileno(stdout)) != 0;
-    return terminal;
-#endif
-}
-
-/** Bold for section headers on a TTY; empty when piped, so logs stay ANSI-free. */
-inline fmt::text_style header_style() noexcept {
-    return stdout_is_terminal() ? fmt::text_style(fmt::emphasis::bold) : fmt::text_style();
-}
-
-/** Green when a judgment value looks healthy, orange otherwise; empty when piped. */
-inline fmt::text_style verdict_style(bool looks_healthy) noexcept {
-    if (!stdout_is_terminal()) return {};
-    return fg(looks_healthy ? fmt::color::green : fmt::color::orange);
-}
+/** A byte count in the gigabytes that reports print as "GB". */
+constexpr double gigabytes(std::size_t bytes) noexcept { return double(bytes) / (1ull << 30); }
 
 /**
  *  @brief Phase progress for every usage form: an in-place line with a bar, rate, and ETA
@@ -99,14 +69,15 @@ inline fmt::text_style verdict_style(bool looks_healthy) noexcept {
  */
 class progress_bar_t {
   public:
-    progress_bar_t(char const* label, std::size_t total) noexcept : label_(label), total_(total) {}
+    progress_bar_t(char const* label, std::size_t total, bool terminal) noexcept
+        : label_(label), total_(total), terminal_(terminal) {}
 
     void tick(std::size_t completed) noexcept {
-        if (stdout_is_terminal()) render_bar_(completed);
+        if (terminal_) render_bar_(completed);
         else render_decile_(completed);
     }
     void finish() noexcept {
-        if (stdout_is_terminal()) fmt::print("\r\033[K");
+        if (terminal_) fmt::print("\r\033[K");
     }
 
   private:
@@ -114,17 +85,18 @@ class progress_bar_t {
 
     char const* label_;
     std::size_t total_;
-    stdc::steady_clock::time_point started_ {stdc::steady_clock::now()};
-    stdc::steady_clock::time_point rendered_ {};
+    bool terminal_;
+    time_point_t started_ {steady_clock_t::now()};
+    time_point_t rendered_ {};
     std::size_t reported_deciles_ = 0;
 
     double rate_per_second_(std::size_t completed) const noexcept {
-        double const seconds = stdc::duration<double>(stdc::steady_clock::now() - started_).count();
+        double const seconds = stdc::duration<double>(steady_clock_t::now() - started_).count();
         return seconds > 0 ? static_cast<double>(completed) / seconds : 0;
     }
 
     void render_bar_(std::size_t completed) noexcept {
-        auto const now = stdc::steady_clock::now();
+        auto const now = steady_clock_t::now();
         bool const final = completed == total_;
         if (!final && now - rendered_ < stdc::milliseconds(100)) return; // The work outruns the terminal.
         rendered_ = now;
@@ -167,81 +139,6 @@ inline char const* dtype_name(nk_dtype_t dtype) noexcept {
     case nk_u1_k: return "u1";
     default: return "unknown";
     }
-}
-
-/**
- *  @brief Precomputes the position-discount tables shared by every query's judgment, so
- *      per-query normalization is one lookup instead of a chain of @c log2 calls.
- *
- *  @param[out] discounts Per-position pay-offs: @c discounts[i] rewards a hit returned at position i.
- *  @param[out] ideal Prefix sums of @p discounts: @c ideal[i] is the gain of a perfect ranking
- *      of length i + 1.
- */
-inline void fill_discounts(std::span<double> discounts, std::span<double> ideal) noexcept {
-    double running = 0;
-    for (std::size_t position = 0; position != discounts.size(); ++position) {
-        discounts[position] = 1.0 / std::log2(double(position) + 2.0);
-        running += discounts[position];
-        if (position < ideal.size()) ideal[position] = running;
-    }
-}
-
-/** The verdicts of one query's judgment, produced together by @c judge_ranking. */
-struct ranking_verdict_t {
-
-    /** 1 when the true nearest neighbor appears among the returned keys. Averaged
-     *  over queries this is the production Recall@K - the probability of finding @b the
-     *  nearest neighbor within the top K - monotone in K, so Recall@1 never exceeds
-     *  Recall@10. */
-    std::size_t found_nearest = 0;
-
-    /** The intersection size between the returned and expected sets - "overlap",
-     *  the set-coverage metric big-ANN leaderboards report. Stricter than Recall@K and
-     *  not monotone against it. */
-    std::size_t overlap = 0;
-
-    /** Unnormalized discounted cumulative gain: every returned key present in the
-     *  expected set earns its position's discount, so early hits weigh more. */
-    double gain = 0;
-};
-
-/**
- *  @brief All ranking verdicts for one query in one sweep: the expected keys are sorted once,
- *      then every returned position pays one binary search - O(k·log k) where the naive
- *      nested probes go O(k²), which matters from top-100 recalls up.
- *
- *  @param[in] returned Keys the index produced, best first.
- *  @param[in] expected Ground-truth keys, ascending by true distance - @c expected[0] is the
- *      true nearest neighbor.
- *  @param[inout] scratch Clobbered workspace for sorting the expected keys; its length caps
- *      how many of them are judged.
- *  @param[in] discounts Position pay-offs from @c fill_discounts.
- */
-template <typename key_type_>
-ranking_verdict_t judge_ranking(std::span<key_type_ const> returned, std::span<key_type_ const> expected,
-                                std::span<key_type_> scratch, std::span<double const> discounts) noexcept {
-    std::size_t const expected_count = expected.size() < scratch.size() ? expected.size() : scratch.size();
-    for (std::size_t sorted = 0; sorted != expected_count; ++sorted) {
-        key_type_ const key = expected[sorted];
-        key_type_* const slot = lower_bound(scratch.subspan(0, sorted), key);
-        std::memmove(slot + 1, slot, (scratch.data() + sorted - slot) * sizeof(key_type_));
-        *slot = key;
-    }
-
-    ranking_verdict_t verdict;
-    if (!expected_count) return verdict;
-    key_type_ const expected_nearest = expected.front();
-    std::span<key_type_ const> const sorted {scratch.data(), expected_count};
-    for (std::size_t position = 0; position != returned.size(); ++position) {
-        key_type_ const key = returned[position];
-        verdict.found_nearest |= static_cast<std::size_t>(key == expected_nearest);
-        key_type_ const* const slot = lower_bound(sorted, key);
-        if (slot != sorted.data() + sorted.size() && *slot == key) {
-            verdict.overlap += 1;
-            if (position < discounts.size()) verdict.gain += discounts[position];
-        }
-    }
-    return verdict;
 }
 
 /** Peak resident set size from @c /proc/self/status in bytes, or zero when unknown. */

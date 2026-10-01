@@ -2,3 +2,4 @@
 fn_single_line = true
 max_width = 120
 unstable_features = true
+reorder_imports = true

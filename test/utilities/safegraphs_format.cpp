@@ -82,6 +82,7 @@ struct embedding_codec_t {
 struct embeddings_fixture_t {
     using index_t =
         basic_ram_index<embedding_t, u64_t, u32_t, f32_t, dummy_waiter_t, standard_atomic_ref, counting_allocator_t>;
+
     static constexpr char const* metric_k = "angular";
     static constexpr char const* key_dtype_k = "u64";
 
@@ -126,12 +127,12 @@ static_assert(interchange_value_codec<embedding_codec_t>);
 /** The shared basic-tier scenarios over the embeddings fixture - a fixed-width value
  *  column, which no modality unit has: monolith, hostile header battery, and the
  *  distributed form, each at every alignment and executor the scenarios cover. */
-std::size_t test::utilities::check_safegraphs_format() {
-    embeddings_fixture_t const fixture;
+std::size_t test::utilities::check_safegraphs_format(settings_t const& settings) {
     std::size_t failures = 0;
-    failures += test_basic_safegraphs_roundtrip(fixture, "u64", embeddings_fixture_t::metric_k);
-    failures += test_basic_safegraphs_hostile(fixture, embeddings_fixture_t::metric_k);
-    failures += test_basic_safegraphs_distributed(fixture, embeddings_fixture_t::metric_k);
+    failures += test_basic_safegraphs_roundtrip<embeddings_fixture_t>(settings.seed, "u64",
+                                                                      embeddings_fixture_t::metric_k);
+    failures += test_basic_safegraphs_hostile<embeddings_fixture_t>(settings.seed, embeddings_fixture_t::metric_k);
+    failures += test_basic_safegraphs_distributed<embeddings_fixture_t>(settings.seed, embeddings_fixture_t::metric_k);
     return report("safegraphs format", failures);
 }
 

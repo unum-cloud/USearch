@@ -1,6 +1,6 @@
 # Dense Indexes
 
-Everything dense, one level deep: equidimensional vectors whose most common similarity measures - Inner-Product, Angular, Euclidean, Hamming, Jaccard - derive from a single inner product of two vectors, so pre-computed per-vector norms cut the arithmetic intensity of the composite metrics by 3x.
+Everything dense, one level deep: equidimensional vectors whose most common similarity measures - Inner-Product, Angular, Euclidean, Hamming, Jaccard - derive from a single inner product of two vectors, so pre-computed per-vector norms cut the arithmetic intensity of the composite metrics by 3×.
 The RAM residency is the portable default every platform owns; the VRAM and NVMe siblings stay opt-in through their own extensions, so neither belongs in a portable include.
 
 ## Residencies
@@ -24,9 +24,9 @@ Every residency builds through the same two verbs, in this order:
 
 - `insert` wires each node against the graph as it stood, so a narrow `expansion_factor` ingests cheaply and leaves a graph whose picks a wider walk could improve on.
 - `refine` re-selects a node range's neighbors against the finished graph, back-linking as an insertion does, then heals whatever no search can reach: the audit's islands re-select from scratch, and whatever the diversity judgment still drops is reconnected into a reached pick, round after round while the island population shrinks.
-It claims no identity and moves no watermark, so a stopped pass merely leaves the graph less improved.
-Call it until a pass re-wires nothing; the first two passes carry most of the gain.
-A `refine` over no nodes is the heal alone, which the plural layer names `heal`.
+  It claims no identity and moves no watermark, so a stopped pass merely leaves the graph less improved.
+  Call it until a pass re-wires nothing; the first two passes carry most of the gain.
+  A `refine` over no nodes is the heal alone, which the plural layer names `heal`.
 
 `health` is the read-only audit the heal starts from - the same landmark sweep, reporting the reachable population and the levels it took, with no edit.
 Use it to judge a graph without changing it.

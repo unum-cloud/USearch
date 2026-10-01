@@ -261,9 +261,9 @@ static std::size_t check_meshes_rigid_invariance() {
 /** Kernel-vs-scalar parity: the NumKong-built metric distance and the scalar
  *  oracle must agree over sampled cloud pairs - each also runs implicitly through
  *  every scenario's per-result audit. */
-static std::size_t check_meshes_kernel_parity() {
+static std::size_t check_meshes_kernel_parity(u64_t seed) {
     std::size_t failures = 0;
-    auto values = meshes_fixture_t::make_values(8, basic_seed_contract_k ^ 0x0Dull);
+    auto values = meshes_fixture_t::make_values(8, stream_key(seed, "kernel_parity"));
     for (std::size_t pair = 0; pair + 1 < values.size(); pair += 2) {
         auto const& first = values[pair].spectrum;
         auto const& second = values[pair + 1].spectrum;
@@ -272,16 +272,16 @@ static std::size_t check_meshes_kernel_parity() {
     return failures;
 }
 
-std::size_t test::basic::check_meshes() {
-    meshes_fixture_t const fixture;
+std::size_t test::basic::check_meshes(settings_t const& settings) {
     std::size_t failures = 0;
-    failures += test_basic_scenarios(fixture);
-    failures += test_basic_scenarios(meshes_fixture<flaky_waiter_t> {});
-    failures += test_basic_scenarios(meshes_fixture<dummy_waiter_t, fu::preferred_atomic_ref> {});
+    failures += test_basic_scenarios<meshes_fixture_t>(settings.seed);
+    failures += test_basic_scenarios<meshes_fixture<flaky_waiter_t>>(settings.seed);
+    failures += test_basic_scenarios<meshes_fixture<dummy_waiter_t, fu::preferred_atomic_ref>>(settings.seed);
     failures += check_meshes_rigid_invariance();
-    failures += check_meshes_kernel_parity();
-    failures += test_basic_safegraphs_roundtrip(fixture, "uuid", "rmsd"); // The uuid key column.
-    failures += test_basic_safegraphs_hostile(fixture, "rmsd");
-    failures += test_basic_safegraphs_distributed(fixture, "rmsd");
+    failures += check_meshes_kernel_parity(settings.seed);
+    // The uuid key column.
+    failures += test_basic_safegraphs_roundtrip<meshes_fixture_t>(settings.seed, "uuid", "rmsd");
+    failures += test_basic_safegraphs_hostile<meshes_fixture_t>(settings.seed, "rmsd");
+    failures += test_basic_safegraphs_distributed<meshes_fixture_t>(settings.seed, "rmsd");
     return report("meshes", failures);
 }

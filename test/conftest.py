@@ -1,28 +1,21 @@
 """Session-wide configuration for the Python side of the USearch test suite.
 
-Holds only what pytest itself loads: the report header, the seeding fixture, and the executors
-every fanned-out verb runs on, which every module inherits without importing anything. Matrices,
-oracle, and gates are plain values and functions, so they live in `test.base` and are imported
-by name.
+Holds only what pytest itself loads: the report header, the filter, the seeding fixtures, and the
+executors every fanned-out verb runs on, which every module inherits without importing anything.
+Settings, matrices, oracle, and gates are plain values and functions, so they live in `base`
+and are imported by name.
 """
 
 from __future__ import annotations
 
-import os
 import platform
+import random
 from collections.abc import Callable, Iterator
 
 import pytest
+from base import SETTINGS
 
 import usearch
-
-# Fixed at 42 unless `USEARCH_SEED` names another, or `random` to draw one; the banner logs it, so
-# a failure that only appears sometimes still names the draw that produced it.
-_REQUESTED_SEED = os.environ.get("USEARCH_SEED", "42")
-try:
-    _RUN_SEED = int.from_bytes(os.urandom(4), "little") if _REQUESTED_SEED == "random" else int(_REQUESTED_SEED)
-except ValueError:
-    raise SystemExit(f'USEARCH_SEED="{_REQUESTED_SEED}" does not parse') from None
 
 
 def pytest_report_header() -> list[str]:
@@ -32,13 +25,23 @@ def pytest_report_header() -> list[str]:
     this hook always shows, and survives `-q`, xdist, and report capture.
     """
     return [
-        f"platform: {platform.platform()}",
-        f"python: {platform.python_version()}",
-        f"usearch: {usearch.version()} from {usearch.DenseIndex.__module__}",
-        f"capabilities compiled: {usearch.capabilities_compiled()}",
-        f"capabilities available: {usearch.capabilities_available()}",
-        f"seed: {_RUN_SEED}, pin with USEARCH_SEED",
+        f"- Platform: {platform.platform()}",
+        f"- Python: {platform.python_version()}",
+        f"- USearch: {usearch.version()} from {usearch.DenseIndex.__module__}",
+        f"- Capabilities compiled: {usearch.capabilities_compiled()}",
+        f"- Capabilities available: {usearch.capabilities_available()}",
+        f"- Seed: {SETTINGS.seed}",
+        f"- Filter: {SETTINGS.filter or 'none'}",
+        f"- Dims: {','.join(map(str, SETTINGS.dims))}",
     ]
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Keeps only the tests whose node id `USEARCH_FILTER` selects, on top of any `-k`."""
+    deselected = [item for item in items if not SETTINGS.selects(item.nodeid)]
+    if deselected:
+        config.hook.pytest_deselected(items=deselected)
+        items[:] = [item for item in items if SETTINGS.selects(item.nodeid)]
 
 
 @pytest.fixture
@@ -49,7 +52,13 @@ def seed(__pytest_repeat_step_number: int | None) -> int:
     one, so a default would replay the first step's draw on every repeat. pytest-repeat hands
     `None` to a test that is not repeated.
     """
-    return _RUN_SEED + (__pytest_repeat_step_number or 0)
+    return SETTINGS.seed + (__pytest_repeat_step_number or 0)
+
+
+@pytest.fixture
+def rng(seed: int) -> random.Random:
+    """An RNG private to this test, so a neighbour's draws cannot shift this one's."""
+    return random.Random(seed)
 
 
 @pytest.fixture(scope="session")

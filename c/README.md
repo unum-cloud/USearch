@@ -93,9 +93,9 @@ usearch_dense_metadata_buffer(view, &options, &error);
 USearch comes pre-packaged with NumKong, bringing over 100 SIMD-accelerated distance kernels for x86 and ARM architectures.
 That includes:
 
-- `usearch_metric_cos_k` - Cosine Similarity metric, defined as `Cos = 1 - sum(a[i] * b[i]) / (sqrt(sum(a[i]^2) * sqrt(sum(b[i]^2)))`.
-- `usearch_metric_ip_k` - Inner Product metric, defined as `IP = 1 - sum(a[i] * b[i])`.
-- `usearch_metric_l2sq_k` - Squared Euclidean Distance metric, defined as `L2 = sum((a[i] - b[i])^2)`.
+- `usearch_metric_cos_k` - Cosine Similarity metric, defined as Cos = 1 − ∑ aᵢ·bᵢ / (√(∑ aᵢ²) · √(∑ bᵢ²)).
+- `usearch_metric_ip_k` - Inner Product metric, defined as IP = 1 − ∑ aᵢ·bᵢ.
+- `usearch_metric_l2sq_k` - Squared Euclidean Distance metric, defined as L2 = ∑ (aᵢ − bᵢ)².
 - `usearch_metric_haversine_k` - Haversine (Great Circle) Distance metric.
 - `usearch_metric_divergence_k` - Jensen Shannon Divergence metric.
 - `usearch_metric_pearson_k` - Pearson Correlation metric.

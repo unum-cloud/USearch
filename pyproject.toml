@@ -89,23 +89,18 @@ input = "VERSION"
 regex = "(?P<value>.+)"
 
 [tool.pytest.ini_options]
-# No `-x`: one failure must not hide the rest, which is how a wrong `batches` dtype survived
-# a green run. The four flags below match NumKong's and StringZilla's blocks exactly.
-addopts = ["-ra", "--showlocals", "--strict-markers", "--strict-config"]
+# `-p no:randomly` keeps `<PROJECT>_SEED` in charge wherever pytest-randomly happens to be installed.
+addopts = ["-ra", "--showlocals", "--strict-markers", "--strict-config", "-p", "no:randomly"]
 filterwarnings = ["error"]
-minversion = "6.0"
+minversion = "8.0"
 python_files = ["*.py"]
 testpaths = ["test"]
 xfail_strict = true
 
-# Avoid running tests, as everything is happening in a super slow container
-# We have already run all the relavent Python tests in `prerelease.yml`
-#   test-requires = ["pytest", "numpy"]
-#   test-command = "pytest {project}/python/scripts"
 [tool.cibuildwheel]
 build-verbosity = 0
-test-command = ""
-test-requires = []
+test-command = "python -X faulthandler -m pytest -x {project}/test"
+test-groups = ["test"]
 
 # Add "pp*" to skip PyPy builds, but they should work fine these days :)
 # https://cibuildwheel.readthedocs.io/en/stable/options/#build-skip
@@ -162,19 +157,18 @@ before-build = [
   "git submodule update --init --recursive",
 ]
 
-# Groups rather than extras, so none of this reaches the published wheel's metadata. They are also
-# deliberately absent from `[tool.cibuildwheel] test-requires`, which builds in a container too slow
-# to run a suite in.
+# Groups rather than extras, so none of this reaches the published wheel's metadata.
 [dependency-groups]
 lint = ["ruff>=0.15.8"]
-tests = ["numpy>=1.21", "pytest>=9.0.2", "pytest-repeat>=0.9.4"]
+# NumKong is what `usearch.eval` computes the exact neighbors with.
+test = ["numkong>=7.8", "numpy>=1.21", "pytest>=8", "pytest-repeat>=0.9.4"]
 # Free-threaded builds only report a race if several threads actually enter the extension at once.
-tests-parallel = ["pytest-run-parallel>=0.7"]
+test-parallel = ["pytest-run-parallel>=0.7"]
 # The reference the recall checks score against, and the progress bar the sweeps in `eval` print.
-tests-oracles = ["scipy>=1.11", "tqdm>=4.66"]
+test-oracles = ["scipy>=1.11", "tqdm>=4.66"]
 # CuPy is the device-buffer producer, exercising `__cuda_array_interface__` against a VRAM-resident
 # index. Not an oracle - the recall reference stays SciPy's, on the host.
-tests-cuda = ["cupy-cuda12x"]
+test-cuda = ["cupy-cuda12x"]
 
 [tool.ruff]
 # Code wraps at 120; prose - docstrings and comments - wraps at 100.
@@ -194,6 +188,7 @@ select = [
   "YTT", # flake8-2020 (misreading `sys.version` and friends)
   "B",   # flake8-bugbear (likely bugs)
   "SIM", # flake8-simplify (needless complexity)
+  "TID", # flake8-tidy-imports (relative imports)
 ]
 ignore = [
   "E501",  # line too long (handled by formatter)
@@ -206,6 +201,9 @@ ignore = [
   "F401",
   "E402",
 ] # re-exports and conditional imports
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
 
 [tool.ruff.lint.isort]
 known-first-party = ["usearch"]

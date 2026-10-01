@@ -25,7 +25,7 @@ concept vram_indexes = std::is_same_v<typename indexes_type_::executor_t, cuda_e
  *  reader walks the published rows only once the writer has returned. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
     requires vram_indexes<indexes_type_>
-std::size_t test_dense_indexes_search_race() {
+std::size_t test_dense_indexes_search_race(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -42,7 +42,7 @@ std::size_t test_dense_indexes_search_race() {
     if (failed(driver.status)) return failures + expect(false);
     auto& executor = driver.executor;
 
-    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, dense_seed_indexes_race_k);
+    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexes_race"));
     std::vector<key_t> keys(nodes_count);
     for (std::size_t row = 0; row != nodes_count; ++row) keys[row] = static_cast<key_t>(1 + row);
     std::array<key_t, 8> found_keys {};
@@ -81,7 +81,7 @@ std::size_t test_dense_indexes_search_race() {
 /** Composes one (dtype, kernel) cell's sharded suite over device zero, skipping it
  *  where no device answers. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-std::size_t test_cuda_indexes_configuration(char const* name) {
+std::size_t test_cuda_indexes_configuration(char const* name, u64_t seed) {
     if (failed(cuda_device_specs_t::query(0).status)) return report(name, "no CUDA device reachable");
 
     using indexes_t = dense_vram_indexes<u32_t, dtype_, kernel_, cuda_arch_blackwellrtx_k>;
@@ -89,17 +89,17 @@ std::size_t test_cuda_indexes_configuration(char const* name) {
     // The suite is composed here, not reflected: every call below is a capability claim
     // this sharded, executor-driven category makes about itself.
     std::size_t failures_count = 0;
-    failures_count += test_dense_indexes_guards<indexes_t>();
-    failures_count += test_dense_indexes_duplicate_keys<indexes_t>();
-    failures_count += test_dense_indexes_save_load<indexes_t, kernel_>();
-    failures_count += test_dense_indexes_split_load<indexes_t, kernel_>();
-    failures_count += test_dense_indexes_buffer_roundtrip<indexes_t, kernel_>();
-    failures_count += test_dense_indexes_cancelled_load<indexes_t, kernel_>();
-    failures_count += test_dense_indexes_concurrent_add<indexes_t, kernel_>();
-    failures_count += test_dense_indexes_search_race<indexes_t, kernel_>();
-    failures_count += test_dense_indexes_refine<indexes_t, kernel_>();
-    failures_count += test_dense_indexes_products<indexes_t, kernel_>();
-    failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>();
+    failures_count += test_dense_indexes_guards<indexes_t>(seed);
+    failures_count += test_dense_indexes_duplicate_keys<indexes_t>(seed);
+    failures_count += test_dense_indexes_save_load<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_split_load<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_buffer_roundtrip<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_cancelled_load<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_concurrent_add<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_search_race<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed);
     return report(name, failures_count);
 }
 
@@ -107,7 +107,7 @@ std::size_t test_cuda_indexes_configuration(char const* name) {
 
 /** The sharded CUDA suite entry its translation unit defines and the suite's @c main
  *  composes explicitly; returns the suite's failure count. */
-std::size_t check_vram_indexes();
+std::size_t check_vram_indexes(settings_t const& settings);
 
 #pragma endregion Suite Entry Points
 
