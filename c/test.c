@@ -16,6 +16,7 @@
  *  faulting frame instead of stopping at a bare exit code.
  */
 #include <errno.h>
+#include <math.h>
 #include <signal.h> // `signal`, `raise`, `SIGSEGV`
 #include <stdio.h>  // `remove`
 #include <stdlib.h>
@@ -488,6 +489,330 @@ void test_mini_float_quantizations(size_t const collection_size, size_t const di
     printf("Test: Mini-float quantizations - PASSED\n");
 }
 
+static size_t counted_cosine_calls = 0;
+
+usearch_distance_t counted_cosine_f32(void const* first_ptr, void const* second_ptr) {
+    float const* first = (float const*)first_ptr;
+    float const* second = (float const*)second_ptr;
+    float dot = 0, first_norm = 0, second_norm = 0;
+    ++counted_cosine_calls;
+    for (size_t dimension = 0; dimension != 3; ++dimension) {
+        dot += first[dimension] * second[dimension];
+        first_norm += first[dimension] * first[dimension];
+        second_norm += second[dimension] * second[dimension];
+    }
+    if (first_norm == 0)
+        return second_norm == 0 ? 0 : 1;
+    if (second_norm == 0)
+        return 1;
+    return 1 - dot / (sqrtf(first_norm) * sqrtf(second_norm));
+}
+
+int keep_even_keys(usearch_key_t key, void* state) {
+    size_t* calls = (size_t*)state;
+    ++*calls;
+    return (key % 2) == 0;
+}
+
+static void expect_distance_for_key(usearch_key_t const* keys, float const* distances, size_t count,
+                                    usearch_key_t key, float expected, float tolerance) {
+    for (size_t i = 0; i != count; ++i)
+        if (keys[i] == key) {
+            expect(fabsf(distances[i] - expected) <= tolerance, "Unexpected cosine distance");
+            return;
+        }
+    expect(false, "Expected cosine key is missing");
+}
+
+void expect_cosine_results(usearch_index_t index, void const* query, usearch_scalar_kind_t query_kind,
+                           size_t expected_count, float tolerance) {
+    usearch_error_t error = NULL;
+    usearch_key_t keys[8] = {0};
+    float distances[8] = {0};
+    usearch_key_t const known_keys[] = {10, 21, 30, 41, 50};
+    size_t found = usearch_search(index, query, query_kind, expected_count, keys, distances, &error);
+    expect(!error, error);
+    expect_eq(found, expected_count, "Unexpected cosine result count");
+    for (size_t i = 0; i != found; ++i) {
+        expect(distances[i] >= 0 && distances[i] <= 2 + tolerance, "Invalid cosine distance range");
+        if (i)
+            expect(distances[i - 1] <= distances[i] + tolerance, "Cosine results are not ordered");
+        bool known = false;
+        for (size_t j = 0; j != sizeof(known_keys) / sizeof(known_keys[0]); ++j)
+            known = known || keys[i] == known_keys[j];
+        expect(known, "Cosine result contains an invalid key");
+        for (size_t j = 0; j != i; ++j)
+            expect(keys[j] != keys[i], "Cosine result contains a duplicate key");
+    }
+}
+
+static bool files_equal(char const* first_path, char const* second_path) {
+    FILE* first = fopen(first_path, "rb");
+    FILE* second = fopen(second_path, "rb");
+    if (!first || !second) {
+        if (first)
+            fclose(first);
+        if (second)
+            fclose(second);
+        return false;
+    }
+    bool equal = true;
+    while (equal) {
+        unsigned char first_bytes[256], second_bytes[256];
+        size_t first_count = fread(first_bytes, 1, sizeof(first_bytes), first);
+        size_t second_count = fread(second_bytes, 1, sizeof(second_bytes), second);
+        equal = first_count == second_count && memcmp(first_bytes, second_bytes, first_count) == 0;
+        if (!first_count || !second_count)
+            break;
+    }
+    fclose(first);
+    fclose(second);
+    return equal;
+}
+
+static size_t test_cosine_norm_cache_kind(usearch_scalar_kind_t quantization, char const* saved_path,
+                                          char const* roundtrip_path, float tolerance) {
+    float const vectors[5][3] = {
+        {1, 0, 0},
+        {0, 1, 0},
+        {-1, 0, 0},
+        {0, 0, 0},
+        {1, 1, 0},
+    };
+    usearch_key_t const vector_keys[5] = {10, 21, 30, 41, 50};
+    float const query_x[3] = {1, 0, 0};
+    float const query_zero[3] = {0, 0, 0};
+    float const query_z[3] = {0, 0, 1};
+    double const query_x_f64[3] = {1, 0, 0};
+    float const replacement[3] = {0, 0, 1};
+    usearch_key_t keys[8] = {0};
+    float distances[8] = {0};
+    usearch_error_t error = NULL;
+
+    usearch_init_options_t options = create_options(3);
+    options.metric_kind = usearch_metric_cos_k;
+    options.quantization = quantization;
+    usearch_index_t index = usearch_init(&options, &error);
+    expect(!error && index, error);
+    usearch_reserve(index, 8, &error);
+    expect(!error, error);
+    size_t reserved_memory = usearch_memory_usage(index, &error);
+    expect(reserved_memory > 8 * sizeof(uint32_t), "Cosine memory accounting is incomplete");
+
+    for (size_t i = 0; i != 5; ++i) {
+        usearch_add(index, vector_keys[i], vectors[i], usearch_scalar_f32_k, &error);
+        expect(!error, error);
+    }
+
+    expect_cosine_results(index, query_x, usearch_scalar_f32_k, 5, tolerance);
+    size_t found = usearch_search(index, query_x, usearch_scalar_f32_k, 5, keys, distances, &error);
+    expect_distance_for_key(keys, distances, found, 10, 0, tolerance);
+    expect_distance_for_key(keys, distances, found, 50, 0.29289323f, tolerance);
+    expect_distance_for_key(keys, distances, found, 21, 1, tolerance);
+    expect_distance_for_key(keys, distances, found, 41, 1, tolerance);
+    expect_distance_for_key(keys, distances, found, 30, 2, tolerance);
+
+    expect_cosine_results(index, query_zero, usearch_scalar_f32_k, 5, tolerance);
+    found = usearch_search(index, query_zero, usearch_scalar_f32_k, 5, keys, distances, &error);
+    expect_distance_for_key(keys, distances, found, 41, 0, tolerance);
+    for (size_t i = 0; i != found; ++i)
+        if (keys[i] != 41)
+            expect(fabsf(distances[i] - 1) <= tolerance, "One-zero cosine semantics changed");
+
+    found = usearch_search(index, query_x_f64, usearch_scalar_f64_k, 5, keys, distances, &error);
+    expect(!error, error);
+    expect_eq(found, 5, "f64 cosine query cast lost results");
+    expect_distance_for_key(keys, distances, found, 10, 0, tolerance);
+
+    size_t filter_calls = 0;
+    found = usearch_filtered_search(index, query_x, usearch_scalar_f32_k, 5, &keep_even_keys, &filter_calls, keys,
+                                    distances, &error);
+    expect(!error, error);
+    expect_eq(found, 3, "Filtered cosine search returned the wrong count");
+    expect(filter_calls > 0, "Cosine filter was not invoked");
+    for (size_t i = 0; i != found; ++i)
+        expect((keys[i] % 2) == 0, "Cosine filter admitted an odd key");
+
+    expect_eq(usearch_remove(index, 10, &error), 1, "Failed to remove cached cosine vector");
+    expect(!error, error);
+    usearch_add(index, 10, replacement, usearch_scalar_f32_k, &error);
+    expect(!error, error);
+    found = usearch_search(index, query_z, usearch_scalar_f32_k, 5, keys, distances, &error);
+    expect(!error && found == 5, error);
+    expect_distance_for_key(keys, distances, found, 10, 0, tolerance);
+    found = usearch_search(index, query_x, usearch_scalar_f32_k, 5, keys, distances, &error);
+    expect_distance_for_key(keys, distances, found, 10, 1, tolerance);
+
+    size_t serialized_length = usearch_serialized_length(index, &error);
+    usearch_save(index, saved_path, &error);
+    expect(!error, error);
+    struct stat saved_stat;
+    expect(stat(saved_path, &saved_stat) == 0, "Failed to stat saved cosine index");
+    expect_eq((size_t)saved_stat.st_size, serialized_length, "Serialized cosine length differs from file bytes");
+
+    usearch_index_t loaded = usearch_init(NULL, &error);
+    expect(!error && loaded, error);
+    usearch_load(loaded, saved_path, &error);
+    expect(!error, error);
+    found = usearch_search(loaded, query_z, usearch_scalar_f32_k, 5, keys, distances, &error);
+    expect(!error && found == 5, error);
+    expect_distance_for_key(keys, distances, found, 10, 0, tolerance);
+    expect(usearch_memory_usage(loaded, &error) > 0, "Loaded cosine index did not report memory");
+    usearch_save(loaded, roundtrip_path, &error);
+    expect(!error, error);
+    struct stat roundtrip_stat;
+    expect(stat(roundtrip_path, &roundtrip_stat) == 0, "Failed to stat round-tripped cosine index");
+    expect_eq((size_t)roundtrip_stat.st_size, serialized_length, "Round-trip changed serialized cosine length");
+    expect(files_equal(saved_path, roundtrip_path), "Cosine norm cache changed serialized bytes");
+
+    usearch_index_t viewed = usearch_init(NULL, &error);
+    expect(!error && viewed, error);
+    usearch_view(viewed, saved_path, &error);
+    expect(!error, error);
+    found = usearch_search(viewed, query_z, usearch_scalar_f32_k, 5, keys, distances, &error);
+    expect(!error && found == 5, error);
+    expect_distance_for_key(keys, distances, found, 10, 0, tolerance);
+
+    usearch_clear(index, &error);
+    expect(!error && usearch_size(index, &error) == 0, error);
+    usearch_add(index, 77, query_x, usearch_scalar_f32_k, &error);
+    expect(!error, error);
+    found = usearch_search(index, query_x, usearch_scalar_f32_k, 1, keys, distances, &error);
+    expect(!error && found == 1 && keys[0] == 77 && distances[0] <= tolerance,
+           "Cosine cache did not recover after clear");
+
+    usearch_free(viewed, &error);
+    usearch_free(loaded, &error);
+    usearch_free(index, &error);
+    remove(saved_path);
+    remove(roundtrip_path);
+    return reserved_memory;
+}
+
+static void test_nonfinite_cosine_fallback(void) {
+    usearch_error_t error = NULL;
+    usearch_init_options_t options = create_options(2);
+    options.metric_kind = usearch_metric_cos_k;
+    options.quantization = usearch_scalar_f32_k;
+    usearch_index_t index = usearch_init(&options, &error);
+    expect(!error && index, error);
+    usearch_reserve(index, 4, &error);
+    expect(!error, error);
+
+    uint32_t nan_bits = 0x7fc00001u, inf_bits = 0x7f800000u;
+    float nan_value = 0, inf_value = 0;
+    memcpy(&nan_value, &nan_bits, sizeof(nan_value));
+    memcpy(&inf_value, &inf_bits, sizeof(inf_value));
+    float const finite_vector[2] = {1, 0};
+    float const zero_vector[2] = {0, 0};
+    float const nan_vector[2] = {nan_value, 1};
+    float const inf_vector[2] = {inf_value, 1};
+    usearch_add(index, 1, finite_vector, usearch_scalar_f32_k, &error);
+    usearch_add(index, 2, zero_vector, usearch_scalar_f32_k, &error);
+    usearch_add(index, 3, nan_vector, usearch_scalar_f32_k, &error);
+    usearch_add(index, 4, inf_vector, usearch_scalar_f32_k, &error);
+    expect(!error, error);
+
+    usearch_key_t keys[4] = {0};
+    float distances[4] = {0};
+    size_t found = usearch_search(index, finite_vector, usearch_scalar_f32_k, 4, keys, distances, &error);
+    expect(!error && found > 0 && found <= 4, "Nonfinite member fallback failed");
+    found = usearch_search(index, nan_vector, usearch_scalar_f32_k, 4, keys, distances, &error);
+    expect(!error && found > 0 && found <= 4, "Nonfinite query fallback failed");
+    usearch_free(index, &error);
+
+    options.quantization = usearch_scalar_bf16_k;
+    index = usearch_init(&options, &error);
+    expect(!error && index, error);
+    usearch_reserve(index, 3, &error);
+    expect(!error, error);
+    uint16_t const bf16_finite[2] = {0x3f80u, 0};
+    uint16_t const bf16_nan[2] = {0x7fc1u, 0x3f80u};
+    uint16_t const bf16_inf[2] = {0x7f80u, 0x3f80u};
+    usearch_add(index, 1, bf16_finite, usearch_scalar_bf16_k, &error);
+    usearch_add(index, 2, bf16_nan, usearch_scalar_bf16_k, &error);
+    usearch_add(index, 3, bf16_inf, usearch_scalar_bf16_k, &error);
+    expect(!error, error);
+    found = usearch_search(index, bf16_finite, usearch_scalar_bf16_k, 3, keys, distances, &error);
+    expect(!error && found > 0 && found <= 3, "Raw bf16 nonfinite member fallback failed");
+    found = usearch_search(index, bf16_nan, usearch_scalar_bf16_k, 3, keys, distances, &error);
+    expect(!error && found > 0 && found <= 3, "Raw bf16 nonfinite query fallback failed");
+    usearch_free(index, &error);
+}
+
+void test_cosine_norm_cache(void) {
+    printf("Test: Cosine norm cache...\n");
+    size_t f32_cosine_memory = test_cosine_norm_cache_kind(
+        usearch_scalar_f32_k, "tmp_cosine_norm_f32.usearch", "tmp_cosine_norm_f32_roundtrip.usearch", 2e-5f);
+    size_t bf16_cosine_memory = test_cosine_norm_cache_kind(
+        usearch_scalar_bf16_k, "tmp_cosine_norm_bf16.usearch", "tmp_cosine_norm_bf16_roundtrip.usearch", 2e-3f);
+
+    // Without NumKong the library reports exactly "serial" and routes built-in metrics through the auto-vectorized
+    // kernels, which are the only ones eligible for the norm sidecar. With NumKong compiled in, the built-in cosine
+    // kernels come from NumKong and no sidecar may ever be allocated. Either way the accounting must be exact.
+    bool const expect_sidecar = strcmp(usearch_hardware_acceleration_compiled(), "serial") == 0;
+    size_t const expected_sidecar_bytes = expect_sidecar ? 8 * sizeof(uint32_t) : 0;
+
+    usearch_error_t error = NULL;
+    usearch_init_options_t options = create_options(3);
+    options.metric_kind = usearch_metric_l2sq_k;
+    options.quantization = usearch_scalar_f32_k;
+    usearch_index_t changed_metric = usearch_init(&options, &error);
+    expect(!error && changed_metric, error);
+    usearch_reserve(changed_metric, 8, &error);
+    expect(!error, error);
+    size_t l2_reserved_memory = usearch_memory_usage(changed_metric, &error);
+    expect_eq(f32_cosine_memory, l2_reserved_memory + expected_sidecar_bytes,
+              "f32 cosine sidecar memory accounting is incorrect");
+    expect_eq(bf16_cosine_memory, l2_reserved_memory + expected_sidecar_bytes,
+              "bf16 cosine sidecar memory accounting is incorrect");
+
+    float const callback_vectors[3][3] = {{1, 0, 0}, {0, 1, 0}, {0, 0, 0}};
+    for (size_t i = 0; i != 3; ++i)
+        usearch_add(changed_metric, i + 1, callback_vectors[i], usearch_scalar_f32_k, &error);
+    expect(!error, error);
+    size_t memory_before_change = usearch_memory_usage(changed_metric, &error);
+    usearch_change_metric_kind(changed_metric, usearch_metric_cos_k, &error);
+    expect(!error, error);
+    size_t memory_after_change = usearch_memory_usage(changed_metric, &error);
+    expect_eq(memory_after_change, memory_before_change + expected_sidecar_bytes,
+              "Changing to cosine reported an invalid sidecar size");
+    usearch_key_t keys[3] = {0};
+    float distances[3] = {0};
+    size_t found = usearch_search(changed_metric, callback_vectors[0], usearch_scalar_f32_k, 3, keys, distances, &error);
+    expect(!error && found == 3, "Changed-metric cosine search failed");
+    // After the change the index must behave exactly like a cosine index built from scratch: the query {1,0,0}
+    // is at distance 0 from key 1, orthogonal (distance 1) to key 2, and at distance 1 from the zero vector, key 3.
+    expect_distance_for_key(keys, distances, found, 1, 0, 2e-5f);
+    expect_distance_for_key(keys, distances, found, 2, 1, 2e-5f);
+    expect_distance_for_key(keys, distances, found, 3, 1, 2e-5f);
+    usearch_change_metric_kind(changed_metric, usearch_metric_l2sq_k, &error);
+    expect(!error, error);
+    expect_eq(usearch_memory_usage(changed_metric, &error), memory_before_change,
+              "Changing away from cosine did not release the sidecar");
+    usearch_free(changed_metric, &error);
+
+    options.metric_kind = usearch_metric_cos_k;
+    options.metric = &counted_cosine_f32;
+    usearch_index_t callback_index = usearch_init(&options, &error);
+    expect(!error && callback_index, error);
+    usearch_reserve(callback_index, 8, &error);
+    expect(!error, error);
+    expect_eq(usearch_memory_usage(callback_index, &error), l2_reserved_memory,
+              "Cosine-labelled callback incorrectly allocated a norm sidecar");
+    for (size_t i = 0; i != 3; ++i)
+        usearch_add(callback_index, i + 1, callback_vectors[i], usearch_scalar_f32_k, &error);
+    expect(!error, error);
+    counted_cosine_calls = 0;
+    found = usearch_search(callback_index, callback_vectors[0], usearch_scalar_f32_k, 3, keys, distances, &error);
+    expect(!error && found == 3, "Cosine callback search failed");
+    expect(counted_cosine_calls > 0, "Built-in cosine cache captured a custom callback");
+    usearch_free(callback_index, &error);
+
+    test_nonfinite_cosine_fallback();
+    printf("Test: Cosine norm cache - PASSED\n");
+}
+
 int main(int argc, char const* argv[]) {
     install_crash_handlers();
     printf("Running tests...\n");
@@ -507,6 +832,8 @@ int main(int argc, char const* argv[]) {
             test_mini_float_quantizations(collection_sizes[index], dimensions[jdx]);
         }
     }
+
+    test_cosine_norm_cache();
 
     (void)argc;
     (void)argv;

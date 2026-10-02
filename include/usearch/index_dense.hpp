@@ -15,6 +15,10 @@
 #include <shared_mutex> // `std::shared_mutex`
 #endif
 
+#if !defined(USEARCH_COSINE_NORM_CACHE_DIAGNOSTIC)
+#define USEARCH_COSINE_NORM_CACHE_DIAGNOSTIC(event) ((void)0)
+#endif
+
 namespace unum {
 namespace usearch {
 
@@ -433,6 +437,44 @@ class index_dense_gt {
     using member_iterator_t = typename index_t::member_iterator_t;
     using member_citerator_t = typename index_t::member_citerator_t;
 
+    /**
+     *  @brief  Cosine norm sidecar entry. Searches read entries while concurrent insertions publish them, so every
+     *          slot is a lock-free 32-bit atomic: insertion and removal store with release semantics after the
+     *          vector bytes are written, searches load with acquire semantics before reading the vector bytes,
+     *          and bulk maintenance that runs without concurrent insertions (reserve, clear, compact, copy, load,
+     *          metric changes) uses relaxed accesses. On x86 these are plain moves; on weakly ordered CPUs they
+     *          also guarantee that a search seeing a fresh norm sees the fully written vector it belongs to.
+     */
+    struct cosine_norm_t {
+        std::atomic<std::uint32_t> bits;
+        inline std::uint32_t load(std::memory_order order) const noexcept { return bits.load(order); }
+        inline void store(std::uint32_t value, std::memory_order order) noexcept { bits.store(value, order); }
+    };
+    using cosine_norms_allocator_t = aligned_allocator_gt<cosine_norm_t, 64>;
+    using cosine_norms_t = buffer_gt<cosine_norm_t, cosine_norms_allocator_t>;
+    enum : std::uint32_t { invalid_cosine_norm_bits_k = 0x7fc00000u };
+    static_assert(sizeof(cosine_norm_t) == sizeof(std::uint32_t), "Sidecar entries must stay four bytes");
+    // Lock-freedom guard, C++11-compatible. `is_always_lock_free` is C++17; its definition is "the
+    // `ATOMIC_xxx_LOCK_FREE` macro of the same type equals 2", so on older standards the macro is selected by
+    // exact type identity (`std::is_same`), never by size: lock-freedom is a per-type property. If `std::uint32_t`
+    // is an extended integer type with no macro of its own, the property can't be evaluated before C++17, so the
+    // guard is skipped there; correctness never depends on it, only the hot-path cost, and every C++17 build of
+    // the same headers still checks it. The public headers advertise C++11 support and must not use C++17-only
+    // members.
+#if __cplusplus >= 201703L
+    static_assert(std::atomic<std::uint32_t>::is_always_lock_free, "Sidecar entries must be lock-free");
+#else
+    enum : int {
+        cosine_norm_lock_free_k = std::is_same<std::uint32_t, unsigned int>::value         ? ATOMIC_INT_LOCK_FREE
+                                  : std::is_same<std::uint32_t, unsigned long>::value      ? ATOMIC_LONG_LOCK_FREE
+                                  : std::is_same<std::uint32_t, unsigned short>::value     ? ATOMIC_SHORT_LOCK_FREE
+                                  : std::is_same<std::uint32_t, unsigned long long>::value ? ATOMIC_LLONG_LOCK_FREE
+                                  : std::is_same<std::uint32_t, unsigned char>::value      ? ATOMIC_CHAR_LOCK_FREE
+                                                                                           : -1
+    };
+    static_assert(cosine_norm_lock_free_k == 2 || cosine_norm_lock_free_k == -1, "Sidecar entries must be lock-free");
+#endif
+
     /// @brief Punned metric object.
     class metric_proxy_t {
         index_dense_gt const* index_ = nullptr;
@@ -453,6 +495,49 @@ class index_dense_gt {
         inline byte_t const* v(member_cref_t m) const noexcept { return index_->vectors_lookup_[get_slot(m)]; }
         inline byte_t const* v(member_citerator_t m) const noexcept { return index_->vectors_lookup_[get_slot(m)]; }
         inline distance_t f(byte_t const* a, byte_t const* b) const noexcept { return index_->metric_(a, b); }
+    };
+
+    /// @brief Search-only metric proxy using a prepared query norm and member norms addressed by dense slot.
+    class metric_proxy_cosine_norms_t {
+        index_dense_gt const* index_ = nullptr;
+        f32_t query_norm_ = 0;
+
+      public:
+        metric_proxy_cosine_norms_t(index_dense_gt const& index, f32_t query_norm) noexcept
+            : index_(&index), query_norm_(query_norm) {}
+
+        inline distance_t operator()(byte_t const* a, member_cref_t b) const noexcept { return f(a, b); }
+        inline distance_t operator()(member_cref_t a, member_cref_t b) const noexcept {
+            return index_->metric_(v(a), v(b));
+        }
+
+        inline distance_t operator()(byte_t const* a, member_citerator_t b) const noexcept { return f(a, b); }
+        inline distance_t operator()(member_citerator_t a, member_citerator_t b) const noexcept {
+            return index_->metric_(v(a), v(b));
+        }
+
+        inline distance_t operator()(byte_t const* a, byte_t const* b) const noexcept {
+            return index_->metric_(a, b);
+        }
+
+        inline byte_t const* v(member_cref_t m) const noexcept { return index_->vectors_lookup_[get_slot(m)]; }
+        inline byte_t const* v(member_citerator_t m) const noexcept { return index_->vectors_lookup_[get_slot(m)]; }
+
+      private:
+        template <typename member_at> inline distance_t f(byte_t const* query, member_at member) const noexcept {
+            // The proxy is only constructed while `cosine_norm_cache_active_()` holds, so the sidecar is
+            // capacity-sized and every slot is in range. The writer only ever stores values accepted by
+            // `try_compute_cosine_norm` or the invalid sentinel, so one classification test is sufficient.
+            std::uint32_t member_norm_bits = index_->cosine_norms_[get_slot(member)].load(std::memory_order_acquire);
+            if (!metric_t::is_valid_cosine_norm_bits(member_norm_bits)) {
+                USEARCH_COSINE_NORM_CACHE_DIAGNOSTIC(invalid_fallback);
+                return index_->metric_(query, v(member));
+            }
+            USEARCH_COSINE_NORM_CACHE_DIAGNOSTIC(cache_hit);
+            f32_t member_norm = 0;
+            std::memcpy(&member_norm, &member_norm_bits, sizeof(member_norm));
+            return index_->metric_.cosine_distance_with_valid_norms(query, v(member), query_norm_, member_norm);
+        }
     };
 
     index_dense_config_t config_;
@@ -476,6 +561,10 @@ class index_dense_gt {
 
     /// @brief For every managed `compressed_slot_t` stores a pointer to the allocated vector copy.
     mutable vectors_lookup_t vectors_lookup_;
+
+    /// @brief Raw f32 L2-norm bits (or the invalid sentinel) per capacity slot, for owned vectors in the
+    ///        eligible built-in cosine route. Empty when the route is ineligible; capacity-sized otherwise.
+    cosine_norms_t cosine_norms_;
 
     using available_threads_allocator_t = aligned_allocator_gt<std::size_t, 64>;
     using available_threads_t = ring_gt<std::size_t, available_threads_allocator_t>;
@@ -595,6 +684,7 @@ class index_dense_gt {
 
           vectors_tape_allocator_(std::move(other.vectors_tape_allocator_)), //
           vectors_lookup_(std::move(other.vectors_lookup_)),                 //
+          cosine_norms_(std::move(other.cosine_norms_)),                     //
 
           available_threads_(std::move(other.available_threads_)), //
           slot_lookup_(std::move(other.slot_lookup_)),             //
@@ -620,6 +710,7 @@ class index_dense_gt {
 
         std::swap(vectors_tape_allocator_, other.vectors_tape_allocator_);
         std::swap(vectors_lookup_, other.vectors_lookup_);
+        std::swap(cosine_norms_, other.cosine_norms_);
 
         std::swap(available_threads_, other.available_threads_);
         std::swap(slot_lookup_, other.slot_lookup_);
@@ -740,8 +831,29 @@ class index_dense_gt {
                 return false;
             cast_buffer_ = std::move(new_buffer);
         }
+
+        // Rebuild the cosine norm sidecar for the new metric before committing anything, so that an allocation
+        // failure leaves the index untouched. Norms are preserved verbatim when the old and new metrics are both
+        // cache-eligible over the same scalars and dimensions, and recomputed with the new metric otherwise.
+        bool new_cache_eligible = cosine_norm_cache_eligible_for_(metric);
+        bool preserve_norms = new_cache_eligible && cosine_norm_cache_active_() &&
+                              metric.dimensions() == metric_.dimensions() &&
+                              metric.scalar_kind() == metric_.scalar_kind();
+        cosine_norms_t replacement_norms;
+        if (new_cache_eligible && !preserve_norms && vectors_lookup_.size()) {
+            replacement_norms = cosine_norms_t(vectors_lookup_.size());
+            if (!replacement_norms)
+                return false;
+            cosine_norms_fill_invalid_(replacement_norms);
+            populate_cosine_norms_(replacement_norms, metric);
+        }
+
         casts_ = casts_punned_t::make(metric.scalar_kind());
         metric_ = std::move(metric);
+        if (!new_cache_eligible)
+            cosine_norms_.reset();
+        else if (!preserve_norms)
+            cosine_norms_ = std::move(replacement_norms);
         return true;
     }
 
@@ -827,7 +939,8 @@ class index_dense_gt {
             typed_->memory_usage(0) +                   //
             typed_->tape_allocator().total_wasted() +   //
             typed_->tape_allocator().total_reserved() + //
-            vectors_tape_allocator_.total_allocated();
+            vectors_tape_allocator_.total_allocated() + //
+            cosine_norms_.size() * sizeof(cosine_norm_t);
     }
 
     /**
@@ -1062,15 +1175,34 @@ class index_dense_gt {
         }
 
         // Hash-table load-factor slack does not need corresponding vector or graph slots.
+        vectors_lookup_t new_vectors_lookup;
         if (limits.members != vectors_lookup_.size()) {
-            vectors_lookup_t new_vectors_lookup(limits.members);
+            new_vectors_lookup = vectors_lookup_t(limits.members);
             if (!new_vectors_lookup)
                 return false;
             if (vectors_lookup_.size() > 0)
                 std::memcpy(new_vectors_lookup.data(), vectors_lookup_.data(),
                             vectors_lookup_.size() * sizeof(byte_t*));
-            vectors_lookup_ = std::move(new_vectors_lookup);
         }
+
+        // Mapped and vector-less indexes stay allocation-free on this route. Mutable eligible indexes keep a
+        // capacity-sized sidecar, initialized with an integer sentinel for all new or otherwise uncertain slots.
+        bool cache_eligible = cosine_norm_cache_eligible_();
+        cosine_norms_t new_cosine_norms;
+        if (cache_eligible && limits.members != cosine_norms_.size()) {
+            new_cosine_norms = cosine_norms_t(limits.members);
+            if (limits.members && !new_cosine_norms)
+                return false;
+            cosine_norms_fill_invalid_(new_cosine_norms);
+            cosine_norms_copy_(new_cosine_norms, cosine_norms_, (std::min)(cosine_norms_.size(), new_cosine_norms.size()));
+        }
+
+        if (new_vectors_lookup)
+            vectors_lookup_ = std::move(new_vectors_lookup);
+        if (!cache_eligible)
+            cosine_norms_.reset();
+        else if (new_cosine_norms)
+            cosine_norms_ = std::move(new_cosine_norms);
 
         // During reserve, no insertions may be happening, so we can safely overwrite the whole collection.
         std::unique_lock<std::mutex> available_threads_lock(available_threads_mutex_);
@@ -1111,6 +1243,7 @@ class index_dense_gt {
         slot_lookup_.clear();
         // Tape pointers are about to be invalidated by the reset below.
         std::fill(vectors_lookup_.begin(), vectors_lookup_.end(), nullptr);
+        cosine_norms_fill_invalid_(cosine_norms_);
         free_keys_.clear();
         vectors_tape_allocator_.reset();
     }
@@ -1132,6 +1265,7 @@ class index_dense_gt {
             typed_->reset();
         slot_lookup_.clear();
         vectors_lookup_.reset();
+        cosine_norms_.reset();
         free_keys_.clear();
         vectors_tape_allocator_.reset();
         available_threads_.reset();
@@ -1334,6 +1468,8 @@ class index_dense_gt {
         available_threads_ = std::move(available_threads);
 
         reindex_keys_();
+        if (!try_rebuild_cosine_norms_(!config.exclude_vectors))
+            return result.failed("Failed to allocate memory for cosine norms");
         return result;
     }
 
@@ -1664,6 +1800,9 @@ class index_dense_gt {
             compressed_slot_t slot = (*slots_it).slot;
             free_keys_.push(slot);
             typed_->at(slot).key = free_key_;
+            if (static_cast<std::size_t>(slot) < cosine_norms_.size())
+                cosine_norms_[slot].store(static_cast<std::uint32_t>(invalid_cosine_norm_bits_k),
+                                          std::memory_order_release);
         }
         slot_lookup_.erase(key);
         result.completed = matching_count;
@@ -1708,6 +1847,9 @@ class index_dense_gt {
                 compressed_slot_t slot = (*slots_it).slot;
                 free_keys_.push(slot);
                 typed_->at(slot).key = free_key_;
+                if (static_cast<std::size_t>(slot) < cosine_norms_.size())
+                    cosine_norms_[slot].store(static_cast<std::uint32_t>(invalid_cosine_norm_bits_k),
+                                              std::memory_order_release);
                 ++matching_count;
             }
 
@@ -1813,6 +1955,16 @@ class index_dense_gt {
 
         copy.slot_lookup_ = slot_lookup_; // TODO: Handle out of memory
         *copy.typed_ = std::move(typed_result.index);
+        // Slots are preserved by `copy`, so a valid source sidecar can be duplicated instead of recomputed.
+        bool vectors_owned = config.force_vector_copy || !copy.config_.exclude_vectors;
+        if (vectors_owned && cosine_norm_cache_active_() && copy.cosine_norm_cache_eligible_() &&
+            cosine_norms_.size() == copy.vectors_lookup_.size()) {
+            copy.cosine_norms_ = cosine_norms_t(cosine_norms_.size());
+            if (cosine_norms_.size() && !copy.cosine_norms_)
+                return result.failed("Out of memory!");
+            cosine_norms_copy_(copy.cosine_norms_, cosine_norms_, cosine_norms_.size());
+        } else if (!copy.try_rebuild_cosine_norms_(vectors_owned))
+            return result.failed("Out of memory!");
         return result;
     }
 
@@ -1911,18 +2063,39 @@ class index_dense_gt {
         if (!new_vectors_lookup)
             return result.failed("Out of memory!");
 
+        bool cache_eligible = cosine_norm_cache_eligible_();
+        cosine_norms_t new_cosine_norms;
+        if (cache_eligible && vectors_lookup_.size()) {
+            new_cosine_norms = cosine_norms_t(vectors_lookup_.size());
+            if (!new_cosine_norms)
+                return result.failed("Out of memory!");
+            cosine_norms_fill_invalid_(new_cosine_norms);
+        }
+
         vectors_tape_allocator_t new_vectors_allocator;
 
-        auto track_slot_change = [&](vector_key_t, compressed_slot_t old_slot, compressed_slot_t new_slot) {
+        auto track_slot_change = [&](vector_key_t key, compressed_slot_t old_slot, compressed_slot_t new_slot) {
             byte_t* new_vector = new_vectors_allocator.allocate(metric_.bytes_per_vector());
             byte_t* old_vector = vectors_lookup_[old_slot];
             std::memcpy(new_vector, old_vector, metric_.bytes_per_vector());
             new_vectors_lookup[new_slot] = new_vector;
+            // Removed members are carried over by `compact` as well; their slots keep the sentinel, as after `remove`.
+            if (cache_eligible && key != free_key_) {
+                std::uint32_t norm_bits = invalid_cosine_norm_bits_k;
+                if (metric_.try_compute_cosine_norm(new_vector, norm_bits)) {
+                    new_cosine_norms[new_slot].store(norm_bits, std::memory_order_relaxed);
+                    USEARCH_COSINE_NORM_CACHE_DIAGNOSTIC(population);
+                }
+            }
         };
         typed_->compact(values_proxy_t{*this}, metric_proxy_t{*this}, track_slot_change,
                         std::forward<executor_at>(executor), std::forward<progress_at>(progress));
         vectors_lookup_ = std::move(new_vectors_lookup);
         vectors_tape_allocator_ = std::move(new_vectors_allocator);
+        if (cache_eligible)
+            cosine_norms_ = std::move(new_cosine_norms);
+        else
+            cosine_norms_.reset();
         return result;
     }
 
@@ -2212,6 +2385,8 @@ class index_dense_gt {
                 std::memcpy(vectors_lookup_[member.slot], vector_data, metric_.bytes_per_vector());
             } else
                 vectors_lookup_[member.slot] = (byte_t*)vector_data;
+            populate_cosine_norm_(static_cast<compressed_slot_t>(member.slot), vectors_lookup_[member.slot],
+                                  copy_vector);
         };
 
         index_update_config_t update_config;
@@ -2245,18 +2420,40 @@ class index_dense_gt {
         search_config.expansion = config_.expansion_search;
         search_config.exact = exact;
 
+        if (cosine_norm_cache_active_()) {
+            std::uint32_t query_norm_bits = invalid_cosine_norm_bits_k;
+            if (metric_.try_compute_cosine_norm(vector_data, query_norm_bits)) {
+                USEARCH_COSINE_NORM_CACHE_DIAGNOSTIC(query_preparation);
+                f32_t query_norm = 0;
+                std::memcpy(&query_norm, &query_norm_bits, sizeof(query_norm));
+                return search_with_metric_(vector_data, wanted, std::forward<predicate_at>(predicate), search_config,
+                                           metric_proxy_cosine_norms_t{*this, query_norm}, std::move(lock));
+            }
+            USEARCH_COSINE_NORM_CACHE_DIAGNOSTIC(invalid_fallback);
+        }
+        USEARCH_COSINE_NORM_CACHE_DIAGNOSTIC(route_bypass);
+        return search_with_metric_(vector_data, wanted, std::forward<predicate_at>(predicate), search_config,
+                                   metric_proxy_t{*this}, std::move(lock));
+    }
+
+    template <typename predicate_at, typename metric_at>
+    search_result_t search_with_metric_(byte_t const* vector_data, std::size_t wanted, predicate_at&& predicate,
+                                        index_search_config_t const& search_config, metric_at&& metric,
+                                        thread_lock_t lock) const {
         vector_key_t free_key_copy = free_key_;
         if (std::is_same<typename std::decay<predicate_at>::type, dummy_predicate_t>::value) {
             auto allow = [free_key_copy](member_cref_t const& member) noexcept {
                 return (vector_key_t)member.key != free_key_copy;
             };
-            auto typed_result = typed_->search(vector_data, wanted, metric_proxy_t{*this}, search_config, allow);
+            auto typed_result =
+                typed_->search(vector_data, wanted, std::forward<metric_at>(metric), search_config, allow);
             return search_result_t{std::move(typed_result), std::move(lock)};
         } else {
             auto allow = [free_key_copy, &predicate](member_cref_t const& member) noexcept {
                 return (vector_key_t)member.key != free_key_copy && predicate(member.key);
             };
-            auto typed_result = typed_->search(vector_data, wanted, metric_proxy_t{*this}, search_config, allow);
+            auto typed_result =
+                typed_->search(vector_data, wanted, std::forward<metric_at>(metric), search_config, allow);
             return search_result_t{std::move(typed_result), std::move(lock)};
         }
     }
@@ -2334,6 +2531,94 @@ class index_dense_gt {
 
         result.mean /= result.count;
         return result;
+    }
+
+    /**
+     *  @brief  Whether `metric` qualifies for the cosine norm sidecar on this index: the built-in auto-vectorized
+     *          f32/bf16 cosine kernel, owned vectors, and a mutable (not memory-mapped) graph.
+     */
+    bool cosine_norm_cache_eligible_for_(metric_t const& metric) const noexcept {
+        return metric.supports_cosine_norm_cache() && !config_.exclude_vectors && typed_ && !typed_->is_immutable();
+    }
+
+    bool cosine_norm_cache_eligible_() const noexcept { return cosine_norm_cache_eligible_for_(metric_); }
+
+    /// @brief Whether searches may use the sidecar: eligible and sized to the current capacity.
+    bool cosine_norm_cache_active_() const noexcept {
+        return cosine_norm_cache_eligible_() && cosine_norms_.size() == vectors_lookup_.size();
+    }
+
+    void populate_cosine_norm_(compressed_slot_t slot, byte_t const* vector, bool vector_owned) noexcept {
+        std::size_t slot_index = static_cast<std::size_t>(slot);
+        if (slot_index >= cosine_norms_.size())
+            return;
+        cosine_norms_[slot_index].store(static_cast<std::uint32_t>(invalid_cosine_norm_bits_k),
+                                        std::memory_order_release);
+        if (!vector_owned || !vector) {
+            USEARCH_COSINE_NORM_CACHE_DIAGNOSTIC(route_bypass);
+            return;
+        }
+
+        std::uint32_t norm_bits = invalid_cosine_norm_bits_k;
+        if (metric_.try_compute_cosine_norm(vector, norm_bits)) {
+            // Release: the vector bytes at this slot were written before this store, and a search that acquires
+            // this value may read them afterwards.
+            cosine_norms_[slot_index].store(norm_bits, std::memory_order_release);
+            USEARCH_COSINE_NORM_CACHE_DIAGNOSTIC(population);
+        }
+    }
+
+    static void cosine_norms_fill_invalid_(cosine_norms_t& norms) noexcept {
+        for (std::size_t i = 0; i != norms.size(); ++i)
+            norms[i].store(static_cast<std::uint32_t>(invalid_cosine_norm_bits_k), std::memory_order_relaxed);
+    }
+
+    static void cosine_norms_copy_(cosine_norms_t& to, cosine_norms_t const& from, std::size_t count) noexcept {
+        for (std::size_t i = 0; i != count; ++i)
+            to[i].store(from[i].load(std::memory_order_relaxed), std::memory_order_relaxed);
+    }
+
+    /**
+     *  @brief  Fills a capacity-sized, sentinel-initialized sidecar with the norms of all live members, using the
+     *          supplied metric (which may differ from `metric_` while a metric change is being prepared).
+     *          No locking: callers guarantee no concurrent insertions.
+     */
+    void populate_cosine_norms_(cosine_norms_t& norms, metric_t const& metric) const noexcept {
+        std::size_t slots_count = (std::min)(typed_->size(), (std::min)(vectors_lookup_.size(), norms.size()));
+        for (std::size_t slot = 0; slot != slots_count; ++slot) {
+            if (typed_->at(static_cast<compressed_slot_t>(slot)).key == free_key_)
+                continue;
+            byte_t const* vector = vectors_lookup_[slot];
+            std::uint32_t norm_bits = invalid_cosine_norm_bits_k;
+            if (vector && metric.try_compute_cosine_norm(vector, norm_bits)) {
+                norms[slot].store(norm_bits, std::memory_order_relaxed);
+                USEARCH_COSINE_NORM_CACHE_DIAGNOSTIC(population);
+            }
+        }
+    }
+
+    /// @brief Drops the sidecar and, if the route is eligible and vectors are owned, rebuilds it from scratch.
+    bool try_rebuild_cosine_norms_(bool vectors_owned) noexcept {
+        if (!cosine_norm_cache_eligible_()) {
+            cosine_norms_.reset();
+            return true;
+        }
+
+        cosine_norms_t rebuilt;
+        if (vectors_lookup_.size()) {
+            rebuilt = cosine_norms_t(vectors_lookup_.size());
+            if (!rebuilt)
+                return false;
+            cosine_norms_fill_invalid_(rebuilt);
+        }
+        cosine_norms_ = std::move(rebuilt);
+
+        if (!vectors_owned) {
+            USEARCH_COSINE_NORM_CACHE_DIAGNOSTIC(route_bypass);
+            return true;
+        }
+        populate_cosine_norms_(cosine_norms_, metric_);
+        return true;
     }
 
     void reindex_keys_() {
