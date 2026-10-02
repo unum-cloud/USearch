@@ -214,6 +214,17 @@ endif ()
 # Include directories
 set(USEARCH_HEADER_INCLUDES "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_SOURCE_DIR}/numkong/include")
 
+# Host tuning for the tests & benchmarks only, never the distributable libraries, and only where the host is the target.
+if (MSVC OR CMAKE_CROSSCOMPILING OR NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang|IntelLLVM")
+    set(USEARCH_HOST_TUNING "")
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
+    set(USEARCH_HOST_TUNING -mcpu=native)
+elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    set(USEARCH_HOST_TUNING -march=native)
+else ()
+    set(USEARCH_HOST_TUNING "")
+endif ()
+
 # Function to setup target
 function (setup_target TARGET_NAME)
     # Compiler-specific options List of all possible compiler IDs:
@@ -237,7 +248,6 @@ function (setup_target TARGET_NAME)
                     -Wextra
                     -Wno-conversion
                     -Wno-unknown-pragmas
-                    -march=native
                     -fmax-errors=1
                     -pedantic
                     -fdiagnostics-color=always
@@ -366,6 +376,9 @@ function (setup_target TARGET_NAME)
 
     if (TARGET_TYPE STREQUAL "SHARED_LIBRARY" OR TARGET_TYPE STREQUAL "STATIC_LIBRARY")
         set_target_properties(${TARGET_NAME} PROPERTIES PREFIX "lib")
+    endif ()
+    if (TARGET_TYPE STREQUAL "EXECUTABLE")
+        target_compile_options(${TARGET_NAME} PRIVATE ${USEARCH_HOST_TUNING})
     endif ()
 
     # Core compilation settings affecting "index.hpp"
