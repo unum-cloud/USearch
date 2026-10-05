@@ -3,10 +3,11 @@
 #include <float.h>  // `_Float16`
 #include <stdlib.h> // `aligned_alloc`
 
-#include <atomic>  // `std::atomic`
-#include <chrono>  // `std::chrono`
-#include <cstring> // `std::strncmp`
-#include <thread>  // `std::thread`
+#include <atomic>      // `std::atomic`
+#include <chrono>      // `std::chrono`
+#include <cstring>     // `std::strncmp`
+#include <thread>      // `std::thread`
+#include <type_traits> // `std::is_floating_point`
 
 #include <usearch/index.hpp> // `expected_gt` and macros
 
@@ -2280,8 +2281,23 @@ template <typename scalar_at = float, typename result_at = scalar_at> struct met
 
     inline result_t operator()(scalar_t const* a, scalar_t const* b, std::size_t dim) const noexcept {
         result_t ab{}, a2{}, b2{};
+        // OpenMP only accepts `x += expr` as a reduction update, not a comma-expression.
+        // With a function-call cast, GCC leaves `a2` and `b2` at zero and every distance becomes 0.
+        add_products_(a, b, dim, ab, a2, b2, std::is_floating_point<scalar_t>());
+
+        result_t result_if_zero[2][2];
+        result_if_zero[0][0] = 1 - ab / (std::sqrt(a2) * std::sqrt(b2));
+        result_if_zero[0][1] = result_if_zero[1][0] = 1;
+        result_if_zero[1][1] = 0;
+        return result_if_zero[a2 == 0][b2 == 0];
+    }
+
+  private:
+    inline void add_products_(scalar_t const* a, scalar_t const* b, std::size_t dim, result_t& ab, result_t& a2,
+                              result_t& b2, std::true_type) const noexcept {
+        result_t product{}, first_squared{}, second_squared{};
 #if USEARCH_USE_OPENMP
-#pragma omp simd reduction(+ : ab, a2, b2)
+#pragma omp simd reduction(+ : product, first_squared, second_squared)
 #elif defined(USEARCH_DEFINED_CLANG)
 #pragma clang loop vectorize(enable)
 #elif defined(USEARCH_DEFINED_GCC)
@@ -2290,14 +2306,24 @@ template <typename scalar_at = float, typename result_at = scalar_at> struct met
         for (std::size_t i = 0; i != dim; ++i) {
             result_t ai = static_cast<result_t>(a[i]);
             result_t bi = static_cast<result_t>(b[i]);
-            ab += ai * bi, a2 += square(ai), b2 += square(bi);
+            product += ai * bi;
+            first_squared += square(ai);
+            second_squared += square(bi);
         }
+        ab = product;
+        a2 = first_squared;
+        b2 = second_squared;
+    }
 
-        result_t result_if_zero[2][2];
-        result_if_zero[0][0] = 1 - ab / (std::sqrt(a2) * std::sqrt(b2));
-        result_if_zero[0][1] = result_if_zero[1][0] = 1;
-        result_if_zero[1][1] = 0;
-        return result_if_zero[a2 == 0][b2 == 0];
+    inline void add_products_(scalar_t const* a, scalar_t const* b, std::size_t dim, result_t& ab, result_t& a2,
+                              result_t& b2, std::false_type) const noexcept {
+        for (std::size_t i = 0; i != dim; ++i) {
+            result_t ai = static_cast<result_t>(a[i]);
+            result_t bi = static_cast<result_t>(b[i]);
+            ab += ai * bi;
+            a2 += square(ai);
+            b2 += square(bi);
+        }
     }
 };
 
