@@ -34,6 +34,7 @@ from usearch.index import (
     Matches,
     MetricKind,
     ScalarKind,
+    search,
 )
 
 ndims = [3, 97, 256]
@@ -196,6 +197,45 @@ def test_index_search(ndim, metric, quantization, dtype, batch_size):
         assert matches.keys.shape[0] == matches.distances.shape[0]
         assert len(matches) == batch_size
         assert np.all(np.sort(index.keys) == np.sort(keys))
+
+
+@pytest.mark.parametrize("ndim", [8, 32, 128])
+@pytest.mark.parametrize("metric", hash_metrics)
+@pytest.mark.parametrize("dtype", [None, ScalarKind.B1])
+@pytest.mark.parametrize("single_query", [False, True])
+def test_binary_brute_force_distances(ndim, metric, dtype, single_query):
+    vec = np.zeros((3, ndim), dtype=np.uint8)
+    vec[:, 0] = 1
+    vec[1, -1] = 1
+    vec[2, -2:] = 1
+    vec_packed = np.packbits(vec, axis=1)
+
+    expected = []
+    for v in vec:
+        if metric == MetricKind.Hamming:
+            expected.append(np.bitwise_xor(v, vec).sum(axis=1))
+        elif metric == MetricKind.Tanimoto:
+            expected.append(1 - np.bitwise_and(v, vec).sum(axis=1) / np.bitwise_or(v, vec).sum(axis=1))
+        else:
+            expected.append(1 - 2 * np.bitwise_and(v, vec).sum(axis=1) / (v.sum() + vec.sum(axis=1)))
+    expected = np.array(expected)
+
+    index = Index(ndim=ndim, metric=metric)
+    index.add(np.arange(len(vec)), vec_packed, threads=1)
+    query = vec_packed[0] if single_query else vec_packed
+    if single_query:
+        expected = expected[:1]
+
+    indexed = index.search(query, len(vec), exact=True, threads=1)
+    brute = search(vec_packed, query, len(vec), metric=metric, exact=True, threads=1, dtype=dtype)
+    for matches in (indexed, brute):
+        distances = matches.distances.reshape(-1, len(vec))
+        keys = matches.keys.reshape(-1, len(vec))
+        actual = np.empty_like(distances)
+        for row, (dist, matched_keys) in enumerate(zip(distances, keys)):
+            for d, k in zip(dist, matched_keys):
+                actual[row, k] = d
+        np.testing.assert_allclose(actual, expected, rtol=1e-6)
 
 
 @pytest.mark.parametrize("ndim", [3, 97, 256])
