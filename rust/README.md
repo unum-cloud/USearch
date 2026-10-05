@@ -86,7 +86,7 @@ So you can memory-map the index file manually, and later call `view_from_buffer`
 ```rust
 assert!(index.save_to_buffer(&mut serialization_buffer).is_ok());
 assert!(index.load_from_buffer(&serialization_buffer).is_ok());
-assert!(index.view_from_buffer(&serialization_buffer).is_ok());
+assert!(unsafe { index.view_from_buffer(&serialization_buffer) }.is_ok());
 ```
 
 To reopen an index without already knowing how it was built, read its header with `Index::metadata` or use the one-shot `Index::restore`:
@@ -109,7 +109,7 @@ That includes:
 
 - `MetricKind::IP` - Inner Product metric, defined as `IP = 1 - sum(a[i] * b[i])`.
 - `MetricKind::L2sq` - Squared Euclidean Distance metric, defined as `L2 = sum((a[i] - b[i])^2)`.
-- `MetricKind::Cos` - Cosine Similarity metric, defined as `Cos = 1 - sum(a[i] * b[i]) / (sqrt(sum(a[i]^2) * sqrt(sum(b[i]^2)))`.
+- `MetricKind::Cos` - Cosine Distance metric, defined as `Cos = 1 - sum(a[i] * b[i]) / (sqrt(sum(a[i]^2)) * sqrt(sum(b[i]^2)))`.
 - `MetricKind::Pearson` - Pearson Correlation metric.
 - `MetricKind::Haversine` - Haversine (Great Circle) Distance metric.
 - `MetricKind::Divergence` - Jensen Shannon Divergence metric.
