@@ -574,7 +574,9 @@ static py::tuple search_many_brute_force(       //
     if (dataset_kind != queries_kind)
         throw std::invalid_argument("The types of vectors don't match!");
 
-    std::size_t dimensions = static_cast<std::size_t>(queries_dimensions);
+    std::size_t dimensions = queries_dimensions;
+    if (queries_kind == scalar_kind_t::b1x8_k)
+        dimensions *= CHAR_BIT;
     metric_t metric =  //
         metric_uintptr //
             ? metric_t::stateless(dimensions, metric_uintptr, metric_signature, metric_kind, queries_kind)
