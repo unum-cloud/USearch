@@ -4022,6 +4022,16 @@ class index_gt {
 #pragma endregion
 #endif
 
+    struct compaction_result_t {
+        error_t error{};
+
+        explicit operator bool() const noexcept { return !error; }
+        compaction_result_t failed(error_t message) noexcept {
+            error = std::move(message);
+            return std::move(*this);
+        }
+    };
+
     /**
      *  @brief  Performs compaction on the whole HNSW index, purging some entries
      *          and links to them, while also generating a more efficient mapping,
@@ -4033,13 +4043,15 @@ class index_gt {
      *  @param[in] executor Thread-pool to execute the job in parallel.
      *  @param[in] progress Callback to report the execution progress.
      *  @param[in] prefetch Callable object to prefetch data into the cache.
+     *  @return The ::compaction_result_t with an error if the compaction was cancelled
+     *          or ran out of memory. The index is left untouched in that case.
      */
     template <typename values_at, typename metric_at,                   //
               typename slot_transition_at = dummy_key_to_key_mapping_t, //
               typename executor_at = dummy_executor_t,                  //
               typename progress_at = dummy_progress_t,                  //
               typename prefetch_at = dummy_prefetch_t>
-    void compact(                             //
+    compaction_result_t compact(              //
         values_at&& values,                   //
         metric_at&& metric,                   //
         slot_transition_at&& slot_transition, //
@@ -4058,14 +4070,17 @@ class index_gt {
             level_t level;
         };
         using slot_level_allocator_t = typename dynamic_allocator_traits_t::template rebind_alloc<slot_level_t>;
+        compaction_result_t result;
         buffer_gt<slot_level_t, slot_level_allocator_t> slots_and_levels(size());
+        if (size() && !slots_and_levels)
+            return result.failed("Out of memory!");
 
         // Progress status
         std::atomic<bool> do_tasks{true};
         std::atomic<std::size_t> processed{0};
         checked_size_result_t total = checked_mul(std::size_t{3}, slots_and_levels.size());
         if (!total)
-            return;
+            return result.failed("Index is too large");
 
         // For every bottom level node, determine its parent cluster
         executor.dynamic(slots_and_levels.size(), [&](std::size_t thread_idx, std::size_t old_slot_as_uint) {
@@ -4082,7 +4097,7 @@ class index_gt {
             return do_tasks.load();
         });
         if (!do_tasks.load())
-            return;
+            return result.failed("Terminated by user");
 
         // Where the actual permutation happens:
         std::sort(slots_and_levels.begin(), slots_and_levels.end(), [](slot_level_t const& a, slot_level_t const& b) {
@@ -4091,11 +4106,15 @@ class index_gt {
 
         using size_allocator_t = typename dynamic_allocator_traits_t::template rebind_alloc<std::size_t>;
         buffer_gt<std::size_t, size_allocator_t> old_slot_to_new(slots_and_levels.size());
+        if (slots_and_levels.size() && !old_slot_to_new)
+            return result.failed("Out of memory!");
         for (std::size_t new_slot = 0; new_slot != slots_and_levels.size(); ++new_slot)
             old_slot_to_new[slots_and_levels[new_slot].old_slot] = new_slot;
 
         // Erase all the incoming links, keeping the nodes buffer as large as the `capacity()`
         buffer_gt<node_t, nodes_allocator_t> reordered_nodes(nodes_capacity_);
+        if (nodes_capacity_ && !reordered_nodes)
+            return result.failed("Out of memory!");
         tape_allocator_t reordered_tape;
 
         for (std::size_t new_slot = 0; new_slot != slots_and_levels.size(); ++new_slot) {
@@ -4104,6 +4123,8 @@ class index_gt {
 
             std::size_t node_bytes = node_bytes_(old_node.level());
             byte_t* new_data = (byte_t*)reordered_tape.allocate(node_bytes);
+            if (!new_data)
+                return result.failed("Out of memory!");
             node_t new_node{new_data};
             std::memcpy(new_data, old_node.tape(), node_bytes);
 
@@ -4113,7 +4134,7 @@ class index_gt {
 
             reordered_nodes[new_slot] = new_node;
             if (!progress(++processed, total.value))
-                return;
+                return result.failed("Terminated by user");
         }
 
         for (std::size_t new_slot = 0; new_slot != slots_and_levels.size(); ++new_slot) {
@@ -4122,12 +4143,13 @@ class index_gt {
                             static_cast<compressed_slot_t>(old_slot), //
                             static_cast<compressed_slot_t>(new_slot));
             if (!progress(++processed, total.value))
-                return;
+                return result.failed("Terminated by user");
         }
 
         nodes_ = std::move(reordered_nodes);
         tape_allocator_ = std::move(reordered_tape);
         entry_slot_ = old_slot_to_new[entry_slot_];
+        return result;
     }
 
     /**

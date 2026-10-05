@@ -1406,6 +1406,54 @@ void test_compact_then_grow() {
     }
 }
 
+/**
+ *  @brief  Regression test: a `compact()` cancelled through its progress callback
+ *          must report the failure and leave the index untouched. Otherwise the
+ *          dense index swaps in a half-filled vectors lookup for unpermuted nodes.
+ */
+void test_compact_cancelled() {
+    constexpr std::size_t dataset_count = 64;
+    constexpr std::size_t dimensions = 8;
+    metric_punned_t metric(dimensions, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
+
+    std::mt19937 generator(42);
+    std::uniform_real_distribution<float> distribution(0.0, 1.0);
+    std::vector<std::vector<float>> vectors(dataset_count, std::vector<float>(dimensions));
+    for (auto& vector : vectors)
+        std::generate(vector.begin(), vector.end(), [&] { return distribution(generator); });
+
+    index_dense_t index = index_dense_t::make(metric);
+    index.reserve(dataset_count);
+    for (std::size_t idx = 0; idx < dataset_count; ++idx)
+        expect(index.add(idx, vectors[idx].data()));
+
+    std::vector<float> reconstructed(dimensions);
+    auto expect_intact = [&] {
+        expect_eq(index.size(), dataset_count);
+        for (std::size_t idx = 0; idx < dataset_count; ++idx) {
+            expect_eq(index.get(idx, reconstructed.data()), std::size_t(1));
+            expect(std::equal(reconstructed.begin(), reconstructed.end(), vectors[idx].begin()));
+            auto result = index.search(vectors[idx].data(), 1);
+            expect_eq(result.size(), std::size_t(1));
+            expect_eq(static_cast<std::size_t>(result[0].member.key), idx);
+        }
+    };
+
+    // Each slot is reported once while clustering, once while relinking, and once while moving
+    for (std::size_t cancel_at : {std::size_t(1), dataset_count, dataset_count + 1, 2 * dataset_count,
+                                  2 * dataset_count + 1, 3 * dataset_count}) {
+        std::size_t calls = 0;
+        auto progress = [&](std::size_t, std::size_t) { return ++calls < cancel_at; };
+        auto result = index.compact(dummy_executor_t{}, progress);
+        expect(!result);
+        result.error.release();
+        expect_intact();
+    }
+
+    expect(index.compact());
+    expect_intact();
+}
+
 static void usearch_write_backtrace(int signal_number) {
     std::fprintf(stderr, "\n[usearch] Fatal signal %d. Back-trace:\n", signal_number);
 #if USEARCH_HAS_STD_STACKTRACE
@@ -1673,6 +1721,7 @@ int main(int, char**) {
     test_isolate();
     test_compact();
     test_compact_then_grow();
+    test_compact_cancelled();
     test_load_after_metric_make();
     test_view_of_truncated_file();
     return 0;

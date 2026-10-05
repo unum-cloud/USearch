@@ -1919,8 +1919,11 @@ class index_dense_gt {
             std::memcpy(new_vector, old_vector, metric_.bytes_per_vector());
             new_vectors_lookup[new_slot] = new_vector;
         };
-        typed_->compact(values_proxy_t{*this}, metric_proxy_t{*this}, track_slot_change,
-                        std::forward<executor_at>(executor), std::forward<progress_at>(progress));
+        auto typed_result = typed_->compact(values_proxy_t{*this}, metric_proxy_t{*this}, track_slot_change,
+                                            std::forward<executor_at>(executor), std::forward<progress_at>(progress));
+        // On failure the nodes kept their slots, so the vectors must keep theirs too
+        if (!typed_result)
+            return result.failed(typed_result.error.release());
         vectors_lookup_ = std::move(new_vectors_lookup);
         vectors_tape_allocator_ = std::move(new_vectors_allocator);
 
