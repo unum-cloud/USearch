@@ -1923,6 +1923,9 @@ class index_dense_gt {
                         std::forward<executor_at>(executor), std::forward<progress_at>(progress));
         vectors_lookup_ = std::move(new_vectors_lookup);
         vectors_tape_allocator_ = std::move(new_vectors_allocator);
+
+        // Slots were permuted, so the key-to-slot lookup and the free-slot list are stale
+        reindex_keys_();
         return result;
     }
 

@@ -1319,6 +1319,51 @@ void test_isolate() {
     }
 }
 
+/**
+ *  @brief  Regression test: `compact()` permutes the slots of all members, so the
+ *          key-to-slot lookup and the free-slot list must follow the permutation.
+ *          Otherwise `get` returns other members' vectors and later `add` calls
+ *          overwrite live members.
+ */
+void test_compact() {
+    constexpr std::size_t dataset_count = 256;
+    constexpr std::size_t added_count = 64;
+    constexpr std::size_t dimensions = 16;
+    metric_punned_t metric(dimensions, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
+
+    std::mt19937 generator(42);
+    std::uniform_real_distribution<float> distribution(0.0, 1.0);
+    std::vector<std::vector<float>> vectors(dataset_count + added_count, std::vector<float>(dimensions));
+    for (auto& vector : vectors)
+        std::generate(vector.begin(), vector.end(), [&] { return distribution(generator); });
+
+    index_dense_t index = index_dense_t::make(metric);
+    index.reserve(dataset_count + added_count);
+    for (std::size_t idx = 0; idx < dataset_count; ++idx)
+        expect(index.add(idx, vectors[idx].data()));
+    for (std::size_t idx = 0; idx < dataset_count; idx += 3)
+        expect(index.remove(idx));
+    std::size_t const removed_count = (dataset_count + 2) / 3;
+
+    expect(index.compact());
+    expect_eq(index.size(), dataset_count - removed_count);
+
+    // Freed slots must be reused without clobbering live members
+    for (std::size_t idx = dataset_count; idx < dataset_count + added_count; ++idx)
+        expect(index.add(idx, vectors[idx].data()));
+    expect_eq(index.size(), dataset_count - removed_count + added_count);
+
+    std::vector<float> reconstructed(dimensions);
+    for (std::size_t idx = 0; idx < dataset_count + added_count; ++idx) {
+        bool const removed = idx < dataset_count && idx % 3 == 0;
+        expect_eq(index.contains(idx), !removed);
+        if (removed)
+            continue;
+        expect_eq(index.get(idx, reconstructed.data()), std::size_t(1));
+        expect(std::equal(reconstructed.begin(), reconstructed.end(), vectors[idx].begin()));
+    }
+}
+
 static void usearch_write_backtrace(int signal_number) {
     std::fprintf(stderr, "\n[usearch] Fatal signal %d. Back-trace:\n", signal_number);
 #if USEARCH_HAS_STD_STACKTRACE
@@ -1584,6 +1629,7 @@ int main(int, char**) {
 
     test_filtered_search();
     test_isolate();
+    test_compact();
     test_load_after_metric_make();
     test_view_of_truncated_file();
     return 0;
