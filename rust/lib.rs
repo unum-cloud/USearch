@@ -1276,7 +1276,7 @@ impl VectorType for b1x8 {
         let trampoline_fn: usize = trampoline as *const () as usize;
         let closure_address = match index.metric_fn {
             Some(MetricFunction::B1X8Metric(metric)) => metric as *mut () as usize,
-            _ => panic!("Expected F1X8Metric"),
+            _ => panic!("Expected B1X8Metric"),
         };
         index.inner.change_metric(trampoline_fn, closure_address)
     }
