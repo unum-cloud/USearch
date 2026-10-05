@@ -247,7 +247,7 @@ public class USearchIndex: NSObject {
         metric: USearchMetric,
         dimensions: UInt32,
         connectivity: UInt32,
-        quantization: USearchScalar
+        quantization: USearchScalar = .f32
     ) throws -> USearchIndex {
         return try make(
             metric: metric,
@@ -296,7 +296,7 @@ public class USearchIndex: NSObject {
 
     public var isEmpty: Bool {
         get throws {
-            return (try throwing { usearch_size(nativeIndex, $0) } != 0)
+            return (try throwing { usearch_size(nativeIndex, $0) } == 0)
         }
     }
 

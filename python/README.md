@@ -46,7 +46,7 @@ index.view('index.usearch') # View from disk without loading in memory
 If you don't know anything about the index except its path, there are two more endpoints to know:
 
 ```py
-Index.metadata('index.usearch') -> IndexMetadata
+Index.metadata('index.usearch') -> dict | None
 Index.restore('index.usearch', view=False) -> Index
 ```
 
@@ -64,8 +64,8 @@ index.add(keys, vectors, threads=..., copy=...)
 matches: BatchMatches = index.search(vectors, 10, threads=...)
 
 first_query_matches: Matches = matches[0]
-assert matches[0].key == 0
-assert matches[0].distance <= 0.001
+assert first_query_matches[0].key == 0
+assert first_query_matches[0].distance <= 0.001
 
 assert len(matches) == vectors.shape[0]
 assert len(matches[0]) <= 10
@@ -128,6 +128,7 @@ Luckily, with the help of [Numba][numba], we can JIT compile a function with a m
 
 ```py
 from numba import cfunc, types, carray
+from usearch.index import CompiledMetric, Index, MetricKind, MetricSignature
 
 ndim = 256
 signature = types.float32(
@@ -200,7 +201,7 @@ function = cppyy.gbl.inner_product
 index = Index(ndim=ndim, metric=CompiledMetric(
     pointer=cppyy.ll.addressof(function),
     kind=MetricKind.IP,
-    signature=MetricSignature.ArrayArraySize,
+    signature=MetricSignature.ArrayArray,
 ))
 ```
 

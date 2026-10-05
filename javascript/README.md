@@ -1,6 +1,7 @@
 # USearch for JavaScript
 
-USearch is a high-performance library for building and querying vector search indexes, optimized for Node.js and WASM environments.
+USearch is a high-performance library for building and querying vector search indexes.
+This page is the Node.js addon. The browser build is the C library compiled with Emscripten, documented in `wasm/README.md`.
 
 ## Installation
 

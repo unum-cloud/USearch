@@ -148,7 +148,7 @@ Every name is structured as `distance_<metric>_<type>`, where
 - `<metric>` is the name of the metric, like `cosine`, `inner`, `sqeuclidean`, and `divergence`,
 - `<type>` is the type of the vector elements, like `f64`, `f32`, `f16`, and `i8`.
 
-The `cosine` metric is the cosine similarity, the `inner` metric is the inner (dot) product, the `sqeuclidean` metric is the squared Euclidean distance, and the `divergence` metric is the Jensen-Shannon divergence - the symmetric variant of the Kullback-Leibler divergence.
+The `cosine` metric is cosine distance (`1 - cosine similarity`), the `inner` metric is inner-product distance, the `sqeuclidean` metric is the squared Euclidean distance, and the `divergence` metric is the Jensen-Shannon divergence - the symmetric variant of the Kullback-Leibler divergence.
 
 - `distance_sqeuclidean_f64`
 - `distance_cosine_f64`

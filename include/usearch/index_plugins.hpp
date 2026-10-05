@@ -374,10 +374,10 @@ inline expected_gt<scalar_kind_t> scalar_kind_from_name(char const* name, std::s
         parsed.result = scalar_kind_t::i8_k;
     else if (str_equals(name, len, "u8"))
         parsed.result = scalar_kind_t::u8_k;
-    else if (str_equals(name, len, "b1"))
+    else if (str_equals(name, len, "b1") || str_equals(name, len, "b1x8"))
         parsed.result = scalar_kind_t::b1x8_k;
     else
-        parsed.failed("Unknown type, choose: f64, f32, bf16, f16, e5m2, e4m3, e3m2, e2m3, i8, u8, b1");
+        parsed.failed("Unknown type, choose: f64, f32, bf16, f16, e5m2, e4m3, e3m2, e2m3, i8, u8, b1, b1x8");
     return parsed;
 }
 

@@ -525,20 +525,39 @@ index = Index(ndim=ndim, metric=CompiledMetric(
 
 ## Integrations & Users
 
+### Databases & Query Engines
+
 - [x] ClickHouse: [C++](https://github.com/ClickHouse/ClickHouse/pull/53447), [docs](https://clickhouse.com/docs/en/engines/table-engines/mergetree-family/annindexes#usearch).
 - [x] DuckDB: [post](https://duckdb.org/2024/05/03/vector-similarity-search-vss.html).
 - [x] ScyllaDB: [Rust](https://github.com/scylladb/vector-store), [presentation](https://www.slideshare.net/slideshow/vector-search-with-scylladb-by-szymon-wasik/276571548).
 - [x] TiDB & TiFlash: [C++](https://github.com/pingcap/tiflash), [announcement](https://www.pingcap.com/article/introduce-vector-search-indexes-in-tidb/).
-- [x] YugaByte: [C++](https://github.com/yugabyte/yugabyte-db/blob/366b9f5e3c4df3a1a17d553db41d6dc50146f488/src/yb/vector_index/usearch_wrapper.cc).
+- [x] YugaByte: [C++](https://github.com/yugabyte/yugabyte-db/blob/366b9f5e3c4df3a1a17d553db41d6dc50146f488/src/yb/vector_index/usearch_wrapper.cc), [architecture](https://www.yugabyte.com/blog/yugabytedb-vector-indexing-architecture/), [1B-vector benchmark](https://www.yugabyte.com/blog/benchmarking-1-billion-vectors-in-yugabytedb/).
 - [x] MemGraph: [C++](https://github.com/memgraph/memgraph/blob/784dd8520f65050d033aea8b29446e84e487d091/src/storage/v2/indices/vector_index.cpp), [announcement](https://memgraph.com/blog/simplify-data-retrieval-memgraph-vector-search).
-- [x] Google: [UniSim](https://github.com/google/unisim), [RetSim](https://arxiv.org/abs/2311.17264) paper.
-- [x] LangChain: [Python](https://github.com/langchain-ai/langchain/releases/tag/v0.0.257) and [JavaScript](https://github.com/hwchase17/langchainjs/releases/tag/0.0.125).
-- [x] Microsoft Semantic Kernel: [Python](https://github.com/microsoft/semantic-kernel/releases/tag/python-0.3.9.dev) and C#.
+- [x] MatrixOne: [GoLang](https://github.com/matrixorigin/matrixone).
+- [x] GreptimeDB: [Rust](https://github.com/GreptimeTeam/greptimedb/blob/main/src/index/src/vector.rs).
+- [x] KurrentDB: [C#](https://github.com/kurrent-io/KurrentDB/blob/master/src/KurrentDB.Kontext/Indexing/USearch/USearchVectorStore.cs), [credits](https://github.com/kurrent-io/KurrentDB/blob/master/NOTICE.md).
+- [x] Chroma: [Rust](https://github.com/chroma-core/chroma/blob/main/rust/index/src/usearch.rs), behind their RaBitQ-quantized SPANN index.
+
+### AI Frameworks & Memory
+
+- [x] Google: [Perch](https://github.com/google-research/perch-hoplite) bioacoustics DB, [UniSim](https://github.com/google/unisim), [RetSim](https://arxiv.org/abs/2311.17264) paper.
+- [x] Microsoft: [Semantic Kernel](https://github.com/microsoft/semantic-kernel/releases/tag/python-0.3.9.dev) and [vcpkg](https://github.com/microsoft/vcpkg/tree/master/ports/usearch).
+- [x] LangChain: [Python](https://github.com/langchain-ai/langchain/releases/tag/v0.0.257) and [JavaScript](https://github.com/langchain-ai/langchainjs/releases/tag/0.0.125).
+- [x] Hugging Face: Sentence-Transformers [docs](https://www.sbert.net/docs/package_reference/quantization.html#sentence_transformers.quantization.semantic_search_usearch), [quantization benchmarks](https://huggingface.co/blog/embedding-quantization).
 - [x] GPTCache: [Python](https://github.com/zilliztech/GPTCache/releases/tag/0.1.29).
-- [x] Sentence-Transformers: Python [docs](https://www.sbert.net/docs/package_reference/quantization.html#sentence_transformers.quantization.semantic_search_usearch).
+- [x] MemMachine: [Python](https://github.com/MemMachine/MemMachine/blob/main/packages/server/src/memmachine_server/common/vector_store/vector_search_engine/usearch_engine.py).
 - [x] Pathway: [Rust](https://github.com/pathwaycom/pathway).
 - [x] Vald: [GoLang](https://github.com/vdaas/vald).
-- [x] MatrixOne: [GoLang](https://github.com/matrixorigin/matrixone).
+
+### Applications & Products
+
+- [x] Arm MCP: [Python](https://github.com/arm/mcp/blob/main/arm_kb_search/loaders.py).
+- [x] GPT4All: [C++](https://github.com/nomic-ai/gpt4all/blob/main/gpt4all-chat/src/database.cpp).
+- [x] Ente: [Rust](https://github.com/ente-io/ente/blob/main/rust/crates/photos/src/ml/vector_db.rs), [post](https://ente.com/blog/vector-db/).
+- [x] Tracy profiler: [C++](https://github.com/wolfpld/tracy/blob/master/profiler/src/profiler/TracyLlmEmbeddings.cpp), behind the embeddings index of its LLM assistant.
+- [x] Copilot for Xcode by Intitni: [Swift](https://github.com/intitni/CopilotForXcode/blob/main/Tool/Sources/USearchIndex/UsearchIndex.swift).
+- [x] LLM for Unity: [C#](https://github.com/undreamai/LLMUnity/tree/main/Runtime/RAG/usearch), [docs](https://undream.ai/LLMUnity/).
+- [x] Music Assistant: [Python](https://github.com/music-assistant/server/blob/dev/music_assistant/providers/sonic_similarity/vectors.py), [docs](https://www.music-assistant.io/plugins/sonic-similarity/).
   
 
 ## Citations
