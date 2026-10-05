@@ -23,16 +23,16 @@ using namespace unum::usearch;
 
 int main(int argc, char **argv) {
     metric_punned_t metric(3, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
-    
+
     // If you plan to store more than 4 Billion entries - use `index_dense_big_t`.
     // Or directly instantiate the template variant you need - `index_dense_gt<vector_key_t, internal_id_t>`.
     index_dense_t index = index_dense_t::make(metric);
     float vec[3] = {0.1, 0.3, 0.2};
-    
+
     index.reserve(10); // Pre-allocate memory for 10 vectors
     index.add(42, &vec[0]); // Pass a key and a vector
     auto results = index.search(&vec[0], 5); // Pass a query and limit number of results
-    
+
     for (std::size_t i = 0; i != results.size(); ++i)
         // You can access the following properties of every match:
         // results[i].element.key, results[i].element.vector, results[i].distance;
@@ -190,4 +190,22 @@ template <typename distance_at = default_distance_t,              // `float`
           typename dynamic_allocator_at = std::allocator<byte_t>, //
           typename tape_allocator_at = dynamic_allocator_at>      //
 class index_gt;
+```
+
+## Testing
+
+`index_gt_test` is a GTest-based unit test suite for the low-level `index_gt` engine, covering add/search correctness, iterator semantics, prefetch, predicate filtering, and more.
+
+**Build and run:**
+
+```bash
+cmake -B build -DUSEARCH_BUILD_TEST_CPP_INDEX_GT=ON
+cmake --build build --target index_gt_test
+./build/cpp/index_gt_test
+```
+
+To run a specific test or filter by name:
+
+```bash
+./build/index_gt_test --gtest_filter="index_gt_basic.*"
 ```
