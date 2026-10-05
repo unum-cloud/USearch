@@ -4094,8 +4094,8 @@ class index_gt {
         for (std::size_t new_slot = 0; new_slot != slots_and_levels.size(); ++new_slot)
             old_slot_to_new[slots_and_levels[new_slot].old_slot] = new_slot;
 
-        // Erase all the incoming links
-        buffer_gt<node_t, nodes_allocator_t> reordered_nodes(slots_and_levels.size());
+        // Erase all the incoming links, keeping the nodes buffer as large as the `capacity()`
+        buffer_gt<node_t, nodes_allocator_t> reordered_nodes(nodes_capacity_);
         tape_allocator_t reordered_tape;
 
         for (std::size_t new_slot = 0; new_slot != slots_and_levels.size(); ++new_slot) {

@@ -1364,6 +1364,48 @@ void test_compact() {
     }
 }
 
+/**
+ *  @brief  Regression test: `compact()` rebuilds the nodes buffer, which must keep
+ *          spanning the whole `capacity()`. Otherwise `add` calls that grow the index
+ *          past its pre-compaction size write beyond the end of the nodes buffer.
+ */
+void test_compact_then_grow() {
+    constexpr std::size_t initial_count = 50;
+    constexpr std::size_t final_count = 100;
+    constexpr std::size_t dimensions = 8;
+    metric_punned_t metric(dimensions, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
+
+    std::mt19937 generator(42);
+    std::uniform_real_distribution<float> distribution(0.0, 1.0);
+    std::vector<std::vector<float>> vectors(final_count, std::vector<float>(dimensions));
+    for (auto& vector : vectors)
+        std::generate(vector.begin(), vector.end(), [&] { return distribution(generator); });
+
+    index_dense_t index = index_dense_t::make(metric);
+    index.reserve(final_count);
+    for (std::size_t idx = 0; idx < initial_count; ++idx)
+        expect(index.add(idx, vectors[idx].data()));
+
+    expect(index.compact());
+    expect_eq(index.size(), initial_count);
+    expect(index.capacity() >= final_count);
+
+    // Fill the capacity reserved before compaction
+    for (std::size_t idx = initial_count; idx < final_count; ++idx)
+        expect(index.add(idx, vectors[idx].data()));
+    expect_eq(index.size(), final_count);
+
+    std::vector<float> reconstructed(dimensions);
+    for (std::size_t idx = 0; idx < final_count; ++idx) {
+        expect(index.contains(idx));
+        expect_eq(index.get(idx, reconstructed.data()), std::size_t(1));
+        expect(std::equal(reconstructed.begin(), reconstructed.end(), vectors[idx].begin()));
+        auto result = index.search(vectors[idx].data(), 1);
+        expect_eq(result.size(), std::size_t(1));
+        expect_eq(static_cast<std::size_t>(result[0].member.key), idx);
+    }
+}
+
 static void usearch_write_backtrace(int signal_number) {
     std::fprintf(stderr, "\n[usearch] Fatal signal %d. Back-trace:\n", signal_number);
 #if USEARCH_HAS_STD_STACKTRACE
@@ -1630,6 +1672,7 @@ int main(int, char**) {
     test_filtered_search();
     test_isolate();
     test_compact();
+    test_compact_then_grow();
     test_load_after_metric_make();
     test_view_of_truncated_file();
     return 0;
