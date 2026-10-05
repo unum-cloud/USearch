@@ -150,6 +150,38 @@ def test_multi_index():
     assert len(matches[0].keys) == 2
 
 
+@pytest.mark.parametrize("view", [False, True])
+@pytest.mark.parametrize("threads", [1, 4])
+def test_multi_index_from_paths(tmp_path, view: bool, threads: int):
+    """Shards loaded from disk in parallel must be searchable as one index (#592)."""
+    ndim, count_shards, count_per_shard, count_queries, wanted = 8, 8, 50, 5, 10
+
+    paths, all_vectors, all_keys = [], [], []
+    for shard_idx in range(count_shards):
+        keys = np.arange(shard_idx * count_per_shard, (shard_idx + 1) * count_per_shard)
+        vectors = random_vectors(count=count_per_shard, ndim=ndim)
+        shard = Index(ndim=ndim, metric="l2sq", dtype="f32")
+        shard.add(keys, vectors)
+        path = str(tmp_path / f"shard{shard_idx}.usearch")
+        shard.save(path)
+        paths.append(path)
+        all_vectors.append(vectors)
+        all_keys.append(keys)
+
+    indexes = Indexes(paths=paths, view=view, threads=threads)
+    assert len(indexes) == count_shards * count_per_shard
+
+    queries = random_vectors(count=count_queries, ndim=ndim)
+    matches = indexes.search(queries, wanted, exact=True, threads=threads)
+
+    # Exact search over every shard must match brute force over the union
+    all_vectors, all_keys = np.vstack(all_vectors), np.concatenate(all_keys)
+    distances = ((queries[:, None, :] - all_vectors[None, :, :]) ** 2).sum(axis=-1)
+    expected_keys = all_keys[np.argsort(distances, axis=1)[:, :wanted]]
+    for query_idx in range(count_queries):
+        assert set(matches[query_idx].keys.tolist()) == set(expected_keys[query_idx].tolist())
+
+
 def test_kmeans(count_vectors: int = 100, ndim: int = 10, count_clusters: int = 5):
     X = np.random.rand(count_vectors, ndim)
     assignments, distances, centroids = kmeans(X, count_clusters)
