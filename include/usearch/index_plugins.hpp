@@ -2570,9 +2570,14 @@ struct metric_cos_i8_t {
             a2 += square(ai);
             b2 += square(bi);
         }
-        result_t a2f = std::sqrt(static_cast<result_t>(a2));
-        result_t b2f = std::sqrt(static_cast<result_t>(b2));
-        return (ab != 0) ? (1.f - ab / (a2f * b2f)) : 0;
+        // Same tail as `nk_angular_i8_serial`: a zero dot product is orthogonal, not identical.
+        if (a2 == 0 && b2 == 0)
+            return 0;
+        if (ab == 0)
+            return 1;
+        result_t norms = std::sqrt(static_cast<result_t>(a2)) * std::sqrt(static_cast<result_t>(b2));
+        result_t unclipped = 1 - static_cast<result_t>(ab) / norms;
+        return unclipped < 0 ? 0 : unclipped;
     }
 };
 
@@ -2622,9 +2627,14 @@ struct metric_cos_u8_t {
             a2 += square(ai);
             b2 += square(bi);
         }
-        result_t a2f = std::sqrt(static_cast<result_t>(a2));
-        result_t b2f = std::sqrt(static_cast<result_t>(b2));
-        return (ab != 0) ? (1.f - ab / (a2f * b2f)) : 0;
+        // Same tail as `nk_angular_u8_serial`: a zero dot product is orthogonal, not identical.
+        if (a2 == 0 && b2 == 0)
+            return 0;
+        if (ab == 0)
+            return 1;
+        result_t norms = std::sqrt(static_cast<result_t>(a2)) * std::sqrt(static_cast<result_t>(b2));
+        result_t unclipped = 1 - static_cast<result_t>(ab) / norms;
+        return unclipped < 0 ? 0 : unclipped;
     }
 };
 
