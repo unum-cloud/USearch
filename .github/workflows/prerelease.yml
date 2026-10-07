@@ -108,8 +108,8 @@ jobs:
         # Rust
       - name: Set up Rust
         run: |
-          rustup update stable
-          rustup default stable
+          rustup update nightly
+          rustup default nightly
           rustup component add clippy
           rustc -vV
       - name: Lint Rust
@@ -285,8 +285,8 @@ jobs:
         # Rust
       - name: Set up Rust
         run: |
-          rustup update stable
-          rustup default stable
+          rustup update nightly
+          rustup default nightly
           rustc -vV
       - name: Build Rust
         run: cargo build
@@ -357,8 +357,8 @@ jobs:
         # Rust
       - name: Set up Rust
         run: |
-          rustup update stable
-          rustup default stable
+          rustup update nightly
+          rustup default nightly
           rustc -vV
       - name: Build Rust
         run: cargo build
@@ -438,8 +438,8 @@ jobs:
         # Rust
       - name: Set up Rust
         run: |
-          rustup update stable
-          rustup default stable
+          rustup update nightly
+          rustup default nightly
           rustc -vV
       - name: Build Rust
         run: cargo build
@@ -728,8 +728,8 @@ jobs:
         # Rust
       - name: Set up Rust
         run: |
-          rustup update stable
-          rustup default stable
+          rustup update nightly
+          rustup default nightly
           rustup target add ${{ matrix.target }}
           rustc -vV
 

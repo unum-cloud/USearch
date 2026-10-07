@@ -4,6 +4,7 @@ description = "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra En
 keywords = ["vector-search", "vector-database", "similarity-search", "embeddings", "nearest-neighbor"]
 documentation = "https://unum-cloud.github.io/USearch"
 edition = "2021"
+rust-version = "1.100"
 include = [
   "/rust/**",
   "/include/**",
@@ -24,11 +25,8 @@ name = "usearch"
 path = "rust/lib.rs"
 
 [dependencies]
-# NumKong is not optional and not merely a build input: its matrices, scalar types, and traits
-# are the crate's public vocabulary, and it links the SIMD kernels the engine calls. For local
-# NumKong development, add a `[patch.crates-io]` override in your personal `.cargo/config.toml`
-# rather than editing this file.
-numkong = ">=7.7.0"
+# Pinned to the same revision as the submodule and CMake.
+numkong = { git = "https://github.com/ashvardanian/NumKong", rev = "8b0e026d472fb4c72f32e0f280c80661ed01a158" }
 
 # Which implementation of the C interface gets linked. Each is a whole implementation rather than
 # a knob on one, so they are mutually exclusive and `build.rs` refuses a pair rather than choosing.

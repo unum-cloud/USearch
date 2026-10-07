@@ -1361,10 +1361,10 @@ judge_path() {
 
 # Runs the gates that judge the commit as a whole, or one formatter over a batch of paths.
 run_tree_checks() {
-    # `cargo fmt` reads the crate's edition, so it runs once over the crate rather than per file.
+    # `cargo fmt` reads the crate's edition, so it runs once over the crate; `rustfmt.toml` needs nightly.
     if command -v cargo > /dev/null 2>&1 && [ -f Cargo.toml ] && staged_any '*.rs'; then
-        if ! cargo fmt --check > /dev/null 2>&1; then
-            echo "pre-commit: a Rust source is not rustfmt clean - run \`cargo fmt\`"
+        if ! cargo +nightly fmt --check > /dev/null 2>&1; then
+            echo "pre-commit: a Rust source is not rustfmt clean - run \`cargo +nightly fmt\`"
             rejection_count=$((rejection_count + 1))
         fi
     fi
@@ -1499,18 +1499,19 @@ run_tree_checks() {
             # A bare `CMakeLists.txt` pattern matches the whole path, so every SDK's own list needs its prefix.
         done < <(staged_matching 'CMakeLists.txt' '*/CMakeLists.txt' '*.cmake')
     fi
-    # A `usearch_sibling` pin and the submodule's gitlink name the same commit, or a recursive clone and a plain one
-    # build different code - the pin is what `FetchContent` uses when the submodule is absent. Both sides are read from
-    # the index, so the comparison is against what this commit will actually record.
-    if ! git diff --cached --quiet -- CMakeLists.txt numkong forkunion stringzilla smashtable 2> /dev/null; then
-        while read -r sibling pinned; do
+    # A `usearch_sibling` pin, a Cargo git `rev` and the submodule's gitlink name the same commit, or a recursive clone,
+    # a plain one and a crate build different code. Every side is read from the index, so the comparison is against
+    # what this commit will actually record.
+    if ! git diff --cached --quiet -- CMakeLists.txt Cargo.toml numkong forkunion stringzilla smashtable 2> /dev/null; then
+        while read -r sibling pinned source; do
             recorded=$(git ls-files --stage -- "$sibling" | awk '$1 == "160000" { print $2 }')
             [ -n "$recorded" ] || continue
             if [ "$recorded" != "$pinned" ]; then
-                echo "pre-commit: $sibling pin has drifted - CMakeLists.txt says ${pinned:0:12}, the submodule records ${recorded:0:12}"
+                echo "pre-commit: $sibling pin has drifted - $source says ${pinned:0:12}, the submodule records ${recorded:0:12}"
                 rejection_count=$((rejection_count + 1))
             fi
-        done < <(git show :CMakeLists.txt 2> /dev/null | awk '
+        done < <(
+            git show :CMakeLists.txt 2> /dev/null | awk '
             /usearch_sibling\(/ { inside = 1; record = ""; sub(/.*usearch_sibling\(/, "") }
             inside { record = record " " $0 }
             inside && /\)/ {
@@ -1522,9 +1523,13 @@ run_tree_checks() {
                     if (name == "") name = fields[i]
                     if (fields[i] ~ /^[0-9a-f]{40}$/) pin = fields[i]
                 }
-                if (name != "" && pin != "") print name, pin
+                if (name != "" && pin != "") print name, pin, "CMakeLists.txt"
                 inside = 0
-            }')
+            }'
+            git show :Cargo.toml 2> /dev/null | sed -nE \
+                's|.*git = "https://github.com/[^/"]+/([^/"]+)", rev = "([0-9a-f]{40})".*|\1 \2 Cargo.toml|p' |
+                awk '{ print tolower($1), $2, $3 }'
+        )
     fi
 
     # Editor settings and extension lists stay sorted case-insensitively, so every addition has one place to go.

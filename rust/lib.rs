@@ -14,8 +14,8 @@
 //! options.quantization = ScalarKind::I8;
 //!
 //! let index = DenseIndex::new(&options)?;
-//! index.reserve(1_000_000)?;
-//! let executor = Executor::for_ram(&[], 0)?;
+//! let executor = Executor::for_ram(&[], 0, 0)?;
+//! index.reserve(&executor, 1_000_000)?;
 //! # Ok::<(), usearch::Error>(())
 //! ```
 
@@ -26,6 +26,6 @@ pub mod dense;
 
 pub use dense::DenseIndex;
 pub use types::{
-    capabilities_available, capabilities_compiled, rows, rows_mut, version, Continuation, Distance, Error, Executor,
-    Key, Residency, Result, Scalar, ScalarKind, Status,
+    capabilities_available, capabilities_compiled, rows, rows_mut, version, Arena, Continuation, Distance, Error,
+    Executor, Key, Mood, Progress, Residency, Result, Scalar, ScalarKind, Status,
 };
