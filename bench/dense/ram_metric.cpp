@@ -10,8 +10,8 @@
  *  chains light up matching rows automatically. Three flavors per supported tuple: USearch's
  *  @c distance (1-to-1), USearch's @c distances (1-to-4 fan-out), and NumKong's @c nk::dot /
  *  @c nk::angular / @c nk::euclidean / @c nk::hamming / @c nk::jaccard monolithic baseline
- *  using the default @c prefer_simd_k compile-time dispatch (run once per kernel-scalar, since
- *  the baseline isn't caps-parameterized). Where a tile engine is adapted and the machine offers
+ *  using the @c nk::default_capabilities() mask (run once per kernel-scalar, since the
+ *  baseline isn't caps-parameterized). Where a tile engine is adapted and the machine offers
  *  it, a fourth row measures one 16×16 tile of distances per call - gather, pack, and the
  *  depth walk - so the tile engine's primitive throughput reads next to 256 quads-path distances.
  *
@@ -235,16 +235,16 @@ struct machine_t {
 /** Probes the capabilities @c machine_t reports. */
 inline machine_t probe_machine() noexcept {
     machine_t machine;
-    machine.compiled = nk_capabilities_compiled();
-    machine.detected = nk_capabilities_detected();
+    if (nk_cpu_capabilities_compiled(&machine.compiled) != nk_success_k) machine.compiled = nk_cap_serial_k;
+    if (nk_cpu_capabilities_detected(&machine.detected) != nk_success_k) machine.detected = nk_cap_serial_k;
     return machine;
 }
 
 /** Prints the version line, then the capabilities as "- Compiled for:" and "- This machine:". */
 inline void print(machine_t const& machine) {
     char compiled[NUMKONG_CAPABILITIES_NAME_CAPACITY], detected[NUMKONG_CAPABILITIES_NAME_CAPACITY];
-    nk_name_capabilities(machine.compiled, compiled, sizeof(compiled));
-    nk_name_capabilities(machine.detected, detected, sizeof(detected));
+    nk_capabilities_name(machine.compiled, compiled, sizeof(compiled));
+    nk_capabilities_name(machine.detected, detected, sizeof(detected));
     fmt::println("USearch {}.{}.{}", USEARCH_VERSION_MAJOR, USEARCH_VERSION_MINOR, USEARCH_VERSION_PATCH);
     fmt::println("- Compiled for: {}", compiled);
     fmt::println("- This machine: {}", detected);
@@ -376,7 +376,7 @@ static candidate_pool<scalar_> make_candidate_pool(std::size_t dim) {
     std::size_t const row_count = round_up_pow2(target_rows);
 
     candidate_pool<scalar_> pool {
-        nk::tensor<scalar_, nk::aligned_allocator<scalar_, 64>, 2>::try_zeros({row_count, dim}),
+        nk::tensor<scalar_, nk::aligned_allocator<scalar_, 64>, 2>::zeros({row_count, dim}).value,
         {}};
     for (std::size_t row = 0; row < row_count; ++row) fill_cyclic(pool.matrix.span().row(row).as_vector(), row);
     pool.norms.reserve(row_count);
@@ -404,7 +404,7 @@ static constexpr std::size_t row_bytes_of(std::size_t dim) noexcept {
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 static void measure_distance(loop_t& loop, environment_t const& env, std::size_t dim) {
     if (!runs_on<caps_>(env.machine)) return loop.skip("capabilities missing at runtime");
-    auto query = nk::vector<scalar_>::try_zeros(dim);
+    auto query = nk::vector<scalar_>::zeros(dim).value;
     fill_cyclic(query.span(), 0);
     auto pool = make_candidate_pool<scalar_>(dim);
     auto query_view = query.view();
@@ -427,7 +427,7 @@ static void measure_distance(loop_t& loop, environment_t const& env, std::size_t
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 static void measure_distances_quad(loop_t& loop, environment_t const& env, std::size_t dim) {
     if (!runs_on<caps_>(env.machine)) return loop.skip("capabilities missing at runtime");
-    auto query = nk::vector<scalar_>::try_zeros(dim);
+    auto query = nk::vector<scalar_>::zeros(dim).value;
     fill_cyclic(query.span(), 0);
     auto pool = make_candidate_pool<scalar_>(dim);
     auto query_view = query.view();
@@ -453,11 +453,11 @@ static void measure_distances_quad(loop_t& loop, environment_t const& env, std::
     rate_distances(loop, dim, 4, 4 * row_bytes_of<scalar_>(dim));
 }
 
-/** NumKong monolithic 1-to-1 baseline using the default @c prefer_simd_k - one
+/** NumKong monolithic 1-to-1 baseline using the @c nk::default_capabilities() - one
  *  candidate per call, randomly picked from the same overflowed pool as the USearch rows. */
 template <nk_kernel_kind_t kernel_, typename scalar_>
 static void measure_baseline(loop_t& loop, environment_t const& env, std::size_t dim) {
-    auto query = nk::vector<scalar_>::try_zeros(dim);
+    auto query = nk::vector<scalar_>::zeros(dim).value;
     fill_cyclic(query.span(), 0);
     auto pool = make_candidate_pool<scalar_>(dim);
     auto query_view = query.view();
@@ -470,28 +470,28 @@ static void measure_baseline(loop_t& loop, environment_t const& env, std::size_t
         adjacency.touch(random_generator());
         auto candidate_view = pool.matrix.view().row(row).as_vector();
         if constexpr (kernel_ == nk_kernel_dot_k) {
-            typename scalar_::dot_result_t result {};
-            nk::dot(query_view, candidate_view, dim, &result);
+            auto [result, status] = nk::dot<scalar_>(query_view, candidate_view);
+            if (nk::failed(status)) return loop.skip("dot failed");
             do_not_optimize(result);
         }
         else if constexpr (kernel_ == nk_kernel_angular_k) {
-            typename scalar_::angular_result_t result {};
-            nk::angular(query_view, candidate_view, dim, &result);
+            auto [result, status] = nk::angular<scalar_>(query_view, candidate_view);
+            if (nk::failed(status)) return loop.skip("angular failed");
             do_not_optimize(result);
         }
         else if constexpr (kernel_ == nk_kernel_euclidean_k) {
-            typename scalar_::euclidean_result_t result {};
-            nk::euclidean(query_view, candidate_view, dim, &result);
+            auto [result, status] = nk::euclidean<scalar_>(query_view, candidate_view);
+            if (nk::failed(status)) return loop.skip("euclidean failed");
             do_not_optimize(result);
         }
         else if constexpr (kernel_ == nk_kernel_hamming_k) {
-            typename scalar_::hamming_result_t result {};
-            nk::hamming(query_view, candidate_view, dim, &result);
+            auto [result, status] = nk::hamming<scalar_>(query_view, candidate_view);
+            if (nk::failed(status)) return loop.skip("hamming failed");
             do_not_optimize(result);
         }
         else if constexpr (kernel_ == nk_kernel_jaccard_k) {
-            typename scalar_::jaccard_result_t result {};
-            nk::jaccard(query_view, candidate_view, dim, &result);
+            auto [result, status] = nk::jaccard<scalar_>(query_view, candidate_view);
+            if (nk::failed(status)) return loop.skip("jaccard failed");
             do_not_optimize(result);
         }
     }
@@ -504,12 +504,14 @@ template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires tiles_supported<kernel_, scalar_, caps_>
 static void measure_distances_tile(loop_t& loop, environment_t const& env, std::size_t dim) {
     if (!runs_on<caps_>(env.machine)) return loop.skip("capabilities missing at runtime");
-    nk_configure_thread(nk_capabilities_available());
+    nk_capability_t available = 0;
+    if (nk_cpu_capabilities_enabled(&available) != nk_success_k || nk_cpu_configure_thread(available) != nk_success_k)
+        return loop.skip("the thread cannot run these capabilities");
     using tiles_kit_t = typename dense_tiles_chain<kernel_, scalar_, caps_>::kit_t;
     constexpr std::size_t rows_k = tiles_kit_t::tile_rows_k;
     std::size_t const depth_tiles = dim / tiles_kit_t::tile_depth_k;
 
-    auto storage = nk::matrix<scalar_>::try_zeros({rows_k, dim});
+    auto storage = nk::matrix<scalar_>::zeros({rows_k, dim}).value;
     auto const vectors = storage.view();
     std::array<nk::vector_view<scalar_>, rows_k> views;
     std::array<vector_norms<typename scalar_::dot_result_t>, rows_k> norms;
@@ -520,7 +522,7 @@ static void measure_distances_tile(loop_t& loop, environment_t const& env, std::
     }
     typename tiles_kit_t::a_tile_t a_tile;
     typename tiles_kit_t::b_tile_t b_tile;
-    auto tiled = nk::matrix<f32_t>::try_zeros({rows_k, rows_k});
+    auto tiled = nk::matrix<f32_t>::zeros({rows_k, rows_k}).value;
     tiles_kit_t::configure_tiles();
 
     for ([[maybe_unused]] std::size_t call : loop) {
@@ -562,14 +564,14 @@ static void bench_tiles(environment_t const& env, std::string_view kernel_name, 
 
 template <nk_kernel_kind_t kernel_, typename scalar_>
 static void bench_kernel(environment_t const& env, std::string_view kernel_name, std::string_view scalar_name) {
-    // The NumKong baseline is caps-agnostic: its default `prefer_simd_k` picks the best backend at compile time.
+    // The NumKong baseline is caps-agnostic: its `nk::default_capabilities()` mask picks the best backend it holds.
     if constexpr (quads_in_scope<kernel_, scalar_>)
         for (std::size_t const dim : dimensions_to_bench)
             run_benchmark(env, fmt::format("{}/{}/numkong/1to1/{}d", kernel_name, scalar_name, dim),
                           measure_baseline<kernel_, scalar_>, dim);
     // Newest silicon first, split by the architecture-family macros like the test's tier
     // sweep - the concept gates silently absorb any tier without a kit.
-#if NUMKONG_ARCH_X86_64_
+#if NUMKONG_ARCH_X8664_
     bench_quads<kernel_, scalar_, nk_cap_diamond_k>(env, kernel_name, scalar_name, "diamond");
     bench_quads<kernel_, scalar_, nk_cap_sierra_k>(env, kernel_name, scalar_name, "sierra");
     bench_quads<kernel_, scalar_, nk_cap_genoa_k>(env, kernel_name, scalar_name, "genoa");

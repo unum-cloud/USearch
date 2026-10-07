@@ -206,7 +206,9 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
     auto traversals_init = [](fu_lambda_context_t punned, std::size_t thread, std::size_t) noexcept {
         auto& bench = *static_cast<bench_t*>(punned);
         // AMX tile state needs a per-thread OS permission handshake before first use.
-        nk_configure_thread(nk_capabilities_available());
+        nk_capability_t available = 0;
+        if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
+        [[maybe_unused]] nk_status_t const configured = nk_cpu_configure_thread(available);
         fu_memory_domain_id_t const domain = bench.settings.memory_domains.empty()
                                                  ? fu_memory_domain_id_t {-1}
                                                  : bench.settings.memory_domains.front();
@@ -223,8 +225,8 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
     // Self-recall probes every ingested row, so the per-query buffers follow the larger count.
     std::size_t const search_count = bench.settings.self_recall == switch_t::present_k ? streamed.vectors.extent(0)
                                                                                        : streamed.queries.extent(0);
-    bench.results.hit_rows = nk::matrix<u32_t>::try_zeros({search_count, bench.settings.top_k.value});
-    bench.results.hit_distances = nk::matrix<dense_distance_t>::try_zeros({search_count, bench.settings.top_k.value});
+    bench.results.hit_rows = nk::matrix<u32_t>::zeros({search_count, bench.settings.top_k.value}).value;
+    bench.results.hit_distances = nk::matrix<dense_distance_t>::zeros({search_count, bench.settings.top_k.value}).value;
     if (bench.results.hit_rows.empty() || bench.results.hit_distances.empty()) {
         fmt::println("Failed to allocate the per-query hit matrices");
         return false;
@@ -311,8 +313,10 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     if constexpr (index_t::has_tiles_k)
         fmt::println("  tiles: {} · reverse refinement",
                      bit_name(compute_choices_k, index_t::picked_tiles_capability_k, "none"));
+    nk_capability_t available = 0;
+    if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
     if (index_t::picked_quads_capability_k == nk_cap_serial_k &&
-        (bench.settings.max_compute & nk_capabilities_available() & ~nk_cap_serial_k))
+        (bench.settings.max_compute & available & ~nk_cap_serial_k))
         fmt::println("  ⚠ scalar fallback: no SIMD kit is adapted for this dtype & metric");
     std::size_t reported_threads = 0;
     [[maybe_unused]] fu_status_t const counted = fu_pool_threads_count(pool, &reported_threads);
@@ -418,7 +422,7 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
     return true;
 }
 
-/** Serializes the index as three RetriEval-layout matrices - vectors, neighbors, and the id → row
+/** Serializes the index as three RetriEval-layout matrices - vectors, neighbors, and the ID → row
  *  map - so later runs @c --load the base and stream only the topping. */
 template <typename streamed_dataset_type_>
 bool save_index(streamed_dataset_type_& streamed) {
@@ -496,8 +500,7 @@ bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
     telemetry_lane_t const sums = summed_lanes(bench.lanes);
     std::size_t searching_threads = 0;
     [[maybe_unused]] fu_status_t const counted = fu_pool_threads_count(pool, &searching_threads);
-    report_search_metrics(bench.settings, query_count, seconds, searching_threads, sums,
-                          {bench.results.latencies_us.data(), bench.results.latencies_us.size()});
+    report_search_metrics(bench.settings, query_count, seconds, searching_threads, sums, bench.results.latencies_us);
     judge_hits(bench.settings, bench.results, streamed.ground_truth, query_count);
     return true;
 }
@@ -570,14 +573,14 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, workload_typ
     std::size_t rows = total_rows - first_row;
     if (launch.settings.max_vectors.value) rows = std::min(rows, launch.settings.max_vectors.value);
     nk::matrix_view<dataset_scalar_type_> const dataset_vectors = dataset.vectors();
-    nk::matrix_view<dataset_scalar_type_> const sliced_vectors = dataset_vectors(
-        nk::range {first_row, first_row + rows}, nk::slice);
+    nk::matrix_view<dataset_scalar_type_> const sliced_vectors = dataset_vectors(nk::range(first_row, first_row + rows),
+                                                                                 nk::slice);
 
     // Self-queries keep the harness usable on a lone vectors file, without recall.
     nk::matrix_view<dataset_scalar_type_> const source_queries =
         dataset.has_queries()
             ? dataset.queries()
-            : sliced_vectors(nk::range {std::size_t {0}, std::min<std::size_t>(1000, rows)}, nk::slice);
+            : sliced_vectors(nk::range(std::size_t {0}, std::min<std::size_t>(1000, rows)), nk::slice);
 
     bench_context_type_ bench {launch.settings};
     streamed_t streamed {bench, sliced_vectors, source_queries};
@@ -594,7 +597,8 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, workload_typ
         }
         std::size_t const batch_rows = launch.settings.batch_per_core.value * threads;
         std::size_t const rows_per_thread = divide_round_up(batch_rows, threads);
-        staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::try_zeros({threads, rows_per_thread, dimensions});
+        staging =
+            nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::zeros({threads, rows_per_thread, dimensions}).value;
         if (staging.empty()) {
             fmt::println("Failed to allocate {} staging rows of {}d {}", batch_rows, dimensions,
                          scalar_t::dtype_name());
@@ -603,8 +607,9 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, workload_typ
         streamed.staging = staging.span();
 
         if constexpr (streamed_t::scaled_k) {
-            rescaling_planes = nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::try_zeros(
-                {threads, rows_per_thread, dimensions});
+            rescaling_planes = nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::zeros(
+                                   {threads, rows_per_thread, dimensions})
+                                   .value;
             if (rescaling_planes.empty()) {
                 fmt::println("Failed to allocate {} rescaling rows of {}d f32", batch_rows, dimensions);
                 return 1;
@@ -668,7 +673,9 @@ int run_with_schedule(bench_launch<dataset_scalar_type_> const& launch, workload
  *  serial kernels every machine owns. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename workload_type_>
 int run_with_compute(bench_launch<dataset_scalar_type_> const& launch, workload_type_ const& workload) {
-    nk_capability_t const effective = launch.settings.max_compute & nk_capabilities_available();
+    nk_capability_t available = 0;
+    if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
+    nk_capability_t const effective = launch.settings.max_compute & available;
     return dispatch_index<std::size(compute_choices_k)>(
         highest_index(compute_choices_k, effective),
         [&](auto row) {

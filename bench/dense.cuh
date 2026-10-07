@@ -61,7 +61,7 @@ struct capability_choice {
  *  NumKong's microarchitecture vocabulary; the floor the table never lists is the serial
  *  kernels. */
 inline constexpr capability_choice<nk_capability_t> compute_choices_k[] = {
-#if NUMKONG_ARCH_X86_64_
+#if NUMKONG_ARCH_X8664_
     {"haswell", nk_cap_haswell_k}, {"skylake", nk_cap_skylake_k},         {"icelake", nk_cap_icelake_k},
     {"genoa", nk_cap_genoa_k},     {"sapphireamx", nk_cap_sapphireamx_k},
 #elif NUMKONG_ARCH_ARM64_
@@ -645,8 +645,8 @@ static std::size_t save_checkpoint(settings_t const& settings, index_type_& inde
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     typename index_type_::saved_shape_t const shape = index.saved_shape();
-    auto vectors = nk::matrix<scalar_t>::try_zeros({shape.nodes, shape.dimensions});
-    auto neighbors = nk::matrix<node_id_t>::try_zeros({shape.nodes, shape.connectivity});
+    auto vectors = nk::matrix<scalar_t>::zeros({shape.nodes, shape.dimensions}).value;
+    auto neighbors = nk::matrix<node_id_t>::zeros({shape.nodes, shape.connectivity}).value;
     if (vectors.empty() || neighbors.empty()) {
         fmt::println("Failed to stage {} rows for serialization", shape.nodes);
         return 0;
@@ -658,8 +658,8 @@ static std::size_t save_checkpoint(settings_t const& settings, index_type_& inde
     bytes_span_t const neighbors_target {reinterpret_cast<byte_t*>(neighbors.data()),
                                          shape.nodes * neighbors_row_bytes};
     // One step's rows at most: a storage chunk never holds more, and the device plan ignores it.
-    auto scratch = nk::matrix<node_id_t>::try_zeros(
-        {min_of(shape.nodes, power_of_two<std::size_t>(20)), shape.connectivity});
+    auto scratch =
+        nk::matrix<node_id_t>::zeros({min_of(shape.nodes, power_of_two<std::size_t>(20)), shape.connectivity}).value;
     if (shape.nodes && scratch.empty()) {
         fmt::println("Failed to stage the neighbor scratch for index {}", slot);
         return 0;
@@ -1002,7 +1002,7 @@ struct streamed_dataset {
      *  was computed for. */
     nk::matrix_view<u32_t> ground_truth;
 
-    /** The @b [rows] recall bookkeeping: dense node id → global dataset row, filled while inserting. */
+    /** The @b [rows] recall bookkeeping: dense node ID → global dataset row, filled while inserting. */
     std::vector<u32_t> id_to_row;
 
     /** The @b [threads,rows_per_thread,dimensions] staging trampoline planes. */
@@ -1020,12 +1020,15 @@ struct streamed_dataset {
      *  this run downcasts a non-integral source into an integral store. */
     void establish_scale() {
         if constexpr (scaled_k) {
-            typename dataset_scalar_type_::reduce_minmax_value_t min_value {}, max_value {};
-            std::size_t min_index = 0, max_index = 0;
             // `as_vector` answers only rank-1 views, so the contiguous payload is flattened by hand.
             nk::vector_view<dataset_scalar_type_> const payload {vectors.data(), vectors.extent(0) * vectors.extent(1)};
-            nk::reduce_minmax(payload, &min_value, &min_index, &max_value, &max_index);
-            float const max_amplitude = std::max(std::abs(float(min_value)), std::abs(float(max_value)));
+            auto const [extremes, status] = nk::reduce_minmax<dataset_scalar_type_>(payload);
+            if (nk::failed(status)) {
+                fmt::println("Rescaling skipped: {}", nk::status_name(status));
+                return;
+            }
+            float const max_amplitude = std::max(std::abs(float(extremes.min_value)),
+                                                 std::abs(float(extremes.max_value)));
             // The stored dtype's largest magnitude; not a constant expression for nvcc's byte floats.
             float const target_amplitude = component_max<scalar_t>();
             if (max_amplitude > 0) scale = target_amplitude / max_amplitude;
@@ -1040,21 +1043,19 @@ struct streamed_dataset {
         std::size_t const dimensions = vectors.extent(1);
         std::size_t const rotation = task % staging.extent(1);
         auto landing = staging.row(thread).row(rotation).as_vector();
+        nk::status_t status = nk::status_t::success_k;
         if constexpr (scaled_k) {
             // An f32 source feeds @c nk::scale straight from the mapping, skipping the widening cast.
             auto rescaled = rescaling.row(thread).row(rotation).as_vector();
-            nk_f32_t const alpha = scale;
-            nk_f32_t const beta = 0.0f;
             if constexpr (std::is_same_v<dataset_scalar_type_, nk::f32_t>)
-                nk::scale(source.data(), dimensions, &alpha, &beta, rescaled.data());
-            else {
-                nk::cast(source, rescaled);
-                nk::scale(rescaled.data(), dimensions, &alpha, &beta, rescaled.data());
-            }
-            nk::cast(rescaled.data(), dimensions, landing.data());
+                status = nk::scale<nk::f32_t>(source, scale, 0.0f, rescaled);
+            else if (nk::succeeded(status = nk::cast<dataset_scalar_type_, nk::f32_t>(source, rescaled)))
+                status = nk::scale<nk::f32_t>(rescaled, scale, 0.0f, rescaled);
+            if (nk::succeeded(status)) status = nk::cast<nk::f32_t, scalar_t>(rescaled, landing);
         }
-        else { nk::cast(source, landing); }
-        return vector_view_t {landing.data(), dimensions};
+        else { status = nk::cast<dataset_scalar_type_, scalar_t>(source, landing); }
+        // A failed conversion stages an empty row, which the index refuses rather than storing garbage.
+        return nk::succeeded(status) ? vector_view_t {landing.data(), dimensions} : vector_view_t {};
     }
 };
 
@@ -1088,7 +1089,7 @@ inline machine_t probe_machine() noexcept {
     [[maybe_unused]] fu_status_t const memory_status = fu_memory_domains_count(machine.topology,
                                                                                &machine.memory_domains);
     machine.schedule = fu_runtime_capabilities();
-    machine.compute = nk_capabilities_available();
+    if (nk_cpu_capabilities_enabled(&machine.compute) != nk_success_k) machine.compute = nk_cap_serial_k;
     return machine;
 }
 

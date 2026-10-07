@@ -10,26 +10,27 @@ Every result is a throughput, a latency and a recall under one explicit configur
 
 ## The Suite
 
-Three executables come out of `bench/CMakeLists.txt`, one per residency and cardinality.
+Four executables come out of `bench/CMakeLists.txt`, in two families that never share a binary or a CLI.
+The retrieval family builds, refines and searches, one binary per residency and cardinality.
+The indexer family loads a saved single index and measures how much of a lightning indexer's selection its walks recover.
 
-| Executable                        | Index                                            | What it isolates                                                                                      |
-| :-------------------------------- | :----------------------------------------------- | :---------------------------------------------------------------------------------------------------- |
-| `usearch_bench_dense_ram_index`   | one `dense_ram_index` on one memory domain       | kernel kits, wait instructions, connectivity and expansion, per-thread staging, latency percentiles   |
-| `usearch_bench_dense_ram_indexes` | one `dense_ram_indexes` over every memory domain | what the C interface drives: admission, rotation across shards, batched verbs, SafeGraphs checkpoints |
-| `usearch_bench_dense_vram_index`  | one `dense_vram_index` on one device             | batch-per-launch build and search, the kit generation ceiling, managed-memory planes                  |
+- `usearch_bench_dense_ram_index` builds one `dense_ram_index` on one memory domain and isolates kernel kits, wait instructions, connectivity and expansion, per-thread staging and latency percentiles.
+- `usearch_bench_dense_ram_indexes` builds one `dense_ram_indexes` over every memory domain and isolates what the C interface drives: admission, rotation across shards, batched verbs and SafeGraphs checkpoints.
+- `usearch_bench_dense_vram_index` builds one `dense_vram_index` on one device and isolates batch-per-launch build and search, the kit generation ceiling and managed-memory planes.
+- `usearch_bench_attention` loads one `dense_ram_index` that `usearch_bench_dense_ram_index --save` built over an indexer's keys and isolates walks scored by `dense_indexer_query`, `--proxy` navigation and exactly scanned `--hubs`.
 
-Each binary prints a `Machine` block, an `Insertions` block and a `Queries` block to standard output and nothing else, so a run is its transcript.
+Each retrieval binary prints a `Machine` block, an `Insertions` block and a `Queries` block to standard output and nothing else, so a run is its transcript.
 The `Insertions` block reports the wall time, the throughput in IPS, the distances computed with the shares spent in refinement, the visited members and the restarts.
 The `Queries` block reports the throughput in QPS, the latency, the distances and members per query, and the judgment.
 
 ### Building
 
-Every number below comes from a Release build: the `release` preset for the two CPU binaries, and `release_cuda` for the CUDA one, narrowed to the host GPU's family code, like `-DUSEARCH_CUDA_ARCHITECTURES=100f` on a B200 or B300.
+Every number below comes from a Release build: the `release` preset for the CPU binaries, and `release_cuda` for the CUDA one, narrowed to the host GPU's family code, like `-DUSEARCH_CUDA_ARCHITECTURES=100f` on a B200 or B300.
 The CUDA bench compiles a generation's kits only when every listed architecture runs them, so the preset's own list measures the Ampere kits alone, whatever the GPU.
 The `profile` preset keeps the same optimization and adds the symbols `perf` needs; `dev` is the `-O2` iteration tree and measures nothing.
 
 ```sh
-cmake --preset release && cmake --build --preset release --target usearch_bench_dense_ram_index usearch_bench_dense_ram_indexes
+cmake --preset release && cmake --build --preset release --target usearch_bench_dense_ram_index usearch_bench_dense_ram_indexes usearch_bench_attention
 cmake --preset release_cuda -DUSEARCH_CUDA_ARCHITECTURES=100f && cmake --build build_release_cuda --target usearch_bench_dense_vram_index
 ```
 
@@ -42,7 +43,7 @@ systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- build_release/
 
 ### Running
 
-The three binaries share one dataset triple and one tuning vocabulary; `--help` prints the full list for each.
+The retrieval binaries share one dataset triple and one tuning vocabulary; `--help` prints the full list for each.
 
 ```sh
 build_release/usearch_bench_dense_ram_indexes \
@@ -52,38 +53,36 @@ build_release/usearch_bench_dense_ram_indexes \
     --stored-dtype u8 --metric euclidean --connectivity 32 --expansion-add 256 --expansion-search 96
 ```
 
-| Flag                 | Default                  | Meaning                                                                                                                                       |
-| :------------------- | :----------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--vectors`          | required                 | Base vectors in the RetriEval layout: `.fbin`, `.bf16bin`, `.f16bin`, `.i8bin`, `.u8bin`, `.u1x8bin`                                          |
-| `--queries`          | the first 1000 vectors   | Query vectors of the same dtype                                                                                                               |
-| `--neighbors`        | none                     | Ground truth, `.ibin`; recall is skipped without it                                                                                           |
-| `--stored-dtype`     | the file's dtype         | `f32`, `bf16`, `f16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`, `i8`, `i4`, `u8`, `u4` or `u1`, cast on ingest; `f32` skips, as no CPU kit takes it yet |
-| `--metric`           | `angular`                | `dot`, `angular`, `euclidean`, `hamming` or `jaccard`; the last two for `u1`                                                                  |
-| `--connectivity`     | `32`                     | Graph degree: 16, 32 or 128                                                                                                                   |
-| `--expansion-add`    | `256`                    | Candidate pool while inserting                                                                                                                |
-| `--expansion-search` | `96`                     | Candidate pool while searching                                                                                                                |
-| `--max-refines`      | `0`                      | Upper bound on refinement passes after ingestion                                                                                              |
-| `--expansion-refine` | twice the connectivity   | Candidate pool while refining                                                                                                                 |
-| `--top-k`            | `10`                     | Matches judged per query                                                                                                                      |
-| `--max-vectors`      | the whole file           | Cap on ingested rows                                                                                                                          |
-| `--self-recall`      | off                      | Judge every stored vector as its own query                                                                                                    |
-| `--save`             | none                     | Checkpoint name to write after ingestion                                                                                                      |
-| `--load`             | none                     | Checkpoint name to restore, then insert only the rows past `--skip-vectors`                                                                   |
-| `--checkpoints-dir`  | `/tmp`                   | Directory for checkpoint blobs                                                                                                                |
-| `--skip-vectors`     | `0`                      | Rows the loaded checkpoint already covers                                                                                                     |
-| `--max-compute`      | the newest detected      | Kernel kit ceiling by microarchitecture, or `serial`; on the GPU by generation, or `ampere`                                                   |
-| `--max-schedule`     | the newest offered       | Wait instruction ceiling, or `standard`; CPU only                                                                                             |
-| `--threads`          | 7/8 of the logical cores | Executor threads; CPU only                                                                                                                    |
-| `--memory-domain`    | the heap                 | NUMA domain to pin, or `all` on the multi-index; CPU only                                                                                     |
-| `--batch-per-core`   | `4`                      | Staging rows per thread for a file cast on ingest; CPU only                                                                                   |
-| `--first-vector`     | `0`                      | First dataset row viewed, to slice one file across runs; CPU only                                                                             |
-| `--huge-pages`       | `0`                      | Huge pages provisioned before launch; the run fails rather than measuring base pages; CPU only                                                |
-| `--device`           | `0`                      | CUDA device ordinal; GPU only                                                                                                                 |
-| `--devices`          | none                     | Ordinals for the multi-device pipeline, like `0,1`; GPU only                                                                                  |
-| `--merge`            | off                      | Stitch the device shards into one graph after ingest; GPU only                                                                                |
-| `--expansion-merge`  | `--expansion-add`        | Candidate pool while merging; GPU only                                                                                                        |
-| `--managed-memory`   | off                      | Managed-memory planes oversubscribing VRAM; GPU only                                                                                          |
-| `--batch`            | `65536`                  | Rows and queries per launch; GPU only                                                                                                         |
+- `--vectors` is required: base vectors in the RetriEval layout, one of `.fbin`, `.bf16bin`, `.f16bin`, `.i8bin`, `.u8bin`, `.u1x8bin`.
+- `--queries` defaults to the first 1000 vectors: query vectors of the same dtype.
+- `--neighbors` defaults to none: ground truth, `.ibin`; recall is skipped without it.
+- `--stored-dtype` defaults to the file's dtype: `f32`, `bf16`, `f16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`, `i8`, `i4`, `u8`, `u4` or `u1`, cast on ingest; `f32` skips, as no CPU kit takes it yet.
+- `--metric` defaults to `angular`: `dot`, `angular`, `euclidean`, `hamming` or `jaccard`; the last two for `u1`.
+- `--connectivity` defaults to `32`: the graph degree, 16, 32 or 128.
+- `--expansion-add` defaults to `256`: candidate pool while inserting.
+- `--expansion-search` defaults to `96`: candidate pool while searching.
+- `--max-refines` defaults to `0`: upper bound on refinement passes after ingestion.
+- `--expansion-refine` defaults to twice the connectivity: candidate pool while refining.
+- `--top-k` defaults to `10`: matches judged per query.
+- `--max-vectors` defaults to the whole file: cap on ingested rows.
+- `--self-recall` defaults to off: judge every stored vector as its own query.
+- `--save` defaults to none: checkpoint name to write after ingestion.
+- `--load` defaults to none: checkpoint name to restore, then insert only the rows past `--skip-vectors`.
+- `--checkpoints-dir` defaults to `/tmp`: directory for checkpoint blobs.
+- `--skip-vectors` defaults to `0`: rows the loaded checkpoint already covers.
+- `--max-compute` defaults to the newest detected: kernel kit ceiling by microarchitecture, or `serial`; on the GPU by generation, or `ampere`.
+- `--max-schedule` defaults to the newest offered: wait instruction ceiling, or `standard`; CPU only.
+- `--threads` defaults to 7/8 of the logical cores: executor threads; CPU only.
+- `--memory-domain` defaults to the heap: NUMA domain to pin, or `all` on the multi-index; CPU only.
+- `--batch-per-core` defaults to `4`: staging rows per thread for a file cast on ingest; CPU only.
+- `--first-vector` defaults to `0`: first dataset row viewed, to slice one file across runs; CPU only.
+- `--huge-pages` defaults to `0`: huge pages provisioned before launch; the run fails rather than measuring base pages; CPU only.
+- `--device` defaults to `0`: CUDA device ordinal; GPU only.
+- `--devices` defaults to none: ordinals for the multi-device pipeline, like `0,1`; GPU only.
+- `--merge` defaults to off: stitch the device shards into one graph after ingest; GPU only.
+- `--expansion-merge` defaults to `--expansion-add`: candidate pool while merging; GPU only.
+- `--managed-memory` defaults to off: managed-memory planes oversubscribing VRAM; GPU only.
+- `--batch` defaults to `65536`: rows and queries per launch; GPU only.
 
 A bad value prints one line, like `--top-k="0" does not parse, expected a positive count`, and exits with status 1.
 
@@ -130,17 +129,15 @@ Rows are named `kernel/scalar/caps/shape/dimensions`, like `dot/bf16/neon/1to4/7
 build_release/usearch_bench_dense_ram_metric --filter 'dot/bf16/.*/1to[14]/768d' --time-limit 2s
 ```
 
-| Flag           | Default | Meaning                                                             |
-| :------------- | :------ | :------------------------------------------------------------------ |
-| `--seed`       | `42`    | Seed the row picks and the adjacency noise derive from, or `random` |
-| `--filter`     | none    | Rows to run, as an ECMAScript regex or else a substring             |
-| `--warmup`     | `1s`    | Untimed run ahead of each row, like `200ms`                         |
-| `--time-limit` | `10s`   | Timed run of each row, like `200ms`                                 |
+- `--seed` defaults to `42`: seed the row picks and the adjacency noise derive from, or `random`.
+- `--filter` defaults to none: rows to run, as an ECMAScript regex or else a substring.
+- `--warmup` defaults to `1s`: untimed run ahead of each row, like `200ms`.
+- `--time-limit` defaults to `10s`: timed run of each row, like `200ms`.
 
 ## Datasets
 
 Datasets live outside the repository and are reached through `data/<name>` symlinks, lowercase with dashes and the scale suffix last, such as `data/sift-10m`.
-The files follow the RetriEval layout: two little-endian `u32` counters, rows then columns, followed by the row-major payload, with the dtype carried by the extension, `.fbin` for `f32`, `.i8bin`, `.u8bin`, `.bf16bin`, and `.ibin` for `u32` neighbor ids.
+The files follow the RetriEval layout: two little-endian `u32` counters, rows then columns, followed by the row-major payload, with the dtype carried by the extension, `.fbin` for `f32`, `.i8bin`, `.u8bin`, `.bf16bin`, and `.ibin` for `u32` neighbor IDs.
 
 | Dataset               | Stored dtype | Dimensions | Metric    | Scales        | Ground truth          |
 | :-------------------- | -----------: | ---------: | :-------- | :------------ | :-------------------- |

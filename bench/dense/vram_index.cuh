@@ -132,8 +132,8 @@ bool prepare(streamed_dataset_type_& streamed) {
     bench.traversal = std::make_unique<traversal_t>(typename traversal_t::allocator_t {nullptr, bench.device});
     std::size_t const search_count = bench.settings.self_recall == switch_t::present_k ? streamed.vectors.extent(0)
                                                                                        : streamed.queries.extent(0);
-    bench.results.hit_rows = nk::matrix<u32_t>::try_zeros({search_count, bench.settings.top_k.value});
-    bench.results.hit_distances = nk::matrix<dense_distance_t>::try_zeros({search_count, bench.settings.top_k.value});
+    bench.results.hit_rows = nk::matrix<u32_t>::zeros({search_count, bench.settings.top_k.value}).value;
+    bench.results.hit_distances = nk::matrix<dense_distance_t>::zeros({search_count, bench.settings.top_k.value}).value;
     if (bench.results.hit_rows.empty() || bench.results.hit_distances.empty()) {
         fmt::println("Failed to allocate the per-query hit matrices");
         return false;
@@ -291,7 +291,7 @@ bool save_index(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/** Answers every query through the batch verb, then translates node ids into dataset rows for the
+/** Answers every query through the batch verb, then translates node IDs into dataset rows for the
  *  shared judgment; a batch-shaped verb has no per-query clock, so the report prints the mean. */
 template <typename streamed_dataset_type_>
 bool run_search(streamed_dataset_type_& streamed) {
@@ -311,8 +311,8 @@ bool run_search(streamed_dataset_type_& streamed) {
     config.count = static_cast<small_size_t>(top_k);
     config.synchronization = synchronization_t::immutable_k;
     std::size_t const batch_rows = streamed_batch_rows(bench.settings, query_count);
-    auto found_ids = nk::matrix<node_id_t>::try_zeros({batch_rows, top_k});
-    auto found_distances = nk::matrix<dense_distance_t>::try_zeros({batch_rows, top_k});
+    auto found_ids = nk::matrix<node_id_t>::zeros({batch_rows, top_k}).value;
+    auto found_distances = nk::matrix<dense_distance_t>::zeros({batch_rows, top_k}).value;
     if (found_ids.empty() || found_distances.empty()) {
         fmt::println("Failed to allocate the batch result matrices");
         return false;
@@ -413,7 +413,7 @@ int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& data
     if constexpr (!streamed_t::zero_copy_k) {
         // The trampoline serves both phases, so it follows the larger of the two row counts.
         std::size_t const batch_rows = streamed_batch_rows(settings, std::max(rows, source_queries.extent(0)));
-        staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::try_zeros({1, batch_rows, dimensions});
+        staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::zeros({1, batch_rows, dimensions}).value;
         if (staging.empty()) {
             fmt::println("Failed to allocate {} staging rows of {}d {}", batch_rows, dimensions,
                          scalar_t::dtype_name());
@@ -422,8 +422,8 @@ int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& data
         streamed.staging = staging.span();
 
         if constexpr (streamed_t::scaled_k) {
-            rescaling_planes = nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::try_zeros(
-                {1, batch_rows, dimensions});
+            rescaling_planes =
+                nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::zeros({1, batch_rows, dimensions}).value;
             if (rescaling_planes.empty()) {
                 fmt::println("Failed to allocate {} rescaling rows of {}d f32", batch_rows, dimensions);
                 return 1;
