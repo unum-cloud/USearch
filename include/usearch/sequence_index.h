@@ -22,7 +22,7 @@
  *  order. A viewed handle admits arbitrarily many concurrent searches, having nothing to
  *  mutate. Serialization is the one exception: saving demands a mutation-free window,
  *  though concurrent readers keep searching throughout. Per-call outputs - counts and the
- *  error - belong to their call and must not be shared between in-flight calls.
+ *  outcome - belong to their call and must not be shared between in-flight calls.
  *
  *  An insertion is all-or-nothing per call, and its entries become visible at once, so a
  *  concurrent search sees every entry of the call or none of them.
@@ -297,7 +297,7 @@ typedef struct usearch_sequence_view_ram_t {
 USEARCH_EXPORT void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments);
 
 /** Frees the resources associated with the index; @c NULL is safe, and it cannot fail, so takes
- *  no error. */
+ *  no outcome. */
 USEARCH_EXPORT void usearch_sequence_free(usearch_sequence_index_t index);
 
 /** The arguments of @c usearch_sequence_reserve. */
@@ -555,7 +555,7 @@ typedef struct usearch_sequence_count_t {
     usearch_key_t key;
 
     /** Output for what @c key holds; zero @c entries means the index holds none. */
-    usearch_sequence_key_stats_t* stats;
+    usearch_sequence_key_stats_t* key_stats;
 } usearch_sequence_count_t;
 
 /** Counts the entries stored under one key, with their payload extent. */
@@ -619,8 +619,8 @@ typedef struct usearch_sequence_merge_t {
     /** Donor handles to absorb. */
     size_t count;
 
-    /** Array of @c count handles, every one of them consumed. */
-    usearch_sequence_index_t const* donors;
+    /** Array of @c count handles, every one of them consumed and nulled as it goes. */
+    usearch_sequence_index_t* donors;
 
     /** The @b optional handler, called with donors absorbed and their count. */
     usearch_progress_callback_t progress;
@@ -640,7 +640,8 @@ typedef struct usearch_sequence_merge_t {
  *
  *  Cancellation stops @b between donors, which makes this the one verb where it is not
  *  all-or-nothing: donors already absorbed stay absorbed, and the rest stay live handles the
- *  caller still owns and must free.
+ *  caller still owns and must free. Every consumed slot is nulled as it goes, so the array itself
+ *  says which handles survived.
  */
 USEARCH_EXPORT void usearch_sequence_merge(usearch_sequence_merge_t* arguments);
 

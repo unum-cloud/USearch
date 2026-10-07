@@ -73,6 +73,7 @@ usearch_executor_for_ram(&(usearch_executor_for_ram_t){
 ```
 
 An application with its own ForkUnion pool lends it instead with `usearch_executor_on_pool`, and GPUs get `usearch_executor_for_vram` with the device ordinals and, optionally, the streams to run on.
+A `NULL` executor is accepted by every verb and runs the call on the caller's own thread, blocking, which suits size lookups and other short calls.
 
 A deferred call returns once queued and keeps using its argument struct until its outcome is final, so many calls can be in flight at once, each with its own outcome:
 
@@ -281,14 +282,14 @@ usearch_geospatial_emplace(&(usearch_geospatial_emplace_t){
     .emplaced = &near_station, .index = places, .executor = executor, .outcome = &outcome,
     .points = station, .point_count = 1});
 
+size_t nearby_offsets[2];
 usearch_key_t* nearby = NULL;
 usearch_distance_t* metres = NULL;
-size_t nearby_count = 0;
 usearch_arena_t arena = NULL;
 usearch_geospatial_within(&(usearch_geospatial_within_t){
-    .index = places, .executor = executor, .outcome = &outcome, .query = near_station,
+    .index = places, .executor = executor, .outcome = &outcome, .count = 1, .queries = &near_station,
     .mode = usearch_geospatial_mode_approach_k, .axes = usearch_geospatial_axes_horizontal_k,
-    .tolerance = {.metres = 500}, .keys = &nearby, .scores = &metres, .written = &nearby_count, .arena = &arena});
+    .tolerance = {.metres = 500}, .offsets = nearby_offsets, .keys = &nearby, .scores = &metres, .arena = &arena});
 usearch_arena_free(arena);
 usearch_geospatial_emplaced_free(near_station);
 ```

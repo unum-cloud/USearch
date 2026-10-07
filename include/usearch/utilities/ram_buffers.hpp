@@ -1218,6 +1218,16 @@ class growing_arena {
     /** Releases every chunk. */
     void reset() noexcept { newest_.reset(); }
 
+    /** Whether @p pointer lies inside any chunk, which the next rewind reuses or frees. */
+    bool contains(void const* pointer) const noexcept {
+        std::uintptr_t const address = reinterpret_cast<std::uintptr_t>(pointer);
+        for (chunk_t const* chunk = newest_.get(); chunk; chunk = chunk->previous.get()) {
+            std::uintptr_t const first = reinterpret_cast<std::uintptr_t>(chunk->run.data());
+            if (address >= first && address < first + chunk->run.capacity()) return true;
+        }
+        return false;
+    }
+
   private:
 
     /** Grows by a chunk of @p width bytes, the newest from now on, the old one chained behind. */

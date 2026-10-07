@@ -317,6 +317,27 @@ void test_count_and_get(size_t const dimensions) {
         expect(fabsf(retrieved[position] - data[position]) <= fabsf(data[position]) / 128,
                "A bf16 index must return rows within its 7-bit mantissa");
 
+    char const path[] = "usearch-test-c-view.safegraphs";
+    usearch_bytes_view_t const path_view = {(uint8_t const*)path, sizeof(path) - 1};
+    usearch_dense_save(
+        &(usearch_dense_save_t) {.index = index, .executor = executor, .outcome = &outcome, .path = path_view});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_index_t view = NULL;
+    usearch_dense_view_ram(&(usearch_dense_view_ram_t) {.index = &view, .outcome = &outcome, .path = path_view});
+    // An implementation that cannot serve a mapping yet says so, and has no view to hold to the contract.
+    if (outcome.status != usearch_status_unsupported_k) {
+        expect(!outcome.message, outcome.message);
+        usearch_dense_add(&(usearch_dense_add_t) {.index = view,
+                                                  .executor = executor,
+                                                  .outcome = &outcome,
+                                                  .count = 1,
+                                                  .keys = {keys, sizeof(usearch_key_t)},
+                                                  .vectors = {data, row_bytes, usearch_scalar_f32_k}});
+        expect_eq(outcome.status, usearch_status_read_only_k, "A view must refuse every mutation");
+        usearch_dense_free(view);
+    }
+    remove(path);
+
     usearch_arena_free(arena);
     free(data);
     usearch_executor_free(executor);

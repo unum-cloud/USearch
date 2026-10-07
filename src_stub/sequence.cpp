@@ -5,11 +5,11 @@
  *  @brief A brute-force stand-in for the @c usearch_sequence_* C ABI, scoring every stored sequence
  *      against every query so a binding can be exercised without the engine.
  *
- *  Variable-length payloads cannot ride a strided matrix, so this modality's batches are tapes
- *  of @c usearch_bytes_view_t views - the shape most worth testing here, because a binding that
- *  handles strides correctly may still mishandle a borrowed pointer and a length. The two
- *  constructors are the other half: a handle built for a uniform metric rejects a weighted one
- *  and the reverse, so a binding calling the wrong one learns immediately.
+ *  Variable-length payloads cannot ride a strided run, so this modality's batches are tapes - the
+ *  bytes end to end around Apache Arrow offsets - the shape most worth testing here, because a
+ *  binding that handles strides correctly may still mishandle an offset off by one. The weights
+ *  are the other half: a Levenshtein kind refuses any and an alignment kind refuses to go without
+ *  them, so a binding pairing the wrong two learns immediately.
  *
  *  @section sequence_stub_blind_spots What It Cannot Tell You
  *
@@ -17,10 +17,12 @@
  *  The alignment kernels are textbook dynamic programming with no band, no vectorization, and
  *  quadratic cost, so a corpus of long sequences is slow rather than wrong. Weighted scores are
  *  similarities and reported as their negation, which ranks correctly but is not the engine's
- *  scale. Refinement keeps no edges to re-select, so its return is a constant zero rather than a
- *  settling signal, and a caller must not read it as one. Traversal statistics are plausible
- *  fiction: shaped correctly, invented numerically. A checkpoint is a binary blob of this file's
- *  own memory image, readable by nothing else.
+ *  scale. Refinement keeps no edges to re-select, so its @c changed is a constant zero rather than
+ *  a settling signal, and a caller must not read it as one. A checkpoint carries its own weights,
+ *  so a load or view checks only that weights are named where the kind needs them, and a view
+ *  copies its checkpoint rather than mapping it. Traversal statistics are plausible fiction:
+ *  shaped correctly, invented numerically. A checkpoint is a binary blob of this file's own memory
+ *  image, readable by nothing else.
  */
 
 #include <algorithm> // `std::stable_sort`, `std::min`, `std::max`
@@ -34,7 +36,6 @@
 
 #include "lib.hpp"
 
-namespace us = unum::usearch;
 using namespace unum::usearch;
 using namespace unum::usearch::stub;
 
@@ -45,12 +46,18 @@ namespace {
 /** The alphabet of a byte-level substitution matrix, one row and column per byte. */
 constexpr std::size_t alphabet_k = 256;
 
-/** What a handle froze at construction: the ABI's options, plus the scoring parameters
- *  only the weighted constructor supplies. */
-struct sequence_options_t {
+/** What a handle froze at construction, or adopted from a checkpoint, with the scoring parameters
+ *  only an alignment kind carries. */
+struct sequence_index_options_t {
 
-    /** The options the caller passed, or a checkpoint later adopted. */
-    usearch_sequence_options_t options {};
+    /** What entries are compared by. */
+    usearch_sequence_metric_t metric = usearch_sequence_metric_unknown_k;
+
+    /** The connections-per-node bound the handle was built with. */
+    std::size_t connectivity = 0;
+
+    /** Upper bound on entries sharing one key. */
+    std::size_t values_per_key = 0;
 
     /** Row-major @c alphabet_k × @c alphabet_k scores; empty under a uniform metric. */
     std::vector<us::i8_t> substitution;
@@ -62,17 +69,19 @@ struct sequence_options_t {
     us::i8_t gap_extend = 0;
 };
 
-using payload_t = std::vector<std::byte>;
-using entry_t = entry<payload_t>;
+using sequence_payload_t = std::vector<std::byte>;
+using sequence_entry_t = entry<sequence_payload_t>;
 
-static_assert(std::is_nothrow_move_constructible_v<entry_t>, "reallocation must move rows, never copy them");
+static_assert(std::is_nothrow_move_constructible_v<sequence_entry_t>, "reallocation must move rows, never copy them");
 
-using index_t = handle<payload_t, sequence_options_t>;
+} // namespace
 
-struct cursor_t {
+struct usearch_sequence_index_handle_t : handle<sequence_payload_t, sequence_index_options_t> {};
+
+struct usearch_sequence_cursor_handle_t {
 
     /** The index being walked; it must outlive the cursor. */
-    index_t* index;
+    usearch_sequence_index_handle_t* index;
 
     /** The next entry to hand out. */
     std::size_t position;
@@ -81,7 +90,9 @@ struct cursor_t {
     std::size_t limit;
 };
 
-/** Whether the kind scores without scoring parameters, which decides the constructor. */
+namespace {
+
+/** Whether the kind scores without scoring parameters, and so refuses any weights. */
 bool levenshtein_metric(usearch_sequence_metric_t metric) {
     return metric == usearch_sequence_metric_levenshtein_bytes_k ||
            metric == usearch_sequence_metric_levenshtein_utf8_k;
@@ -146,8 +157,8 @@ double levenshtein(std::span<unit_ const> first, std::span<unit_ const> second, 
 /** Global alignment with affine gaps - Needleman-Wunsch-Gotoh - as a negated similarity.
  *  Three recurrences run together: an aligned pair, a gap in the first, a gap in the second.
  *  An @p extend equal to @c gap_open collapses it to the flat-gap Needleman-Wunsch kind. */
-double global_alignment(bytes_view_t first, bytes_view_t second, sequence_options_t const& parameters, us::i64_t extend,
-                        std::vector<us::i64_t>& scratch) {
+double global_alignment(bytes_view_t first, bytes_view_t second, sequence_index_options_t const& parameters,
+                        us::i64_t extend, std::vector<us::i64_t>& scratch) {
     us::i64_t const open = parameters.gap_open;
     us::i64_t const unreachable = std::numeric_limits<us::i64_t>::min() / 4;
     std::size_t const width = second.size() + 1;
@@ -184,8 +195,8 @@ double global_alignment(bytes_view_t first, bytes_view_t second, sequence_option
 /** Local alignment with affine gaps - Smith-Waterman-Gotoh - as a negated similarity.
  *  The same three recurrences under a zero floor, reporting the best cell anywhere in the
  *  table. An @p extend equal to @c gap_open collapses it to the flat-gap Smith-Waterman kind. */
-double local_alignment(bytes_view_t first, bytes_view_t second, sequence_options_t const& parameters, us::i64_t extend,
-                       std::vector<us::i64_t>& scratch) {
+double local_alignment(bytes_view_t first, bytes_view_t second, sequence_index_options_t const& parameters,
+                       us::i64_t extend, std::vector<us::i64_t>& scratch) {
     us::i64_t const open = parameters.gap_open;
     std::size_t const width = second.size() + 1;
     scratch.assign(width * 3, 0);
@@ -217,18 +228,19 @@ double local_alignment(bytes_view_t first, bytes_view_t second, sequence_options
 }
 
 /** Reusable buffers, so scoring a whole corpus allocates once rather than per pair. */
-struct scratch_t {
+struct sequence_search_scratch_t {
     std::vector<us::u32_t> query_points;
     std::vector<us::u32_t> entry_points;
     std::vector<std::size_t> unsigned_row;
     std::vector<us::i64_t> signed_row;
 };
 
-/** Scores one pair under the frozen kind. Both constructors and @c adopt refuse a kind
+/** Scores one pair under the frozen kind. The constructor and @c adopt refuse a kind
  *  this build does not know, so every enumerator reaching here is one of the six. */
-double distance(index_t const& index, bytes_view_t query, bytes_view_t stored, scratch_t& scratch) {
-    sequence_options_t const& parameters = index.options;
-    switch (parameters.options.metric) {
+double distance(usearch_sequence_index_handle_t const& index, bytes_view_t query, bytes_view_t stored,
+                sequence_search_scratch_t& scratch) {
+    sequence_index_options_t const& parameters = index.options;
+    switch (parameters.metric) {
     case usearch_sequence_metric_levenshtein_utf8_k:
         decode_utf8(query, scratch.query_points);
         decode_utf8(stored, scratch.entry_points);
@@ -245,32 +257,37 @@ double distance(index_t const& index, bytes_view_t query, bytes_view_t stored, s
     }
 }
 
-bytes_view_t viewed(usearch_bytes_view_t sequence) { return bytes_of(sequence.data, sequence.length); }
+/** Entry @p entry of a tape, as the bytes its offsets bound. */
+bytes_view_t viewed(usearch_tape_view_t tape, std::size_t entry) {
+    std::size_t const begin = tape.offsets[entry], end = tape.offsets[entry + 1];
+    return bytes_of(static_cast<std::uint8_t const*>(tape.data) + begin, end - begin);
+}
 
 /**
- *  @brief The shared body of both search forms; the filtered one passes a predicate.
- *  @return Queries answered, short of @p counts.size() exactly when the handler cancelled.
+ *  @brief The body of a search, filtered when @p predicate is set.
+ *  @return Queries answered, short of @p count exactly when the handler cancelled.
  */
-std::size_t search_tape(index_t& index, usearch_bytes_view_t const* queries, std::size_t wanted,
-                        usearch_sequence_search_options_t const* options, usearch_sequence_traversal_stats_t* stats,
-                        usearch_predicate_t predicate, void* predicate_state, usearch_progress_callback_t progress,
-                        void* progress_state, usearch_key_t* keys, std::size_t keys_stride,
-                        usearch_distance_t* distances, std::size_t distances_stride, std::span<std::size_t> counts) {
+std::size_t search_tape(usearch_sequence_index_handle_t& index, usearch_tape_view_t queries, std::size_t count,
+                        usearch_matches_span_t const& matches, std::size_t expansion_factor,
+                        usearch_sequence_traversal_stats_t* stats, usearch_predicate_t predicate, void* predicate_state,
+                        usearch_progress_callback_t progress, void* progress_state) {
     std::size_t const rows = index.entries.size();
-    if (stats && options && options->expansion_factor)
-        stats->computed_distances += options->expansion_factor * counts.size();
+    std::size_t const wanted = matches.wanted;
+    if (stats && expansion_factor) stats->computed_distances += expansion_factor * count;
 
+    std::span<std::size_t> const counts {matches.counts, count};
     std::fill(counts.begin(), counts.end(), 0);
-    scratch_t scratch;
+    sequence_search_scratch_t scratch;
     std::vector<match_t> ranked;
     for (std::size_t query = 0; query != counts.size(); ++query) {
-        bytes_view_t const query_view = viewed(queries[query]);
-        rank<payload_t>(
-            std::span<entry_t const>(index.entries).first(rows), admitting(predicate, predicate_state),
-            [&](payload_t const& payload) { return distance(index, query_view, payload, scratch); }, ranked);
-        std::span<usearch_key_t> const keys_row = row_at<usearch_key_t>(keys, query, keys_stride, wanted);
-        std::span<usearch_distance_t> const distances_row = row_at<usearch_distance_t>(distances, query,
-                                                                                       distances_stride, wanted);
+        bytes_view_t const query_view = viewed(queries, query);
+        rank<sequence_payload_t>(
+            std::span<sequence_entry_t const>(index.entries).first(rows), admitting(predicate, predicate_state),
+            [&](sequence_payload_t const& payload) { return distance(index, query_view, payload, scratch); }, ranked);
+        std::span<usearch_key_t> const keys_row = row_at<usearch_key_t>(matches.keys, query, matches.keys_stride,
+                                                                        wanted);
+        std::span<usearch_distance_t> const distances_row = row_at<usearch_distance_t>(matches.scores, query,
+                                                                                       matches.scores_stride, wanted);
         std::size_t const found = std::min(wanted, ranked.size());
         for (std::size_t match = 0; match != found; ++match)
             keys_row[match] = ranked[match].key, distances_row[match] = ranked[match].distance;
@@ -296,7 +313,7 @@ std::size_t search_tape(index_t& index, usearch_bytes_view_t const* queries, std
  *  Entries are ragged, so the payload is a run of `{key, length, bytes}` records rather than
  *  fixed-width rows, and the prefix carries their summed extent to size the read.
  */
-struct prefix_t {
+struct sequence_checkpoint_prefix_t {
 
     /** The connections-per-node bound the handle was built with. */
     std::size_t connectivity;
@@ -320,24 +337,26 @@ struct prefix_t {
 /** The per-entry overhead of the blob: the key, then the byte length that follows it. */
 constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(std::size_t);
 
-std::size_t payload_extent(index_t const& index, std::size_t rows) {
+std::size_t payload_extent(usearch_sequence_index_handle_t const& index, std::size_t rows) {
     std::size_t extent = 0;
     for (std::size_t row = 0; row != rows; ++row) extent += record_overhead_k + index.entries[row].payload.size();
     return extent;
 }
 
-std::size_t substitution_bytes(index_t const& index) { return index.options.substitution.size(); }
-
-std::optional<std::size_t> serialized_bytes(index_t const& index, std::size_t rows) {
-    return blob_bytes(sizeof(prefix_t) + substitution_bytes(index), payload_extent(index, rows), 1);
+std::size_t substitution_bytes(usearch_sequence_index_handle_t const& index) {
+    return index.options.substitution.size();
 }
 
-void write_into(index_t const& index, std::size_t rows, bytes_span_t target) {
-    prefix_t prefix {};
-    prefix.connectivity = index.options.options.connectivity;
+std::optional<std::size_t> serialized_bytes(usearch_sequence_index_handle_t const& index, std::size_t rows) {
+    return blob_bytes(sizeof(sequence_checkpoint_prefix_t) + substitution_bytes(index), payload_extent(index, rows), 1);
+}
+
+void write_into(usearch_sequence_index_handle_t const& index, std::size_t rows, bytes_span_t target) {
+    sequence_checkpoint_prefix_t prefix {};
+    prefix.connectivity = index.options.connectivity;
     prefix.entries = rows;
     prefix.payload_bytes = payload_extent(index, rows);
-    prefix.metric = index.options.options.metric;
+    prefix.metric = index.options.metric;
     prefix.gap_open = index.options.gap_open;
     prefix.gap_extend = index.options.gap_extend;
     write_pod(target, prefix);
@@ -350,7 +369,7 @@ void write_into(index_t const& index, std::size_t rows, bytes_span_t target) {
         cursor = cursor.subspan(index.options.substitution.size());
     }
     for (std::size_t row = 0; row != rows; ++row) {
-        entry_t const& entry = index.entries[row];
+        sequence_entry_t const& entry = index.entries[row];
         std::size_t const length = entry.payload.size();
         write_pod(cursor, entry.key);
         cursor = cursor.subspan(sizeof(usearch_key_t));
@@ -362,40 +381,42 @@ void write_into(index_t const& index, std::size_t rows, bytes_span_t target) {
 }
 
 /** Reads the prefix and checks the blob is long enough for what it claims. */
-bool parse_prefix(prefix_t& prefix, bytes_view_t blob, usearch_error_t* error) {
-    if (reject_if(blob.size() < sizeof(prefix_t), usearch_error_malformed_input_k, "The checkpoint ends early", error))
+bool parse_prefix(sequence_checkpoint_prefix_t& prefix, bytes_view_t blob, usearch_outcome_t* outcome) {
+    if (reject_if(blob.size() < sizeof(sequence_checkpoint_prefix_t), usearch_status_malformed_k,
+                  "The checkpoint ends early", outcome))
         return false;
-    prefix = read_pod<prefix_t>(blob);
+    prefix = read_pod<sequence_checkpoint_prefix_t>(blob);
     std::size_t const table = alignment_metric(prefix.metric) ? alphabet_k * alphabet_k : 0;
-    return fits_blob(blob, sizeof(prefix_t) + table, prefix.payload_bytes, 1, error);
+    return fits_blob(blob, sizeof(sequence_checkpoint_prefix_t) + table, prefix.payload_bytes, 1, outcome);
 }
 
-/** Adopts a checkpoint's configuration, answering whether its metric is one we know. */
-bool adopt(usearch_sequence_options_t& options, prefix_t const& prefix) {
+/** Adopts a checkpoint's configuration, answering whether its metric is one we know. The bound
+ *  on entries per key is the loader's to choose, since no checkpoint records it. */
+bool adopt(sequence_index_options_t& options, sequence_checkpoint_prefix_t const& prefix) {
     if (!known_metric(prefix.metric)) return false;
     options.metric = prefix.metric;
     options.connectivity = prefix.connectivity;
     return true;
 }
 
-/** Replaces the contents of @p index; the caller holds both locks exclusively. */
-bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
-    prefix_t prefix {};
-    if (!parse_prefix(prefix, blob, error)) return false;
+/** Fills a fresh @p index from a checkpoint, which no other thread can see yet. */
+bool read_from(usearch_sequence_index_handle_t& index, bytes_view_t blob, usearch_outcome_t* outcome) {
+    sequence_checkpoint_prefix_t prefix {};
+    if (!parse_prefix(prefix, blob, outcome)) return false;
     std::size_t const rows = prefix.entries;
     index.reset();
     if (!index.accommodate(rows)) {
-        propagate_error(usearch_error_out_of_memory_k, error, "The checkpoint's entries could not be allocated");
+        propagate_error(usearch_status_out_of_memory_k, outcome, "The checkpoint's entries could not be allocated");
         return false;
     }
-    if (!adopt(index.options.options, prefix)) {
-        propagate_error(usearch_error_unknown_kind_k, error, "The checkpoint names a metric this build lacks");
+    if (!adopt(index.options, prefix)) {
+        propagate_error(usearch_status_unknown_kind_k, outcome, "The checkpoint names a metric this build lacks");
         return false;
     }
     index.options.gap_open = prefix.gap_open;
     index.options.gap_extend = prefix.gap_extend;
 
-    bytes_view_t cursor = blob.subspan(sizeof(prefix_t));
+    bytes_view_t cursor = blob.subspan(sizeof(sequence_checkpoint_prefix_t));
     index.options.substitution.clear();
     if (alignment_metric(prefix.metric)) {
         index.options.substitution.resize(alphabet_k * alphabet_k);
@@ -405,11 +426,11 @@ bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
         cursor = cursor.subspan(index.options.substitution.size());
     }
 
-    payload_t payload;
+    sequence_payload_t payload;
     for (std::size_t row = 0; row != rows; ++row) {
         if (cursor.size() < record_overhead_k) {
             index.reset();
-            propagate_error(usearch_error_malformed_input_k, error, "The checkpoint ends inside an entry");
+            propagate_error(usearch_status_malformed_k, outcome, "The checkpoint ends inside an entry");
             return false;
         }
         usearch_key_t key;
@@ -420,7 +441,7 @@ bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
         cursor = cursor.subspan(sizeof(length));
         if (cursor.size() < length) {
             index.reset();
-            propagate_error(usearch_error_malformed_input_k, error, "The checkpoint ends inside an entry");
+            propagate_error(usearch_status_malformed_k, outcome, "The checkpoint ends inside an entry");
             return false;
         }
         payload.assign(cursor.begin(), cursor.begin() + static_cast<std::ptrdiff_t>(length));
@@ -430,363 +451,325 @@ bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
     return true;
 }
 
+/** Refuses weights a Levenshtein kind would ignore, and their absence where an alignment kind
+ *  needs them, so a binding pairing the wrong two learns at once. */
+bool reject_weights(usearch_sequence_metric_t metric, usearch_sequence_weights_t const* weights,
+                    usearch_outcome_t* outcome) {
+    if (reject_if(levenshtein_metric(metric) && weights, usearch_status_config_mismatch_k,
+                  "A Levenshtein kind takes no weights", outcome))
+        return true;
+    return reject_if(alignment_metric(metric) && (!weights || !weights->substitution_matrix),
+                     usearch_status_config_mismatch_k, "An alignment kind needs a substitution matrix", outcome);
+}
+
+/** A new handle holding the checkpoint in @p blob, or null once the outcome records why not. */
+usearch_sequence_index_handle_t* open_checkpoint(bytes_view_t blob, usearch_sequence_weights_t const* weights,
+                                                 usearch_outcome_t* outcome) {
+    usearch_sequence_index_handle_t* const index = new (std::nothrow) usearch_sequence_index_handle_t();
+    if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return nullptr;
+    if (read_from(*index, blob, outcome) && !reject_weights(index->options.metric, weights, outcome)) return index;
+    delete index;
+    return nullptr;
+}
+
 #pragma endregion Serialization
 
 } // namespace
 
 extern "C" {
 
-usearch_sequence_index_t usearch_sequence_init_uniform(usearch_sequence_options_t const* options,
-                                                       usearch_error_t* error) {
-    propagate_success(error);
-    if (!options) {
-        propagate_error(usearch_error_malformed_input_k, error, "The options are null");
-        return nullptr;
+void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    usearch_sequence_metric_t const metric = arguments->metric;
+    usearch_sequence_weights_t const* const weights = arguments->weights;
+    if (reject_if(!known_metric(metric), usearch_status_unknown_kind_k, "The stand-in does not implement that metric",
+                  outcome))
+        return;
+    if (reject_weights(metric, weights, outcome)) return;
+    usearch_sequence_index_handle_t* const index = new (std::nothrow) usearch_sequence_index_handle_t();
+    if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return;
+    index->options.metric = metric;
+    index->options.connectivity = arguments->connectivity ? arguments->connectivity : us::connectivity_16_k;
+    index->options.values_per_key = arguments->values_per_key;
+    if (weights) {
+        // Copied rather than borrowed, so a binding whose matrix dies after this call still scores.
+        index->options.substitution.assign(weights->substitution_matrix,
+                                           weights->substitution_matrix + alphabet_k * alphabet_k);
+        index->options.gap_open = weights->gap_open;
+        index->options.gap_extend = weights->gap_extend;
     }
-    if (!known_metric(options->metric)) {
-        propagate_error(usearch_error_unknown_kind_k, error, "The stand-in does not implement that metric");
-        return nullptr;
-    }
-    if (!levenshtein_metric(options->metric)) {
-        propagate_error(usearch_error_config_mismatch_k, error, "The uniform constructor takes a Levenshtein kind");
-        return nullptr;
-    }
-    index_t* index = new (std::nothrow) index_t();
-    if (!index) {
-        propagate_error(usearch_error_out_of_memory_k, error, "The handle could not be allocated");
-        return nullptr;
-    }
-    index->options.options = *options;
-    if (!index->options.options.connectivity) index->options.options.connectivity = us::connectivity_16_k;
-    return index;
+    *arguments->index = index;
 }
 
-usearch_sequence_index_t usearch_sequence_init_weighted(usearch_sequence_options_t const* options,
-                                                        us::i8_t const* substitution_matrix, us::i8_t gap_open,
-                                                        us::i8_t gap_extend, usearch_error_t* error) {
-    propagate_success(error);
-    if (!options || !substitution_matrix) {
-        propagate_error(usearch_error_malformed_input_k, error, "The options or the substitution matrix are null");
-        return nullptr;
-    }
-    if (!known_metric(options->metric)) {
-        propagate_error(usearch_error_unknown_kind_k, error, "The stand-in does not implement that metric");
-        return nullptr;
-    }
-    if (!alignment_metric(options->metric)) {
-        propagate_error(usearch_error_config_mismatch_k, error, "The weighted constructor takes an alignment kind");
-        return nullptr;
-    }
-    index_t* index = new (std::nothrow) index_t();
-    if (!index) {
-        propagate_error(usearch_error_out_of_memory_k, error, "The handle could not be allocated");
-        return nullptr;
-    }
-    index->options.options = *options;
-    if (!index->options.options.connectivity) index->options.options.connectivity = us::connectivity_16_k;
-    // Copied rather than borrowed, so a binding whose matrix dies after this call still scores.
-    index->options.substitution.assign(substitution_matrix, substitution_matrix + alphabet_k * alphabet_k);
-    index->options.gap_open = gap_open;
-    index->options.gap_extend = gap_extend;
-    return index;
+void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
+        return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
+    std::vector<std::byte> blob;
+    if (!read_file(arguments->path, blob, outcome)) return;
+    usearch_sequence_index_handle_t* const index = open_checkpoint(blob, arguments->weights, outcome);
+    if (!index) return;
+    index->options.values_per_key = arguments->values_per_key;
+    keep_going(arguments->progress, arguments->progress_state, 1, 1);
+    *arguments->index = index;
 }
 
-void usearch_sequence_free(usearch_sequence_index_t handle) { delete static_cast<index_t*>(handle); }
+void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    mapped_file_t served = map_file(arguments->path, outcome);
+    if (!served) return;
+    // Rows are still copied out of the mapping, so only the view's refusals are mirrored, not its zero cost.
+    usearch_sequence_index_handle_t* const index = open_checkpoint(served.view(), arguments->weights, outcome);
+    if (!index) return;
+    index->served = std::move(served);
+    *arguments->index = index;
+}
 
-void usearch_sequence_reserve(usearch_sequence_index_t handle, std::size_t entries,
-                              [[maybe_unused]] std::size_t payload_bytes, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
+void usearch_sequence_free(usearch_sequence_index_t handle) { delete handle; }
+
+void usearch_sequence_reserve(usearch_sequence_reserve_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    usearch_sequence_index_handle_t& index = *arguments->index;
+    if (reject_read_only(index, outcome)) return;
     std::unique_lock writers(index.mutex);
-    if (!index.accommodate(entries))
-        propagate_error(usearch_error_out_of_memory_k, error, "The capacity could not be reserved");
+    reject_if(!index.accommodate(arguments->entries), usearch_status_out_of_memory_k,
+              "The capacity could not be reserved", outcome);
 }
 
-void usearch_sequence_clear(usearch_sequence_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
+void usearch_sequence_clear(usearch_sequence_clear_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    usearch_sequence_index_handle_t& index = *arguments->index;
+    if (reject_read_only(index, outcome)) return;
     std::unique_lock writers(index.mutex);
     index.reset();
 }
 
-std::size_t usearch_sequence_size(usearch_sequence_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
+void usearch_sequence_describe(usearch_sequence_describe_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->description = {};
+    usearch_sequence_index_handle_t& index = *arguments->index;
     // Held shared like every other reader, so a size taken beside an insertion is not a data race.
     std::shared_lock readers(index.mutex);
-    return index.entries.size();
-}
-std::size_t usearch_sequence_capacity(usearch_sequence_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
-    std::shared_lock readers(index.mutex);
-    return index.entries.capacity();
-}
-std::size_t usearch_sequence_connectivity(usearch_sequence_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    return borrowed<index_t>(handle).options.options.connectivity;
-}
-std::size_t usearch_sequence_memory_usage(usearch_sequence_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
-    std::shared_lock readers(index.mutex);
-    std::size_t const rows = index.entries.size();
-    return payload_extent(index, rows) + index.options.substitution.size();
-}
-char const* usearch_sequence_capabilities([[maybe_unused]] usearch_sequence_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    return "serial";
+    *arguments->description = {
+        {index.options.metric, index.options.connectivity},
+        index.entries.size(),
+        index.entries.capacity(),
+        payload_extent(index, index.entries.size()) + index.options.substitution.size(),
+        "serial",
+    };
 }
 
-std::size_t usearch_sequence_add(usearch_sequence_index_t handle, usearch_executor_t executor, usearch_keys_view_t keys,
-                                 usearch_bytes_view_t const* sequences,
-                                 [[maybe_unused]] usearch_sequence_insertion_options_t const* options,
-                                 usearch_progress_callback_t progress, void* progress_state,
-                                 usearch_sequence_traversal_stats_t* stats, usearch_error_t* error) {
-    propagate_success(error);
+void usearch_sequence_add(usearch_sequence_add_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    usearch_sequence_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return 0;
-    if (reject_keys(keys, error)) return 0;
-    std::size_t const count = keys.count;
-    if (reject_if(!sequences, usearch_error_malformed_input_k, "The tape must name storage", error)) return 0;
+    usearch_sequence_index_handle_t& index = *arguments->index;
+    std::size_t const count = arguments->count;
+    if (reject_read_only(index, outcome)) return;
+    if (reject_keys(arguments->keys, outcome)) return;
+    if (reject_tape(arguments->sequences, count, outcome)) return;
 
     std::unique_lock writers(index.mutex);
-    if (reject_oversubscribed(index, keys, index.options.options.values_per_key, error)) return 0;
-    if (!index.accommodate(index.entries.size() + count)) {
-        propagate_error(usearch_error_out_of_memory_k, error, "The batch could not be accommodated");
-        return 0;
-    }
+    if (reject_oversubscribed(index, arguments->keys, count, index.options.values_per_key, outcome)) return;
+    if (reject_if(!index.accommodate(index.entries.size() + count), usearch_status_out_of_memory_k,
+                  "The batch could not be accommodated", outcome))
+        return;
 
     std::size_t const watermark = index.entries.size();
-    payload_t payload;
+    sequence_payload_t payload;
     std::size_t published = 0;
     for (std::size_t row = 0; row != count; ++row) {
-        bytes_view_t const sequence = viewed(sequences[row]);
+        bytes_view_t const sequence = viewed(arguments->sequences, row);
         payload.assign(sequence.begin(), sequence.end());
-        index.append(keys.data[row], payload);
+        index.append(key_at(arguments->keys, row), payload);
         ++published;
-        if (!keep_going(progress, progress_state, published, count)) break;
+        if (!keep_going(arguments->progress, arguments->progress_state, published, count)) break;
     }
     // This modality's batch is all-or-nothing, a cancellation included, so a stopped tape unwinds
     // to the watermark rather than leaving a prefix published.
     if (published != count) {
         index.unwind(watermark);
-        propagate_error(usearch_error_cancelled_k, error, "The caller's handler stopped the batch");
-        return 0;
+        return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the batch");
     }
     if (stats) {
         stats->visited_members = published;
         stats->computed_distances = published * index.entries.size();
         stats->restarts = 1;
     }
-    return count;
 }
 
-std::size_t usearch_sequence_refine(usearch_sequence_index_t handle, usearch_executor_t executor,
-                                    [[maybe_unused]] usearch_sequence_insertion_options_t const* options,
-                                    usearch_progress_callback_t progress, void* progress_state,
-                                    usearch_sequence_traversal_stats_t* stats, usearch_error_t* error) {
-    propagate_success(error);
-    reset(stats);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return 0;
+void usearch_sequence_refine(usearch_sequence_refine_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    reset(arguments->stats);
+    if (arguments->changed) *arguments->changed = 0;
+    usearch_sequence_index_handle_t& index = *arguments->index;
+    if (reject_read_only(index, outcome)) return;
     std::shared_lock readers(index.mutex);
     std::size_t const rows = index.entries.size();
     // An exact scan keeps no edges, so a sweep re-selects nothing and the graph is always settled.
     // Cancelling is not an error here, the header having made a stopped sweep merely less improved.
     for (std::size_t row = 0; row != rows; ++row)
-        if (!keep_going(progress, progress_state, row + 1, rows)) break;
-    if (stats) stats->visited_members = rows;
-    return 0;
+        if (!keep_going(arguments->progress, arguments->progress_state, row + 1, rows)) break;
+    if (arguments->stats) arguments->stats->visited_members = rows;
 }
 
-/** The shared body of both search doors; the unfiltered one admits with a null predicate. */
-void search_sequence_tape(usearch_sequence_index_t handle, usearch_executor_t executor,
-                          usearch_bytes_view_t const* queries, std::size_t queries_count,
-                          usearch_matches_span_t const* matches, usearch_sequence_search_options_t const* options,
-                          usearch_predicate_t predicate, void* predicate_state, usearch_progress_callback_t progress,
-                          void* progress_state, usearch_sequence_traversal_stats_t* stats, usearch_error_t* error) {
-    propagate_success(error);
-    reset(stats);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return;
-    if (reject_if(!queries, usearch_error_malformed_input_k, "The tape must name storage", error)) return;
-    std::size_t keys_stride = 0, scores_stride = 0;
-    if (reject_matches(matches, keys_stride, scores_stride, error)) return;
+void usearch_sequence_search(usearch_sequence_search_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    reset(arguments->stats);
+    usearch_sequence_index_handle_t& index = *arguments->index;
+    std::size_t const count = arguments->count;
+    if (reject_tape(arguments->queries, count, outcome)) return;
+    if (reject_matches(arguments->matches, count, outcome)) return;
 
     std::shared_lock readers(index.mutex);
-    std::size_t const answered = search_tape(index, queries, matches->wanted, options, stats, predicate,
-                                             predicate_state, progress, progress_state, matches->keys, keys_stride,
-                                             matches->scores, scores_stride, {matches->counts, queries_count});
-    reject_cancelled(answered, queries_count, error);
+    std::size_t const answered = search_tape(
+        index, arguments->queries, count, arguments->matches, arguments->expansion_factor, arguments->stats,
+        arguments->predicate, arguments->predicate_state, arguments->progress, arguments->progress_state);
+    reject_cancelled(answered, count, outcome);
 }
 
-void usearch_sequence_search(usearch_sequence_index_t handle, usearch_executor_t executor,
-                             usearch_bytes_view_t const* queries, std::size_t queries_count,
-                             usearch_matches_span_t const* matches, usearch_sequence_search_options_t const* options,
-                             usearch_progress_callback_t progress, void* progress_state,
-                             usearch_sequence_traversal_stats_t* stats, usearch_error_t* error) {
-    search_sequence_tape(handle, executor, queries, queries_count, matches, options, nullptr, nullptr, progress,
-                         progress_state, stats, error);
-}
-
-void usearch_sequence_search_if(usearch_sequence_index_t handle, usearch_executor_t executor,
-                                usearch_bytes_view_t const* queries, std::size_t queries_count,
-                                usearch_matches_span_t const* matches, usearch_sequence_search_options_t const* options,
-                                usearch_predicate_t predicate, void* predicate_state,
-                                usearch_progress_callback_t progress, void* progress_state,
-                                usearch_sequence_traversal_stats_t* stats, usearch_error_t* error) {
-    search_sequence_tape(handle, executor, queries, queries_count, matches, options, predicate, predicate_state,
-                         progress, progress_state, stats, error);
-}
-
-std::size_t usearch_sequence_count(usearch_sequence_index_t handle, usearch_key_t key,
-                                   usearch_sequence_key_stats_t* stats, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
+void usearch_sequence_count(usearch_sequence_count_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->key_stats = {};
+    usearch_sequence_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
-    std::vector<std::size_t> const rows = rows_under(index, key);
-    std::size_t total_bytes = 0, largest_bytes = 0;
-    for (std::size_t row : rows) {
-        total_bytes += index.entries[row].payload.size();
-        largest_bytes = std::max(largest_bytes, index.entries[row].payload.size());
+    auto const range = index.by_key.equal_range(keyed(arguments->key));
+    std::size_t entries = 0, total_bytes = 0, largest_bytes = 0;
+    for (auto position = range.first; position != range.second; ++position, ++entries) {
+        std::size_t const bytes = index.entries[position->second].payload.size();
+        total_bytes += bytes;
+        largest_bytes = std::max(largest_bytes, bytes);
     }
-    if (stats) {
-        stats->entries = rows.size();
-        stats->total_bytes = total_bytes;
-        stats->largest_bytes = largest_bytes;
-    }
-    return rows.size();
+    *arguments->key_stats = {entries, total_bytes, largest_bytes};
 }
 
-std::size_t usearch_sequence_get(usearch_sequence_index_t handle, usearch_key_t key, char* sequences,
-                                 std::size_t wanted, std::size_t stride, std::size_t* lengths, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
+void usearch_sequence_get(usearch_sequence_get_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->sequences = nullptr;
+    *arguments->offsets = nullptr;
+    if (arguments->written) *arguments->written = 0;
+    usearch_sequence_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
-    std::vector<std::size_t> const rows = rows_under(index, key);
-    for (std::size_t found = 0; found != rows.size() && found < wanted; ++found) {
-        payload_t const& payload = index.entries[rows[found]].payload;
-        std::size_t const copied_bytes = std::min(stride, payload.size());
-        if (sequences) {
-            [[maybe_unused]] status_t const copied = copy_bytes(bytes_of(sequences + found * stride, copied_bytes),
-                                                                bytes_view_t(payload).first(copied_bytes));
-        }
-        if (lengths) lengths[found] = payload.size();
+    std::vector<std::size_t> const rows = rows_under(index, arguments->key);
+    if (rows.empty()) return;
+    std::size_t total_bytes = 0;
+    for (std::size_t row : rows) total_bytes += index.entries[row].payload.size();
+    // The offsets lead, so they start on a word boundary however long the bytes behind them run.
+    std::size_t const offsets_bytes = (rows.size() + 1) * sizeof(std::size_t);
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, nullptr, outcome);
+    if (!arena) return;
+    std::unique_lock const held {arena->busy, std::adopt_lock};
+    std::byte* const landing = arena->memory.allocate(offsets_bytes + total_bytes, default_alignment_k);
+    if (!landing) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+    std::size_t* const offsets = reinterpret_cast<std::size_t*>(landing);
+    std::byte* const tape = landing + offsets_bytes;
+    offsets[0] = 0;
+    for (std::size_t found = 0; found != rows.size(); ++found) {
+        sequence_payload_t const& payload = index.entries[rows[found]].payload;
+        std::copy(payload.begin(), payload.end(), tape + offsets[found]);
+        offsets[found + 1] = offsets[found] + payload.size();
     }
-    return rows.size();
+    *arguments->sequences = reinterpret_cast<std::uint8_t*>(tape);
+    *arguments->offsets = offsets;
+    if (arguments->written) *arguments->written = rows.size();
 }
 
-void usearch_sequence_merge(usearch_sequence_index_t handle, usearch_executor_t executor,
-                            usearch_sequence_index_t const* donors, std::size_t donors_count,
-                            usearch_progress_callback_t progress, void* progress_state, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return;
+void usearch_sequence_merge(usearch_sequence_merge_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    usearch_sequence_index_handle_t& index = *arguments->index;
+    if (reject_read_only(index, outcome)) return;
 
+    std::size_t const donors_count = arguments->count;
+    usearch_sequence_index_t* const donors = arguments->donors;
+    usearch_progress_callback_t const progress = arguments->progress;
+    void* const progress_state = arguments->progress_state;
     std::size_t merged = 0;
     bool accommodated = true;
     while (accommodated && merged != donors_count) {
-        index_t& donor = borrowed<index_t>(donors[merged]);
+        usearch_sequence_index_handle_t& donor = *donors[merged];
         std::unique_lock writers(index.mutex);
         accommodated = index.accommodate(index.entries.size() + donor.entries.size());
         if (!accommodated) break;
-        for (entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
+        for (sequence_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
         ++merged;
         if (!keep_going(progress, progress_state, merged, donors_count)) break;
     }
-    // Only an absorbed donor is consumed: a stopped merge leaves the rest live handles the caller
-    // still owns and must free, as the header promises.
-    for (std::size_t position = 0; position != merged; ++position) delete static_cast<index_t*>(donors[position]);
-    if (!accommodated)
-        return propagate_error(usearch_error_out_of_memory_k, error, "The donor's entries could not be accommodated");
-    reject_cancelled(merged, donors_count, error);
+    // Only an absorbed donor is consumed, and its slot is nulled as it goes, so a stopped merge
+    // leaves the rest live handles the caller still owns and must free.
+    for (std::size_t position = 0; position != merged; ++position) {
+        delete donors[position];
+        donors[position] = nullptr;
+    }
+    if (reject_if(!accommodated, usearch_status_out_of_memory_k, "The donor's entries could not be accommodated",
+                  outcome))
+        return;
+    reject_cancelled(merged, donors_count, outcome);
 }
 
-usearch_sequence_cursor_t usearch_sequence_cursor(usearch_sequence_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
+void usearch_sequence_cursor_init(usearch_sequence_cursor_init_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->cursor = nullptr;
+    usearch_sequence_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
-    cursor_t* cursor = new (std::nothrow) cursor_t {&index, 0, index.entries.size()};
-    if (!cursor) propagate_error(usearch_error_out_of_memory_k, error, "The cursor could not be allocated");
-    return cursor;
+    usearch_sequence_cursor_handle_t* const cursor = new (std::nothrow)
+        usearch_sequence_cursor_handle_t {&index, 0, index.entries.size()};
+    if (reject_if(!cursor, usearch_status_out_of_memory_k, "The cursor could not be allocated", outcome)) return;
+    *arguments->cursor = cursor;
 }
 
-std::size_t usearch_sequence_cursor_next(usearch_sequence_cursor_t handle, usearch_keys_span_t keys,
-                                         usearch_bytes_view_t* sequences, usearch_error_t* error) {
-    propagate_success(error);
-    cursor_t& cursor = borrowed<cursor_t>(handle);
-    index_t& index = *cursor.index;
-    if (reject_keys_span(keys, error)) return 0;
+void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->written = 0;
+    usearch_sequence_cursor_handle_t& cursor = *arguments->cursor;
+    usearch_sequence_index_handle_t& index = *cursor.index;
+    usearch_keys_span_t const& keys = arguments->keys;
+    if (reject_keys_span(keys, outcome)) return;
     std::shared_lock readers(index.mutex);
     std::size_t const written = std::min(keys.capacity, cursor.limit - cursor.position);
-    std::span<usearch_key_t> const keys_row {keys.data, written};
     for (std::size_t row = 0; row != written; ++row) {
-        entry_t const& entry = index.entries[cursor.position + row];
-        keys_row[row] = entry.key;
-        // Views borrow the arena's own bytes, which growth relocates the row of but never the
+        sequence_entry_t const& entry = index.entries[cursor.position + row];
+        row_at<usearch_key_t>(keys.data, row, keys.stride, 1).front() = entry.key;
+        // Views borrow the handle's own bytes, which growth relocates the row of but never the
         // payload buffer itself, so they survive concurrent insertion.
-        if (sequences) sequences[row] = as_bytes(entry.payload);
+        if (arguments->sequences) arguments->sequences[row] = as_bytes(entry.payload);
     }
     cursor.position += written;
-    return written;
+    *arguments->written = written;
 }
 
-void usearch_sequence_cursor_free(usearch_sequence_cursor_t handle) { delete static_cast<cursor_t*>(handle); }
+void usearch_sequence_cursor_free(usearch_sequence_cursor_t handle) { delete handle; }
 
-std::size_t usearch_sequence_storage_requirements(usearch_sequence_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
-    std::shared_lock readers(index.mutex);
-    std::optional<std::size_t> const length = serialized_bytes(index, index.entries.size());
-    if (!length) {
-        propagate_error(usearch_error_overflow_k, error, "The checkpoint would not fit an addressable buffer");
-        return 0;
-    }
-    return *length;
-}
-
-void usearch_sequence_save(usearch_sequence_index_t handle, usearch_executor_t executor, usearch_bytes_view_t path,
-                           usearch_progress_callback_t progress, void* progress_state, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return;
+void usearch_sequence_save(usearch_sequence_save_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    usearch_sequence_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
     std::size_t const rows = index.entries.size();
     std::optional<std::size_t> const length = serialized_bytes(index, rows);
-    if (!length)
-        return propagate_error(usearch_error_overflow_k, error, "The checkpoint would not fit an addressable buffer");
-    if (!keep_going(progress, progress_state, 0, 1))
-        return propagate_error(usearch_error_cancelled_k, error, "The caller's handler stopped the checkpoint");
+    if (reject_if(!length, usearch_status_overflow_k, "The checkpoint would not fit an addressable buffer", outcome))
+        return;
+    if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
+        return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob(*length);
     write_into(index, rows, blob);
-    if (!write_file(path, blob, error)) return;
-    keep_going(progress, progress_state, 1, 1);
+    if (!write_file(arguments->path, blob, outcome)) return;
+    keep_going(arguments->progress, arguments->progress_state, 1, 1);
 }
 
-void usearch_sequence_load(usearch_sequence_index_t handle, usearch_executor_t executor, usearch_bytes_view_t path,
-                           usearch_progress_callback_t progress, void* progress_state, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return;
-    if (!keep_going(progress, progress_state, 0, 1))
-        return propagate_error(usearch_error_cancelled_k, error, "The caller's handler stopped the checkpoint");
+void usearch_sequence_metadata_read(usearch_sequence_metadata_read_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->metadata = {};
     std::vector<std::byte> blob;
-    if (!read_file(path, blob, error)) return;
-    std::unique_lock writers(index.mutex);
-    if (!read_from(index, blob, error)) return;
-    keep_going(progress, progress_state, 1, 1);
-}
-
-void usearch_sequence_metadata(usearch_bytes_view_t path, usearch_sequence_options_t* options, usearch_error_t* error) {
-    propagate_success(error);
-    std::vector<std::byte> blob;
-    if (!read_file(path, blob, error)) return;
-    prefix_t prefix {};
-    if (!parse_prefix(prefix, blob, error)) return;
-    if (!adopt(*options, prefix))
-        propagate_error(usearch_error_unknown_kind_k, error, "The checkpoint names a metric this build lacks");
+    if (!read_file(arguments->path, blob, outcome)) return;
+    sequence_checkpoint_prefix_t prefix {};
+    if (!parse_prefix(prefix, blob, outcome)) return;
+    sequence_index_options_t options {};
+    if (reject_if(!adopt(options, prefix), usearch_status_unknown_kind_k,
+                  "The checkpoint names a metric this build lacks", outcome))
+        return;
+    *arguments->metadata = {options.metric, options.connectivity};
 }
 
 } // extern "C"

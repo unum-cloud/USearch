@@ -9,7 +9,8 @@
  *  is not its width - @c surface_k carries two axes, @c timed_k three, @c elevated_timed_k four
  *  - so a binding that reached for the enumerator when sizing a point fails on its first
  *  insertion. And a query is an object with its own lifetime, emplaced once and reused across
- *  searches of differing mode and axes, which is a handle to leak or to free twice.
+ *  searches of differing mode and axes, which is a handle to leak or to pass to
+ *  @c usearch_geospatial_emplaced_free twice.
  *
  *  @section geospatial_stub_blind_spots What It Cannot Tell You
  *
@@ -18,8 +19,10 @@
  *  distances are close but never survey-grade. Coordinates are stored as @c float, because that
  *  is what a cursor borrows them back as, so a @c get after an @c add returns single-precision
  *  values. A zeroed characteristic speed derives a fixed constant instead of the corpus median.
- *  Refinement keeps no edges to re-select, so its return is a constant zero rather than a settling
- *  signal, and a caller must not read it as one. Traversal statistics are plausible fiction:
+ *  Position deviations are ignored, and overlap scoring is refused rather than approximated.
+ *  Refinement keeps no edges to re-select, so its @c changed is a constant zero rather than a
+ *  settling signal, and a caller must not read it as one. A view copies its checkpoint rather than
+ *  mapping it, and every VRAM lifecycle verb refuses. Traversal statistics are plausible fiction:
  *  shaped correctly, invented numerically. A checkpoint is a binary blob of this file's own memory
  *  image, readable by nothing else.
  */
@@ -36,7 +39,6 @@
 
 #include "lib.hpp"
 
-namespace us = unum::usearch;
 using namespace unum::usearch;
 using namespace unum::usearch::stub;
 
@@ -51,19 +53,37 @@ constexpr double earth_radius_k = 6371000.0;
 constexpr double derived_speed_k = 13.0;
 
 /** The converted form every mode scores over: Earth-fixed metres, plus scaled time. */
-using position_t = std::array<double, 4>;
+using geospatial_position_t = std::array<double, 4>;
 
-using payload_t = std::vector<float>;
-using entry_t = entry<payload_t>;
+using geospatial_payload_t = std::vector<float>;
+using geospatial_entry_t = entry<geospatial_payload_t>;
 
-static_assert(std::is_nothrow_move_constructible_v<entry_t>, "reallocation must move rows, never copy them");
+static_assert(std::is_nothrow_move_constructible_v<geospatial_entry_t>, "reallocation must move rows, never copy them");
 
-using index_t = handle<payload_t, usearch_geospatial_options_t>;
+/** What a handle froze at construction, or adopted from a checkpoint. */
+struct geospatial_index_options_t {
 
-struct cursor_t {
+    /** Which axes each stored position carries. */
+    usearch_geospatial_layout_t layout;
+
+    /** What the ordering of points within one set means. */
+    usearch_geospatial_structure_t structure;
+
+    /** The connections-per-node bound the handle was built with. */
+    std::size_t connectivity;
+
+    /** Upper bound on entries sharing one key. */
+    std::size_t values_per_key;
+};
+
+} // namespace
+
+struct usearch_geospatial_index_handle_t : handle<geospatial_payload_t, geospatial_index_options_t> {};
+
+struct usearch_geospatial_cursor_handle_t {
 
     /** The index being walked; it must outlive the cursor. */
-    index_t* index;
+    usearch_geospatial_index_handle_t* index;
 
     /** The next entry to hand out. */
     std::size_t position;
@@ -77,14 +97,16 @@ struct cursor_t {
 
 /** A query converted once and reused: it keeps the caller's coordinates, since the axes
  *  a search selects are not known until the search itself. */
-struct emplaced_t {
+struct usearch_geospatial_emplaced_handle_t {
 
     /** The index whose layout and speed govern conversion; it must outlive this. */
-    index_t* index;
+    usearch_geospatial_index_handle_t* index;
 
     /** The query's positions, as many as its point count times the layout's width. */
     std::vector<double> points;
 };
+
+namespace {
 
 /** How many coordinates one position carries. Deliberately a switch rather than a cast
  *  of the enumerator, whose values are not the widths they name. */
@@ -107,9 +129,9 @@ bool layout_carries_time(usearch_geospatial_layout_t layout) {
 }
 
 /** Whether the layout is frozen; a zeroed one makes every derived extent zero. */
-bool reject_unfrozen(index_t const& index, usearch_error_t* error) {
-    return reject_if(!layout_width(index.options.layout), usearch_error_uninitialized_k, "The layout was never frozen",
-                     error);
+bool reject_unfrozen(usearch_geospatial_index_handle_t const& index, usearch_outcome_t* outcome) {
+    return reject_if(!layout_width(index.options.layout), usearch_status_uninitialized_k, "The layout was never frozen",
+                     outcome);
 }
 
 /** Whether the mode is one this build scores at all. */
@@ -119,14 +141,15 @@ bool known_mode(usearch_geospatial_mode_t mode) {
 }
 
 /** Route scoring reads the ordering of a set, which only a path structure carries. */
-bool reject_mode(index_t const& index, usearch_geospatial_mode_t mode, usearch_error_t* error) {
-    if (reject_if(!known_mode(mode), usearch_error_unknown_kind_k, "The scoring mode is not one this build knows",
-                  error))
+bool reject_mode(usearch_geospatial_index_handle_t const& index, usearch_geospatial_mode_t mode,
+                 usearch_outcome_t* outcome) {
+    if (reject_if(!known_mode(mode), usearch_status_unknown_kind_k, "The scoring mode is not one this build knows",
+                  outcome))
         return true;
     bool const needs_paths = mode == usearch_geospatial_mode_route_k &&
                              index.options.structure != usearch_geospatial_structure_path_k;
-    return reject_if(needs_paths, usearch_error_config_mismatch_k, "Route scoring needs an index of ordered paths",
-                     error);
+    return reject_if(needs_paths, usearch_status_config_mismatch_k, "Route scoring needs an index of ordered paths",
+                     outcome);
 }
 
 /** The exchange rate between the axes, which a tolerance names as a radius over a window. */
@@ -138,10 +161,11 @@ double speed_of(usearch_geospatial_tolerance_t const* tolerance) {
 /** Whether the query was emplaced against this very index. The conversion a query holds
  *  is only meaningful under the layout it was built for, so crossing handles is rejected
  *  rather than scored. */
-bool reject_foreign(index_t const& index, usearch_geospatial_emplaced_t query, usearch_error_t* error) {
-    if (reject_if(!query, usearch_error_malformed_input_k, "The query is null", error)) return true;
-    return reject_if(borrowed<emplaced_t const>(query).index != &index, usearch_error_config_mismatch_k,
-                     "The query was emplaced against another index", error);
+bool reject_foreign(usearch_geospatial_index_handle_t const& index, usearch_geospatial_emplaced_t query,
+                    usearch_outcome_t* outcome) {
+    if (reject_if(!query, usearch_status_invalid_argument_k, "The query is null", outcome)) return true;
+    return reject_if(query->index != &index, usearch_status_config_mismatch_k,
+                     "The query was emplaced against another index", outcome);
 }
 
 #pragma endregion Storage
@@ -150,8 +174,8 @@ bool reject_foreign(index_t const& index, usearch_geospatial_emplaced_t query, u
 
 /** Converts one geodetic position into Earth-fixed metres under the selected axes, with
  *  the unselected components zeroed so they cancel on both sides of a comparison. */
-position_t converted(std::span<double const> point, usearch_geospatial_layout_t layout, usearch_geospatial_axes_t axes,
-                     double speed) {
+geospatial_position_t converted(std::span<double const> point, usearch_geospatial_layout_t layout,
+                                usearch_geospatial_axes_t axes, double speed) {
     double const latitude = point[0] * M_PI / 180.0, longitude = point[1] * M_PI / 180.0;
     bool const with_altitude = layout_carries_altitude(layout) && axes != usearch_geospatial_axes_horizontal_k;
     bool const with_time = layout_carries_time(layout) && axes == usearch_geospatial_axes_full_k;
@@ -159,7 +183,7 @@ position_t converted(std::span<double const> point, usearch_geospatial_layout_t 
     double const seconds = with_time ? point[layout_width(layout) - 1] : 0.0;
 
     double const radius = earth_radius_k + altitude;
-    position_t converted_position {};
+    geospatial_position_t converted_position {};
     converted_position[0] = radius * std::cos(latitude) * std::cos(longitude);
     converted_position[1] = radius * std::cos(latitude) * std::sin(longitude);
     converted_position[2] = radius * std::sin(latitude);
@@ -167,7 +191,7 @@ position_t converted(std::span<double const> point, usearch_geospatial_layout_t 
     return converted_position;
 }
 
-double position_distance(position_t const& first, position_t const& second) {
+double position_distance(geospatial_position_t const& first, geospatial_position_t const& second) {
     double squared = 0;
     for (std::size_t axis = 0; axis != first.size(); ++axis) {
         double const delta = first[axis] - second[axis];
@@ -178,7 +202,7 @@ double position_distance(position_t const& first, position_t const& second) {
 
 /** The converted form of a whole point set, which every mode below scores over. */
 void convert_set(std::span<double const> points, usearch_geospatial_layout_t layout, usearch_geospatial_axes_t axes,
-                 double speed, std::vector<position_t>& positions) {
+                 double speed, std::vector<geospatial_position_t>& positions) {
     std::size_t const width = layout_width(layout);
     positions.clear();
     for (std::size_t point = 0; point * width != points.size(); ++point)
@@ -186,17 +210,19 @@ void convert_set(std::span<double const> points, usearch_geospatial_layout_t lay
 }
 
 void convert_stored(std::span<float const> stored, usearch_geospatial_layout_t layout, usearch_geospatial_axes_t axes,
-                    double speed, std::vector<double>& widened, std::vector<position_t>& positions) {
+                    double speed, std::vector<double>& widened, std::vector<geospatial_position_t>& positions) {
     widened.assign(stored.begin(), stored.end());
     convert_set(widened, layout, axes, speed, positions);
 }
 
 /** The directed nearest-approach of every position in @p from to the whole of @p onto. */
-void directed(std::span<position_t const> from, std::span<position_t const> onto, double& nearest, double& worst) {
+void directed(std::span<geospatial_position_t const> from, std::span<geospatial_position_t const> onto, double& nearest,
+              double& worst) {
     nearest = INFINITY, worst = 0;
-    for (position_t const& position : from) {
+    for (geospatial_position_t const& position : from) {
         double closest = INFINITY;
-        for (position_t const& partner : onto) closest = std::min(closest, position_distance(position, partner));
+        for (geospatial_position_t const& partner : onto)
+            closest = std::min(closest, position_distance(position, partner));
         if (closest == INFINITY) closest = 0;
         nearest = std::min(nearest, closest);
         worst = std::max(worst, closest);
@@ -206,7 +232,8 @@ void directed(std::span<position_t const> from, std::span<position_t const> onto
 
 /** Scores one query set against one stored set under the selected mode. Route scoring
  *  pairs positions in order, which is what an ordered structure buys. */
-double distance(std::span<position_t const> query, std::span<position_t const> stored, usearch_geospatial_mode_t mode) {
+double distance(std::span<geospatial_position_t const> query, std::span<geospatial_position_t const> stored,
+                usearch_geospatial_mode_t mode) {
     if (mode == usearch_geospatial_mode_route_k) {
         std::size_t const paired = std::min(query.size(), stored.size());
         double worst = 0;
@@ -226,21 +253,22 @@ double distance(std::span<position_t const> query, std::span<position_t const> s
 }
 
 /** Reusable buffers, so scoring a whole corpus allocates once rather than per pair. */
-struct scratch_t {
-    std::vector<position_t> query_positions;
-    std::vector<position_t> entry_positions;
+struct geospatial_search_scratch_t {
+    std::vector<geospatial_position_t> query_positions;
+    std::vector<geospatial_position_t> entry_positions;
     std::vector<double> widened;
 };
 
 /** One query's whole scan. The query converts once, then every entry scores against it. */
-void rank(index_t const& index, emplaced_t const& query, usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes,
+void rank(usearch_geospatial_index_handle_t const& index, usearch_geospatial_emplaced_handle_t const& query,
+          usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes,
           usearch_geospatial_tolerance_t const* tolerance, std::size_t rows, usearch_predicate_t predicate,
-          void* predicate_state, scratch_t& scratch, std::vector<match_t>& ranked) {
+          void* predicate_state, geospatial_search_scratch_t& scratch, std::vector<match_t>& ranked) {
     double const speed = speed_of(tolerance);
     convert_set(query.points, index.options.layout, axes, speed, scratch.query_positions);
-    us::stub::rank<payload_t>(
-        std::span<entry_t const>(index.entries).first(rows), admitting(predicate, predicate_state),
-        [&](payload_t const& payload) {
+    us::stub::rank<geospatial_payload_t>(
+        std::span<geospatial_entry_t const>(index.entries).first(rows), admitting(predicate, predicate_state),
+        [&](geospatial_payload_t const& payload) {
             convert_stored(payload, index.options.layout, axes, speed, scratch.widened, scratch.entry_positions);
             return distance(scratch.query_positions, scratch.entry_positions, mode);
         },
@@ -248,29 +276,27 @@ void rank(index_t const& index, emplaced_t const& query, usearch_geospatial_mode
 }
 
 /**
- *  @brief The shared body of both search forms; the filtered one passes a predicate.
- *  @return Queries answered, short of @p counts.size() exactly when the handler cancelled.
+ *  @brief The body of a search, filtered when its @c predicate is set.
+ *  @return Queries answered, short of @c count exactly when the handler cancelled.
  */
-std::size_t search_queries(index_t& index, usearch_geospatial_emplaced_t const* queries, usearch_geospatial_mode_t mode,
-                           usearch_geospatial_axes_t axes, usearch_geospatial_tolerance_t const* tolerance,
-                           std::size_t wanted, usearch_geospatial_search_options_t const* options,
-                           usearch_geospatial_traversal_stats_t* stats, usearch_predicate_t predicate,
-                           void* predicate_state, usearch_progress_callback_t progress, void* progress_state,
-                           usearch_key_t* keys, std::size_t keys_stride, usearch_distance_t* distances,
-                           std::size_t distances_stride, std::span<std::size_t> counts) {
+std::size_t search_queries(usearch_geospatial_index_handle_t& index, usearch_geospatial_search_t const& arguments) {
     std::size_t const rows = index.entries.size();
-    if (stats && options && options->expansion_factor)
-        stats->computed_distances += options->expansion_factor * counts.size();
+    std::size_t const count = arguments.count, wanted = arguments.matches.wanted;
+    usearch_matches_span_t const& matches = arguments.matches;
+    usearch_geospatial_traversal_stats_t* const stats = arguments.stats;
+    if (stats && arguments.expansion_factor) stats->computed_distances += arguments.expansion_factor * count;
 
+    std::span<std::size_t> const counts {matches.counts, count};
     std::fill(counts.begin(), counts.end(), 0);
-    scratch_t scratch;
+    geospatial_search_scratch_t scratch;
     std::vector<match_t> ranked;
     for (std::size_t query = 0; query != counts.size(); ++query) {
-        rank(index, borrowed<emplaced_t const>(queries[query]), mode, axes, tolerance, rows, predicate, predicate_state,
-             scratch, ranked);
-        std::span<usearch_key_t> const keys_row = row_at<usearch_key_t>(keys, query, keys_stride, wanted);
-        std::span<usearch_distance_t> const distances_row = row_at<usearch_distance_t>(distances, query,
-                                                                                       distances_stride, wanted);
+        rank(index, *arguments.queries[query], arguments.mode, arguments.axes, &arguments.tolerance, rows,
+             arguments.predicate, arguments.predicate_state, scratch, ranked);
+        std::span<usearch_key_t> const keys_row = row_at<usearch_key_t>(matches.keys, query, matches.keys_stride,
+                                                                        wanted);
+        std::span<usearch_distance_t> const distances_row = row_at<usearch_distance_t>(matches.scores, query,
+                                                                                       matches.scores_stride, wanted);
         std::size_t const found = std::min(wanted, ranked.size());
         for (std::size_t match = 0; match != found; ++match)
             keys_row[match] = ranked[match].key, distances_row[match] = ranked[match].distance;
@@ -280,7 +306,7 @@ std::size_t search_queries(index_t& index, usearch_geospatial_emplaced_t const* 
             stats->computed_distances += ranked.size();
             stats->restarts += 1;
         }
-        if (!keep_going(progress, progress_state, query + 1, counts.size())) return query + 1;
+        if (!keep_going(arguments.progress, arguments.progress_state, query + 1, counts.size())) return query + 1;
     }
     return counts.size();
 }
@@ -291,7 +317,7 @@ std::size_t search_queries(index_t& index, usearch_geospatial_emplaced_t const* 
 
 /** What @c load needs before it can read an entry. The blob is this file's own memory
  *  image rather than a format: no magic, no version, and nothing else reads it back. */
-struct prefix_t {
+struct geospatial_checkpoint_prefix_t {
 
     /** The connections-per-node bound the handle was built with. */
     std::size_t connectivity;
@@ -312,19 +338,19 @@ struct prefix_t {
 /** The per-entry overhead of the blob: the key, then the point count that follows it. */
 constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(us::u64_t);
 
-std::size_t payload_extent(index_t const& index, std::size_t rows) {
+std::size_t payload_extent(usearch_geospatial_index_handle_t const& index, std::size_t rows) {
     std::size_t extent = 0;
     for (std::size_t row = 0; row != rows; ++row)
         extent += record_overhead_k + index.entries[row].payload.size() * sizeof(float);
     return extent;
 }
 
-std::optional<std::size_t> serialized_bytes(index_t const& index, std::size_t rows) {
-    return blob_bytes(sizeof(prefix_t), payload_extent(index, rows), 1);
+std::optional<std::size_t> serialized_bytes(usearch_geospatial_index_handle_t const& index, std::size_t rows) {
+    return blob_bytes(sizeof(geospatial_checkpoint_prefix_t), payload_extent(index, rows), 1);
 }
 
-void write_into(index_t const& index, std::size_t rows, bytes_span_t target) {
-    prefix_t prefix {};
+void write_into(usearch_geospatial_index_handle_t const& index, std::size_t rows, bytes_span_t target) {
+    geospatial_checkpoint_prefix_t prefix {};
     prefix.connectivity = index.options.connectivity;
     prefix.entries = rows;
     prefix.payload_bytes = payload_extent(index, rows);
@@ -335,7 +361,7 @@ void write_into(index_t const& index, std::size_t rows, bytes_span_t target) {
     std::size_t const width = layout_width(index.options.layout);
     bytes_span_t cursor = target.subspan(sizeof(prefix));
     for (std::size_t row = 0; row != rows; ++row) {
-        entry_t const& entry = index.entries[row];
+        geospatial_entry_t const& entry = index.entries[row];
         std::size_t const points = width ? entry.payload.size() / width : 0;
         std::size_t const payload_bytes = entry.payload.size() * sizeof(float);
         write_pod(cursor, entry.key);
@@ -349,38 +375,41 @@ void write_into(index_t const& index, std::size_t rows, bytes_span_t target) {
 }
 
 /** Reads the prefix and checks the blob is long enough for what it claims. */
-bool parse_prefix(prefix_t& prefix, bytes_view_t blob, usearch_error_t* error) {
-    if (reject_if(blob.size() < sizeof(prefix_t), usearch_error_malformed_input_k, "The checkpoint ends early", error))
+bool parse_prefix(geospatial_checkpoint_prefix_t& prefix, bytes_view_t blob, usearch_outcome_t* outcome) {
+    if (reject_if(blob.size() < sizeof(geospatial_checkpoint_prefix_t), usearch_status_malformed_k,
+                  "The checkpoint ends early", outcome))
         return false;
-    prefix = read_pod<prefix_t>(blob);
-    return fits_blob(blob, sizeof(prefix_t), prefix.payload_bytes, 1, error);
+    prefix = read_pod<geospatial_checkpoint_prefix_t>(blob);
+    return fits_blob(blob, sizeof(geospatial_checkpoint_prefix_t), prefix.payload_bytes, 1, outcome);
 }
 
-void adopt(usearch_geospatial_options_t& options, prefix_t const& prefix) {
+/** Adopts a checkpoint's configuration. The bound on entries per key is the loader's to choose,
+ *  since no checkpoint records it. */
+void adopt(geospatial_index_options_t& options, geospatial_checkpoint_prefix_t const& prefix) {
     options.layout = prefix.layout;
     options.structure = prefix.structure;
     options.connectivity = prefix.connectivity;
 }
 
-/** Replaces the contents of @p index; the caller holds both locks exclusively. */
-bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
-    prefix_t prefix {};
-    if (!parse_prefix(prefix, blob, error)) return false;
+/** Fills a fresh @p index from a checkpoint, which no other thread can see yet. */
+bool read_from(usearch_geospatial_index_handle_t& index, bytes_view_t blob, usearch_outcome_t* outcome) {
+    geospatial_checkpoint_prefix_t prefix {};
+    if (!parse_prefix(prefix, blob, outcome)) return false;
     std::size_t const entries = prefix.entries;
     index.reset();
     if (!index.accommodate(entries)) {
-        propagate_error(usearch_error_out_of_memory_k, error, "The checkpoint's entries could not be allocated");
+        propagate_error(usearch_status_out_of_memory_k, outcome, "The checkpoint's entries could not be allocated");
         return false;
     }
     adopt(index.options, prefix);
     std::size_t const width = layout_width(index.options.layout);
 
-    bytes_view_t cursor = blob.subspan(sizeof(prefix_t));
-    payload_t payload;
+    bytes_view_t cursor = blob.subspan(sizeof(geospatial_checkpoint_prefix_t));
+    geospatial_payload_t payload;
     for (std::size_t entry_index = 0; entry_index != entries; ++entry_index) {
         if (cursor.size() < record_overhead_k) {
             index.reset();
-            propagate_error(usearch_error_malformed_input_k, error, "The checkpoint ends inside an entry");
+            propagate_error(usearch_status_malformed_k, outcome, "The checkpoint ends inside an entry");
             return false;
         }
         usearch_key_t key;
@@ -392,7 +421,7 @@ bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
         std::size_t const scalars = points * width;
         if (cursor.size() < scalars * sizeof(float)) {
             index.reset();
-            propagate_error(usearch_error_malformed_input_k, error, "The checkpoint ends inside an entry");
+            propagate_error(usearch_status_malformed_k, outcome, "The checkpoint ends inside an entry");
             return false;
         }
         payload.resize(scalars);
@@ -404,339 +433,364 @@ bool read_from(index_t& index, bytes_view_t blob, usearch_error_t* error) {
     return true;
 }
 
+/** A new handle holding the checkpoint in @p blob, or null once the outcome records why not. */
+usearch_geospatial_index_handle_t* open_checkpoint(bytes_view_t blob, usearch_outcome_t* outcome) {
+    usearch_geospatial_index_handle_t* const index = new (std::nothrow) usearch_geospatial_index_handle_t();
+    if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return nullptr;
+    if (read_from(*index, blob, outcome)) return index;
+    delete index;
+    return nullptr;
+}
+
 #pragma endregion Serialization
 
 } // namespace
 
 extern "C" {
 
-usearch_geospatial_index_t usearch_geospatial_init(usearch_geospatial_options_t const* options,
-                                                   usearch_error_t* error) {
-    propagate_success(error);
-    if (!options) {
-        propagate_error(usearch_error_malformed_input_k, error, "The options are null");
-        return nullptr;
-    }
-    index_t* index = new (std::nothrow) index_t();
-    if (!index) {
-        propagate_error(usearch_error_out_of_memory_k, error, "The handle could not be allocated");
-        return nullptr;
-    }
-    index->options = *options;
-    if (!index->options.connectivity) index->options.connectivity = us::connectivity_16_k;
-    return index;
+void usearch_geospatial_init_ram(usearch_geospatial_init_ram_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    usearch_geospatial_index_handle_t* const index = new (std::nothrow) usearch_geospatial_index_handle_t();
+    if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return;
+    index->options = {arguments->layout, arguments->structure,
+                      arguments->connectivity ? arguments->connectivity : us::connectivity_16_k,
+                      arguments->values_per_key};
+    *arguments->index = index;
 }
 
-void usearch_geospatial_free(usearch_geospatial_index_t handle) { delete static_cast<index_t*>(handle); }
+void usearch_geospatial_init_vram(usearch_geospatial_init_vram_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA backends");
+}
 
-void usearch_geospatial_reserve(usearch_geospatial_index_t handle, std::size_t entries,
-                                [[maybe_unused]] std::size_t points, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
+void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
+        return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
+    std::vector<std::byte> blob;
+    if (!read_file(arguments->path, blob, outcome)) return;
+    usearch_geospatial_index_handle_t* const index = open_checkpoint(blob, outcome);
+    if (!index) return;
+    index->options.values_per_key = arguments->values_per_key;
+    keep_going(arguments->progress, arguments->progress_state, 1, 1);
+    *arguments->index = index;
+}
+
+void usearch_geospatial_load_vram(usearch_geospatial_load_vram_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA backends");
+}
+
+void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    mapped_file_t served = map_file(arguments->path, outcome);
+    if (!served) return;
+    // Rows are still copied out of the mapping, so only the view's refusals are mirrored, not its zero cost.
+    usearch_geospatial_index_handle_t* const index = open_checkpoint(served.view(), outcome);
+    if (!index) return;
+    index->served = std::move(served);
+    *arguments->index = index;
+}
+
+void usearch_geospatial_free(usearch_geospatial_index_t handle) { delete handle; }
+
+void usearch_geospatial_reserve(usearch_geospatial_reserve_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    usearch_geospatial_index_handle_t& index = *arguments->index;
+    if (reject_read_only(index, outcome)) return;
     std::unique_lock writers(index.mutex);
-    if (!index.accommodate(entries))
-        propagate_error(usearch_error_out_of_memory_k, error, "The capacity could not be reserved");
+    reject_if(!index.accommodate(arguments->entries), usearch_status_out_of_memory_k,
+              "The capacity could not be reserved", outcome);
 }
 
-void usearch_geospatial_clear(usearch_geospatial_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
+void usearch_geospatial_clear(usearch_geospatial_clear_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    usearch_geospatial_index_handle_t& index = *arguments->index;
+    if (reject_read_only(index, outcome)) return;
     std::unique_lock writers(index.mutex);
     index.reset();
 }
 
-std::size_t usearch_geospatial_size(usearch_geospatial_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
+void usearch_geospatial_describe(usearch_geospatial_describe_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->description = {};
+    usearch_geospatial_index_handle_t& index = *arguments->index;
     // Held shared like every other reader, so a size taken beside an insertion is not a data race.
     std::shared_lock readers(index.mutex);
-    return index.entries.size();
-}
-std::size_t usearch_geospatial_capacity(usearch_geospatial_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
-    std::shared_lock readers(index.mutex);
-    return index.entries.capacity();
-}
-std::size_t usearch_geospatial_connectivity(usearch_geospatial_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    return borrowed<index_t>(handle).options.connectivity;
-}
-std::size_t usearch_geospatial_memory_usage(usearch_geospatial_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
-    std::shared_lock readers(index.mutex);
-    return payload_extent(index, index.entries.size());
-}
-char const* usearch_geospatial_capabilities([[maybe_unused]] usearch_geospatial_index_t handle,
-                                            usearch_error_t* error) {
-    propagate_success(error);
-    return "serial";
+    geospatial_index_options_t const& options = index.options;
+    *arguments->description = {
+        {options.layout, options.structure, options.connectivity},
+        index.entries.size(),
+        index.entries.capacity(),
+        payload_extent(index, index.entries.size()),
+        "serial",
+    };
 }
 
-std::size_t usearch_geospatial_add(usearch_geospatial_index_t handle, usearch_executor_t executor,
-                                   usearch_keys_view_t keys, double const* const* point_sets,
-                                   std::size_t const* point_counts, [[maybe_unused]] double const* const* deviations,
-                                   [[maybe_unused]] usearch_geospatial_insertion_options_t const* options,
-                                   usearch_progress_callback_t progress, void* progress_state,
-                                   usearch_geospatial_traversal_stats_t* stats, usearch_error_t* error) {
-    propagate_success(error);
+void usearch_geospatial_add(usearch_geospatial_add_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    usearch_geospatial_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return 0;
-    if (reject_unfrozen(index, error)) return 0;
-    if (reject_keys(keys, error)) return 0;
-    if (reject_if(!point_sets || !point_counts, usearch_error_malformed_input_k, "The tape must name storage", error))
-        return 0;
-    std::size_t const count = keys.count;
+    usearch_geospatial_index_handle_t& index = *arguments->index;
+    std::size_t const count = arguments->count;
+    usearch_tape_view_t const& points = arguments->points;
+    if (reject_read_only(index, outcome)) return;
+    if (reject_unfrozen(index, outcome)) return;
+    if (reject_keys(arguments->keys, outcome)) return;
+    if (reject_tape(points, count, outcome)) return;
     std::size_t const width = layout_width(index.options.layout);
 
     std::unique_lock writers(index.mutex);
-    if (reject_oversubscribed(index, keys, index.options.values_per_key, error)) return 0;
-    if (!index.accommodate(index.entries.size() + count)) {
-        propagate_error(usearch_error_out_of_memory_k, error, "The batch could not be accommodated");
-        return 0;
-    }
+    if (reject_oversubscribed(index, arguments->keys, count, index.options.values_per_key, outcome)) return;
+    if (reject_if(!index.accommodate(index.entries.size() + count), usearch_status_out_of_memory_k,
+                  "The batch could not be accommodated", outcome))
+        return;
 
     std::size_t const watermark = index.entries.size();
-    payload_t payload;
+    double const* const coordinates = static_cast<double const*>(points.data);
+    geospatial_payload_t payload;
     std::size_t published = 0;
     for (std::size_t row = 0; row != count; ++row) {
-        std::span<double const> const points {point_sets[row], point_counts[row] * width};
-        payload.assign(points.begin(), points.end());
-        index.append(keys.data[row], payload);
+        payload.assign(coordinates + points.offsets[row] * width, coordinates + points.offsets[row + 1] * width);
+        index.append(key_at(arguments->keys, row), payload);
         ++published;
-        if (!keep_going(progress, progress_state, published, count)) break;
+        if (!keep_going(arguments->progress, arguments->progress_state, published, count)) break;
     }
     // This modality's batch is all-or-nothing, a cancellation included, so a stopped tape unwinds
     // to the watermark rather than leaving a prefix published.
     if (published != count) {
         index.unwind(watermark);
-        propagate_error(usearch_error_cancelled_k, error, "The caller's handler stopped the batch");
-        return 0;
+        return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the batch");
     }
     if (stats) {
         stats->visited_members = published;
         stats->computed_distances = published * index.entries.size();
         stats->restarts = 1;
     }
-    return count;
 }
 
-std::size_t usearch_geospatial_refine(usearch_geospatial_index_t handle, usearch_executor_t executor,
-                                      [[maybe_unused]] usearch_geospatial_insertion_options_t const* options,
-                                      usearch_progress_callback_t progress, void* progress_state,
-                                      usearch_geospatial_traversal_stats_t* stats, usearch_error_t* error) {
-    propagate_success(error);
-    reset(stats);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return 0;
+void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    reset(arguments->stats);
+    if (arguments->changed) *arguments->changed = 0;
+    usearch_geospatial_index_handle_t& index = *arguments->index;
+    if (reject_read_only(index, outcome)) return;
     std::shared_lock readers(index.mutex);
     std::size_t const rows = index.entries.size();
     // An exact scan keeps no edges, so a sweep re-selects nothing and the graph is always settled.
     // Cancelling is not an error here, the header having made a stopped sweep merely less improved.
     for (std::size_t row = 0; row != rows; ++row)
-        if (!keep_going(progress, progress_state, row + 1, rows)) break;
-    if (stats) stats->visited_members = rows;
-    return 0;
+        if (!keep_going(arguments->progress, arguments->progress_state, row + 1, rows)) break;
+    if (arguments->stats) arguments->stats->visited_members = rows;
 }
 
-usearch_geospatial_emplaced_t usearch_geospatial_emplace(usearch_geospatial_index_t handle, double const* points,
-                                                         std::size_t point_count, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_unfrozen(index, error)) return nullptr;
-    emplaced_t* emplaced = new (std::nothrow) emplaced_t();
-    if (!emplaced) {
-        propagate_error(usearch_error_out_of_memory_k, error, "The query could not be allocated");
-        return nullptr;
-    }
+void usearch_geospatial_emplace(usearch_geospatial_emplace_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->emplaced = nullptr;
+    usearch_geospatial_index_handle_t& index = *arguments->index;
+    if (reject_unfrozen(index, outcome)) return;
+    if (reject_if(!arguments->points && arguments->point_count, usearch_status_invalid_argument_k,
+                  "The points must name storage", outcome))
+        return;
+    usearch_geospatial_emplaced_handle_t* const emplaced = new (std::nothrow) usearch_geospatial_emplaced_handle_t();
+    if (reject_if(!emplaced, usearch_status_out_of_memory_k, "The query could not be allocated", outcome)) return;
     std::size_t const width = layout_width(index.options.layout);
     emplaced->index = &index;
-    emplaced->points.assign(points, points + point_count * width);
-    return emplaced;
+    emplaced->points.assign(arguments->points, arguments->points + arguments->point_count * width);
+    *arguments->emplaced = emplaced;
 }
 
-void usearch_geospatial_release(usearch_geospatial_emplaced_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    delete static_cast<emplaced_t*>(handle);
+void usearch_geospatial_emplaced_free(usearch_geospatial_emplaced_t handle) { delete handle; }
+
+void usearch_geospatial_search(usearch_geospatial_search_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    reset(arguments->stats);
+    usearch_geospatial_index_handle_t& index = *arguments->index;
+    std::size_t const count = arguments->count;
+    if (reject_unfrozen(index, outcome)) return;
+    if (reject_mode(index, arguments->mode, outcome)) return;
+    if (reject_if(!arguments->queries && count, usearch_status_invalid_argument_k, "The batch must name storage",
+                  outcome))
+        return;
+    for (std::size_t query = 0; query != count; ++query)
+        if (reject_foreign(index, arguments->queries[query], outcome)) return;
+    if (reject_matches(arguments->matches, count, outcome)) return;
+
+    std::shared_lock readers(index.mutex);
+    std::size_t const answered = search_queries(index, *arguments);
+    reject_cancelled(answered, count, outcome);
 }
 
-/** The shared body of both search doors; the unfiltered one admits with a null predicate. */
-void search_geospatial_batch(usearch_geospatial_index_t handle, usearch_executor_t executor,
-                             usearch_geospatial_emplaced_t const* queries, std::size_t queries_count,
-                             usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes,
-                             usearch_geospatial_tolerance_t const* tolerance, usearch_matches_span_t const* matches,
-                             usearch_geospatial_search_options_t const* options, usearch_predicate_t predicate,
-                             void* predicate_state, usearch_progress_callback_t progress, void* progress_state,
-                             usearch_geospatial_traversal_stats_t* stats, usearch_error_t* error) {
-    propagate_success(error);
+void usearch_geospatial_within(usearch_geospatial_within_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    usearch_geospatial_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return;
-    if (reject_unfrozen(index, error)) return;
-    if (reject_mode(index, mode, error)) return;
-    if (reject_if(!queries, usearch_error_malformed_input_k, "The batch must name storage", error)) return;
-    for (std::size_t query = 0; query != queries_count; ++query)
-        if (reject_foreign(index, queries[query], error)) return;
-    std::size_t keys_stride = 0, scores_stride = 0;
-    if (reject_matches(matches, keys_stride, scores_stride, error)) return;
-
-    std::shared_lock readers(index.mutex);
-    std::size_t const answered = search_queries(
-        index, queries, mode, axes, tolerance, matches->wanted, options, stats, predicate, predicate_state, progress,
-        progress_state, matches->keys, keys_stride, matches->scores, scores_stride, {matches->counts, queries_count});
-    reject_cancelled(answered, queries_count, error);
-}
-
-void usearch_geospatial_search(usearch_geospatial_index_t handle, usearch_executor_t executor,
-                               usearch_geospatial_emplaced_t const* queries, std::size_t queries_count,
-                               usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes,
-                               usearch_geospatial_tolerance_t const* tolerance, usearch_matches_span_t const* matches,
-                               usearch_geospatial_search_options_t const* options, usearch_progress_callback_t progress,
-                               void* progress_state, usearch_geospatial_traversal_stats_t* stats,
-                               usearch_error_t* error) {
-    search_geospatial_batch(handle, executor, queries, queries_count, mode, axes, tolerance, matches, options, nullptr,
-                            nullptr, progress, progress_state, stats, error);
-}
-
-void usearch_geospatial_search_if(usearch_geospatial_index_t handle, usearch_executor_t executor,
-                                  usearch_geospatial_emplaced_t const* queries, std::size_t queries_count,
-                                  usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes,
-                                  usearch_geospatial_tolerance_t const* tolerance,
-                                  usearch_matches_span_t const* matches,
-                                  usearch_geospatial_search_options_t const* options, usearch_predicate_t predicate,
-                                  void* predicate_state, usearch_progress_callback_t progress, void* progress_state,
-                                  usearch_geospatial_traversal_stats_t* stats, usearch_error_t* error) {
-    search_geospatial_batch(handle, executor, queries, queries_count, mode, axes, tolerance, matches, options,
-                            predicate, predicate_state, progress, progress_state, stats, error);
-}
-
-std::size_t usearch_geospatial_within(usearch_geospatial_index_t handle, usearch_executor_t executor,
-                                      usearch_geospatial_emplaced_t query, usearch_geospatial_mode_t mode,
-                                      usearch_geospatial_axes_t axes, usearch_geospatial_tolerance_t const* tolerance,
-                                      usearch_progress_callback_t progress, void* progress_state,
-                                      usearch_keys_span_t keys, usearch_distance_t* distances, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return 0;
-    if (reject_unfrozen(index, error)) return 0;
-    if (reject_mode(index, mode, error)) return 0;
-    if (reject_foreign(index, query, error)) return 0;
-    if (reject_keys_span(keys, error)) return 0;
-    if (reject_if(!distances, usearch_error_malformed_input_k, "The distance output must name storage", error))
-        return 0;
-    // Containment is measured from a radius, so an absent or zero-metre tolerance names no ball
-    // to report - the one place this verb parts with its ranked sibling, which derives both.
-    if (reject_if(!tolerance || !(tolerance->metres > 0), usearch_error_shape_mismatch_k,
-                  "A containment walk needs a positive radius in metres", error))
-        return 0;
+    *arguments->keys = nullptr;
+    *arguments->scores = nullptr;
+    if (arguments->written) *arguments->written = 0;
+    usearch_geospatial_index_handle_t& index = *arguments->index;
+    std::size_t const count = arguments->count;
+    usearch_geospatial_tolerance_t const& tolerance = arguments->tolerance;
+    if (reject_unfrozen(index, outcome)) return;
+    if (reject_mode(index, arguments->mode, outcome)) return;
+    if (reject_if(!arguments->queries && count, usearch_status_invalid_argument_k, "The batch must name storage",
+                  outcome))
+        return;
+    for (std::size_t query = 0; query != count; ++query)
+        if (reject_foreign(index, arguments->queries[query], outcome)) return;
+    if (reject_if(!arguments->offsets, usearch_status_invalid_argument_k, "The offsets must name storage", outcome))
+        return;
+    // Containment is measured from a radius, so a zero-metre tolerance names no ball to report -
+    // the one place this verb parts with its ranked sibling, which derives it.
+    if (reject_if(!(tolerance.metres > 0), usearch_status_invalid_argument_k,
+                  "A containment walk needs a positive radius in metres", outcome))
+        return;
     std::shared_lock readers(index.mutex);
 
-    scratch_t scratch;
-    std::vector<match_t> ranked;
-    rank(index, borrowed<emplaced_t const>(query), mode, axes, tolerance, index.entries.size(), nullptr, nullptr,
-         scratch, ranked);
-    double const radius = tolerance->metres;
-    // The header has this one saturate at capacity rather than report the true total, unlike
-    // every truncating verb of the dense modality.
-    std::size_t written = 0;
-    for (match_t const& match : ranked) {
-        if (written == keys.capacity || match.distance > radius) break;
-        keys.data[written] = match.key;
-        distances[written] = match.distance;
-        ++written;
-        if (!keep_going(progress, progress_state, written, keys.capacity)) {
-            propagate_error(usearch_error_cancelled_k, error, "The caller's handler stopped the walk");
-            break;
+    std::size_t const rows = index.entries.size();
+    geospatial_search_scratch_t scratch;
+    std::vector<match_t> ranked, balls;
+    arguments->offsets[0] = 0;
+    for (std::size_t query = 0; query != count; ++query) {
+        rank(index, *arguments->queries[query], arguments->mode, arguments->axes, &tolerance, rows,
+             arguments->predicate, arguments->predicate_state, scratch, ranked);
+        // Ranked nearest first, so each ball is a prefix, and only the walk learns how long it runs.
+        std::size_t inside = 0;
+        while (inside != ranked.size() && ranked[inside].distance <= tolerance.metres) ++inside;
+        balls.insert(balls.end(), ranked.begin(), ranked.begin() + static_cast<std::ptrdiff_t>(inside));
+        arguments->offsets[query + 1] = balls.size();
+        if (stats) {
+            stats->visited_members += rows;
+            stats->computed_distances += ranked.size();
+            stats->restarts += 1;
         }
+        if (!keep_going(arguments->progress, arguments->progress_state, query + 1, count))
+            return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the walks");
     }
-    return written;
+    std::size_t const total = balls.size();
+    if (!total) return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, nullptr, outcome);
+    if (!arena) return;
+    std::unique_lock const held {arena->busy, std::adopt_lock};
+    std::byte* const landing = arena->memory.allocate(total * (sizeof(usearch_key_t) + sizeof(usearch_distance_t)),
+                                                      default_alignment_k);
+    if (!landing) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+    usearch_key_t* const keys = reinterpret_cast<usearch_key_t*>(landing);
+    usearch_distance_t* const scores = reinterpret_cast<usearch_distance_t*>(landing + total * sizeof(usearch_key_t));
+    for (std::size_t match = 0; match != total; ++match)
+        keys[match] = balls[match].key, scores[match] = balls[match].distance;
+    *arguments->keys = keys;
+    *arguments->scores = scores;
+    if (arguments->written) *arguments->written = total;
 }
 
-std::size_t usearch_geospatial_count(usearch_geospatial_index_t handle, usearch_key_t key,
-                                     usearch_geospatial_key_stats_t* stats, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
+void usearch_geospatial_count(usearch_geospatial_count_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->key_stats = {};
+    usearch_geospatial_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
     std::size_t const width = layout_width(index.options.layout);
-    std::vector<std::size_t> const rows = rows_under(index, key);
-    std::size_t total_points = 0, largest_points = 0;
-    for (std::size_t row : rows) {
-        std::size_t const points = width ? index.entries[row].payload.size() / width : 0;
+    auto const range = index.by_key.equal_range(keyed(arguments->key));
+    std::size_t entries = 0, total_points = 0, largest_points = 0;
+    for (auto position = range.first; position != range.second; ++position, ++entries) {
+        std::size_t const points = width ? index.entries[position->second].payload.size() / width : 0;
         total_points += points;
         largest_points = std::max(largest_points, points);
     }
-    if (stats) {
-        stats->entries = rows.size();
-        stats->total_points = total_points;
-        stats->largest_points = largest_points;
-    }
-    return rows.size();
+    *arguments->key_stats = {entries, total_points, largest_points};
 }
 
-std::size_t usearch_geospatial_get(usearch_geospatial_index_t handle, usearch_key_t key, double* point_sets,
-                                   std::size_t wanted, std::size_t stride, std::size_t* point_counts,
-                                   usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
+void usearch_geospatial_get(usearch_geospatial_get_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->points = nullptr;
+    *arguments->offsets = nullptr;
+    if (arguments->written) *arguments->written = 0;
+    usearch_geospatial_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
     std::size_t const width = layout_width(index.options.layout);
-    std::vector<std::size_t> const rows = rows_under(index, key);
-    for (std::size_t found = 0; found != rows.size() && found < wanted; ++found) {
-        entry_t const& entry = index.entries[rows[found]];
-        if (point_sets) {
-            std::span<double> const target = row_at<double>(point_sets, found, stride, entry.payload.size());
-            for (std::size_t scalar = 0; scalar != entry.payload.size(); ++scalar)
-                target[scalar] = entry.payload[scalar];
-        }
-        if (point_counts) point_counts[found] = width ? entry.payload.size() / width : 0;
+    std::vector<std::size_t> const rows = rows_under(index, arguments->key);
+    if (rows.empty() || !width) return;
+    std::size_t total_scalars = 0;
+    for (std::size_t row : rows) total_scalars += index.entries[row].payload.size();
+    std::size_t const offsets_bytes = (rows.size() + 1) * sizeof(std::size_t);
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, nullptr, outcome);
+    if (!arena) return;
+    std::unique_lock const held {arena->busy, std::adopt_lock};
+    std::byte* const landing = arena->memory.allocate(offsets_bytes + total_scalars * sizeof(double),
+                                                      default_alignment_k);
+    if (!landing) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+    std::size_t* const offsets = reinterpret_cast<std::size_t*>(landing);
+    double* const coordinates = reinterpret_cast<double*>(landing + offsets_bytes);
+    offsets[0] = 0;
+    for (std::size_t found = 0; found != rows.size(); ++found) {
+        geospatial_payload_t const& payload = index.entries[rows[found]].payload;
+        std::copy(payload.begin(), payload.end(), coordinates + offsets[found] * width);
+        offsets[found + 1] = offsets[found] + payload.size() / width;
     }
-    return rows.size();
+    *arguments->points = coordinates;
+    *arguments->offsets = offsets;
+    if (arguments->written) *arguments->written = rows.size();
 }
 
-void usearch_geospatial_merge(usearch_geospatial_index_t handle, usearch_executor_t executor,
-                              usearch_geospatial_index_t const* donors, std::size_t donors_count,
-                              usearch_progress_callback_t progress, void* progress_state, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return;
+void usearch_geospatial_merge(usearch_geospatial_merge_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    usearch_geospatial_index_handle_t& index = *arguments->index;
+    if (reject_read_only(index, outcome)) return;
 
+    std::size_t const donors_count = arguments->count;
+    usearch_geospatial_index_t* const donors = arguments->donors;
+    usearch_progress_callback_t const progress = arguments->progress;
+    void* const progress_state = arguments->progress_state;
     std::size_t merged = 0;
     bool accommodated = true;
     while (accommodated && merged != donors_count) {
-        index_t& donor = borrowed<index_t>(donors[merged]);
+        usearch_geospatial_index_handle_t& donor = *donors[merged];
         std::unique_lock writers(index.mutex);
         accommodated = index.accommodate(index.entries.size() + donor.entries.size());
         if (!accommodated) break;
-        for (entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
+        for (geospatial_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
         ++merged;
         if (!keep_going(progress, progress_state, merged, donors_count)) break;
     }
-    // Only an absorbed donor is consumed: a stopped merge leaves the rest live handles the caller
-    // still owns and must free, as the header promises.
-    for (std::size_t position = 0; position != merged; ++position) delete static_cast<index_t*>(donors[position]);
-    if (!accommodated)
-        return propagate_error(usearch_error_out_of_memory_k, error, "The donor's entries could not be accommodated");
-    reject_cancelled(merged, donors_count, error);
+    // Only an absorbed donor is consumed, and its slot is nulled as it goes, so a stopped merge
+    // leaves the rest live handles the caller still owns and must free.
+    for (std::size_t position = 0; position != merged; ++position) {
+        delete donors[position];
+        donors[position] = nullptr;
+    }
+    if (reject_if(!accommodated, usearch_status_out_of_memory_k, "The donor's entries could not be accommodated",
+                  outcome))
+        return;
+    reject_cancelled(merged, donors_count, outcome);
 }
 
-usearch_geospatial_cursor_t usearch_geospatial_cursor(usearch_geospatial_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
+void usearch_geospatial_cursor_init(usearch_geospatial_cursor_init_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->cursor = nullptr;
+    usearch_geospatial_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
-    cursor_t* cursor = new (std::nothrow) cursor_t {&index, 0, index.entries.size(), {}};
-    if (!cursor) propagate_error(usearch_error_out_of_memory_k, error, "The cursor could not be allocated");
-    return cursor;
+    usearch_geospatial_cursor_handle_t* const cursor = new (std::nothrow)
+        usearch_geospatial_cursor_handle_t {&index, 0, index.entries.size(), {}};
+    if (reject_if(!cursor, usearch_status_out_of_memory_k, "The cursor could not be allocated", outcome)) return;
+    *arguments->cursor = cursor;
 }
 
-std::size_t usearch_geospatial_cursor_next(usearch_geospatial_cursor_t handle, usearch_keys_span_t keys,
-                                           us::i32_t const** point_sets, std::size_t* point_counts,
-                                           usearch_error_t* error) {
-    propagate_success(error);
-    cursor_t& cursor = borrowed<cursor_t>(handle);
-    index_t& index = *cursor.index;
-    if (reject_keys_span(keys, error)) return 0;
+void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->written = 0;
+    usearch_geospatial_cursor_handle_t& cursor = *arguments->cursor;
+    usearch_geospatial_index_handle_t& index = *cursor.index;
+    usearch_keys_span_t const& keys = arguments->keys;
+    us::i32_t const** const point_sets = arguments->point_sets;
+    std::size_t* const point_counts = arguments->point_counts;
+    if (reject_keys_span(keys, outcome)) return;
+    if (reject_if(!point_counts, usearch_status_invalid_argument_k, "The point counts must name storage", outcome))
+        return;
     std::shared_lock readers(index.mutex);
     std::size_t const width = layout_width(index.options.layout);
     std::size_t const written = std::min(keys.capacity, cursor.limit - cursor.position);
@@ -748,81 +802,56 @@ std::size_t usearch_geospatial_cursor_next(usearch_geospatial_cursor_t handle, u
         points_total += width ? index.entries[cursor.position + row].payload.size() / width : 0;
     cursor.centimetres.assign(points_total * 3, 0);
 
-    std::span<usearch_key_t> const keys_row {keys.data, written};
     std::vector<double> widened;
     std::size_t filled = 0;
     for (std::size_t row = 0; row != written; ++row) {
-        entry_t const& entry = index.entries[cursor.position + row];
+        geospatial_entry_t const& entry = index.entries[cursor.position + row];
         std::size_t const points = width ? entry.payload.size() / width : 0;
-        keys_row[row] = entry.key;
+        row_at<usearch_key_t>(keys.data, row, keys.stride, 1).front() = entry.key;
         if (point_sets) point_sets[row] = cursor.centimetres.data() + filled * 3;
-        if (point_counts) point_counts[row] = points;
+        point_counts[row] = points;
         widened.assign(entry.payload.begin(), entry.payload.end());
         for (std::size_t point = 0; point != points; ++point) {
-            position_t const fixed = converted(std::span<double const>(widened).subspan(point * width, width),
-                                               index.options.layout, usearch_geospatial_axes_full_k, 0.0);
+            geospatial_position_t const fixed = converted(
+                std::span<double const>(widened).subspan(point * width, width), index.options.layout,
+                usearch_geospatial_axes_full_k, 0.0);
             for (std::size_t axis = 0; axis != 3; ++axis)
                 cursor.centimetres[(filled + point) * 3 + axis] = static_cast<us::i32_t>(fixed[axis] * 100.0);
         }
         filled += points;
     }
     cursor.position += written;
-    return written;
+    *arguments->written = written;
 }
 
-void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t handle) { delete static_cast<cursor_t*>(handle); }
+void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t handle) { delete handle; }
 
-std::size_t usearch_geospatial_storage_requirements(usearch_geospatial_index_t handle, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
-    std::shared_lock readers(index.mutex);
-    std::optional<std::size_t> const length = serialized_bytes(index, index.entries.size());
-    if (!length) {
-        propagate_error(usearch_error_overflow_k, error, "The checkpoint would not fit an addressable buffer");
-        return 0;
-    }
-    return *length;
-}
-
-void usearch_geospatial_save(usearch_geospatial_index_t handle, usearch_executor_t executor, usearch_bytes_view_t path,
-                             usearch_progress_callback_t progress, void* progress_state, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return;
+void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    usearch_geospatial_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
     std::size_t const rows = index.entries.size();
     std::optional<std::size_t> const length = serialized_bytes(index, rows);
-    if (!length)
-        return propagate_error(usearch_error_overflow_k, error, "The checkpoint would not fit an addressable buffer");
-    if (!keep_going(progress, progress_state, 0, 1))
-        return propagate_error(usearch_error_cancelled_k, error, "The caller's handler stopped the checkpoint");
+    if (reject_if(!length, usearch_status_overflow_k, "The checkpoint would not fit an addressable buffer", outcome))
+        return;
+    if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
+        return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob(*length);
     write_into(index, rows, blob);
-    if (!write_file(path, blob, error)) return;
-    keep_going(progress, progress_state, 1, 1);
+    if (!write_file(arguments->path, blob, outcome)) return;
+    keep_going(arguments->progress, arguments->progress_state, 1, 1);
 }
 
-void usearch_geospatial_load(usearch_geospatial_index_t handle, usearch_executor_t executor, usearch_bytes_view_t path,
-                             usearch_progress_callback_t progress, void* progress_state, usearch_error_t* error) {
-    propagate_success(error);
-    index_t& index = borrowed<index_t>(handle);
-    if (reject_executor(executor, error)) return;
-    if (!keep_going(progress, progress_state, 0, 1))
-        return propagate_error(usearch_error_cancelled_k, error, "The caller's handler stopped the checkpoint");
+void usearch_geospatial_metadata_read(usearch_geospatial_metadata_read_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->metadata = {};
     std::vector<std::byte> blob;
-    if (!read_file(path, blob, error)) return;
-    std::unique_lock writers(index.mutex);
-    if (!read_from(index, blob, error)) return;
-    keep_going(progress, progress_state, 1, 1);
-}
-
-void usearch_geospatial_metadata(usearch_bytes_view_t path, usearch_geospatial_options_t* options,
-                                 usearch_error_t* error) {
-    propagate_success(error);
-    std::vector<std::byte> blob;
-    if (!read_file(path, blob, error)) return;
-    prefix_t prefix {};
-    if (parse_prefix(prefix, blob, error)) adopt(*options, prefix);
+    if (!read_file(arguments->path, blob, outcome)) return;
+    geospatial_checkpoint_prefix_t prefix {};
+    if (!parse_prefix(prefix, blob, outcome)) return;
+    geospatial_index_options_t options {};
+    adopt(options, prefix);
+    *arguments->metadata = {options.layout, options.structure, options.connectivity};
 }
 
 } // extern "C"

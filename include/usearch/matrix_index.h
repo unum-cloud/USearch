@@ -70,7 +70,7 @@
  *  order. A VRAM handle is driven through the streams of its executor. A viewed handle admits
  *  arbitrarily many concurrent searches, having nothing to mutate. Serialization is the one
  *  exception: saving demands a mutation-free window, though concurrent readers keep
- *  searching throughout. Per-call outputs - counts and the error - belong to their
+ *  searching throughout. Per-call outputs - counts and the outcome - belong to their
  *  call and must not be shared between in-flight calls.
  *
  *  An insertion is all-or-nothing per call, and on a RAM handle its entries become visible at
@@ -385,7 +385,7 @@ typedef struct usearch_matrix_view_ram_t {
 USEARCH_EXPORT void usearch_matrix_view_ram(usearch_matrix_view_ram_t* arguments);
 
 /** Frees the resources associated with the index; @c NULL is safe, and it cannot fail, so takes
- *  no error. */
+ *  no outcome. */
 USEARCH_EXPORT void usearch_matrix_free(usearch_matrix_index_t index);
 
 /** The arguments of @c usearch_matrix_reserve. */
@@ -648,7 +648,7 @@ typedef struct usearch_matrix_count_t {
     usearch_key_t key;
 
     /** Output for what @c key holds; zero @c entries means the index holds none. */
-    usearch_matrix_key_stats_t* stats;
+    usearch_matrix_key_stats_t* key_stats;
 } usearch_matrix_count_t;
 
 /** Counts the entries stored under one key, with the extent of their rows. */
@@ -715,8 +715,8 @@ typedef struct usearch_matrix_merge_t {
     /** Donor handles to absorb. */
     size_t count;
 
-    /** Array of @c count handles, every one of them consumed. */
-    usearch_matrix_index_t const* donors;
+    /** Array of @c count handles, every one of them consumed and nulled as it goes. */
+    usearch_matrix_index_t* donors;
 
     /** The @b optional handler, called with donors absorbed and their count. */
     usearch_progress_callback_t progress;
@@ -736,7 +736,8 @@ typedef struct usearch_matrix_merge_t {
  *
  *  Cancellation stops @b between donors, which makes this the one verb where it is not
  *  all-or-nothing: donors already absorbed stay absorbed, and the rest stay live handles the
- *  caller still owns and must free.
+ *  caller still owns and must free. Every consumed slot is nulled as it goes, so the array itself
+ *  says which handles survived.
  */
 USEARCH_EXPORT void usearch_matrix_merge(usearch_matrix_merge_t* arguments);
 

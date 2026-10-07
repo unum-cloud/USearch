@@ -2,91 +2,121 @@
  *  @file src_stub/types.cpp
  *  @author Ash Vardanian
  *  @date September 5, 2026
- *  @brief The vocabulary verbs that belong to no modality - version, capabilities, executors.
+ *  @brief The vocabulary verbs that belong to no modality - outcomes, arenas, executors, version,
+ *      capabilities.
  *
  *  The engine renders the capability strings from NumKong's dispatch mask in @c src/types.cpp. A
  *  stand-in dispatches to nothing, so it reports @c serial and says so wherever a binding asks.
  *
  *  Its executors are inert by the same logic. A handle is spawned, validated and freed exactly as
  *  the engine's is, so a binding suite exercises the whole lifetime, but no thread and no stream
- *  ever exists behind it: every verb runs on the caller's thread. Only the RAM constructor
- *  succeeds, because those are the residencies this library implements at all.
+ *  ever exists behind it: every verb runs to completion on the caller's thread before it returns,
+ *  as the headers allow an executor without threads of its own to. Only the RAM constructors
+ *  succeed, because those are the residencies this library implements at all.
  *
- *  Nothing here serializes, so @c usearch_error_contended_k is a status this library never
- *  reports: two threads driving one executor both run, where the engine refuses the second.
+ *  Nothing here queues, so an in-flight table never fills: two threads driving one executor both
+ *  run, where the engine may refuse the second with @c usearch_status_contended_k.
  */
 #include "usearch/types.h"
 
 #include "lib.hpp"
 
-namespace us = unum::usearch;
 using namespace unum::usearch;
 using namespace unum::usearch::stub;
 
 extern "C" {
 
-char const* usearch_version(void) { return "3.0.0"; }
+void usearch_version(int* major, int* minor, int* patch) {
+    if (major) *major = USEARCH_VERSION_MAJOR;
+    if (minor) *minor = USEARCH_VERSION_MINOR;
+    if (patch) *patch = USEARCH_VERSION_PATCH;
+}
+
+char const* usearch_version_name(void) { return "3.0.0"; }
 char const* usearch_capabilities_compiled(void) { return "serial"; }
 char const* usearch_capabilities_available(void) { return "serial"; }
 
-usearch_executor_t usearch_executor_for_ram(usearch_ram_options_t const*, std::size_t threads, usearch_error_t* error) {
-    propagate_success(error);
-    executor_t* const executor = new (std::nothrow) executor_t {threads ? threads : 1};
-    if (!executor) {
-        propagate_error(usearch_error_out_of_memory_k, error, "The executor could not be allocated");
-        return nullptr;
-    }
-    return executor;
+usearch_status_t usearch_outcome_wait(usearch_outcome_t const* outcome) {
+    if (!outcome) return usearch_status_invalid_argument_k;
+    std::atomic_ref status(const_cast<usearch_status_t&>(outcome->status));
+    usearch_status_t current = status.load(std::memory_order_acquire);
+    for (; current == usearch_status_pending_k; current = status.load(std::memory_order_acquire))
+        status.wait(usearch_status_pending_k, std::memory_order_acquire);
+    return current;
 }
 
-usearch_executor_t usearch_executor_for_nvme(usearch_nvme_options_t const*, std::size_t, usearch_error_t* error) {
-    propagate_error(usearch_error_unsupported_k, error, "This build carries no NVMe residency");
-    return nullptr;
+void usearch_arena_free(usearch_arena_t arena) { delete arena; }
+
+void usearch_executor_for_ram(usearch_executor_for_ram_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->executor = nullptr;
+    usearch_executor_handle_t* const executor = new (std::nothrow)
+        usearch_executor_handle_t {arguments->threads ? arguments->threads : 1};
+    if (reject_if(!executor, usearch_status_out_of_memory_k, "The executor could not be allocated", outcome)) return;
+    *arguments->executor = executor;
 }
 
-usearch_executor_t usearch_executor_for_vram(usearch_vram_options_t const*, usearch_error_t* error) {
-    propagate_error(usearch_error_device_k, error, "This build carries no CUDA backends");
-    return nullptr;
+void usearch_executor_on_pool(usearch_executor_on_pool_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->executor = nullptr;
+    if (reject_if(!arguments->pool, usearch_status_invalid_argument_k, "The pool must not be null", outcome)) return;
+    // The pool is borrowed and never driven, every verb running on the thread that called it.
+    usearch_executor_handle_t* const executor = new (std::nothrow) usearch_executor_handle_t {};
+    if (reject_if(!executor, usearch_status_out_of_memory_k, "The executor could not be allocated", outcome)) return;
+    *arguments->executor = executor;
 }
 
-void usearch_executor_drain(usearch_executor_t executor, usearch_error_t* error) {
-    propagate_success(error);
+void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->executor = nullptr;
+    propagate_error(usearch_status_unsupported_k, outcome, "This build carries no NVMe residency");
+}
+
+void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments) {
+    pending_outcome_t outcome(arguments->outcome);
+    *arguments->executor = nullptr;
+    propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA backends");
+}
+
+void usearch_executor_drain(usearch_executor_drain_t* arguments) {
     // Nothing is ever queued, every verb having run on the thread that called it.
-    reject_if(!executor, usearch_error_malformed_input_k, "The executor must not be null", error);
+    pending_outcome_t outcome(arguments->outcome);
 }
 
-void usearch_executor_free(usearch_executor_t executor) { delete static_cast<executor_t*>(executor); }
+void usearch_executor_free(usearch_executor_t executor) { delete executor; }
 
 #pragma region Vocabulary
 
 char const* usearch_status_name(usearch_status_t status) {
     switch (status) {
-    case usearch_success_k: return "success";
-    case usearch_error_out_of_memory_k: return "out-of-memory";
-    case usearch_error_shape_mismatch_k: return "shape-mismatch";
-    case usearch_error_unsupported_layout_k: return "unsupported-layout";
-    case usearch_error_unknown_kind_k: return "unknown-kind";
-    case usearch_error_read_only_k: return "read-only";
-    case usearch_error_io_k: return "io";
-    case usearch_error_device_k: return "device";
-    case usearch_error_malformed_input_k: return "malformed-input";
-    case usearch_error_internal_k: return "internal";
-    case usearch_error_overflow_k: return "overflow";
-    case usearch_error_uninitialized_k: return "uninitialized";
-    case usearch_error_config_mismatch_k: return "config-mismatch";
-    case usearch_error_contended_k: return "contended";
-    case usearch_error_cancelled_k: return "cancelled";
-    case usearch_error_unsupported_k: return "unsupported";
+    case usearch_status_success_k: return "success";
+    case usearch_status_out_of_memory_k: return "out-of-memory";
+    case usearch_status_shape_mismatch_k: return "shape-mismatch";
+    case usearch_status_unsupported_layout_k: return "unsupported-layout";
+    case usearch_status_unknown_kind_k: return "unknown-kind";
+    case usearch_status_read_only_k: return "read-only";
+    case usearch_status_io_k: return "io";
+    case usearch_status_device_k: return "device";
+    case usearch_status_malformed_k: return "malformed";
+    case usearch_status_internal_k: return "internal";
+    case usearch_status_overflow_k: return "overflow";
+    case usearch_status_uninitialized_k: return "uninitialized";
+    case usearch_status_config_mismatch_k: return "config-mismatch";
+    case usearch_status_contended_k: return "contended";
+    case usearch_status_cancelled_k: return "cancelled";
+    case usearch_status_unsupported_k: return "unsupported";
+    case usearch_status_pending_k: return "pending";
+    case usearch_status_invalid_argument_k: return "invalid-argument";
     default: return "unrecognized";
     }
 }
 
 usearch_status_t usearch_status_from_name(usearch_bytes_view_t name) {
-    for (int code = usearch_success_k; code <= usearch_error_unsupported_k; ++code) {
+    for (int code = usearch_status_success_k; code <= usearch_status_invalid_argument_k; ++code) {
         usearch_status_t const status = static_cast<usearch_status_t>(code);
         if (named(name, usearch_status_name(status))) return status;
     }
-    return usearch_error_internal_k;
+    return usearch_status_invalid_argument_k;
 }
 
 char const* usearch_scalar_name(usearch_scalar_t scalar_kind) {

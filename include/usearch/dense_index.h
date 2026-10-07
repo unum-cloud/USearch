@@ -75,26 +75,27 @@
  *  threading adds nothing. A viewed handle admits arbitrarily many concurrent searches, having
  *  nothing to mutate. Serialization is the one exception: saving demands a mutation-free window,
  *  though concurrent readers keep searching throughout. Per-call outputs - stats, counts, the
- *  error - belong to their call and must not be shared between in-flight calls.
+ *  outcome - belong to their call and must not be shared between in-flight calls.
  *
  *  The executor, not the handle, is what orders: a handle admits any number of concurrent
  *  callers, while calls on one executor run in the order they were submitted. Callers wanting
- *  genuine parallelism give each thread its own executor - a single-thread one spawns no
- *  operating-system threads, so "use my thread" needs no special case - or share one and let it
- *  queue them.
+ *  genuine parallelism give each thread its own executor or share one and let it queue them, and
+ *  a @c NULL executor runs the call on the caller's own thread.
  *
  *  @section dense_index_residencies Verbs per Residency
  *
  *  Every verb this header declares is exported by the engine and by the stand-in alike, so a
  *  residency that lacks one answers @c usearch_status_unsupported_k rather than a missing symbol.
  *
- *  @c usearch_dense_add, @c usearch_dense_search, @c usearch_dense_get, @c usearch_dense_count,
- *  @c usearch_dense_refine and the whole serialization family answer on a RAM handle and on a
- *  VRAM one alike. A search with a @c predicate answers on RAM and is refused on VRAM with
+ *  @c usearch_dense_add, @c usearch_dense_search, @c usearch_dense_count, @c usearch_dense_refine
+ *  and the serialization family, except @c usearch_dense_save_buffer, answer on a RAM handle and
+ *  on a VRAM one alike. A search with a @c predicate answers on RAM and is refused on VRAM with
  *  @c usearch_status_device_k, since a host predicate cannot narrow a device walk.
  *  @c usearch_dense_cursor_init answers on RAM only; VRAM rows are read back through a search.
- *  @c usearch_dense_search_stream_init, @c usearch_dense_merge, @c usearch_dense_multiply,
- *  @c usearch_dense_attend and @c usearch_dense_maxsim are unsupported on both.
+ *  @c usearch_dense_get, @c usearch_dense_save_buffer, @c usearch_dense_multiply,
+ *  @c usearch_dense_attend and @c usearch_dense_maxsim answer on RAM only, the first three
+ *  waiting on device arenas. @c usearch_dense_search_stream_init and @c usearch_dense_merge are
+ *  unsupported on both.
  *
  *  @c usearch_dense_view_nvme answers @c usearch_status_unsupported_k: NVMe checkpoints carry no
  *  keys and no shard wrapper yet, so no C verb can answer on such a handle.
@@ -489,7 +490,7 @@ USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments
 
 /**
  *  @brief Frees the resources associated with the index; @c NULL is safe, and it cannot fail, so
- *      takes no error.
+ *      takes no outcome.
  *  @param[inout] index The handle to be freed; invalid afterwards.
  */
 USEARCH_EXPORT void usearch_dense_free(usearch_dense_index_t index);
@@ -1397,7 +1398,7 @@ typedef struct usearch_dense_attend_t {
  *  @brief Softmax-weighted attention of a run of queries over the indexed keys, folded into the
  *      graph walk in a single pass - no match list is materialized, and each value row is
  *      gathered exactly once, at the moment its key was scored. @ref dense_index_linear_algebra
- *  @retval usearch_status_unsupported_k No residency folds attention over the walk yet.
+ *  @retval usearch_status_unsupported_k A VRAM handle, which folds no attention over its walk yet.
  *
  *  The index holds the keys and @c values holds the value rows, addressed by key: an entry's key
  *  is its row offset into @c values, parked in the low bytes with the rest zeroed. Token positions

@@ -178,7 +178,7 @@ int main() {
 
     fu::preferred_cache_hints_t const hints;
     hints(&random_generator, fu::prefetch_line_t {});
-    hints(&random_generator, fu::stream_line_t {});
+    hints(&random_generator, fu::demote_line_t {});
 
     // The basic index, narrow instantiation: the whole public surface, existence-level.
     narrow_index_t index;

@@ -2,8 +2,8 @@
  *  @file src_stub/lib.hpp
  *  @author Ash Vardanian
  *  @date September 5, 2026
- *  @brief Machinery every modality's stand-in shares - errors, scalars, files, and the append-only
- *      store that keeps the headers' thread-safety promises.
+ *  @brief Machinery every modality's stand-in shares - outcomes, arenas, scalars, files, and the
+ *      append-only store that keeps the headers' thread-safety promises.
  *
  *  Nothing here is part of the C ABI: each @c <modality>.cpp owns its verbs and includes this
  *  for the parts that have nothing to do with which modality it answers. The one shared lock is
@@ -15,8 +15,9 @@
  *  throwaway validation layer, so a @c std::vector under a @c std::shared_mutex is the right
  *  shape and a hand-drawn primitive never is.
  *
- *  The one project header this pulls in is @c usearch/utilities/types.hpp, for the sized-integer
- *  vocabulary the rest of the codebase writes in. It costs no submodule and no runtime.
+ *  The project headers this pulls in are the sized-integer vocabulary, the blocking files, and the
+ *  engine's own arena, so both libraries rewind and refuse aliasing inputs alike. None costs a
+ *  submodule or a runtime.
  */
 #ifndef UNUM_USEARCH_STUB_LIB_HPP
 #define UNUM_USEARCH_STUB_LIB_HPP
@@ -28,9 +29,10 @@
 
 #include <algorithm>     // `std::copy`, `std::sort`, `std::stable_sort`
 #include <array>         // `std::array`
+#include <atomic>        // `std::atomic_ref`
 #include <bit>           // `std::bit_cast`
 #include <functional>    // `std::function`
-#include <mutex>         // `std::lock_guard`, `std::unique_lock`
+#include <mutex>         // `std::mutex`, `std::unique_lock`
 #include <new>           // `std::bad_alloc`
 #include <optional>      // `std::optional`
 #include <shared_mutex>  // `std::shared_mutex`, `std::shared_lock`
@@ -42,8 +44,11 @@
 #include <vector>        // `std::vector`
 
 #include "usearch/types.h"
-#include "usearch/utilities/blocking_files.hpp" // `seekable_file_t` - the checkpoints' resource handle
+#include "usearch/utilities/blocking_files.hpp" // `seekable_file_t`, `mapped_file_t` - the checkpoints' handles
+#include "usearch/utilities/ram_buffers.hpp"    // `growing_arena` - the engine's arena, `contains` included
 #include "usearch/utilities/types.hpp"
+
+namespace us = unum::usearch;
 
 namespace unum {
 namespace usearch {
@@ -86,22 +91,51 @@ inline bytes_view_t as_readable_bytes(usearch_bytes_view_t bytes) {
 
 #pragma endregion Vocabulary
 
-#pragma region Errors
+#pragma region Outcomes
 
-inline void propagate_success(usearch_error_t* error) {
-    if (error) { error->status = usearch_success_k, error->message = nullptr; }
+/** Marks @p outcome running - every verb's first act, so a waiter never reads a stale status. */
+inline void propagate_pending(usearch_outcome_t* outcome) {
+    if (outcome) std::atomic_ref(outcome->status).store(usearch_status_pending_k, std::memory_order_relaxed);
 }
 
-/** The one write path to @p error; the message is null exactly on success. */
-inline void propagate_error(usearch_status_t status, usearch_error_t* error, char const* message) {
-    if (error) *error = usearch_error_t {status, status == usearch_success_k ? nullptr : message};
+/** The one final write to @p outcome: the message, then the status with release ordering, waking
+ *  every waiter. The message is null exactly on success. */
+inline void propagate_error(usearch_status_t status, usearch_outcome_t* outcome, char const* message) {
+    if (!outcome) return;
+    outcome->message = status == usearch_status_success_k ? nullptr : message;
+    std::atomic_ref final_status(outcome->status);
+    final_status.store(status, std::memory_order_release);
+    final_status.notify_all();
 }
 
-/** Reports @p status through @p error when @p wrong, and answers whether it did - the
+/**
+ *  @brief A verb's outcome while it runs: pending from construction, and published once at
+ *      destruction with whatever its guards recorded - success when none did.
+ *
+ *  Every verb declares it first, so it unwinds last: each lock the verb took is released and each
+ *  output written before the final status lets a waiter free what the call named.
+ */
+class pending_outcome_t {
+    usearch_outcome_t* published_;
+    usearch_outcome_t recorded_ {usearch_status_success_k, nullptr};
+
+  public:
+    explicit pending_outcome_t(usearch_outcome_t* published) noexcept : published_(published) {
+        propagate_pending(published_);
+    }
+    ~pending_outcome_t() noexcept { propagate_error(recorded_.status, published_, recorded_.message); }
+    pending_outcome_t(pending_outcome_t const&) = delete;
+    pending_outcome_t& operator=(pending_outcome_t const&) = delete;
+
+    /** The private slot every guard records into, so a verb passes this wherever an outcome goes. */
+    operator usearch_outcome_t*() noexcept { return &recorded_; }
+};
+
+/** Reports @p status through @p outcome when @p wrong, and answers whether it did - the
  *  one shape every guard below takes, so a caller reads `if (reject_if(...)) return;`. */
-inline bool reject_if(bool wrong, usearch_status_t status, char const* message, usearch_error_t* error) {
+inline bool reject_if(bool wrong, usearch_status_t status, char const* message, usearch_outcome_t* outcome) {
     if (!wrong) return false;
-    propagate_error(status, error, message);
+    propagate_error(status, outcome, message);
     return true;
 }
 
@@ -111,63 +145,59 @@ void reset(stats_* stats) {
     if (stats) *stats = {};
 }
 
-#pragma endregion Errors
+#pragma endregion Outcomes
 
 #pragma region Runs
 
 /** Refuses a key run that names no storage; a batch's identities are never optional. */
-inline bool reject_keys(usearch_keys_view_t keys, usearch_error_t* error) {
-    return reject_if(!keys.data, usearch_error_malformed_input_k, "The key run must name storage", error);
+inline bool reject_keys(usearch_keys_view_t keys, usearch_outcome_t* outcome) {
+    return reject_if(!keys.data, usearch_status_invalid_argument_k, "The key run must name storage", outcome);
 }
 
-/** Refuses a key run that does not pair one key with every row it accompanies. */
-inline bool reject_keys_pairing(usearch_keys_view_t keys, std::size_t rows, usearch_error_t* error) {
-    if (reject_keys(keys, error)) return true;
-    return reject_if(keys.count != rows, usearch_error_shape_mismatch_k,
-                     "The key count does not match the row count it accompanies", error);
+/** The @p row -th key of a run, where a zero stride repeats the first. */
+inline usearch_key_t key_at(usearch_keys_view_t keys, std::size_t row) {
+    return *reinterpret_cast<usearch_key_t const*>(reinterpret_cast<std::byte const*>(keys.data) + row * keys.stride);
 }
 
 /** The output twin of @c reject_keys, whose capacity bounds what a streaming verb writes. */
-inline bool reject_keys_span(usearch_keys_span_t keys, usearch_error_t* error) {
-    if (reject_if(!keys.data, usearch_error_malformed_input_k, "The key run must name storage", error)) return true;
-    return reject_if(!keys.capacity, usearch_error_shape_mismatch_k, "A batch must hold at least one key", error);
+inline bool reject_keys_span(usearch_keys_span_t keys, usearch_outcome_t* outcome) {
+    if (reject_if(!keys.data, usearch_status_invalid_argument_k, "The key run must name storage", outcome)) return true;
+    if (reject_if(keys.stride < sizeof(usearch_key_t), usearch_status_unsupported_layout_k,
+                  "The key stride is shorter than one key", outcome))
+        return true;
+    return reject_if(!keys.capacity, usearch_status_shape_mismatch_k, "A batch must hold at least one key", outcome);
 }
 
-/** Refuses a ranked-output triple that names no storage, resolving its two pitches. */
-inline bool reject_matches(usearch_matches_span_t const* matches, std::size_t& keys_stride, std::size_t& scores_stride,
-                           usearch_error_t* error) {
-    if (reject_if(!matches || !matches->keys || !matches->scores || !matches->counts, usearch_error_malformed_input_k,
-                  "The matches span must name all three outputs", error))
+/** Refuses a ranked output that names no storage, lands rows on one another, or holds fewer rows
+ *  than the call's @p count. A zero @c wanted lands only the counts, so it needs no other storage. */
+inline bool reject_matches(usearch_matches_span_t const& matches, std::size_t count, usearch_outcome_t* outcome) {
+    bool const columns = matches.wanted != 0;
+    if (reject_if(!matches.counts || (columns && (!matches.keys || !matches.scores)), usearch_status_invalid_argument_k,
+                  "The matches span must name all three outputs", outcome))
         return true;
-    keys_stride = matches->keys_stride_bytes ? matches->keys_stride_bytes : matches->wanted * sizeof(usearch_key_t);
-    scores_stride = matches->scores_stride_bytes ? matches->scores_stride_bytes
-                                                 : matches->wanted * sizeof(usearch_distance_t);
+    if (reject_if(columns && (matches.keys_stride < matches.wanted * sizeof(usearch_key_t) ||
+                              matches.scores_stride < matches.wanted * sizeof(usearch_distance_t)),
+                  usearch_status_unsupported_layout_k, "A matches stride is shorter than its row", outcome))
+        return true;
+    return reject_if(matches.capacity < count, usearch_status_shape_mismatch_k,
+                     "The matches span holds fewer rows than the call's count", outcome);
+}
+
+/** Refuses a tape without its storage or offsets, or whose offsets ever decrease. */
+inline bool reject_tape(usearch_tape_view_t tape, std::size_t count, usearch_outcome_t* outcome) {
+    if (reject_if(!tape.offsets || (!tape.data && count), usearch_status_invalid_argument_k,
+                  "The tape must name storage", outcome))
+        return true;
+    for (std::size_t entry = 0; entry != count; ++entry)
+        if (reject_if(tape.offsets[entry + 1] < tape.offsets[entry], usearch_status_malformed_k,
+                      "The tape's offsets must not decrease", outcome))
+            return true;
     return false;
 }
 
 #pragma endregion Runs
 
 #pragma region Executors
-
-/**
- *  @brief A stand-in's executor: a handle that exists, remembers what was asked for, and drives
- *      nothing - every verb runs on the thread that called it.
- *
- *  Keeping the handle real rather than ignoring the parameter is what lets a binding suite
- *  exercise the lifetime it will meet against the engine - spawn, pass, drain, free - and see a
- *  null or wrong-kind executor refused at the same place.
- */
-struct executor_t {
-
-    /** Worker threads the caller asked for; honoured by remembering, never by spawning. */
-    std::size_t threads = 1;
-};
-
-/** Refuses a null executor with the engine's own code and message; one stand-in serves
- *  every residency, so the engine's kind-mismatch refusal has nothing to mirror here. */
-inline bool reject_executor(usearch_executor_t executor, usearch_error_t* error) {
-    return reject_if(!executor, usearch_error_malformed_input_k, "Executor must not be null", error);
-}
 
 /** Ticks the caller's handler and answers whether to carry on; a null handler always does. */
 inline bool keep_going(usearch_progress_callback_t progress, void* progress_state, std::size_t completed,
@@ -176,11 +206,63 @@ inline bool keep_going(usearch_progress_callback_t progress, void* progress_stat
 }
 
 /** Reports a handler's cancellation once a loop stopped short, and answers whether it did. */
-inline bool reject_cancelled(std::size_t completed, std::size_t total, usearch_error_t* error) {
-    return reject_if(completed < total, usearch_error_cancelled_k, "The caller's handler stopped the work", error);
+inline bool reject_cancelled(std::size_t completed, std::size_t total, usearch_outcome_t* outcome) {
+    return reject_if(completed < total, usearch_status_cancelled_k, "The caller's handler stopped the work", outcome);
 }
 
+} // namespace stub
+} // namespace usearch
+} // namespace unum
+
+/**
+ *  @brief A stand-in's executor: a handle that exists, remembers what was asked for, and drives
+ *      nothing - every verb runs on the thread that called it.
+ *
+ *  Keeping the handle real rather than ignoring the parameter is what lets a binding suite
+ *  exercise the lifetime it will meet against the engine - spawn, pass, drain, free. A null
+ *  executor behaves exactly like this one, as the engine's runs on the caller's thread too.
+ */
+struct usearch_executor_handle_t {
+
+    /** Worker threads the caller asked for; honoured by remembering, never by spawning. */
+    std::size_t threads = 1;
+};
+
 #pragma endregion Executors
+
+#pragma region Arenas
+
+/** What @c usearch_arena_t owns: host memory that one call at a time rewinds and refills. */
+struct usearch_arena_handle_t {
+    us::growing_arena<> memory {us::global_allocator};
+    std::mutex busy;
+};
+
+namespace unum {
+namespace usearch {
+namespace stub {
+
+/** Claims the caller's arena for one call: creates it behind a null pointee, else rewinds it, which
+ *  frees the previous call's outputs, so an @p input still inside it is refused. The caller adopts
+ *  @c busy into a lock declared after its outcome, so it is released before the final store. */
+inline usearch_arena_handle_t* claim_arena(usearch_arena_t* arena, void const* input, usearch_outcome_t* outcome) {
+    if (!arena)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The arena pointer must not be null"),
+               nullptr;
+    if (!*arena) *arena = new (std::nothrow) usearch_arena_handle_t {};
+    if (!*arena)
+        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the arena"), nullptr;
+    if (!(*arena)->busy.try_lock())
+        return propagate_error(usearch_status_contended_k, outcome, "The arena serves another call"), nullptr;
+    if (input && (*arena)->memory.contains(input))
+        return (*arena)->busy.unlock(),
+               propagate_error(usearch_status_invalid_argument_k, outcome, "An input lies inside the arena it rewinds"),
+               nullptr;
+    (*arena)->memory.clear();
+    return *arena;
+}
+
+#pragma endregion Arenas
 
 #pragma region Scalars
 
@@ -227,8 +309,8 @@ inline std::size_t row_extent(usearch_scalar_t kind, std::size_t dimensions) {
 
 /** Rejects a kind that names no scalar, rather than reading it as @c f32 - a wrong
  *  row-byte computation would otherwise pass. */
-inline bool reject_scalar(usearch_scalar_t kind, usearch_error_t* error) {
-    return reject_if(!scalar_bytes(kind), usearch_error_unknown_kind_k, "The kind names no scalar", error);
+inline bool reject_scalar(usearch_scalar_t kind, usearch_outcome_t* outcome) {
+    return reject_if(!scalar_bytes(kind), usearch_status_unknown_kind_k, "The kind names no scalar", outcome);
 }
 
 inline double read_half(u16_t bits) {
@@ -500,13 +582,6 @@ std::span<value_type_ const> row_at(void const* base, std::size_t row, std::size
 
 #pragma region Storage
 
-/** Unwraps one of the ABI's opaque handles. Every verb's first act, and the only place a
- *  handle's cast is written - the C headers declare all of them as @c void*. */
-template <typename handle_type_>
-handle_type_& borrowed(void* handle) noexcept {
-    return *static_cast<handle_type_*>(handle);
-}
-
 /** One stored row: its key, and whatever the modality calls a payload. */
 template <typename payload_>
 struct entry {
@@ -540,6 +615,9 @@ struct handle {
 
     /** Held shared by every reader, exclusively by every mutation. */
     mutable std::shared_mutex mutex;
+
+    /** The checkpoint a @c view_ram verb serves from, whose presence refuses every mutating verb. */
+    mapped_file_t served;
 
     /** Drops every row, which @c clear promises without touching the frozen options. */
     void reset() noexcept { entries.clear(), by_key.clear(); }
@@ -584,18 +662,25 @@ struct handle {
  *  and the count spans both the entries already stored and the duplicates the batch itself brings.
  */
 template <typename handle_>
-bool reject_oversubscribed(handle_ const& index, usearch_keys_view_t keys, std::size_t values_per_key,
-                           usearch_error_t* error) {
+bool reject_oversubscribed(handle_ const& index, usearch_keys_view_t keys, std::size_t count,
+                           std::size_t values_per_key, usearch_outcome_t* outcome) {
     std::size_t const bound = values_per_key ? values_per_key : 1;
     std::unordered_map<uuid_t, std::size_t> admitted;
-    for (std::size_t row = 0; row != keys.count; ++row) {
-        uuid_t const key = keyed(keys.data[row]);
+    for (std::size_t row = 0; row != count; ++row) {
+        uuid_t const key = keyed(key_at(keys, row));
         std::size_t const held = index.by_key.count(key) + ++admitted[key];
-        if (reject_if(held > bound, usearch_error_overflow_k, "A key would hold more entries than the options admit",
-                      error))
+        if (reject_if(held > bound, usearch_status_overflow_k, "A key would hold more entries than the index admits",
+                      outcome))
             return true;
     }
     return false;
+}
+
+/** Refuses a mutating verb on a handle that serves its checkpoint in place. */
+template <typename handle_>
+bool reject_read_only(handle_ const& index, usearch_outcome_t* outcome) {
+    return reject_if(static_cast<bool>(index.served), usearch_status_read_only_k, "The handle is a read-only view",
+                     outcome);
 }
 
 /** Row positions under @p key, ascending - the insertion order every @c get promises.
@@ -636,7 +721,7 @@ enum class admission_t : bool { rejected_k, admitted_k };
 inline std::function<admission_t(usearch_key_t)> admitting(usearch_predicate_t predicate, void* state) {
     if (!predicate) return [](usearch_key_t) { return admission_t::admitted_k; };
     return [predicate, state](usearch_key_t key) {
-        return predicate(key, state) ? admission_t::admitted_k : admission_t::rejected_k;
+        return predicate(key, state) == usearch_admit_k ? admission_t::admitted_k : admission_t::rejected_k;
     };
 }
 
@@ -677,44 +762,55 @@ inline std::optional<std::size_t> blob_bytes(std::size_t prefix, std::size_t cou
 }
 
 /** Whether @p blob is long enough for @p count records of @p each bytes past @p header,
- *  reporting through @p error which way it fell short. Every modality's @c parse_prefix
+ *  reporting through @p outcome which way it fell short. Every modality's @c parse_prefix
  *  ends in this check; only the extent it computes differs. */
 inline bool fits_blob(bytes_view_t blob, std::size_t header, std::size_t count, std::size_t each,
-                      usearch_error_t* error) {
+                      usearch_outcome_t* outcome) {
     std::optional<std::size_t> const needed = blob_bytes(header, count, each);
-    if (reject_if(!needed, usearch_error_overflow_k, "The checkpoint claims more than can be addressed", error))
+    if (reject_if(!needed, usearch_status_overflow_k, "The checkpoint claims more than can be addressed", outcome))
         return false;
-    return !reject_if(blob.size() < *needed, usearch_error_malformed_input_k,
-                      "The checkpoint is shorter than the entries it claims", error);
+    return !reject_if(blob.size() < *needed, usearch_status_malformed_k,
+                      "The checkpoint is shorter than the entries it claims", outcome);
 }
 
-inline bool read_file(usearch_bytes_view_t path, std::vector<std::byte>& blob, usearch_error_t* error) {
+inline bool read_file(usearch_bytes_view_t path, std::vector<std::byte>& blob, usearch_outcome_t* outcome) {
     auto [file, status] = seekable_file_t::open(as_text(path), file_mode_t::read_k);
     if (failed(status)) {
-        propagate_error(usearch_error_io_k, error, "The checkpoint could not be opened for reading");
+        propagate_error(usearch_status_io_k, outcome, "The checkpoint could not be opened for reading");
         return false;
     }
     auto const [bytes, length_status] = file.length();
     if (failed(length_status)) {
-        propagate_error(usearch_error_io_k, error, "The checkpoint could not be read");
+        propagate_error(usearch_status_io_k, outcome, "The checkpoint could not be read");
         return false;
     }
     blob.resize(bytes);
     if (failed(file.read_at(0, bytes_span_t {blob}))) {
-        propagate_error(usearch_error_io_k, error, "The checkpoint could not be read");
+        propagate_error(usearch_status_io_k, outcome, "The checkpoint could not be read");
         return false;
     }
     return true;
 }
 
-inline bool write_file(usearch_bytes_view_t path, bytes_view_t blob, usearch_error_t* error) {
+/** Maps the checkpoint at @p path for a view to serve from; empty once the outcome records why not. */
+inline mapped_file_t map_file(usearch_bytes_view_t path, usearch_outcome_t* outcome) {
+    auto [mapping, status] = mapped_file_t::read(as_text(path));
+    // An empty file maps nothing, which is the short checkpoint every parser would refuse.
+    if (status == status_t::malformed_k)
+        propagate_error(usearch_status_malformed_k, outcome, "The checkpoint ends early");
+    else if (failed(status))
+        propagate_error(usearch_status_io_k, outcome, "The checkpoint could not be opened for reading");
+    return std::move(mapping);
+}
+
+inline bool write_file(usearch_bytes_view_t path, bytes_view_t blob, usearch_outcome_t* outcome) {
     auto [file, status] = seekable_file_t::open(as_text(path), file_mode_t::write_k);
     if (failed(status)) {
-        propagate_error(usearch_error_io_k, error, "The checkpoint could not be opened for writing");
+        propagate_error(usearch_status_io_k, outcome, "The checkpoint could not be opened for writing");
         return false;
     }
     if (failed(file.write_at(0, blob)) || failed(file.close())) {
-        propagate_error(usearch_error_io_k, error, "The checkpoint could not be written");
+        propagate_error(usearch_status_io_k, outcome, "The checkpoint could not be written");
         return false;
     }
     return true;

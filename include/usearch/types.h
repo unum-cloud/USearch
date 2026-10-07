@@ -271,6 +271,10 @@ typedef enum usearch_status_t {
 
     /** The call was submitted and has not finished; never a final status. */
     usearch_status_pending_k = 16,
+
+    /** An argument breaks the verb's contract - a required pointer left @c NULL, inputs inside
+     *  the arena the call rewinds, a name no table spells. */
+    usearch_status_invalid_argument_k = 17,
 } usearch_status_t;
 
 /** Outcome of one call: a status every binding can branch on, and a static message
@@ -670,8 +674,10 @@ typedef usearch_continuation_t (*usearch_progress_callback_t)( //
 /**
  *  @brief Blocks until @p outcome is final, without spinning, and with acquire ordering.
  *  @param[in] outcome An outcome passed to a call, read until its status leaves @c usearch_status_pending_k.
- *  @return The final status; @c usearch_status_pending_k at once when called from inside a callback of
- *      the executor running that call, rather than waiting on itself.
+ *  @return The final status.
+ *
+ *  Never wait on a call's own outcome from inside its progress handler or predicate: the call ends
+ *  only after they return.
  */
 USEARCH_EXPORT usearch_status_t usearch_outcome_wait(usearch_outcome_t const* outcome);
 
@@ -741,8 +747,13 @@ USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena);
  *  @c usearch_status_contended_k as its final status, leaving the caller to wait on earlier calls
  *  and resubmit. Blocking calls take no slot.
  *
- *  @c usearch_executor_drain called from inside a progress handler, a predicate, or a host
- *  function an executor runs reports @c usearch_status_contended_k rather than waiting on itself.
+ *  A blocking verb or @c usearch_executor_drain called from inside a progress handler or a predicate
+ *  of a call on the same executor reports @c usearch_status_contended_k rather than waiting on itself.
+ *
+ *  Every verb accepts a @c NULL executor and then runs on the caller's thread, blocking whatever
+ *  its @c completion says: RAM work runs single-threaded, VRAM work runs on the handle's device and
+ *  default stream and synchronizes before returning, and NVMe reads are synchronous. An arena such
+ *  a call creates lives where the handle's residency computes.
  *
  *  The library stages only to change layout on the side that computes, or to make pageable memory
  *  DMA-able, and never routes device bytes through the host:
@@ -920,7 +931,7 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments);
 
 /**
  *  @brief Drains every call, releases the scratch and the streams it owns, and frees the executor;
- *      @c NULL is safe, and it cannot fail, so takes no error.
+ *      @c NULL is safe, and it cannot fail, so takes no outcome.
  *  @param[inout] executor The handle to be freed; invalid afterwards.
  *
  *  Never call it from inside a progress handler, a predicate, or a host function the executor
@@ -938,7 +949,7 @@ USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor);
  */
 USEARCH_EXPORT char const* usearch_status_name(usearch_status_t status);
 
-/** Reads a status back from its canonical spelling. */
+/** Reads a status back; @c usearch_status_invalid_argument_k when unrecognized. */
 USEARCH_EXPORT usearch_status_t usearch_status_from_name(usearch_bytes_view_t name);
 
 /** The canonical spelling of a scalar kind, as @c usearch_scalar_f32_k spells "f32". */

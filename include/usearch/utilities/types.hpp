@@ -164,55 +164,61 @@ struct dummy_fold_t {
 enum class [[nodiscard]] status_t : int {
 
     /** The call completed and any paired value is meaningful. */
-    success_k = usearch_success_k,
+    success_k = usearch_status_success_k,
 
     /** The underlying allocator failed to provide memory; retrying a smaller batch may succeed. */
-    bad_alloc_k = usearch_error_out_of_memory_k,
+    bad_alloc_k = usearch_status_out_of_memory_k,
 
     /** Dimensionality, row counts, or output capacity disagree. */
-    shape_mismatch_k = usearch_error_shape_mismatch_k,
+    shape_mismatch_k = usearch_status_shape_mismatch_k,
 
     /** A stride or packing no traversal can walk. */
-    unsupported_layout_k = usearch_error_unsupported_layout_k,
+    unsupported_layout_k = usearch_status_unsupported_layout_k,
 
     /** A scalar, metric, or residency tag this build does not know. */
-    unknown_kind_k = usearch_error_unknown_kind_k,
+    unknown_kind_k = usearch_status_unknown_kind_k,
 
     /** A mutating verb on a structure that opens its checkpoint in place. */
-    read_only_k = usearch_error_read_only_k,
+    read_only_k = usearch_status_read_only_k,
 
     /** A file could not be opened, read, written, or parsed. */
-    io_k = usearch_error_io_k,
+    io_k = usearch_status_io_k,
 
     /** An accelerator runtime call failed - the device state should be treated as
      *  poisoned and the structure rebuilt. */
-    device_error_k = usearch_error_device_k,
+    device_error_k = usearch_status_device_k,
 
     /** The serialized payload is truncated or does not describe this structure. */
-    malformed_k = usearch_error_malformed_input_k,
+    malformed_k = usearch_status_malformed_k,
 
     /** Neither success nor a named failure was reported - a defect, not a state. */
-    internal_k = usearch_error_internal_k,
+    internal_k = usearch_status_internal_k,
 
     /** The structure reached a hard design ceiling, like the 2^32 id space; retrying can't help. */
-    overflow_k = usearch_error_overflow_k,
+    overflow_k = usearch_status_overflow_k,
 
     /** The operation requires a prior successful @c reserve() -like initialization call. */
-    uninitialized_k = usearch_error_uninitialized_k,
+    uninitialized_k = usearch_status_uninitialized_k,
 
     /** The requested configuration contradicts an already-frozen one, like re-reserving
      *  with a different geometry; pass matching parameters or start a fresh structure. */
-    config_mismatch_k = usearch_error_config_mismatch_k,
+    config_mismatch_k = usearch_status_config_mismatch_k,
 
     /** A certified synchronization contract was violated by a concurrent operation;
      *  discard any produced output and retry in a quieter phase. */
-    contended_k = usearch_error_contended_k,
+    contended_k = usearch_status_contended_k,
 
     /** A progress callback asked the operation to stop; it unwound without publishing,
      *  so the structure carries whatever it did before the call. */
-    cancelled_k = usearch_error_cancelled_k,
+    cancelled_k = usearch_status_cancelled_k,
     /** @brief The verb is declared for every residency but this one does not implement it. */
-    unsupported_k = usearch_error_unsupported_k,
+    unsupported_k = usearch_status_unsupported_k,
+
+    /** The call was submitted and has not finished; never a final status. */
+    pending_k = usearch_status_pending_k,
+
+    /** An argument breaks the verb's contract, like a required pointer left null. */
+    invalid_argument_k = usearch_status_invalid_argument_k,
 };
 
 /** Whether @p status reports success. */
@@ -251,15 +257,15 @@ enum class continuation_t : int {
     cancel_k = usearch_cancel_k,
 };
 
-/** Whether a verb returns when its work is done, or once it is merely queued on the
- *  executor. Mirrors @c usearch_completion_t value for value, so the two enums cannot drift. */
+/** Whether a device verb returns when its work is done, or once it is merely queued on its stream,
+ *  which is how a sharded index overlaps its devices before one drain. */
 enum class completion_t : int {
 
     /** Return once the work is finished and its outputs are readable. */
-    blocking_k = usearch_completion_blocking_k,
+    blocking_k,
 
     /** Return once the work is queued; outputs stay indeterminate until a drain. */
-    deferred_k = usearch_completion_deferred_k,
+    deferred_k,
 };
 
 /**
@@ -285,6 +291,8 @@ constexpr char const* status_to_string(status_t status) noexcept {
     case status_t::contended_k: return "a synchronization contract was violated concurrently";
     case status_t::cancelled_k: return "a progress callback asked the operation to stop";
     case status_t::unsupported_k: return "this residency does not implement the verb";
+    case status_t::pending_k: return "the call was submitted and has not finished";
+    case status_t::invalid_argument_k: return "an argument breaks the verb's contract";
     }
     return "an unrecognized status";
 }

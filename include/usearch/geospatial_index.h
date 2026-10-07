@@ -68,7 +68,7 @@
  *  exception: saving demands a mutation-free window, though concurrent readers keep
  *  searching throughout. An emplaced query object is @b not internally synchronized - build
  *  one per thread, or confine it to the thread that emplaced it. Per-call outputs - stats,
- *  counts, the error - belong to their call and must not be shared between in-flight calls.
+ *  counts, the outcome - belong to their call and must not be shared between in-flight calls.
  *
  *  An insertion is all-or-nothing per call, and on a RAM handle its entries become visible at
  *  once, so a concurrent search sees every entry of the call or none of them.
@@ -425,7 +425,7 @@ typedef struct usearch_geospatial_view_ram_t {
 USEARCH_EXPORT void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments);
 
 /** Frees the resources associated with the index; @c NULL is safe, and it cannot fail, so takes
- *  no error. */
+ *  no outcome. */
 USEARCH_EXPORT void usearch_geospatial_free(usearch_geospatial_index_t index);
 
 /** The arguments of @c usearch_geospatial_reserve. */
@@ -733,10 +733,13 @@ typedef struct usearch_geospatial_within_t {
     /** Whether the call blocks or returns once queued; zero blocks. */
     usearch_completion_t completion;
 
-    /** The emplaced query the containment is measured from. */
-    usearch_geospatial_emplaced_t query;
+    /** Emplaced queries to resolve, one walk apiece. */
+    size_t count;
 
-    /** What "close" means for this walk. */
+    /** Array of @c count emplaced query handles. */
+    usearch_geospatial_emplaced_t const* queries;
+
+    /** What "close" means for these walks. */
     usearch_geospatial_mode_t mode;
 
     /** Which axes participate; narrowing never invalidates the graph. */
@@ -745,38 +748,54 @@ typedef struct usearch_geospatial_within_t {
     /** The radius and time window; @c metres must be positive. */
     usearch_geospatial_tolerance_t tolerance;
 
+    /** Output for @c count + 1 offsets into @c keys and @c scores, query @c i spanning entries
+     *  @c offsets[i] up to @c offsets[i+1]. */
+    size_t* offsets;
+
     /** Output for the keys inside @c arena. */
     usearch_key_t** keys;
 
     /** Output for the scores inside @c arena, positionally paired with @c keys. */
     usearch_distance_t** scores;
 
-    /** The @b optional output for the entries written. */
+    /** The @b optional output for the entries written across every query. */
     size_t* written;
 
     /** Memory for @c keys and @c scores: reused when it points to an arena, created when it points
      *  to @c NULL. */
     usearch_arena_t* arena;
 
-    /** The @b optional handler, called as the walk scores its candidate pool; @c NULL skips it. */
+    /** The @b optional per-key admission callback; @c NULL admits everything. */
+    usearch_predicate_t predicate;
+
+    /** Opaque pointer forwarded into every @c predicate call. */
+    void* predicate_state;
+
+    /** The @b optional handler, called with queries resolved and their count. */
     usearch_progress_callback_t progress;
 
     /** Opaque pointer forwarded into every @c progress call. */
     void* progress_state;
+
+    /** The @b optional traversal telemetry; @c NULL skips reporting. */
+    usearch_geospatial_traversal_stats_t* stats;
 } usearch_geospatial_within_t;
 
 /**
- *  @brief Reports every entry scoring within the tolerance of one emplaced query - the
+ *  @brief Reports every entry scoring within the tolerance of each emplaced query - the
  *      containment counterpart of the ranked search, unbounded in result count.
+ *  @retval usearch_status_invalid_argument_k A tolerance of zero metres, since containment needs a
+ *      radius.
  *
  *  Complete on the converged graph: the walk widens its pool by the cone graph's spanner
  *  bound before trusting it, so every candidate inside the tolerance is enumerated, at
- *  about thirty times the cost of the ball it reports. A tolerance of zero metres is
- *  rejected here, since containment needs a radius. Containment sizes its own pool from that
- *  bound, so it takes no breadth a caller could make the report incomplete with. Only the walk
- *  learns how large the report is, so the keys and scores land in @c arena.
+ *  about thirty times the cost of the ball it reports. Containment sizes its own pool from that
+ *  bound, so it takes no breadth a caller could make the report incomplete with. Only the walks
+ *  learn how large the report is, so the keys and scores land in @c arena as a ragged output with
+ *  Apache Arrow offsets, as @c usearch_dense_multiply lands its pairs. A @c predicate narrows the
+ *  report without stopping the walk from crossing the entries it rejects.
  *
- *  A cancelled walk reports @c usearch_status_cancelled_k and leaves the outputs indeterminate.
+ *  A cancelled call reports @c usearch_status_cancelled_k and leaves the outputs @c NULL.
  */
 USEARCH_EXPORT void usearch_geospatial_within(usearch_geospatial_within_t* arguments);
 
@@ -812,7 +831,7 @@ typedef struct usearch_geospatial_count_t {
     usearch_key_t key;
 
     /** Output for what @c key holds; zero @c entries means the index holds none. */
-    usearch_geospatial_key_stats_t* stats;
+    usearch_geospatial_key_stats_t* key_stats;
 } usearch_geospatial_count_t;
 
 /** Counts the entries stored under one key, with the extent of their points. */
@@ -876,8 +895,8 @@ typedef struct usearch_geospatial_merge_t {
     /** Donor handles to absorb. */
     size_t count;
 
-    /** Array of @c count handles, every one of them consumed. */
-    usearch_geospatial_index_t const* donors;
+    /** Array of @c count handles, every one of them consumed and nulled as it goes. */
+    usearch_geospatial_index_t* donors;
 
     /** The @b optional handler, called with donors absorbed and their count. */
     usearch_progress_callback_t progress;
@@ -897,7 +916,8 @@ typedef struct usearch_geospatial_merge_t {
  *
  *  Cancellation stops @b between donors, which makes this the one verb where it is not
  *  all-or-nothing: donors already absorbed stay absorbed, and the rest stay live handles the
- *  caller still owns and must free.
+ *  caller still owns and must free. Every consumed slot is nulled as it goes, so the array itself
+ *  says which handles survived.
  */
 USEARCH_EXPORT void usearch_geospatial_merge(usearch_geospatial_merge_t* arguments);
 
