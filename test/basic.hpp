@@ -29,7 +29,7 @@
 #include <array>       // `std::array` - handmade triples
 #include <atomic>      // `std::atomic` - per-thread failure counters & metric gates
 #include <bit>         // `std::bit_cast` - planting an id into a monolith
-#include <limits>      // `std::numeric_limits` - the widest node id
+#include <limits>      // `std::numeric_limits` - the widest node ID and the unarmed budgets
 #include <string>      // `std::string` - the metric token read back
 #include <string_view> // `std::string_view` - dtype names
 #include <thread>      // `std::this_thread::yield` - the gated metric's spin
@@ -92,8 +92,8 @@ struct basic_auditing_metric {
     /** Contract breaches observed; every scenario asserts this stays zero. */
     std::size_t violations = 0;
 
-    /** Accepted pushes before refusal begins; @c SIZE_MAX means unarmed. */
-    std::size_t budget_left = SIZE_MAX;
+    /** Accepted pushes before refusal begins; the type's maximum means unarmed. */
+    std::size_t budget_left = std::numeric_limits<std::size_t>::max();
 
     template <typename query_type_>
     void reset(query_type_ const& query) noexcept {
@@ -120,7 +120,7 @@ struct basic_auditing_metric {
     }
 
     void arm(std::size_t budget) noexcept { budget_left = budget; }
-    void disarm() noexcept { budget_left = SIZE_MAX; }
+    void disarm() noexcept { budget_left = std::numeric_limits<std::size_t>::max(); }
 };
 
 /** Wrapper whose first push parks until released - the deterministic way to hold
@@ -747,7 +747,7 @@ std::size_t test_basic_allocation_budget(u64_t seed) {
         ledger.byte_budget.store(ledger.live_bytes.load() + 64);
         failures += expect_eq(index.reserve(basic_growth_nodes_k).status, status_t::bad_alloc_k);
         failures += expect_eq(index.capacity(), 0u);
-        ledger.byte_budget.store(PTRDIFF_MAX);
+        ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
         failures += expect_eq(index.reserve(basic_growth_nodes_k).status, status_t::success_k);
 
         constexpr std::size_t linked_nodes_k = 40;
@@ -770,7 +770,7 @@ std::size_t test_basic_allocation_budget(u64_t seed) {
         failures += expect(refused_target != 0);
         failures += expect_eq(index.degree_of(0).value, degree_before + fresh_links);
 
-        ledger.byte_budget.store(PTRDIFF_MAX);
+        ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
         auto const [retry_membership, retry_status] = index.link(0, refused_target);
         failures += expect_eq(retry_status, status_t::success_k);
         failures += expect(retry_membership == membership_t::absent_k);
@@ -878,7 +878,7 @@ std::size_t test_basic_starved(u64_t seed) {
         failures += expect(saturations > 0);
 
         // Lifting the budget makes every refusal retryable.
-        ledger.byte_budget.store(PTRDIFF_MAX);
+        ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
         failures += expect_eq(index.health(warm_context).status, status_t::success_k);
         failures += expect_eq(
             index.insert({extras.data() + 1, 1}, {extra_keys.data() + 1, 1}, metric, {}, cold_context).status,
@@ -893,7 +893,7 @@ std::size_t test_basic_starved(u64_t seed) {
         ledger.byte_budget.store(ledger.live_bytes.load());
         failures += expect_eq(restored.load(columns.view(), codec), status_t::bad_alloc_k);
         failures += expect_eq(restored.size(), 0u);
-        ledger.byte_budget.store(PTRDIFF_MAX);
+        ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
         failures += expect_eq(restored.load(columns.view(), codec), status_t::success_k);
         failures += expect_eq(restored.size(), index.size());
     }
@@ -1721,7 +1721,7 @@ std::size_t test_basic_metric_contract(u64_t seed) {
 
     /** Tallies the rounds & pairs a walk scores, sated once it has seen @c rounds_limit rounds. */
     struct counting_fold_t {
-        std::size_t rounds_limit = SIZE_MAX;
+        std::size_t rounds_limit = std::numeric_limits<std::size_t>::max();
         std::size_t rounds = 0;
         std::size_t pairs = 0;
 

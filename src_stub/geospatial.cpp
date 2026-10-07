@@ -29,6 +29,7 @@
 #include <cmath> // `std::sqrt`, `std::sin`, `std::cos`
 
 #include <algorithm> // `std::stable_sort`, `std::min`, `std::max`
+#include <limits>    // `std::numeric_limits`
 #include <array>     // `std::array`
 #include <optional>  // `std::optional`
 #include <span>      // `std::span`
@@ -218,16 +219,16 @@ void convert_stored(std::span<float const> stored, usearch_geospatial_layout_t l
 /** The directed nearest-approach of every position in @p from to the whole of @p onto. */
 void directed(std::span<geospatial_position_t const> from, std::span<geospatial_position_t const> onto, double& nearest,
               double& worst) {
-    nearest = INFINITY, worst = 0;
+    nearest = 0, worst = 0;
+    if (from.empty() || onto.empty()) return;
+    nearest = std::numeric_limits<double>::infinity();
     for (geospatial_position_t const& position : from) {
-        double closest = INFINITY;
+        double closest = std::numeric_limits<double>::infinity();
         for (geospatial_position_t const& partner : onto)
             closest = std::min(closest, position_distance(position, partner));
-        if (closest == INFINITY) closest = 0;
         nearest = std::min(nearest, closest);
         worst = std::max(worst, closest);
     }
-    if (nearest == INFINITY) nearest = 0;
 }
 
 /** Scores one query set against one stored set under the selected mode. Route scoring

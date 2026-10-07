@@ -24,7 +24,7 @@
 
 #include <cmath>   // `std::ldexp`, `std::frexp`
 #include <cstddef> // `std::byte`, `std::size_t`
-#include <cstdint> // `SIZE_MAX`
+#include <cstdint> // `std::uint8_t`
 #include <cstring> // `std::memcmp`
 
 #include <algorithm>     // `std::copy`, `std::sort`, `std::stable_sort`
@@ -32,6 +32,7 @@
 #include <atomic>        // `std::atomic_ref`
 #include <bit>           // `std::bit_cast`
 #include <functional>    // `std::function`
+#include <limits>        // `std::numeric_limits`
 #include <mutex>         // `std::mutex`, `std::unique_lock`
 #include <new>           // `std::bad_alloc`
 #include <optional>      // `std::optional`
@@ -319,7 +320,9 @@ inline double read_half(u16_t bits) {
     int const mantissa = bits & 0x3FF;
     double value;
     if (exponent == 0) { value = std::ldexp(static_cast<double>(mantissa), -24); }
-    else if (exponent == 31) { value = mantissa ? NAN : INFINITY; }
+    else if (exponent == 31) {
+        value = mantissa ? std::numeric_limits<double>::quiet_NaN() : std::numeric_limits<double>::infinity();
+    }
     else { value = std::ldexp(1024.0 + mantissa, exponent - 25); }
     return sign ? -value : value;
 }
@@ -400,9 +403,9 @@ inline double read_minifloat(u8_t bits, minifloat_t format) {
     int const bias = (1 << (format.exponent_bits - 1)) - 1;
     double const sign = code >> (width - 1) ? -1.0 : 1.0;
     if (exponent == saturated && format.specials == minifloat_specials_t::inf_and_nan_k)
-        return mantissa ? NAN : sign * INFINITY;
+        return mantissa ? std::numeric_limits<double>::quiet_NaN() : sign * std::numeric_limits<double>::infinity();
     if (exponent == saturated && mantissa == mantissa_span - 1 && format.specials == minifloat_specials_t::nan_only_k)
-        return NAN;
+        return std::numeric_limits<double>::quiet_NaN();
     // A zero exponent field is the subnormal step, so the arms differ only in the implied leading bit.
     unsigned const significand = exponent ? mantissa + mantissa_span : mantissa;
     int const scale = static_cast<int>(exponent ? exponent : 1) - bias - static_cast<int>(format.mantissa_bits);
@@ -757,7 +760,7 @@ void rank(std::span<entry<payload_> const> entries, std::function<admission_t(us
 /** The extent of a checkpoint, empty when that many rows cannot be addressed. Every
  *  modality's blob is a prefix followed by @p count entries of @p each bytes. */
 inline std::optional<std::size_t> blob_bytes(std::size_t prefix, std::size_t count, std::size_t each) {
-    if (each && count > (SIZE_MAX - prefix) / each) return std::nullopt;
+    if (each && count > (std::numeric_limits<std::size_t>::max() - prefix) / each) return std::nullopt;
     return prefix + count * each;
 }
 

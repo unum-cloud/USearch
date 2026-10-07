@@ -39,6 +39,7 @@
 #include <cmath> // `std::sqrt`, `std::exp`
 
 #include <algorithm>     // `std::stable_sort`, `std::min`, `std::max`
+#include <limits>        // `std::numeric_limits`
 #include <optional>      // `std::optional`
 #include <span>          // `std::span`
 #include <unordered_map> // `std::unordered_map`
@@ -884,7 +885,7 @@ void usearch_dense_attend(usearch_dense_attend_t* arguments) {
     for (std::size_t query = 0; query != queries_count; ++query) {
         read_row(row_at<std::byte>(queries.data, query, queries.stride, query_bytes), queries.scalar, query_row);
         // The online-softmax recurrence: a running maximum, a partition, and a weighted sum.
-        double maximum = -INFINITY, partition = 0;
+        double maximum = std::numeric_limits<double>::lowest(), partition = 0;
         std::fill(accumulated.begin(), accumulated.end(), 0.0);
         for (std::size_t member = 0; member != indexed; ++member) {
             dense_entry_t const& entry = index.entries[member];
@@ -966,7 +967,7 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
             double summed = 0;
             for (std::size_t row = 0; row != rows_per_query; ++row) {
                 std::span<double const> const query_row {query_rows.data() + row * dimensions, dimensions};
-                double best = -INFINITY;
+                double best = std::numeric_limits<double>::lowest();
                 for (std::size_t stored : token_rows[document])
                     best = std::max(best, dot_product(query_row, index.entries[stored].payload));
                 summed += best;

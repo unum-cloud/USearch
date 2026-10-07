@@ -27,6 +27,7 @@
 #include <cmath> // `std::sqrt`
 
 #include <algorithm> // `std::stable_sort`, `std::min`, `std::max`
+#include <limits>    // `std::numeric_limits`
 #include <optional>  // `std::optional`
 #include <span>      // `std::span`
 #include <vector>    // `std::vector`
@@ -125,12 +126,12 @@ void nearest_partners(std::span<double const> from, std::span<double const> onto
                       double& worst) {
     summed = 0, worst = 0;
     std::size_t const from_rows = from.size() / columns, onto_rows = onto.size() / columns;
+    if (!onto_rows) return;
     for (std::size_t row = 0; row != from_rows; ++row) {
-        double nearest = INFINITY;
+        double nearest = std::numeric_limits<double>::infinity();
         for (std::size_t partner = 0; partner != onto_rows; ++partner)
             nearest = std::min(
                 nearest, row_distance(from.subspan(row * columns, columns), onto.subspan(partner * columns, columns)));
-        if (nearest == INFINITY) nearest = 0;
         summed += nearest;
         worst = std::max(worst, nearest);
     }

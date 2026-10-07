@@ -2778,7 +2778,7 @@ std::size_t dense_expect_starved_load(make_index_type_ const& make_index, alloca
     ledger.byte_budget.store(ledger.live_bytes.load());
     failures += expect_eq(starved.load(source, nodes_count, local), status_t::bad_alloc_k);
     failures += expect_eq(starved.size(), 0u);
-    ledger.byte_budget.store(PTRDIFF_MAX);
+    ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
     return failures;
 }
 
@@ -2810,7 +2810,7 @@ std::size_t dense_expect_allocation_budget(make_index_type_ const& make_index, a
     failures += expect_eq(index.size(), fill_rows_count);
 
     // Lift it: the identical batch is retryable.
-    ledger.byte_budget.store(PTRDIFF_MAX);
+    ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
     failures += expect(index.insert(extra_rows, {}, context).status == status_t::success_k);
     std::size_t const nodes_count = fill_rows_count + extra_rows_count;
     failures += expect_eq(index.size(), nodes_count);
@@ -2929,7 +2929,7 @@ std::size_t dense_expect_saturated(make_index_type_ const& make_index, allocatio
     failures += expect_eq(insert_status, status_t::success_k);
     failures += expect_eq(insert_result.saturated_walks, 1u);
     failures += expect_eq(index.size(), dense_growth_nodes_k + 1);
-    ledger.byte_budget.store(PTRDIFF_MAX);
+    ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
     return failures;
 }
 
@@ -3012,7 +3012,7 @@ std::size_t dense_expect_overflow_race(make_index_type_ const& make_index, alloc
                               status_t::overflow_k);
 
     // A lifted budget makes a refused batch retryable.
-    ledger.byte_budget.store(PTRDIFF_MAX);
+    ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
     failures += expect(refused_thread != racing_threads_count);
     failures += expect(index
                            .insert(threads.slices[refused_thread].view(), {}, //

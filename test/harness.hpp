@@ -20,7 +20,7 @@
 #pragma once
 
 #include <cmath>   // `std::fabs`, `std::fmax` - the relative tolerance of `expect_near`
-#include <cstdint> // `PTRDIFF_MAX` - the unbounded allocation budget
+#include <cstdint> // `std::uint32_t` - the seed
 #include <cstdlib> // `std::malloc`, `std::free`, `std::abort`, `std::getenv`, `std::exit`
 #include <cstring> // `std::memset` - the scribble over a freed block
 
@@ -29,6 +29,7 @@
 #include <atomic>       // `std::atomic`
 #include <charconv>     // `std::from_chars` - the seed
 #include <chrono>       // `std::chrono::microseconds` - the flaky waiter's oversleep
+#include <limits>       // `std::numeric_limits` - the unbounded allocation budget
 #include <optional>     // `std::optional` - the settings readers
 #include <random>       // `std::random_device` - a drawn seed
 #include <regex>        // `std::regex`, `std::regex_search` - the filter
@@ -263,7 +264,7 @@ struct allocation_ledger_t {
 
     /** Allocation ceiling in live bytes; scenarios lower it to drive the all-or-
      *  nothing refusal paths, so a request past it is refused, never counted. */
-    std::atomic<std::ptrdiff_t> byte_budget {PTRDIFF_MAX};
+    std::atomic<std::ptrdiff_t> byte_budget {std::numeric_limits<std::ptrdiff_t>::max()};
 };
 
 /**

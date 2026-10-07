@@ -652,6 +652,17 @@ check_hand_ceils() {
         "$file hand-rolls a ceiling division - write divide_round_up(value, divisor) from usearch/utilities/types.hpp:"
 }
 
+# C's limit macros - `INFINITY`, `NAN`, `SIZE_MAX`, `PTRDIFF_MAX`, `FLT_MAX` and kin - name what
+# `std::numeric_limits` spells per type, so a C++ line writes `lowest()`, `max()`, `quiet_NaN()` or
+# `infinity()`. Preprocessor lines, comments and string literals stay out; the C sources keep the macros.
+check_c_limit_macros() {
+    local macros
+    macros=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(#|//|/\*|\*( |/|$))' | sed -E 's/"([^"\\]|\\.)*"//g' |
+        grep -E '\b(INFINITY|NAN|HUGE_VALF?|SIZE_MAX|PTRDIFF_(MAX|MIN)|U?INT(8|16|32|64)?_(MAX|MIN)|U?L?LONG_(MAX|MIN)|(FLT|DBL)_(MAX|MIN|EPSILON))\b' || true)
+    [ -z "$macros" ] || fail "$macros" \
+        "$file spells a C limit macro - write std::numeric_limits<type>::lowest(), max(), quiet_NaN() or infinity():"
+}
+
 # `std::min` / `std::max` re-derive what the shared vocabulary already names, and the parenthesized
 # `(std::min<...>)` spelling exists only to dodge the `windows.h` min/max macros - a ritual that
 # `min_of` / `max_of` remove outright. Library code says what it means; tests and benches, where the
@@ -1221,6 +1232,7 @@ judge_path() {
     # Every C++ source: the C bindings under c/ and the C ABI headers keep their C idioms.
     *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh)
         check_qualified_namespace
+        check_c_limit_macros
         check_template_parameter_underscores
         check_template_type_suffixes
         check_function_like_macros

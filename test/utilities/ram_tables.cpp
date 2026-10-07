@@ -297,7 +297,7 @@ std::size_t check_multimap_starved_growth() noexcept {
         failures += expect_eq(multimap.capacity(), capacity);
         for (u64_t key = 0; key != 16; ++key) failures += expect(multimap.contains(key));
 
-        ledger.byte_budget.store(PTRDIFF_MAX);
+        ledger.byte_budget.store(std::numeric_limits<std::ptrdiff_t>::max());
         failures += expect(succeeded(multimap.reserve(capacity + 1)));
         for (u64_t key = 0; key != 16; ++key) failures += expect(multimap.contains(key));
     }
