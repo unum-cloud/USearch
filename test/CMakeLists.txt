@@ -88,9 +88,9 @@ if (USEARCH_BUILD_CUDA)
     )
     # The capability probes and dispatch points answer from NumKong's archive as in `usearch_test`; the device units
     # test a generation's kits only when every listed architecture runs them.
-    usearch_cuda_tiers(test_cuda_tiers_ "${USEARCH_CUDA_ARCHITECTURES}")
+    usearch_cuda_capabilities(test_cuda_capabilities_ "${USEARCH_CUDA_ARCHITECTURES}")
     target_sources(usearch_test_cuda PRIVATE ${PROJECT_SOURCE_DIR}/src/types.cpp)
-    target_compile_definitions(usearch_test_cuda PRIVATE ${test_cuda_tiers_})
+    target_compile_definitions(usearch_test_cuda PRIVATE ${test_cuda_capabilities_})
     target_compile_options(usearch_test_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     target_link_libraries(usearch_test_cuda PRIVATE fmt::fmt yyjson CUDA::cuda_driver forkunion::static numkong::header)
 endif ()

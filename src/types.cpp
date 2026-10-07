@@ -72,12 +72,16 @@ USEARCH_EXPORT char const* usearch_version(void) { return rendered_version(); }
 
 USEARCH_EXPORT char const* usearch_capabilities_compiled(void) {
     static char rendered[256] = {0};
-    return render_capabilities(rendered, sizeof(rendered), nk_capabilities_compiled());
+    nk_capability_t compiled = 0;
+    if (nk_cpu_capabilities_compiled(&compiled) != nk_success_k) compiled = 0;
+    return render_capabilities(rendered, sizeof(rendered), compiled);
 }
 
 USEARCH_EXPORT char const* usearch_capabilities_available(void) {
     static char rendered[256] = {0};
-    return render_capabilities(rendered, sizeof(rendered), nk_capabilities_available());
+    nk_capability_t available = 0;
+    if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = 0;
+    return render_capabilities(rendered, sizeof(rendered), available);
 }
 
 USEARCH_EXPORT char const* usearch_status_name(usearch_status_t status) {

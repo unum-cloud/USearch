@@ -400,8 +400,8 @@ struct dense_io_arena {
         storage = bytes_tensor_t(allocator);
         stride = fu::round_up_to_multiple(buffer_stride, dense_nvme_alignment_k);
         std::size_t bytes = buffer_count * stride + dense_nvme_alignment_k;
-        if (!storage.reserve(bytes)) return status_t::bad_alloc_k;
-        if (!storage.try_resize({bytes})) return status_t::bad_alloc_k;
+        if (nk::failed(storage.reserve(bytes))) return status_t::bad_alloc_k;
+        if (nk::failed(storage.resize({bytes}))) return status_t::bad_alloc_k;
         std::uintptr_t raw = reinterpret_cast<std::uintptr_t>(storage.data());
         base_ = reinterpret_cast<std::byte*>(fu::round_up_to_multiple(raw, dense_nvme_alignment_k));
         return status_t::success_k;
@@ -423,11 +423,11 @@ struct dense_io_completions {
 
     inline status_t reserve(std::size_t queue_depth, allocator_type_ const& allocator) noexcept {
         queue = completions_tensor_t(completions_allocator_t(allocator));
-        return queue.reserve(queue_depth) ? status_t::success_k : status_t::bad_alloc_k;
+        return nk::succeeded(queue.reserve(queue_depth)) ? status_t::success_k : status_t::bad_alloc_k;
     }
     inline status_t complete(dense_io_completion_t completion) noexcept {
         std::size_t fill = queue.extent(0);
-        if (!queue.try_resize({fill + 1})) return status_t::overflow_k;
+        if (nk::failed(queue.resize({fill + 1}))) return status_t::overflow_k;
         queue[fill] = completion;
         return status_t::success_k;
     }
@@ -438,7 +438,7 @@ struct dense_io_completions {
         if (!fill) return false;
         completion = queue[fill - 1];
         // Shrinking inside the reservation cannot fail, so this says nothing a caller needs.
-        [[maybe_unused]] bool const shrunk = queue.try_resize({fill - 1});
+        [[maybe_unused]] nk::status_t const shrunk = queue.resize({fill - 1});
         return true;
     }
 };
@@ -457,12 +457,12 @@ struct dense_io_staging {
 
     inline status_t reserve(std::size_t queue_depth, allocator_type_ const& allocator) noexcept {
         pending = requests_tensor_t(requests_allocator_t(allocator));
-        if (!pending.reserve(queue_depth)) return status_t::bad_alloc_k;
+        if (nk::failed(pending.reserve(queue_depth))) return status_t::bad_alloc_k;
         return completions.reserve(queue_depth, allocator);
     }
     inline status_t push(dense_io_request_t request) noexcept {
         std::size_t fill = pending.extent(0);
-        if (!pending.try_resize({fill + 1})) return status_t::overflow_k;
+        if (nk::failed(pending.resize({fill + 1}))) return status_t::overflow_k;
         pending[fill] = request;
         return status_t::success_k;
     }
@@ -527,7 +527,7 @@ struct dense_posix_sync_engine {
             if (status_t const reaped = staging_.complete(dense_io_completion_t {request.tag, result}); failed(reaped))
                 return reaped;
         }
-        return staging_.pending.try_resize({0}) ? status_t::success_k : status_t::overflow_k;
+        return nk::succeeded(staging_.pending.resize({0})) ? status_t::success_k : status_t::overflow_k;
     }
 
     inline bool pop(dense_io_completion_t& completion) noexcept { return staging_.pop(completion); }
@@ -585,9 +585,10 @@ struct dense_linux_aio_engine {
         control_blocks_ = control_blocks_tensor_t(control_blocks_allocator_t(allocator));
         control_pointers_ = control_pointers_tensor_t(control_pointers_allocator_t(allocator));
         events_ = events_tensor_t(events_allocator_t(allocator));
-        if (!control_blocks_.reserve(queue_depth)) return status_t::bad_alloc_k;
-        if (!control_pointers_.reserve(queue_depth)) return status_t::bad_alloc_k;
-        if (!events_.reserve(queue_depth) || !events_.try_resize({queue_depth})) return status_t::bad_alloc_k;
+        if (nk::failed(control_blocks_.reserve(queue_depth))) return status_t::bad_alloc_k;
+        if (nk::failed(control_pointers_.reserve(queue_depth))) return status_t::bad_alloc_k;
+        if (nk::failed(events_.reserve(queue_depth)) || nk::failed(events_.resize({queue_depth})))
+            return status_t::bad_alloc_k;
         status_t completions_status = completions_.reserve(queue_depth, allocator);
         if (completions_status != status_t::success_k) return completions_status;
         aio_context_ = 0;
@@ -604,7 +605,7 @@ struct dense_linux_aio_engine {
     inline status_t push(dense_io_request_t request) noexcept {
         std::size_t staged = control_blocks_.extent(0);
         if (in_flight_ + staged == events_.extent(0)) return status_t::overflow_k;
-        if (!control_blocks_.try_resize({staged + 1}) || !control_pointers_.try_resize({staged + 1}))
+        if (nk::failed(control_blocks_.resize({staged + 1})) || nk::failed(control_pointers_.resize({staged + 1})))
             return status_t::overflow_k;
         struct iocb& control = control_blocks_[staged];
         control = iocb {};
@@ -624,7 +625,8 @@ struct dense_linux_aio_engine {
             long submitted = syscall(SYS_io_submit, aio_context_, static_cast<long>(staged), control_pointers_.data());
             if (submitted < 0) return status_t::device_error_k;
             in_flight_ += static_cast<std::size_t>(submitted);
-            if (!control_blocks_.try_resize({0}) || !control_pointers_.try_resize({0})) return status_t::overflow_k;
+            if (nk::failed(control_blocks_.resize({0})) || nk::failed(control_pointers_.resize({0})))
+                return status_t::overflow_k;
         }
         if (!in_flight_) return status_t::success_k;
         // AIO surfaces no monitorable completion word, so there is no user-space fast
@@ -843,7 +845,7 @@ struct dense_uring_ring_t {
         using iovecs_allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<struct iovec>;
         using iovecs_tensor_t = nk::tensor<struct iovec, iovecs_allocator_t, 1>;
         iovecs_tensor_t buffer_regions {iovecs_allocator_t(allocator)};
-        if (!buffer_regions.reserve(buffer_count) || !buffer_regions.try_resize({buffer_count}))
+        if (nk::failed(buffer_regions.reserve(buffer_count)) || nk::failed(buffer_regions.resize({buffer_count})))
             return status_t::bad_alloc_k;
         for (std::size_t i = 0; i != buffer_count; ++i)
             buffer_regions[i] = iovec {arena.buffer(static_cast<dense_staging_buffer_id_t>(i)), arena.stride};
@@ -1296,7 +1298,7 @@ struct dense_windows_ioring_engine {
                                        static_cast<UINT32>(queue_depth * 2), &ring_);
         if (!SUCCEEDED(created)) return status_t::device_error_k;
         buffer_infos_ = buffer_infos_tensor_t(buffer_infos_allocator_t(allocator));
-        if (!buffer_infos_.reserve(queue_depth) || !buffer_infos_.try_resize({queue_depth}))
+        if (nk::failed(buffer_infos_.reserve(queue_depth)) || nk::failed(buffer_infos_.resize({queue_depth})))
             return status_t::bad_alloc_k;
         for (std::size_t i = 0; i != queue_depth; ++i)
             buffer_infos_[i] = IORING_BUFFER_INFO {arena_.buffer(static_cast<dense_staging_buffer_id_t>(i)),
@@ -1446,9 +1448,9 @@ struct dense_nvme_slot {
     /** Sizes every queue for @p expansion results and the visited volume one traversal
      *  can touch. Called once per context, never per query. */
     inline status_t reserve(std::size_t expansion, std::size_t connectivity_ceiling) noexcept {
-        if (!results.reserve(expansion)) return status_t::bad_alloc_k;
-        if (!frontier.reserve(expansion * connectivity_ceiling)) return status_t::bad_alloc_k;
-        if (!visited.reserve(expansion * connectivity_ceiling)) return status_t::bad_alloc_k;
+        if (failed(results.reserve(expansion))) return status_t::bad_alloc_k;
+        if (failed(frontier.reserve(expansion * connectivity_ceiling))) return status_t::bad_alloc_k;
+        if (failed(visited.reserve(expansion * connectivity_ceiling))) return status_t::bad_alloc_k;
         return status_t::success_k;
     }
 
@@ -1533,7 +1535,8 @@ struct dense_nvme_context {
         // A slot's transient peak holds its expansion record while emitting up to
         // connectivity scoring fetches, so each slot budgets connectivity + 1 buffers.
         std::size_t depth = slot_count * (max_of<std::size_t>(connectivity_ceiling, 1) + 1);
-        if (!free_buffers.reserve(depth) || !free_buffers.try_resize({depth})) return status_t::bad_alloc_k;
+        if (nk::failed(free_buffers.reserve(depth)) || nk::failed(free_buffers.resize({depth})))
+            return status_t::bad_alloc_k;
         for (std::size_t i = 0; i != depth; ++i)
             free_buffers[i] = static_cast<dense_staging_buffer_id_t>(depth - 1 - i);
 
@@ -1552,13 +1555,13 @@ struct dense_nvme_context {
     inline dense_staging_buffer_id_t acquire_buffer() noexcept {
         std::size_t depth = free_buffers.extent(0);
         dense_staging_buffer_id_t leased = free_buffers[depth - 1];
-        [[maybe_unused]] bool const drained = free_buffers.try_resize({depth - 1});
+        [[maybe_unused]] nk::status_t const drained = free_buffers.resize({depth - 1});
         return leased;
     }
     inline void release_buffer(dense_staging_buffer_id_t index) noexcept {
         std::size_t depth = free_buffers.extent(0);
         // Never exceeds the reservation it drained from.
-        [[maybe_unused]] bool const refilled = free_buffers.try_resize({depth + 1});
+        [[maybe_unused]] nk::status_t const refilled = free_buffers.resize({depth + 1});
         free_buffers[depth] = index;
     }
 
@@ -1667,7 +1670,8 @@ struct dense_nvme_index {
         dimensions_ = header.dimensions;
         connectivity_ceiling_ = header.connectivity;
         std::size_t offsets_count = std::size_t(header.node_count) + 1;
-        if (!offsets_.reserve(offsets_count) || !offsets_.try_resize({offsets_count})) return status_t::bad_alloc_k;
+        if (nk::failed(offsets_.reserve(offsets_count)) || nk::failed(offsets_.resize({offsets_count})))
+            return status_t::bad_alloc_k;
         std::size_t offsets_bytes = dense_nvme_layout_t::offsets_bytes(header.node_count);
         ssize_t read_bytes = ::pread(metadata.file_descriptor, offsets_.data(), offsets_bytes,
                                      dense_nvme_layout_t::offsets_begin_k);

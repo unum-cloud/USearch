@@ -2,8 +2,8 @@
 # class's instruction set outright and the compiler may use it anywhere inside. A class is its parent plus a delta - the
 # kits and the ForkUnion bits `parent_class_of`, `numkong_capabilities_of`, `waiter_for_cpu_class` and
 # `atomic_ref_for_cpu_class` add over the parent - restated here row for row. A unit inherits its parent's flags, adds
-# the flags each delta kit was probed with, and exists only when the parent does and some delta entry compiled: the rung
-# oracle at unit granularity, and the same gates the arm lists carry.
+# the flags of each delta kit that compiled, and exists only when the parent does and some delta entry compiled: the
+# rung oracle at unit granularity, and the same gates the arm lists carry.
 add_library(usearch_dense_ram_variants OBJECT dense/ram_variants_serial.cpp)
 usearch_setup_target(usearch_dense_ram_variants)
 target_include_directories(usearch_dense_ram_variants PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -12,8 +12,8 @@ target_link_libraries(usearch_dense_ram_variants PRIVATE yyjson forkunion::stati
 set(usearch_variant_serial_exists_ TRUE)
 set(usearch_variant_serial_flags_)
 
-# Unions the flags the probes compiled with: x86 `-m<feature>` flags collect, an Arm or RISC-V `-march=` string merges
-# to the newest base with every extension once, and MSVC's `/arch:` keeps the last, which the lineage lists highest.
+# Unions the kits' flags: x86 `-m<feature>` flags collect, an Arm or RISC-V `-march=` string merges to the newest base
+# with every extension once, and MSVC's `/arch:` keeps the last, which the lineage lists highest.
 function (usearch_union_isa_flags out_)
     set(collected_)
     set(arm_base_)
@@ -68,8 +68,7 @@ function (usearch_dense_ram_variant class)
     foreach (entry_ IN LISTS arg_UNPARSED_ARGUMENTS)
         if (nk_target_${entry_}_compiles)
             set(advances_ TRUE)
-            separate_arguments(probed_ NATIVE_COMMAND "${nk_target_${entry_}_flags}")
-            list(APPEND flags_ ${probed_})
+            list(APPEND flags_ ${nk_target_${entry_}_flags})
         elseif (fu_target_${entry_}_compiles)
             set(advances_ TRUE)
         endif ()
@@ -135,8 +134,8 @@ usearch_dense_ram_variant(
     risc5_wrs
     risc5_zacas
 )
-# A WebAssembly module carries the one SIMD tier its toolchain declares, so its verdicts read the compiler's own macros
-# rather than a probe that would pass the tier's flags itself.
+# A WebAssembly module carries the one SIMD capability its toolchain declares, so its verdicts read the compiler's own
+# macros rather than a probe that would pass the capability's flags itself.
 if (CMAKE_SYSTEM_NAME STREQUAL "Emscripten" OR CMAKE_SYSTEM_NAME STREQUAL "WASI")
     include(CheckCXXSourceCompiles)
     check_cxx_source_compiles(
@@ -163,11 +162,12 @@ if (USEARCH_BUILD_CUDA)
     find_package(CUDAToolkit REQUIRED)
 
     # One unit per GPU class, compiled for its own architecture alone - the device twin of the CPU classes' per-unit ISA
-    # flags - so no cubin carries another generation's kernels. Every unit sees the same NumKong GPU tiers, as the CPU
-    # units see the same probe verdicts, so the arms' types agree across units, and each class's ceiling keeps its arms
-    # within its generation. The codes reach NVCC directly, since CMake spells family-specific ones only from 3.31.
-    set(usearch_cuda_tiers_ NUMKONG_TARGET_AMPERE=1 NUMKONG_TARGET_ADA=1 NUMKONG_TARGET_HOPPER=1
-                            NUMKONG_TARGET_BLACKWELL=1 NUMKONG_TARGET_BLACKWELLRTX=1
+    # flags - so no cubin carries another generation's kernels. Every unit sees the same NumKong GPU capabilities, as
+    # the CPU units see the same probe verdicts, so the arms' types agree across units, and each class's ceiling keeps
+    # its arms within its generation. The codes reach NVCC directly, since CMake spells family-specific ones only from
+    # 3.31.
+    set(usearch_cuda_capabilities_ NUMKONG_TARGET_AMPERE=1 NUMKONG_TARGET_ADA=1 NUMKONG_TARGET_HOPPER=1
+                                   NUMKONG_TARGET_BLACKWELL=1 NUMKONG_TARGET_BLACKWELLRTX=1
     )
     function (usearch_dense_vram_variant class)
         set(target_ usearch_dense_vram_variants_${class})
@@ -176,10 +176,9 @@ if (USEARCH_BUILD_CUDA)
             ${target_} PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
                                ${CMAKE_CURRENT_SOURCE_DIR}
         )
-        # Skips `usearch_setup_target`, whose host-compiler flags the CUDA driver rejects, so it takes the list by hand.
-        target_compile_definitions(
-            ${target_} PRIVATE "USEARCH_BUILD_CUDA=1" ${usearch_compile_definitions_} ${usearch_cuda_tiers_}
-        )
+        # Skips `usearch_setup_target`, whose host-compiler flags the CUDA driver rejects, so it links NumKong's and
+        # ForkUnion's compilable capabilities itself.
+        target_compile_definitions(${target_} PRIVATE "USEARCH_BUILD_CUDA=1" ${usearch_cuda_capabilities_})
         set_target_properties(
             ${target_}
             PROPERTIES CXX_STANDARD 20
@@ -188,7 +187,16 @@ if (USEARCH_BUILD_CUDA)
                        POSITION_INDEPENDENT_CODE ON
         )
         target_compile_options(${target_} PRIVATE --expt-relaxed-constexpr ${ARGN})
-        target_link_libraries(${target_} PRIVATE yyjson CUDA::cuda_driver forkunion::static)
+        target_link_libraries(
+            ${target_}
+            PRIVATE yyjson
+                    CUDA::cuda_driver
+                    forkunion::static
+                    numkong::header
+                    numkong::cpu_capabilities_compiled
+                    stringzilla::cpu_capabilities_compiled
+                    forkunion::cpu_capabilities_compiled
+        )
         set(USEARCH_PUNNED_LIBRARIES
             ${USEARCH_PUNNED_LIBRARIES} ${target_}
             PARENT_SCOPE
@@ -204,7 +212,7 @@ if (USEARCH_BUILD_CUDA)
     usearch_dense_vram_variant(nvidia_blackwellrtx --generate-code=arch=compute_120f,code=sm_120f)
 
     target_sources(usearch_punned PRIVATE dense_index.cu)
-    target_compile_definitions(usearch_punned PRIVATE "USEARCH_BUILD_CUDA=1" ${usearch_cuda_tiers_})
+    target_compile_definitions(usearch_punned PRIVATE "USEARCH_BUILD_CUDA=1" ${usearch_cuda_capabilities_})
     set_target_properties(
         usearch_punned
         PROPERTIES CUDA_STANDARD 20

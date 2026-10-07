@@ -484,7 +484,7 @@ struct dense_ram_indexes {
             std::size_t const shard = (rotation + task) % shards;
             shard_t& one = shards_[shard];
             dense_node_id_t assigned = 0;
-            one.index->insert(shard_capacity_claim_t {}, new_vectors(nk::range {task, task + 1}, nk::slice), {},
+            one.index->insert(shard_capacity_claim_t {}, new_vectors(nk::range(task, task + 1), nk::slice), {},
                               traversals[thread], config, [&](dense_node_id_t assigned_id) noexcept {
                                   assigned = assigned_id;
                                   one.keys[assigned_id] = keys[task];

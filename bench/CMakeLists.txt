@@ -79,8 +79,8 @@ if (USEARCH_BUILD_CUDA)
     )
     target_compile_options(usearch_bench_dense_vram_index PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
     # A generation's kits join the bench only when every listed architecture runs them.
-    usearch_cuda_tiers(bench_cuda_tiers_ "${USEARCH_CUDA_ARCHITECTURES}")
-    target_compile_definitions(usearch_bench_dense_vram_index PRIVATE ${bench_cuda_tiers_})
+    usearch_cuda_capabilities(bench_cuda_capabilities_ "${USEARCH_CUDA_ARCHITECTURES}")
+    target_compile_definitions(usearch_bench_dense_vram_index PRIVATE ${bench_cuda_capabilities_})
     target_link_libraries(
         usearch_bench_dense_vram_index PRIVATE fmt::fmt yyjson CUDA::cuda_driver forkunion::static stringzilla::static
     )

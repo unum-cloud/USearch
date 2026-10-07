@@ -312,15 +312,20 @@ struct dense_traversal_context {
      *  geometry freezes once, so the tensors allocate once. */
     status_t reserve_neighbors(std::size_t capacity) noexcept {
         if (selected_neighbors.capacity() >= capacity) return status_t::success_k;
-        selected_neighbors = selection_t::try_zeros({capacity}, candidates_allocator_t(allocator_));
-        refined_neighbors = selection_t::try_zeros({capacity}, candidates_allocator_t(allocator_));
-        staged_ids = ids_tensor_t::try_zeros({capacity}, ids_allocator_t(allocator_));
-        staged_vectors = views_tensor_t::try_zeros({capacity}, views_allocator_t(allocator_));
-        staged_norms = norms_tensor_t::try_zeros({capacity}, norms_allocator_t(allocator_));
-        kept_positions = ids_tensor_t::try_zeros({capacity}, ids_allocator_t(allocator_));
-        bool const sized = !selected_neighbors.empty() && !refined_neighbors.empty() && !staged_ids.empty() &&
-                           !staged_vectors.empty() && !staged_norms.empty() && !kept_positions.empty();
-        return sized ? status_t::success_k : status_t::bad_alloc_k;
+        auto selected = selection_t::zeros({capacity}, candidates_allocator_t(allocator_));
+        auto refined = selection_t::zeros({capacity}, candidates_allocator_t(allocator_));
+        auto ids = ids_tensor_t::zeros({capacity}, ids_allocator_t(allocator_));
+        auto views = views_tensor_t::zeros({capacity}, views_allocator_t(allocator_));
+        auto norms = norms_tensor_t::zeros({capacity}, norms_allocator_t(allocator_));
+        auto positions = ids_tensor_t::zeros({capacity}, ids_allocator_t(allocator_));
+        if (!selected || !refined || !ids || !views || !norms || !positions) return status_t::bad_alloc_k;
+        selected_neighbors = std::move(selected.value);
+        refined_neighbors = std::move(refined.value);
+        staged_ids = std::move(ids.value);
+        staged_vectors = std::move(views.value);
+        staged_norms = std::move(norms.value);
+        kept_positions = std::move(positions.value);
+        return status_t::success_k;
     }
 
     /** Bytes @c reserve_neighbors reserves for @p capacity neighbors, each tensor on its own arena line. */
@@ -337,9 +342,12 @@ struct dense_traversal_context {
      *  row stride, so tail tiles always write in bounds. */
     status_t reserve_tiles(std::size_t capacity, std::size_t scratch_bytes) noexcept {
         if (pair_distances.extent(0) >= capacity) return status_t::success_k;
-        tiles_scratch = bytes_tensor_t::try_zeros({scratch_bytes}, bytes_allocator_t(allocator_));
-        pair_distances = distances_matrix_t::try_zeros({capacity, capacity}, distances_allocator_t(allocator_));
-        return !tiles_scratch.empty() && !pair_distances.empty() ? status_t::success_k : status_t::bad_alloc_k;
+        auto scratch = bytes_tensor_t::zeros({scratch_bytes}, bytes_allocator_t(allocator_));
+        auto distances = distances_matrix_t::zeros({capacity, capacity}, distances_allocator_t(allocator_));
+        if (!scratch || !distances) return status_t::bad_alloc_k;
+        tiles_scratch = std::move(scratch.value);
+        pair_distances = std::move(distances.value);
+        return status_t::success_k;
     }
 
     /** Allocator instance behind every neighbor scratch; the queues hold rebound copies. */
@@ -1849,7 +1857,7 @@ struct dense_ram_index {
 
             location_t const location = chunk_schedule_t::locate(rows.first);
             vectors_view_t const vectors = index_->vectors_chunks_[location.chunk](
-                nk::range {location.offset, location.offset + rows.size()}, nk::slice);
+                nk::range(location.offset, location.offset + rows.size()), nk::slice);
             // Chunk rows are padded to whole kit steps, while checkpoints keep logical rows.
             std::size_t const row_bytes = row_values * sizeof(scalar_t);
             for (std::size_t row = 0; row != rows.size(); ++row) {
@@ -2092,7 +2100,7 @@ struct dense_ram_index {
 
             location_t const location = chunk_schedule_t::locate(range.first);
             nk::matrix_span<scalar_t> const vectors = index_->vectors_chunks_[location.chunk](
-                nk::range {location.offset, location.offset + range.size()}, nk::slice);
+                nk::range(location.offset, location.offset + range.size()), nk::slice);
             // Checkpoints keep logical rows, while chunk rows are padded to whole kit steps.
             std::size_t const row_bytes = row_values * sizeof(scalar_t);
             for (std::size_t row = 0; row != range.size(); ++row) {
@@ -2108,7 +2116,7 @@ struct dense_ram_index {
             atomic_ref<std::size_t>(covered_vectors).add(range.size(), std::memory_order_release);
 
             nk::matrix_span<node_id_t> const neighbors = index_->neighbors_chunks_[location.chunk](
-                nk::range {location.offset, location.offset + range.size()}, nk::slice);
+                nk::range(location.offset, location.offset + range.size()), nk::slice);
             [[maybe_unused]] status_t const copied_neighbors = copy_bytes(
                 bytes_of(neighbors.data(), step_slots),
                 columns.neighbors.subspan(neighbors_first, step.neighbors_bytes));
@@ -2411,23 +2419,20 @@ struct dense_ram_index {
 
             std::size_t const chunk_rows = chunk_schedule_t::rows_in(chunks_count_);
 
-            vectors_chunk_t vectors_chunk = vectors_chunk_t::try_zeros( //
-                {chunk_rows, chunk_dimensions}, vectors_allocator_);
+            auto vectors_chunk = vectors_chunk_t::zeros({chunk_rows, chunk_dimensions}, vectors_allocator_);
             // Norms chunks exist only for kernels whose finalize reads them; dot pays nothing.
-            norms_chunk_t norms_chunk;
+            nk::expected<norms_chunk_t> norms_chunk {{}, nk::status_t::success_k};
             if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>)
-                norms_chunk = norms_chunk_t::try_zeros({chunk_rows}, norms_allocator_t(vectors_allocator_));
+                norms_chunk = norms_chunk_t::zeros({chunk_rows}, norms_allocator_t(vectors_allocator_));
             // The all-ones fill is load-bearing: a sentinel leading slot reads as unpublished, and
             // sentinel tails terminate short rows, so no neighbor counts are stored anywhere.
-            neighbors_chunk_t neighbors_chunk = neighbors_chunk_t::try_full( //
+            auto neighbors_chunk = neighbors_chunk_t::full( //
                 {chunk_rows, chunk_connectivity}, dense_node_id_unknown_k, neighbors_allocator_);
-            bool const norms_missing = !std::is_same_v<vector_norms_t, no_norms_t> && norms_chunk.empty();
-            if (vectors_chunk.empty() || norms_missing || neighbors_chunk.empty())
-                return {added_capacity, status_t::bad_alloc_k};
+            if (!vectors_chunk || !norms_chunk || !neighbors_chunk) return {added_capacity, status_t::bad_alloc_k};
 
-            vectors_chunks_[chunks_count_] = std::move(vectors_chunk);
-            norms_chunks_[chunks_count_] = std::move(norms_chunk);
-            neighbors_chunks_[chunks_count_] = std::move(neighbors_chunk);
+            vectors_chunks_[chunks_count_] = std::move(vectors_chunk.value);
+            norms_chunks_[chunks_count_] = std::move(norms_chunk.value);
+            neighbors_chunks_[chunks_count_] = std::move(neighbors_chunk.value);
             ++chunks_count_;
             added_capacity += chunk_rows;
             // The all-ones ID is the sentinel: account one row less in the final chunk, so no
@@ -2534,7 +2539,7 @@ struct dense_ram_index {
     static void fill_selection(std::span<dense_scored_node_t const> pool, selection_t& out,
                                std::size_t limit) noexcept {
         std::size_t const diverse_count = out.size();
-        if (diverse_count == limit || !out.try_resize({limit})) return;
+        if (diverse_count == limit || nk::failed(out.resize({limit}))) return;
         std::size_t filled_count = diverse_count;
         std::size_t matched = 0;
         for (dense_scored_node_t const candidate : pool) {
@@ -2543,7 +2548,7 @@ struct dense_ram_index {
             else out[filled_count++] = candidate;
         }
         // Shrinking within the reservation never fails - the fill becomes the live shape.
-        [[maybe_unused]] bool const shrunk = out.try_resize({filled_count});
+        [[maybe_unused]] nk::status_t const shrunk = out.resize({filled_count});
     }
 
     /** The vector-engine sibling of @c select_diverse: pair distances computed on the fly with
@@ -2551,7 +2556,7 @@ struct dense_ram_index {
      *  norms ride the staging surface, free during any selection. */
     std::size_t select_diverse_via_quads(results_array_t const& candidates, std::size_t limit, selection_t& out,
                                          dense_traversal_context_t& context) const noexcept {
-        if (!out.try_resize({limit})) return 0;
+        if (nk::failed(out.resize({limit}))) return 0;
         vector_view_t* const kept_vectors = context.staged_vectors.data();
         vector_norms_t* const kept_norms = context.staged_norms.data();
         small_size_t kept_count = 0;
@@ -2584,7 +2589,7 @@ struct dense_ram_index {
             ++kept_count;
         }
         // Shrinking within the reservation never fails - the fill becomes the live shape.
-        [[maybe_unused]] bool const shrunk = out.try_resize({kept_count});
+        [[maybe_unused]] nk::status_t const shrunk = out.resize({kept_count});
         return computed_distances;
     }
 
@@ -2606,7 +2611,7 @@ struct dense_ram_index {
         constexpr std::size_t rows_k = tiles_kit_t::tile_rows_k;
         constexpr std::size_t columns_k = tiles_kit_t::tile_columns_k;
         constexpr std::size_t depth_k = tiles_kit_t::tile_depth_k;
-        if (!out.try_resize({limit})) return 0;
+        if (nk::failed(out.resize({limit}))) return 0;
 
         vector_view_t* const kept_vectors = context.staged_vectors.data();
         vector_norms_t* const kept_norms = context.staged_norms.data();
@@ -2696,7 +2701,7 @@ struct dense_ram_index {
             }
         }
         // Shrinking within the reservation never fails - the fill becomes the live shape.
-        [[maybe_unused]] bool const shrunk = out.try_resize({kept_count});
+        [[maybe_unused]] nk::status_t const shrunk = out.resize({kept_count});
         return computed_distances;
     }
 
@@ -2783,7 +2788,7 @@ struct dense_ram_index {
         distance_t const* pairs = context.pair_distances.data();
         std::size_t const stride = context.pair_distances.extent(1);
         dense_scored_node_t const* pool_data = pool.data();
-        if (!out.try_resize({limit})) return 0;
+        if (nk::failed(out.resize({limit}))) return 0;
         small_size_t kept_count = 0;
         for (std::size_t index = 0; index != pool.size() && kept_count != limit; ++index) {
             small_size_t const position = static_cast<small_size_t>(pool_data[index].node_id);
@@ -2812,7 +2817,7 @@ struct dense_ram_index {
             out[kept_count++] = dense_scored_node_t(filled_id, pool_data[index].distance);
         }
         // Shrinking within the reservation never fails - the fill becomes the live shape.
-        [[maybe_unused]] bool const shrunk = out.try_resize({kept_count});
+        [[maybe_unused]] nk::status_t const shrunk = out.resize({kept_count});
         return 0; // Decision only - every distance here was already paid for.
     }
 
@@ -2963,7 +2968,7 @@ struct dense_ram_index {
             // Staged at their own slot positions, the lock-displaced slot-0 value first. The
             // newcomer stays out: it would hand the tile kernels an irregular connectivity + 1
             // operand, and its symmetric score was already recorded at selection time.
-            if (!context.staged_ids.try_resize({slots_count})) {
+            if (nk::failed(context.staged_ids.resize({slots_count}))) {
                 neighbors.unlock(first_slot_value);
                 continue;
             }
@@ -3020,7 +3025,7 @@ struct dense_ram_index {
                                   dense_traversal_context_t& context) const noexcept {
         ids_tensor_t& staged_ids = context.staged_ids;
         small_size_t const slots_count = neighbors.capacity();
-        if (!staged_ids.try_resize({slots_count})) return 0;
+        if (nk::failed(staged_ids.resize({slots_count}))) return 0;
         node_id_t first_value = neighbors.peek_first();
         while (first_value == dense_node_id_unknown_k) {
             neighbors.wait_while_locked();
@@ -3036,7 +3041,7 @@ struct dense_ram_index {
             }
         }
         // Shrinking within the reservation never fails - the fill becomes the live shape.
-        [[maybe_unused]] bool const shrunk = staged_ids.try_resize({staged_count});
+        [[maybe_unused]] nk::status_t const shrunk = staged_ids.resize({staged_count});
         return staged_count;
     }
 
@@ -3473,8 +3478,10 @@ struct dense_ram_cursor {
      *  traversals-side family by default; call once before any @c seek. */
     status_t reserve(allocator_t allocator = {}) noexcept {
         if (staged_neighbors_.size() >= connectivity_) return status_t::success_k;
-        staged_neighbors_ = ids_tensor_t::try_zeros({connectivity_}, ids_allocator_t(allocator));
-        return !staged_neighbors_.empty() ? status_t::success_k : status_t::bad_alloc_k;
+        auto staged = ids_tensor_t::zeros({connectivity_}, ids_allocator_t(allocator));
+        if (!staged) return status_t::bad_alloc_k;
+        staged_neighbors_ = std::move(staged.value);
+        return status_t::success_k;
     }
 
     /** Nodes visible to this cursor; IDs strictly below are readable. */

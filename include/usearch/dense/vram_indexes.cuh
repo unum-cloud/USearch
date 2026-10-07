@@ -479,9 +479,9 @@ struct dense_vram_indexes {
 
         auto search_shard = [&](std::size_t shard, traversal_t& traversal) noexcept {
             nk::matrix_span<dense_node_id_t> const shard_ids = ids_wide(
-                nk::all, nk::range {shard * config.count, (shard + 1) * config.count}, nk::slice);
+                nk::all, nk::range(shard * config.count, (shard + 1) * config.count), nk::slice);
             nk::matrix_span<dense_distance_t> const shard_distances = distances_wide(
-                nk::all, nk::range {shard * config.count, (shard + 1) * config.count}, nk::slice);
+                nk::all, nk::range(shard * config.count, (shard + 1) * config.count), nk::slice);
             expected<search_result_t> const found = shards_[shard].index->search(
                 queries, shard_ids, shard_distances, traversal, config, completion_t::deferred_k);
             return found.status;
@@ -546,9 +546,9 @@ struct dense_vram_indexes {
 
         auto multiply_shard = [&](std::size_t shard, traversal_t& traversal) noexcept {
             nk::matrix_span<dense_node_id_t> const shard_ids = ids_wide(
-                nk::all, nk::range {shard * wanted, (shard + 1) * wanted}, nk::slice);
+                nk::all, nk::range(shard * wanted, (shard + 1) * wanted), nk::slice);
             nk::matrix_span<dot_result_t> const shard_products = products_wide(
-                nk::all, nk::range {shard * wanted, (shard + 1) * wanted}, nk::slice);
+                nk::all, nk::range(shard * wanted, (shard + 1) * wanted), nk::slice);
             std::span<u32_t> const shard_counts {counts_landing.data() + shard * rows_count, rows_count};
             expected<search_result_t> const multiplied = shards_[shard].index->multiply(
                 left, shard_ids, shard_products, shard_counts, traversal, config, completion_t::deferred_k);
@@ -1279,7 +1279,7 @@ struct dense_vram_indexes {
             }
             for (std::size_t taken = 0; taken != taking; ++taken)
                 one.keys[first_node + static_cast<dense_node_id_t>(taken)] = keys[first + taken * shards];
-            one.inserted = one.index->insert(new_vectors(nk::range {first, rows, shards}, nk::slice), {},
+            one.inserted = one.index->insert(new_vectors(nk::range(first, rows, shards), nk::slice), {},
                                              traversals[launched], config, completion_t::deferred_k);
             // A mismatched first ID means a claimer outside the gate, which no key written here can name.
             status_t const launched_status = !one.inserted                               ? one.inserted.status

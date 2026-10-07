@@ -67,13 +67,13 @@ struct levenshtein_serial_kit_t {
     using class_t = sz_u32_t;
     using classes_t = sz_u32_t;
     using counts_t = sz_u64_t;
-    static constexpr std::size_t candidates_per_step_k = sz_levenshtein_serial_u64x1_candidates_per_step_k;
-    static constexpr std::size_t registers_per_position_k = sz_levenshtein_serial_u64x1_registers_per_position_k;
+    static constexpr std::size_t candidates_per_step_k = sz_levenshtein_u64x1_candidates_per_step_serial_k;
+    static constexpr std::size_t registers_per_position_k = sz_levenshtein_u64x1_registers_per_position_serial_k;
     static constexpr auto init = sz_levenshtein_u64x1_init_serial;
     static constexpr auto step = sz_levenshtein_u64x1_step_serial;
     static constexpr auto any_active = sz_levenshtein_u64x1_any_active_serial;
     static constexpr auto score = sz_levenshtein_u64x1_score_serial;
-    static constexpr sz_levenshtein_transpose_t transpose = sz_levenshtein_transpose;
+    static constexpr auto transpose = sz_levenshtein_transpose;
     static classes_t classes(class_t const* transpose_classes) noexcept { return *transpose_classes; }
     static counts_t counts(sz_u64_t const* lengths) noexcept { return *lengths; }
 };
@@ -87,13 +87,13 @@ struct levenshtein_haswell_kit_t {
     using class_t = sz_u8_t;
     using classes_t = sz_u256_vec_t;
     using counts_t = sz_u256_vec_t;
-    static constexpr std::size_t candidates_per_step_k = sz_levenshtein_haswell_u64x4_candidates_per_step_k;
-    static constexpr std::size_t registers_per_position_k = sz_levenshtein_haswell_u64x4_registers_per_position_k;
+    static constexpr std::size_t candidates_per_step_k = sz_levenshtein_u64x4_candidates_per_step_haswell_k;
+    static constexpr std::size_t registers_per_position_k = sz_levenshtein_u64x4_registers_per_position_haswell_k;
     static constexpr auto init = sz_levenshtein_u64x4_init_haswell;
     static constexpr auto step = sz_levenshtein_u64x4_step_haswell;
     static constexpr auto any_active = sz_levenshtein_u64x4_any_active_haswell;
     static constexpr auto score = sz_levenshtein_u64x4_score_haswell;
-    static constexpr sz_levenshtein_transpose_t transpose = sz_levenshtein_u8x4_transpose_haswell;
+    static constexpr auto transpose = sz_levenshtein_u8x4_transpose_haswell;
     static classes_t classes(class_t const* transpose_classes) noexcept {
         return sz_levenshtein_u64x4_classes_u8_haswell(transpose_classes);
     }
@@ -114,13 +114,13 @@ struct levenshtein_skylake_kit_t {
     using class_t = sz_u8_t;
     using classes_t = sz_u512_vec_t;
     using counts_t = sz_u512_vec_t;
-    static constexpr std::size_t candidates_per_step_k = sz_levenshtein_skylake_u64x8_candidates_per_step_k;
-    static constexpr std::size_t registers_per_position_k = sz_levenshtein_skylake_u64x8_registers_per_position_k;
+    static constexpr std::size_t candidates_per_step_k = sz_levenshtein_u64x8_candidates_per_step_skylake_k;
+    static constexpr std::size_t registers_per_position_k = sz_levenshtein_u64x8_registers_per_position_skylake_k;
     static constexpr auto init = sz_levenshtein_u64x8_init_skylake;
     static constexpr auto step = sz_levenshtein_u64x8_step_skylake;
     static constexpr auto any_active = sz_levenshtein_u64x8_any_active_skylake;
     static constexpr auto score = sz_levenshtein_u64x8_score_skylake;
-    static constexpr sz_levenshtein_transpose_t transpose = sz_levenshtein_u8x8_transpose_skylake;
+    static constexpr auto transpose = sz_levenshtein_u8x8_transpose_skylake;
     static classes_t classes(class_t const* transpose_classes) noexcept {
         return sz_levenshtein_u64x8_classes_u8_skylake(transpose_classes);
     }
@@ -273,7 +273,7 @@ struct overlap_skylake_kit_t;
 
 /** Scalar binding: one position per step, one key per sort and probe step. */
 struct overlap_serial_kit_t {
-    static constexpr std::size_t positions_per_step_k = sz_overlap_serial_f64x1_positions_per_step_k;
+    static constexpr std::size_t positions_per_step_k = sz_overlap_f64x1_positions_per_step_serial_k;
     static constexpr auto prefix_hash_step = sz_overlap_f64x1_prefix_hash_step_serial;
     static constexpr auto prefix_hash_step_tail = sz_overlap_f64x1_prefix_hash_step_tail_serial;
     static constexpr auto window_hash_step = sz_overlap_f64x1_window_hash_step_serial;
@@ -286,7 +286,7 @@ struct overlap_serial_kit_t {
 
 /** Intel Haswell AVX2: four positions per step, eight keys per sort and probe step. */
 struct overlap_haswell_kit_t {
-    static constexpr std::size_t positions_per_step_k = sz_overlap_haswell_f64x4_positions_per_step_k;
+    static constexpr std::size_t positions_per_step_k = sz_overlap_f64x4_positions_per_step_haswell_k;
     static constexpr auto prefix_hash_step = sz_overlap_f64x4_prefix_hash_step_haswell;
     static constexpr auto prefix_hash_step_tail = sz_overlap_f64x4_prefix_hash_step_tail_haswell;
     static constexpr auto window_hash_step = sz_overlap_f64x4_window_hash_step_haswell;
@@ -300,7 +300,7 @@ struct overlap_haswell_kit_t {
 
 /** Intel Skylake AVX-512: eight positions per step, sixteen keys per sort and probe step. */
 struct overlap_skylake_kit_t {
-    static constexpr std::size_t positions_per_step_k = sz_overlap_skylake_f64x8_positions_per_step_k;
+    static constexpr std::size_t positions_per_step_k = sz_overlap_f64x8_positions_per_step_skylake_k;
     static constexpr auto prefix_hash_step = sz_overlap_f64x8_prefix_hash_step_skylake;
     static constexpr auto prefix_hash_step_tail = sz_overlap_f64x8_prefix_hash_step_tail_skylake;
     static constexpr auto window_hash_step = sz_overlap_f64x8_window_hash_step_skylake;

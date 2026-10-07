@@ -51,47 +51,38 @@ option(USEARCH_BUILD_CUDA "Compile CUDA index tests & benchmarks" ${USEARCH_CAN_
 
 # The library compiles one unit per GPU class, each for its own architecture alone - "80" with its PTX for every GPU
 # without a class, "89", "90a", "100f" and "120f" - and ignores this list. The CUDA tests, benchmarks and the dispatch
-# unit compile one pass per entry, and a NumKong GPU tier turns on in them only when every entry runs it, so iterate on
-# one GPU with its family code, like "100f", to test that generation's kits.
+# unit compile one pass per entry, and a NumKong GPU capability turns on in them only when every entry runs it, so
+# iterate on one GPU with its family code, like "100f", to test that generation's kits.
 set(USEARCH_CUDA_ARCHITECTURES
     "80;90a;100f;120f"
     CACHE STRING "GPU architectures the CUDA tests, benchmarks & dispatch unit compile for"
 )
 
-# Sets @p output to NUMKONG_TARGET_<tier>=1 where every one of the architectures, without CMake's "-real" or "-virtual",
-# is one of the tier's, and to NUMKONG_TARGET_<tier>=0 otherwise. NumKong's one-code units need any of them; a unit here
-# compiles every listed code, and a kit compiled into one pass is compiled into all.
-function (usearch_cuda_tier tier architectures tier_architectures output)
+# Sets @p output to `capability_macro=1` where every one of the architectures, without CMake's "-real" or "-virtual", is
+# one of NumKong's cached `nk_target_<capability>_architectures`, and to `capability_macro=0` otherwise. NumKong's
+# one-code units need any of them; a unit here compiles every listed code, and a kit compiled into one pass is compiled
+# into all.
+function (usearch_cuda_capability capability_name capability_macro architectures output)
     set(enabled_ 1)
     foreach (architecture_ IN LISTS architectures)
         string(REGEX REPLACE "-(real|virtual)$" "" architecture_ "${architecture_}")
-        if (NOT architecture_ IN_LIST tier_architectures)
+        if (NOT architecture_ IN_LIST nk_target_${capability_name}_architectures)
             set(enabled_ 0)
         endif ()
     endforeach ()
     set(${output}
-        NUMKONG_TARGET_${tier}=${enabled_}
+        ${capability_macro}=${enabled_}
         PARENT_SCOPE
     )
 endfunction ()
 
-# The NumKong GPU tiers the CUDA codes run, as the definitions a target compiles with, over NumKong's own code lists.
-function (usearch_cuda_tiers output architectures)
-    # `mma.sync`: A100, A30, A40, RTX 30, Jetson Orin, L40, RTX 40, and every GPU since.
-    usearch_cuda_tier(
-        AMPERE "${architectures}"
-        "80;86;87;88;89;90;90a;100;100a;100f;103;103a;103f;110;110a;110f;120;120a;120f;121;121a;121f" ampere_
-    )
-    # FP8 `mma.sync`: L4, L40S, RTX 40, and every GPU since.
-    usearch_cuda_tier(
-        ADA "${architectures}" "89;90;90a;100;100a;100f;103;103a;103f;110;110a;110f;120;120a;120f;121;121a;121f" ada_
-    )
-    # `wgmma`: H100, H200, GH200.
-    usearch_cuda_tier(HOPPER "${architectures}" "90a" hopper_)
-    # `tcgen05`: B200, GB200, B300, GB300.
-    usearch_cuda_tier(BLACKWELL "${architectures}" "100a;100f;103a;103f" blackwell_)
-    # FP6/FP4 `mma.sync`: RTX 50, RTX PRO 6000, DGX Spark.
-    usearch_cuda_tier(BLACKWELLRTX "${architectures}" "120a;120f;121a;121f" blackwellrtx_)
+# The NumKong GPU capabilities the CUDA codes run, as the definitions a target compiles with.
+function (usearch_cuda_capabilities output architectures)
+    usearch_cuda_capability(ampere NUMKONG_TARGET_AMPERE "${architectures}" ampere_)
+    usearch_cuda_capability(ada NUMKONG_TARGET_ADA "${architectures}" ada_)
+    usearch_cuda_capability(hopper NUMKONG_TARGET_HOPPER "${architectures}" hopper_)
+    usearch_cuda_capability(blackwell NUMKONG_TARGET_BLACKWELL "${architectures}" blackwell_)
+    usearch_cuda_capability(blackwellrtx NUMKONG_TARGET_BLACKWELLRTX "${architectures}" blackwellrtx_)
     set(${output}
         ${ampere_} ${ada_} ${hopper_} ${blackwell_} ${blackwellrtx_}
         PARENT_SCOPE
@@ -337,10 +328,18 @@ function (usearch_setup_target TARGET_NAME)
     target_include_directories(
         ${TARGET_NAME} PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
     )
+    # Host-tuned units read the compiler; every other unit takes each sibling's compiled capabilities and instantiates
+    # its kits per CPU class, never by a template's default capability, so the class units and the dispatch unit name
+    # the same rungs.
     if (usearch_setup_HOST)
         target_compile_options(${TARGET_NAME} PRIVATE ${USEARCH_HOST_TUNING})
     else ()
-        target_compile_definitions(${TARGET_NAME} PRIVATE ${usearch_compile_definitions_})
+        target_link_libraries(
+            ${TARGET_NAME}
+            PRIVATE $<BUILD_INTERFACE:numkong::cpu_capabilities_compiled>
+                    $<BUILD_INTERFACE:stringzilla::cpu_capabilities_compiled>
+                    $<BUILD_INTERFACE:forkunion::cpu_capabilities_compiled>
+        )
     endif ()
     set_target_properties(${TARGET_NAME} PROPERTIES CXX_STANDARD 20)
 
@@ -351,10 +350,9 @@ function (usearch_setup_target TARGET_NAME)
         set_target_properties(${TARGET_NAME} PROPERTIES PREFIX "lib")
     endif ()
 
-    # NumKong's archive answers the capability queries and the punned kernels through its dispatch table, so every
-    # artifact carries it whole and none needs a `libnumkong.so` beside it.
-    target_compile_definitions(${TARGET_NAME} PRIVATE "NUMKONG_RUNTIME_DISPATCH=1")
-    target_link_libraries(${TARGET_NAME} PRIVATE numkong::static)
+    # Header-only NumKong: each unit inlines the kernels its CPU class runs, and USearch dispatches by CPU class, so no
+    # artifact needs NumKong's library or its dispatch points.
+    target_link_libraries(${TARGET_NAME} PRIVATE numkong::header)
 
 endfunction ()
 
@@ -367,7 +365,7 @@ include(FetchContent)
 # without them and no switch pretending otherwise. Include directories are copied onto the interface target, because
 # `usearch_setup_target` reads `INTERFACE_INCLUDE_DIRECTORIES` directly - a genex that sees only what this target
 # declares, not what its link interface would carry - to keep the C++20 feature requirement off the pure-C targets. So
-# each sibling's paths are copied onto the interface here; its verdicts arrive in `usearch_compile_definitions_` below.
+# each sibling's paths are copied onto the interface here.
 function (usearch_sibling NAME LINK_TARGET REPOSITORY TAG)
     if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${NAME}/CMakeLists.txt")
         add_subdirectory(${NAME})
@@ -413,35 +411,22 @@ foreach (USEARCH_CONFIGURATION DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
     set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${USEARCH_CONFIGURATION} "${CMAKE_BINARY_DIR}")
 endforeach ()
 
-# The compiled siblings land as archives inside our shared objects, so every one is position-independent. NumKong
-# defines its archive under the same switch as its shared library, so the switch is set before the subdirectory lands.
+# The compiled siblings land as archives inside our shared objects, so every one is position-independent.
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
-set(NUMKONG_BUILD_SHARED
-    ON
-    CACHE BOOL "" FORCE
-)
 
 usearch_sibling(
-    numkong numkong::header https://github.com/ashvardanian/NumKong 5dbdcbc6617c7158e0615bc6ba139d2e86c99c4a
+    numkong numkong::header https://github.com/ashvardanian/NumKong 8b0e026d472fb4c72f32e0f280c80661ed01a158
 )
 usearch_sibling(
-    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion a1cf2eca59914af322846b89f563170486676e75
+    forkunion forkunion::header https://github.com/ashvardanian/ForkUnion d9342216440d36c9c880223a5e94440d5d897835
 )
 usearch_sibling(
     stringzilla stringzilla::header https://github.com/ashvardanian/StringZilla
-    9635aa893cab3130a0c95734be9a2911b17a3377
+    619ef62d92992c67271bc6d18ba10abf2e6c65e0
 )
 usearch_sibling(
-    smashtable smashtable::header https://github.com/ashvardanian/SmashTable add0dcc3a845bbe743bdd2cb4a1d842c08c57703
+    smashtable smashtable::header https://github.com/ashvardanian/SmashTable a7df2585228a444755ce85ac4b1a86dc425a3cee
 )
-
-# The siblings' compile verdicts, one list: every unit that admits rungs at runtime takes it whole, so the class units,
-# the dispatch unit and the CUDA arms name the same rungs. Host-tuned executables take none and read the compiler.
-# StringZilla stays out: its header-only entry points pick a tier at compile time, so a unit keeps its own flags there.
-set(usearch_compile_definitions_ ${nk_compile_definitions_} ${fu_compile_definitions_})
-if (NOT DEFINED CACHE{nk_compile_definitions_} OR NOT DEFINED CACHE{fu_compile_definitions_})
-    message(FATAL_ERROR "usearch: the sibling pins predate the cached probe lists; bump the usearch_sibling tags")
-endif ()
 
 # Recorded without headers - each sibling owns its own - so `usearch::header` names nothing a consumer cannot resolve.
 if (USEARCH_INSTALL AND USEARCH_SIBLING_TARGETS)
@@ -461,9 +446,6 @@ if (USEARCH_INSTALL)
         DESTINATION ${USEARCH_CONFIG_INSTALL_DIR}
     )
 endif ()
-
-# Nothing links NumKong's dynamic flavor, so a bare build skips it.
-set_target_properties(numkong_shared PROPERTIES EXCLUDE_FROM_ALL ON)
 
 # Only `safegraphs_format.hpp` reaches for yyjson, and only a compiled target ever includes it - so it is acquired under
 # the same condition as `src/`, leaving the header-only target consumable without it.

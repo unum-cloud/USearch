@@ -26,8 +26,8 @@
 
 #include <forkunion.h>            // `fu_topology_new` - the executor factories' discovery
 #include <forkunion/types.hpp>    // `fu::spin_mutex` - the ticks' lock
-#include <numkong/capabilities.h> // `nk_capabilities_available`
-#include <numkong/cast.h>         // `nk_cast` - converting foreign scalar rows at the boundary
+#include <numkong/capabilities.h> // `nk_cpu_capabilities_enabled`
+#include <numkong/cast.h>         // `nk_cast_best` - converting foreign scalar rows at the boundary
 
 #include "dense_specializations.cuh"
 #include "usearch/utilities/ram_device.hpp" // `forkunion_allocator`, `no_memory_domain_k` - the multi-indexes' host tables
@@ -48,7 +48,7 @@
 struct punned_dense_index_t {
 
     using variants_t = std::variant<
-#if NUMKONG_ARCH_X86_64_
+#if NUMKONG_ARCH_X8664_
 #if NUMKONG_TARGET_HASWELL
         // intel_haswell over serial by haswell: every dtype, 33 arms
         ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>,       //
@@ -642,7 +642,7 @@ struct punned_dense_index_t {
 
 /** The arms' explicit instantiation declarations: every body compiles in its class's unit, so this
  *  unit only visits. */
-#if NUMKONG_ARCH_X86_64_
+#if NUMKONG_ARCH_X8664_
 #if NUMKONG_TARGET_HASWELL
 /* intel_haswell over serial by haswell: every dtype, 33 arms */
 extern template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>>;

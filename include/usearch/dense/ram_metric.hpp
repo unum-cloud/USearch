@@ -55,8 +55,8 @@
  *
  *  @section Design Goals & Decisions
  *
- *  1. @b Avoid-call-overhead. All NumKong logic is inlined from @c NUMKONG_API_COMPTIME ISA-specific
- *  APIs - the @c NUMKONG_API_RUNTIME stack-frame construction in the shared lib is skipped.
+ *  1. @b Avoid-call-overhead. The arms build NumKong header-only, so every capability kernel and kit inlines
+ *  into the arm, and no call crosses into the shared library.
  *
  *  2. @b Amortize-arithmetic-reductions. Both Euclidean (L2) and Angular (Cos) distances
  *  can be inferred from the inner product if the norms are known. This means @b 2-by-D
@@ -91,6 +91,8 @@
  *  side-by-side in @c vector_norms, which the index stores once per vector at insert time.
  */
 #pragma once
+
+#include <cassert>
 
 #include <array>
 #include <type_traits>
@@ -244,8 +246,10 @@ inline vector_norms<typename scalar_type_::dot_result_t> invoke_dense_norms_( //
     // downcasting to the underlying C-level raw types from its own C++ wrappers.
     native_sum_t native_sum;
     native_sumsq_t native_sumsq;
-    function(reinterpret_cast<raw_scalar_t const*>(vec.data()), vec.size(), sizeof(scalar_type_),
-             reinterpret_cast<raw_sum_t*>(&native_sum), reinterpret_cast<raw_sumsq_t*>(&native_sumsq));
+    [[maybe_unused]] nk_status_t const status = function(
+        reinterpret_cast<raw_scalar_t const*>(vec.data()), vec.size(), sizeof(scalar_type_),
+        reinterpret_cast<raw_sum_t*>(&native_sum), reinterpret_cast<raw_sumsq_t*>(&native_sumsq), nullptr);
+    assert(status == nk_success_k && "A CPU tier reduces any vector, given no stream");
     return {static_cast<dot_result_t>(native_sum), static_cast<dot_result_t>(native_sumsq)};
 }
 
@@ -3909,7 +3913,7 @@ template <std::size_t fan_out_, dense_quads_kit kit_>
     // scalar variants - and its caller contract is that every slot it reads is initialized,
     // even when the 1-to-1 instantiation only extracts lane 0. Three zero-stores buy a
     // well-defined finalize on every path.
-    NUMKONG_ALIGN64_ accumulator_t accumulators[4];
+    alignas(64) accumulator_t accumulators[4];
     kit_::init_accumulator(&accumulators[0]);
     kit_::init_accumulator(&accumulators[1]);
     kit_::init_accumulator(&accumulators[2]);
@@ -3931,8 +3935,8 @@ template <std::size_t fan_out_, dense_quads_kit kit_>
     std::size_t const tail_dimensions = total_dimensions % kit_::step_dimensions;
     std::size_t passed_dimensions = 0;
 
-    NUMKONG_ALIGN64_ step_vec_t query_step_vec;
-    NUMKONG_ALIGN64_ step_vec_t candidate_step_vecs[fan_out_];
+    alignas(64) step_vec_t query_step_vec;
+    alignas(64) step_vec_t candidate_step_vecs[fan_out_];
     for (; passed_dimensions + kit_::step_dimensions <= total_dimensions; passed_dimensions += kit_::step_dimensions) {
         std::size_t const value_offset = passed_dimensions / dims_per_value;
         std::size_t const next_value_offset = (passed_dimensions + kit_::step_dimensions) / dims_per_value;
@@ -3984,7 +3988,7 @@ template <std::size_t fan_out_, dense_quads_kit kit_>
     // u8/i8 finalize takes 8 args (DPBUSD bias correction); float-path takes 6. Detected
     // via `std::is_invocable_v` so kits keep `reduce_accumulators` as a raw alias.
     using finalized_vec_t = typename kit_::finalized_vec_t;
-    NUMKONG_ALIGN64_ finalized_vec_t dot_products_vec;
+    alignas(64) finalized_vec_t dot_products_vec;
     constexpr bool needs_compensation = std::is_invocable_v<                                    //
         decltype(kit_::reduce_accumulators),                                                    //
         accumulator_t const*, accumulator_t const*, accumulator_t const*, accumulator_t const*, //
@@ -4006,7 +4010,7 @@ template <std::size_t fan_out_, dense_quads_kit kit_>
     // Now infer the angular/euclidean distance from the inner product, in vec form.
     // The through helper (`nk_*_through_*_from_dot_*` or our `inner_product_distance_`)
     // takes the dots vec, query sumsq, candidate sumsqs vec, and writes a distances vec.
-    NUMKONG_ALIGN64_ finalized_vec_t distances_from_dot_products_vec;
+    alignas(64) finalized_vec_t distances_from_dot_products_vec;
     {
         alignas(16) std::array<dot_result_t, 4> candidates_sumsqs_array {};
         [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
