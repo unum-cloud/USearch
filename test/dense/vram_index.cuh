@@ -77,7 +77,7 @@ static_assert(cuda_reservable_allocator<counting_cuda_allocator_t>);
  *  while counting past it, a short row ends in sentinels, every kept pair names a distinct stored row with its
  *  exact dot, and mismatched spans refuse. */
 template <typename index_type_, typename make_index_type_>
-    requires dense_device_resident_k<index_type_>
+    requires dense_device_resident<index_type_>
 std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using dot_result_t = typename index_type_::dot_result_t;
@@ -89,7 +89,7 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
     typename index_type_::dense_traversal_context_t context {{}};
     failures += expect(index.reserve({rows_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "multiply"));
-    auto const left = vectors(nk::range {std::size_t {0}, left_count}, nk::slice);
+    auto const left = vectors(nk::range(std::size_t {0}, left_count), nk::slice);
 
     std::array<dense_node_id_t, left_count * rows_count> node_ids;
     std::array<dot_result_t, left_count * rows_count> products;
@@ -107,7 +107,7 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
     failures += expect(std::all_of(node_ids.begin(), node_ids.begin() + left_count * 4,
                                    [](dense_node_id_t id) { return id == dense_node_id_unknown_k; }));
 
-    auto assigned_ids = nk::vector<dense_node_id_t>::try_zeros(rows_count);
+    auto assigned_ids = nk::vector<dense_node_id_t>::zeros(rows_count).value;
     failures += expect(index.insert(vectors.view(), assigned_ids.span(), context).status == status_t::success_k);
 
     search_config_t const exhaustive {static_cast<typename index_type_::small_size_t>(rows_count)};
@@ -137,7 +137,7 @@ using test::test_dense_multiply;
 
 /** @ref dense_expect_multiply, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-    requires(kernel_ == nk_kernel_dot_k && dense_device_resident_k<index_type_>)
+    requires(kernel_ == nk_kernel_dot_k && dense_device_resident<index_type_>)
 std::size_t test_dense_multiply(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_multiply<index_type_>(make_index, ledger, seed);

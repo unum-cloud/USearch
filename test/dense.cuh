@@ -21,12 +21,14 @@
  */
 #pragma once
 
+#include <cassert> // `assert` - the CPU casts never refuse
+#include <cmath>   // `std::exp`, `std::sin`, `std::fabs` - the fold oracles
 #include <cstdint> // `std::uintptr_t` - the checkpoint paths' per-run salt
 #include <cstdio>  // `std::snprintf`, `std::remove` - the checkpoint round-trip's files
 #include <cstdlib> // `std::abs`
 #include <cstring> // `std::strlen`, `std::memcmp` - the fetched-row byte comparison
 
-#include <algorithm> // `std::sort`, `std::unique`
+#include <algorithm> // `std::sort`, `std::unique`, `std::all_of`
 #include <array>     // `std::array`
 #include <atomic>    // `std::atomic`
 #include <bit>       // `std::bit_cast` - the ULP distance of the oracle audits; `std::bit_floor` - a cell's ceiling
@@ -100,8 +102,9 @@ static bool dense_cell_admitted() noexcept {
     constexpr fu::capabilities_t atomics_k = atomic_ref_<u32_t>::capabilities_k;
     if ((fu::runtime_capabilities() & atomics_k) != atomics_k) return false;
     if constexpr (caps_ != nk_cap_serial_k) {
-        if ((nk_capabilities_available() & caps_) != caps_) return false;
-        nk_configure_thread(nk_capabilities_available());
+        nk_capability_t available = 0;
+        if (nk_cpu_capabilities_enabled(&available) != nk_success_k || (available & caps_) != caps_) return false;
+        if (nk_cpu_configure_thread(available) != nk_success_k) return false;
     }
     return true;
 }
@@ -321,7 +324,7 @@ std::size_t dense_expect_three_vectors(make_index_type_ const& make_index, alloc
     failures += expect(
         index.reserve({8, connectivity_16_k, dense_dimensions_for<scalar_t>(dense_tiny_values_k)}).status ==
         status_t::success_k);
-    auto assigned_ids = nk::vector<dense_node_id_t>::try_zeros(3);
+    auto assigned_ids = nk::vector<dense_node_id_t>::zeros(3).value;
     auto const [insert_result, insert_status] = index.insert(vectors.view(), assigned_ids.span(), context);
     failures += expect(insert_status == status_t::success_k);
     failures += expect_eq(insert_result.new_size, 3u);
@@ -368,7 +371,7 @@ std::size_t dense_expect_growth_and_recall(make_index_type_ const& make_index, a
 
     failures += expect(index.reserve({16, connectivity_16_k, dense_dimensions_for<scalar_t>(dense_values_k)}).status ==
                        status_t::success_k);
-    auto assigned_ids = nk::vector<dense_node_id_t>::try_zeros(dense_growth_nodes_k);
+    auto assigned_ids = nk::vector<dense_node_id_t>::zeros(dense_growth_nodes_k).value;
     auto const [result, status] = index.insert(vectors.view(), assigned_ids.span(), context);
     failures += expect(status == status_t::success_k);
     failures += expect_eq(result.new_size, dense_growth_nodes_k);
@@ -419,7 +422,7 @@ std::size_t dense_expect_predicated_search(make_index_type_ const& make_index, a
     failures += expect(
         index.reserve({dense_growth_nodes_k, connectivity_16_k, dense_dimensions_for<scalar_t>(dense_values_k)})
             .status == status_t::success_k);
-    auto assigned_ids = nk::vector<dense_node_id_t>::try_zeros(dense_growth_nodes_k);
+    auto assigned_ids = nk::vector<dense_node_id_t>::zeros(dense_growth_nodes_k).value;
     failures += expect(index.insert(vectors.view(), assigned_ids.span(), context).status == status_t::success_k);
 
     // The oracle: distances of one query against the whole store, through the very 4-way
@@ -538,7 +541,7 @@ std::size_t test_dense_predicated_search(make_index_type_ const& make_index, u64
 
 /** Whether an index lives on a device, so its checkpoint plans take a stream. */
 template <typename index_type_>
-constexpr bool dense_device_resident_k = requires(index_type_ const& index) { index.device_specs(); };
+constexpr bool dense_device_resident = requires(index_type_ const& index) { index.device_specs(); };
 
 /** The bytes of a host matrix's rows - a positional target over its own storage. */
 template <typename value_type_>
@@ -580,8 +583,8 @@ std::size_t dense_expect_pooled_save(index_type_& index, typename index_type_::s
                                      nk::matrix<scalar_type_>& saved_vectors,
                                      nk::matrix<node_id_type_>& saved_neighbors) {
     std::size_t failures = 0;
-    auto pooled_vectors = nk::matrix<scalar_type_>::try_zeros({shape.nodes, shape.dimensions});
-    auto pooled_neighbors = nk::matrix<node_id_type_>::try_zeros({shape.nodes, shape.connectivity});
+    auto pooled_vectors = nk::matrix<scalar_type_>::zeros({shape.nodes, shape.dimensions}).value;
+    auto pooled_neighbors = nk::matrix<node_id_type_>::zeros({shape.nodes, shape.connectivity}).value;
     failures += expect(!pooled_vectors.empty() && !pooled_neighbors.empty());
     auto [plan, status] = index.plan_save({dense_matrix_bytes(pooled_vectors), dense_matrix_bytes(pooled_neighbors)},
                                           synchronization_t::immutable_k);
@@ -593,7 +596,7 @@ std::size_t dense_expect_pooled_save(index_type_& index, typename index_type_::s
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(lanes_count))) return failures + expect(false);
     pool.for_threads([&](std::size_t) noexcept {
-        auto scratch = nk::matrix<node_id_type_>::try_zeros({widest, shape.connectivity});
+        auto scratch = nk::matrix<node_id_type_>::zeros({widest, shape.connectivity}).value;
         if (scratch.empty()) return void(lane_failures.fetch_add(1));
         auto const steps = plan.steps();
         for (std::size_t position = cursor.fetch_add(1); position < steps.size(); position = cursor.fetch_add(1))
@@ -627,13 +630,13 @@ std::size_t dense_expect_save_load_roundtrip(make_index_type_ const& make_index,
     failures += expect(
         index.reserve({dense_growth_nodes_k, connectivity_16_k, dense_dimensions_for<scalar_t>(dense_values_k)})
             .status == status_t::success_k);
-    auto assigned_ids = nk::vector<dense_node_id_t>::try_zeros(dense_growth_nodes_k);
+    auto assigned_ids = nk::vector<dense_node_id_t>::zeros(dense_growth_nodes_k).value;
     failures += expect(index.insert(vectors.view(), assigned_ids.span(), context).status == status_t::success_k);
 
     auto const shape = index.saved_shape();
-    auto saved_vectors = nk::matrix<scalar_t>::try_zeros({shape.nodes, shape.dimensions});
-    auto saved_neighbors = nk::matrix<node_id_t>::try_zeros({shape.nodes, shape.connectivity});
-    auto scratch = nk::matrix<node_id_t>::try_zeros({shape.nodes, shape.connectivity});
+    auto saved_vectors = nk::matrix<scalar_t>::zeros({shape.nodes, shape.dimensions}).value;
+    auto saved_neighbors = nk::matrix<node_id_t>::zeros({shape.nodes, shape.connectivity}).value;
+    auto scratch = nk::matrix<node_id_t>::zeros({shape.nodes, shape.connectivity}).value;
     failures += expect(!saved_vectors.empty() && !saved_neighbors.empty() && !scratch.empty());
     failures += expect_eq(index.save({dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
                                      synchronization_t::exclusive_k, scratch.span()),
@@ -652,8 +655,8 @@ std::size_t dense_expect_save_load_roundtrip(make_index_type_ const& make_index,
     // A restored index must re-save on every contract: the settlement counters arrive
     // fully released, so the optimistic arm's probe sees a quiescent chain, and the
     // re-saved bytes mirror the originals exactly.
-    auto resaved_vectors = nk::matrix<scalar_t>::try_zeros({shape.nodes, shape.dimensions});
-    auto resaved_neighbors = nk::matrix<node_id_t>::try_zeros({shape.nodes, shape.connectivity});
+    auto resaved_vectors = nk::matrix<scalar_t>::zeros({shape.nodes, shape.dimensions}).value;
+    auto resaved_neighbors = nk::matrix<node_id_t>::zeros({shape.nodes, shape.connectivity}).value;
     failures += expect(!resaved_vectors.empty() && !resaved_neighbors.empty());
     typename index_type_::columns_t const resaved {dense_matrix_bytes(resaved_vectors),
                                                    dense_matrix_bytes(resaved_neighbors)};
@@ -661,14 +664,14 @@ std::size_t dense_expect_save_load_roundtrip(make_index_type_ const& make_index,
     failures += expect_eq(restored.save(resaved, synchronization_t::immutable_k, scratch.span()), status_t::success_k);
     // A device index refuses the concurrent arm by contract; the RAM index settles it.
     failures += expect_eq(restored.save(resaved, synchronization_t::concurrent_k, scratch.span()),
-                          dense_device_resident_k<index_type_> ? status_t::config_mismatch_k : status_t::success_k);
+                          dense_device_resident<index_type_> ? status_t::config_mismatch_k : status_t::success_k);
     failures += expect(std::memcmp(resaved_vectors.data(), saved_vectors.data(),
                                    dense_rows_bytes(saved_vectors.view(), shape.nodes)) == 0);
     failures += expect(std::memcmp(resaved_neighbors.data(), saved_neighbors.data(),
                                    dense_rows_bytes(saved_neighbors.view(), shape.nodes)) == 0);
 
     // Lanes take chunks from one plan only where the residency admits the concurrent arm.
-    if constexpr (!dense_device_resident_k<index_type_>)
+    if constexpr (!dense_device_resident<index_type_>)
         failures += dense_expect_pooled_save(restored, shape, saved_vectors, saved_neighbors);
 
     if constexpr (kernel_ != nk_kernel_dot_k)
@@ -796,9 +799,9 @@ std::size_t dense_expect_load_hostile(make_index_type_ const& make_index, alloca
     failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     failures += expect(index.insert(vectors.view(), {}, context).status == status_t::success_k);
 
-    auto saved_vectors = nk::matrix<scalar_t>::try_zeros({nodes_count, dimensions});
-    auto saved_neighbors = nk::matrix<node_id_t>::try_zeros({nodes_count, connectivity_16_k});
-    auto scratch = nk::matrix<node_id_t>::try_zeros({nodes_count, connectivity_16_k});
+    auto saved_vectors = nk::matrix<scalar_t>::zeros({nodes_count, dimensions}).value;
+    auto saved_neighbors = nk::matrix<node_id_t>::zeros({nodes_count, connectivity_16_k}).value;
+    auto scratch = nk::matrix<node_id_t>::zeros({nodes_count, connectivity_16_k}).value;
     failures += expect(!saved_vectors.empty() && !saved_neighbors.empty() && !scratch.empty());
     failures += expect_eq(index.save({dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
                                      synchronization_t::exclusive_k, scratch.span()),
@@ -827,7 +830,7 @@ std::size_t dense_expect_load_hostile(make_index_type_ const& make_index, alloca
 
     // Out-of-range neighbor IDs load as sentinels - the interchange admits any - and the
     // translation frontier keeps them from ever surfacing in a search.
-    auto patched_neighbors = nk::matrix<node_id_t>::try_zeros({nodes_count, connectivity_16_k});
+    auto patched_neighbors = nk::matrix<node_id_t>::zeros({nodes_count, connectivity_16_k}).value;
     failures += expect(!patched_neighbors.empty());
     std::size_t const row_ids = dense_rows_bytes(saved_neighbors.view(), 1) / sizeof(node_id_t);
     std::memcpy(patched_neighbors.data(), saved_neighbors.data(),
@@ -875,9 +878,9 @@ std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocat
     failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     failures += expect(index.insert(vectors.view(), {}, context).status == status_t::success_k);
 
-    auto saved_vectors = nk::matrix<scalar_t>::try_zeros({nodes_count, dimensions});
-    auto saved_neighbors = nk::matrix<node_id_t>::try_zeros({nodes_count, connectivity_16_k});
-    auto scratch = nk::matrix<node_id_t>::try_zeros({2 * nodes_count, connectivity_16_k});
+    auto saved_vectors = nk::matrix<scalar_t>::zeros({nodes_count, dimensions}).value;
+    auto saved_neighbors = nk::matrix<node_id_t>::zeros({nodes_count, connectivity_16_k}).value;
+    auto scratch = nk::matrix<node_id_t>::zeros({2 * nodes_count, connectivity_16_k}).value;
     failures += expect(!saved_vectors.empty() && !saved_neighbors.empty() && !scratch.empty());
     failures += expect_eq(index.save({dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
                                      synchronization_t::exclusive_k, scratch.span()),
@@ -897,8 +900,8 @@ std::size_t dense_expect_load_append(make_index_type_ const& make_index, allocat
     failures += expect_eq(doubled.load(source, nodes_count, local), status_t::success_k);
     failures += expect_eq(doubled.size(), 2 * nodes_count);
 
-    auto doubled_vectors = nk::matrix<scalar_t>::try_zeros({2 * nodes_count, dimensions});
-    auto doubled_neighbors = nk::matrix<node_id_t>::try_zeros({2 * nodes_count, connectivity_16_k});
+    auto doubled_vectors = nk::matrix<scalar_t>::zeros({2 * nodes_count, dimensions}).value;
+    auto doubled_neighbors = nk::matrix<node_id_t>::zeros({2 * nodes_count, connectivity_16_k}).value;
     failures += expect(!doubled_vectors.empty() && !doubled_neighbors.empty());
     failures += expect_eq(doubled.save({dense_matrix_bytes(doubled_vectors), dense_matrix_bytes(doubled_neighbors)},
                                        synchronization_t::exclusive_k, scratch.span()),
@@ -1137,10 +1140,10 @@ std::size_t dense_expect_heal_islands(make_index_type_ const& make_index, alloca
     failures += expect(built.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     failures += expect(built.insert(vectors.view(), {}, context).status == status_t::success_k);
 
-    auto saved_vectors = nk::matrix<scalar_t>::try_zeros({nodes_count, dimensions});
-    auto saved_neighbors = nk::matrix<node_id_t>::try_zeros(
-        {nodes_count, static_cast<std::size_t>(built.connectivity())});
-    auto scratch = nk::matrix<node_id_t>::try_zeros({nodes_count, static_cast<std::size_t>(built.connectivity())});
+    auto saved_vectors = nk::matrix<scalar_t>::zeros({nodes_count, dimensions}).value;
+    auto saved_neighbors =
+        nk::matrix<node_id_t>::zeros({nodes_count, static_cast<std::size_t>(built.connectivity())}).value;
+    auto scratch = nk::matrix<node_id_t>::zeros({nodes_count, static_cast<std::size_t>(built.connectivity())}).value;
     failures += expect(!saved_vectors.empty() && !saved_neighbors.empty() && !scratch.empty());
     if (saved_vectors.empty() || saved_neighbors.empty() || scratch.empty()) return failures;
 
@@ -1226,7 +1229,7 @@ std::size_t dense_expect_product_row(nk::vector_view<scalar_type_> left, nk::mat
  *  while counting past it, every kept pair names a distinct stored row with its exact dot, and mismatched
  *  spans refuse. */
 template <typename index_type_, typename make_index_type_>
-    requires(!dense_device_resident_k<index_type_>)
+    requires(!dense_device_resident<index_type_>)
 std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     constexpr std::size_t rows_count = dense_thread_nodes_k, left_count = 4;
@@ -1245,7 +1248,7 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
     failures += expect(empty.status == status_t::success_k && empty.value.count == 0);
     failures += expect(node_ids[0] == dense_node_id_unknown_k);
 
-    auto assigned_ids = nk::vector<dense_node_id_t>::try_zeros(rows_count);
+    auto assigned_ids = nk::vector<dense_node_id_t>::zeros(rows_count).value;
     failures += expect(index.insert(vectors.view(), assigned_ids.span(), context).status == status_t::success_k);
 
     typename index_type_::search_config_t const exhaustive {
@@ -1279,7 +1282,7 @@ std::size_t test_dense_multiply(make_index_type_ const&, u64_t) {
 
 /** @ref dense_expect_multiply, then the ledger it left must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-    requires(kernel_ == nk_kernel_dot_k && !dense_device_resident_k<index_type_>)
+    requires(kernel_ == nk_kernel_dot_k && !dense_device_resident<index_type_>)
 std::size_t test_dense_multiply(make_index_type_ const& make_index, u64_t seed) {
     allocation_ledger_t ledger;
     std::size_t const failures = dense_expect_multiply<index_type_>(make_index, ledger, seed);
@@ -1692,7 +1695,7 @@ template <typename indexes_type_>
 save_config_t dense_indexes_save_config(checkpoint_layout_t layout) noexcept {
     save_config_t config;
     config.layout = layout;
-    if constexpr (dense_device_resident_k<typename indexes_type_::index_t>)
+    if constexpr (dense_device_resident<typename indexes_type_::index_t>)
         config.synchronization = synchronization_t::immutable_k;
     return config;
 }
@@ -1837,7 +1840,7 @@ std::size_t test_dense_indexes_save_load(u64_t seed) {
     misaligned.alignment = 32;
     failures += expect_eq(indexes.save(paths.monolith, misaligned, executor), status_t::config_mismatch_k);
     failures += expect(succeeded(indexes.save(paths.monolith, monolith, executor)));
-    if constexpr (dense_device_resident_k<index_t>) {
+    if constexpr (dense_device_resident<index_t>) {
         save_config_t probing = monolith;
         probing.synchronization = synchronization_t::concurrent_k;
         failures += expect_eq(indexes.save(paths.monolith, probing, executor), status_t::config_mismatch_k);
@@ -1978,7 +1981,7 @@ std::size_t test_dense_indexes_pooled_save(u64_t seed) {
     fu::flat_pool_t pool;
     if (fu::failed(pool.spawn(3))) return failures + expect(false);
     pool.for_threads([&](std::size_t) noexcept {
-        auto scratch = nk::matrix<node_id_t>::try_zeros({rows, connectivity_16_k});
+        auto scratch = nk::matrix<node_id_t>::zeros({rows, connectivity_16_k}).value;
         if (scratch.empty()) return void(lane_failures.fetch_add(1));
         for (std::size_t position = cursor.fetch_add(1); position < steps.size(); position = cursor.fetch_add(1))
             if (failed(plan.save(steps[position], scratch.span()))) lane_failures.fetch_add(1);
@@ -2283,7 +2286,7 @@ std::size_t test_dense_indexes_products(u64_t seed) {
     failures += expect(
         succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
 
-    auto const left = vectors(nk::range {std::size_t {0}, left_count}, nk::slice);
+    auto const left = vectors(nk::range(std::size_t {0}, left_count), nk::slice);
     std::array<key_t, left_count * rows_count> found_keys;
     std::array<typename indexes_type_::dot_result_t, left_count * rows_count> found_products;
     std::array<std::size_t, left_count> counts;
@@ -2345,7 +2348,7 @@ std::size_t test_dense_indexes_maxsim(u64_t seed) {
 
     // Each document's exact score per query: every query row's best dot among its tokens, summed. Test rows
     // are non-negative, so every dot is too, and a row that misses a document only lowers its score.
-    auto const queries = vectors(nk::range {std::size_t {0}, queries_count * rows_per_query}, nk::slice);
+    auto const queries = vectors(nk::range(std::size_t {0}, queries_count * rows_per_query), nk::slice);
     std::array<std::array<f64_t, documents_count>, queries_count> exact {};
     for (std::size_t row = 0; row != queries_count * rows_per_query; ++row)
         for (std::size_t document = 0; document != documents_count; ++document) {
@@ -2398,7 +2401,7 @@ std::size_t test_dense_indexes_maxsim(u64_t seed) {
                 failures += expect_near(found_scores[query][rank], exact[query][document]);
         }
 
-    failures += expect(maxsim(queries(nk::range {std::size_t {0}, rows_per_query + 1}, nk::slice), {}).status ==
+    failures += expect(maxsim(queries(nk::range(std::size_t {0}, rows_per_query + 1), nk::slice), {}).status ==
                        status_t::shape_mismatch_k);
     return failures;
 }
@@ -2434,9 +2437,9 @@ std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocatio
 
     // The saver's destinations are sized once at the ceiling; each attempt fills the
     // walked prefix, so nothing allocates inside the race loop.
-    auto saver_vectors = nk::matrix<scalar_t>::try_zeros({nodes_ceiling, dimensions});
-    auto saver_neighbors = nk::matrix<node_id_t>::try_zeros({nodes_ceiling, connectivity_16_k});
-    auto saver_scratch = nk::matrix<node_id_t>::try_zeros({nodes_ceiling, connectivity_16_k});
+    auto saver_vectors = nk::matrix<scalar_t>::zeros({nodes_ceiling, dimensions}).value;
+    auto saver_neighbors = nk::matrix<node_id_t>::zeros({nodes_ceiling, connectivity_16_k}).value;
+    auto saver_scratch = nk::matrix<node_id_t>::zeros({nodes_ceiling, connectivity_16_k}).value;
     failures += expect(!saver_vectors.empty() && !saver_neighbors.empty() && !saver_scratch.empty());
 
     struct recorded_payload_t {
@@ -2477,8 +2480,8 @@ std::size_t dense_expect_save_race(make_index_type_ const& make_index, allocatio
         settled_saves.fetch_add(1);
         if (!audit_settled(nodes)) thread_failures.fetch_add(1);
         if (recorded_payloads.size() == recorded_payloads.capacity()) return;
-        recorded_payload_t recorded {nk::matrix<scalar_t>::try_zeros({nodes, dimensions}),
-                                     nk::matrix<node_id_t>::try_zeros({nodes, connectivity_16_k}), nodes};
+        recorded_payload_t recorded {nk::matrix<scalar_t>::zeros({nodes, dimensions}).value,
+                                     nk::matrix<node_id_t>::zeros({nodes, connectivity_16_k}).value, nodes};
         if (recorded.vectors.empty() || recorded.neighbors.empty()) return;
         std::memcpy(recorded.vectors.data(), saver_vectors.data(), dense_rows_bytes(saver_vectors.view(), nodes));
         std::memcpy(recorded.neighbors.data(), saver_neighbors.data(), dense_rows_bytes(saver_neighbors.view(), nodes));
@@ -2812,9 +2815,9 @@ std::size_t dense_expect_allocation_budget(make_index_type_ const& make_index, a
     std::size_t const nodes_count = fill_rows_count + extra_rows_count;
     failures += expect_eq(index.size(), nodes_count);
 
-    auto saved_vectors = nk::matrix<scalar_t>::try_zeros({nodes_count, dimensions});
-    auto saved_neighbors = nk::matrix<node_id_t>::try_zeros({nodes_count, connectivity_16_k});
-    auto scratch = nk::matrix<node_id_t>::try_zeros({nodes_count, connectivity_16_k});
+    auto saved_vectors = nk::matrix<scalar_t>::zeros({nodes_count, dimensions}).value;
+    auto saved_neighbors = nk::matrix<node_id_t>::zeros({nodes_count, connectivity_16_k}).value;
+    auto scratch = nk::matrix<node_id_t>::zeros({nodes_count, connectivity_16_k}).value;
     failures += expect(!saved_vectors.empty() && !saved_neighbors.empty() && !scratch.empty());
     failures += expect_eq(index.save({dense_matrix_bytes(saved_vectors), dense_matrix_bytes(saved_neighbors)},
                                      synchronization_t::exclusive_k, scratch.span()),

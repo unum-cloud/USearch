@@ -42,7 +42,7 @@
 #include <numkong/tensor.hpp>
 #include <numkong/vector.hpp>
 
-#include "usearch/types.h" // `usearch_version`, `usearch_capabilities_compiled`, `usearch_capabilities_available`
+#include "usearch/types.h" // `usearch_version_name`, `usearch_capabilities_compiled`, `usearch_capabilities_available`
 #include "usearch/utilities/types.hpp"
 
 /** The short spelling every test reaches the library through where its `using` directive is
@@ -177,7 +177,7 @@ struct machine_t {
 
 /** Probes the names @c machine_t reports. */
 inline machine_t probe_machine() noexcept {
-    return {usearch_version(), usearch_capabilities_compiled(), usearch_capabilities_available()};
+    return {usearch_version_name(), usearch_capabilities_compiled(), usearch_capabilities_available()};
 }
 
 /** Prints the version line, then the capabilities as "- Compiled for:" and "- This machine:". */
@@ -386,11 +386,11 @@ nk::matrix<scalar_, allocator_type_> make_sketched_vectors(std::size_t count, st
     // different seeds, like the concurrent builds', still land in one sketch space.
     splitmix64_t hyperplanes_generator {0x5E7C4ull}, points_generator {seed};
     uniform_between<f64_t> const centered {-1, 1};
-    auto hyperplanes = nk::matrix<f64_t>::try_zeros({dimensions, latent_dimensions_k});
+    auto hyperplanes = nk::matrix<f64_t>::zeros({dimensions, latent_dimensions_k}).value;
     for (std::size_t dimension = 0; dimension != dimensions; ++dimension)
         for (std::size_t latent = 0; latent != latent_dimensions_k; ++latent)
             hyperplanes(dimension, latent) = centered(hyperplanes_generator);
-    auto vectors = nk::matrix<scalar_, allocator_type_>::try_zeros({count, dimensions}, allocator);
+    auto vectors = nk::matrix<scalar_, allocator_type_>::zeros({count, dimensions}, allocator).value;
     std::array<f64_t, latent_dimensions_k> point;
     for (auto row : vectors.rows()) {
         for (f64_t& coordinate : point) coordinate = centered(points_generator);
@@ -413,7 +413,7 @@ nk::matrix<scalar_, allocator_type_> make_vectors(std::size_t count, std::size_t
                                                   allocator_type_ allocator = {}) {
     if constexpr (std::is_same_v<scalar_, nk::u1x8_t>)
         return make_sketched_vectors<scalar_>(count, dimensions, seed, allocator);
-    auto vectors = nk::matrix<scalar_, allocator_type_>::try_zeros({count, dimensions}, allocator);
+    auto vectors = nk::matrix<scalar_, allocator_type_>::zeros({count, dimensions}, allocator).value;
     splitmix64_t random_generator {seed};
     uniform_below<u32_t> component_distribution {random_component_levels<scalar_>()};
     for (auto row : vectors.rows()) {

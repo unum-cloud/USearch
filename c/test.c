@@ -5,9 +5,10 @@
  *  @brief Unit tests for the pure-C ABI of USearch (`usearch/dense_index.h`).
  *
  *  Exercises the dense surface through the ABI every binding consumes: initialization and
- *  reservation, batch `add`, `search` and `multiply`, retrieval by key, and the error contract of
- *  `usearch_error_t`. Scoped to the verbs `src/` instantiates today - the header runs ahead of
- *  the implementation, and a smoke test that cannot link proves nothing. The harness is
+ *  reservation, batch `add`, `search` and `multiply`, retrieval by key into an arena, and the
+ *  contract of `usearch_outcome_t`. Every call here blocks, so its outcome is final once it
+ *  returns. Scoped to the verbs `src/` instantiates today - the header runs ahead of the
+ *  implementation, and a smoke test that cannot link proves nothing. The harness is
  *  intentionally dependency-free so it can run in the same matrix as the C++ tests and on
  *  cross-compilation targets where only the C runtime is available.
  *
@@ -113,65 +114,82 @@ usearch_key_t key_of(uint64_t value) {
     return key;
 }
 
-/** An angular RAM index over @p dimensions -wide `f32` rows, every optional field derived. */
-usearch_dense_options_t create_options(size_t const dimensions) {
-    usearch_dense_options_t options;
-    memset(&options, 0, sizeof(options));
-    options.metric = usearch_dense_metric_angular_k;
-    options.quantization = usearch_scalar_bf16_k;
-    options.dimensions = dimensions;
-    options.connectivity = 16;
-    options.residency = usearch_residency_ram_k;
-    return options;
+/** An angular `bf16` RAM index over @p dimensions -wide rows, every other optional field derived. */
+usearch_dense_index_t create_index(size_t const dimensions) {
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t index = NULL;
+    usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
+                                                        .outcome = &outcome,
+                                                        .metric = usearch_dense_metric_angular_k,
+                                                        .quantization = usearch_scalar_bf16_k,
+                                                        .dimensions = dimensions,
+                                                        .connectivity = 16});
+    expect(!outcome.message, outcome.message);
+    expect(index != NULL, "Initialization returned no handle");
+    return index;
 }
 
-/** Initializes an index twice, checking the error slot at each step, and reserves capacity,
- *  verifying that size, capacity, dimensions, and connectivity read back as configured. */
+/** A RAM executor with every field derived. */
+usearch_executor_t create_executor(void) {
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t executor = NULL;
+    usearch_executor_for_ram(&(usearch_executor_for_ram_t) {.executor = &executor, .outcome = &outcome});
+    expect(!outcome.message, outcome.message);
+    return executor;
+}
+
+/** Admits the keys whose integer identity is even. */
+usearch_admission_t admits_even(usearch_key_t key, void* state) {
+    (void)state;
+    return key.bytes[15] % 2 == 0 ? usearch_admit_k : usearch_reject_k;
+}
+
+/** Initializes an index twice, checking the outcome at each step, and reserves capacity,
+ *  verifying that size, capacity, dimensions, and connectivity describe back as configured. */
 void test_init(size_t const collection_size, size_t const dimensions) {
     printf("Test: Index Initialization... %zu vectors, %zu dimensions\n", collection_size, dimensions);
 
-    usearch_dense_options_t options = create_options(dimensions);
-    usearch_error_t error = {0};
+    usearch_outcome_t outcome = {0};
+    usearch_dense_free(create_index(dimensions));
+    usearch_dense_index_t const index = create_index(dimensions);
+    usearch_executor_t const executor = create_executor();
 
-    usearch_dense_index_t index = usearch_dense_init(&options, &error);
-    expect(!error.message, error.message);
-    expect(index != NULL, "Initialization returned no handle");
-    usearch_dense_free(index);
+    usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = index,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .capacity = collection_size});
+    expect(!outcome.message, outcome.message);
 
-    index = usearch_dense_init(&options, &error);
-    expect(!error.message, error.message);
+    usearch_dense_index_description_t description = {0};
+    usearch_dense_describe(&(usearch_dense_describe_t) {.index = index,
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect_eq(description.size, 0, "Fresh index must be empty");
+    expect(description.capacity >= collection_size, "Capacity must cover the reservation");
+    expect_eq(description.metadata.dimensions, dimensions, "Dimensions must read back as configured");
+    expect_eq(description.metadata.connectivity, 16, "Connectivity must read back as configured");
 
-    usearch_dense_reserve(index, collection_size, &error);
-    expect(!error.message, error.message);
-
-    expect_eq(usearch_dense_size(index, &error), 0, "Fresh index must be empty");
-    expect(!error.message, error.message);
-    expect(usearch_dense_capacity(index, &error) >= collection_size, "Capacity must cover the reservation");
-    expect(!error.message, error.message);
-    expect_eq(usearch_dense_dimensions(index, &error), dimensions, "Dimensions must read back as configured");
-    expect(!error.message, error.message);
-    expect_eq(usearch_dense_connectivity(index, &error), options.connectivity,
-              "Connectivity must read back as configured");
-    expect(!error.message, error.message);
-
+    usearch_executor_free(executor);
     usearch_dense_free(index);
     printf("Test: Index Initialization - PASSED\n");
 }
 
 /** Inserts a batch and queries every row back, which an exact self-search must answer with the
- *  row's own key. The batch is all-or-nothing, so a short return is a failure even without an
- *  error status. */
+ *  row's own key. The batch is all-or-nothing, so a short size is a failure even without an
+ *  error status. A predicate then narrows the same queries to the keys it admits. */
 void test_add_and_search(size_t const collection_size, size_t const dimensions) {
     printf("Test: Add & Search... %zu vectors, %zu dimensions\n", collection_size, dimensions);
 
-    usearch_dense_options_t options = create_options(dimensions);
-    usearch_error_t error = {0};
-    usearch_dense_index_t index = usearch_dense_init(&options, &error);
-    expect(!error.message, error.message);
-    usearch_dense_reserve(index, collection_size, &error);
-    expect(!error.message, error.message);
-    usearch_executor_t const executor = usearch_executor_for_ram(&options.ram, 0, &error);
-    expect(!error.message, error.message);
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t const index = create_index(dimensions);
+    usearch_executor_t const executor = create_executor();
+    usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = index,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .capacity = collection_size});
+    expect(!outcome.message, outcome.message);
 
     float* const data = create_vectors(collection_size, dimensions);
     usearch_key_t* const keys = (usearch_key_t*)malloc(collection_size * sizeof(usearch_key_t));
@@ -179,12 +197,20 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     for (size_t row = 0; row != collection_size; ++row) keys[row] = key_of(row);
 
     size_t const row_bytes = dimensions * sizeof(float);
-    usearch_keys_view_t const key_run = {keys, collection_size};
-    usearch_matrix_view_t const rows = {data, collection_size, dimensions, row_bytes, usearch_scalar_f32_k};
-    size_t const inserted = usearch_dense_add(index, executor, key_run, &rows, NULL, NULL, NULL, NULL, &error);
-    expect(!error.message, error.message);
-    expect_eq(inserted, collection_size, "A batch is all-or-nothing");
-    expect_eq(usearch_dense_size(index, &error), collection_size, "Every row must be published");
+    usearch_dense_add(&(usearch_dense_add_t) {.index = index,
+                                              .executor = executor,
+                                              .outcome = &outcome,
+                                              .count = collection_size,
+                                              .keys = {keys, sizeof(usearch_key_t)},
+                                              .vectors = {data, row_bytes, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_index_description_t description = {0};
+    usearch_dense_describe(&(usearch_dense_describe_t) {.index = index,
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect_eq(description.size, collection_size, "A batch is all-or-nothing, so every row must be published");
 
     // One match per query, so the output matrices are one column wide.
     usearch_key_t* const found_keys = (usearch_key_t*)malloc(collection_size * sizeof(usearch_key_t));
@@ -193,10 +219,15 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     size_t* const counts = (size_t*)malloc(collection_size * sizeof(size_t));
     expect(found_keys && found_distances && counts, "Failed to allocate outputs");
 
-    usearch_matches_span_t const matches = {
-        found_keys, sizeof(usearch_key_t), found_distances, sizeof(usearch_distance_t), counts, 1};
-    usearch_dense_search(index, executor, &rows, &matches, NULL, NULL, NULL, NULL, &error);
-    expect(!error.message, error.message);
+    usearch_dense_search(
+        &(usearch_dense_search_t) {.index = index,
+                                   .executor = executor,
+                                   .outcome = &outcome,
+                                   .count = collection_size,
+                                   .queries = {data, row_bytes, usearch_scalar_f32_k},
+                                   .matches = {found_keys, sizeof(usearch_key_t), found_distances,
+                                               sizeof(usearch_distance_t), counts, collection_size, 1}});
+    expect(!outcome.message, outcome.message);
 
     size_t recalled = 0;
     for (size_t row = 0; row != collection_size; ++row) {
@@ -206,6 +237,18 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     }
     // Approximate search may miss, but a self-query missing itself often means a broken graph.
     expect(recalled * 10 >= collection_size * 9, "Self-recall collapsed below 90%");
+
+    usearch_dense_search(&(usearch_dense_search_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = collection_size,
+                                                    .queries = {data, row_bytes, usearch_scalar_f32_k},
+                                                    .matches = {found_keys, sizeof(usearch_key_t), found_distances,
+                                                                sizeof(usearch_distance_t), counts, collection_size, 1},
+                                                    .predicate = admits_even});
+    expect(!outcome.message, outcome.message);
+    for (size_t row = 0; row != collection_size; ++row)
+        expect(counts[row] == 0 || found_keys[row].bytes[15] % 2 == 0, "A predicate must narrow the matches");
 
     free(counts);
     free(found_distances);
@@ -217,47 +260,64 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     printf("Test: Add & Search - PASSED\n");
 }
 
-/** Reads entries back by key. `usearch_dense_get` reports the true entry count rather than the
- *  number written, so a probe with a NULL output is how a caller sizes its buffer. */
+/** Reads entries back by key. `usearch_dense_get` sizes its own output, landing every row under
+ *  the key in an arena and reporting how many there were. */
 void test_count_and_get(size_t const dimensions) {
     printf("Test: Count & Get... %zu dimensions\n", dimensions);
 
-    usearch_dense_options_t options = create_options(dimensions);
-    usearch_error_t error = {0};
-    usearch_dense_index_t index = usearch_dense_init(&options, &error);
-    expect(!error.message, error.message);
-    usearch_dense_reserve(index, 2, &error);
-    expect(!error.message, error.message);
-    usearch_executor_t const executor = usearch_executor_for_ram(&options.ram, 0, &error);
-    expect(!error.message, error.message);
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t const index = create_index(dimensions);
+    usearch_executor_t const executor = create_executor();
+    usearch_dense_reserve(
+        &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = 2});
+    expect(!outcome.message, outcome.message);
 
     float* const data = create_vectors(2, dimensions);
     usearch_key_t const keys[2] = {key_of(7), key_of(8)};
     size_t const row_bytes = dimensions * sizeof(float);
-    usearch_keys_view_t const key_run = {keys, 2};
-    usearch_matrix_view_t const rows = {data, 2, dimensions, row_bytes, usearch_scalar_f32_k};
-    usearch_dense_add(index, executor, key_run, &rows, NULL, NULL, NULL, NULL, &error);
-    expect(!error.message, error.message);
+    usearch_dense_add(&(usearch_dense_add_t) {.index = index,
+                                              .executor = executor,
+                                              .outcome = &outcome,
+                                              .count = 2,
+                                              .keys = {keys, sizeof(usearch_key_t)},
+                                              .vectors = {data, row_bytes, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
 
-    expect_eq(usearch_dense_count(index, key_of(7), &error), 1, "The key was inserted once");
-    expect(!error.message, error.message);
-    expect_eq(usearch_dense_count(index, key_of(9), &error), 0, "The key was never inserted");
-    expect(!error.message, error.message);
+    size_t entries = 0;
+    usearch_dense_count(&(usearch_dense_count_t) {.index = index,
+                                                  .executor = executor,
+                                                  .outcome = &outcome,
+                                                  .key = key_of(7),
+                                                  .entries = &entries});
+    expect(!outcome.message, outcome.message);
+    expect_eq(entries, 1, "The key was inserted once");
+    usearch_dense_count(&(usearch_dense_count_t) {.index = index,
+                                                  .executor = executor,
+                                                  .outcome = &outcome,
+                                                  .key = key_of(9),
+                                                  .entries = &entries});
+    expect(!outcome.message, outcome.message);
+    expect_eq(entries, 0, "The key was never inserted");
 
-    expect_eq(usearch_dense_get(index, key_of(7), NULL, &error), 1, "A NULL output probes the count");
-    expect(!error.message, error.message);
-
-    float* const retrieved = (float*)malloc(row_bytes);
-    expect(retrieved, "Failed to allocate the retrieval buffer");
-    usearch_matrix_span_t const retrieved_rows = {retrieved, 1, dimensions, row_bytes, usearch_scalar_f32_k};
-    expect_eq(usearch_dense_get(index, key_of(7), &retrieved_rows, &error), 1,
-              "Retrieval must report the true entry count");
-    expect(!error.message, error.message);
+    float* retrieved = NULL;
+    size_t written = 0;
+    usearch_arena_t arena = NULL;
+    usearch_dense_get(&(usearch_dense_get_t) {.index = index,
+                                              .executor = executor,
+                                              .outcome = &outcome,
+                                              .key = key_of(7),
+                                              .scalar = usearch_scalar_f32_k,
+                                              .vectors = (void**)&retrieved,
+                                              .written = &written,
+                                              .arena = &arena});
+    expect(!outcome.message, outcome.message);
+    expect_eq(written, 1, "Retrieval must report the true entry count");
+    expect(retrieved != NULL, "Retrieval must land the rows in the arena");
     for (size_t position = 0; position != dimensions; ++position)
         expect(fabsf(retrieved[position] - data[position]) <= fabsf(data[position]) / 128,
                "A bf16 index must return rows within its 7-bit mantissa");
 
-    free(retrieved);
+    usearch_arena_free(arena);
     free(data);
     usearch_executor_free(executor);
     usearch_dense_free(index);
@@ -270,16 +330,19 @@ void test_multiply_packed(void) {
     printf("Test: Multiply Packed Rows\n");
 
     enum { rows_count = 8, dimensions = 16 };
-    usearch_dense_options_t options = create_options(dimensions);
-    options.metric = usearch_dense_metric_inner_k;
-    options.quantization = usearch_scalar_i4x2_k;
-    usearch_error_t error = {0};
-    usearch_dense_index_t index = usearch_dense_init(&options, &error);
-    expect(!error.message, error.message);
-    usearch_dense_reserve(index, rows_count, &error);
-    expect(!error.message, error.message);
-    usearch_executor_t const executor = usearch_executor_for_ram(&options.ram, 0, &error);
-    expect(!error.message, error.message);
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t index = NULL;
+    usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
+                                                        .outcome = &outcome,
+                                                        .metric = usearch_dense_metric_inner_k,
+                                                        .quantization = usearch_scalar_i4x2_k,
+                                                        .dimensions = dimensions,
+                                                        .connectivity = 16});
+    expect(!outcome.message, outcome.message);
+    usearch_executor_t const executor = create_executor();
+    usearch_dense_reserve(
+        &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = rows_count});
+    expect(!outcome.message, outcome.message);
 
     // Small integers survive the cast into `i4` exactly, so every product is known up front.
     float data[rows_count * dimensions];
@@ -289,67 +352,121 @@ void test_multiply_packed(void) {
         for (size_t column = 0; column != dimensions; ++column)
             data[row * dimensions + column] = (float)((row + column) % 5) - 2;
     }
-    usearch_keys_view_t const key_run = {keys, rows_count};
-    usearch_matrix_view_t const rows = {data, rows_count, dimensions, 0, usearch_scalar_f32_k};
-    usearch_dense_add(index, executor, key_run, &rows, NULL, NULL, NULL, NULL, &error);
-    expect(!error.message, error.message);
+    usearch_dense_add(&(usearch_dense_add_t) {.index = index,
+                                              .executor = executor,
+                                              .outcome = &outcome,
+                                              .count = rows_count,
+                                              .keys = {keys, sizeof(usearch_key_t)},
+                                              .vectors = {data, dimensions * sizeof(float), usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
 
-    usearch_key_t columns[rows_count * rows_count];
-    usearch_distance_t products[rows_count * rows_count];
-    size_t counts[rows_count];
-    usearch_matches_span_t const pairs = {columns, 0, products, 0, counts, rows_count};
-    usearch_dense_multiply(index, executor, &rows, &pairs, NULL, NULL, NULL, NULL, &error);
-    expect(!error.message, error.message);
+    size_t offsets[rows_count + 1];
+    usearch_key_t* columns = NULL;
+    usearch_distance_t* products = NULL;
+    usearch_arena_t arena = NULL;
+    usearch_dense_multiply(
+        &(usearch_dense_multiply_t) {.index = index,
+                                     .executor = executor,
+                                     .outcome = &outcome,
+                                     .count = rows_count,
+                                     .left = {data, dimensions * sizeof(float), usearch_scalar_f32_k},
+                                     .offsets = offsets,
+                                     .keys = &columns,
+                                     .scores = &products,
+                                     .arena = &arena});
+    expect(!outcome.message, outcome.message);
 
     for (size_t row = 0; row != rows_count; ++row) {
-        expect(counts[row] != 0, "Every walk scores at least its entry point");
-        for (size_t pair = 0; pair != counts[row] && pair != rows_count; ++pair) {
-            size_t const named = columns[row * rows_count + pair].bytes[15];
+        expect(offsets[row + 1] > offsets[row], "Every walk scores at least its entry point");
+        for (size_t pair = offsets[row]; pair != offsets[row + 1]; ++pair) {
+            size_t const named = columns[pair].bytes[15];
             double exact = 0;
             for (size_t column = 0; column != dimensions; ++column)
                 exact += data[row * dimensions + column] * data[named * dimensions + column];
-            expect(products[row * rows_count + pair] == exact, "A product must span every packed dimension");
+            expect(products[pair] == exact, "A product must span every packed dimension");
         }
     }
 
+    // A NULL executor runs the call on this thread, and a row still inside the arena it rewinds is refused.
+    usearch_dense_multiply(
+        &(usearch_dense_multiply_t) {.index = index,
+                                     .outcome = &outcome,
+                                     .count = 1,
+                                     .left = {data, dimensions * sizeof(float), usearch_scalar_f32_k},
+                                     .offsets = offsets,
+                                     .keys = &columns,
+                                     .scores = &products,
+                                     .arena = &arena});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_multiply(&(usearch_dense_multiply_t) {.index = index,
+                                                        .outcome = &outcome,
+                                                        .count = 1,
+                                                        .left = {columns, sizeof(usearch_key_t), usearch_scalar_u8_k},
+                                                        .offsets = offsets,
+                                                        .keys = &columns,
+                                                        .scores = &products,
+                                                        .arena = &arena});
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "An input inside the rewound arena is refused");
+
+    usearch_arena_free(arena);
     usearch_executor_free(executor);
     usearch_dense_free(index);
     printf("Test: Multiply Packed Rows - PASSED\n");
 }
 
-/** A message is @c NULL exactly when the status is success, and the slot a caller reuses is
+/** A message is @c NULL exactly when the status is success, and the outcome a caller reuses is
  *  fully overwritten - the contract every binding branches on. Only the success half is
  *  exercised here; the failing verbs are the ones `src/` has yet to instantiate. */
-void test_error_contract(size_t const dimensions) {
-    printf("Test: Error Contract\n");
+void test_outcome_contract(size_t const dimensions) {
+    printf("Test: Outcome Contract\n");
 
-    usearch_dense_options_t options = create_options(dimensions);
-    // A slot carrying an earlier failure must come back clean, not merely unchanged.
-    usearch_error_t error = {usearch_error_io_k, "a stale message the call must overwrite"};
+    // An outcome carrying an earlier failure must come back clean, not merely unchanged.
+    usearch_outcome_t outcome = {usearch_status_io_k, "a stale message the call must overwrite"};
 
-    usearch_dense_index_t const index = usearch_dense_init(&options, &error);
+    usearch_dense_index_t index = NULL;
+    usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
+                                                        .outcome = &outcome,
+                                                        .metric = usearch_dense_metric_angular_k,
+                                                        .quantization = usearch_scalar_bf16_k,
+                                                        .dimensions = dimensions});
     expect(index != NULL, "Initialization returned no handle");
-    expect_eq(error.status, usearch_success_k, "A successful call must report success");
-    expect(error.message == NULL, "A successful call must carry no message");
+    expect_eq(outcome.status, usearch_status_success_k, "A successful call must report success");
+    expect(outcome.message == NULL, "A successful call must carry no message");
 
-    usearch_dense_reserve(index, 4, &error);
-    expect_eq(error.status, usearch_success_k, "A successful call must report success");
-    expect(error.message == NULL, "A successful call must carry no message");
+    usearch_executor_t const executor = create_executor();
+    outcome = (usearch_outcome_t) {usearch_status_io_k, "a stale message the call must overwrite"};
+    usearch_dense_reserve(
+        &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = 4});
+    expect_eq(outcome.status, usearch_status_success_k, "A successful call must report success");
+    expect(outcome.message == NULL, "A successful call must carry no message");
 
     // A key the index never saw is a state, not a failure.
-    expect_eq(usearch_dense_count(index, key_of(4242), &error), 0, "An absent key counts zero");
-    expect_eq(error.status, usearch_success_k, "An absent key is not an error");
+    size_t entries = 1;
+    usearch_dense_count(&(usearch_dense_count_t) {.index = index,
+                                                  .executor = executor,
+                                                  .outcome = &outcome,
+                                                  .key = key_of(4242),
+                                                  .entries = &entries});
+    expect_eq(entries, 0, "An absent key counts zero");
+    expect_eq(outcome.status, usearch_status_success_k, "An absent key is not an error");
 
+    usearch_executor_free(executor);
     usearch_dense_free(index);
-    printf("Test: Error Contract - PASSED\n");
+    printf("Test: Outcome Contract - PASSED\n");
 }
 
 /** The library-wide probes, which take no handle and cannot fail. */
 void test_library_probes(void) {
     printf("Test: Library Probes\n");
-    expect(usearch_version() != NULL, "The version must be reported");
+    int major = -1, minor = -1, patch = -1;
+    usearch_version(&major, &minor, &patch);
+    expect_eq(major, USEARCH_VERSION_MAJOR, "The linked major version must match the header's");
+    expect(minor >= 0 && patch >= 0, "The version must be reported");
+    expect(usearch_version_name() != NULL, "The version must be reported");
     expect(usearch_capabilities_compiled() != NULL, "The compiled capabilities must be reported");
     expect(usearch_capabilities_available() != NULL, "The available capabilities must be reported");
+    usearch_status_t const unnamed = usearch_status_from_name((usearch_bytes_view_t) {(uint8_t const*)"no-such", 7});
+    expect_eq(unnamed, usearch_status_invalid_argument_k, "An unrecognized status name is an invalid argument");
     printf("Test: Library Probes - PASSED\n");
 }
 
@@ -358,12 +475,12 @@ int main(int argc, char* argv[]) {
     (void)argv;
     install_crash_handlers();
 
-    printf("USearch %s\n", usearch_version());
+    printf("USearch %s\n", usearch_version_name());
     printf("- Compiled for: %s\n", usearch_capabilities_compiled());
     printf("- This machine: %s\n", usearch_capabilities_available());
 
     test_library_probes();
-    test_error_contract(64);
+    test_outcome_contract(64);
 
     size_t const collection_sizes[] = {11, 512};
     size_t const dimension_counts[] = {83, 256};

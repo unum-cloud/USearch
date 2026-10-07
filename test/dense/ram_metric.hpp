@@ -37,6 +37,7 @@
 #include <cstdio>
 
 #include <array>
+#include <limits>
 #include <string_view>
 
 #include <fmt/format.h>
@@ -81,28 +82,28 @@ template <nk_kernel_kind_t kernel_, typename scalar_>
 static f32_t reference_distance(nk::vector_view<scalar_> first_vector,
                                 nk::vector_view<scalar_> second_vector) noexcept {
     if constexpr (kernel_ == nk_kernel_dot_k) {
-        typename scalar_::dot_result_t inner_product {};
-        nk::dot(first_vector, second_vector, first_vector.size(), &inner_product);
+        auto const [inner_product, status] = nk::dot<scalar_>(first_vector, second_vector);
+        if (nk::failed(status)) return std::numeric_limits<f32_t>::max();
         return f32_t(1) - static_cast<f32_t>(inner_product);
     }
     else if constexpr (kernel_ == nk_kernel_angular_k) {
-        typename scalar_::angular_result_t angular_value {};
-        nk::angular(first_vector, second_vector, first_vector.size(), &angular_value);
+        auto const [angular_value, status] = nk::angular<scalar_>(first_vector, second_vector);
+        if (nk::failed(status)) return std::numeric_limits<f32_t>::max();
         return static_cast<f32_t>(angular_value);
     }
     else if constexpr (kernel_ == nk_kernel_euclidean_k) {
-        typename scalar_::euclidean_result_t euclidean_value {};
-        nk::euclidean(first_vector, second_vector, first_vector.size(), &euclidean_value);
+        auto const [euclidean_value, status] = nk::euclidean<scalar_>(first_vector, second_vector);
+        if (nk::failed(status)) return std::numeric_limits<f32_t>::max();
         return static_cast<f32_t>(euclidean_value);
     }
     else if constexpr (kernel_ == nk_kernel_hamming_k) {
-        typename scalar_::hamming_result_t hamming_value {};
-        nk::hamming(first_vector, second_vector, first_vector.size(), &hamming_value);
+        auto const [hamming_value, status] = nk::hamming<scalar_>(first_vector, second_vector);
+        if (nk::failed(status)) return std::numeric_limits<f32_t>::max();
         return static_cast<f32_t>(hamming_value);
     }
     else if constexpr (kernel_ == nk_kernel_jaccard_k) {
-        typename scalar_::jaccard_result_t jaccard_value {};
-        nk::jaccard(first_vector, second_vector, first_vector.size(), &jaccard_value);
+        auto const [jaccard_value, status] = nk::jaccard<scalar_>(first_vector, second_vector);
+        if (nk::failed(status)) return std::numeric_limits<f32_t>::max();
         return static_cast<f32_t>(jaccard_value);
     }
 }
@@ -127,11 +128,11 @@ static int check_quads(std::size_t dim) noexcept {
                       dense_quads_chain<kernel_, scalar_, caps_>::picked_k == nk_cap_serial_k,
                   "Capability cascade selected a tier that was never requested");
 
-    auto query = nk::vector<scalar_>::try_zeros(dim);
-    auto first_candidate = nk::vector<scalar_>::try_zeros(dim);
-    auto second_candidate = nk::vector<scalar_>::try_zeros(dim);
-    auto third_candidate = nk::vector<scalar_>::try_zeros(dim);
-    auto fourth_candidate = nk::vector<scalar_>::try_zeros(dim);
+    auto query = nk::vector<scalar_>::zeros(dim).value;
+    auto first_candidate = nk::vector<scalar_>::zeros(dim).value;
+    auto second_candidate = nk::vector<scalar_>::zeros(dim).value;
+    auto third_candidate = nk::vector<scalar_>::zeros(dim).value;
+    auto fourth_candidate = nk::vector<scalar_>::zeros(dim).value;
     fill_cyclic(query.span(), 0);
     fill_cyclic(first_candidate.span(), 1);
     fill_cyclic(second_candidate.span(), 2);
@@ -196,15 +197,16 @@ static int check_tiles() noexcept {
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires tiles_supported<kernel_, scalar_, caps_>
 static int check_tiles() noexcept {
-    if ((nk_capabilities_available() & caps_) != caps_) return 0;
-    nk_configure_thread(nk_capabilities_available());
+    nk_capability_t available = 0;
+    if (nk_cpu_capabilities_enabled(&available) != nk_success_k || (available & caps_) != caps_) return 0;
+    if (nk_cpu_configure_thread(available) != nk_success_k) return 0;
 
     using tiles_kit_t = typename dense_tiles_chain<kernel_, scalar_, caps_>::kit_t;
     constexpr std::size_t rows_k = tiles_kit_t::tile_rows_k;
     constexpr std::size_t dimensions_k = 128; // Two full depth tiles - the shape the index runs.
     constexpr std::size_t depth_tiles_k = dimensions_k / tiles_kit_t::tile_depth_k;
 
-    auto storage = nk::matrix<scalar_>::try_zeros({rows_k, dimensions_k});
+    auto storage = nk::matrix<scalar_>::zeros({rows_k, dimensions_k}).value;
     auto const vectors = storage.view();
     std::array<nk::vector_view<scalar_>, rows_k> views;
     std::array<vector_norms<typename scalar_::dot_result_t>, rows_k> norms;
@@ -224,7 +226,7 @@ static int check_tiles() noexcept {
         tiles_kit_t::pack_b_tile(a_tile, b_tile);
         tiles_kit_t::update_tile(accumulator, a_tile, b_tile);
     }
-    auto tiled = nk::matrix<f32_t>::try_zeros({rows_k, rows_k});
+    auto tiled = nk::matrix<f32_t>::zeros({rows_k, rows_k}).value;
     tiles_kit_t::finalize_tile(accumulator, norms, norms, tiled.data(), rows_k);
 
     std::size_t failures = 0;

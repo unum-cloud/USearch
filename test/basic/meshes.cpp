@@ -15,8 +15,9 @@
  */
 #include <cmath> // `std::sqrt`
 
-#include <array> // `std::array` - the handmade tetrahedra
-#include <span>  // `std::span` - the metric's drain surface
+#include <array>  // `std::array` - the handmade tetrahedra
+#include <limits> // `std::numeric_limits` - the failed kernel's sentinel
+#include <span>   // `std::span` - the metric's drain surface
 #include <vector>
 
 #include <numkong/spatial.hpp> // `nk::euclidean` - the spectra oracle's oracle
@@ -39,9 +40,10 @@ struct mesh_t {
 };
 
 static f32_t point_distance(point3_t first, point3_t second) noexcept {
-    nk::f32_t::euclidean_result_t distance {};
-    nk::euclidean(reinterpret_cast<nk::f32_t const*>(&first.x), reinterpret_cast<nk::f32_t const*>(&second.x), 3,
-                  &distance);
+    std::array<f32_t, 3> const first_coordinates {first.x, first.y, first.z};
+    std::array<f32_t, 3> const second_coordinates {second.x, second.y, second.z};
+    auto const [distance, status] = nk::euclidean<nk::f32_t>(first_coordinates, second_coordinates);
+    if (nk::failed(status)) return std::numeric_limits<f32_t>::max();
     return float(distance);
 }
 
@@ -60,9 +62,8 @@ static void refresh_spectrum(mesh_t& mesh) {
  *  intended shape, a caller metric built on the SIMD kernel library. */
 static f64_t spectra_distance(std::span<f32_t const> first, std::span<f32_t const> second) noexcept {
     if (first.empty()) return 0.0;
-    nk::f32_t::euclidean_result_t gap {};
-    nk::euclidean(reinterpret_cast<nk::f32_t const*>(first.data()), reinterpret_cast<nk::f32_t const*>(second.data()),
-                  first.size(), &gap);
+    auto const [gap, status] = nk::euclidean<nk::f32_t>(first, second);
+    if (nk::failed(status)) return std::numeric_limits<f64_t>::max();
     return static_cast<f64_t>(float(gap)) / std::sqrt(static_cast<f64_t>(first.size()));
 }
 

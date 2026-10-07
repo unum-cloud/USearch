@@ -21,11 +21,12 @@
 #include <type_traits> // `std::is_same_v` - the columns' witness
 #include <vector>      // `std::vector` - the five snapshot columns
 
+#include <forkunion/capabilities.hpp> // `fu::preferred_cache_hints_t` - the read hints
+
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp"
 #include "usearch/utilities/ram_sorts.hpp"
 #include "usearch/utilities/ram_tables.hpp"
-#include "usearch/utilities/ram_hints.hpp"
 #include "usearch/dense/types.hpp"
 #include "usearch/basic/ram_index.hpp"
 #include "usearch/geospatial/ram_index.hpp"
@@ -175,10 +176,9 @@ int main() {
     multimap.clear();
     if (multimap.contains(7)) return 1;
 
-    prefetch_query_sse_t const prefetch_query;
-    prefetch_query(&random_generator);
-    prefetch_candidate_sse_t const prefetch_candidate;
-    prefetch_candidate(&random_generator);
+    fu::preferred_cache_hints_t const hints;
+    hints(&random_generator, fu::prefetch_line_t {});
+    hints(&random_generator, fu::stream_line_t {});
 
     // The basic index, narrow instantiation: the whole public surface, existence-level.
     narrow_index_t index;
