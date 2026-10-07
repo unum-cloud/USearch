@@ -102,6 +102,8 @@
 #include <numkong/types.hpp>
 #include <numkong/vector.hpp>
 
+#include <forkunion/types.hpp> // `fu::standard_cache_hints_t`
+
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_tables.hpp"
 #include "usearch/dense/types.hpp"
@@ -3623,12 +3625,14 @@ struct dense_scores {
  *  via @c std::is_invocable_v on the kit's raw function pointer, so each kit can keep
  *  exposing @c reduce_accumulators as a direct @c nk_* alias rather than a wrapper.
  */
-template <std::size_t fan_out_, dense_quads_kit kit_>
+template <std::size_t fan_out_, dense_quads_kit kit_, typename cache_hints_type_>
 [[gnu::always_inline]] inline dense_scores<typename kit_::scalar_t::dot_result_t, fan_out_> invoke_scores_( //
     nk::vector_view<typename kit_::scalar_t> query,                                                         //
     vector_norms<typename kit_::scalar_t::dot_result_t> query_norms,                                        //
     std::array<nk::vector_view<typename kit_::scalar_t>, fan_out_> candidates,                              //
-    std::array<vector_norms<typename kit_::scalar_t::dot_result_t>, fan_out_> candidates_norms) noexcept {
+    std::array<vector_norms<typename kit_::scalar_t::dot_result_t>, fan_out_> candidates_norms,             //
+    std::array<nk::vector_view<typename kit_::scalar_t>, fan_out_> next_candidates,                         //
+    [[maybe_unused]] cache_hints_type_ hints) noexcept {
 
     static_assert(fan_out_ == 1 || fan_out_ == 4, "Only 1-to-1 and 1-to-4 fan-outs are supported");
     using scalar_t = typename kit_::scalar_t;
@@ -3653,6 +3657,9 @@ template <std::size_t fan_out_, dense_quads_kit kit_>
     auto candidate_bases = [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
         return std::array<decltype(query.data()), fan_out_> {candidates[lane_index].data()...};
     }(std::make_index_sequence<fan_out_> {});
+    [[maybe_unused]] auto next_bases = [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
+        return std::array<decltype(query.data()), fan_out_> {next_candidates[lane_index].data()...};
+    }(std::make_index_sequence<fan_out_> {});
 
     std::size_t const total_dimensions = query.size();
     std::size_t const tail_dimensions = total_dimensions % kit_::step_dimensions;
@@ -3672,6 +3679,13 @@ template <std::size_t fan_out_, dense_quads_kit kit_>
                                       passed_dimensions, kit_::step_dimensions),
              ...);
         }(std::make_index_sequence<fan_out_> {});
+
+        // One prefetch per line of the next quad, at the depth this quad has reached.
+        if constexpr (!std::is_same_v<cache_hints_type_, fu::standard_cache_hints_t>)
+            if (value_offset * sizeof(scalar_t) % fu::default_alignment_k == 0)
+                [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
+                    (hints(next_bases[lane_index] + value_offset, fu::prefetch_line_k), ...);
+                }(std::make_index_sequence<fan_out_> {});
     }
 
     if (tail_dimensions) {
@@ -3795,7 +3809,8 @@ template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype sca
     using kit_t = typename dense_quads_chain<kernel_, scalar_, caps_>::kit_t;
     return invoke_scores_<1, kit_t>( //
                query, moments_of<scalar_>(query_norms), std::array<nk::vector_view<scalar_>, 1> {candidate},
-               std::array {moments_of<scalar_>(candidate_norms)})
+               std::array {moments_of<scalar_>(candidate_norms)}, std::array<nk::vector_view<scalar_>, 1> {candidate},
+               fu::standard_cache_hints_t {})
         .distances[0];
 }
 
@@ -3809,7 +3824,7 @@ template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype sca
     std::array<norms_type_, 4> candidates_norms) noexcept {
     using kit_t = typename dense_quads_chain<kernel_, scalar_, caps_>::kit_t;
     return invoke_scores_<4, kit_t>(query, moments_of<scalar_>(query_norms), candidates,
-                                    moments_of<scalar_>(candidates_norms))
+                                    moments_of<scalar_>(candidates_norms), candidates, fu::standard_cache_hints_t {})
         .distances;
 }
 
@@ -3823,7 +3838,24 @@ template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype sca
     std::array<norms_type_, 4> candidates_norms) noexcept {
     using kit_t = typename dense_quads_chain<kernel_, scalar_, caps_>::kit_t;
     return invoke_scores_<4, kit_t>(query, moments_of<scalar_>(query_norms), candidates,
-                                    moments_of<scalar_>(candidates_norms));
+                                    moments_of<scalar_>(candidates_norms), candidates, fu::standard_cache_hints_t {});
+}
+
+/** As @c scores, while streaming @p next_candidates toward L2 one line per line scored, so the walk's next quad
+ *  arrives as this one finishes. */
+template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype scalar_, typename norms_type_,
+          typename cache_hints_type_>
+    requires norms_argument<norms_type_, scalar_>
+[[gnu::always_inline]] inline dense_scores<typename scalar_::dot_result_t, 4> scores( //
+    nk::vector_view<scalar_> query,                                                   //
+    norms_type_ query_norms,                                                          //
+    std::array<nk::vector_view<scalar_>, 4> candidates,                               //
+    std::array<norms_type_, 4> candidates_norms,                                      //
+    std::array<nk::vector_view<scalar_>, 4> next_candidates,                          //
+    cache_hints_type_ hints) noexcept {
+    using kit_t = typename dense_quads_chain<kernel_, scalar_, caps_>::kit_t;
+    return invoke_scores_<4, kit_t>(query, moments_of<scalar_>(query_norms), candidates,
+                                    moments_of<scalar_>(candidates_norms), next_candidates, hints);
 }
 
 /** Empty tile kit: the (kernel, scalar) pair has no matrix-engine backend on this

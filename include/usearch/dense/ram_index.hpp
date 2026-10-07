@@ -2250,6 +2250,15 @@ struct dense_ram_index {
             query, query_norms, candidates, candidates_norms);
     }
 
+    /** As @c scores, streaming @p next_candidates in under this CPU class's cache hints. */
+    inline static dense_scores<dot_result_t, 4> scores(                                          //
+        vector_view_t query, vector_norms_t query_norms,                                         //
+        std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms, //
+        std::array<vector_view_t, 4> next_candidates) noexcept {
+        return usearch::scores<kernel_kind_, capability_, scalar_t>( //
+            query, query_norms, candidates, candidates_norms, next_candidates, cache_hints_type_ {});
+    }
+
     /** Scores @p query against four consecutive entries of the cached @p vectors & @p norms
      *  arrays starting at @p start; the gather cursor sticks at @p count - 1, so short tails
      *  repeat the last entry and the kernel always streams four valid lanes. */
@@ -2358,6 +2367,25 @@ struct dense_ram_index {
     /** Immutable view of the vector stored at @p location. */
     inline vector_view_t vector_for(location_t const& location) const noexcept {
         return vectors_chunks_[location.chunk].row(location.offset).as_vector();
+    }
+
+    /** The vectors behind the four neighbor slots from @p start, for the current quad's scoring to stream in;
+     *  the lanes the list leaves short keep @p lane_vectors, the current quad's own. */
+    template <typename neighbors_type_>
+    inline std::array<vector_view_t, 4> vectors_quad_of(neighbors_type_ const& neighbors, small_size_t start,
+                                                        node_id_t first_invisible_id,
+                                                        std::array<vector_view_t, 4> lane_vectors) const noexcept {
+        if constexpr (!std::is_same_v<cache_hints_type_, fu::standard_cache_hints_t>) {
+            small_size_t const slots_limit = min_of<small_size_t>(start + 4, neighbors.capacity());
+            small_size_t lane = 0;
+            for (small_size_t slot = start; slot < slots_limit; ++slot) {
+                node_id_t const neighbor_id = neighbors.load_slot(slot);
+                if (neighbor_id == dense_node_id_unknown_k) break;
+                if (neighbor_id >= first_invisible_id) continue;
+                lane_vectors[lane++] = vector_for(chunk_schedule_t::locate(neighbor_id));
+            }
+        }
+        return lane_vectors;
     }
 
     /** Mutable span over the vector slot at @p location - only for the slot's unpublished owner. */
@@ -3315,7 +3343,8 @@ struct dense_ram_index {
                     gathered_norms[lane] = gathered_norms[0];
                 }
                 dense_scores<dot_result_t, 4> gathered_scores = scores( //
-                    dense_query_vector(query), query_norms, gathered_vectors, gathered_norms);
+                    dense_query_vector(query), query_norms, gathered_vectors, gathered_norms,
+                    vectors_quad_of(candidate_neighbors, neighbor_slot, first_invisible_id, gathered_vectors));
                 dense_correct_scores(query, gathered_ids, gathered_vectors, gathered_scores, gathered_count);
                 context.computed_distances += gathered_count;
                 std::array<dense_scored_node_t, 4> scored_batch;
