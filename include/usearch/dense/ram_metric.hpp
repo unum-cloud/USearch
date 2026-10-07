@@ -3602,6 +3602,140 @@ struct dense_quads_chain<nk_kernel_jaccard_k, nk::u1x8_t, caps_> {
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
+/** Widens value rows to @c f32 and folds them into a running sum, with the kernels every CPU runs. */
+struct serial_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr auto cast = nk_cast_serial;
+    static constexpr auto scale = nk_each_scale_f32_serial;
+    static constexpr auto blend = nk_each_blend_f32_serial;
+};
+
+struct haswell_elementwise_kit_t;
+struct skylake_elementwise_kit_t;
+struct icelake_elementwise_kit_t;
+struct sapphire_elementwise_kit_t;
+struct neon_elementwise_kit_t;
+struct rvv_elementwise_kit_t;
+struct v128relaxed_elementwise_kit_t;
+struct powervsx_elementwise_kit_t;
+
+#if NUMKONG_TARGET_HASWELL
+struct haswell_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr auto cast = nk_cast_haswell;
+    static constexpr auto scale = nk_each_scale_f32_haswell;
+    static constexpr auto blend = nk_each_blend_f32_haswell;
+};
+#endif // NUMKONG_TARGET_HASWELL
+
+#if NUMKONG_TARGET_SKYLAKE
+struct skylake_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr auto cast = nk_cast_skylake;
+    static constexpr auto scale = nk_each_scale_f32_skylake;
+    static constexpr auto blend = nk_each_blend_f32_skylake;
+};
+
+#if NUMKONG_TARGET_ICELAKE
+
+/** Icelake's casts over Skylake's arithmetic, which Icelake adds no kernels to. */
+struct icelake_elementwise_kit_t : skylake_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
+    static constexpr auto cast = nk_cast_icelake;
+};
+
+#if NUMKONG_TARGET_SAPPHIRE
+
+/** Sapphire's half-precision casts over Skylake's arithmetic. */
+struct sapphire_elementwise_kit_t : icelake_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphire_k;
+    static constexpr auto cast = nk_cast_sapphire;
+};
+#endif // NUMKONG_TARGET_SAPPHIRE
+#endif // NUMKONG_TARGET_ICELAKE
+#endif // NUMKONG_TARGET_SKYLAKE
+
+#if NUMKONG_TARGET_NEON
+struct neon_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr auto cast = nk_cast_neon;
+    static constexpr auto scale = nk_each_scale_f32_neon;
+    static constexpr auto blend = nk_each_blend_f32_neon;
+};
+#endif // NUMKONG_TARGET_NEON
+
+#if NUMKONG_TARGET_RVV
+struct rvv_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_rvv_k;
+    static constexpr auto cast = nk_cast_rvv;
+    static constexpr auto scale = nk_each_scale_f32_rvv;
+    static constexpr auto blend = nk_each_blend_f32_rvv;
+};
+#endif // NUMKONG_TARGET_RVV
+
+#if NUMKONG_TARGET_V128RELAXED
+struct v128relaxed_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_v128relaxed_k;
+    static constexpr auto cast = nk_cast_v128relaxed;
+    static constexpr auto scale = nk_each_scale_f32_v128relaxed;
+    static constexpr auto blend = nk_each_blend_f32_v128relaxed;
+};
+#endif // NUMKONG_TARGET_V128RELAXED
+
+#if NUMKONG_TARGET_POWERVSX
+
+/** POWER's casts over the serial arithmetic, which POWER adds no kernels to. */
+struct powervsx_elementwise_kit_t : serial_elementwise_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_powervsx_k;
+    static constexpr auto cast = nk_cast_powervsx;
+};
+#endif // NUMKONG_TARGET_POWERVSX
+
+/** The values kit for one capability ceiling. Reading order is the priority order. */
+template <nk_capability_t caps_>
+struct dense_elementwise_chain {
+    using kit_t = typename first_available_kit<                                                               //
+        serial_elementwise_kit_t,                                                                             //
+        chain_layer<NUMKONG_TARGET_SAPPHIRE && (caps_ & nk_cap_sapphire_k) != 0, sapphire_elementwise_kit_t>, //
+        chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, icelake_elementwise_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, skylake_elementwise_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, haswell_elementwise_kit_t>,    //
+        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, neon_elementwise_kit_t>,             //
+        chain_layer<NUMKONG_TARGET_RVV && (caps_ & nk_cap_rvv_k) != 0, rvv_elementwise_kit_t>,                //
+        chain_layer<NUMKONG_TARGET_V128RELAXED && (caps_ & nk_cap_v128relaxed_k) != 0,
+                    v128relaxed_elementwise_kit_t>,                                                          //
+        chain_layer<NUMKONG_TARGET_POWERVSX && (caps_ & nk_cap_powervsx_k) != 0, powervsx_elementwise_kit_t> //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+/** Scales an @c f32 sum by @p correction, then adds @p count weighted value rows into it: each chunk
+ *  of the sum stays in L1 while every row widens into it. */
+template <nk::numeric_dtype scalar_type_, nk_capability_t caps_>
+void dense_values_step(f32_t* accumulated, std::size_t columns, char const* const* rows, f32_t const* weights,
+                       std::size_t count, f32_t correction) noexcept {
+    using kit_t = typename dense_elementwise_chain<caps_>::kit_t;
+    // A multiple of eight columns, so every chunk starts on a byte even for the packed kinds.
+    constexpr std::size_t chunk_columns_k = 64;
+    std::size_t const bits = nk_dtype_bits(scalar_type_::dtype());
+    std::array<f32_t, chunk_columns_k> widened;
+    f32_t const one = 1, zero = 0;
+    for (std::size_t first = 0; first < columns; first += chunk_columns_k) {
+        std::size_t const width = min_of(chunk_columns_k, columns - first);
+        f32_t* const target = accumulated + first;
+        [[maybe_unused]] nk_status_t status = nk_success_k;
+        if (correction != 1) status = kit_t::scale(target, width, &correction, &zero, target, nullptr);
+        assert(status == nk_success_k && "The serial tier scales on every CPU");
+        for (std::size_t row = 0; row != count; ++row) {
+            status = kit_t::cast(rows[row] + first * bits / 8, scalar_type_::dtype(), widened.data(), nk_f32_k, width,
+                                 nullptr);
+            assert(status == nk_success_k && "The serial tier casts every dtype pair");
+            status = kit_t::blend(target, widened.data(), width, &one, &weights[row], target, nullptr);
+            assert(status == nk_success_k && "The serial tier blends on every CPU");
+        }
+    }
+}
+
 /** One finalize read two ways: the native dots, and the distances derived from them. */
 template <typename dot_result_type_, std::size_t fan_out_>
 struct dense_scores {

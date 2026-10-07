@@ -26,6 +26,8 @@
  */
 #pragma once
 
+#include <array> // `std::array` - a fragment's weighted sums
+
 #include <cuda_bf16.h> // `__nv_bfloat162` packed math, sm_80+
 #include <cuda_fp16.h> // `__half2` packed math
 
@@ -42,12 +44,13 @@ namespace unum {
 namespace usearch {
 
 template <typename kit_>
-concept dense_cuda_kit = requires(typename kit_::fragment_t fragment, typename kit_::dot_t dot,
-                                  typename kit_::norms_accumulator_t norms_accumulator, typename kit_::norms_t norms,
-                                  dense_distance_t ranked) {
+concept dense_cuda_kit = requires(
+    typename kit_::fragment_t fragment, typename kit_::dot_t dot, typename kit_::weighted_t weighted,
+    typename kit_::norms_accumulator_t norms_accumulator, typename kit_::norms_t norms, dense_distance_t ranked) {
     typename kit_::scalar_t;
     { kit_::arch_k } -> std::convertible_to<cuda_arch_t>;
     { kit_::accumulate_dot(fragment, fragment, dot) } -> std::same_as<typename kit_::dot_t>;
+    { kit_::accumulate_weighted(fragment, f32_t {}, weighted) } -> std::same_as<typename kit_::weighted_t>;
     { kit_::accumulate_norms(fragment, norms_accumulator) } -> std::same_as<typename kit_::norms_accumulator_t>;
     { kit_::partials_to_norms(norms_accumulator) } -> std::same_as<typename kit_::norms_t>;
     { kit_::distance(dot, norms, norms) } -> std::same_as<dense_distance_t>;
@@ -240,6 +243,32 @@ __device__ __forceinline__ float2 dense_cuda_moments_bf16x8_ampere(uint4 a, floa
     return moments;
 }
 
+/** Returns @p sums plus @p weight times each of an @c f16 fragment's eight values, widened to f32. */
+__device__ __forceinline__ std::array<f32_t, 8> dense_cuda_weighted_f16x8_ampere( //
+    uint4 a, f32_t weight, std::array<f32_t, 8> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        float2 const values = __half22float2(*reinterpret_cast<__half2 const*>(&words[word]));
+        sums[2 * word] += weight * values.x;
+        sums[2 * word + 1] += weight * values.y;
+    }
+    return sums;
+}
+
+/** The @c bf16 twin of @ref dense_cuda_weighted_f16x8_ampere. */
+__device__ __forceinline__ std::array<f32_t, 8> dense_cuda_weighted_bf16x8_ampere( //
+    uint4 a, f32_t weight, std::array<f32_t, 8> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        float2 const values = __bfloat1622float2(*reinterpret_cast<__nv_bfloat162 const*>(&words[word]));
+        sums[2 * word] += weight * values.x;
+        sums[2 * word + 1] += weight * values.y;
+    }
+    return sums;
+}
+
 /** f16 kit - the sm_80 floor. */
 template <nk_kernel_kind_t kernel_>
 struct f16_ampere_kit {
@@ -247,6 +276,7 @@ struct f16_ampere_kit {
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 8>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
 
@@ -255,6 +285,10 @@ struct f16_ampere_kit {
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return dense_cuda_moments_f16x8_ampere(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_f16x8_ampere(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -274,6 +308,7 @@ struct bf16_ampere_kit {
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 8>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
 
@@ -282,6 +317,10 @@ struct bf16_ampere_kit {
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return dense_cuda_moments_bf16x8_ampere(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_bf16x8_ampere(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -346,6 +385,7 @@ struct f16_blackwell_kit {
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 8>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
 
@@ -354,6 +394,10 @@ struct f16_blackwell_kit {
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return dense_cuda_moments_f16x8_ampere(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_f16x8_ampere(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -373,6 +417,7 @@ struct bf16_blackwell_kit {
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 8>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
 
@@ -381,6 +426,10 @@ struct bf16_blackwell_kit {
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return dense_cuda_moments_bf16x8_ampere(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_bf16x8_ampere(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -442,6 +491,26 @@ __device__ __forceinline__ uint2 dense_cuda_moments_u8x16_ampere(uint4 a, uint2 
     return moments;
 }
 
+/** Returns @p sums plus @p weight times each of an @c i8 fragment's sixteen values. */
+__device__ __forceinline__ std::array<f32_t, 16> dense_cuda_weighted_i8x16_ampere( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t byte = 0; byte != 16; ++byte)
+        sums[byte] += weight * static_cast<f32_t>(static_cast<i8_t>(words[byte / 4] >> (8 * (byte % 4))));
+    return sums;
+}
+
+/** Returns @p sums plus @p weight times each of a @c u8 fragment's sixteen values. */
+__device__ __forceinline__ std::array<f32_t, 16> dense_cuda_weighted_u8x16_ampere( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t byte = 0; byte != 16; ++byte)
+        sums[byte] += weight * static_cast<f32_t>(static_cast<u8_t>(words[byte / 4] >> (8 * (byte % 4))));
+    return sums;
+}
+
 /** i8 kit - the sm_80 floor. */
 template <nk_kernel_kind_t kernel_>
 struct i8_ampere_kit {
@@ -449,6 +518,7 @@ struct i8_ampere_kit {
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
     using dot_t = int;
+    using weighted_t = std::array<f32_t, 16>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = int2;
 
@@ -457,6 +527,10 @@ struct i8_ampere_kit {
     }
     static __device__ __forceinline__ int2 accumulate_norms(fragment_t a, int2 moments) noexcept {
         return dense_cuda_moments_i8x16_ampere(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_i8x16_ampere(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(int2 moments) noexcept {
         return {moments.x, moments.y};
@@ -476,6 +550,7 @@ struct u8_ampere_kit {
     using scalar_t = nk::u8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
+    using weighted_t = std::array<f32_t, 16>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = uint2;
 
@@ -484,6 +559,10 @@ struct u8_ampere_kit {
     }
     static __device__ __forceinline__ uint2 accumulate_norms(fragment_t a, uint2 moments) noexcept {
         return dense_cuda_moments_u8x16_ampere(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_u8x16_ampere(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(uint2 moments) noexcept {
         return {moments.x, moments.y};
@@ -532,6 +611,23 @@ __device__ __forceinline__ float2 dense_cuda_moments_minifloats_ampere(uint4 a, 
             moments.y += values.x * values.x + values.y * values.y;
         }
     return moments;
+}
+
+/** Returns @p sums plus @p weight times each of a minifloat fragment's sixteen values, each byte pair
+ *  widened by @p widening_type_ into f32. */
+template <typename widening_type_>
+__device__ __forceinline__ std::array<f32_t, 16> dense_cuda_weighted_minifloats_ampere( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = widening_type_::pair_to_floats(words[word] >> (16 * pair));
+            sums[4 * word + 2 * pair] += weight * values.x;
+            sums[4 * word + 2 * pair + 1] += weight * values.y;
+        }
+    return sums;
 }
 
 /** The Ampere floor has no fp8 conversion, so each byte's fields are placed into an f32 by hand:
@@ -592,6 +688,7 @@ struct e5m2_ampere_kit {
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
 
@@ -600,6 +697,10 @@ struct e5m2_ampere_kit {
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return dense_cuda_moments_minifloats_ampere<e5m2_ampere_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_minifloats_ampere<e5m2_ampere_widening_t>(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -619,6 +720,7 @@ struct e4m3_ampere_kit {
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
 
@@ -627,6 +729,10 @@ struct e4m3_ampere_kit {
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return dense_cuda_moments_minifloats_ampere<e4m3_ampere_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_minifloats_ampere<e4m3_ampere_widening_t>(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -646,6 +752,7 @@ struct e3m2_ampere_kit {
     using scalar_t = nk::e3m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
 
@@ -654,6 +761,10 @@ struct e3m2_ampere_kit {
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return dense_cuda_moments_minifloats_ampere<e3m2_ampere_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_minifloats_ampere<e3m2_ampere_widening_t>(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -673,6 +784,7 @@ struct e2m3_ampere_kit {
     using scalar_t = nk::e2m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
 
@@ -681,6 +793,10 @@ struct e2m3_ampere_kit {
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return dense_cuda_moments_minifloats_ampere<e2m3_ampere_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_minifloats_ampere<e2m3_ampere_widening_t>(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -728,6 +844,7 @@ struct e5m2_ada_kit {
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
 
@@ -736,6 +853,10 @@ struct e5m2_ada_kit {
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return dense_cuda_moments_minifloats_ampere<e5m2_ada_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_minifloats_ampere<e5m2_ada_widening_t>(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -755,6 +876,7 @@ struct e4m3_ada_kit {
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
 
@@ -763,6 +885,10 @@ struct e4m3_ada_kit {
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return dense_cuda_moments_minifloats_ampere<e4m3_ada_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_minifloats_ampere<e4m3_ada_widening_t>(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -826,6 +952,7 @@ struct e5m2_blackwell_kit {
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
 
@@ -834,6 +961,10 @@ struct e5m2_blackwell_kit {
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return dense_cuda_moments_minifloats_ampere<e5m2_ada_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_minifloats_ampere<e5m2_ada_widening_t>(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -853,6 +984,7 @@ struct e4m3_blackwell_kit {
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
 
@@ -861,6 +993,10 @@ struct e4m3_blackwell_kit {
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return dense_cuda_moments_minifloats_ampere<e4m3_ada_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_minifloats_ampere<e4m3_ada_widening_t>(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -880,6 +1016,7 @@ struct e3m2_blackwell_kit {
     using scalar_t = nk::e3m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
 
@@ -888,6 +1025,10 @@ struct e3m2_blackwell_kit {
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return dense_cuda_moments_minifloats_ampere<e3m2_blackwell_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_minifloats_ampere<e3m2_blackwell_widening_t>(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -907,6 +1048,7 @@ struct e2m3_blackwell_kit {
     using scalar_t = nk::e2m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = float2;
 
@@ -915,6 +1057,10 @@ struct e2m3_blackwell_kit {
     }
     static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
         return dense_cuda_moments_minifloats_ampere<e2m3_blackwell_widening_t>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_minifloats_ampere<e2m3_blackwell_widening_t>(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
@@ -1000,6 +1146,39 @@ __device__ __forceinline__ uint2 dense_cuda_moments_u4x32_ampere(uint4 a, uint2 
     return moments;
 }
 
+/** Returns @p sums plus @p weight times each of an @c i4 fragment's thirty-two values, through the same
+ *  unpacking; the even column of a byte is its high nibble. */
+__device__ __forceinline__ std::array<f32_t, 32> dense_cuda_weighted_i4x32_ampere( //
+    uint4 a, f32_t weight, std::array<f32_t, 32> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked = dense_cuda_unpack_i4x8_ampere(words[word]);
+#pragma unroll
+        for (u32_t byte = 0; byte != 4; ++byte) {
+            sums[8 * word + 2 * byte] += weight * static_cast<f32_t>(static_cast<i8_t>(unpacked.y >> (8 * byte)));
+            sums[8 * word + 2 * byte + 1] += weight * static_cast<f32_t>(static_cast<i8_t>(unpacked.x >> (8 * byte)));
+        }
+    }
+    return sums;
+}
+
+/** The @c u4 twin of @ref dense_cuda_weighted_i4x32_ampere. */
+__device__ __forceinline__ std::array<f32_t, 32> dense_cuda_weighted_u4x32_ampere( //
+    uint4 a, f32_t weight, std::array<f32_t, 32> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked = dense_cuda_unpack_u4x8_ampere(words[word]);
+#pragma unroll
+        for (u32_t byte = 0; byte != 4; ++byte) {
+            sums[8 * word + 2 * byte] += weight * static_cast<f32_t>(static_cast<u8_t>(unpacked.y >> (8 * byte)));
+            sums[8 * word + 2 * byte + 1] += weight * static_cast<f32_t>(static_cast<u8_t>(unpacked.x >> (8 * byte)));
+        }
+    }
+    return sums;
+}
+
 /** i4x2 kit - the sm_80 floor, the byte engine over unpacked nibbles. */
 template <nk_kernel_kind_t kernel_>
 struct i4x2_ampere_kit {
@@ -1007,6 +1186,7 @@ struct i4x2_ampere_kit {
     using scalar_t = nk::i4x2_t;
     using fragment_t = uint4;
     using dot_t = int;
+    using weighted_t = std::array<f32_t, 32>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = int2;
 
@@ -1015,6 +1195,10 @@ struct i4x2_ampere_kit {
     }
     static __device__ __forceinline__ int2 accumulate_norms(fragment_t a, int2 moments) noexcept {
         return dense_cuda_moments_i4x32_ampere(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_i4x32_ampere(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(int2 moments) noexcept {
         return {moments.x, moments.y};
@@ -1034,6 +1218,7 @@ struct u4x2_ampere_kit {
     using scalar_t = nk::u4x2_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
+    using weighted_t = std::array<f32_t, 32>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = uint2;
 
@@ -1042,6 +1227,10 @@ struct u4x2_ampere_kit {
     }
     static __device__ __forceinline__ uint2 accumulate_norms(fragment_t a, uint2 moments) noexcept {
         return dense_cuda_moments_u4x32_ampere(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_u4x32_ampere(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(uint2 moments) noexcept {
         return {moments.x, moments.y};
@@ -1066,6 +1255,17 @@ __device__ __forceinline__ u32_t dense_cuda_intersect_u1x128_ampere(uint4 a, uin
     return static_cast<u32_t>(__popcll(low) + __popcll(high));
 }
 
+/** Returns @p sums plus @p weight times each of a fragment's 128 bits, most significant bit of each byte
+ *  first, as NumKong's casts order them. */
+__device__ __forceinline__ std::array<f32_t, 128> dense_cuda_weighted_u1x128_ampere( //
+    uint4 a, f32_t weight, std::array<f32_t, 128> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t bit = 0; bit != 128; ++bit)
+        sums[bit] += weight * static_cast<f32_t>((words[bit / 32] >> (8 * (bit / 8 % 4) + 7 - bit % 8)) & 1u);
+    return sums;
+}
+
 /** u1x8 kit - the sm_80 floor: the "dot" is the intersection popcount, and the norms store each row's
  *  set-bit count, the currency of Jaccard's union, mirrored into both fields. */
 template <nk_kernel_kind_t kernel_>
@@ -1074,6 +1274,7 @@ struct u1x8_ampere_kit {
     using scalar_t = nk::u1x8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
+    using weighted_t = std::array<f32_t, 128>;
     using norms_t = vector_norms<dot_t>;
     using norms_accumulator_t = uint2;
 
@@ -1083,6 +1284,10 @@ struct u1x8_ampere_kit {
     static __device__ __forceinline__ uint2 accumulate_norms(fragment_t a, uint2 moments) noexcept {
         moments.x += dense_cuda_intersect_u1x128_ampere(a, a);
         return moments;
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_cuda_weighted_u1x128_ampere(a, weight, sums);
     }
     static __device__ __forceinline__ norms_t partials_to_norms(uint2 moments) noexcept {
         return {moments.x, moments.x};

@@ -25,11 +25,11 @@ using dense_node_id_t = u32_t;
 /** Distance representation shared by all metrics, regardless of the stored dtype. */
 using dense_distance_t = f32_t;
 
-/** Reserved all-ones value, never a valid node id within a sub-index. Doubles as the
+/** Reserved all-ones value, never a valid node ID within a sub-index. Doubles as the
  *  lock & empty-slot sentinel in neighbor lists of every index design. */
 inline constexpr dense_node_id_t dense_node_id_unknown_k = 0xFFFFFFFFu;
 
-/** One traversal candidate: a node id paired with its distance to the query. */
+/** One traversal candidate: a node ID paired with its distance to the query. */
 struct dense_scored_node_t {
 
     /** Identifier of the scored node within its sub-index. */
@@ -106,6 +106,17 @@ struct [[nodiscard]] dense_refine_result_t {
     std::size_t saturated_walks = 0;
 };
 
+/** The online-softmax carry of one attended row, in natural-log units - the C++ face of
+ *  @c usearch_dense_softmax_state_t. */
+struct dense_softmax_state_t {
+
+    /** Largest logit seen so far. */
+    f32_t maximum_score;
+
+    /** Sum of exponentials taken against that maximum. */
+    f32_t partition;
+};
+
 /** Fixed 32-byte descriptor fronting every serialized dense index payload - volatile
  *  in-RAM snapshots, GPU-resident uploads, and persisted on-NVMe layouts alike. It describes
  *  the graph & its frozen geometry, never the residency: what sections follow and how they
@@ -133,7 +144,7 @@ struct dense_index_header_t {
     /** Scalar dimensions per vector - one half of the frozen geometry. */
     u32_t dimensions;
 
-    /** Neighbor ids per node - the other half of the frozen geometry. */
+    /** Neighbor IDs per node - the other half of the frozen geometry. */
     u32_t connectivity;
 
     /** Published nodes in the payload; the chunk layout re-derives from it. */
