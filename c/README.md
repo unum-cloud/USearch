@@ -37,7 +37,7 @@ int main(void) {
     usearch_dense_add(&(usearch_dense_add_t){
         .index = index, .executor = executor, .outcome = &outcome,
         .count = 2, .keys = {keys, sizeof(usearch_key_t)},
-        .vectors = {vectors, sizeof(vectors[0]), usearch_scalar_f32_k}});
+        .vectors = {vectors, sizeof(vectors[0]), 128, usearch_scalar_f32_k}});
     if (outcome.status != usearch_status_success_k) goto cleanup;
 
     // Search one query; a zero stride would repeat it across a larger `count`.
@@ -84,7 +84,7 @@ for (size_t shard = 0; shard != 4; ++shard) {
     searches[shard] = (usearch_dense_search_t){
         .index = shards[shard], .executor = executor, .outcome = &outcomes[shard],
         .completion = usearch_completion_deferred_k,
-        .count = 32, .queries = {queries, 128 * sizeof(float), usearch_scalar_f32_k},
+        .count = 32, .queries = {queries, 128 * sizeof(float), 128, usearch_scalar_f32_k},
         .matches = {shard_keys[shard], 10 * sizeof(usearch_key_t), shard_distances[shard],
                     10 * sizeof(usearch_distance_t), shard_counts[shard], 32, 10}};
     usearch_dense_search(&searches[shard]);
@@ -163,7 +163,7 @@ cudaHostAlloc((void**)&rows, 4096 * 1024 * sizeof(float), cudaHostAllocDefault);
 usearch_dense_add(&(usearch_dense_add_t){
     .index = index, .executor = gpu, .outcome = &outcome,
     .count = 4096, .keys = {row_keys, sizeof(usearch_key_t)},
-    .vectors = {rows, 1024 * sizeof(float), usearch_scalar_f32_k}});
+    .vectors = {rows, 1024 * sizeof(float), 1024, usearch_scalar_f32_k}});
 ```
 
 An arena lives where the executor that created it computes, so on a VRAM executor every output an arena holds is __device memory__.
@@ -308,7 +308,7 @@ usearch_admission_t admits_tenant(usearch_key_t key, void* state) {
 uint8_t tenant = 7;
 usearch_dense_search(&(usearch_dense_search_t){
     .index = index, .executor = executor, .outcome = &outcome,
-    .count = 1, .queries = {query, 0, usearch_scalar_f32_k},
+    .count = 1, .queries = {query, 0, 128, usearch_scalar_f32_k},
     .matches = {found_keys, sizeof(found_keys), found_distances, sizeof(found_distances), &found_count, 1, 10},
     .predicate = admits_tenant, .predicate_state = &tenant});
 ```
@@ -322,10 +322,10 @@ When a filter is selective enough that no `wanted` can be guessed upfront, a sea
 ```c
 usearch_dense_search_stream_t stream = NULL;
 usearch_dense_search_stream_init(&(usearch_dense_search_stream_init_t){
-    .stream = &stream, .index = index, .outcome = &outcome, .query = {query, 0, usearch_scalar_f32_k}});
+    .stream = &stream, .index = index, .outcome = &outcome, .query = {query, 0, 128, usearch_scalar_f32_k}});
 for (size_t pulled = 1; pulled != 0 && outcome.status == usearch_status_success_k;) {
     usearch_dense_search_stream_next(&(usearch_dense_search_stream_next_t){
-        .stream = stream, .executor = executor, .outcome = &outcome,
+        .index = index, .executor = executor, .outcome = &outcome, .stream = stream,
         .matches = {found_keys, sizeof(found_keys), found_distances, sizeof(found_distances), &pulled, 1, 10}});
         // ... keep the matches that pass, and stop once enough did ...
 }
@@ -333,6 +333,7 @@ usearch_dense_search_stream_free(stream);
 ```
 
 A stream keeps the walk's state between pulls, never a thread, so any number of them may stay open on one executor.
+It keeps no hold on the index either: every pull passes the index the stream was opened on, and any other is refused.
 
 ## Inspecting and Scanning
 
@@ -354,7 +355,8 @@ usearch_dense_cursor_t cursor = NULL;
 usearch_dense_cursor_init(&(usearch_dense_cursor_init_t){.cursor = &cursor, .index = index, .outcome = &outcome});
 for (size_t written = 1; written != 0 && outcome.status == usearch_status_success_k;)
     usearch_dense_cursor_next(&(usearch_dense_cursor_next_t){
-        .cursor = cursor, .outcome = &outcome, .keys = {found_keys, sizeof(usearch_key_t), 10}, .written = &written});
+        .index = index, .executor = executor, .outcome = &outcome, .cursor = cursor,
+        .keys = {found_keys, sizeof(usearch_key_t), 10}, .written = &written});
 usearch_dense_cursor_free(cursor);
 ```
 
@@ -366,7 +368,7 @@ Higher expansion values buy recall at the cost of latency; zero derives a defaul
 ```c
 usearch_dense_search(&(usearch_dense_search_t){
     .index = index, .executor = executor, .outcome = &outcome,
-    .count = 1, .queries = {query, 0, usearch_scalar_f32_k},
+    .count = 1, .queries = {query, 0, 128, usearch_scalar_f32_k},
     .matches = {found_keys, sizeof(found_keys), found_distances, sizeof(found_distances), &found_count, 1, 10},
     .expansion_factor = 128});
 ```

@@ -83,8 +83,8 @@ struct usearch_geospatial_index_handle_t : handle<geospatial_payload_t, geospati
 
 struct usearch_geospatial_cursor_handle_t {
 
-    /** The index being walked; it must outlive the cursor. */
-    usearch_geospatial_index_handle_t* index;
+    /** The handle the cursor was opened on, only ever compared with the one each pull passes. */
+    usearch_geospatial_index_handle_t const* opened_on;
 
     /** The next entry to hand out. */
     std::size_t position;
@@ -94,6 +94,9 @@ struct usearch_geospatial_cursor_handle_t {
 
     /** Earth-fixed centimetres of the batch just handed out, borrowed until the next call. */
     std::vector<us::i32_t> centimetres;
+
+    /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
+    std::atomic_flag busy;
 };
 
 /** A query converted once and reused: it keeps the caller's coordinates, since the axes
@@ -776,7 +779,7 @@ void usearch_geospatial_cursor_init(usearch_geospatial_cursor_init_t* arguments)
     usearch_geospatial_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
     usearch_geospatial_cursor_handle_t* const cursor = new (std::nothrow)
-        usearch_geospatial_cursor_handle_t {&index, 0, index.entries.size(), {}};
+        usearch_geospatial_cursor_handle_t {&index, 0, index.entries.size(), {}, {}};
     if (reject_if(!cursor, usearch_status_out_of_memory_k, "The cursor could not be allocated", outcome)) return;
     *arguments->cursor = cursor;
 }
@@ -785,12 +788,18 @@ void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments)
     pending_outcome_t outcome(arguments->outcome);
     *arguments->written = 0;
     usearch_geospatial_cursor_handle_t& cursor = *arguments->cursor;
-    usearch_geospatial_index_handle_t& index = *cursor.index;
+    if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
+                  "The cursor was opened on another index", outcome))
+        return;
+    usearch_geospatial_index_handle_t& index = *arguments->index;
     usearch_keys_span_t const& keys = arguments->keys;
     us::i32_t const** const point_sets = arguments->point_sets;
     std::size_t* const point_counts = arguments->point_counts;
     if (reject_keys_span(keys, outcome)) return;
     if (reject_if(!point_counts, usearch_status_invalid_argument_k, "The point counts must name storage", outcome))
+        return;
+    if (reject_if(cursor.busy.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
+                  "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
     std::size_t const width = layout_width(index.options.layout);
@@ -823,6 +832,7 @@ void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments)
     }
     cursor.position += written;
     *arguments->written = written;
+    cursor.busy.clear(std::memory_order_release);
 }
 
 void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t handle) { delete handle; }

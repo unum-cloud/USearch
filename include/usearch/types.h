@@ -348,9 +348,8 @@ typedef enum usearch_scalar_t {
  *  @brief A borrowed run of rows along a call's batch axis - the input currency of every verb
  *      whose rows share one width.
  *
- *  Carries neither a row count nor a width: the call's @c count is the one batch axis, and the
- *  width is the geometry the index froze, so neither can disagree with a second copy of itself.
- *  A zero @c stride repeats the first row for every one of them.
+ *  The call's @c count is the row count, and the call checks @c columns against the frozen
+ *  geometry. A zero @c stride repeats the first row.
  */
 typedef struct usearch_rows_view_t {
 
@@ -359,6 +358,9 @@ typedef struct usearch_rows_view_t {
 
     /** Bytes between the starts of consecutive rows; zero repeats the first row. */
     size_t stride;
+
+    /** Values per row the caller laid out; one that differs from the frozen geometry is refused. */
+    size_t columns;
 
     /** The scalar type the rows hold, converted on the way in where it differs. */
     usearch_scalar_t scalar;
@@ -373,6 +375,9 @@ typedef struct usearch_rows_span_t {
 
     /** Bytes between the starts of consecutive rows; zero is refused. */
     size_t stride;
+
+    /** Values per row the caller laid out; one that differs from the frozen geometry is refused. */
+    size_t columns;
 
     /** Rows the span can hold; fewer than the call writes is refused. */
     size_t capacity;
@@ -944,8 +949,8 @@ USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor);
  *      and the inverse that reads one back.
  *
  *  Every binding that touches user text otherwise writes these tables itself, against a header
- *  that nothing checks it against. The names are static storage and are never deallocated; an
- *  unrecognized name reads back as the set's own unknown enumerator.
+ *  that nothing checks it against. The names are static storage and are never deallocated. An
+ *  unrecognized status name or value reads as @c usearch_status_invalid_argument_k.
  */
 USEARCH_EXPORT char const* usearch_status_name(usearch_status_t status);
 

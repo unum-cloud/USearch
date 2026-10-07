@@ -108,7 +108,8 @@ typedef struct usearch_geospatial_index_handle_t* usearch_geospatial_index_t;
 typedef struct usearch_geospatial_emplaced_handle_t* usearch_geospatial_emplaced_t;
 
 /** A consistent snapshot cursor over the index contents, capturing the publication
- *  watermark at creation - concurrent inserts never appear mid-iteration. */
+ *  watermark at creation - concurrent inserts never appear mid-iteration.
+ *  Each pull names the index again; an overlapping pull reports @c usearch_status_contended_k. */
 typedef struct usearch_geospatial_cursor_handle_t* usearch_geospatial_cursor_t;
 
 /** Which axes each incoming position carries, and in which order. Fixed for the
@@ -927,7 +928,7 @@ typedef struct usearch_geospatial_cursor_init_t {
     /** Output for the new cursor; @c NULL on failure. */
     usearch_geospatial_cursor_t* cursor;
 
-    /** The handle to be scanned, borrowed until the cursor is freed. */
+    /** The handle to be scanned. */
     usearch_geospatial_index_t index;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
@@ -940,11 +941,20 @@ USEARCH_EXPORT void usearch_geospatial_cursor_init(usearch_geospatial_cursor_ini
 /** The arguments of @c usearch_geospatial_cursor_next. */
 typedef struct usearch_geospatial_cursor_next_t {
 
-    /** The cursor to advance. */
-    usearch_geospatial_cursor_t cursor;
+    /** The handle the cursor was opened on. */
+    usearch_geospatial_index_t index;
+
+    /** The executor the pull runs on. */
+    usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
     usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** The cursor to advance. */
+    usearch_geospatial_cursor_t cursor;
 
     /** Where the identities land; its capacity bounds the batch. */
     usearch_keys_span_t keys;
@@ -961,6 +971,7 @@ typedef struct usearch_geospatial_cursor_next_t {
 
 /**
  *  @brief Copies the next batch of entries out of the cursor.
+ *  @retval usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
  *
  *  The borrowed pointers reach into the index's storage and stay valid until the cursor moves
  *  or closes. Their coordinates are the internal Earth-fixed integer centimetres, three per

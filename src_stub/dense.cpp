@@ -87,23 +87,32 @@ struct usearch_dense_index_handle_t : handle<dense_payload_t, dense_index_option
 
 struct usearch_dense_cursor_handle_t {
 
-    /** The index being walked; it must outlive the cursor. */
-    usearch_dense_index_handle_t* index;
+    /** The handle the cursor was opened on, only ever compared with the one each pull passes. */
+    usearch_dense_index_handle_t const* opened_on;
 
     /** The next row to hand out. */
     std::size_t position;
 
     /** The watermark captured at creation, which later insertions cannot raise. */
     std::size_t limit;
+
+    /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
+    std::atomic_flag busy;
 };
 
 struct usearch_dense_search_stream_handle_t {
+
+    /** The handle the stream was opened on, only ever compared with the one each pull passes. */
+    usearch_dense_index_handle_t const* opened_on;
 
     /** Every scored match, nearest first - a snapshot, so it needs no further locking. */
     std::vector<match_t> ranked;
 
     /** The next match to hand out. */
     std::size_t position;
+
+    /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
+    std::atomic_flag busy;
 };
 
 namespace {
@@ -111,12 +120,15 @@ namespace {
 /**
  *  @brief Checks a run of input rows against the frozen geometry, answering whether to refuse it.
  *
- *  The view carries no width, so the index's own is the only one a row can have, and a stride
- *  narrower than it is where an over-read becomes an error. A zero stride repeats the first row.
+ *  The view's width must be the index's own, and a stride narrower than it is where an over-read
+ *  becomes an error. A zero stride repeats the first row.
  */
 bool reject_view(usearch_rows_view_t const& rows, std::size_t count, usearch_dense_index_handle_t const& index,
                  usearch_outcome_t* outcome) {
     if (reject_if(!rows.data && count, usearch_status_invalid_argument_k, "The rows must name storage", outcome))
+        return true;
+    if (reject_if(count && rows.columns != index.options.dimensions, usearch_status_shape_mismatch_k,
+                  "The rows' width differs from the frozen geometry", outcome))
         return true;
     if (reject_scalar(rows.scalar, outcome)) return true;
     std::size_t const natural = row_extent(rows.scalar, index.options.dimensions);
@@ -124,10 +136,13 @@ bool reject_view(usearch_rows_view_t const& rows, std::size_t count, usearch_den
                      "The stride is shorter than one row", outcome);
 }
 
-/** The output twin of @c reject_view, whose width the caller chooses rather than the index, and
+/** The output twin of @c reject_view, whose width the verb names rather than the index, and
  *  whose zero stride is refused since every row would land in one place. */
 bool reject_span(usearch_rows_span_t const& rows, std::size_t columns, std::size_t count, usearch_outcome_t* outcome) {
     if (reject_if(!rows.data, usearch_status_invalid_argument_k, "The rows must name storage", outcome)) return true;
+    if (reject_if(rows.columns != columns, usearch_status_shape_mismatch_k,
+                  "The rows' width differs from the one the call writes", outcome))
+        return true;
     if (reject_scalar(rows.scalar, outcome)) return true;
     if (reject_if(rows.stride < row_extent(rows.scalar, columns), usearch_status_unsupported_layout_k,
                   "The stride is shorter than one row", outcome))
@@ -601,6 +616,7 @@ void usearch_dense_get(usearch_dense_get_t* arguments) {
     pending_outcome_t outcome(arguments->outcome);
     *arguments->vectors = nullptr;
     if (arguments->written) *arguments->written = 0;
+    if (arguments->stride) *arguments->stride = 0;
     usearch_dense_index_handle_t& index = *arguments->index;
     usearch_scalar_t const scalar = arguments->scalar;
     if (reject_scalar(scalar, outcome)) return;
@@ -617,6 +633,7 @@ void usearch_dense_get(usearch_dense_get_t* arguments) {
         write_row(row_at<std::byte>(landing, found, row_bytes, row_bytes), scalar, index.entries[rows[found]].payload);
     *arguments->vectors = landing;
     if (arguments->written) *arguments->written = rows.size();
+    if (arguments->stride) *arguments->stride = row_bytes;
 }
 
 void usearch_dense_merge(usearch_dense_merge_t* arguments) {
@@ -654,7 +671,7 @@ void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
     usearch_dense_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
     usearch_dense_cursor_handle_t* const cursor = new (std::nothrow)
-        usearch_dense_cursor_handle_t {&index, 0, index.entries.size()};
+        usearch_dense_cursor_handle_t {&index, 0, index.entries.size(), {}};
     if (reject_if(!cursor, usearch_status_out_of_memory_k, "The cursor could not be allocated", outcome)) return;
     *arguments->cursor = cursor;
 }
@@ -663,11 +680,17 @@ void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
     pending_outcome_t outcome(arguments->outcome);
     *arguments->written = 0;
     usearch_dense_cursor_handle_t& cursor = *arguments->cursor;
-    usearch_dense_index_handle_t& index = *cursor.index;
+    if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
+                  "The cursor was opened on another index", outcome))
+        return;
+    usearch_dense_index_handle_t& index = *arguments->index;
     usearch_keys_span_t const& keys = arguments->keys;
     usearch_rows_span_t const& vectors = arguments->vectors;
     if (reject_keys_span(keys, outcome)) return;
     if (vectors.data && reject_span(vectors, index.options.dimensions, keys.capacity, outcome)) return;
+    if (reject_if(cursor.busy.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
+                  "Another pull is still running on the cursor", outcome))
+        return;
     std::shared_lock readers(index.mutex);
     std::size_t const written = std::min(keys.capacity, cursor.limit - cursor.position);
     std::size_t const row_bytes = row_extent(vectors.scalar, index.options.dimensions);
@@ -679,6 +702,7 @@ void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
     }
     cursor.position += written;
     *arguments->written = written;
+    cursor.busy.clear(std::memory_order_release);
 }
 
 void usearch_dense_cursor_free(usearch_dense_cursor_t handle) { delete handle; }
@@ -703,6 +727,7 @@ void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* argume
             [&](dense_payload_t const& payload) { return distance(index.options.metric, query_row, payload); },
             stream->ranked);
     }
+    stream->opened_on = &index;
     stream->position = 0;
     *arguments->stream = stream;
 }
@@ -710,8 +735,14 @@ void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* argume
 void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* arguments) {
     pending_outcome_t outcome(arguments->outcome);
     usearch_dense_search_stream_handle_t& stream = *arguments->stream;
+    if (reject_if(arguments->index != stream.opened_on, usearch_status_invalid_argument_k,
+                  "The stream was opened on another index", outcome))
+        return;
     usearch_matches_span_t const& matches = arguments->matches;
     if (reject_matches(matches, 1, outcome)) return;
+    if (reject_if(stream.busy.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
+                  "Another pull is still running on the stream", outcome))
+        return;
     std::size_t const written = std::min(matches.wanted, stream.ranked.size() - stream.position);
     for (std::size_t match = 0; match != written; ++match) {
         matches.keys[match] = stream.ranked[stream.position + match].key;
@@ -719,6 +750,7 @@ void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* argume
     }
     stream.position += written;
     matches.counts[0] = written;
+    stream.busy.clear(std::memory_order_release);
 }
 
 void usearch_dense_search_stream_free(usearch_dense_search_stream_t handle) { delete handle; }

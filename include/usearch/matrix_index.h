@@ -105,7 +105,8 @@ typedef struct usearch_matrix_index_handle_t* usearch_matrix_index_t;
 
 /** A consistent snapshot cursor over the index contents. Captures the publication
  *  watermark at creation, so concurrent inserts never appear mid-iteration, and the
- *  walk is a sequential entry scan - export, migration, and visualization feed off it. */
+ *  walk is a sequential entry scan - export, migration, and visualization feed off it.
+ *  Each pull names the index again; an overlapping pull reports @c usearch_status_contended_k. */
 typedef struct usearch_matrix_cursor_handle_t* usearch_matrix_cursor_t;
 
 /**
@@ -684,6 +685,9 @@ typedef struct usearch_matrix_get_t {
     /** The @b optional output for the entries written; zero when the key is absent. */
     size_t* written;
 
+    /** The @b optional output for the bytes between consecutive rows of @c matrices. */
+    size_t* stride;
+
     /** Memory for @c matrices and @c offsets: reused when it points to an arena, created when it
      *  points to @c NULL. */
     usearch_arena_t* arena;
@@ -747,7 +751,7 @@ typedef struct usearch_matrix_cursor_init_t {
     /** Output for the new cursor; @c NULL on failure. */
     usearch_matrix_cursor_t* cursor;
 
-    /** The handle to be scanned, borrowed until the cursor is freed. */
+    /** The handle to be scanned. */
     usearch_matrix_index_t index;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
@@ -760,11 +764,20 @@ USEARCH_EXPORT void usearch_matrix_cursor_init(usearch_matrix_cursor_init_t* arg
 /** The arguments of @c usearch_matrix_cursor_next. */
 typedef struct usearch_matrix_cursor_next_t {
 
-    /** The cursor to advance. */
-    usearch_matrix_cursor_t cursor;
+    /** The handle the cursor was opened on. */
+    usearch_matrix_index_t index;
+
+    /** The executor the pull runs on. */
+    usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
     usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** The cursor to advance. */
+    usearch_matrix_cursor_t cursor;
 
     /** Where the identities land; its capacity bounds the batch. */
     usearch_keys_span_t keys;
@@ -779,8 +792,13 @@ typedef struct usearch_matrix_cursor_next_t {
     size_t* written;
 } usearch_matrix_cursor_next_t;
 
-/** Copies the next batch of entries out of the cursor. The borrowed pointers reach into the
- *  index's storage and stay valid until the cursor moves or closes. */
+/**
+ *  @brief Copies the next batch of entries out of the cursor.
+ *  @retval usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
+ *
+ *  The borrowed pointers reach into the index's storage and stay valid until the cursor moves or
+ *  closes.
+ */
 USEARCH_EXPORT void usearch_matrix_cursor_next(usearch_matrix_cursor_next_t* arguments);
 
 /** Releases the cursor; @c NULL is safe. */

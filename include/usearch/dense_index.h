@@ -153,8 +153,7 @@ typedef struct usearch_dense_index_handle_t* usearch_dense_index_t;
  *      a row once passed is never revisited, while a later shard may still carry rows published
  *      after the walk began.
  *
- *  The cursor borrows the index rather than owning a share of it: free the cursor before the
- *  index it walks.
+ *  Each pull names the index again; an overlapping pull reports @c usearch_status_contended_k.
  */
 typedef struct usearch_dense_cursor_handle_t* usearch_dense_cursor_t;
 
@@ -164,7 +163,7 @@ typedef struct usearch_dense_cursor_handle_t* usearch_dense_cursor_t;
  *
  *  Callers that post-filter aggressively pull until satisfied instead of guessing @c wanted upfront.
  *  The stream holds state, never a thread, so any number of them may stay open on one executor.
- *  Where a cursor walks storage order, a stream walks distance order.
+ *  Each pull names the index again; an overlapping pull reports @c usearch_status_contended_k.
  */
 typedef struct usearch_dense_search_stream_handle_t* usearch_dense_search_stream_t;
 
@@ -610,7 +609,7 @@ typedef struct usearch_dense_add_t {
  *  usearch_dense_add(&(usearch_dense_add_t){
  *      .index = index, .executor = executor, .outcome = &outcome,
  *      .count = 256, .keys = {keys, sizeof(usearch_key_t)},
- *      .vectors = {rows_base, 128 * sizeof(float), usearch_scalar_f32_k}});
+ *      .vectors = {rows_base, 128 * sizeof(float), 128, usearch_scalar_f32_k}});
  *  if (outcome.status != usearch_status_success_k) report(outcome.message);
  *  @endcode
  */
@@ -785,7 +784,7 @@ typedef struct usearch_dense_search_t {
  *  usearch_outcome_t outcome = {0};
  *  usearch_dense_search(&(usearch_dense_search_t){
  *      .index = index, .executor = executor, .outcome = &outcome,
- *      .count = 32, .queries = {rows_base, 256 * sizeof(float), usearch_scalar_f32_k},
+ *      .count = 32, .queries = {rows_base, 256 * sizeof(float), 256, usearch_scalar_f32_k},
  *      .matches = {keys, 10 * sizeof(usearch_key_t), distances, 10 * sizeof(double), counts, 32, 10},
  *      .predicate = admits_tenant, .predicate_state = &tenant});
  *  @endcode
@@ -849,6 +848,9 @@ typedef struct usearch_dense_get_t {
 
     /** The @b optional output for the rows written; zero when the key is absent. */
     size_t* written;
+
+    /** The @b optional output for the bytes between consecutive rows of @c vectors. */
+    size_t* stride;
 
     /** Memory for @c vectors: reused when it points to an arena, created when it points to @c NULL. */
     usearch_arena_t* arena;
@@ -922,7 +924,7 @@ typedef struct usearch_dense_cursor_init_t {
     /** Output for the new cursor; @c NULL on failure. */
     usearch_dense_cursor_t* cursor;
 
-    /** The handle to be scanned, borrowed until the cursor is freed. */
+    /** The handle to be scanned. */
     usearch_dense_index_t index;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
@@ -935,11 +937,20 @@ USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* argum
 /** The arguments of @c usearch_dense_cursor_next. */
 typedef struct usearch_dense_cursor_next_t {
 
-    /** The cursor to advance. */
-    usearch_dense_cursor_t cursor;
+    /** The handle the cursor was opened on. */
+    usearch_dense_index_t index;
+
+    /** The executor the pull runs on. */
+    usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
     usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** The cursor to advance. */
+    usearch_dense_cursor_t cursor;
 
     /** Where the identities land; its capacity bounds the batch. */
     usearch_keys_span_t keys;
@@ -953,6 +964,7 @@ typedef struct usearch_dense_cursor_next_t {
 
 /**
  *  @brief Copies the next batch of entries out of the cursor.
+ *  @retval usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
  *  @retval usearch_status_shape_mismatch_k @c vectors.capacity is below @c keys.capacity.
  *
  *  The keys are what every batch carries, so their capacity is the batch size and a vector export
@@ -969,7 +981,7 @@ typedef struct usearch_dense_search_stream_init_t {
     /** Output for the new stream; @c NULL on failure. */
     usearch_dense_search_stream_t* stream;
 
-    /** The handle to be queried, borrowed until the stream is freed. */
+    /** The handle to be queried. */
     usearch_dense_index_t index;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
@@ -992,10 +1004,10 @@ USEARCH_EXPORT void usearch_dense_search_stream_init(usearch_dense_search_stream
 /** The arguments of @c usearch_dense_search_stream_next. */
 typedef struct usearch_dense_search_stream_next_t {
 
-    /** The stream to advance. */
-    usearch_dense_search_stream_t stream;
+    /** The handle the stream was opened on. */
+    usearch_dense_index_t index;
 
-    /** The executor the pull runs on; each pull is an ordinary submission. */
+    /** The executor the pull runs on. */
     usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
@@ -1004,14 +1016,22 @@ typedef struct usearch_dense_search_stream_next_t {
     /** Whether the call blocks or returns once queued; zero blocks. */
     usearch_completion_t completion;
 
+    /** The stream to advance. */
+    usearch_dense_search_stream_t stream;
+
     /** Where the pull lands, as one row of a search: up to @c matches.wanted more matches, their
      *  number in @c matches.counts[0], zero once the walk is drained. */
     usearch_matches_span_t matches;
 } usearch_dense_search_stream_next_t;
 
-/** Pulls the next-nearest matches from the stream. Ordering beyond the expansion horizon is
- *  best-effort nearest rather than globally exact, so a caller pulling far past the breadth it
- *  configured sees the ranking degrade rather than the stream end. */
+/**
+ *  @brief Pulls the next-nearest matches from the stream.
+ *  @retval usearch_status_invalid_argument_k @c index is not the handle the stream was opened on.
+ *
+ *  Ordering beyond the expansion horizon is best-effort nearest rather than globally exact, so a
+ *  caller pulling far past the breadth it configured sees the ranking degrade rather than the
+ *  stream end.
+ */
 USEARCH_EXPORT void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* arguments);
 
 /** Releases the stream and the walk state it keeps; @c NULL is safe. */
@@ -1309,7 +1329,7 @@ typedef struct usearch_dense_multiply_t {
  *  usearch_outcome_t outcome = {0};
  *  usearch_dense_multiply(&(usearch_dense_multiply_t){
  *      .index = index, .executor = executor, .outcome = &outcome,
- *      .count = m, .left = {a, a_stride, usearch_scalar_f32_k},
+ *      .count = m, .left = {a, a_stride, k, usearch_scalar_f32_k},
  *      .offsets = offsets, .keys = &columns, .scores = &products, .arena = &arena});
  *  for (size_t row = 0; row != m; ++row)
  *      for (size_t pair = offsets[row]; pair != offsets[row + 1]; ++pair)
@@ -1434,9 +1454,9 @@ typedef struct usearch_dense_attend_t {
  *  usearch_outcome_t outcome = {0};
  *  usearch_dense_attend(&(usearch_dense_attend_t){
  *      .index = index, .executor = executor, .outcome = &outcome, .count = heads,
- *      .queries = {query_rows, key_dimensions * 2, usearch_scalar_bf16_k},
+ *      .queries = {query_rows, key_dimensions * 2, key_dimensions, usearch_scalar_bf16_k},
  *      .values = {value_rows, tokens, value_dimensions, value_dimensions * 2, usearch_scalar_bf16_k},
- *      .outputs = {attended, value_dimensions * 2, heads, usearch_scalar_bf16_k},
+ *      .outputs = {attended, value_dimensions * 2, value_dimensions, heads, usearch_scalar_bf16_k},
  *      .carry = carry});
  *
  *  // `carry` holds Flash Attention's `m` and `l` per query row, so a second branch over the
@@ -1512,7 +1532,7 @@ typedef struct usearch_dense_maxsim_t {
  *  usearch_outcome_t outcome = {0};
  *  usearch_dense_maxsim(&(usearch_dense_maxsim_t){
  *      .index = index, .executor = executor, .outcome = &outcome,
- *      .count = 4, .queries = {query_tokens, 128 * sizeof(float), usearch_scalar_f32_k}, .rows_per_query = 32,
+ *      .count = 4, .queries = {query_tokens, 128 * sizeof(float), 128, usearch_scalar_f32_k}, .rows_per_query = 32,
  *      .matches = {keys, 10 * sizeof(usearch_key_t), scores, 10 * sizeof(double), counts, 4, 10}});
  *  @endcode
  */

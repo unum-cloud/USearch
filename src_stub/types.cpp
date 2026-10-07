@@ -107,7 +107,8 @@ char const* usearch_status_name(usearch_status_t status) {
     case usearch_status_unsupported_k: return "unsupported";
     case usearch_status_pending_k: return "pending";
     case usearch_status_invalid_argument_k: return "invalid-argument";
-    default: return "unrecognized";
+    // An unrecognized value spells like the status an unrecognized name reads back as.
+    default: return "invalid-argument";
     }
 }
 

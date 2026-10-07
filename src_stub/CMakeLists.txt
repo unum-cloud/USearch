@@ -28,6 +28,15 @@ foreach (TARGET_NAME usearch_shared_stub usearch_static_stub)
                    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/stub"
                    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/stub"
     )
+    # The root pins every configuration's directory too, and those outrank the plain ones above.
+    foreach (STUB_CONFIGURATION DEBUG RELEASE RELWITHDEBINFO MINSIZEREL)
+        set_target_properties(
+            ${TARGET_NAME}
+            PROPERTIES LIBRARY_OUTPUT_DIRECTORY_${STUB_CONFIGURATION} "${CMAKE_BINARY_DIR}/stub"
+                       ARCHIVE_OUTPUT_DIRECTORY_${STUB_CONFIGURATION} "${CMAKE_BINARY_DIR}/stub"
+                       RUNTIME_OUTPUT_DIRECTORY_${STUB_CONFIGURATION} "${CMAKE_BINARY_DIR}/stub"
+        )
+    endforeach ()
 endforeach ()
 
 set_target_properties(usearch_shared_stub PROPERTIES OUTPUT_NAME "usearch_shared")

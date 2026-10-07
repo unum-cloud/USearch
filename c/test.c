@@ -5,7 +5,7 @@
  *  @brief Unit tests for the pure-C ABI of USearch (`usearch/dense_index.h`).
  *
  *  Exercises the dense surface through the ABI every binding consumes: initialization and
- *  reservation, batch `add`, `search` and `multiply`, retrieval by key into an arena, and the
+ *  reservation, batch `add`, `search`, `multiply` and `attend`, retrieval by key into an arena, and the
  *  contract of `usearch_outcome_t`. Every call here blocks, so its outcome is final once it
  *  returns. Scoped to the verbs `src/` instantiates today - the header runs ahead of the
  *  implementation, and a smoke test that cannot link proves nothing. The harness is
@@ -202,7 +202,7 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
                                               .outcome = &outcome,
                                               .count = collection_size,
                                               .keys = {keys, sizeof(usearch_key_t)},
-                                              .vectors = {data, row_bytes, usearch_scalar_f32_k}});
+                                              .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
     expect(!outcome.message, outcome.message);
     usearch_dense_index_description_t description = {0};
     usearch_dense_describe(&(usearch_dense_describe_t) {.index = index,
@@ -224,7 +224,7 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
                                    .executor = executor,
                                    .outcome = &outcome,
                                    .count = collection_size,
-                                   .queries = {data, row_bytes, usearch_scalar_f32_k},
+                                   .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
                                    .matches = {found_keys, sizeof(usearch_key_t), found_distances,
                                                sizeof(usearch_distance_t), counts, collection_size, 1}});
     expect(!outcome.message, outcome.message);
@@ -242,7 +242,7 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
                                                     .executor = executor,
                                                     .outcome = &outcome,
                                                     .count = collection_size,
-                                                    .queries = {data, row_bytes, usearch_scalar_f32_k},
+                                                    .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
                                                     .matches = {found_keys, sizeof(usearch_key_t), found_distances,
                                                                 sizeof(usearch_distance_t), counts, collection_size, 1},
                                                     .predicate = admits_even});
@@ -280,7 +280,7 @@ void test_count_and_get(size_t const dimensions) {
                                               .outcome = &outcome,
                                               .count = 2,
                                               .keys = {keys, sizeof(usearch_key_t)},
-                                              .vectors = {data, row_bytes, usearch_scalar_f32_k}});
+                                              .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
     expect(!outcome.message, outcome.message);
 
     size_t entries = 0;
@@ -300,7 +300,7 @@ void test_count_and_get(size_t const dimensions) {
     expect_eq(entries, 0, "The key was never inserted");
 
     float* retrieved = NULL;
-    size_t written = 0;
+    size_t written = 0, stride = 0;
     usearch_arena_t arena = NULL;
     usearch_dense_get(&(usearch_dense_get_t) {.index = index,
                                               .executor = executor,
@@ -309,13 +309,23 @@ void test_count_and_get(size_t const dimensions) {
                                               .scalar = usearch_scalar_f32_k,
                                               .vectors = (void**)&retrieved,
                                               .written = &written,
+                                              .stride = &stride,
                                               .arena = &arena});
     expect(!outcome.message, outcome.message);
     expect_eq(written, 1, "Retrieval must report the true entry count");
+    expect_eq(stride, row_bytes, "Retrieval must report the pitch of the rows it packed");
     expect(retrieved != NULL, "Retrieval must land the rows in the arena");
     for (size_t position = 0; position != dimensions; ++position)
         expect(fabsf(retrieved[position] - data[position]) <= fabsf(data[position]) / 128,
                "A bf16 index must return rows within its 7-bit mantissa");
+
+    usearch_dense_add(&(usearch_dense_add_t) {.index = index,
+                                              .executor = executor,
+                                              .outcome = &outcome,
+                                              .count = 1,
+                                              .keys = {keys, sizeof(usearch_key_t)},
+                                              .vectors = {data, row_bytes, dimensions - 1, usearch_scalar_f32_k}});
+    expect_eq(outcome.status, usearch_status_shape_mismatch_k, "Rows of another width than the frozen one are refused");
 
     char const path[] = "usearch-test-c-view.safegraphs";
     usearch_bytes_view_t const path_view = {(uint8_t const*)path, sizeof(path) - 1};
@@ -332,7 +342,7 @@ void test_count_and_get(size_t const dimensions) {
                                                   .outcome = &outcome,
                                                   .count = 1,
                                                   .keys = {keys, sizeof(usearch_key_t)},
-                                                  .vectors = {data, row_bytes, usearch_scalar_f32_k}});
+                                                  .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
         expect_eq(outcome.status, usearch_status_read_only_k, "A view must refuse every mutation");
         usearch_dense_free(view);
     }
@@ -343,6 +353,91 @@ void test_count_and_get(size_t const dimensions) {
     usearch_executor_free(executor);
     usearch_dense_free(index);
     printf("Test: Count & Get - PASSED\n");
+}
+
+/** A cursor or a stream keeps no hold on its index, so every pull names it, and a pull naming any
+ *  other handle is refused before the walk moves. */
+void test_walks_name_their_index(size_t const dimensions) {
+    printf("Test: Walks Name Their Index\n");
+
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t const index = create_index(dimensions);
+    usearch_dense_index_t const other = create_index(dimensions);
+    usearch_executor_t const executor = create_executor();
+    size_t const row_bytes = dimensions * sizeof(float);
+    float* const data = (float*)calloc(2 * dimensions, sizeof(float));
+    data[0] = 1, data[dimensions + 1] = 1;
+    usearch_key_t const keys[2] = {key_of(3), key_of(5)};
+    usearch_dense_reserve(
+        &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = 2});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_add(&(usearch_dense_add_t) {.index = index,
+                                              .executor = executor,
+                                              .outcome = &outcome,
+                                              .count = 2,
+                                              .keys = {keys, sizeof(usearch_key_t)},
+                                              .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+
+    usearch_dense_cursor_t cursor = NULL;
+    usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.cursor = &cursor, .index = index, .outcome = &outcome});
+    expect(!outcome.message, outcome.message);
+    usearch_key_t walked[4] = {0};
+    size_t written = 0;
+    usearch_dense_cursor_next(&(usearch_dense_cursor_next_t) {.index = other,
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .cursor = cursor,
+                                                              .keys = {walked, sizeof(usearch_key_t), 4},
+                                                              .written = &written});
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "A cursor pull must name the index it was opened on");
+    expect_eq(written, 0, "A refused pull hands out nothing");
+    usearch_dense_cursor_next(&(usearch_dense_cursor_next_t) {.index = index,
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .cursor = cursor,
+                                                              .keys = {walked, sizeof(usearch_key_t), 4},
+                                                              .written = &written});
+    expect(!outcome.message, outcome.message);
+    expect_eq(written, 2, "A refused pull must leave the walk where it was");
+    usearch_dense_cursor_free(cursor);
+
+    usearch_dense_search_stream_t stream = NULL;
+    usearch_dense_search_stream_init(
+        &(usearch_dense_search_stream_init_t) {.stream = &stream,
+                                               .index = index,
+                                               .outcome = &outcome,
+                                               .query = {data, 0, dimensions, usearch_scalar_f32_k}});
+    // An implementation that cannot stream yet says so, and has no stream to hold to the contract.
+    if (outcome.status != usearch_status_unsupported_k) {
+        expect(!outcome.message, outcome.message);
+        usearch_key_t found_keys[2] = {0};
+        usearch_distance_t found_distances[2] = {0};
+        size_t pulled = 0;
+        usearch_dense_search_stream_next(&(usearch_dense_search_stream_next_t) {
+            .index = other,
+            .executor = executor,
+            .outcome = &outcome,
+            .stream = stream,
+            .matches = {found_keys, sizeof(found_keys), found_distances, sizeof(found_distances), &pulled, 1, 2}});
+        expect_eq(outcome.status, usearch_status_invalid_argument_k,
+                  "A stream pull must name the index it was opened on");
+        usearch_dense_search_stream_next(&(usearch_dense_search_stream_next_t) {
+            .index = index,
+            .executor = executor,
+            .outcome = &outcome,
+            .stream = stream,
+            .matches = {found_keys, sizeof(found_keys), found_distances, sizeof(found_distances), &pulled, 1, 2}});
+        expect(!outcome.message, outcome.message);
+        expect_eq(pulled, 2, "A refused pull must leave the stream where it was");
+        usearch_dense_search_stream_free(stream);
+    }
+
+    free(data);
+    usearch_executor_free(executor);
+    usearch_dense_free(other);
+    usearch_dense_free(index);
+    printf("Test: Walks Name Their Index - PASSED\n");
 }
 
 /** A packed kind's row is as wide as its logical dimensions, so every product spans all of them -
@@ -373,12 +468,13 @@ void test_multiply_packed(void) {
         for (size_t column = 0; column != dimensions; ++column)
             data[row * dimensions + column] = (float)((row + column) % 5) - 2;
     }
-    usearch_dense_add(&(usearch_dense_add_t) {.index = index,
-                                              .executor = executor,
-                                              .outcome = &outcome,
-                                              .count = rows_count,
-                                              .keys = {keys, sizeof(usearch_key_t)},
-                                              .vectors = {data, dimensions * sizeof(float), usearch_scalar_f32_k}});
+    usearch_dense_add(
+        &(usearch_dense_add_t) {.index = index,
+                                .executor = executor,
+                                .outcome = &outcome,
+                                .count = rows_count,
+                                .keys = {keys, sizeof(usearch_key_t)},
+                                .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
     expect(!outcome.message, outcome.message);
 
     size_t offsets[rows_count + 1];
@@ -390,7 +486,7 @@ void test_multiply_packed(void) {
                                      .executor = executor,
                                      .outcome = &outcome,
                                      .count = rows_count,
-                                     .left = {data, dimensions * sizeof(float), usearch_scalar_f32_k},
+                                     .left = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
                                      .offsets = offsets,
                                      .keys = &columns,
                                      .scores = &products,
@@ -413,26 +509,94 @@ void test_multiply_packed(void) {
         &(usearch_dense_multiply_t) {.index = index,
                                      .outcome = &outcome,
                                      .count = 1,
-                                     .left = {data, dimensions * sizeof(float), usearch_scalar_f32_k},
+                                     .left = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
                                      .offsets = offsets,
                                      .keys = &columns,
                                      .scores = &products,
                                      .arena = &arena});
     expect(!outcome.message, outcome.message);
-    usearch_dense_multiply(&(usearch_dense_multiply_t) {.index = index,
-                                                        .outcome = &outcome,
-                                                        .count = 1,
-                                                        .left = {columns, sizeof(usearch_key_t), usearch_scalar_u8_k},
-                                                        .offsets = offsets,
-                                                        .keys = &columns,
-                                                        .scores = &products,
-                                                        .arena = &arena});
+    usearch_dense_multiply(
+        &(usearch_dense_multiply_t) {.index = index,
+                                     .outcome = &outcome,
+                                     .count = 1,
+                                     .left = {columns, sizeof(usearch_key_t), dimensions, usearch_scalar_u8_k},
+                                     .offsets = offsets,
+                                     .keys = &columns,
+                                     .scores = &products,
+                                     .arena = &arena});
     expect_eq(outcome.status, usearch_status_invalid_argument_k, "An input inside the rewound arena is refused");
 
     usearch_arena_free(arena);
     usearch_executor_free(executor);
     usearch_dense_free(index);
     printf("Test: Multiply Packed Rows - PASSED\n");
+}
+
+/** A graph this small walks every key, so attention reproduces the exact softmax over the value rows
+ *  the keys address, and a key past the last value row refuses the call rather than shrinking it. */
+void test_attend(void) {
+    printf("Test: Attend\n");
+
+    enum { tokens = 4, dimensions = 4, value_dimensions = 2 };
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t index = NULL;
+    usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
+                                                        .outcome = &outcome,
+                                                        .metric = usearch_dense_metric_inner_k,
+                                                        .quantization = usearch_scalar_i8_k,
+                                                        .dimensions = dimensions});
+    expect(!outcome.message, outcome.message);
+    usearch_executor_t const executor = create_executor();
+    usearch_dense_reserve(
+        &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = tokens});
+    expect(!outcome.message, outcome.message);
+
+    // Token `t` scores a dot of `t` against a query of ones, and its value row is `{t, 1}`.
+    float rows[tokens * dimensions] = {0};
+    int8_t values[tokens * value_dimensions];
+    usearch_key_t keys[tokens];
+    for (size_t token = 0; token != tokens; ++token) {
+        keys[token] = key_of(token);
+        rows[token * dimensions + token] = (float)token;
+        values[token * value_dimensions] = (int8_t)token, values[token * value_dimensions + 1] = 1;
+    }
+    usearch_dense_add(
+        &(usearch_dense_add_t) {.index = index,
+                                .executor = executor,
+                                .outcome = &outcome,
+                                .count = tokens,
+                                .keys = {keys, sizeof(usearch_key_t)},
+                                .vectors = {rows, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+
+    // A logit scale of ln 2 turns the dots into weights 1/8, 1/4, 1/2 and 1, summing to 1.875.
+    float const query[dimensions] = {1, 1, 1, 1};
+    float attended[value_dimensions] = {0};
+    usearch_dense_softmax_state_t carry = {0};
+    usearch_dense_attend_t attend = {
+        .index = index,
+        .executor = executor,
+        .outcome = &outcome,
+        .count = 1,
+        .queries = {query, sizeof(query), dimensions, usearch_scalar_f32_k},
+        .values = {values, tokens, value_dimensions, value_dimensions, usearch_scalar_i8_k},
+        .outputs = {attended, sizeof(attended), value_dimensions, 1, usearch_scalar_f32_k},
+        .carry = &carry,
+        .score_scale = 0.69314718f};
+    usearch_dense_attend(&attend);
+    expect(!outcome.message, outcome.message);
+    expect(fabsf(carry.maximum_score - 3 * 0.69314718f) < 1e-5f, "The carry must hold the largest logit");
+    expect(fabsf(carry.partition - 1.875f) < 1e-4f, "The carry must hold the partition");
+    expect(fabsf(attended[0] - 4.25f / 1.875f) < 1e-4f && fabsf(attended[1] - 1) < 1e-4f,
+           "Every key must weigh the value row it addresses");
+
+    attend.values.rows = tokens - 1;
+    usearch_dense_attend(&attend);
+    expect_eq(outcome.status, usearch_status_shape_mismatch_k, "A key past the value rows must refuse the call");
+
+    usearch_executor_free(executor);
+    usearch_dense_free(index);
+    printf("Test: Attend - PASSED\n");
 }
 
 /** A message is @c NULL exactly when the status is success, and the outcome a caller reuses is
@@ -511,7 +675,9 @@ int main(int argc, char* argv[]) {
             test_add_and_search(collection_sizes[size_index], dimension_counts[dimension_index]);
         }
     test_count_and_get(dimension_counts[0]);
+    test_walks_name_their_index(dimension_counts[0]);
     test_multiply_packed();
+    test_attend();
 
     printf("All tests passed!\n");
     return 0;

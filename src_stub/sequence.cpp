@@ -80,14 +80,17 @@ struct usearch_sequence_index_handle_t : handle<sequence_payload_t, sequence_ind
 
 struct usearch_sequence_cursor_handle_t {
 
-    /** The index being walked; it must outlive the cursor. */
-    usearch_sequence_index_handle_t* index;
+    /** The handle the cursor was opened on, only ever compared with the one each pull passes. */
+    usearch_sequence_index_handle_t const* opened_on;
 
     /** The next entry to hand out. */
     std::size_t position;
 
     /** The watermark captured at creation, which later insertions cannot raise. */
     std::size_t limit;
+
+    /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
+    std::atomic_flag busy;
 };
 
 namespace {
@@ -715,7 +718,7 @@ void usearch_sequence_cursor_init(usearch_sequence_cursor_init_t* arguments) {
     usearch_sequence_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
     usearch_sequence_cursor_handle_t* const cursor = new (std::nothrow)
-        usearch_sequence_cursor_handle_t {&index, 0, index.entries.size()};
+        usearch_sequence_cursor_handle_t {&index, 0, index.entries.size(), {}};
     if (reject_if(!cursor, usearch_status_out_of_memory_k, "The cursor could not be allocated", outcome)) return;
     *arguments->cursor = cursor;
 }
@@ -724,9 +727,15 @@ void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments) {
     pending_outcome_t outcome(arguments->outcome);
     *arguments->written = 0;
     usearch_sequence_cursor_handle_t& cursor = *arguments->cursor;
-    usearch_sequence_index_handle_t& index = *cursor.index;
+    if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
+                  "The cursor was opened on another index", outcome))
+        return;
+    usearch_sequence_index_handle_t& index = *arguments->index;
     usearch_keys_span_t const& keys = arguments->keys;
     if (reject_keys_span(keys, outcome)) return;
+    if (reject_if(cursor.busy.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
+                  "Another pull is still running on the cursor", outcome))
+        return;
     std::shared_lock readers(index.mutex);
     std::size_t const written = std::min(keys.capacity, cursor.limit - cursor.position);
     for (std::size_t row = 0; row != written; ++row) {
@@ -738,6 +747,7 @@ void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments) {
     }
     cursor.position += written;
     *arguments->written = written;
+    cursor.busy.clear(std::memory_order_release);
 }
 
 void usearch_sequence_cursor_free(usearch_sequence_cursor_t handle) { delete handle; }

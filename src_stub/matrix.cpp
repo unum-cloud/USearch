@@ -77,14 +77,17 @@ struct usearch_matrix_index_handle_t : handle<matrix_payload_t, matrix_index_opt
 
 struct usearch_matrix_cursor_handle_t {
 
-    /** The index being walked; it must outlive the cursor. */
-    usearch_matrix_index_handle_t* index;
+    /** The handle the cursor was opened on, only ever compared with the one each pull passes. */
+    usearch_matrix_index_handle_t const* opened_on;
 
     /** The next entry to hand out. */
     std::size_t position;
 
     /** The watermark captured at creation, which later insertions cannot raise. */
     std::size_t limit;
+
+    /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
+    std::atomic_flag busy;
 };
 
 namespace {
@@ -554,6 +557,7 @@ void usearch_matrix_get(usearch_matrix_get_t* arguments) {
     *arguments->matrices = nullptr;
     *arguments->offsets = nullptr;
     if (arguments->written) *arguments->written = 0;
+    if (arguments->stride) *arguments->stride = 0;
     usearch_matrix_index_handle_t& index = *arguments->index;
     usearch_scalar_t const scalar = arguments->scalar;
     if (reject_scalar(scalar, outcome)) return;
@@ -585,6 +589,7 @@ void usearch_matrix_get(usearch_matrix_get_t* arguments) {
     *arguments->matrices = tape;
     *arguments->offsets = offsets;
     if (arguments->written) *arguments->written = rows.size();
+    if (arguments->stride) *arguments->stride = row_bytes;
 }
 
 void usearch_matrix_merge(usearch_matrix_merge_t* arguments) {
@@ -625,7 +630,7 @@ void usearch_matrix_cursor_init(usearch_matrix_cursor_init_t* arguments) {
     usearch_matrix_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
     usearch_matrix_cursor_handle_t* const cursor = new (std::nothrow)
-        usearch_matrix_cursor_handle_t {&index, 0, index.entries.size()};
+        usearch_matrix_cursor_handle_t {&index, 0, index.entries.size(), {}};
     if (reject_if(!cursor, usearch_status_out_of_memory_k, "The cursor could not be allocated", outcome)) return;
     *arguments->cursor = cursor;
 }
@@ -634,11 +639,17 @@ void usearch_matrix_cursor_next(usearch_matrix_cursor_next_t* arguments) {
     pending_outcome_t outcome(arguments->outcome);
     *arguments->written = 0;
     usearch_matrix_cursor_handle_t& cursor = *arguments->cursor;
-    usearch_matrix_index_handle_t& index = *cursor.index;
+    if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
+                  "The cursor was opened on another index", outcome))
+        return;
+    usearch_matrix_index_handle_t& index = *arguments->index;
     usearch_keys_span_t const& keys = arguments->keys;
     if (reject_keys_span(keys, outcome)) return;
     if (reject_if(!arguments->row_counts, usearch_status_invalid_argument_k, "The row counts must name storage",
                   outcome))
+        return;
+    if (reject_if(cursor.busy.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
+                  "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
     std::size_t const written = std::min(keys.capacity, cursor.limit - cursor.position);
@@ -651,6 +662,7 @@ void usearch_matrix_cursor_next(usearch_matrix_cursor_next_t* arguments) {
     }
     cursor.position += written;
     *arguments->written = written;
+    cursor.busy.clear(std::memory_order_release);
 }
 
 void usearch_matrix_cursor_free(usearch_matrix_cursor_t handle) { delete handle; }
