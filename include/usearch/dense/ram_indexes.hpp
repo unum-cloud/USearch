@@ -67,6 +67,7 @@ template <                                                                    //
     nk_capability_t capability_ = nk_cap_icelake_k,                           //
     typename wait_type_ = fu::standard_yield_t,                               //
     template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
+    typename cache_hints_type_ = fu::standard_cache_hints_t,                  //
     typename key_hash_type_ = std::hash<key_type_>                            //
     >
 struct dense_ram_indexes {
@@ -102,6 +103,7 @@ struct dense_ram_indexes {
     /** The shard type - geometry parameters in the shard's own order, so the two can never
      *  disagree. */
     using index_t = dense_ram_index<vector_dtype_, kernel_kind_, capability_, wait_type_, atomic_ref_template_, //
+                                    cache_hints_type_,                                                          //
                                     forkunion_allocator_t,                                                      //
                                     forkunion_allocator_t,                                                      //
                                     arena_allocator<byte_t, forkunion_allocator_t>>;

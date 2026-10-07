@@ -55,8 +55,8 @@ template <                                       //
     requires(index_combo_supported<dtype_, kernel_> && dense_cell_compiled<dtype_, kernel_, caps_>)
 static std::size_t test_configuration(char const* name, u64_t seed) {
 
-    using index_t = dense_ram_index<dtype_, kernel_, caps_, waiter_type_, atomic_ref_, counting_allocator_t,
-                                    counting_allocator_t, std::allocator<byte_t>>;
+    using index_t = dense_ram_index<dtype_, kernel_, caps_, waiter_type_, atomic_ref_, fu::standard_cache_hints_t,
+                                    counting_allocator_t, counting_allocator_t, std::allocator<byte_t>>;
 
     if (!dense_cell_admitted<caps_, atomic_ref_>()) return report(name, "capabilities missing at runtime");
 
@@ -98,8 +98,9 @@ static std::size_t test_configuration(char const* name, u64_t seed) {
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
     requires(index_combo_supported<dtype_, kernel_>)
 static std::size_t test_starved_configuration(char const* name, u64_t seed) {
-    using index_t = dense_ram_index<dtype_, kernel_, nk_cap_serial_k, dummy_waiter_t, fu::standard_atomic_ref,
-                                    counting_allocator_t, counting_allocator_t, counting_allocator_t>;
+    using index_t =
+        dense_ram_index<dtype_, kernel_, nk_cap_serial_k, dummy_waiter_t, fu::standard_atomic_ref,
+                        fu::standard_cache_hints_t, counting_allocator_t, counting_allocator_t, counting_allocator_t>;
     auto make_index = [](allocation_ledger_t& ledger) {
         return index_t {counting_allocator_t(ledger), counting_allocator_t(ledger)};
     };

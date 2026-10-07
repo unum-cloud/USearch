@@ -279,6 +279,57 @@ struct atomic_ref_for_cpu_class<cpu_class_t::alibaba_c930_k> {
 };
 #endif
 
+/** The cache hints one CPU class pairs: the x86 classes demote with CLDEMOTE and the Arm classes
+ *  prefetch with PRFM, all in hint or reserved-NOP space, so no class gains a bit to confirm. */
+template <cpu_class_t cpu_class_>
+struct cache_hints_for_cpu_class {
+    using type = fu::standard_cache_hints_t;
+};
+#if FORKUNION_TARGET_X86_CLDEMOTE
+template <>
+struct cache_hints_for_cpu_class<cpu_class_t::intel_haswell_k> {
+    using type = fu::x86_cache_hints_t;
+};
+template <>
+struct cache_hints_for_cpu_class<cpu_class_t::intel_skylake_k> {
+    using type = fu::x86_cache_hints_t;
+};
+template <>
+struct cache_hints_for_cpu_class<cpu_class_t::intel_icelake_k> {
+    using type = fu::x86_cache_hints_t;
+};
+template <>
+struct cache_hints_for_cpu_class<cpu_class_t::amd_genoa_k> {
+    using type = fu::x86_cache_hints_t;
+};
+template <>
+struct cache_hints_for_cpu_class<cpu_class_t::intel_sierra_k> {
+    using type = fu::x86_cache_hints_t;
+};
+template <>
+struct cache_hints_for_cpu_class<cpu_class_t::intel_diamond_k> {
+    using type = fu::x86_cache_hints_t;
+};
+#endif
+#if FORKUNION_TARGET_ARM64_PRFM
+template <>
+struct cache_hints_for_cpu_class<cpu_class_t::aws_g2_k> {
+    using type = fu::arm64_prefetch_cache_hints_t;
+};
+template <>
+struct cache_hints_for_cpu_class<cpu_class_t::apple_m2_k> {
+    using type = fu::arm64_prefetch_cache_hints_t;
+};
+template <>
+struct cache_hints_for_cpu_class<cpu_class_t::aws_g5_k> {
+    using type = fu::arm64_prefetch_cache_hints_t;
+};
+template <>
+struct cache_hints_for_cpu_class<cpu_class_t::nvidia_vera_k> {
+    using type = fu::arm64_prefetch_cache_hints_t;
+};
+#endif
+
 /** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause: the runtime
  *  confirms nothing about them, and a class differing by one alone earns no rung. */
 inline constexpr fu::capabilities_t baseline_hints_k = fu::capability_x86_pause_k | fu::capability_arm64_yield_k |
@@ -410,11 +461,12 @@ template <typename multi_type_>
 inline constexpr bool is_vram_index = false;
 #endif
 
-/** One RAM alternative: the CPU class alone names the rung, lowering onto its NumKong mask, its waiter
- *  and its atomic reference. */
+/** One RAM alternative: the CPU class alone names the rung, lowering onto its NumKong mask, its waiter,
+ *  its atomic reference and its cache hints. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_>
 using ram_index = dense_ram_indexes<us::uuid_t, dtype_, kernel_, numkong_capabilities_of(cpu_class_),
-                                    waiter_of<cpu_class_>, atomic_ref_for_cpu_class<cpu_class_>::template type>;
+                                    waiter_of<cpu_class_>, atomic_ref_for_cpu_class<cpu_class_>::template type,
+                                    typename cache_hints_for_cpu_class<cpu_class_>::type>;
 #if USEARCH_BUILD_CUDA
 
 /** One VRAM alternative: the GPU class alone names the rung, lowering onto its architecture ceiling;

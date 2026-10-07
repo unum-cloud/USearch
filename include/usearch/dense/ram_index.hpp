@@ -17,7 +17,7 @@
 #include <type_traits> // `std::has_unique_object_representations_v`
 
 #include <forkunion/atomics.hpp> // `fu::standard_atomic_ref`
-#include <forkunion/types.hpp>   // `fu::standard_yield_t`
+#include <forkunion/types.hpp>   // `fu::standard_yield_t`, `fu::standard_cache_hints_t`
 #include <numkong/tensor.hpp>
 
 #include "usearch/utilities/types.hpp"
@@ -73,6 +73,7 @@ template <                                                                    //
     nk_capability_t capability_ = nk_cap_icelake_k,                           //
     typename wait_type_ = fu::standard_yield_t,                               //
     template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
+    typename cache_hints_type_ = fu::standard_cache_hints_t,                  //
     typename vectors_allocator_type_ = std::allocator<byte_t>,                //
     typename neighbors_allocator_type_ = std::allocator<byte_t>,              //
     typename traversals_allocator_type_ = std::allocator<byte_t>              //
@@ -357,7 +358,7 @@ struct dense_traversal_context {
 template <                                                                                //
     nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_kind_, nk_capability_t capability_, //
     typename wait_type_, template <typename> class atomic_ref_template_,                  //
-    typename vectors_allocator_type_, typename neighbors_allocator_type_,
+    typename cache_hints_type_, typename vectors_allocator_type_, typename neighbors_allocator_type_,
     typename traversals_allocator_type_> //
 struct dense_ram_index {
 
@@ -2759,10 +2760,10 @@ struct dense_ram_index {
             for (std::size_t depth_tile = 0; depth_tile != depth_tiles; ++depth_tile)
                 tiles_kit_t::gather_a_tile(a_tiles[depth_tile], tile_rows, depth_tile * depth_k);
             // The Gram never reads these rows again, so their lines leave the private caches now.
-            [[maybe_unused]] typename tiles_kit_t::demote_candidate_t const demote_candidate {};
+            cache_hints_type_ const hints;
             for (std::size_t row = 0; row != rows_k; ++row)
                 for (std::size_t depth_tile = 0; depth_tile != depth_tiles; ++depth_tile)
-                    demote_candidate(tile_rows[row].data() + depth_tile * depth_k);
+                    hints(tile_rows[row].data() + depth_tile * depth_k, fu::demote_line_t {});
             for (std::size_t column_tile = 0; column_tile != row_tiles; ++column_tile) {
                 for (std::size_t column = 0; column != columns_k; ++column)
                     column_norms[column] = norms[min_of(column_tile * columns_k + column, count - 1)];

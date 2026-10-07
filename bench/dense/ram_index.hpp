@@ -554,7 +554,7 @@ template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kin
 int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, workload_type_ const& workload) {
     using allocator_t = forkunion_allocator<std::byte>;
     using index_t = dense_ram_index<stored_dtype_, kernel_, capability_, wait_type_, fu::preferred_atomic_ref,
-                                    allocator_t, allocator_t, allocator_t>;
+                                    fu::preferred_cache_hints_t, allocator_t, allocator_t, allocator_t>;
     using bench_context_type_ = bench_context<index_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_type_>;
     using scalar_t = typename bench_context_type_::scalar_t;
