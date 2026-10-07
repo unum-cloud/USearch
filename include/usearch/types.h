@@ -2,28 +2,115 @@
  *  @file include/usearch/types.h
  *  @author Ash Vardanian
  *  @date August 14, 2026
- *  @brief Shared vocabulary of the USearch C interface: scalar types, keys, distances, error
- *      reporting, residency selection, and library introspection.
+ *  @brief Shared vocabulary of the USearch C interface: scalar types, keys, distances, shapes,
+ *      outcomes, executors, arenas, and library introspection.
  *
- *  Everything the modality headers have in common - @c dense_index.h, @c sequence_index.h, and
- *  @c geospatial_index.h - and nothing they don't. Include a modality header directly, since it
- *  pulls this one in; there is no umbrella header. The C vocabulary sits beside its C++ twin
- *  @c types.hpp, so one installed tree serves both languages and the headers pair by stem.
+ *  Everything the modality headers have in common - @c dense_index.h, @c sequence_index.h,
+ *  @c matrix_index.h, and @c geospatial_index.h - and nothing they don't. Include @c usearch.h for
+ *  all of them, or a modality header alone, since each pulls this one in. The C vocabulary sits
+ *  beside its C++ twin @c types.hpp, so one installed tree serves both languages and the headers
+ *  pair by stem.
+ *
+ *  @section types_verbs Verbs
+ *
+ *  Every verb that takes options, outputs, or callbacks takes one argument structure named after
+ *  it - @c usearch_dense_search takes a @c usearch_dense_search_t - so optional arguments are
+ *  skipped by name and their order never matters. Name lookups and the @c _free family stay
+ *  positional. Every structure opens in the same order: the handle, @c executor, @c outcome, then
+ *  @c completion. Inputs follow, then outputs and the @c arena they land in, then knobs, and last
+ *  @c progress, @c progress_state and @c stats.
+ *
+ *  Structures carry no size or version field, so they grow source-compatibly only: initialize
+ *  them by designator, which zeroes every field left out, and expect the major version to change
+ *  whenever one does.
+ *
+ *  @section types_asynchrony Asynchrony
+ *
+ *  Every call on an executor says how it completes, in one shape for both: a blocking call, the
+ *  default, returns with its final status stored and every output readable, and a deferred call
+ *  returns once queued and keeps using its argument structure until its @c outcome is final, as an
+ *  io_uring entry does. Nothing is copied at submission, so the structure, and every input,
+ *  output, arena, and executor it names, stays borrowed until then.
+ *
+ *  - @c outcome->status reads @c usearch_status_pending_k while a deferred call runs; the message,
+ *    then the final status, are stored with release ordering, even for a call refused at submission.
+ *    The caller reads it with acquire ordering, through @c usearch_outcome_wait or by polling.
+ *  - A GPU executor stores the final status of a deferred call from a host callback that still fires
+ *    after a device fault, so a faulted call still completes, and an outcome may live in any host
+ *    memory. A blocking call synchronizes the stream instead.
+ *  - Executors own their streams, so no verb takes one, and no call carries an ordering field: a
+ *    caller orders dependent calls itself, by waiting on the first before submitting the second.
+ *  - A deferred submission that finds its executor's in-flight table full, sized by
+ *    @c in_flight_limit, stores @c usearch_status_contended_k as its final status.
+ *  - A call stops early only when its progress handler returns @c usearch_cancel_k.
+ *
+ *  @code{.c}
+ *  usearch_outcome_t outcomes[4] = {0};
+ *  for (size_t shard = 0; shard != 4; ++shard) {
+ *      searches[shard].outcome = &outcomes[shard];
+ *      searches[shard].completion = usearch_completion_deferred_k;
+ *      usearch_dense_search(&searches[shard]);
+ *  }
+ *  for (size_t shard = 0; shard != 4; ++shard) usearch_outcome_wait(&outcomes[shard]);
+ *  @endcode
+ *
+ *  @section types_memory Memory
+ *
+ *  Every byte has one owner, and each owner picks where its bytes live once, when it is created:
+ *
+ *      Bytes                                Owner           Place chosen at
+ *      Payload                              the index       its init, load or view
+ *      Scratch and staging                  the executor    its creation, grown to a high-water mark
+ *      Outputs whose size a call discovers  the arena       the executor of the call that created it
+ *      Outputs whose size the inputs bound  the caller      the caller's own span
+ *
+ *  No allocator, alignment, or memory kind crosses the interface. The caller's own inputs and
+ *  outputs are plain pointers the library classifies through the driver once per call, staging
+ *  only to change a layout or to make pageable memory DMA-able. Outputs only a call can size land
+ *  in a @c usearch_arena_t the caller passes back to the next call, which rewinds and refills it,
+ *  so a steady loop allocates once. On a VRAM executor those outputs are device memory, which the
+ *  caller copies out itself when it wants them elsewhere.
+ *
+ *  @code{.c}
+ *  usearch_arena_t arena = NULL;
+ *  for (size_t i = 0; i != keys_count; ++i) {
+ *      get.key = keys[i], get.vectors = &rows, get.written = &rows_count, get.arena = &arena;
+ *      usearch_dense_get(&get);
+ *      if (get.outcome->status != usearch_status_success_k) break; // blocking, so already final
+ *      consume(rows, rows_count); // valid until the next call that takes `&arena`
+ *  }
+ *  usearch_arena_free(arena);
+ *  @endcode
+ *
+ *  @section types_shapes Shapes
+ *
+ *  A verb's @c count is its batch axis and nothing else. Inputs are views, where a zero stride
+ *  repeats the first element as BLAS does; outputs are spans with a capacity, where a zero stride
+ *  is refused, since every row would land in one place. Operands off the batch axis keep their
+ *  own shape, and ragged inputs are tapes with Apache Arrow offsets: @c count + 1 of them
+ *  around the elements laid end to end.
  */
 #ifndef UNUM_USEARCH_TYPES_H
 #define UNUM_USEARCH_TYPES_H
 
-#include <stdbool.h> // `bool`
-#include <stddef.h>  // `size_t`
-#include <stdint.h>  // `uint64_t`
+#include <stddef.h> // `size_t`
+#include <stdint.h> // `uint8_t`, `int32_t`, `uint32_t`
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+/** Marks exported functions: exported while building the shared library, imported when consuming
+ *  it on Windows, and of default visibility on ELF and Mach-O. Define it to override. */
 #ifndef USEARCH_EXPORT
-#if defined(_WIN32) && !defined(__MINGW32__)
+#if defined(_WIN32) || defined(__CYGWIN__)
+#if defined(USEARCH_EXPORTING)
 #define USEARCH_EXPORT __declspec(dllexport)
+#else
+#define USEARCH_EXPORT __declspec(dllimport)
+#endif
+#elif defined(__GNUC__) || defined(__clang__)
+#define USEARCH_EXPORT __attribute__((visibility("default")))
 #else
 #define USEARCH_EXPORT
 #endif
@@ -41,13 +128,13 @@ extern "C" {
  *  Keys need not be unique: several entries may share one, and count-like functions report how
  *  many. Integer identities park in the low bytes with the rest zeroed.
  */
-USEARCH_EXPORT typedef struct usearch_key_t {
+typedef struct usearch_key_t {
     uint8_t bytes[16];
 } usearch_key_t;
 
 /** Distance or similarity score between two entries, in the metric of the index that
  *  produced it. Wide enough for every modality's scoring range. */
-USEARCH_EXPORT typedef double usearch_distance_t;
+typedef double usearch_distance_t;
 
 /**
  *  @brief A borrowed run of bytes and its length, never null-terminated by contract - the shape
@@ -56,7 +143,7 @@ USEARCH_EXPORT typedef double usearch_distance_t;
  *  Callers holding a Rust @c str, a Go string, or a Java byte array pass their own storage without
  *  manufacturing a terminator none of them keeps.
  */
-USEARCH_EXPORT typedef struct usearch_bytes_view_t {
+typedef struct usearch_bytes_view_t {
 
     /** First byte of the run; text is bytes that happen to decode. */
     uint8_t const* data;
@@ -72,7 +159,7 @@ USEARCH_EXPORT typedef struct usearch_bytes_view_t {
  *  Pairing the pointer with its length in one argument is what makes a mismatched capacity
  *  unrepresentable, where two loose arguments only made it unlikely.
  */
-USEARCH_EXPORT typedef struct usearch_bytes_span_t {
+typedef struct usearch_bytes_span_t {
 
     /** First byte of the run; text is bytes that happen to decode. */
     uint8_t* data;
@@ -82,18 +169,19 @@ USEARCH_EXPORT typedef struct usearch_bytes_span_t {
 } usearch_bytes_span_t;
 
 /**
- *  @brief A borrowed run of keys and its length - how a batch names the identities it carries.
+ *  @brief A borrowed, strided run of keys - how a batch names the identities it carries, one per
+ *      row of the call's @c count.
  *
- *  One key per row of the matrix it accompanies, so the two counts are checked against each other
- *  rather than assumed equal, which is the check every binding otherwise writes for itself.
+ *  A zero @c stride repeats the first key for every row, which is how a batch of rows lands under
+ *  one key without a caller materializing the copies.
  */
-USEARCH_EXPORT typedef struct usearch_keys_view_t {
+typedef struct usearch_keys_view_t {
 
     /** First key of the run. */
     usearch_key_t const* data;
 
-    /** Keys the run spans. */
-    size_t count;
+    /** Bytes between consecutive keys; zero repeats the first. */
+    size_t stride;
 } usearch_keys_view_t;
 
 /**
@@ -103,10 +191,13 @@ USEARCH_EXPORT typedef struct usearch_keys_view_t {
  *  Its capacity is the only bound a streaming verb has on how much it may write, so the pointer
  *  and that bound travel as one argument rather than as two a caller could contradict.
  */
-USEARCH_EXPORT typedef struct usearch_keys_span_t {
+typedef struct usearch_keys_span_t {
 
     /** First key of the run. */
     usearch_key_t* data;
+
+    /** Bytes between consecutive keys; zero is refused, since every key would land in one place. */
+    size_t stride;
 
     /** Keys the run can hold. */
     size_t capacity;
@@ -121,74 +212,78 @@ USEARCH_EXPORT typedef struct usearch_keys_span_t {
  *  same status the engine would if it could see the same thing. The set describes the project's
  *  failures, not this implementation's exits, so unused enumerators are deliberate.
  */
-USEARCH_EXPORT typedef enum usearch_status_t {
+typedef enum usearch_status_t {
 
     /** The call completed; @c message carries nothing. */
-    usearch_success_k = 0,
+    usearch_status_success_k = 0,
 
     /** An allocation or reservation could not be satisfied. */
-    usearch_error_out_of_memory_k = 1,
+    usearch_status_out_of_memory_k = 1,
 
     /** Dimensionality, row counts, or output capacity disagree. */
-    usearch_error_shape_mismatch_k = 2,
+    usearch_status_shape_mismatch_k = 2,
 
     /** A stride or packing the engine cannot traverse. */
-    usearch_error_unsupported_layout_k = 3,
+    usearch_status_unsupported_layout_k = 3,
 
     /** A scalar, metric, or residency tag this build does not know. */
-    usearch_error_unknown_kind_k = 4,
+    usearch_status_unknown_kind_k = 4,
 
-    /** A mutating verb on a handle that opens its checkpoint in place. */
-    usearch_error_read_only_k = 5,
+    /** A mutating verb on a handle that serves its checkpoint in place. */
+    usearch_status_read_only_k = 5,
 
     /** A file could not be opened, read, written, or parsed. */
-    usearch_error_io_k = 6,
+    usearch_status_io_k = 6,
 
     /** A device could not be selected, or its memory could not be claimed. */
-    usearch_error_device_k = 7,
+    usearch_status_device_k = 7,
 
     /** A caller-supplied representation could not be decoded - a malformed key, a truncated
      *  buffer, a checkpoint that ends early. */
-    usearch_error_malformed_input_k = 8,
+    usearch_status_malformed_k = 8,
 
     /** The library reported neither success nor a failure - a contract violation rather
      *  than a condition, so it names a defect and not a state. */
-    usearch_error_internal_k = 9,
+    usearch_status_internal_k = 9,
 
-    /** A hard design ceiling was reached, like the 32-bit id space; a smaller request
+    /** A hard design ceiling was reached, like the 32-bit ID space; a smaller request
      *  cannot help where a smaller allocation would. */
-    usearch_error_overflow_k = 10,
+    usearch_status_overflow_k = 10,
 
     /** The verb needs a prior successful reservation that never happened. */
-    usearch_error_uninitialized_k = 11,
+    usearch_status_uninitialized_k = 11,
 
     /** The request contradicts an already-frozen configuration, like re-reserving with
      *  a different geometry. */
-    usearch_error_config_mismatch_k = 12,
+    usearch_status_config_mismatch_k = 12,
 
-    /** A synchronization contract was violated by a concurrent operation; discard any
-     *  produced output and retry in a quieter phase. */
-    usearch_error_contended_k = 13,
+    /** A synchronization contract was violated - a submission to an executor whose in-flight
+     *  table is full, or a blocking call from inside a callback of the executor it would wait on. */
+    usearch_status_contended_k = 13,
 
-    /** A progress handler asked the operation to stop; it unwound and published nothing,
-     *  so the handle carries whatever it did before the call. */
-    usearch_error_cancelled_k = 14,
-    /** @brief The verb is declared for every residency but this one does not implement it; no
-     *      retry, option, or smaller request can help, so a caller picks another residency. */
-    usearch_error_unsupported_k = 15,
+    /** A progress handler asked the operation to stop; it unwound and
+     *  published nothing, so the handle carries whatever it did before the call. */
+    usearch_status_cancelled_k = 14,
+
+    /** The verb is declared for every residency but this one does not implement it; no retry,
+     *  option, or smaller request can help, so a caller picks another residency. */
+    usearch_status_unsupported_k = 15,
+
+    /** The call was submitted and has not finished; never a final status. */
+    usearch_status_pending_k = 16,
 } usearch_status_t;
 
 /** Outcome of one call: a status every binding can branch on, and a static message
  *  carrying the detail the status cannot. Messages are static and @b don't need to be
- *  deallocated, and are @c NULL exactly when the status is @c usearch_success_k. */
-USEARCH_EXPORT typedef struct usearch_error_t {
+ *  deallocated, and are @c NULL exactly when the status is @c usearch_status_success_k. */
+typedef struct usearch_outcome_t {
     usearch_status_t status;
     char const* message;
-} usearch_error_t;
+} usearch_outcome_t;
 
 /** Scalar types the indexes store and exchange, named by width and encoding.
  *  Sub-byte types pack several dimensions per byte, as their @c xN suffixes spell. */
-USEARCH_EXPORT typedef enum usearch_scalar_t {
+typedef enum usearch_scalar_t {
 
     /** No scalar named - an unset field, or a custom metric owning its own storage. */
     usearch_scalar_unknown_k = 0,
@@ -246,17 +341,50 @@ USEARCH_EXPORT typedef enum usearch_scalar_t {
 } usearch_scalar_t;
 
 /**
- *  @brief A borrowed strided matrix - the batch currency every modality's row inputs take.
+ *  @brief A borrowed run of rows along a call's batch axis - the input currency of every verb
+ *      whose rows share one width.
  *
- *  One row is a one-row matrix, so a caller never packs a special case. The row count and
- *  the column count are scalars; @c stride_bytes alone is a byte count, which is why it says
- *  so in its name. A zero @c stride_bytes means rows sit contiguously at their natural width.
- *
- *  @c columns is what the engine checks the frozen geometry against, so a matrix whose width
- *  disagrees with the index is refused with @c usearch_error_shape_mismatch_k rather than read
- *  past its end.
+ *  Carries neither a row count nor a width: the call's @c count is the one batch axis, and the
+ *  width is the geometry the index froze, so neither can disagree with a second copy of itself.
+ *  A zero @c stride repeats the first row for every one of them.
  */
-USEARCH_EXPORT typedef struct usearch_matrix_view_t {
+typedef struct usearch_rows_view_t {
+
+    /** Base pointer of the first row. */
+    void const* data;
+
+    /** Bytes between the starts of consecutive rows; zero repeats the first row. */
+    size_t stride;
+
+    /** The scalar type the rows hold, converted on the way in where it differs. */
+    usearch_scalar_t scalar;
+} usearch_rows_view_t;
+
+/** The writable twin of @c usearch_rows_view_t, carried by every verb that lands rows of a
+ *  known width in memory the caller allocated. */
+typedef struct usearch_rows_span_t {
+
+    /** Base pointer of the first row. */
+    void* data;
+
+    /** Bytes between the starts of consecutive rows; zero is refused. */
+    size_t stride;
+
+    /** Rows the span can hold; fewer than the call writes is refused. */
+    size_t capacity;
+
+    /** The scalar type to write, converted on the way out where it differs. */
+    usearch_scalar_t scalar;
+} usearch_rows_span_t;
+
+/**
+ *  @brief A borrowed strided matrix off the batch axis - an operand whose rows and columns are its
+ *      own, like the value rows attention gathers from.
+ *
+ *  @c rows and @c columns are counts and @c stride alone is in bytes. A zero @c stride repeats the
+ *  first row.
+ */
+typedef struct usearch_matrix_view_t {
 
     /** Base pointer of the first row. */
     void const* data;
@@ -267,60 +395,61 @@ USEARCH_EXPORT typedef struct usearch_matrix_view_t {
     /** Logical scalars per row, as the caller counts them. */
     size_t columns;
 
-    /** Bytes between the starts of consecutive rows; zero means contiguous. */
-    size_t stride_bytes;
+    /** Bytes between the starts of consecutive rows; zero repeats the first row. */
+    size_t stride;
 
-    /** The scalar type the rows hold, converted on the way in where it differs. */
-    usearch_scalar_t scalar_kind;
+    /** The scalar type the rows hold. */
+    usearch_scalar_t scalar;
 } usearch_matrix_view_t;
 
-/** The writable twin of @c usearch_matrix_view_t, carried by every verb that
- *  lands rows in a matrix the caller allocated. */
-USEARCH_EXPORT typedef struct usearch_matrix_span_t {
+/**
+ *  @brief A borrowed ragged batch as Apache Arrow lays one out: elements end to end, and
+ *      @c count + 1 offsets around them.
+ *
+ *  Entry @c i spans elements @c offsets[i] up to @c offsets[i+1], so the last offset closes the
+ *  final entry. What an element is belongs to the modality: a byte of a sequence, a row of a
+ *  matrix, a point of a set.
+ */
+typedef struct usearch_tape_view_t {
 
-    /** Base pointer of the first row. */
-    void* data;
+    /** First element of the tape, which every offset counts from. */
+    void const* data;
 
-    /** Rows the matrix can hold, which a verb writes up to and reports back. */
-    size_t capacity;
-
-    /** Logical scalars per row, as the caller counts them. */
-    size_t columns;
-
-    /** Bytes between the starts of consecutive rows; zero means contiguous. */
-    size_t stride_bytes;
-
-    /** The scalar type to write, converted on the way out where it differs. */
-    usearch_scalar_t scalar_kind;
-} usearch_matrix_span_t;
+    /** The call's @c count + 1 non-decreasing offsets, in elements. */
+    size_t const* offsets;
+} usearch_tape_view_t;
 
 /**
- *  @brief Where a ranked run lands - three caller-owned outputs sharing the queries' count.
+ *  @brief Where a ranked run lands - three caller-owned outputs of @c count rows by @c wanted
+ *      columns, where @c count is the call's own.
  *
- *  Carries no query count of its own: the queries the call took already fixed it, and a second
- *  copy is a second thing to disagree. The strides stay because a caller may land results inside
- *  a wider host matrix, which @c wanted alone cannot express.
+ *  Carries no query count of its own: the call already fixed it, and a second copy is a second
+ *  thing to disagree. The strides stay because a caller may land results inside a wider host
+ *  matrix, which @c wanted alone cannot express, and a zero stride is refused.
  *
  *  What @c scores hold is each verb's own: a search writes distances nearest-first, whichever kind
  *  the index froze - the inner kind as @c 1 @c - @c dot - while the linear-algebra verbs write
  *  similarities, as their own docs state.
  */
-USEARCH_EXPORT typedef struct usearch_matches_span_t {
+typedef struct usearch_matches_span_t {
 
     /** First row of the key output. */
     usearch_key_t* keys;
 
-    /** Bytes between the starts of consecutive key rows; zero packs them. */
-    size_t keys_stride_bytes;
+    /** Bytes between the starts of consecutive key rows. */
+    size_t keys_stride;
 
     /** First row of the score output, positionally paired with @c keys. */
     usearch_distance_t* scores;
 
-    /** Bytes between the starts of consecutive score rows; zero packs them. */
-    size_t scores_stride_bytes;
+    /** Bytes between the starts of consecutive score rows. */
+    size_t scores_stride;
 
-    /** Matches written per query - one entry per query, never strided. */
+    /** Matches written per row - one entry per row, never strided. */
     size_t* counts;
+
+    /** Rows the outputs can hold; fewer than the call's @c count is refused. */
+    size_t capacity;
 
     /** Columns per row, and the upper bound on matches - the "k" in "kANN"; zero lands only the counts. */
     size_t wanted;
@@ -329,7 +458,7 @@ USEARCH_EXPORT typedef struct usearch_matches_span_t {
 /** The CPU families USearch ships tuned variants for - dispatch reports its pick in
  *  this vocabulary, and callers may pin one. Each class bundles the compute features,
  *  wait instruction, and atomics its silicon generation guarantees. */
-USEARCH_EXPORT typedef enum usearch_cpu_class_t {
+typedef enum usearch_cpu_class_t {
     usearch_cpu_class_unknown_k = 0,
 
     /** The portable floor: no SIMD assumptions, standard yields. */
@@ -383,7 +512,7 @@ USEARCH_EXPORT typedef enum usearch_cpu_class_t {
 
 /** The GPU families USearch ships tuned variants for, the device twin of
  *  @c usearch_cpu_class_t: one class per generation of kernel kits. */
-USEARCH_EXPORT typedef enum usearch_gpu_class_t {
+typedef enum usearch_gpu_class_t {
     usearch_gpu_class_unknown_k = 0,
 
     /** Ampere-class NVIDIA and every GPU without a class of its own - A100, A10 & RTX 30. */
@@ -405,10 +534,15 @@ USEARCH_EXPORT typedef enum usearch_gpu_class_t {
     usearch_gpu_class_nvidia_rubin_k,
 } usearch_gpu_class_t;
 
-/** Where an index's payload lives and which engine traverses it. Selects the active
- *  member of each modality's options union, and decides what "load" means: materialize
- *  into RAM, upload to a device, or open in place on disk. */
-USEARCH_EXPORT typedef enum usearch_residency_t {
+/**
+ *  @brief Where an index's payload lives and which engine traverses it - the vocabulary the
+ *      lifecycle verbs spell in their names, as @c usearch_dense_init_vram does.
+ *
+ *  Each modality names a verb per action and residency rather than taking this as a tag, so a
+ *  residency a modality lacks has no verb to call. The enumerators remain for the name tables
+ *  bindings parse user text with.
+ */
+typedef enum usearch_residency_t {
 
     /** Volatile-memory index traversed by CPU threads - the concurrent baseline. */
     usearch_residency_ram_k = 0,
@@ -425,14 +559,15 @@ USEARCH_EXPORT typedef enum usearch_residency_t {
  *      named NUMA node, so a dual-socket box names two and gets two graphs whose traversals
  *      stay local to the cores that walk them.
  *
- *  Names where the index lives, never who walks it: worker threads belong to the pool the
- *  bulk verbs take. Every modality's RAM arm is this struct.
+ *  Names where the index lives, never who walks it: threads belong to the executor the verbs
+ *  take. Every modality's RAM lifecycle verbs and the RAM executor take this struct.
  *
- *  Arenas always claim huge pages, falling back to base pages where no pool is provisioned.
+ *  The library's own payload blocks always claim huge pages, falling back to base pages where no
+ *  pool is provisioned.
  */
-USEARCH_EXPORT typedef struct usearch_ram_options_t {
+typedef struct usearch_ram_options_t {
 
-    /** NUMA node ids to place shards on, borrowed for the duration of the call;
+    /** NUMA node IDs to place shards on, borrowed for the duration of the call;
      *  @c NULL derives every node the process may allocate on. */
     int32_t const* memory_domains;
 
@@ -445,13 +580,13 @@ USEARCH_EXPORT typedef struct usearch_ram_options_t {
  *      ordinal, sharded and never replicated, so eight devices host eight slices of one
  *      graph rather than eight copies of it.
  *
- *  Names where the index lives, never who walks it: streams belong to the pool the bulk
- *  verbs take.
+ *  Names where the index lives, never who walks it: streams belong to the executor the verbs
+ *  take.
  *
  *  Planes are device-resident, never migratable: an index outgrowing the named devices
  *  fails rather than paging to the host, and the answer is to name more devices.
  */
-USEARCH_EXPORT typedef struct usearch_vram_options_t {
+typedef struct usearch_vram_options_t {
 
     /** CUDA device ordinals to place shards on, borrowed for the duration of the
      *  call; @c NULL derives one free device. */
@@ -462,12 +597,11 @@ USEARCH_EXPORT typedef struct usearch_vram_options_t {
 } usearch_vram_options_t;
 
 /**
- *  @brief The devices an NVMe-resident index places its shards on - one shard per named
- *      path, so striping across four drives names four.
+ *  @brief The devices an NVMe-resident index serves its shards from - one shard per named path,
+ *      so striping across four drives names four.
  *
- *  Names where the index lives, never who walks it: submission depth belongs to the pool the
- *  bulk verbs take. Naming nothing opens every shard where its manifest already points and
- *  moves no bytes; naming devices makes @c load place shards across them as it reads.
+ *  Names where the index lives, never who walks it: submission depth belongs to the executor the
+ *  verbs take. Naming nothing serves every shard where its manifest already points.
  *
  *  A path is whatever identifies a device to the engine that can reach it, so the string is
  *  the extension point rather than a field per transport. A filesystem path names a kernel
@@ -481,9 +615,9 @@ USEARCH_EXPORT typedef struct usearch_vram_options_t {
  *
  *  Reads always bypass the page cache where the filesystem admits @c O_DIRECT.
  */
-USEARCH_EXPORT typedef struct usearch_nvme_options_t {
+typedef struct usearch_nvme_options_t {
 
-    /** Devices or directories to place shards on, borrowed for the duration of the
+    /** Devices or directories to serve shards from, borrowed for the duration of the
      *  call; @c NULL leaves every shard where its manifest points. */
     usearch_bytes_view_t const* paths;
 
@@ -492,7 +626,7 @@ USEARCH_EXPORT typedef struct usearch_nvme_options_t {
 } usearch_nvme_options_t;
 
 /** Whether a filtered search admits one candidate key or passes over it. */
-USEARCH_EXPORT typedef enum usearch_admission_t {
+typedef enum usearch_admission_t {
 
     /** Skip the key; the walk still routes through it. */
     usearch_reject_k = 0,
@@ -504,15 +638,15 @@ USEARCH_EXPORT typedef enum usearch_admission_t {
 /** Type-punned per-key admission predicate for filtered searches. The batched
  *  span-admission form exists only in the C++ layer - a C callback per candidate quad
  *  would cost more than it amortizes. */
-USEARCH_EXPORT typedef usearch_admission_t (*usearch_predicate_t)(usearch_key_t, void*);
+typedef usearch_admission_t (*usearch_predicate_t)(usearch_key_t, void*);
 
 /** Whether the operation a handler is watching carries on or unwinds. */
-USEARCH_EXPORT typedef enum usearch_continuation_t {
+typedef enum usearch_continuation_t {
 
     /** Carry on to the next unit of work. */
     usearch_continue_k = 0,
 
-    /** Stop and report @c usearch_error_cancelled_k; whether finished increments stand
+    /** Stop and report @c usearch_status_cancelled_k; whether finished increments stand
      *  is each verb's own contract. */
     usearch_cancel_k = 1,
 } usearch_continuation_t;
@@ -523,89 +657,233 @@ USEARCH_EXPORT typedef enum usearch_continuation_t {
  *      search, shards for a checkpoint - so one handler serves every one of them.
  *
  *  Never invoked concurrently, however many threads perform the work, so the handler needs no
- *  synchronization of its own - and never after the verb it was passed to has returned.
+ *  synchronization of its own - and never after the call it was passed to stores its final status.
  *
  *  Arguments, in order:
  *  - @c completed: units finished so far, never decreasing across one call's reports.
  *  - @c total: units the call will finish if it runs to completion.
  *  - @c state: the opaque pointer registered alongside the handler, forwarded verbatim.
  */
-USEARCH_EXPORT typedef usearch_continuation_t (*usearch_progress_callback_t)( //
+typedef usearch_continuation_t (*usearch_progress_callback_t)( //
     size_t completed, size_t total, void* state);
 
 /**
+ *  @brief Blocks until @p outcome is final, without spinning, and with acquire ordering.
+ *  @param[in] outcome An outcome passed to a call, read until its status leaves @c usearch_status_pending_k.
+ *  @return The final status; @c usearch_status_pending_k at once when called from inside a callback of
+ *      the executor running that call, rather than waiting on itself.
+ */
+USEARCH_EXPORT usearch_status_t usearch_outcome_wait(usearch_outcome_t const* outcome);
+
+/** Whether a call returns once its work is done, or once it is queued on the executor. */
+typedef enum usearch_completion_t {
+
+    /** Return with the final status stored and every output readable; the default. */
+    usearch_completion_blocking_k = 0,
+
+    /** Return once queued, with the status pending until the call ends; the caller waits or polls. */
+    usearch_completion_deferred_k = 1,
+} usearch_completion_t;
+
+/**
+ *  @brief Memory the library allocates for the outputs only a call can size, reused across calls.
+ *      @ref types_memory
+ *
+ *  A call given a pointer to a @c NULL arena creates one there. Given an existing one, it rewinds
+ *  it, which invalidates every output of the previous call, and refills it, growing only when the
+ *  new outputs outsize everything it held, so a steady loop allocates once. The memory lives where
+ *  the executor that created the arena computes: host pages on its memory domains, or the memory
+ *  of its GPU, and a GPU that runs out reports @c usearch_status_out_of_memory_k rather than falling
+ *  back to the host. To keep one call's outputs alive past the next call, pass the next call
+ *  another arena.
+ *
+ *  - A call whose inputs point into the arena it is about to rewind reports
+ *    @c usearch_status_invalid_argument_k.
+ *  - An arena serves one call at a time; a second submission while the first is pending finishes
+ *    with @c usearch_status_contended_k.
+ *  - A call on an executor of another residency or device than the arena's creator reports
+ *    @c usearch_status_device_k.
+ *  - A call that fails, is cancelled, or has nothing to report leaves its outputs @c NULL.
+ */
+typedef struct usearch_arena_handle_t* usearch_arena_t;
+
+/**
+ *  @brief Frees the arena and every output in it; @c NULL is safe, and it cannot fail, so takes no
+ *      outcome.
+ *  @param[inout] arena The arena to be freed; invalid afterwards.
+ *
+ *  Free it once the last call using it is final and the caller's own device work on its outputs
+ *  has finished; device memory returns in order on the stream that last used it.
+ */
+USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena);
+
+/**
  *  @brief Everything a call needs to run but an index does not own: the host threads or device
- *      streams that advance the work, and the traversal scratch each of them walks with.
+ *      streams that advance the work, the traversal scratch each of them walks with, and the
+ *      pinned bounce buffer staging passes through.
  *
  *  One executor serves any number of index handles, so separate categories of indexes share one
  *  machine's cores or devices instead of each claiming a private set. Its kind is fixed by the
  *  constructor that produced it and must match the residency of every handle it drives; a mismatch
- *  reports @c usearch_error_device_k on the first call.
+ *  reports @c usearch_status_device_k.
  *
- *  Scratch is a byte arena carved one slice per thread or stream, sized from geometry rather than from the
- *  scalar type, which is what lets a single executor drive indexes of different quantizations and
- *  metrics. It grows to the widest geometry asked of it and is kept between calls, so a steady
- *  workload allocates once.
+ *  Scratch is carved one slice per thread or stream, sized from geometry rather than
+ *  from the scalar type, which is what lets a single executor drive indexes of different
+ *  quantizations and metrics. It grows to the widest geometry asked of it, is rewound per call,
+ *  and is kept between calls, so a steady workload allocates once.
  *
- *  An executor admits @b one driver at a time: a second concurrent call reports
- *  @c usearch_error_contended_k rather than corrupting the dispatch already in flight. Handles
- *  stay freely concurrent - it is the executor that serializes, never the index. A single-thread
- *  executor spawns no operating-system threads, so "just use my thread" is one executor per caller
- *  thread rather than a special case in the verbs.
+ *  Calls on one executor run in submission order, and handles stay freely concurrent - it is the
+ *  executor that orders, never the index. An executor without threads of its own - caller-inclusive,
+ *  single-thread, or WebAssembly - runs even a deferred call to completion at submission.
+ *
+ *  Every executor tracks its deferred calls in a fixed table sized at creation, so submitting
+ *  never allocates. A deferred submission that finds the table full stores
+ *  @c usearch_status_contended_k as its final status, leaving the caller to wait on earlier calls
+ *  and resubmit. Blocking calls take no slot.
+ *
+ *  @c usearch_executor_drain called from inside a progress handler, a predicate, or a host
+ *  function an executor runs reports @c usearch_status_contended_k rather than waiting on itself.
+ *
+ *  The library stages only to change layout on the side that computes, or to make pageable memory
+ *  DMA-able, and never routes device bytes through the host:
+ *
+ *      Case                                          Action
+ *      Device inputs on the executor's device        read in place
+ *      Device inputs needing padding or a cast       a device-to-device copy or a cast kernel
+ *      Pinned or managed host inputs                 a direct asynchronous upload
+ *      Pageable host inputs                          the pinned bounce buffer, then an upload
+ *      Device outputs                                the kernel writes them directly
+ *      Pageable host outputs                         a download into the bounce buffer, then a
+ *                                                    copy in the host callback before the increment
  */
-USEARCH_EXPORT typedef void* usearch_executor_t;
+typedef struct usearch_executor_handle_t* usearch_executor_t;
+
+/** The arguments of @c usearch_executor_for_ram. */
+typedef struct usearch_executor_for_ram_t {
+
+    /** Output for the new executor. */
+    usearch_executor_t* executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** The memory domains of the indexes it will drive; copied, not borrowed. */
+    usearch_ram_options_t ram;
+
+    /** Threads to spawn; zero takes 7/8 of the cores those domains carry. */
+    size_t threads;
+
+    /** Deferred calls it tracks at once, fixing the size of its in-flight table; zero takes a
+     *  default. */
+    size_t in_flight_limit;
+} usearch_executor_for_ram_t;
 
 /**
- *  @brief Spawns host workers for RAM-resident indexes, interleaved across the compute domains
- *      local to the named memory domains.
+ *  @brief Spawns host threads for RAM-resident indexes, interleaved across the compute domains
+ *      local to the named memory domains, or borrows an existing ForkUnion pool.
  *
- *  @param[in] ram The same options the indexes were initialized with; copied, not borrowed.
- *  @param[in] threads Worker threads; zero takes 7/8 of the cores those domains carry.
- *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return A handle to the spawned executor, or @c NULL on failure.
- *
- *  Passing the very options the indexes were built with is what makes compute and memory domains
+ *  Passing the very placement the indexes were built with is what makes compute and memory domains
  *  agree, leaving no second place to name hardware and no way for the two to disagree.
  *
  *  Interleaving is why a half-size executor takes half of every socket rather than all of one, and
  *  the default stops at 7/8 of the cores because full occupancy starves the ordered publication
- *  path.
+ *  path. A borrowed pool keeps its own threads and its lender's mood, so one machine runs one pool
+ *  however many libraries schedule onto it.
  */
-USEARCH_EXPORT usearch_executor_t usearch_executor_for_ram( //
-    usearch_ram_options_t const* ram, size_t threads, usearch_error_t* error);
+USEARCH_EXPORT void usearch_executor_for_ram(usearch_executor_for_ram_t* arguments);
+
+/** The arguments of @c usearch_executor_on_pool. */
+typedef struct usearch_executor_on_pool_t {
+
+    /** Output for the new executor. */
+    usearch_executor_t* executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** The memory domains of the indexes it will drive; copied, not borrowed. */
+    usearch_ram_options_t ram;
+
+    /** The ForkUnion @c fu_pool_t to borrow; it must outlive the executor, and keeps its lender's mood. */
+    void* pool;
+
+    /** Deferred calls it tracks at once, fixing the size of its in-flight table; zero takes a
+     *  default. */
+    size_t in_flight_limit;
+} usearch_executor_on_pool_t;
 
 /**
- *  @brief Spawns host workers for NVMe-resident indexes, one submission ring apiece, interleaved
- *      across the compute domains local to the devices the paths name.
- *
- *  @param[in] nvme The same options the indexes were initialized with; copied, not borrowed.
- *  @param[in] threads Worker threads; zero derives from the devices' queue capabilities.
- *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return A handle to the spawned executor, or @c NULL on failure.
- *
- *  One ring per thread is what keeps submission lock-free: a thread owns its queue outright, so
- *  an external-memory walk never coordinates with a sibling to issue a read.
+ *  @brief Creates a RAM executor over a borrowed ForkUnion pool, so several libraries in one process share one set
+ *      of threads while each keeps its own scratch.
+ *  @param[in] arguments Named arguments, whose outputs are written through their pointers.
  */
-USEARCH_EXPORT usearch_executor_t usearch_executor_for_nvme( //
-    usearch_nvme_options_t const* nvme, size_t threads, usearch_error_t* error);
+USEARCH_EXPORT void usearch_executor_on_pool(usearch_executor_on_pool_t* arguments);
+
+/** The arguments of @c usearch_executor_for_vram. */
+typedef struct usearch_executor_for_vram_t {
+
+    /** Output for the new executor. */
+    usearch_executor_t* executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** The devices of the indexes it will drive; copied, not borrowed. */
+    usearch_vram_options_t vram;
+
+    /** The @b optional borrowed CUDA streams, one per device in @c vram order; @c NULL creates its own. */
+    void* const* streams;
+
+    /** The @b optional ceiling on scratch bytes per device; zero lets scratch grow as geometry asks. */
+    size_t scratch_limit;
+
+    /** Deferred calls it tracks at once, fixing the size of its in-flight table; zero takes a
+     *  default. */
+    size_t in_flight_limit;
+} usearch_executor_for_vram_t;
 
 /**
- *  @brief Opens one submission stream on every named device, all of them driven by the one host
- *      thread that calls the verbs.
- *
- *  @param[in] vram The same options the indexes were initialized with; copied, not borrowed.
- *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return A handle to the opened executor, or @c NULL on failure.
+ *  @brief Opens one submission stream on every named device, or borrows the caller's, all of them
+ *      driven by whichever host thread submits.
  *
  *  One stream per device is the whole design: a single host thread keeps every device fed, and
  *  adding host threads would buy nothing, since the work has already left for the accelerator
- *  by the time one of them would return.
+ *  by the time one of them would return. A GPU executor never changes process-wide device flags.
  */
-USEARCH_EXPORT usearch_executor_t usearch_executor_for_vram( //
-    usearch_vram_options_t const* vram, usearch_error_t* error);
+USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments);
 
-/** What an executor does with its threads or streams once a call's work is done. */
-USEARCH_EXPORT typedef enum usearch_mood_t {
+/** The arguments of @c usearch_executor_for_nvme. */
+typedef struct usearch_executor_for_nvme_t {
+
+    /** Output for the new executor. */
+    usearch_executor_t* executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** The devices of the indexes it will drive; copied, not borrowed. */
+    usearch_nvme_options_t nvme;
+
+    /** Threads to spawn, one submission ring apiece; zero derives from the devices' queue capabilities. */
+    size_t threads;
+
+    /** Deferred calls it tracks at once, fixing the size of its in-flight table; zero takes a
+     *  default. */
+    size_t in_flight_limit;
+} usearch_executor_for_nvme_t;
+
+/**
+ *  @brief Spawns host threads for NVMe-resident indexes, one submission ring apiece, interleaved
+ *      across the compute domains local to the devices the paths name.
+ *
+ *  One ring per thread is what keeps submission lock-free: a thread owns its queue outright, so
+ *  an external-memory walk never coordinates with a sibling to issue a read. A ring's completions
+ *  appear only inside the thread that owns it, so asynchronous calls complete on those threads.
+ */
+USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments);
+
+/** What an executor does with its threads or streams once it goes idle. */
+typedef enum usearch_mood_t {
 
     /** Park them; the next call pays a wake-up. */
     usearch_mood_chill_k = 0,
@@ -614,44 +892,39 @@ USEARCH_EXPORT typedef enum usearch_mood_t {
     usearch_mood_grind_k = 1,
 } usearch_mood_t;
 
-/** Whether a verb returns when its work is done, or when it is merely queued. */
-USEARCH_EXPORT typedef enum usearch_completion_t {
+/** The arguments of @c usearch_executor_drain. */
+typedef struct usearch_executor_drain_t {
 
-    /** Return once the work is finished and its outputs are readable. */
-    usearch_completion_blocking_k = 0,
+    /** The executor whose submitted calls are awaited. */
+    usearch_executor_t executor;
 
-    /** Return once the work is queued; outputs stay indeterminate until a drain. */
-    usearch_completion_deferred_k = 1,
-} usearch_completion_t;
+    /** Output for an executor-level failure, such as a lost device; never one of a drained call. */
+    usearch_outcome_t* outcome;
 
-/**
- *  @brief Optional per-call scheduling of the executor, orthogonal to what a verb computes.
- *      Passing @c NULL blocks and parks, which is what almost every caller wants.
- *
- *  Deferring is not merely faster: it moves both the outputs and the failure out of the call.
- *  Nothing a deferred verb writes may be read, and no error it would have reported is known,
- *  until @c usearch_executor_drain returns.
- */
-USEARCH_EXPORT typedef struct usearch_execution_options_t {
-
-    /** What the threads or streams do between calls. */
+    /** What the executor does whenever it next goes idle; the last drain wins. */
     usearch_mood_t mood;
-
-    /** Whether the verb waits for its own work. */
-    usearch_completion_t completion;
-} usearch_execution_options_t;
+} usearch_executor_drain_t;
 
 /**
- *  @brief Waits for every deferred call on @p executor to finish.
- *  @param[inout] executor The handle whose queued work is awaited.
- *  @param[out] error The first failure a drained call reported; @c usearch_success_k if none.
+ *  @brief Waits for every call submitted to the executor before the drain began, then sets the
+ *      mood it adopts whenever it next goes idle.
+ *
+ *  The drain reads the submission ticket on entry and waits up to it, so calls submitted while it
+ *  waits can't keep it waiting forever. Every call reports its own failure through its own
+ *  @c outcome, so a drain reports only what befell the executor itself.
+ *
+ *  Parking means futex waits on RAM, blocking-sync events on VRAM, and waiting for one completion
+ *  on NVMe; spinning polls each of them instead. A borrowed pool keeps its lender's mood.
  */
-USEARCH_EXPORT void usearch_executor_drain(usearch_executor_t executor, usearch_error_t* error);
+USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments);
 
 /**
- *  @brief Drains every thread or stream, releases the scratch arena, and frees the executor; cannot fail,
- *      so takes no error.
+ *  @brief Drains every call, releases the scratch and the streams it owns, and frees the executor;
+ *      @c NULL is safe, and it cannot fail, so takes no error.
  *  @param[inout] executor The handle to be freed; invalid afterwards.
+ *
+ *  Never call it from inside a progress handler, a predicate, or a host function the executor
+ *  runs, since it would drain itself.
  */
 USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor);
 
@@ -669,7 +942,7 @@ USEARCH_EXPORT char const* usearch_status_name(usearch_status_t status);
 USEARCH_EXPORT usearch_status_t usearch_status_from_name(usearch_bytes_view_t name);
 
 /** The canonical spelling of a scalar kind, as @c usearch_scalar_f32_k spells "f32". */
-USEARCH_EXPORT char const* usearch_scalar_name(usearch_scalar_t scalar_kind);
+USEARCH_EXPORT char const* usearch_scalar_name(usearch_scalar_t scalar);
 
 /** Reads a scalar kind back; @c usearch_scalar_unknown_k when unrecognized. */
 USEARCH_EXPORT usearch_scalar_t usearch_scalar_from_name(usearch_bytes_view_t name);
@@ -687,10 +960,16 @@ USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class)
 USEARCH_EXPORT char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class);
 
 /**
- *  @brief Retrieves the version of the library.
- *  @return The version of the library as a static null-terminated string.
+ *  @brief Reports the version of the library this process linked, which may differ from the
+ *      @c USEARCH_VERSION_MAJOR family of macros it was compiled against.
+ *  @param[out] major The major version, which changes whenever an argument structure does.
+ *  @param[out] minor The minor version.
+ *  @param[out] patch The patch version.
  */
-USEARCH_EXPORT char const* usearch_version(void);
+USEARCH_EXPORT void usearch_version(int* major, int* minor, int* patch);
+
+/** The version of the library as a static null-terminated string, like "3.0.0". */
+USEARCH_EXPORT char const* usearch_version_name(void);
 
 /**
  *  @brief Retrieves the hardware capabilities this binary was compiled with.

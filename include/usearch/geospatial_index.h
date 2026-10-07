@@ -11,9 +11,16 @@
  *  Every entry is a @b point @b set: one or more positions sharing a key. A single
  *  position is a set of one, a vehicle track is a set of thousands, a parcel outline is a
  *  closed set of vertices. Sets are variable-height and fixed-width, so batch inputs take a
- *  @b tape - one array of base pointers, one of point counts, index-aligned - rather than
- *  the dense modality's strided matrix. Coordinates are numeric rather than textual, so the
- *  tape carries counts instead of the sequence modality's @c usearch_bytes_view_t views.
+ *  @b tape - every set's points end to end, and @c count + 1 Apache Arrow offsets counting
+ *  points around them - rather than the dense modality's run of rows. Coordinates are numeric
+ *  rather than textual, so the elements are points of the layout's width rather than the
+ *  sequence modality's bytes.
+ *
+ *  Handles live in RAM or VRAM, created empty by @c usearch_geospatial_init_ram or
+ *  @c usearch_geospatial_init_vram, copied from a checkpoint by @c usearch_geospatial_load_ram
+ *  or @c usearch_geospatial_load_vram, or served from one in place by
+ *  @c usearch_geospatial_view_ram, which is read-only and refuses every mutating verb with
+ *  @c usearch_status_read_only_k.
  *
  *  @section geospatial_index_geometry Internal Geometry
  *
@@ -56,21 +63,24 @@
  *  A handle may be shared across threads. On a RAM handle, insertions and searches overlap
  *  freely: searches read only entries published behind the visibility watermark and never
  *  write to the graph, while insertions synchronize through per-node locks and publish in
- *  order. A VRAM handle is driven by one host thread through streams. An NVMe handle admits
+ *  order. A VRAM handle is driven through the streams of its executor. A viewed handle admits
  *  arbitrarily many concurrent searches, having nothing to mutate. Serialization is the one
  *  exception: saving demands a mutation-free window, though concurrent readers keep
  *  searching throughout. An emplaced query object is @b not internally synchronized - build
  *  one per thread, or confine it to the thread that emplaced it. Per-call outputs - stats,
- *  counts, the error pointer - belong to their call and must not be shared between
- *  in-flight calls.
+ *  counts, the error - belong to their call and must not be shared between in-flight calls.
+ *
+ *  An insertion is all-or-nothing per call, and on a RAM handle its entries become visible at
+ *  once, so a concurrent search sees every entry of the call or none of them.
  *
  *  Entries are permanent. No verb removes one, so an index only ever grows until it is
  *  cleared wholesale, and a key's entries accumulate up to the @c values_per_key bound its
- *  options froze.
+ *  creation froze.
  *
- *  The executor, not the handle, is what serializes: a handle admits any number of
- *  concurrent callers, while an executor admits @b one driver at a time and reports
- *  @c usearch_error_contended_k to the second.
+ *  The executor, not the handle, is what orders: a handle admits any number of concurrent
+ *  callers, while calls on one executor run in the order they were submitted. Device inputs are
+ *  read in place and only pageable host inputs pass through the executor's pinned bounce buffer,
+ *  as the staging rules beside @c usearch_executor_t describe.
  */
 #ifndef UNUM_USEARCH_GEOSPATIAL_INDEX_H
 #define UNUM_USEARCH_GEOSPATIAL_INDEX_H
@@ -82,7 +92,7 @@ extern "C" {
 #endif
 
 /** Similarity Search Index over point sets in space & time. */
-USEARCH_EXPORT typedef void* usearch_geospatial_index_t;
+typedef struct usearch_geospatial_index_handle_t* usearch_geospatial_index_t;
 
 /**
  *  @brief A query point set converted into the index's internal geometry once and reused across
@@ -93,17 +103,17 @@ USEARCH_EXPORT typedef void* usearch_geospatial_index_t;
  *  object pays it once.
  *
  *  @see usearch_geospatial_emplace To build one.
- *  @see usearch_geospatial_release To dispose of one.
+ *  @see usearch_geospatial_emplaced_free To dispose of one.
  */
-USEARCH_EXPORT typedef void* usearch_geospatial_emplaced_t;
+typedef struct usearch_geospatial_emplaced_handle_t* usearch_geospatial_emplaced_t;
 
 /** A consistent snapshot cursor over the index contents, capturing the publication
  *  watermark at creation - concurrent inserts never appear mid-iteration. */
-USEARCH_EXPORT typedef void* usearch_geospatial_cursor_t;
+typedef struct usearch_geospatial_cursor_handle_t* usearch_geospatial_cursor_t;
 
 /** Which axes each incoming position carries, and in which order. Fixed for the
  *  lifetime of the index: every point set must present the same width. */
-USEARCH_EXPORT typedef enum usearch_geospatial_layout_t {
+typedef enum usearch_geospatial_layout_t {
     usearch_geospatial_layout_unknown_k = 0,
 
     /** Latitude, longitude - degrees on the WGS-84 ellipsoid. */
@@ -121,7 +131,7 @@ USEARCH_EXPORT typedef enum usearch_geospatial_layout_t {
 
 /** What the ordering of points within one set means. Decides which scoring modes
  *  the index will accept: route scoring is defined only for ordered sets. */
-USEARCH_EXPORT typedef enum usearch_geospatial_structure_t {
+typedef enum usearch_geospatial_structure_t {
     usearch_geospatial_structure_unknown_k = 0,
 
     /** Order carries nothing - a scatter of observations, a bag of vertices. */
@@ -138,7 +148,7 @@ USEARCH_EXPORT typedef enum usearch_geospatial_structure_t {
  *  altitude and time enter when the candidates it found are scored, and a distance
  *  that adds them never falls below the surface chord, so narrowing the axes only
  *  widens the candidate set. */
-USEARCH_EXPORT typedef enum usearch_geospatial_axes_t {
+typedef enum usearch_geospatial_axes_t {
     usearch_geospatial_axes_unknown_k = 0,
 
     /** Ground track only - altitude and time ignored. */
@@ -165,7 +175,7 @@ USEARCH_EXPORT typedef enum usearch_geospatial_axes_t {
  *  sum does not commute, and overlap's indicator kernel is affected only exactly at the
  *  tolerance boundary; that is the standing constraint on what may be added here.
  */
-USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
+typedef enum usearch_geospatial_mode_t {
     usearch_geospatial_mode_unknown_k = 0,
 
     /**
@@ -263,9 +273,14 @@ USEARCH_EXPORT typedef enum usearch_geospatial_mode_t {
     usearch_geospatial_mode_route_k = 5,
 } usearch_geospatial_mode_t;
 
-/** Construction & loading options of a geospatial index. The @c residency field
- *  tags which union member is read; zeroed optional fields derive from the geometry. */
-USEARCH_EXPORT typedef struct usearch_geospatial_options_t {
+/** The arguments of @c usearch_geospatial_init_ram. */
+typedef struct usearch_geospatial_init_ram_t {
+
+    /** Output for the new index. */
+    usearch_geospatial_index_t* index;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
 
     /** Which axes incoming positions carry. */
     usearch_geospatial_layout_t layout;
@@ -280,78 +295,182 @@ USEARCH_EXPORT typedef struct usearch_geospatial_options_t {
     /** Upper bound on points sharing one key; zero derives to one - unique keys. */
     size_t values_per_key;
 
-    /** Selects the active member of the union below, and the meaning of "load". */
-    usearch_residency_t residency;
-    union {
-        usearch_ram_options_t ram;
-        usearch_vram_options_t vram;
-        usearch_nvme_options_t nvme;
-    };
+    /** The memory domains to place one shard on apiece. */
+    usearch_ram_options_t ram;
+} usearch_geospatial_init_ram_t;
 
-} usearch_geospatial_options_t;
+/** Creates an empty, mutable geospatial index in host memory. */
+USEARCH_EXPORT void usearch_geospatial_init_ram(usearch_geospatial_init_ram_t* arguments);
+
+/** The arguments of @c usearch_geospatial_init_vram, which match
+ *  @c usearch_geospatial_init_ram_t but for the placement. */
+typedef struct usearch_geospatial_init_vram_t {
+
+    /** Output for the new index. */
+    usearch_geospatial_index_t* index;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Which axes incoming positions carry. */
+    usearch_geospatial_layout_t layout;
+
+    /** What ordering within a point set means. */
+    usearch_geospatial_structure_t structure;
+
+    /** The @b optional connections-per-node bound; zero derives to twelve. */
+    size_t connectivity;
+
+    /** Upper bound on points sharing one key; zero derives to one - unique keys. */
+    size_t values_per_key;
+
+    /** The devices to place one shard on apiece. */
+    usearch_vram_options_t vram;
+} usearch_geospatial_init_vram_t;
+
+/** Creates an empty, mutable geospatial index in device memory. */
+USEARCH_EXPORT void usearch_geospatial_init_vram(usearch_geospatial_init_vram_t* arguments);
+
+/** The arguments of @c usearch_geospatial_load_ram. */
+typedef struct usearch_geospatial_load_ram_t {
+
+    /** Output for the new index, written once the call completes. */
+    usearch_geospatial_index_t* index;
+
+    /** The executor the read fans out over, one shard per thread. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** Checkpoint path - a monolith, or a manifest naming many. */
+    usearch_bytes_view_t path;
+
+    /** The memory domains to place the parts on. */
+    usearch_ram_options_t ram;
+
+    /** Upper bound on points sharing one key, which no checkpoint records; zero derives to one. */
+    size_t values_per_key;
+
+    /** The @b optional handler, called with parts placed and their count. */
+    usearch_progress_callback_t progress;
+
+    /** Opaque pointer forwarded into every @c progress call. */
+    void* progress_state;
+} usearch_geospatial_load_ram_t;
 
 /**
- *  @brief Initializes a geospatial index over point sets.
- *  @param[in] options Pointer to the populated options.
- *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return A handle to the initialized index, or @c NULL on failure.
+ *  @brief Copies a checkpoint into a new, mutable index in host memory, its geometry read from
+ *      the checkpoint's own headers.
+ *
+ *  Where the parts end up is the call's own memory domains, never the manifest's. A part
+ *  carries its own length in its header, so a second load skips whatever already arrived
+ *  whole and cancelling costs the part in flight rather than everything behind it.
  */
-USEARCH_EXPORT usearch_geospatial_index_t usearch_geospatial_init( //
-    usearch_geospatial_options_t const* options, usearch_error_t* error);
+USEARCH_EXPORT void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments);
 
-/** Frees the resources associated with the index; cannot fail, so takes no error. */
+/** The arguments of @c usearch_geospatial_load_vram. */
+typedef struct usearch_geospatial_load_vram_t {
+
+    /** Output for the new index, written once the call completes. */
+    usearch_geospatial_index_t* index;
+
+    /** The executor the upload runs on, one stream per device. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** Checkpoint path - a monolith, or a manifest naming many. */
+    usearch_bytes_view_t path;
+
+    /** The devices to place the parts on. */
+    usearch_vram_options_t vram;
+
+    /** Upper bound on points sharing one key, which no checkpoint records; zero derives to one. */
+    size_t values_per_key;
+
+    /** The @b optional handler, called with parts placed and their count. */
+    usearch_progress_callback_t progress;
+
+    /** Opaque pointer forwarded into every @c progress call. */
+    void* progress_state;
+} usearch_geospatial_load_vram_t;
+
+/** Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
+ *  @c usearch_geospatial_load_ram. */
+USEARCH_EXPORT void usearch_geospatial_load_vram(usearch_geospatial_load_vram_t* arguments);
+
+/** The arguments of @c usearch_geospatial_view_ram. */
+typedef struct usearch_geospatial_view_ram_t {
+
+    /** Output for the new, read-only index. */
+    usearch_geospatial_index_t* index;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Checkpoint path - a monolith, or a manifest naming many. */
+    usearch_bytes_view_t path;
+} usearch_geospatial_view_ram_t;
+
+/** Serves a checkpoint in place through a memory mapping, as a read-only index whose mutating
+ *  verbs report @c usearch_status_read_only_k. */
+USEARCH_EXPORT void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments);
+
+/** Frees the resources associated with the index; @c NULL is safe, and it cannot fail, so takes
+ *  no error. */
 USEARCH_EXPORT void usearch_geospatial_free(usearch_geospatial_index_t index);
 
-/**
- *  @brief Reserves capacity ahead of insertion.
- *  @param[in] entries The desired total entry capacity, including the current size.
- *  @param[in] points Expected total point volume across all sets; zero grows lazily.
- */
-USEARCH_EXPORT void usearch_geospatial_reserve( //
-    usearch_geospatial_index_t index, size_t entries, size_t points, usearch_error_t* error);
+/** The arguments of @c usearch_geospatial_reserve. */
+typedef struct usearch_geospatial_reserve_t {
+
+    /** The handle to be resized. */
+    usearch_geospatial_index_t index;
+
+    /** The executor the growth runs on. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** The desired total entry capacity, including the current size. */
+    size_t entries;
+
+    /** Expected total point volume across all sets; zero grows lazily. */
+    size_t points;
+} usearch_geospatial_reserve_t;
+
+/** Reserves capacity ahead of insertion. */
+USEARCH_EXPORT void usearch_geospatial_reserve(usearch_geospatial_reserve_t* arguments);
+
+/** The arguments of @c usearch_geospatial_clear. */
+typedef struct usearch_geospatial_clear_t {
+
+    /** The handle to be cleared. */
+    usearch_geospatial_index_t index;
+
+    /** The executor the erasure runs on. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+} usearch_geospatial_clear_t;
 
 /** Erases all entries, keeping the reserved capacity. */
-USEARCH_EXPORT void usearch_geospatial_clear(usearch_geospatial_index_t index, usearch_error_t* error);
-
-/** Reports the number of stored entries. */
-USEARCH_EXPORT size_t usearch_geospatial_size(usearch_geospatial_index_t index, usearch_error_t* error);
-
-/** Reports the reserved capacity in entries. */
-USEARCH_EXPORT size_t usearch_geospatial_capacity(usearch_geospatial_index_t index, usearch_error_t* error);
-
-/** Reports the frozen connections-per-node bound of the graph. */
-USEARCH_EXPORT size_t usearch_geospatial_connectivity(usearch_geospatial_index_t index, usearch_error_t* error);
-
-/** Reports the memory usage of the index in bytes, point arenas included. */
-USEARCH_EXPORT size_t usearch_geospatial_memory_usage(usearch_geospatial_index_t index, usearch_error_t* error);
-
-/** Reports the capability codename the index dispatched to on this machine. */
-USEARCH_EXPORT char const* usearch_geospatial_capabilities(usearch_geospatial_index_t index, usearch_error_t* error);
-
-/** Optional per-call settings of @c usearch_geospatial_add and
- *  @c usearch_geospatial_refine - a pure input, never written. Passing @c NULL derives
- *  every setting. */
-USEARCH_EXPORT typedef struct usearch_geospatial_insertion_options_t {
-
-    /** The @b optional candidate-pool breadth the build walk explores - the @c ef of
-     *  the literature; zero derives. */
-    size_t expansion_factor;
-} usearch_geospatial_insertion_options_t;
-
-/**
- *  @brief Optional per-call settings of @c usearch_geospatial_search and
- *      @c usearch_geospatial_search_if - a pure input, never written. Passing @c NULL derives
- *      every setting.
- *
- *  @c usearch_geospatial_within takes none: containment sizes its own pool from the cone
- *  graph's spanner bound, so a caller-chosen breadth would only make the report incomplete.
- */
-USEARCH_EXPORT typedef struct usearch_geospatial_search_options_t {
-
-    /** The @b optional candidate-pool breadth the walk explores - the @c ef of the
-     *  literature; zero derives. */
-    size_t expansion_factor;
-} usearch_geospatial_search_options_t;
+USEARCH_EXPORT void usearch_geospatial_clear(usearch_geospatial_clear_t* arguments);
 
 /**
  *  @brief What "close" means numerically for one search: the radius the walk around each
@@ -363,7 +482,7 @@ USEARCH_EXPORT typedef struct usearch_geospatial_search_options_t {
  *  walk by three combined deviations, so the candidate set stays a superset at 98.9 %
  *  confidence, and the scoring tightens back to the pair's own.
  */
-USEARCH_EXPORT typedef struct usearch_geospatial_tolerance_t {
+typedef struct usearch_geospatial_tolerance_t {
 
     /** Radius in metres; zero derives as described above. */
     double metres;
@@ -374,7 +493,7 @@ USEARCH_EXPORT typedef struct usearch_geospatial_tolerance_t {
 
 /** Traversal telemetry, shared by insertion and every search form - a pure output,
  *  fully overwritten by the call it is passed to. Passing @c NULL skips reporting. */
-USEARCH_EXPORT typedef struct usearch_geospatial_traversal_stats_t {
+typedef struct usearch_geospatial_traversal_stats_t {
 
     /** Graph members visited while resolving the batch. */
     size_t visited_members;
@@ -387,59 +506,101 @@ USEARCH_EXPORT typedef struct usearch_geospatial_traversal_stats_t {
     size_t restarts;
 } usearch_geospatial_traversal_stats_t;
 
+/** The arguments of @c usearch_geospatial_add. */
+typedef struct usearch_geospatial_add_t {
+
+    /** The handle to be populated. */
+    usearch_geospatial_index_t index;
+
+    /** The executor to fan out over; its kind must match the residency. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** Point sets to admit - the batch axis of @c keys and @c points. */
+    size_t count;
+
+    /** The identities to admit the point sets under, one per set. */
+    usearch_keys_view_t keys;
+
+    /** The point sets, as @c double coordinates end to end around @c count + 1 point offsets. */
+    usearch_tape_view_t points;
+
+    /** The @b optional per-point position uncertainties in metres, one per point of @c points
+     *  and addressed by the same offsets; @c NULL records none. */
+    double const* deviations;
+
+    /** The @b optional candidate-pool breadth the build walk explores - the @c ef of
+     *  the literature; zero derives. */
+    size_t expansion_factor;
+
+    /** The @b optional handler, called with entries admitted and the batch length. */
+    usearch_progress_callback_t progress;
+
+    /** Opaque pointer forwarded into every @c progress call. */
+    void* progress_state;
+
+    /** The @b optional traversal telemetry; @c NULL skips reporting. */
+    usearch_geospatial_traversal_stats_t* stats;
+} usearch_geospatial_add_t;
+
 /**
  *  @brief Adds a tape of point sets under their keys - the native batch operation; a
  *      single set is a tape of one, and a single position is a set of one.
+ *  @retval usearch_status_read_only_k The handle is a view.
+ *  @retval usearch_status_overflow_k A key already holds @c values_per_key entries.
  *
- *  @param[inout] index The handle to be populated.
- *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
- *  @param[in] keys The identities to admit the point sets under, one per set; its count is the
- *      length of the tape.
- *  @param[in] point_sets Array of @c keys.count base pointers, one per set.
- *  @param[in] point_counts Array of @c keys.count point counts, index-aligned with @p point_sets.
- *  @param[in] deviations The @b optional array of @c keys.count base pointers to per-point
- *      position uncertainties in metres, index-aligned with @p point_sets; @c NULL records none.
- *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
- *  @param[in] progress The @b optional handler, called with entries admitted and the tape length.
- *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
- *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
- *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return @c keys.count on success, zero on failure.
+ *  A point is @c layout_width coordinates, row-major, in the index's layout order - degrees for
+ *  the angular axes, metres for altitude, seconds for time.
  *
- *  Set @c i points at `point_counts[i] * layout_width` coordinates, row-major, in the index's
- *  layout order - degrees for the angular axes, metres for altitude, seconds for time - and,
- *  when @p deviations is given, at `point_counts[i]` uncertainties in metres.
+ *  An insertion is all-or-nothing per call. Every fallible step runs before the first entry
+ *  identity is claimed, so a rejected call publishes nothing - a cancelled one included, which
+ *  reports @c usearch_status_cancelled_k - and on a RAM handle the entries of an accepted one
+ *  become visible at once.
  *
- *  A batch is all-or-nothing. Every fallible step runs before the first entry identity is
- *  claimed, so a rejected batch publishes nothing - a cancelled one included, which reports
- *  @c usearch_error_cancelled_k. A second thread driving @p executor reports
- *  @c usearch_error_contended_k before any work begins.
- *
- *  A key already holding @c values_per_key entries rejects the whole batch with
- *  @c usearch_error_overflow_k, since a smaller retry cannot help.
+ *  A key already holding @c values_per_key entries rejects the whole call, since a smaller retry
+ *  cannot help.
  */
-USEARCH_EXPORT size_t usearch_geospatial_add(                      //
-    usearch_geospatial_index_t index, usearch_executor_t executor, //
-    usearch_keys_view_t keys,                                      //
-    double const* const* point_sets, size_t const* point_counts,   //
-    double const* const* deviations,                               //
-    usearch_geospatial_insertion_options_t const* options,         //
-    usearch_progress_callback_t progress, void* progress_state,    //
-    usearch_geospatial_traversal_stats_t* stats,                   //
-    usearch_error_t* error);
+USEARCH_EXPORT void usearch_geospatial_add(usearch_geospatial_add_t* arguments);
+
+/** The arguments of @c usearch_geospatial_refine. */
+typedef struct usearch_geospatial_refine_t {
+
+    /** The handle to be refined. */
+    usearch_geospatial_index_t index;
+
+    /** The executor to fan out over; its kind must match the residency. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** The @b optional output for the number of entries whose edges changed; zero means settled. */
+    size_t* changed;
+
+    /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
+    size_t expansion_factor;
+
+    /** The @b optional handler, called with entries swept; @c NULL skips it. */
+    usearch_progress_callback_t progress;
+
+    /** Opaque pointer forwarded into every @c progress call. */
+    void* progress_state;
+
+    /** The @b optional traversal telemetry; @c NULL skips reporting. */
+    usearch_geospatial_traversal_stats_t* stats;
+} usearch_geospatial_refine_t;
 
 /**
  *  @brief Re-selects the neighbors of every stored entry against the finished graph, improving
  *      edges that were chosen when the graph around them was still incomplete.
- *
- *  @param[inout] index The handle to be refined.
- *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
- *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
- *  @param[in] progress The @b optional handler, called with entries swept; @c NULL skips it.
- *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
- *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
- *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return Number of entries whose edges changed; zero means the graph has settled.
  *
  *  This is a build step rather than a repair. A cheap insertion pass followed by one refinement
  *  reaches a better graph, in less total time, than a single expensive insertion pass - so a wide
@@ -447,72 +608,162 @@ USEARCH_EXPORT size_t usearch_geospatial_add(                      //
  *
  *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-selecting an entry's
  *  edges is idempotent and claims no identity, so a stopped pass leaves the graph correct and
- *  merely less improved - nothing unwinds, and no @c usearch_error_cancelled_k is reported. The
+ *  merely less improved - nothing unwinds, and no @c usearch_status_cancelled_k is reported. The
  *  sweep resumes where it stopped, so calling under a time budget converges across calls.
  *
- *  Searches may run throughout. A read-only handle refuses with @c usearch_error_read_only_k, like
+ *  Searches may run throughout. A viewed handle refuses with @c usearch_status_read_only_k, like
  *  every other mutating verb.
  */
-USEARCH_EXPORT size_t usearch_geospatial_refine(                   //
-    usearch_geospatial_index_t index, usearch_executor_t executor, //
-    usearch_geospatial_insertion_options_t const* options,         //
-    usearch_progress_callback_t progress, void* progress_state,    //
-    usearch_geospatial_traversal_stats_t* stats,                   //
-    usearch_error_t* error);
+USEARCH_EXPORT void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments);
 
-/**
- *  @brief Converts a query point set into the index's internal geometry, returning a
- *      handle reusable across searches of differing mode and axis selection.
- *
- *  @param[in] index The handle whose layout governs conversion.
- *  @param[in] points Base pointer to `point_count * layout_width` coordinates.
- *  @param[in] point_count Number of positions; one is legal and is the point query.
- *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return A handle to the emplaced object, or @c NULL on failure.
- */
-USEARCH_EXPORT usearch_geospatial_emplaced_t usearch_geospatial_emplace( //
-    usearch_geospatial_index_t index, double const* points, size_t point_count, usearch_error_t* error);
+/** The arguments of @c usearch_geospatial_emplace. */
+typedef struct usearch_geospatial_emplace_t {
 
-/** Frees an emplaced query object. The index it was emplaced against must outlive it. */
-USEARCH_EXPORT void usearch_geospatial_release( //
-    usearch_geospatial_emplaced_t emplaced, usearch_error_t* error);
+    /** Output for the emplaced query; @c NULL on failure. */
+    usearch_geospatial_emplaced_t* emplaced;
+
+    /** The handle whose layout governs conversion, borrowed until the emplaced query is freed. */
+    usearch_geospatial_index_t index;
+
+    /** The executor the conversion runs on. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** Base pointer to `point_count * layout_width` coordinates. */
+    double const* points;
+
+    /** Number of positions; one is legal and is the point query. */
+    size_t point_count;
+} usearch_geospatial_emplace_t;
+
+/** Converts a query point set into the index's internal geometry, as a handle reusable across
+ *  searches of differing mode and axis selection. */
+USEARCH_EXPORT void usearch_geospatial_emplace(usearch_geospatial_emplace_t* arguments);
+
+/** Frees an emplaced query object; @c NULL is safe, and it cannot fail, so takes no outcome. The
+ *  index it was emplaced against must outlive it. */
+USEARCH_EXPORT void usearch_geospatial_emplaced_free(usearch_geospatial_emplaced_t emplaced);
+
+/** The arguments of @c usearch_geospatial_search. */
+typedef struct usearch_geospatial_search_t {
+
+    /** The handle to be queried. */
+    usearch_geospatial_index_t index;
+
+    /** The executor to fan out over; its kind must match the residency. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** Emplaced queries to resolve; the outputs have @c count rows of @c matches.wanted entries. */
+    size_t count;
+
+    /** Array of @c count emplaced query handles. */
+    usearch_geospatial_emplaced_t const* queries;
+
+    /** What "close" means for this search. */
+    usearch_geospatial_mode_t mode;
+
+    /** Which axes participate; narrowing never invalidates the graph. */
+    usearch_geospatial_axes_t axes;
+
+    /** The radius and time window; zeroed fields derive as the type describes. */
+    usearch_geospatial_tolerance_t tolerance;
+
+    /** Where the run lands. */
+    usearch_matches_span_t matches;
+
+    /** The @b optional candidate-pool breadth the walk explores - the @c ef of the
+     *  literature; zero derives. */
+    size_t expansion_factor;
+
+    /** The @b optional per-key admission callback; @c NULL admits everything. */
+    usearch_predicate_t predicate;
+
+    /** Opaque pointer forwarded into every @c predicate call. */
+    void* predicate_state;
+
+    /** The @b optional handler, called with queries resolved and their count. */
+    usearch_progress_callback_t progress;
+
+    /** Opaque pointer forwarded into every @c progress call. */
+    void* progress_state;
+
+    /** The @b optional traversal telemetry; @c NULL skips reporting. */
+    usearch_geospatial_traversal_stats_t* stats;
+} usearch_geospatial_search_t;
 
 /**
  *  @brief Performs k-Approximate Nearest Neighbors Search for a batch of emplaced query
  *      objects under one scoring mode - the native batch operation, parallelized
  *      internally; one query is a batch of one.
  *
- *  @param[in] index The handle to be queried.
- *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
- *  @param[in] queries Array of @p queries_count emplaced query handles.
- *  @param[in] queries_count Number of emplaced queries in the batch.
- *  @param[in] mode What "close" means for this search.
- *  @param[in] axes Which axes participate; narrowing never invalidates the graph.
- *  @param[in] tolerance The @b optional radius and time window; @c NULL derives both as zero.
- *  @param[out] matches Where the run lands, sized for @p queries_count rows of @c matches->wanted.
- *  @param[in] options The @b optional per-call settings; @c NULL derives every setting.
- *  @param[in] progress The @b optional handler, called with queries resolved and their count.
- *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
- *  @param[out] stats The @b optional traversal telemetry; @c NULL skips reporting.
- *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *
  *  Scores are metres, except overlap, which is a count of query points: route scores are
  *  leash lengths, the rest are separations.
  *
- *  A cancelled search reports @c usearch_error_cancelled_k and leaves every output row
- *  indeterminate. A second thread driving @p executor reports @c usearch_error_contended_k
- *  before any work begins.
+ *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
+ *  the traversal, so recall does not collapse at low selectivity.
+ *
+ *  A cancelled search reports @c usearch_status_cancelled_k and leaves every output row
+ *  indeterminate.
  */
-USEARCH_EXPORT void usearch_geospatial_search(                          //
-    usearch_geospatial_index_t index, usearch_executor_t executor,      //
-    usearch_geospatial_emplaced_t const* queries, size_t queries_count, //
-    usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes,     //
-    usearch_geospatial_tolerance_t const* tolerance,                    //
-    usearch_matches_span_t const* matches,                              //
-    usearch_geospatial_search_options_t const* options,                 //
-    usearch_progress_callback_t progress, void* progress_state,         //
-    usearch_geospatial_traversal_stats_t* stats,                        //
-    usearch_error_t* error);
+USEARCH_EXPORT void usearch_geospatial_search(usearch_geospatial_search_t* arguments);
+
+/** The arguments of @c usearch_geospatial_within. */
+typedef struct usearch_geospatial_within_t {
+
+    /** The handle to be queried. */
+    usearch_geospatial_index_t index;
+
+    /** The executor to fan out over; its kind must match the residency. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** The emplaced query the containment is measured from. */
+    usearch_geospatial_emplaced_t query;
+
+    /** What "close" means for this walk. */
+    usearch_geospatial_mode_t mode;
+
+    /** Which axes participate; narrowing never invalidates the graph. */
+    usearch_geospatial_axes_t axes;
+
+    /** The radius and time window; @c metres must be positive. */
+    usearch_geospatial_tolerance_t tolerance;
+
+    /** Output for the keys inside @c arena. */
+    usearch_key_t** keys;
+
+    /** Output for the scores inside @c arena, positionally paired with @c keys. */
+    usearch_distance_t** scores;
+
+    /** The @b optional output for the entries written. */
+    size_t* written;
+
+    /** Memory for @c keys and @c scores: reused when it points to an arena, created when it points
+     *  to @c NULL. */
+    usearch_arena_t* arena;
+
+    /** The @b optional handler, called as the walk scores its candidate pool; @c NULL skips it. */
+    usearch_progress_callback_t progress;
+
+    /** Opaque pointer forwarded into every @c progress call. */
+    void* progress_state;
+} usearch_geospatial_within_t;
 
 /**
  *  @brief Reports every entry scoring within the tolerance of one emplaced query - the
@@ -521,59 +772,16 @@ USEARCH_EXPORT void usearch_geospatial_search(                          //
  *  Complete on the converged graph: the walk widens its pool by the cone graph's spanner
  *  bound before trusting it, so every candidate inside the tolerance is enumerated, at
  *  about thirty times the cost of the ball it reports. A tolerance of zero metres is
- *  rejected here, since containment needs a radius.
+ *  rejected here, since containment needs a radius. Containment sizes its own pool from that
+ *  bound, so it takes no breadth a caller could make the report incomplete with. Only the walk
+ *  learns how large the report is, so the keys and scores land in @c arena.
  *
- *  @param[in] index The handle to be queried.
- *  @param[in] executor Lanes and scratch to fan out over; its kind must match the residency.
- *  @param[in] query The emplaced query the containment is measured from.
- *  @param[in] mode What "close" means for this walk.
- *  @param[in] axes Which axes participate; narrowing never invalidates the graph.
- *  @param[in] tolerance The radius and time window; @c metres must be positive.
- *  @param[in] progress The @b optional handler, called with entries written and @c keys.capacity.
- *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
- *  @param[out] keys Where the identities land; its capacity bounds the walk's report.
- *  @param[out] distances Output array of as many scores, positionally paired with @p keys.
- *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return Number of entries written, saturating at @c keys.capacity.
- *
- *  A cancelled walk reports @c usearch_error_cancelled_k and leaves every output slot
- *  indeterminate. A second thread driving @p executor reports @c usearch_error_contended_k
- *  before any work begins.
+ *  A cancelled walk reports @c usearch_status_cancelled_k and leaves the outputs indeterminate.
  */
-USEARCH_EXPORT size_t usearch_geospatial_within(                    //
-    usearch_geospatial_index_t index, usearch_executor_t executor,  //
-    usearch_geospatial_emplaced_t query,                            //
-    usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes, //
-    usearch_geospatial_tolerance_t const* tolerance,                //
-    usearch_progress_callback_t progress, void* progress_state,     //
-    usearch_keys_span_t keys, usearch_distance_t* distances,        //
-    usearch_error_t* error);
-
-/**
- *  @brief The filtered sibling of @c usearch_geospatial_search: identical batch shape,
- *      admitting only entries the @p predicate approves. Every parameter it shares carries
- *      the meaning documented there.
- *
- *  @param[in] predicate Per-key admission callback; returns non-zero to admit.
- *  @param[in] predicate_state Opaque pointer forwarded into every @p predicate call.
- *
- *  Non-matching entries still route the traversal, so recall does not collapse at low
- *  selectivity.
- */
-USEARCH_EXPORT void usearch_geospatial_search_if(                       //
-    usearch_geospatial_index_t index, usearch_executor_t executor,      //
-    usearch_geospatial_emplaced_t const* queries, size_t queries_count, //
-    usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes,     //
-    usearch_geospatial_tolerance_t const* tolerance,                    //
-    usearch_matches_span_t const* matches,                              //
-    usearch_geospatial_search_options_t const* options,                 //
-    usearch_predicate_t predicate, void* predicate_state,               //
-    usearch_progress_callback_t progress, void* progress_state,         //
-    usearch_geospatial_traversal_stats_t* stats,                        //
-    usearch_error_t* error);
+USEARCH_EXPORT void usearch_geospatial_within(usearch_geospatial_within_t* arguments);
 
 /** What one key holds, enough to size a buffer before retrieving any of it. */
-USEARCH_EXPORT typedef struct usearch_geospatial_key_stats_t {
+typedef struct usearch_geospatial_key_stats_t {
 
     /** Entries sharing the key; keys need not be unique. */
     size_t entries;
@@ -581,60 +789,109 @@ USEARCH_EXPORT typedef struct usearch_geospatial_key_stats_t {
     /** Positions summed across those entries. */
     size_t total_points;
 
-    /** Positions of the longest single entry - the per-entry stride one @c get needs. */
+    /** Positions of the longest single entry. */
     size_t largest_points;
 } usearch_geospatial_key_stats_t;
 
-/**
- *  @brief Counts the entries stored under @p key; zero means the index holds none.
- *
- *  Pairing this with @c usearch_geospatial_get is not atomic: an insertion between the two
- *  calls leaves the count stale. That is harmless, because entries are only ever added, so
- *  a stale count under-reports and @c usearch_geospatial_get returns the true total - a
- *  caller seeing more than it asked for allocates again and converges.
- *
- *  @param[out] stats The @b optional extent of the key's payload; @c NULL asks for the count.
- *  @return The number of entries under @p key, mirroring @c stats->entries.
- */
-USEARCH_EXPORT size_t usearch_geospatial_count(          //
-    usearch_geospatial_index_t index, usearch_key_t key, //
-    usearch_geospatial_key_stats_t* stats, usearch_error_t* error);
+/** The arguments of @c usearch_geospatial_count. */
+typedef struct usearch_geospatial_count_t {
+
+    /** The handle to be queried. */
+    usearch_geospatial_index_t index;
+
+    /** The executor the lookup runs on. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** The key whose entries are counted. */
+    usearch_key_t key;
+
+    /** Output for what @c key holds; zero @c entries means the index holds none. */
+    usearch_geospatial_key_stats_t* stats;
+} usearch_geospatial_count_t;
+
+/** Counts the entries stored under one key, with the extent of their points. */
+USEARCH_EXPORT void usearch_geospatial_count(usearch_geospatial_count_t* arguments);
+
+/** The arguments of @c usearch_geospatial_get. */
+typedef struct usearch_geospatial_get_t {
+
+    /** The handle to be queried. */
+    usearch_geospatial_index_t index;
+
+    /** The executor whose stream or thread copies the points; its kind must match the residency. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** The key whose entries are exported. */
+    usearch_key_t key;
+
+    /** Output for the tape's coordinates inside @c arena, every set's points end to end. */
+    double** points;
+
+    /** Output for @c written + 1 point offsets into @c points, inside @c arena. */
+    size_t** offsets;
+
+    /** The @b optional output for the entries written; zero when the key is absent. */
+    size_t* written;
+
+    /** Memory for @c points and @c offsets: reused when it points to an arena, created when it
+     *  points to @c NULL. */
+    usearch_arena_t* arena;
+} usearch_geospatial_get_t;
 
 /**
- *  @brief Retrieves the point sets stored under @p key into a caller-owned buffer, as the
- *      geodetic degrees, metres, and seconds they were inserted as.
+ *  @brief Retrieves every point set stored under one key as an Apache Arrow tape, as the geodetic
+ *      degrees, metres, and seconds they were inserted as, in insertion order.
  *
- *  Entries are written at @p stride spacing in insertion order, so sizing the buffer takes
- *  @c usearch_geospatial_count first: @c entries slots of @c largest_points positions each.
- *
- *  @param[out] point_sets Destination for up to @p wanted entries; @c NULL probes the count.
- *  @param[in] wanted Upper bound on entries to write - the entry capacity of @p point_sets.
- *  @param[in] stride Number of bytes between starts of consecutive entries in @p point_sets.
- *  @param[out] point_counts The @b optional per-entry position counts; @c NULL skips it.
- *  @return The @b true number of entries under @p key; zero when absent.
- *
- *  The return is never the number written. A value above @p wanted means the copy was
- *  truncated, so allocate that many and call again.
+ *  An absent key leaves both outputs @c NULL.
  */
-USEARCH_EXPORT size_t usearch_geospatial_get(                               //
-    usearch_geospatial_index_t index, usearch_key_t key,                    //
-    double* point_sets, size_t wanted, size_t stride, size_t* point_counts, //
-    usearch_error_t* error);
+USEARCH_EXPORT void usearch_geospatial_get(usearch_geospatial_get_t* arguments);
+
+/** The arguments of @c usearch_geospatial_merge. */
+typedef struct usearch_geospatial_merge_t {
+
+    /** The handle absorbing the donors. */
+    usearch_geospatial_index_t index;
+
+    /** The executor the merge fans out over, one donor per thread. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** Donor handles to absorb. */
+    size_t count;
+
+    /** Array of @c count handles, every one of them consumed. */
+    usearch_geospatial_index_t const* donors;
+
+    /** The @b optional handler, called with donors absorbed and their count. */
+    usearch_progress_callback_t progress;
+
+    /** Opaque pointer forwarded into every @c progress call. */
+    void* progress_state;
+} usearch_geospatial_merge_t;
 
 /**
- *  @brief Absorbs every handle in @p donors into @p index - cheaper than re-inserting their
+ *  @brief Absorbs every handle in @c donors into @c index - cheaper than re-inserting their
  *      point sets one by one, wiring cross-links via landmark stitching. Donor handles are
  *      consumed and must not be used afterwards, not even for @c usearch_geospatial_free.
  *
- *  @param[inout] index The handle absorbing the donors.
- *  @param[in] executor The threads and scratch the merge fans out over, one donor per thread.
- *  @param[in] donors Array of @p donors_count handles, every one of them consumed.
- *  @param[in] donors_count Number of entries in @p donors.
- *  @param[in] progress The @b optional handler, called with donors absorbed and their count.
- *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
- *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *
- *  Readers of @p index may keep searching throughout, since unpublished entries hide behind
+ *  Readers of @c index may keep searching throughout, since unpublished entries hide behind
  *  the watermark. Absorbing a group costs the wall clock of its largest source rather than
  *  the sum of them, because the threads advance in parallel.
  *
@@ -642,90 +899,168 @@ USEARCH_EXPORT size_t usearch_geospatial_get(                               //
  *  all-or-nothing: donors already absorbed stay absorbed, and the rest stay live handles the
  *  caller still owns and must free.
  */
-USEARCH_EXPORT void usearch_geospatial_merge(                      //
-    usearch_geospatial_index_t index, usearch_executor_t executor, //
-    usearch_geospatial_index_t const* donors, size_t donors_count, //
-    usearch_progress_callback_t progress, void* progress_state,    //
-    usearch_error_t* error);
+USEARCH_EXPORT void usearch_geospatial_merge(usearch_geospatial_merge_t* arguments);
 
-/**
- *  @brief Opens a snapshot cursor over the current contents; see
- *      @c usearch_geospatial_cursor_t.
- *  @return The cursor, or @c NULL on failure.
- */
-USEARCH_EXPORT usearch_geospatial_cursor_t usearch_geospatial_cursor(usearch_geospatial_index_t index,
-                                                                     usearch_error_t* error);
+/** The arguments of @c usearch_geospatial_cursor_init. */
+typedef struct usearch_geospatial_cursor_init_t {
+
+    /** Output for the new cursor; @c NULL on failure. */
+    usearch_geospatial_cursor_t* cursor;
+
+    /** The handle to be scanned, borrowed until the cursor is freed. */
+    usearch_geospatial_index_t index;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+} usearch_geospatial_cursor_init_t;
+
+/** Opens a snapshot cursor over the current contents; see @c usearch_geospatial_cursor_t. */
+USEARCH_EXPORT void usearch_geospatial_cursor_init(usearch_geospatial_cursor_init_t* arguments);
+
+/** The arguments of @c usearch_geospatial_cursor_next. */
+typedef struct usearch_geospatial_cursor_next_t {
+
+    /** The cursor to advance. */
+    usearch_geospatial_cursor_t cursor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Where the identities land; its capacity bounds the batch. */
+    usearch_keys_span_t keys;
+
+    /** The @b optional output for up to @c keys.capacity borrowed base pointers; @c NULL skips them. */
+    int32_t const** point_sets;
+
+    /** Output for up to @c keys.capacity position counts. */
+    size_t* point_counts;
+
+    /** Output for the entries written; zero when the snapshot is exhausted. */
+    size_t* written;
+} usearch_geospatial_cursor_next_t;
 
 /**
  *  @brief Copies the next batch of entries out of the cursor.
- *  @param[inout] cursor The cursor to advance.
- *  @param[out] keys Where the identities land; its capacity bounds the batch.
- *  @param[out] point_sets Output array of up to @c keys.capacity borrowed base pointers; @c NULL skips.
- *  @param[out] point_counts Output array of up to @c keys.capacity position counts.
- *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *  @return Number of entries written; zero when the snapshot is exhausted.
  *
- *  The borrowed pointers reach into the index's arena and stay valid until the cursor moves
+ *  The borrowed pointers reach into the index's storage and stay valid until the cursor moves
  *  or closes. Their coordinates are the internal Earth-fixed integer centimetres, three per
  *  point, not the geodetic degrees inserted.
  */
-USEARCH_EXPORT size_t usearch_geospatial_cursor_next(             //
-    usearch_geospatial_cursor_t cursor, usearch_keys_span_t keys, //
-    int32_t const** point_sets, size_t* point_counts, usearch_error_t* error);
+USEARCH_EXPORT void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments);
 
-/** Releases the cursor. */
+/** Releases the cursor; @c NULL is safe. */
 USEARCH_EXPORT void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t cursor);
 
-/** Bytes one monolith takes under the default layout; a manifest's parts sum to about the same. */
-USEARCH_EXPORT size_t usearch_geospatial_storage_requirements(usearch_geospatial_index_t index, usearch_error_t* error);
+/** The arguments of @c usearch_geospatial_save. */
+typedef struct usearch_geospatial_save_t {
+
+    /** The handle to be written. */
+    usearch_geospatial_index_t index;
+
+    /** The executor the write fans out over, one shard per thread or stream. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** Destination path, whose extension picks the layout. */
+    usearch_bytes_view_t path;
+
+    /** The @b optional handler, called with parts written and their count. */
+    usearch_progress_callback_t progress;
+
+    /** Opaque pointer forwarded into every @c progress call. */
+    void* progress_state;
+} usearch_geospatial_save_t;
 
 /**
- *  @brief Saves the index under @p path. Demands a mutation-free window; concurrent readers
+ *  @brief Saves a mutable index under @c path. Demands a mutation-free window; concurrent readers
  *      keep searching throughout.
- *
- *  @param[in] index The handle to be written.
- *  @param[in] executor The threads and scratch the write fans out over, one shard per thread.
- *  @param[in] path Destination path, whose extension picks the layout.
- *  @param[in] progress The @b optional handler, called with parts written and their count.
- *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
- *  @param[out] error Status and a static message; @c usearch_success_k on success.
  *
  *  A cancelled save leaves the parts it already wrote and no manifest referencing them, so the
  *  checkpoint reads as absent rather than half-valid. Those leftovers are the caller's to remove.
  */
-USEARCH_EXPORT void usearch_geospatial_save(                       //
-    usearch_geospatial_index_t index, usearch_executor_t executor, //
-    usearch_bytes_view_t path,                                     //
-    usearch_progress_callback_t progress, void* progress_state,    //
-    usearch_error_t* error);
+USEARCH_EXPORT void usearch_geospatial_save(usearch_geospatial_save_t* arguments);
 
-/**
- *  @brief Loads a checkpoint into an initialized handle, with the handle's residency deciding the
- *      behavior: materialize into RAM, upload to the device, or open in place on disk - the
- *      read-only form, where mutating verbs fail.
- *
- *  A handle whose geometry was left zeroed freezes it here, from the checkpoint's own headers.
- *
- *  @param[inout] index The handle to be populated.
- *  @param[in] executor The threads and scratch the read fans out over, one shard per thread.
- *  @param[in] path Checkpoint path - a monolith, or a manifest naming many.
- *  @param[in] progress The @b optional handler, called with parts placed and their count.
- *  @param[in] progress_state Opaque pointer forwarded into every @p progress call.
- *  @param[out] error Status and a static message; @c usearch_success_k on success.
- *
- *  Where the parts end up is the handle's own memory domains, never the manifest's. A part
- *  carries its own length in its header, so a second load skips whatever already arrived
- *  whole and cancelling costs the part in flight rather than everything behind it.
- */
-USEARCH_EXPORT void usearch_geospatial_load(                       //
-    usearch_geospatial_index_t index, usearch_executor_t executor, //
-    usearch_bytes_view_t path,                                     //
-    usearch_progress_callback_t progress, void* progress_state,    //
-    usearch_error_t* error);
+/** The layout and geometry a checkpoint froze - everything a reader learns without opening it. */
+typedef struct usearch_geospatial_metadata_t {
 
-/** Reads a checkpoint's geometry & metric metadata into @p options without loading it. */
-USEARCH_EXPORT void usearch_geospatial_metadata( //
-    usearch_bytes_view_t path, usearch_geospatial_options_t* options, usearch_error_t* error);
+    /** Which axes its positions carry. */
+    usearch_geospatial_layout_t layout;
+
+    /** What ordering within its point sets means. */
+    usearch_geospatial_structure_t structure;
+
+    /** Connections per node the graph was built with. */
+    size_t connectivity;
+} usearch_geospatial_metadata_t;
+
+/** The arguments of @c usearch_geospatial_metadata_read. */
+typedef struct usearch_geospatial_metadata_read_t {
+
+    /** The executor the read runs on. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** Checkpoint path - a monolith, or a manifest naming many. */
+    usearch_bytes_view_t path;
+
+    /** Output for every field the checkpoint froze. */
+    usearch_geospatial_metadata_t* metadata;
+} usearch_geospatial_metadata_read_t;
+
+/** Reads a checkpoint's layout & geometry without loading it. */
+USEARCH_EXPORT void usearch_geospatial_metadata_read(usearch_geospatial_metadata_read_t* arguments);
+
+/** A live index's state. Each counter is read once, so under concurrent insertions they may come
+ *  from slightly different moments. */
+typedef struct usearch_geospatial_index_description_t {
+
+    /** The frozen layout, structure and connectivity, as a checkpoint reports them. */
+    usearch_geospatial_metadata_t metadata;
+
+    /** Stored entries. */
+    size_t size;
+
+    /** Entries hosted without growing again. */
+    size_t capacity;
+
+    /** Bytes the handle holds, point storage included; traversal scratch is the executor's. */
+    size_t memory_usage;
+
+    /** Static codename of the kernels the index dispatched to on this machine. */
+    char const* capabilities;
+} usearch_geospatial_index_description_t;
+
+/** The arguments of @c usearch_geospatial_describe. */
+typedef struct usearch_geospatial_describe_t {
+
+    /** The handle to be described. */
+    usearch_geospatial_index_t index;
+
+    /** The executor the report runs on. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    usearch_outcome_t* outcome;
+
+    /** Whether the call blocks or returns once queued; zero blocks. */
+    usearch_completion_t completion;
+
+    /** Output, filled whole. */
+    usearch_geospatial_index_description_t* description;
+} usearch_geospatial_describe_t;
+
+/** Reports a live index's frozen metadata and current counters in one call. */
+USEARCH_EXPORT void usearch_geospatial_describe(usearch_geospatial_describe_t* arguments);
 
 #ifdef __cplusplus
 }
