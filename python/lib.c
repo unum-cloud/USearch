@@ -25,10 +25,12 @@ static struct {
     {"Match", &MatchType},
     {"Matches", &MatchesType},
     {"Executor", &ExecutorType},
+    {"Arena", &ArenaType},
+    {NULL, &ArenaBufferType}, //! Exported by the views a verb returns, never constructed by name.
 
     {"DenseIndex", &DenseIndexType},
-    {NULL, &DenseCursorType}, //! Returned by `cursor`, never constructed by name.
-    {NULL, &DenseFinderType}, //! Returned by `find`, likewise.
+    {NULL, &DenseCursorType},       //! Returned by `cursor`, never constructed by name.
+    {NULL, &DenseSearchStreamType}, //! Returned by `search_stream`, likewise.
 
     {"SequenceIndex", &SequenceIndexType},
     {"MatrixIndex", &MatrixIndexType},
@@ -63,8 +65,8 @@ PyMODINIT_FUNC PyInit_lib(void) {
     PyUnstable_Module_SetGIL(module, Py_MOD_GIL_NOT_USED);
 #endif
 
-    if (usearch_py_register_error_type(module) < 0) goto failed;
-    if (PyModule_AddStringConstant(module, "__version__", usearch_version()) < 0) goto failed;
+    if (usearch_py_register_error_types(module) < 0) goto failed;
+    if (PyModule_AddStringConstant(module, "__version__", usearch_version_name()) < 0) goto failed;
 
     for (size_t type_index = 0; type_index != types_count; ++type_index) {
         char const* const name = module_types[type_index].name;

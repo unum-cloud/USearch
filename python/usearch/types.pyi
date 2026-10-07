@@ -46,12 +46,95 @@ type ScalarAlias = Literal[
 type ScalarName = ScalarKind | ScalarAlias
 
 type KeyLike = Key | int | str | uuid.UUID | Buffer
+
+# What an executor does with its workers once idle: park them, or keep them spinning.
+type MoodName = Literal["chill", "grind"]
 type PathLike = str | bytes | os.PathLike[str] | os.PathLike[bytes]
 
 class Error(RuntimeError):
-    """Every failure the engine reports, carrying the status shared with the C API."""
+    """The base of every failure the library reports, one subclass per status shared with the C API."""
 
     status: str
+
+class OutOfMemoryError(Error):
+    """An allocation or reservation could not be satisfied."""
+
+    status: Literal["out-of-memory"]
+
+class ShapeMismatchError(Error):
+    """Dimensionality, row counts, or output capacity disagree."""
+
+    status: Literal["shape-mismatch"]
+
+class UnsupportedLayoutError(Error):
+    """A stride or packing the engine cannot traverse."""
+
+    status: Literal["unsupported-layout"]
+
+class UnknownKindError(Error):
+    """A scalar, metric, or residency this build does not know."""
+
+    status: Literal["unknown-kind"]
+
+class ReadOnlyError(Error):
+    """A mutating verb on a handle that serves its checkpoint in place."""
+
+    status: Literal["read-only"]
+
+class InputOutputError(Error):
+    """A file could not be opened, read, written, or parsed."""
+
+    status: Literal["io"]
+
+class DeviceError(Error):
+    """A device could not be selected, or its memory could not be claimed."""
+
+    status: Literal["device"]
+
+class MalformedError(Error):
+    """A representation could not be decoded - a key, a buffer, a checkpoint."""
+
+    status: Literal["malformed"]
+
+class InternalError(Error):
+    """The library reported neither success nor a failure - a defect."""
+
+    status: Literal["internal"]
+
+class CapacityOverflowError(Error):
+    """A hard design ceiling was reached; a smaller request cannot help."""
+
+    status: Literal["overflow"]
+
+class UninitializedError(Error):
+    """The handle is not ready for the verb - unfrozen, or consumed by a merge."""
+
+    status: Literal["uninitialized"]
+
+class ConfigMismatchError(Error):
+    """The request contradicts an already-frozen configuration."""
+
+    status: Literal["config-mismatch"]
+
+class ContendedError(Error):
+    """An executor or arena is busy with another call."""
+
+    status: Literal["contended"]
+
+class CancelledError(Error):
+    """A progress handler stopped the call, which published nothing."""
+
+    status: Literal["cancelled"]
+
+class UnsupportedError(Error):
+    """This residency does not implement the verb; pick another residency."""
+
+    status: Literal["unsupported"]
+
+class InvalidArgumentError(Error):
+    """An argument breaks the verb's contract."""
+
+    status: Literal["invalid-argument"]
 
 class Key:
     """A 128-bit entry identity, rendered as a lowercase dashed UUID."""
@@ -78,22 +161,41 @@ class Executor:
 
     def __init__(self, *args: object, **keywords: object) -> NoReturn: ...
     @classmethod
-    def for_ram(cls, threads: int = 0, *, memory_domains: Sequence[int] | None = None) -> Executor:
+    def for_ram(
+        cls, threads: int = 0, *, memory_domains: Sequence[int] | None = None, in_flight_limit: int = 0
+    ) -> Executor:
         """Spawns host worker threads for a RAM-resident index."""
         ...
 
     @classmethod
-    def for_vram(cls, *, devices: Sequence[int] | None = None) -> Executor:
+    def on_pool(
+        cls, pool: int, /, *, memory_domains: Sequence[int] | None = None, in_flight_limit: int = 0
+    ) -> Executor:
+        """Drives RAM-resident indexes on a thread pool the caller owns, passed by address."""
+        ...
+
+    @classmethod
+    def for_vram(cls, *, devices: Sequence[int] | None = None, in_flight_limit: int = 0) -> Executor:
         """Opens one stream per device for a VRAM-resident index."""
         ...
 
     @classmethod
-    def for_nvme(cls, threads: int = 0, *, paths: Sequence[PathLike] | None = None) -> Executor:
+    def for_nvme(
+        cls, threads: int = 0, *, paths: Sequence[PathLike] | None = None, in_flight_limit: int = 0
+    ) -> Executor:
         """Opens one submission ring per worker for an NVMe-resident index."""
         ...
 
-    def drain(self) -> None: ...
+    def drain(self, mood: MoodName = "chill") -> None:
+        """Waits for every call submitted before it, then sets what idle workers do."""
+        ...
+
     def __repr__(self) -> str: ...
+
+class Arena:
+    """The memory a verb lands the outputs only it can size in, reused by the next call handed it."""
+
+    def __init__(self) -> None: ...
 
 class Stats:
     """Traversal telemetry, fully overwritten by every call it is passed to."""
@@ -121,7 +223,7 @@ class Match:
     def __repr__(self) -> str: ...
 
 class Matches:
-    """A ranked run, read back off the three buffers a search filled."""
+    """A ranked run, as `search` and `maxsim` return it, reading through to three buffers."""
 
     def __init__(self, keys: Buffer, distances: Buffer, counts: Buffer, /) -> None: ...
     @property

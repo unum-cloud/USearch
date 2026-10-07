@@ -119,9 +119,9 @@ def self_recall(index: DenseIndex, sample: float | int = 1.0, count: int = 1, **
     ``exact_matches`` when the question is how the index ranks against the exact answer.
 
     The *sample* is a share when a float and a count when an integer, and *count* is how many
-    matches each query retrieves. Every other keyword reaches ``index.search``, so the
-    ``executor`` it needs is passed through here, and a ``stats`` given here is what the
-    returned telemetry reads off.
+    matches each query retrieves. Every other keyword reaches ``index.search``, so an
+    ``executor`` is passed through here, and a ``stats`` given here is what the returned
+    telemetry reads off.
     """
     if len(index) == 0:
         return SearchStats(0, 0, 0, 0, 0)
@@ -138,16 +138,14 @@ def self_recall(index: DenseIndex, sample: float | int = 1.0, count: int = 1, **
         vectors = np.concatenate([np.asarray(index[row]) for row in keys], axis=0)
     vectors = np.atleast_2d(np.asarray(vectors))
 
-    found_keys = np.zeros((len(vectors), count, 16), dtype=np.uint8)
-    found_distances = np.zeros((len(vectors), count), dtype=np.float64)
-    found_counts = np.zeros(len(vectors), dtype=np.uint64)
     stats = kwargs.pop("stats", None)
     if stats is None:
         stats = Stats()
-    index.search(vectors, count, found_keys, found_distances, found_counts, stats=stats, **kwargs)
+    matches = index.search(vectors, count, stats=stats, **kwargs)
 
     expected = keys_to_integers(keys)
-    found = keys_to_integers(found_keys)
+    found = keys_to_integers(matches.keys)
+    found_counts = np.asarray(matches.counts)
 
     count_matches = 0
     for query_index in range(len(expected)):

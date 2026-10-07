@@ -16,7 +16,7 @@ import pytest
 from base import batch_sizes, matches_outputs
 
 import usearch
-from usearch import Error, Key, Matches, Stats
+from usearch import Error, Key, MalformedError, Matches, ShapeMismatchError, Stats
 from usearch.keys import integers_to_keys, keys_to_integers
 
 # region Library
@@ -104,10 +104,10 @@ def test_key_rejects_malformed(value, failure):
 
 
 def test_key_malformed_text_carries_a_status():
-    """A binding-side rejection reports the status the engine would for the same fault."""
-    with pytest.raises(Error) as raised:
+    """A binding-side rejection raises the class the engine would for the same fault."""
+    with pytest.raises(MalformedError) as raised:
         Key("not-a-key")
-    assert raised.value.status == "malformed-input"
+    assert raised.value.status == "malformed"
 
 
 @pytest.mark.parametrize("count", batch_sizes)
@@ -177,9 +177,8 @@ def test_matches_keeps_its_buffers_alive():
 )
 def test_matches_refuses_disagreeing_buffers(outputs: tuple):
     """Three lengths that cannot be read as one shape are a shape error, not a guess."""
-    with pytest.raises(Error) as raised:
+    with pytest.raises(ShapeMismatchError):
         Matches(*outputs)
-    assert raised.value.status == "shape-mismatch"
 
 
 def test_matches_takes_three_buffers():
@@ -211,6 +210,35 @@ def test_stats_takes_no_arguments():
 def test_error_is_a_runtime_error():
     """`Error` subclasses `RuntimeError`, so code that never heard of USearch still catches it."""
     assert issubclass(Error, RuntimeError)
+
+
+def test_every_failing_status_raises_its_own_class():
+    """One `Error` subclass per final failing status of the C ABI, each naming the status it mirrors."""
+    raised = {
+        name: getattr(usearch, name).status
+        for name in dir(usearch)
+        if isinstance(getattr(usearch, name), type) and issubclass(getattr(usearch, name), Error)
+        if name != "Error"
+    }
+    assert set(raised.values()) == {
+        "out-of-memory",
+        "shape-mismatch",
+        "unsupported-layout",
+        "unknown-kind",
+        "read-only",
+        "io",
+        "device",
+        "malformed",
+        "internal",
+        "overflow",
+        "uninitialized",
+        "config-mismatch",
+        "contended",
+        "cancelled",
+        "unsupported",
+        "invalid-argument",
+    }
+    assert len(raised) == len(set(raised.values()))
 
 
 # endregion Telemetry & Failures

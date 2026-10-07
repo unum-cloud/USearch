@@ -20,8 +20,10 @@
  *
  *  Batch inputs arrive through PEP 3118 first and @c __array_interface__ second, so a
  *  PyTorch or TensorFlow tensor reaches the index without a NumPy round-trip and NumPy
- *  itself is never a build-time dependency. Outputs are buffers the caller already owns and
- *  a verb fills, and a @c Matches reads them back as @c memoryview objects.
+ *  itself is never a build-time dependency. A verb returns its outputs rather than filling the
+ *  caller's: what only the call can size stays in an @c Arena and leaves as zero-copy views that
+ *  keep it alive, and what the inputs bound lands in fresh buffers, or in the caller's own
+ *  through @c out= when a sweep must not allocate.
  */
 #ifndef UNUM_USEARCH_PYTHON_LIB_H
 #define UNUM_USEARCH_PYTHON_LIB_H
@@ -164,16 +166,18 @@ extern PyTypeObject StatsType;
 extern PyTypeObject MatchType;
 extern PyTypeObject MatchesType;
 extern PyTypeObject ExecutorType;
+extern PyTypeObject ArenaType;
+extern PyTypeObject ArenaBufferType;
 
 extern PyTypeObject DenseIndexType;
 extern PyTypeObject DenseCursorType;
-extern PyTypeObject DenseFinderType;
+extern PyTypeObject DenseSearchStreamType;
 
 extern PyTypeObject SequenceIndexType;
 extern PyTypeObject MatrixIndexType;
 extern PyTypeObject GeospatialIndexType;
 
-/** The one exception every failing verb raises, subclassing @c RuntimeError. */
+/** The base of the one exception class per failing status, subclassing @c RuntimeError. */
 extern PyObject* ErrorType;
 
 /** The workers a fanned-out verb runs on, owned apart from any index so one pool serves many. */
@@ -181,6 +185,20 @@ typedef struct Executor {
     PyObject ob_base;
     usearch_executor_t handle;
 } Executor;
+
+/**
+ *  @brief The memory a verb lands the outputs only it can size in, reused by the next call handed it.
+ *
+ *  The library creates the handle on first use. Reuse rewinds it, so a call is refused while any
+ *  view over its previous outputs is still exported.
+ */
+typedef struct Arena {
+    PyObject ob_base;
+    usearch_arena_t handle;
+
+    /** Buffers exported over the arena and still held, plus one while a call fills it. */
+    Py_ssize_t exports;
+} Arena;
 
 /** Traversal telemetry a caller may pass into @c add or @c search to have overwritten. */
 typedef struct Stats {
@@ -225,10 +243,10 @@ typedef struct Matches {
 #pragma region Shared Helpers
 
 /**
- *  @brief Raises the mapped exception when @p error carries a failure.
- *  @return -1 with an exception set when @p error failed, 0 otherwise.
+ *  @brief Raises the class @p outcome 's status maps to when it carries a failure.
+ *  @return -1 with an exception set when @p outcome failed, 0 otherwise.
  */
-int usearch_py_raise_on_error(usearch_error_t const* error);
+int usearch_py_raise_on_outcome(usearch_outcome_t const* outcome);
 
 /**
  *  @brief Stores @p value under @p key in @p dict and drops the caller's reference to it, whether or not the store
@@ -237,7 +255,7 @@ int usearch_py_raise_on_error(usearch_error_t const* error);
  */
 int usearch_py_dict_steal_item(PyObject* dict, char const* key, PyObject* value);
 
-/** Raises @c ErrorType with @p status and a formatted message; always returns -1. */
+/** Raises the @c Error subclass @p status maps to, with a formatted message; always returns -1. */
 int usearch_py_raise(usearch_status_t status, char const* format, ...);
 
 /**
@@ -287,7 +305,15 @@ size_t usearch_py_scalar_row_bytes(usearch_scalar_t kind, size_t columns);
 char const* usearch_py_scalar_buffer_format(usearch_scalar_t kind);
 
 /**
- *  @brief A read-only @c (rows,columns) view over @p arena in @p kind 's own format.
+ *  @brief A @p rank -dimensional @c memoryview over the whole of @p exporter, cast to @p format.
+ *
+ *  A @c memoryview refuses a zero extent in a cast shape, so an empty export leaves flat in
+ *  @p format instead. Returns a new reference, or @c NULL with an exception set.
+ */
+PyObject* usearch_py_shaped_view(PyObject* exporter, char const* format, Py_ssize_t const* shape, Py_ssize_t rank);
+
+/**
+ *  @brief A @c (rows,columns) view over the first rows of @p arena in @p kind 's own format.
  *
  *  Kinds a @c memoryview cannot format - the sub-byte and mini-float ones - leave as a
  *  @c (rows,row_bytes) run of @c 'B' instead, since a cast to their format would report the
@@ -363,8 +389,8 @@ int usearch_py_path_from_object(PyObject* object, usearch_bytes_view_t* path, Py
 /** Whether @p object exports a buffer, distinguishing a checkpoint blob from a path. */
 int usearch_py_object_is_buffer(PyObject* object);
 
-/** Readies and registers @c ErrorType on @p module; returns 0 or -1. */
-int usearch_py_register_error_type(PyObject* module);
+/** Readies and registers @c ErrorType and one subclass per failing status on @p module; returns 0 or -1. */
+int usearch_py_register_error_types(PyObject* module);
 
 /** One spelling of a closed-set option and the value it selects. */
 typedef struct usearch_py_choice_naming_t {
@@ -426,10 +452,41 @@ void usearch_py_paths_release(usearch_py_paths_arena_t* arena);
 int usearch_py_size_from_object(PyObject* object, char const* field, size_t* value);
 
 /**
- *  @brief Unwraps the @c executor keyword every fanned-out verb takes.
- *  @return 0 on success, -1 with an exception set when @p object is not an @c Executor.
+ *  @brief Unwraps the @c executor keyword every fanned-out verb takes; @c None runs on the caller's thread.
+ *  @return 0 on success, -1 with an exception set when @p object is neither.
  */
 int usearch_py_executor_from_object(PyObject* object, usearch_executor_t* executor);
+
+/**
+ *  @brief Takes the @c arena keyword of a verb whose outputs only the call can size, for one call.
+ *
+ *  @c NULL or @c None claims a fresh arena that the call's outputs alone will keep alive.
+ *
+ *  @param[out] arena A new reference to the claimed @c Arena; hand it to @c usearch_py_arena_unclaim.
+ *  @return 0 on success, -1 with an exception set when @p object is neither, or still exports.
+ */
+int usearch_py_arena_claim(PyObject* object, PyObject** arena);
+
+/** Ends the claim @c usearch_py_arena_claim took, and drops its reference. */
+void usearch_py_arena_unclaim(PyObject* arena);
+
+/**
+ *  @brief A writable C-contiguous @c memoryview over @p data inside @p arena, which it keeps alive and
+ *      blocks from reuse until released.
+ *  @return A new reference, or @c NULL with an exception set.
+ */
+PyObject* usearch_py_arena_view(PyObject* arena, void* data, char const* format, Py_ssize_t item_bytes,
+                                Py_ssize_t const* shape, int rank);
+
+/**
+ *  @brief The @c Matches a ranked verb lands @p queries rows of @p wanted in, and the span over it.
+ *
+ *  A fresh one owns three zeroed buffers; @p out, when neither @c NULL nor @c None, must be a
+ *  writable @c Matches of exactly that shape, and is reused so a sweep allocates nothing.
+ *
+ *  @return A new reference, or @c NULL with an exception set.
+ */
+PyObject* usearch_py_matches_prepare(PyObject* out, size_t queries, size_t wanted, usearch_matches_span_t* span);
 
 #pragma endregion Shared Helpers
 
