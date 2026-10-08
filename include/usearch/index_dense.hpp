@@ -1790,10 +1790,13 @@ class index_dense_gt {
 
         // Export the free (removed) slot numbers
         index_dense_gt& copy = result.index;
-        if (!copy.free_keys_.reserve(free_keys_.size()))
-            return result.failed(std::move(typed_result.error));
-        for (std::size_t i = 0; i != free_keys_.size(); ++i)
-            copy.free_keys_.push(free_keys_[i]);
+        {
+            std::unique_lock<std::mutex> free_lock(free_keys_mutex_);
+            if (!copy.free_keys_.reserve(free_keys_.size()))
+                return result.failed("Out of memory!");
+            for (std::size_t i = 0; i != free_keys_.size(); ++i)
+                copy.free_keys_.push(free_keys_[i]);
+        }
 
         // Allocate buffers and move the vectors themselves
         copy.vectors_lookup_ = vectors_lookup_t(vectors_lookup_.size());
@@ -1811,7 +1814,10 @@ class index_dense_gt {
                 std::memcpy(copy.vectors_lookup_[slot], vectors_lookup_[slot], metric_.bytes_per_vector());
         }
 
-        copy.slot_lookup_ = slot_lookup_; // TODO: Handle out of memory
+        {
+            shared_lock_t lookup_lock(slot_lookup_mutex_);
+            copy.slot_lookup_ = slot_lookup_;
+        }
         *copy.typed_ = std::move(typed_result.index);
         return result;
     }
@@ -2356,6 +2362,7 @@ class index_dense_gt {
         // Pull entries from the underlying `typed_` into either
         // into `slot_lookup_`, or `free_keys_` if they are unused.
         unique_lock_t lock(slot_lookup_mutex_);
+        std::unique_lock<std::mutex> free_lock(free_keys_mutex_);
         slot_lookup_.clear();
         if (config_.enable_key_lookups)
             slot_lookup_.reserve(count_total - count_removed);

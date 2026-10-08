@@ -1284,6 +1284,64 @@ void test_filtered_search() {
     }
 }
 
+/**
+ *  @brief  Regression for #447: filtered L2 search over a memory-mapped index must
+ *          return matches that satisfy the predicate, not an empty result set.
+ */
+/**
+ *  @brief  Regression for #454: an f64 index must accept f32 add/search vectors without
+ *          reading past the supplied buffer (C# PersistAndRestore used f32 data on f64).
+ */
+void test_f64_index_accepts_f32_vectors() {
+    metric_punned_t metric(3, metric_kind_t::cos_k, scalar_kind_t::f64_k);
+    index_dense_t index = index_dense_t::make(metric);
+    index.reserve(4);
+
+    float vector[3] = {0.2f, 0.6f, 0.4f};
+    expect(index.add(42, vector));
+
+    float query[3] = {0.2f, 0.6f, 0.4f};
+    auto search_result = index.search(query, 1);
+    expect(search_result);
+    expect(search_result.size() > 0);
+    expect_eq(index_dense_t::key_t(42), search_result[0].member.key);
+
+    float reconstructed[3] = {};
+    expect_eq(index.get(42, reconstructed), std::size_t(1));
+}
+
+void test_filtered_search_view_l2sq() {
+    using index_t = index_dense_gt<std::uint64_t, std::uint64_t>;
+    metric_punned_t metric(1, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
+
+    index_t::state_result_t built = index_t::make(metric);
+    expect(built);
+    index_t& index = built.index;
+    index.reserve(128);
+
+    for (std::uint64_t i = 0; i < 128; ++i) {
+        float vec[1] = {static_cast<float>(i)};
+        expect(index.add(i, vec));
+    }
+
+    char const* path = "tmp_filtered_view_l2sq.usearch";
+    expect(index.save(path));
+
+    index_t::state_result_t viewed = index_t::make(metric);
+    expect(viewed);
+    expect(viewed.index.view(path));
+    expect_eq(viewed.index.size(), 128);
+
+    float query[1] = {122.1f};
+    auto predicate = [](std::uint64_t key) { return key <= 64; };
+    auto results = viewed.index.filtered_search(query, 1, predicate);
+    expect(results);
+    expect(results.size() > 0);
+    expect(results[0].member.key <= 64);
+
+    std::remove(path);
+}
+
 void test_isolate() {
     constexpr std::size_t dataset_count = 16;
     constexpr std::size_t dimensions = 32;
@@ -1628,6 +1686,8 @@ int main(int, char**) {
     test_slot_lookup_churn<std::int64_t, uint40_t>();
 
     test_filtered_search();
+    test_f64_index_accepts_f32_vectors();
+    test_filtered_search_view_l2sq();
     test_isolate();
     test_compact();
     test_load_after_metric_make();
