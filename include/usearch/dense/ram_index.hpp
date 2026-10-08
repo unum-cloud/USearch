@@ -7,8 +7,8 @@
 #pragma once
 
 #include <cassert> // `assert`
-#include <cmath>   // `std::pow`, `std::cos`, `std::sin` - the RoPE phasor tables
-#include <cstring> // `std::memcpy`
+#include <cmath>   // `std::exp` - the softmax epilogue
+#include <cstring> // `std::memcpy`, `std::memset`
 
 #include <array>       // `std::array`
 #include <bit>         // `std::bit_width`, `std::bit_floor`, `std::has_single_bit`
@@ -170,185 +170,79 @@ struct dense_multiply_fold {
     }
 };
 
-/** The vector a query scores with. */
-template <typename scalar_type_>
-nk::vector_view<scalar_type_> dense_query_vector(nk::vector_view<scalar_type_> query) noexcept {
-    return query;
-}
+/** Prefetches the value row of every scored node that beats the pool's current k-th best, so the attention
+ *  epilogue gathers its picks from cache. The pool is read before each quad merges into it. */
+template <nk::numeric_dtype scalar_type_, typename cache_hints_type_, typename pool_type_,
+          typename row_of_type_ = std::identity>
+struct dense_attend_prefetch_fold {
 
-/** A plain vector's scores need no correction. */
-template <nk_capability_t capability_, typename scalar_type_, typename node_id_type_, typename dot_type_,
-          std::size_t fan_out_>
-void dense_correct_scores(nk::vector_view<scalar_type_>, std::array<node_id_type_, fan_out_> const&,
-                          std::array<nk::vector_view<scalar_type_>, fan_out_> const&,
-                          dense_scores<dot_type_, fan_out_>&, std::size_t) noexcept {}
+    /** The value rows the picks address. */
+    nk::matrix_view<scalar_type_> values;
 
-/** One unit phasor, e^{jφ}. */
-struct dense_phasor_t {
+    /** The walk's pool, ascending by distance. */
+    pool_type_ const& pool;
 
-    /** The real part, cos φ. */
-    f32_t cosine;
+    /** The picks the epilogue weighs - the "k". */
+    std::size_t picks;
 
-    /** The imaginary part, sin φ. */
-    f32_t sine;
-};
+    /** Maps a walked node ID to its value row. */
+    row_of_type_ row_of = {};
 
-/** Rotate-half RoPE phasors e^{jΔθᵢ} for every token offset Δ below the reach, split as `high·low_rows_k + low`
- *  so two short tables replace per-pair trigonometry. */
-struct dense_rotary_phasors_t {
-
-    /** Offsets the low table covers; the high table steps in multiples of it. */
-    static constexpr std::size_t low_rows_k = 4096;
-
-    /** Rotated dimensions, a prefix of the vector: dimension i pairs with dimension i + rotary_dims / 2. */
-    std::size_t rotary_dims = 0;
-
-    /** Phasors of `low·θᵢ`, @b [low_rows_k,rotary_dims/2]. */
-    std::span<dense_phasor_t const> low;
-
-    /** Phasors of `high·low_rows_k·θᵢ`, @b [rows,rotary_dims/2]; its rows set the reach. */
-    std::span<dense_phasor_t const> high;
-
-    /** The first offset past the table. */
-    std::size_t reach() const noexcept { return rotary_dims ? high.size() / (rotary_dims / 2) * low_rows_k : 0; }
-
-    /** The phasor of offset @p offset for pair @p pair. */
-    dense_phasor_t at(std::size_t offset, std::size_t pair) const noexcept {
-        std::size_t const pairs = rotary_dims / 2;
-        dense_phasor_t const coarse = high[offset / low_rows_k * pairs + pair];
-        dense_phasor_t const fine = low[offset % low_rows_k * pairs + pair];
-        return {coarse.cosine * fine.cosine - coarse.sine * fine.sine,
-                coarse.sine * fine.cosine + coarse.cosine * fine.sine};
-    }
-
-    /** Fills @p low and @p high for RoPE base @p theta, with θᵢ = theta^(−2i/rotary_dims), in @c f64. */
-    static void fill(std::size_t rotary_dims, f64_t theta, std::span<dense_phasor_t> low,
-                     std::span<dense_phasor_t> high) noexcept {
-        std::size_t const pairs = rotary_dims / 2;
-        for (std::size_t pair = 0; pair != pairs; ++pair) {
-            f64_t const frequency = std::pow(theta, -static_cast<f64_t>(pair) / static_cast<f64_t>(pairs));
-            for (std::size_t row = 0; row != low.size() / pairs; ++row)
-                low[row * pairs + pair] = {static_cast<f32_t>(std::cos(frequency * static_cast<f64_t>(row))),
-                                           static_cast<f32_t>(std::sin(frequency * static_cast<f64_t>(row)))};
-            for (std::size_t row = 0; row != high.size() / pairs; ++row) {
-                f64_t const angle = frequency * static_cast<f64_t>(row * low_rows_k);
-                high[row * pairs + pair] = {static_cast<f32_t>(std::cos(angle)), static_cast<f32_t>(std::sin(angle))};
+    template <typename dot_result_type_>
+    walk_demand_t absorb(std::span<dense_scored_node_t const> scored_nodes,
+                         std::span<dot_result_type_ const>) noexcept {
+        if constexpr (!std::is_same_v<cache_hints_type_, fu::standard_cache_hints_t>) {
+            cache_hints_type_ const hints;
+            bool const bounded = picks && pool.size() >= picks;
+            std::size_t const row_bytes = values.extent(1) * nk_dtype_bits(scalar_type_::dtype()) / 8;
+            for (dense_scored_node_t const scored : scored_nodes) {
+                if (bounded && !(scored.distance < pool[picks - 1].distance)) continue;
+                std::size_t const row = row_of(scored.node_id);
+                if (row >= values.extent(0)) continue;
+                char const* const bytes = values.row(row).byte_data();
+                for (std::size_t offset = 0; offset < row_bytes; offset += fu::default_alignment_k)
+                    hints(bytes + offset, fu::prefetch_line_k);
             }
         }
+        return walk_demand_t::continue_k;
     }
 };
 
-/** A query at a token position over pre-RoPE keys: each scored dot gains the rotary term for the offset to the
- *  key's position in @c node_positions. */
-template <typename scalar_type_>
-struct dense_rotary_query {
-
-    /** The pre-RoPE query, in the index's own dtype. */
-    nk::vector_view<scalar_type_> vector;
-
-    /** The query's token position; every key's position must lie within the phasors' reach of it. */
-    std::size_t position = 0;
-
-    /** The phasor tables of the model's RoPE. */
-    dense_rotary_phasors_t phasors;
-
-    /** The token position of every node, indexed by node ID. */
-    std::span<u32_t const> node_positions;
-};
-
-/** A rotary query scores with its pre-RoPE vector. */
-template <typename scalar_type_>
-nk::vector_view<scalar_type_> dense_query_vector(dense_rotary_query<scalar_type_> const& query) noexcept {
-    return query.vector;
-}
-
-/** Adds each scored pair's rotary term to its dot and takes it from its distance, since a dot kernel's distance
- *  is `1 − dot`. With `b = (n − m)·θᵢ`, pair i contributes `(q₁k₁ + q₂k₂)(cos b − 1) + (q₂k₁ − q₁k₂) sin b`. */
-template <nk_capability_t capability_, typename scalar_type_, typename node_id_type_, typename dot_type_,
-          std::size_t fan_out_>
-void dense_correct_scores(dense_rotary_query<scalar_type_> const& query,
-                          std::array<node_id_type_, fan_out_> const& node_ids,
-                          std::array<nk::vector_view<scalar_type_>, fan_out_> const& keys,
-                          dense_scores<dot_type_, fan_out_>& scores, std::size_t count) noexcept {
-    static_assert(!nk::is_integral_dtype<scalar_type_>(), "Rotary scoring needs floating-point keys");
-    constexpr std::size_t max_rotary_dims_k = 256;
-    std::size_t const rotary_dims = query.phasors.rotary_dims, pairs = rotary_dims / 2;
-    assert(rotary_dims <= max_rotary_dims_k && "The rotated prefix fits the stack buffers");
-    std::array<f32_t, max_rotary_dims_k> query_rotary, key_rotary;
-    using kit_t = typename dense_elementwise_chain<capability_>::kit_t;
-    [[maybe_unused]] nk_status_t status = kit_t::cast(query.vector.data(), scalar_type_::dtype(), query_rotary.data(),
-                                                      nk_f32_k, rotary_dims, nullptr);
-    assert(status == nk_success_k && "The serial tier casts every dtype pair");
-    for (std::size_t lane = 0; lane != count; ++lane) {
-        status = kit_t::cast(keys[lane].data(), scalar_type_::dtype(), key_rotary.data(), nk_f32_k, rotary_dims,
-                             nullptr);
-        assert(status == nk_success_k && "The serial tier casts every dtype pair");
-        std::size_t const key_position = query.node_positions[node_ids[lane]];
-        // A key after the query turns the other way: sin is odd, cos is even.
-        bool const ahead = key_position > query.position;
-        std::size_t const offset = ahead ? key_position - query.position : query.position - key_position;
-        assert(offset < query.phasors.reach() && "Every key lies within the phasors' reach of the query");
-        f32_t const turn = ahead ? 1.f : -1.f;
-        f32_t correction = 0;
-        for (std::size_t pair = 0; pair != pairs; ++pair) {
-            dense_phasor_t const phasor = query.phasors.at(offset, pair);
-            f32_t const query_first = query_rotary[pair], query_second = query_rotary[pair + pairs];
-            f32_t const key_first = key_rotary[pair], key_second = key_rotary[pair + pairs];
-            correction += (query_first * key_first + query_second * key_second) * (phasor.cosine - 1) +
-                          (query_second * key_first - query_first * key_second) * phasor.sine * turn;
+/**
+ *  @brief The softmax over @p count picks, written into @p output already divided by its partition.
+ *
+ *  @p logit_of names each pick's logit and @p row_of its value row, gathered once. A row past
+ *  @c values.extent(0) refuses with @c shape_mismatch_k before anything is written.
+ */
+template <nk::numeric_dtype scalar_type_, nk_capability_t capability_, typename logit_of_type_, typename row_of_type_>
+expected<dense_softmax_state_t> dense_attend_picks(std::size_t count, logit_of_type_&& logit_of, row_of_type_&& row_of,
+                                                   nk::matrix_view<scalar_type_> values,
+                                                   std::span<f32_t> output) noexcept {
+    dense_softmax_state_t state {std::numeric_limits<f32_t>::lowest(), 0};
+    for (std::size_t pick = 0; pick != count; ++pick) {
+        if (row_of(pick) >= values.extent(0)) return {state, status_t::shape_mismatch_k};
+        state.maximum_score = max_of(state.maximum_score, logit_of(pick));
+    }
+    std::memset(output.data(), 0, output.size_bytes());
+    constexpr std::size_t batch_k = 16;
+    std::array<char const*, batch_k> rows;
+    std::array<f32_t, batch_k> weights;
+    for (std::size_t first = 0; first < count; first += batch_k) {
+        std::size_t const batch = min_of(batch_k, count - first);
+        for (std::size_t lane = 0; lane != batch; ++lane) {
+            weights[lane] = std::exp(logit_of(first + lane) - state.maximum_score);
+            rows[lane] = values.row(row_of(first + lane)).byte_data();
+            state.partition += weights[lane];
         }
-        scores.dots[lane] += dot_type_(correction);
-        scores.distances[lane] -= correction;
+        dense_values_step<scalar_type_, capability_>(output.data(), output.size(), rows.data(), weights.data(), batch,
+                                                     1);
     }
+    f32_t const normalizer = state.partition > 0 ? 1 / state.partition : 0, zero = 0;
+    [[maybe_unused]] nk_status_t const scaled = dense_elementwise_chain<capability_>::kit_t::scale(
+        output.data(), output.size(), &normalizer, &zero, output.data(), nullptr);
+    assert(scaled == nk_success_k && "The serial tier scales on every CPU");
+    return {state, status_t::success_k};
 }
-
-/** A lightning indexer's query, as DeepSeek V4 and GLM 5 pick sparse-attention keys: the walk navigates by
- *  @c vector, and each scored dot becomes `Σₕ wₕ·ReLU(qₕ·k)`. */
-template <typename scalar_type_>
-struct dense_indexer_query {
-
-    /** The vector the walk navigates by, conventionally `Σₕ wₕ·qₕ`. */
-    nk::vector_view<scalar_type_> vector;
-
-    /** The per-head queries, each of the index's dimensionality. */
-    std::span<nk::vector_view<scalar_type_> const> heads;
-
-    /** The signed per-head weights, one per head, with the model's scale folded in. */
-    std::span<f32_t const> weights;
-};
-
-/** An indexer query navigates by its combined vector. */
-template <typename scalar_type_>
-nk::vector_view<scalar_type_> dense_query_vector(dense_indexer_query<scalar_type_> const& query) noexcept {
-    return query.vector;
-}
-
-/** Replaces each scored dot with `Σₕ wₕ·ReLU(qₕ·k)` and its distance with `1 − score`. */
-template <nk_capability_t capability_, typename scalar_type_, typename node_id_type_, typename dot_type_,
-          std::size_t fan_out_>
-void dense_correct_scores(dense_indexer_query<scalar_type_> const& query, std::array<node_id_type_, fan_out_> const&,
-                          std::array<nk::vector_view<scalar_type_>, fan_out_> const& keys,
-                          dense_scores<dot_type_, fan_out_>& scores, std::size_t count) noexcept {
-    static_assert(!nk::is_integral_dtype<scalar_type_>(), "Indexer scoring needs floating-point keys");
-    std::array<dot_type_, fan_out_> indexed {};
-    for (std::size_t head = 0; head != query.heads.size(); ++head) {
-        dense_scores<dot_type_, fan_out_> const head_scores =
-            usearch::scores<nk_kernel_dot_k, capability_, scalar_type_>(query.heads[head], no_norms_t {}, keys,
-                                                                        std::array<no_norms_t, fan_out_> {});
-        for (std::size_t lane = 0; lane != count; ++lane)
-            indexed[lane] += dot_type_(query.weights[head]) * max_of(head_scores.dots[lane], dot_type_ {});
-    }
-    for (std::size_t lane = 0; lane != count; ++lane) {
-        scores.dots[lane] = indexed[lane];
-        scores.distances[lane] = 1 - indexed[lane];
-    }
-}
-
-/** A query the dense walk accepts: a plain vector, or a rotary or indexer query over the same scalar. */
-template <typename query_type_, typename scalar_type_>
-concept dense_query = std::same_as<query_type_, nk::vector_view<scalar_type_>> ||
-                      std::same_as<query_type_, dense_rotary_query<scalar_type_>> ||
-                      std::same_as<query_type_, dense_indexer_query<scalar_type_>>;
 
 /** Per-thread traversal scratch: candidate queues, visited set, neighbor selection buffers and
  *  the running telemetry counters - one instance per scanning thread. */
@@ -1708,9 +1602,6 @@ struct dense_ram_index {
         /** Reader contract; @c immutable_k - or stronger - drops every atomic in the traversal
          *  when the caller certifies no concurrent mutators. */
         synchronization_t synchronization = synchronization_t::concurrent_k;
-
-        /** Nodes the walk starts from ahead of its random landmarks, each taken once. */
-        std::span<node_id_t const> seeds;
     };
 
     /** Telemetry of one @c search() call; matches stay in the caller's context. */
@@ -1749,10 +1640,30 @@ struct dense_ram_index {
      *      @c context.results, ascending by distance - the nearest first.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
-    template <dense_query<scalar_t> query_type_ = vector_view_t>
-    expected<search_result_t> search(query_type_ const& query_vector, dense_traversal_context_t& context,
+    expected<search_result_t> search(vector_view_t query_vector, dense_traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
         return search(query_vector, dummy_fold_t {}, context, config);
+    }
+
+    /**
+     *  @brief Finds the published nodes a lightning indexer scores highest for one query row - the
+     *      @c search contract, with every distance `1 −` the node's indexer score.
+     *
+     *  @param[in] query_vector The row the walk navigates by, conventionally `Σₕ wₕ·qₕ`.
+     *  @param[in] heads The indexer heads of this one query row.
+     *  @param[inout] context The calling thread's scratch & telemetry: the matches end up in
+     *      @c context.results, ascending by distance - the highest score first.
+     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     */
+    expected<search_result_t> search(vector_view_t query_vector, dense_indexer_heads<scalar_t> const& heads,
+                                     dense_traversal_context_t& context, search_config_t config = {}) noexcept
+        requires(kernel_kind_ == nk_kernel_dot_k && !nk::is_integral_dtype<scalar_t>())
+    {
+        if (config.synchronization != synchronization_t::concurrent_k)
+            return search_typed<synchronization_t::immutable_k>(query_vector, context, config, dummy_fold_t {},
+                                                                context.results, heads);
+        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config, dummy_fold_t {},
+                                                             context.results, heads);
     }
 
     /**
@@ -1765,13 +1676,15 @@ struct dense_ram_index {
      *      candidates end up in @c context.results, ascending by distance.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
-    template <dense_query<scalar_t> query_type_, typename fold_type_>
+    template <typename fold_type_>
         requires dense_fold<std::remove_cvref_t<fold_type_>, dot_result_t>
-    expected<search_result_t> search(query_type_ const& query_vector, fold_type_&& fold,
-                                     dense_traversal_context_t& context, search_config_t config = {}) noexcept {
+    expected<search_result_t> search(vector_view_t query_vector, fold_type_&& fold, dense_traversal_context_t& context,
+                                     search_config_t config = {}) noexcept {
         if (config.synchronization != synchronization_t::concurrent_k)
-            return search_typed<synchronization_t::immutable_k>(query_vector, context, config, fold, context.results);
-        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config, fold, context.results);
+            return search_typed<synchronization_t::immutable_k>(query_vector, context, config, fold, context.results,
+                                                                dummy_heads_t {});
+        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config, fold, context.results,
+                                                             dummy_heads_t {});
     }
 
     /**
@@ -1803,9 +1716,9 @@ struct dense_ram_index {
         expected<search_result_t> const result =
             config.synchronization != synchronization_t::concurrent_k
                 ? search_typed<synchronization_t::immutable_k>(query_vector, context, config, filtering,
-                                                               context.refining_candidates)
+                                                               context.refining_candidates, dummy_heads_t {})
                 : search_typed<synchronization_t::concurrent_k>(query_vector, context, config, filtering,
-                                                                context.refining_candidates);
+                                                                context.refining_candidates, dummy_heads_t {});
         std::swap(context.results, context.refining_candidates);
         return result;
     }
@@ -1821,8 +1734,7 @@ struct dense_ram_index {
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *  @return The pairs scored in @c count - above the spans' width when they were truncated.
      */
-    template <dense_query<scalar_t> query_type_ = vector_view_t>
-    expected<search_result_t> multiply(query_type_ const& left, std::span<dense_node_id_t> node_ids,
+    expected<search_result_t> multiply(vector_view_t left, std::span<dense_node_id_t> node_ids,
                                        std::span<dot_result_t> products, dense_traversal_context_t& context,
                                        search_config_t config = {}) noexcept
         requires(kernel_kind_ == nk_kernel_dot_k)
@@ -1834,19 +1746,57 @@ struct dense_ram_index {
         return walked;
     }
 
+    /**
+     *  @brief Softmax attention of one query row over its most relevant published nodes: @c search's walk
+     *      pools them, and the softmax weighs the best @p attended.size() of the pool, each value row
+     *      gathered once.
+     *
+     *  @param[in] query The query row, in the index's own dtype & frozen dimensionality.
+     *  @param[inout] context The calling thread's scratch & telemetry; the pool stays in @c context.results.
+     *  @param[in] values One value row per node ID, stored like the keys, at least as many rows as the index holds.
+     *  @param[in] score_scale The factor turning a dot into a logit.
+     *  @param[out] attended The picks' node IDs, nearest first; its size is the "k".
+     *  @param[out] output The attended row, @c values.extent(1) wide.
+     *  @param[out] state The row's softmax carry, for recombining with other walks.
+     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     *  @return The picks landed in @p attended, in @c count - fewer than k only when the pool holds fewer.
+     */
+    expected<search_result_t> attend(vector_view_t query, dense_traversal_context_t& context, vectors_view_t values,
+                                     f32_t score_scale, std::span<dense_node_id_t> attended, std::span<f32_t> output,
+                                     dense_softmax_state_t& state, search_config_t config = {}) noexcept
+        requires(kernel_kind_ == nk_kernel_dot_k)
+    {
+        if (output.size() != values.extent(1)) return {{}, status_t::config_mismatch_k};
+        if (values.extent(0) < size()) return {{}, status_t::shape_mismatch_k};
+        dense_attend_prefetch_fold<scalar_t, cache_hints_type_, results_array_t> fold {values, context.results,
+                                                                                       attended.size()};
+        expected<search_result_t> walked = search(query, fold, context, config);
+        if (!walked) return walked;
+        results_array_t const& pool = context.results;
+        std::size_t const count = min_of(attended.size(), pool.size());
+        // The dot kernel's distance is `1 − dot`, so the logit inverts it rather than re-scoring the key.
+        auto const [softmax, status] = dense_attend_picks<scalar_t, capability_>(
+            count, [&](std::size_t pick) noexcept { return score_scale * (1 - pool[pick].distance); },
+            [&](std::size_t pick) noexcept { return std::size_t {pool[pick].node_id}; }, values, output);
+        if (failed(status)) return {walked.value, status};
+        for (std::size_t pick = 0; pick != count; ++pick) attended[pick] = pool[pick].node_id;
+        state = softmax;
+        walked.value.count = count;
+        return walked;
+    }
+
     /** The compile-time form of @c search() & @c search_if(): one whole-traversal instantiation per
-     *  @p synchronization_ contract and per fold type, so a certified contract carries no atomics
-     *  and @c dummy_fold_t inlines the fold away. The walk ends against @p bound once it fills -
-     *  @c context.results itself for every walk but a filtered one. */
-    template <synchronization_t synchronization_, typename fold_type_, dense_query<scalar_t> query_type_>
+     *  @p synchronization_ contract, per fold type and per heads type, so a certified contract carries
+     *  no atomics and @c dummy_fold_t & @c dummy_heads_t inline away. The walk ends against @p bound
+     *  once it fills - @c context.results itself for every walk but a filtered one. */
+    template <synchronization_t synchronization_, typename fold_type_, typename heads_type_>
         requires dense_fold<std::remove_cvref_t<fold_type_>, dot_result_t>
-    expected<search_result_t> search_typed(query_type_ const& query_vector, dense_traversal_context_t& context,
-                                           search_config_t config, fold_type_&& fold,
-                                           results_array_t const& bound) noexcept {
+    expected<search_result_t> search_typed(vector_view_t query_vector, dense_traversal_context_t& context,
+                                           search_config_t config, fold_type_&& fold, results_array_t const& bound,
+                                           heads_type_ const& heads) noexcept {
         // Every distance kernel takes its width from the geometry, so a narrower query would be over-read.
         geometry_t const frozen = geometry();
-        if (frozen && dense_query_vector(query_vector).size() != frozen.dimensions())
-            return {{}, status_t::config_mismatch_k};
+        if (frozen && query_vector.size() != frozen.dimensions()) return {{}, status_t::config_mismatch_k};
         std::size_t const expansion_factor = non_zero_expansion_factor(config);
 
         // The same reservations `insert` makes, which also size the buffer `search_if` admits into.
@@ -1872,9 +1822,9 @@ struct dense_ram_index {
         std::size_t const restarts_before = context.restarts;
         std::size_t const saturated_walks_before = context.saturated_walks;
 
-        vector_norms_t const query_norms = dense_norms(dense_query_vector(query_vector));
+        vector_norms_t const query_norms = dense_norms(query_vector);
         status_t const walked = search_around<synchronization_>(query_vector, query_norms, first_invisible_id,
-                                                                expansion_factor, context, bound, fold, config.seeds);
+                                                                expansion_factor, context, bound, fold, {}, heads);
 
         // A refused walk still ranked what it reached; the counter says the ranking is short
         // because scratch ran out, not because the graph had nothing better.
@@ -3309,11 +3259,11 @@ struct dense_ram_index {
      *  nodes are re-rolled, like the traversal itself.
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename fold_type_ = dummy_fold_t,
-              dense_query<scalar_t> query_type_ = vector_view_t>
-    expected<walk_step_t> sample_landmarks(query_type_ const& query, vector_norms_t query_norms,
+              typename heads_type_ = dummy_heads_t>
+    expected<walk_step_t> sample_landmarks(vector_view_t query, vector_norms_t query_norms,
                                            node_id_t first_invisible_id, std::size_t expansion_factor,
                                            dense_traversal_context_t& context, std::span<node_id_t const>& seeds,
-                                           fold_type_&& fold = fold_type_ {}) noexcept {
+                                           fold_type_&& fold = fold_type_ {}, heads_type_ const& heads = {}) noexcept {
         results_array_t& results = context.results;
         frontier_queue_t& frontier = context.frontier;
         visited_set_t& visited = context.visited;
@@ -3363,8 +3313,8 @@ struct dense_ram_index {
             landmarks_norms[lane] = landmarks_norms[0];
         }
         dense_scores<dot_result_t, 4> landmark_scores = scores( //
-            dense_query_vector(query), query_norms, landmarks_vectors, landmarks_norms);
-        dense_correct_scores<capability_>(query, landmarks_ids, landmarks_vectors, landmark_scores, landmarks_in_batch);
+            query, query_norms, landmarks_vectors, landmarks_norms);
+        dense_rescore<capability_>(heads, query, landmarks_ids, landmarks_vectors, landmark_scores, landmarks_in_batch);
         context.computed_distances += landmarks_in_batch;
         std::array<dense_scored_node_t, 4> landmarks_scored;
         for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane)
@@ -3400,13 +3350,14 @@ struct dense_ram_index {
      *      walk, except that a @c sated_k from it ends the walk successfully.
      *  @param[in] seeds Optional landmarks to start from ahead of the random draws - a
      *      re-selection hands in the node's own neighbors, so every one already wired competes.
+     *  @param[in] heads Optional indexer heads of this one query row, rescoring every scored node.
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename fold_type_ = dummy_fold_t,
-              dense_query<scalar_t> query_type_ = vector_view_t>
-    status_t search_around(query_type_ const& query, vector_norms_t query_norms, node_id_t first_invisible_id,
+              typename heads_type_ = dummy_heads_t>
+    status_t search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
                            std::size_t expansion_factor, dense_traversal_context_t& context,
                            results_array_t const& bound, fold_type_&& fold = fold_type_ {},
-                           std::span<node_id_t const> seeds = {}) noexcept {
+                           std::span<node_id_t const> seeds = {}, heads_type_ const& heads = {}) noexcept {
         results_array_t& results = context.results;
         frontier_queue_t& frontier = context.frontier;
         visited_set_t& visited = context.visited;
@@ -3417,7 +3368,7 @@ struct dense_ram_index {
         small_size_t const landmark_batches = divide_round_up<small_size_t>(node_connectivity, 4);
         for (small_size_t landmarks_batch = 0; landmarks_batch != landmark_batches; ++landmarks_batch) {
             auto const [seeding, seed_status] = sample_landmarks<synchronization_>(
-                query, query_norms, first_invisible_id, expansion_factor, context, seeds, fold);
+                query, query_norms, first_invisible_id, expansion_factor, context, seeds, fold, heads);
             if (failed(seed_status)) return seed_status;
             if (seeding == walk_step_t::sated_k) return status_t::success_k;
             if (seeding == walk_step_t::exhausted_k) break; // Everything published is already visited.
@@ -3433,7 +3384,7 @@ struct dense_ram_index {
                 // drained frontier never reached.
                 if (bound.size() >= expansion_factor) break;
                 auto const [seeding, seed_status] = sample_landmarks<synchronization_>(
-                    query, query_norms, first_invisible_id, expansion_factor, context, seeds, fold);
+                    query, query_norms, first_invisible_id, expansion_factor, context, seeds, fold, heads);
                 if (failed(seed_status)) return seed_status;
                 if (seeding == walk_step_t::sated_k) return status_t::success_k;
                 if (seeding == walk_step_t::exhausted_k) break; // Nothing fresh left to restart from.
@@ -3511,10 +3462,10 @@ struct dense_ram_index {
                     gathered_norms[lane] = gathered_norms[0];
                 }
                 dense_scores<dot_result_t, 4> gathered_scores = scores( //
-                    dense_query_vector(query), query_norms, gathered_vectors, gathered_norms,
+                    query, query_norms, gathered_vectors, gathered_norms,
                     vectors_quad_of(candidate_neighbors, neighbor_slot, first_invisible_id, gathered_vectors));
-                dense_correct_scores<capability_>(query, gathered_ids, gathered_vectors, gathered_scores,
-                                                  gathered_count);
+                dense_rescore<capability_>(heads, query, gathered_ids, gathered_vectors, gathered_scores,
+                                           gathered_count);
                 context.computed_distances += gathered_count;
                 std::array<dense_scored_node_t, 4> scored_batch;
                 for (small_size_t lane = 0; lane != gathered_count; ++lane)

@@ -15,7 +15,8 @@
  */
 #pragma once
 
-#include <cstring> // `std::memcpy`, `std::memcmp`
+#include <cassert> // `assert`
+#include <cstring> // `std::memcpy`, `std::memcmp`, `std::memset`
 
 #include <array>       // `std::array`
 #include <atomic>      // `std::atomic`
@@ -51,6 +52,21 @@ struct dense_keyed_ids {
 
     auto operator()(dense_node_id_t node_id) const noexcept { return (*keys)[node_id]; }
 };
+
+/** The value row @p key addresses: an integer key is its own row, and a @c uuid_t parks it big-endian in
+ *  its low eight bytes, so a set high byte addresses past every table. */
+template <typename key_type_>
+std::size_t dense_key_row(key_type_ const& key) noexcept {
+    if constexpr (std::is_integral_v<key_type_>) return static_cast<std::size_t>(key);
+    else {
+        u64_t high = 0, low = 0;
+        for (std::size_t byte = 0; byte != 8; ++byte) {
+            high = high << 8 | static_cast<u8_t>(key.bytes[byte]);
+            low = low << 8 | static_cast<u8_t>(key.bytes[8 + byte]);
+        }
+        return high ? std::numeric_limits<std::size_t>::max() : static_cast<std::size_t>(low);
+    }
+}
 
 /**
  *  @brief The sharded index: same-geometry CPU-resident shards viewed as one.
@@ -497,7 +513,7 @@ struct dense_ram_indexes {
         // ForkUnion runs every task or none, so a refused fan-out releases the claims whole.
         if (status_t const fanned = executor.for_tasks(rows, insert_row); failed(fanned)) return {result, fanned};
 
-        // Every row dispensed an id, so the claim is spent rather than released.
+        // Every row dispensed an ID, so the claim is spent rather than released.
         claim.consume();
 
         for (traversal_t const& traversal : traversals) {
@@ -692,6 +708,21 @@ struct dense_ram_indexes {
     }
 
     /**
+     *  @brief The batched @ref search under a lightning indexer, sharing its whole contract: every
+     *      distance is `1 −` its key's indexer score against the heads of its query row.
+     *
+     *  @param[in] heads The indexer heads of every query row.
+     */
+    expected<search_result_t> search(vectors_view_t queries, dense_indexer_heads<scalar_t> const& heads,
+                                     executor_t& executor, search_config_t config, std::size_t wanted,
+                                     std::span<key_t> keys, std::span<distance_t> distances,
+                                     std::span<std::size_t> counts) noexcept
+        requires(kernel_kind_ == nk_kernel_dot_k && !nk::is_integral_dtype<scalar_t>())
+    {
+        return search_rows_(queries, heads, executor, config, wanted, keys, distances, counts, dummy_predicate_t {});
+    }
+
+    /**
      *  @brief The filtered sibling of the batched @ref search, sharing its whole contract.
      *
      *  @param[in] predicate The per-key admission filter; @c dummy_predicate_t admits everything and
@@ -702,37 +733,7 @@ struct dense_ram_indexes {
     expected<search_result_t> search_if(vectors_view_t queries, executor_t& executor, search_config_t config,
                                         std::size_t wanted, std::span<key_t> keys, std::span<distance_t> distances,
                                         std::span<std::size_t> counts, predicate_type_&& predicate) noexcept {
-        std::size_t const queries_count = queries.extent(0);
-        if (shards_.empty()) return {{}, status_t::uninitialized_k};
-        if (counts.size() != queries_count || keys.size() < queries_count * wanted ||
-            distances.size() < queries_count * wanted)
-            return {{}, status_t::config_mismatch_k};
-        if (!queries_count) return {{}, status_t::success_k};
-
-        auto search_row = [&](std::size_t query, std::size_t, traversal_t& traversal) noexcept {
-            std::span<key_t> const keys_row {keys.data() + query * wanted, wanted};
-            std::span<distance_t> const distances_row {distances.data() + query * wanted, wanted};
-            std::size_t found_count = 0;
-            status_t refusal = status_t::success_k;
-            for (shard_t const& one : shards_) {
-                expected<search_result_t> found {};
-                if constexpr (std::is_same_v<std::decay_t<predicate_type_>, dummy_predicate_t>)
-                    found = one.index->search(queries.row(query).as_vector(), traversal, config);
-                else {
-                    auto keyed = [&](dense_node_id_t node) noexcept { return predicate(one.keys[node]); };
-                    found = one.index->search_if(queries.row(query).as_vector(), keyed, traversal, config);
-                }
-                if (!found) {
-                    refusal = found.status;
-                    break;
-                }
-                found_count = merge_search_results(to_span(traversal.results), one.keys, keys_row, distances_row, //
-                                                   found_count);
-            }
-            counts[query] = found_count;
-            return refusal;
-        };
-        return for_each_row_(queries_count, executor, config, search_row, counts);
+        return search_rows_(queries, dummy_heads_t {}, executor, config, wanted, keys, distances, counts, predicate);
     }
 
     /**
@@ -829,6 +830,68 @@ struct dense_ram_indexes {
         ranked.value.count = reduce(to_span(row_keys), to_span(row_distances), to_span(row_counts), keys, scores,
                                     counts);
         return ranked;
+    }
+
+    /**
+     *  @brief Softmax attention of every query row over its k most relevant keys across the shards: the
+     *      merged @ref search ranking picks them, and one softmax per row gathers their value rows by key.
+     *
+     *  @param[in] queries The query rows, one walk per shard each.
+     *  @param[inout] executor The threads and their scratch; one query row occupies one at a time.
+     *  @param[in] config The per-shard walk configuration, applied uniformly.
+     *  @param[in] values The value rows, stored like the keys, each key addressing the row
+     *      @ref dense_key_row names.
+     *  @param[in] score_scale The factor turning a dot into a logit.
+     *  @param[out] attended The picked keys, @b [queries,k] row-major, nearest first.
+     *  @param[out] logits The picks' logits, parallel to @p attended.
+     *  @param[out] counts Picks landed per query row, at most k.
+     *  @param[out] outputs The attended rows, @b [queries,values.extent(1)] row-major.
+     *  @param[out] carry Each row's softmax state, one per query row; empty skips it.
+     *
+     *  A pick addressing a row past @c values.extent(0) refuses its query row with @c shape_mismatch_k.
+     */
+    expected<search_result_t> attend(vectors_view_t queries, executor_t& executor, search_config_t config,
+                                     vectors_view_t values, f32_t score_scale, std::span<key_t> attended,
+                                     std::span<f32_t> logits, std::span<std::size_t> counts, std::span<f32_t> outputs,
+                                     std::span<dense_softmax_state_t> carry) noexcept
+        requires(kernel_kind_ == nk_kernel_dot_k)
+    {
+        std::size_t const rows_count = queries.extent(0), columns = values.extent(1);
+        if (shards_.empty()) return {{}, status_t::uninitialized_k};
+        if (counts.size() != rows_count || logits.size() != attended.size() ||
+            (rows_count && attended.size() % rows_count) || outputs.size() < rows_count * columns ||
+            (!carry.empty() && carry.size() != rows_count))
+            return {{}, status_t::config_mismatch_k};
+        if (!rows_count) return {{}, status_t::success_k};
+        std::size_t const wanted = attended.size() / rows_count;
+
+        auto attend_row = [&](std::size_t row, std::size_t, traversal_t& traversal) noexcept {
+            std::span<key_t> const keys_row {attended.data() + row * wanted, wanted};
+            std::span<f32_t> const logits_row {logits.data() + row * wanted, wanted};
+            std::size_t picked = 0;
+            for (shard_t const& one : shards_) {
+                auto const row_of = [&one](dense_node_id_t node) noexcept { return dense_key_row(one.keys[node]); };
+                dense_attend_prefetch_fold<scalar_t, cache_hints_type_, typename traversal_t::results_array_t,
+                                           decltype(row_of)>
+                    fold {values, traversal.results, wanted, row_of};
+                expected<search_result_t> const walked = one.index->search(queries.row(row).as_vector(), fold,
+                                                                           traversal, config);
+                if (!walked) return walked.status;
+                // The logits row holds the merged distances until the softmax inverts them.
+                picked = merge_search_results(to_span(traversal.results), one.keys, keys_row, logits_row, picked);
+            }
+            counts[row] = picked;
+            // The dot kernel's distance is `1 − dot`, so the logit inverts it rather than re-scoring the key.
+            for (f32_t& logit : logits_row.first(picked)) logit = score_scale * (1 - logit);
+            auto const [softmax, status] = dense_attend_picks<scalar_t, capability_>(
+                picked, [&](std::size_t pick) noexcept { return logits_row[pick]; },
+                [&](std::size_t pick) noexcept { return dense_key_row(keys_row[pick]); }, values,
+                std::span<f32_t> {outputs.data() + row * columns, columns});
+            if (failed(status)) return status;
+            if (!carry.empty()) carry[row] = softmax;
+            return status_t::success_k;
+        };
+        return for_each_row_(rows_count, executor, config, attend_row, counts);
     }
 
 #pragma endregion Search
@@ -1482,6 +1545,47 @@ struct dense_ram_indexes {
 
 #pragma region Search
 
+    /** The batched @ref search_if under @p heads, which only a @c dummy_predicate_t accompanies. */
+    template <typename heads_type_, typename predicate_type_>
+    expected<search_result_t> search_rows_(vectors_view_t queries, heads_type_ const& heads, executor_t& executor,
+                                           search_config_t config, std::size_t wanted, std::span<key_t> keys,
+                                           std::span<distance_t> distances, std::span<std::size_t> counts,
+                                           predicate_type_&& predicate) noexcept {
+        std::size_t const queries_count = queries.extent(0);
+        if (shards_.empty()) return {{}, status_t::uninitialized_k};
+        if (counts.size() != queries_count || keys.size() < queries_count * wanted ||
+            distances.size() < queries_count * wanted)
+            return {{}, status_t::config_mismatch_k};
+        if (!queries_count) return {{}, status_t::success_k};
+
+        auto search_row = [&](std::size_t query, std::size_t, traversal_t& traversal) noexcept {
+            std::span<key_t> const keys_row {keys.data() + query * wanted, wanted};
+            std::span<distance_t> const distances_row {distances.data() + query * wanted, wanted};
+            std::size_t found_count = 0;
+            status_t refusal = status_t::success_k;
+            for (shard_t const& one : shards_) {
+                expected<search_result_t> found {};
+                if constexpr (!std::is_same_v<heads_type_, dummy_heads_t>)
+                    found = one.index->search(queries.row(query).as_vector(), heads.row(query), traversal, config);
+                else if constexpr (std::is_same_v<std::decay_t<predicate_type_>, dummy_predicate_t>)
+                    found = one.index->search(queries.row(query).as_vector(), traversal, config);
+                else {
+                    auto keyed = [&](dense_node_id_t node) noexcept { return predicate(one.keys[node]); };
+                    found = one.index->search_if(queries.row(query).as_vector(), keyed, traversal, config);
+                }
+                if (!found) {
+                    refusal = found.status;
+                    break;
+                }
+                found_count = merge_search_results(to_span(traversal.results), one.keys, keys_row, distances_row, //
+                                                   found_count);
+            }
+            counts[query] = found_count;
+            return refusal;
+        };
+        return for_each_row_(queries_count, executor, config, search_row, counts);
+    }
+
     /** Claims @p executor, sizes one traversal per thread, runs @p per_row over every row with its
      *  thread and that thread's traversal, and sums the threads' telemetry & the rows' @p counts; a row
      *  that refuses stops itself, and the first refusal is the one kept. */
@@ -1978,9 +2082,11 @@ struct dense_ram_indexes {
  *  @brief External reader's cursor over the published rows of one @c dense_ram_indexes: keys
  *      and vectors in placement order, shard by shard.
  *
- *  Strictly read-only - the index is never written through, so readers never stall writers.
- *  A shard's watermark is snapshotted as the walk enters it, so a row once passed is never
- *  revisited, while a later shard may carry rows published after the walk began.
+ *  Pure position - every read names the index it reads, which must be the one the cursor was
+ *  opened on, so the cursor keeps no reference that could outlive it. Strictly read-only - the
+ *  index is never written through, so readers never stall writers. A shard's watermark is
+ *  snapshotted as the walk enters it, so a row once passed is never revisited, while a later
+ *  shard may carry rows published after the walk began.
  */
 template <typename indexes_type_>
 struct dense_ram_indexes_cursor {
@@ -1988,64 +2094,41 @@ struct dense_ram_indexes_cursor {
     using indexes_t = indexes_type_;
     using key_t = typename indexes_t::key_t;
     using scalar_t = typename indexes_t::scalar_t;
-    using vector_view_t = typename indexes_t::vector_view_t;
     using vectors_span_t = typename indexes_t::vectors_span_t;
 
-    /** @brief Binds the cursor and enters the first shard. */
-    explicit dense_ram_indexes_cursor(indexes_t const& indexes) noexcept : indexes_(indexes) { enter_(); }
+    /** Enters the first shard of @p indexes, the one every later @ref read must name. */
+    explicit dense_ram_indexes_cursor(indexes_t const& indexes) noexcept { enter_(indexes); }
 
-    dense_ram_indexes_cursor(dense_ram_indexes_cursor const&) = delete;
-    dense_ram_indexes_cursor& operator=(dense_ram_indexes_cursor const&) = delete;
-    dense_ram_indexes_cursor(dense_ram_indexes_cursor&&) = default;
-    dense_ram_indexes_cursor& operator=(dense_ram_indexes_cursor&&) = delete;
-
-    /** @brief @c true while the cursor points at a readable row. */
-    explicit operator bool() const noexcept { return shard_ < indexes_.shards_.size(); }
-    /** @brief The current row's key; meaningless past the end. */
-    key_t key() const noexcept { return indexes_.shards_[shard_].keys[node_]; }
-    /** @brief Immutable view of the current row's vector; meaningless past the end. */
-    vector_view_t vector() const noexcept { return indexes_.shards_[shard_].index->vector(node_); }
-    /** @brief The walked index. */
-    indexes_t const& indexes() const noexcept { return indexes_; }
-
-    /** @brief Moves to the next row below the shard's snapshot, or into the next shard. */
-    dense_ram_indexes_cursor& operator++() noexcept {
-        if (++node_ != visible_) return *this;
-        ++shard_;
-        enter_();
-        return *this;
-    }
-    dense_ram_indexes_cursor operator++(int) = delete;
-
-    /**
-     *  @brief Copies up to @p keys.size() rows into @p keys - and their vectors in the stored
-     *      scalar type into @p vectors, unless it holds no rows - advancing past them and
-     *      reporting the rows written. An export wanting vectors must offer at least as many
-     *      rows as @p keys, each wide enough for a stored row, or nothing is read.
-     */
-    std::size_t read(std::span<key_t> keys, vectors_span_t vectors) noexcept {
+    /** Copies up to @p keys.size() rows of @p indexes into @p keys - and their vectors in the stored scalar type
+     *  into @p vectors, unless it holds no rows - advancing past them and reporting the rows written. An export
+     *  wanting vectors must offer at least as many rows as @p keys, each wide enough for a stored row, or nothing
+     *  is read. */
+    std::size_t read(indexes_t const& indexes, std::span<key_t> keys, vectors_span_t vectors) noexcept {
         bool const with_vectors = vectors.extent(0) != 0;
-        std::size_t const row_values = indexes_.row_values_();
+        std::size_t const row_values = indexes.row_values_();
         if (with_vectors && (vectors.extent(0) < keys.size() || vectors.extent(1) < row_values)) return 0;
         std::size_t const row_bytes = row_values * sizeof(scalar_t);
         std::size_t written = 0;
-        for (; written != keys.size() && *this; ++written, ++*this) {
-            keys[written] = key();
+        for (; written != keys.size() && shard_ < indexes.shards_.size(); ++written) {
+            auto const& shard = indexes.shards_[shard_];
+            keys[written] = shard.keys[node_];
             if (with_vectors)
-                std::memcpy(vectors.row(written).as_vector().byte_data(), vector().byte_data(), row_bytes);
+                std::memcpy(vectors.row(written).as_vector().byte_data(), shard.index->vector(node_).byte_data(),
+                            row_bytes);
+            if (++node_ != visible_) continue;
+            ++shard_;
+            enter_(indexes);
         }
         return written;
     }
 
   private:
     /** @brief Snapshots the current shard's watermark, skipping shards with nothing published. */
-    void enter_() noexcept {
-        for (node_ = 0; shard_ < indexes_.shards_.size(); ++shard_)
-            if ((visible_ = static_cast<dense_node_id_t>(indexes_.shards_[shard_].index->size())) != 0) return;
+    void enter_(indexes_t const& indexes) noexcept {
+        for (node_ = 0; shard_ < indexes.shards_.size(); ++shard_)
+            if ((visible_ = static_cast<dense_node_id_t>(indexes.shards_[shard_].index->size())) != 0) return;
     }
 
-    /** @brief The walked index - never written through. */
-    indexes_t const& indexes_;
     /** @brief The shard being read, positional in placement order; the shard count past the end. */
     std::size_t shard_ = 0;
     /** @brief The current row inside that shard. */

@@ -170,18 +170,25 @@ struct forkunion_executor_t {
         return {cores - cores / idle_cores_denominator_k, status_t::success_k};
     }
 
-    /** Spawns @p threads over @p topology and takes the pool; zero means @ref default_threads. */
+    /** Spawns @p threads over @p topology and takes the pool; zero means @ref default_threads. One
+     *  thread, or a build without OS threads, is the caller itself. */
     static expected<forkunion_executor_t> spawn(fu_topology_t topology, std::size_t threads) noexcept {
         if (!threads) {
             auto const [count, status] = default_threads(topology);
             if (failed(status)) return {{}, status};
             threads = count;
         }
-        fu_pool_t pool = nullptr;
-        if (fu_pool_new(pool_name_k, fu_capabilities_all_k, &pool) != fu_success_k) return {{}, status_t::bad_alloc_k};
-        fu_caller_exclusivity_t const exclusivity = (fu_comptime_capabilities() & fu_capability_os_threads_k)
+        fu_caller_exclusivity_t const exclusivity = (threads != 1 &&
+                                                     (fu_comptime_capabilities() & fu_capability_os_threads_k))
                                                         ? fu_caller_exclusive_k
                                                         : fu_caller_inclusive_k;
+        // A flat pool, unlike a distributed one, never pins the caller's own thread.
+        fu_capabilities_t const capabilities =
+            exclusivity == fu_caller_inclusive_k
+                ? static_cast<fu_capabilities_t>(fu_capabilities_all_k & ~fu_capability_place_memory_on_domain_k)
+                : fu_capabilities_all_k;
+        fu_pool_t pool = nullptr;
+        if (fu_pool_new(pool_name_k, capabilities, &pool) != fu_success_k) return {{}, status_t::bad_alloc_k};
         if (fu_pool_spawn(topology, pool, threads, exclusivity) != fu_success_k)
             return fu_pool_delete(pool), expected<forkunion_executor_t> {{}, status_t::uninitialized_k};
         return acquire(topology, pool);

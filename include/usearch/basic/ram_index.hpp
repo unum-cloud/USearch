@@ -17,7 +17,7 @@
 #include <cstdint> // `std::uint64_t`
 
 #include <atomic>       // `std::memory_order`
-#include <limits>       // `std::numeric_limits` - the id-space ceiling in `reserve`
+#include <limits>       // `std::numeric_limits` - the ID-space ceiling in `reserve`
 #include <memory>       // `std::allocator`, `std::allocator_traits`
 #include <mutex>        // `std::unique_lock` - the try-only unique side's guard
 #include <shared_mutex> // `std::shared_lock` - the mutators' guard
@@ -443,7 +443,7 @@ struct basic_traversal_context {
     /** Pseudo-random generator for picking traversal starting points. */
     splitmix64_t random_generator;
 
-    /** Ids of one staged fan-out - the batch a single metric round scores; also
+    /** IDs of one staged fan-out - the batch a single metric round scores; also
      *  the flood stack of `health` and the row copies of back-linking. */
     scratch_buffer<node_id_type_> staged_ids;
 
@@ -474,7 +474,7 @@ struct basic_columns_extents_t {
     /** Published nodes, the row count of every node-sized column. */
     std::size_t nodes = 0;
 
-    /** Neighbor ids across every row. */
+    /** Neighbor IDs across every row. */
     std::size_t neighbors = 0;
 
     /** Codec bytes across every value. */
@@ -491,10 +491,10 @@ struct basic_columns {
     /** One key per row. */
     std::span<key_type_> keys;
 
-    /** @b nodes+1 sums of neighbor ids, from zero. */
+    /** @b nodes+1 sums of neighbor IDs, from zero. */
     std::span<offset_type_> neighbor_offsets;
 
-    /** Every row's neighbor ids, back to back. */
+    /** Every row's neighbor IDs, back to back. */
     std::span<node_id_type_> neighbor_ids;
 
     /** @b nodes+1 sums of codec bytes, from zero. */
@@ -585,7 +585,7 @@ struct basic_ram_index {
      *  trimmed by manual linking - with its own @c size() as the live degree. */
     struct node_t {
 
-        /** Mutable so id-addressed const readers, like @c degree_of, may briefly
+        /** Mutable so ID-addressed const readers, like @c degree_of, may briefly
          *  hold it - locking never mutates the record's logical state. */
         mutable basic_mutex<wait_t, atomic_ref_template_> mutex;
         value_t value {};
@@ -863,7 +863,7 @@ struct basic_ram_index {
         return status;
     }
 
-    /** Removals are deleted, not pending: id immortality is what keeps every
+    /** Removals are deleted, not pending: ID immortality is what keeps every
      *  reader's stale ID valid. */
     status_t remove(std::span<key_t const>, traversal_context_t&) noexcept = delete;
 
@@ -1048,7 +1048,7 @@ struct basic_ram_index {
         return key_map_.find(key);
     }
 
-    /** Invokes @p callback with the id of every published node under @p key -
+    /** Invokes @p callback with the ID of every published node under @p key -
      *  wait-free, concurrent with everything; a no-op before the first @c reserve. */
     template <typename callback_type_>
     void find_each(key_t const& key, callback_type_&& callback) const noexcept {
@@ -1076,7 +1076,7 @@ struct basic_ram_index {
         /** @c success_k, or why the report could not be taken. */
         status_t status = status_t::success_k;
 
-        /** Forward-reachability components, flooded in id order - equal to weak
+        /** Forward-reachability components, flooded in ID order - equal to weak
          *  components whenever back-linking has kept the edges reciprocal. */
         std::size_t connected_components = 0;
 
@@ -1881,12 +1881,12 @@ struct basic_ram_index {
      *  never writes and the count never overshoots. */
     alignas(default_alignment_k) std::size_t claimed_count_ {0};
 
-    /** Node-id dispenser; ids are claimed after the walk, right before publication.
+    /** Node-ID dispenser; IDs are claimed after the walk, right before publication.
      *  Its per-insert RMW gets its own line, so it never invalidates the watermark line
      *  every search snapshots. */
     alignas(default_alignment_k) node_id_t next_dispensed_id_ {0};
 
-    /** The visibility watermark: every id strictly below it is published. */
+    /** The visibility watermark: every ID strictly below it is published. */
     alignas(default_alignment_k) node_id_t last_visible_id_ {0};
 
     /** Key → ID multimap, sized by @c reserve. */
@@ -1938,7 +1938,7 @@ struct basic_ram_cursor {
           visible_count_(atomic_ref<node_id_t const>(index.last_visible_id_).load(watermark_order_k)),
           current_(visible_count_) {}
 
-    /** Ids strictly below this snapshot are readable through this cursor. */
+    /** IDs strictly below this snapshot are readable through this cursor. */
     node_id_t visible_count() const noexcept { return visible_count_; }
 
     /** Widens the snapshot to admit nodes published since; a cursor standing past the
@@ -1976,7 +1976,7 @@ struct basic_ram_cursor {
         return status_t::success_k;
     }
 
-    /** Advances to the next published id, staging its row; past the last one the
+    /** Advances to the next published ID, staging its row; past the last one the
      *  cursor turns false. A staging refusal parks on the new ID with an empty row -
      *  a later @c seek to the same ID retries the staging. */
     basic_ram_cursor& operator++() noexcept {
@@ -2015,10 +2015,10 @@ struct basic_ram_cursor {
     /** The private copy of the current node's row - @c follow's ground truth. */
     growing_buffer<node_id_t, allocator_t> staged_row_;
 
-    /** This cursor's watermark snapshot; ids strictly below it are readable. */
+    /** This cursor's watermark snapshot; IDs strictly below it are readable. */
     node_id_t visible_count_;
 
-    /** The current id, or @c visible_count_ when past the end. */
+    /** The current ID, or @c visible_count_ when past the end. */
     node_id_t current_;
 };
 

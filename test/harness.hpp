@@ -24,7 +24,7 @@
 #include <cstdlib> // `std::malloc`, `std::free`, `std::abort`, `std::getenv`, `std::exit`
 #include <cstring> // `std::memset` - the scribble over a freed block
 
-#include <algorithm>    // `std::sort`, `std::unique` - the dispensed-id density check
+#include <algorithm>    // `std::sort`, `std::unique` - the dispensed-ID density check
 #include <array>        // `std::array` - one latent point of the sign sketches
 #include <atomic>       // `std::atomic`
 #include <charconv>     // `std::from_chars` - the seed
@@ -33,7 +33,7 @@
 #include <optional>     // `std::optional` - the settings readers
 #include <random>       // `std::random_device` - a drawn seed
 #include <regex>        // `std::regex`, `std::regex_search` - the filter
-#include <span>         // `std::span` - the dispensed-id density check
+#include <span>         // `std::span` - the dispensed-ID density check
 #include <string_view>  // `std::string_view` - the settings readers
 #include <system_error> // `std::errc`
 #include <thread>       // `std::this_thread::yield`, `std::this_thread::sleep_for`
@@ -202,7 +202,7 @@ constexpr u64_t stream_key(u64_t seed, std::string_view name, u64_t index = 0) n
 
 #pragma endregion Settings
 
-/** Ids dispensed to racing lanes must land dense & duplicate-free: sorted in
+/** IDs dispensed to racing lanes must land dense & duplicate-free: sorted in
  *  place, unique, and running from @p first_id through the half-open bound
  *  @p first_id plus the ID count. */
 template <typename node_id_type_>
@@ -237,7 +237,7 @@ template <typename condition_type_>
     return false;
 }
 
-/** The reader-lane invariants over one search's scored results: every id below
+/** The reader-lane invariants over one search's scored results: every ID below
  *  the watermark sampled after the search, distances ascending, the pool bound
  *  honored. Answers the violation count silently - racing lanes add it to their
  *  shared counter, since printing from inside a race would interleave & flood - and

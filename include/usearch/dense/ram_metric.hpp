@@ -3992,6 +3992,41 @@ template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype sca
                                     moments_of<scalar_>(candidates_norms), next_candidates, hints);
 }
 
+#pragma region Query Corrections
+
+/** Without heads, every node keeps the score the kit gave it. */
+template <nk_capability_t capability_, typename scalar_type_, typename node_id_type_, typename dot_type_,
+          std::size_t fan_out_>
+void dense_rescore(dummy_heads_t, nk::vector_view<scalar_type_>, std::array<node_id_type_, fan_out_> const&,
+                   std::array<nk::vector_view<scalar_type_>, fan_out_> const&, dense_scores<dot_type_, fan_out_>&,
+                   std::size_t) noexcept {}
+
+/** Replaces each scored dot with `Σₕ wₕ·ReLU(qₕ·k)` and its distance with `1 − score`. The heads are those of
+ *  the one query row being walked. */
+template <nk_capability_t capability_, typename scalar_type_, typename node_id_type_, typename dot_type_,
+          std::size_t fan_out_>
+void dense_rescore(dense_indexer_heads<scalar_type_> const& indexer, nk::vector_view<scalar_type_>,
+                   std::array<node_id_type_, fan_out_> const&,
+                   std::array<nk::vector_view<scalar_type_>, fan_out_> const& keys,
+                   dense_scores<dot_type_, fan_out_>& scores, std::size_t count) noexcept {
+    static_assert(!nk::is_integral_dtype<scalar_type_>(), "Indexer scoring needs floating-point keys");
+    std::array<dot_type_, fan_out_> indexed {};
+    for (std::size_t head = 0; head != indexer.heads.extent(0); ++head) {
+        dense_scores<dot_type_, fan_out_> const head_scores =
+            usearch::scores<nk_kernel_dot_k, capability_, scalar_type_>(
+                indexer.heads.row(head).as_vector(), no_norms_t {}, keys, std::array<no_norms_t, fan_out_> {});
+        dot_type_ const weight = dot_type_(indexer.weights(0, head));
+        for (std::size_t lane = 0; lane != count; ++lane)
+            indexed[lane] += weight * max_of(head_scores.dots[lane], dot_type_ {});
+    }
+    for (std::size_t lane = 0; lane != count; ++lane) {
+        scores.dots[lane] = indexed[lane];
+        scores.distances[lane] = 1 - indexed[lane];
+    }
+}
+
+#pragma endregion Query Corrections
+
 /** Empty tile kit: the (kernel, scalar) pair has no matrix-engine backend on this
  *  target, so eager refinement stays unavailable and callers keep the lazy 4-way loops. */
 struct no_tiles_kit_t {

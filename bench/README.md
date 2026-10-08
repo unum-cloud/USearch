@@ -17,7 +17,6 @@ The indexer family loads a saved single index and measures how much of a lightni
 - `usearch_bench_dense_ram_index` builds one `dense_ram_index` on one memory domain and isolates kernel kits, wait instructions, connectivity and expansion, per-thread staging and latency percentiles.
 - `usearch_bench_dense_ram_indexes` builds one `dense_ram_indexes` over every memory domain and isolates what the C interface drives: admission, rotation across shards, batched verbs and SafeGraphs checkpoints.
 - `usearch_bench_dense_vram_index` builds one `dense_vram_index` on one device and isolates batch-per-launch build and search, the kit generation ceiling and managed-memory planes.
-- `usearch_bench_attention` loads one `dense_ram_index` that `usearch_bench_dense_ram_index --save` built over an indexer's keys and isolates walks scored by `dense_indexer_query`, `--proxy` navigation and exactly scanned `--hubs`.
 
 Each retrieval binary prints a `Machine` block, an `Insertions` block and a `Queries` block to standard output and nothing else, so a run is its transcript.
 The `Insertions` block reports the wall time, the throughput in IPS, the distances computed with the shares spent in refinement, the visited members and the restarts.

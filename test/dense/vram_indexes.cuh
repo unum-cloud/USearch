@@ -78,6 +78,49 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
     return failures;
 }
 
+/** The VRAM reading of the sharded indexer search, keys equal to their rows: every shard walks the same queries
+ *  under the same heads with a pool as wide as the index, so the merged top of every query is the oracle's. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+    requires vram_indexes<indexes_type_>
+std::size_t test_dense_indexes_indexer_search(u64_t seed) {
+    using scalar_t = typename indexes_type_::scalar_t;
+    if constexpr (kernel_ != nk_kernel_dot_k || nk::is_integral_dtype<scalar_t>()) return 0;
+    else {
+        using key_t = typename indexes_type_::key_t;
+        constexpr std::size_t rows_count = dense_thread_nodes_k, queries_count = 4, wanted = 16;
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        std::size_t failures = 0;
+
+        dense_indexes_executor<indexes_type_> driver;
+        if (failed(driver.status)) return failures + expect(false);
+        indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+        failures += expect(succeeded(driver.place_shards(indexes)));
+        failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
+        auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_indexer"));
+        std::array<key_t, rows_count> keys;
+        for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(row);
+        failures += expect(
+            succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
+
+        auto const queries = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
+        dense_indexer_inputs<scalar_t> const inputs = dense_make_indexer_inputs(vectors.view(), queries_count);
+        typename indexes_type_::search_config_t const exhaustive {rows_count, wanted};
+        std::vector<key_t> found_keys(queries_count * wanted);
+        std::vector<dense_distance_t> found_distances(queries_count * wanted);
+        std::array<std::size_t, queries_count> counts;
+        failures += expect(
+            succeeded(indexes
+                          .search(queries, inputs.heads(), driver.executor, exhaustive, wanted, std::span {found_keys},
+                                  std::span {found_distances}, std::span {counts})
+                          .status));
+        for (std::size_t query = 0; query != queries_count; ++query)
+            failures += dense_expect_indexer_matches(
+                inputs, query, std::span<key_t const> {found_keys.data() + query * wanted, counts[query]},
+                std::span<dense_distance_t const> {found_distances.data() + query * wanted, counts[query]});
+        return failures;
+    }
+}
+
 /** Composes one (dtype, kernel) cell's sharded suite over device zero, skipping it
  *  where no device answers. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
@@ -100,6 +143,7 @@ std::size_t test_cuda_indexes_configuration(char const* name, u64_t seed) {
     failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_indexer_search<indexes_t, kernel_>(seed);
     return report(name, failures_count);
 }
 

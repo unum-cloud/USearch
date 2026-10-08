@@ -194,7 +194,7 @@ enum class [[nodiscard]] status_t : int {
     /** Neither success nor a named failure was reported - a defect, not a state. */
     internal_k = usearch_status_internal_k,
 
-    /** The structure reached a hard design ceiling, like the 2^32 id space; retrying can't help. */
+    /** The structure reached a hard design ceiling, like the 2^32 ID space; retrying can't help. */
     overflow_k = usearch_status_overflow_k,
 
     /** The operation requires a prior successful @c reserve() -like initialization call. */
@@ -373,7 +373,7 @@ struct indexed_range {
     constexpr iterator end() const noexcept { return {owner, count}; }
 };
 
-/** Moves neighbor IDs between id spaces: an ID inside @p source_range lands at
+/** Moves neighbor IDs between ID spaces: an ID inside @p source_range lands at
  *  @c id-source_range.first+shift, every other ID folds onto @p sentinel, which a walk
  *  reads as naming no node. */
 template <std::unsigned_integral id_type_>
@@ -865,7 +865,7 @@ struct standard_atomic_ref<value_type_ const> {
     std::atomic_ref<value_type_> word_;
 };
 
-/** The compiled-out default for optional callbacks, like an insertion's assigned-id
+/** The compiled-out default for optional callbacks, like an insertion's assigned-ID
  *  observer: accepts any arguments and does nothing. */
 struct dummy_callback_t {
     template <typename... args_types_>

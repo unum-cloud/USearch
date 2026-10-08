@@ -766,7 +766,7 @@ struct checkpoint_assignment_t {
     /** The part the rows come from. */
     std::size_t part = 0;
 
-    /** The part-local rows taken, in the part's own id space. */
+    /** The part-local rows taken, in the part's own ID space. */
     iota_view<std::size_t> rows;
 };
 
@@ -998,7 +998,7 @@ struct safegraphs_index_layout_t {
     /** A regular key column, a value column shaped by the codec, and ragged neighbors. */
     safegraphs_header_t header;
 
-    /** Bytes of the data segment, from the key column to the last neighbor id. */
+    /** Bytes of the data segment, from the key column to the last neighbor ID. */
     std::size_t segment_bytes = 0;
 
     /** Bytes of the whole monolith, header segment included. */
@@ -1214,7 +1214,7 @@ struct safegraphs_index_metadata_t {
     /** Nodes the monolith holds. */
     std::size_t nodes = 0;
 
-    /** Neighbor ids across every node. */
+    /** Neighbor IDs across every node. */
     std::size_t neighbors = 0;
 
     /** Value bytes across every node - what a tape must hold to load them. */

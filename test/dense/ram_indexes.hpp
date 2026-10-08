@@ -68,7 +68,9 @@ static std::size_t test_configuration(char const* name, u64_t seed) {
     failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_growth<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_indexer_search<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_attend<indexes_t, kernel_>(seed);
     return report(name, failures_count);
 }
 

@@ -12,6 +12,8 @@
 #include <limits>    // `std::numeric_limits` - the reducer's hit ceiling & unscored rows
 #include <span>      // `std::span` - the reducer's rankings & outputs
 
+#include <numkong/tensor.hpp> // `nk::matrix_view` - the indexer heads
+
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the reducer's staging
 #include "usearch/utilities/ram_sorts.hpp"   // `radix_group` - the reducer's grouping
@@ -151,6 +153,35 @@ struct dense_index_header_t {
     u32_t node_count;
 };
 static_assert(sizeof(dense_index_header_t) == 32 && std::is_trivially_copyable_v<dense_index_header_t>);
+
+#pragma region Indexer Heads
+
+/** A lightning indexer, as DeepSeek V4 and GLM 5 pick sparse-attention keys: a node scores `Σₕ wₕ·ReLU(qₕ·k)`
+ *  against these heads, and its distance is `1 − score`, while the walk navigates by the query rows,
+ *  conventionally `Σₕ wₕ·qₕ`. */
+template <typename scalar_type_>
+struct dense_indexer_heads {
+
+    /** Every query's heads back to back, @b [queries·heads,dimensions], in the index's own dtype. */
+    nk::matrix_view<scalar_type_> heads;
+
+    /** The signed head weights with the model's scale folded in, @b [queries,heads]. */
+    nk::matrix_view<f32_t> weights;
+
+    /** The heads of query row @p query alone. */
+    dense_indexer_heads row(std::size_t query) const noexcept {
+        std::size_t const heads_count = weights.extent(1);
+        return {heads(nk::range(query * heads_count, (query + 1) * heads_count), nk::slice),
+                weights(nk::range(query, query + 1), nk::slice)};
+    }
+};
+
+/** The walks' default: no heads, so every node scores as the kit scored it. */
+struct dummy_heads_t {
+    dummy_heads_t row(std::size_t) const noexcept { return {}; }
+};
+
+#pragma endregion Indexer Heads
 
 /** One ranked hit while @c dense_maxsim_reducer folds a query, then one document's summed maxima. */
 template <typename key_type_>

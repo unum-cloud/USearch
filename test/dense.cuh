@@ -48,7 +48,6 @@
 #include "usearch/utilities/sanitizers.hpp"        // `assert_no_locks_held` - the racing threads' tail check
 #include "usearch/utilities/safegraphs_format.hpp" // `save_config_t`, `safegraphs_read_header` - the checkpoints' surface
 #include "usearch/dense/ram_metric.hpp"            // `usearch::distance`, `usearch::dense_norms` - the oracle's kernels
-#include "usearch/dense/ram_index.hpp"             // `dense_rotary_query`, `dense_indexer_query` - the query forms
 
 namespace unum::usearch::test {
 
@@ -1239,6 +1238,147 @@ std::size_t dense_expect_dot(dot_result_type_ found, dense_oracle_dot_t oracle) 
     return expect(std::fabs(static_cast<f64_t>(found) - oracle.dot) <= 1e-4 * oracle.magnitude + 1e-6);
 }
 
+/** Oracle dots of every query row against every stored row, row-major. */
+inline std::vector<dense_oracle_dot_t> dense_oracle_dots(std::vector<f32_t> const& widened_queries,
+                                                         std::vector<f32_t> const& widened_rows, std::size_t columns) {
+    std::size_t const queries_count = widened_queries.size() / columns, rows_count = widened_rows.size() / columns;
+    std::vector<dense_oracle_dot_t> dots(queries_count * rows_count);
+    for (std::size_t query = 0; query != queries_count; ++query)
+        for (std::size_t row = 0; row != rows_count; ++row)
+            dots[query * rows_count + row] = dense_widened_dot(widened_queries.data() + query * columns,
+                                                               widened_rows.data() + row * columns, columns);
+    return dots;
+}
+
+/** Varied value columns past the one-hot block, a multiple of eight so every packed kind fills whole bytes. */
+constexpr std::size_t dense_varied_columns_k = 24;
+
+/** One value table stored like the keys, beside the @c f32 widening the oracle weighs. Each row opens
+ *  with its own one-hot block, so an attended row reports the softmax weight of every pick. */
+template <typename scalar_type_>
+struct dense_attend_values {
+
+    /** Rows in the table, one per node. */
+    std::size_t rows;
+
+    /** Columns per row: the one-hot block, then the varied ones. */
+    std::size_t columns;
+
+    /** The rows as stored, back to back. */
+    std::vector<byte_t> stored;
+
+    /** The same rows widened to @c f32, row-major. */
+    std::vector<f32_t> widened;
+
+    /** Bytes of one stored row. */
+    std::size_t row_bytes() const noexcept { return columns * nk_dtype_bits(scalar_type_::dtype()) / 8; }
+
+    /** The table's view over @p data, wherever the stored rows were copied. */
+    nk::matrix_view<scalar_type_> view(byte_t const* data) const noexcept {
+        return {reinterpret_cast<scalar_type_ const*>(data), rows, columns};
+    }
+};
+
+/** A deterministic value table, rounded through @p scalar_type_ so the widening is what it stores. */
+template <typename scalar_type_>
+dense_attend_values<scalar_type_> dense_make_attend_values(std::size_t rows) {
+    std::size_t const columns = rows + dense_varied_columns_k, count = rows * columns;
+    std::vector<f32_t> source(count, 0);
+    for (std::size_t row = 0; row != rows; ++row) {
+        source[row * columns + row] = 1;
+        for (std::size_t column = rows; column != columns; ++column)
+            source[row * columns + column] = static_cast<f32_t>(3 * std::sin(0.37 * row + 0.11 * column));
+    }
+    dense_attend_values<scalar_type_> values {rows, columns, {}, std::vector<f32_t>(count)};
+    values.stored.resize(rows * values.row_bytes());
+    [[maybe_unused]] nk_status_t const narrowed = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
+        source.data(), nk_f32_k, values.stored.data(), scalar_type_::dtype(), count, nullptr);
+    [[maybe_unused]] nk_status_t const widened = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
+        values.stored.data(), scalar_type_::dtype(), values.widened.data(), nk_f32_k, count, nullptr);
+    assert(narrowed == nk_success_k && widened == nk_success_k && "The serial tier casts every dtype pair");
+    return values;
+}
+
+/** A logit scale spreading the oracle's dots over @c [-4,4], so no scored row's weight underflows. */
+inline f32_t dense_attend_scale(std::vector<dense_oracle_dot_t> const& dots) noexcept {
+    f64_t widest = 0;
+    for (dense_oracle_dot_t const oracle : dots) widest = std::fmax(widest, std::fabs(oracle.dot));
+    return widest > 0 ? static_cast<f32_t>(4 / widest) : 1;
+}
+
+/** The @c f32 widening of @p query, as one row. */
+template <typename scalar_type_>
+std::vector<f32_t> dense_widened_query(nk::vector_view<scalar_type_> query) {
+    return dense_widened_rows(
+        nk::matrix_view<scalar_type_> {reinterpret_cast<scalar_type_ const*>(query.byte_data()), 1, query.size()},
+        scalar_type_::dtype());
+}
+
+/** The attended @p output and its carry equal the f64 softmax over exactly the @p picks: logits are
+ *  `score_scale · ⟨query, key⟩` over the keys' rows, weights gather the values' rows of the same picks. */
+template <typename scalar_type_, typename row_type_>
+std::size_t dense_expect_attended_picks(nk::matrix_view<scalar_type_> keys, nk::matrix_view<scalar_type_> values,
+                                        nk::vector_view<scalar_type_> query, f32_t score_scale,
+                                        std::span<row_type_ const> picks, std::span<f32_t const> output,
+                                        dense_softmax_state_t state) {
+    std::size_t const columns = values.extent(1);
+    std::size_t failures = expect(!picks.empty() && output.size() == columns);
+    for (row_type_ const pick : picks)
+        failures += expect(static_cast<std::size_t>(pick) < min_of(keys.extent(0), values.extent(0)));
+    if (failures) return failures;
+
+    std::vector<f32_t> const widened_query = dense_widened_query(query);
+    std::vector<f64_t> logits(picks.size());
+    f64_t maximum = std::numeric_limits<f64_t>::lowest(), partition = 0;
+    for (std::size_t pick = 0; pick != picks.size(); ++pick) {
+        std::size_t const row = static_cast<std::size_t>(picks[pick]);
+        std::vector<f32_t> const key = dense_widened_rows(keys(nk::range(row, row + 1), nk::slice),
+                                                          scalar_type_::dtype());
+        logits[pick] = score_scale * dense_widened_dot(widened_query.data(), key.data(), key.size()).dot;
+        maximum = std::fmax(maximum, logits[pick]);
+    }
+    std::vector<f64_t> expected(columns, 0);
+    for (std::size_t pick = 0; pick != picks.size(); ++pick) {
+        std::size_t const row = static_cast<std::size_t>(picks[pick]);
+        std::vector<f32_t> const value = dense_widened_rows(values(nk::range(row, row + 1), nk::slice),
+                                                            scalar_type_::dtype());
+        f64_t const weight = std::exp(logits[pick] - maximum);
+        partition += weight;
+        for (std::size_t column = 0; column != columns; ++column) expected[column] += weight * value[column];
+    }
+    for (std::size_t column = 0; column != columns; ++column)
+        failures += expect_near(output[column], expected[column] / partition);
+    failures += expect_near(state.maximum_score, maximum);
+    failures += expect_near(state.partition, partition);
+    return failures;
+}
+
+/** The @p picks are the exact top `picks.size()` rows of @p keys by `⟨query, key⟩`, as an exhaustive walk lands
+ *  them. */
+template <typename scalar_type_, typename row_type_>
+std::size_t dense_expect_top_logits(nk::matrix_view<scalar_type_> keys, nk::vector_view<scalar_type_> query,
+                                    std::span<row_type_ const> picks) {
+    std::size_t const rows_count = keys.extent(0);
+    std::size_t failures = expect(!picks.empty() && picks.size() <= rows_count);
+    if (failures) return failures;
+    std::vector<dense_oracle_dot_t> const dots = dense_oracle_dots(
+        dense_widened_query(query), dense_widened_rows(keys, scalar_type_::dtype()), keys.extent(1));
+    std::vector<f64_t> ranked(rows_count);
+    for (std::size_t row = 0; row != rows_count; ++row) ranked[row] = dots[row].dot;
+    std::sort(ranked.rbegin(), ranked.rend());
+    f64_t const threshold = ranked[picks.size() - 1];
+
+    std::vector<bool> seen(rows_count);
+    for (row_type_ const pick : picks) {
+        std::size_t const row = static_cast<std::size_t>(pick);
+        failures += expect(row < rows_count && !seen[row]);
+        if (row >= rows_count || seen[row]) continue;
+        seen[row] = true;
+        failures += expect(dots[row].dot + 1e-4 * dots[row].magnitude + 1e-6 >= threshold);
+    }
+    return failures;
+}
+
 /** The dot a walk reports for @p left against @p right. Test rows hold small integers, so every kernel and
  *  accumulation order lands it exactly, and the serial kernel stands in for every residency's. */
 template <typename scalar_type_>
@@ -1333,103 +1473,222 @@ std::size_t test_dense_multiply(make_index_type_ const& make_index, u64_t seed) 
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
-/** Rotary and indexer queries against independent @c f64 oracles. Keys sit pre-RoPE at positions far apart, and
- *  every pair a rotary @c multiply scores carries the dot of the query and key each rotated to its own position,
- *  whichever side of the query the key sits; every pair an indexer @c multiply scores carries `Σₕ wₕ·ReLU(qₕ·k)`. */
+/** Attention under an exhaustive walk against an @c f64 softmax over exactly its picks, every node ID its
+ *  stored row: the picks are the exact top k by logit, for every node and for fewer, and a short table or a
+ *  mismatched output refuses. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
     requires(!dense_device_resident<index_type_>)
-std::size_t dense_expect_corrected_scores(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
+std::size_t dense_expect_attend(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
-    using dot_result_t = typename index_type_::dot_result_t;
     std::size_t failures = 0;
-    std::size_t const nodes_count = dense_thread_nodes_k, rows_count = 4;
-    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k), rotary_dims = dimensions / 2;
-    f64_t const theta = 1e4;
+    std::size_t const nodes_count = dense_thread_nodes_k, queries_count = 4;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     index_type_ index = make_index(ledger);
     typename index_type_::dense_traversal_context_t context {{}};
-    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "corrected"));
+    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "attend"));
+    auto queries = make_vectors<scalar_t>(queries_count, dimensions, stream_key(seed, "attend", 1));
+    failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
+    dense_attend_values<scalar_t> const table = dense_make_attend_values<scalar_t>(nodes_count);
+    auto const values = table.view(table.stored.data());
+    std::vector<f32_t> output(table.columns, 1);
+    std::vector<dense_node_id_t> picks(nodes_count);
+    dense_softmax_state_t state;
+
+    // An empty index picks nothing: a zero row and an empty carry.
+    {
+        auto const [attended, status] = index.attend(queries.view().row(0).as_vector(), context, values, 1,
+                                                     std::span {picks}, std::span {output}, state);
+        failures += expect(status == status_t::success_k);
+        failures += expect_eq(attended.count, 0u);
+        failures += expect(std::all_of(output.begin(), output.end(), [](f32_t value) { return value == 0; }));
+        failures += expect(state.partition == 0);
+    }
+
+    std::vector<dense_node_id_t> assigned_ids(nodes_count);
+    if (failed(index.insert(vectors.view(), {assigned_ids.data(), nodes_count}, context).status))
+        return failures + expect(false);
+    failures += expect_contiguous_ids(std::span {assigned_ids}, 0);
+
+    f32_t const score_scale = dense_attend_scale(
+        dense_oracle_dots(dense_widened_rows(queries.view(), index_type_::vector_dtype_k),
+                          dense_widened_rows(vectors.view(), index_type_::vector_dtype_k), dimensions));
+    typename index_type_::search_config_t const exhaustive {
+        static_cast<typename index_type_::small_size_t>(nodes_count)};
+    // Logits over ±60 underflow most weights.
+    for (f32_t const scale : {score_scale, 15 * score_scale})
+        for (std::size_t const wanted : {nodes_count, std::size_t {16}})
+            for (std::size_t query = 0; query != queries_count; ++query) {
+                auto const row = queries.view().row(query).as_vector();
+                auto const [attended, status] = index.attend(row, context, values, scale,
+                                                             std::span {picks}.first(wanted), std::span {output}, state,
+                                                             exhaustive);
+                failures += expect(status == status_t::success_k);
+                failures += expect_eq(attended.count, wanted);
+                std::span<dense_node_id_t const> const landed {picks.data(), min_of(attended.count, wanted)};
+                failures += dense_expect_top_logits(vectors.view(), row, landed);
+                failures += dense_expect_attended_picks(vectors.view(), values, row, scale, landed,
+                                                        std::span<f32_t const> {output}, state);
+            }
+
+    auto const query = queries.view().row(0).as_vector();
+    auto const shortened = values(nk::range(std::size_t {0}, nodes_count - 1), nk::slice);
+    failures += expect(
+        index.attend(query, context, shortened, score_scale, std::span {picks}, std::span {output}, state).status ==
+        status_t::shape_mismatch_k);
+    failures += expect(index
+                           .attend(query, context, values, score_scale, std::span {picks},
+                                   std::span {output}.first(table.columns - 1), state)
+                           .status == status_t::config_mismatch_k);
+    return failures;
+}
+
+/** @ref dense_expect_attend for the dot kernel, then the ledger it left must balance; no other kernel offers it. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+    requires(!dense_device_resident<index_type_>)
+std::size_t test_dense_attend(make_index_type_ const& make_index, u64_t seed) {
+    if constexpr (kernel_ != nk_kernel_dot_k) return expect(!requires { &index_type_::attend; });
+    else {
+        allocation_ledger_t ledger;
+        std::size_t const failures = dense_expect_attend<index_type_, kernel_>(make_index, ledger, seed);
+        return failures + expect_eq(ledger.live_bytes.load(), 0);
+    }
+}
+
+/** What every indexer test feeds its index: zero-centered heads under signed weights, so the ReLU clamps some keys. */
+template <typename scalar_type_>
+struct dense_indexer_inputs {
+    static constexpr std::size_t heads_count_k = 3;
+
+    std::size_t dimensions = 0;
+
+    /** The stored rows widened to @c f32, row-major. */
+    std::vector<f32_t> widened;
+
+    /** Every query's heads widened, then as stored, @b [queries·heads,dimensions]. */
+    std::vector<f32_t> heads_widened;
+    std::vector<scalar_type_> heads_stored;
+
+    /** Every query's head weights, @b [queries,heads]. */
+    std::vector<f32_t> weights;
+
+    /** The indexer heads of every query and their weights. */
+    dense_indexer_heads<scalar_type_> heads() const noexcept {
+        return {{heads_stored.data(), heads_stored.size() / dimensions, dimensions},
+                {weights.data(), weights.size() / heads_count_k, heads_count_k}};
+    }
+};
+
+/** Builds @ref dense_indexer_inputs over @p vectors for @p queries_count queries. */
+template <typename scalar_type_>
+dense_indexer_inputs<scalar_type_> dense_make_indexer_inputs(nk::matrix_view<scalar_type_> vectors,
+                                                             std::size_t queries_count) {
+    using inputs_t = dense_indexer_inputs<scalar_type_>;
+    inputs_t inputs;
+    inputs.dimensions = vectors.extent(1);
+    inputs.widened = dense_widened_rows(vectors, scalar_type_::dtype());
+
+    // Every head is a stored row shifted from {0..7} to {-4..3}, exact in every floating kind.
+    std::size_t const heads_rows = queries_count * inputs_t::heads_count_k;
+    inputs.heads_widened.assign(inputs.widened.begin() + inputs.dimensions,
+                                inputs.widened.begin() + (heads_rows + 1) * inputs.dimensions);
+    for (f32_t& value : inputs.heads_widened) value -= 4;
+    inputs.heads_stored.resize(inputs.heads_widened.size());
+    [[maybe_unused]] nk_status_t const narrowed = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
+        inputs.heads_widened.data(), nk_f32_k, inputs.heads_stored.data(), scalar_type_::dtype(),
+        inputs.heads_stored.size(), nullptr);
+    assert(narrowed == nk_success_k && "The serial tier casts every dtype pair");
+    for (std::size_t query = 0; query != queries_count; ++query)
+        inputs.weights.insert(inputs.weights.end(), {0.75f, -0.5f, 0.25f});
+    return inputs;
+}
+
+/** `Σₕ wₕ·ReLU(qₕ·k)` of stored row @p row against the heads of query @p query, in @c f64. */
+template <typename scalar_type_>
+dense_oracle_dot_t dense_indexer_score(dense_indexer_inputs<scalar_type_> const& inputs, std::size_t query,
+                                       std::size_t row) noexcept {
+    using inputs_t = dense_indexer_inputs<scalar_type_>;
+    dense_oracle_dot_t score {0, 0};
+    for (std::size_t head = 0; head != inputs_t::heads_count_k; ++head) {
+        std::size_t const head_row = query * inputs_t::heads_count_k + head;
+        f64_t const weight = inputs.weights[head_row];
+        dense_oracle_dot_t const oracle = dense_widened_dot(inputs.heads_widened.data() + head_row * inputs.dimensions,
+                                                            inputs.widened.data() + row * inputs.dimensions,
+                                                            inputs.dimensions);
+        score.dot += weight * max_of(oracle.dot, f64_t {});
+        score.magnitude += std::fabs(weight) * oracle.magnitude;
+    }
+    return score;
+}
+
+/** Every returned distance is `1 −` the f64 indexer score of its row, and the rows are the exact top `rows.size()`. */
+template <typename scalar_type_, typename row_type_>
+std::size_t dense_expect_indexer_matches(dense_indexer_inputs<scalar_type_> const& inputs, std::size_t query,
+                                         std::span<row_type_ const> rows, std::span<dense_distance_t const> distances) {
+    std::size_t const rows_count = inputs.widened.size() / inputs.dimensions;
+    std::size_t failures = expect(!rows.empty() && rows.size() <= rows_count && distances.size() == rows.size());
+    if (failures) return failures;
+    std::vector<f64_t> ranked(rows_count);
+    for (std::size_t row = 0; row != rows_count; ++row) ranked[row] = dense_indexer_score(inputs, query, row).dot;
+    std::sort(ranked.rbegin(), ranked.rend());
+    f64_t const threshold = ranked[rows.size() - 1];
+
+    std::vector<bool> seen(rows_count);
+    for (std::size_t rank = 0; rank != rows.size(); ++rank) {
+        std::size_t const row = static_cast<std::size_t>(rows[rank]);
+        failures += expect(row < rows_count && !seen[row]);
+        if (row >= rows_count || seen[row]) continue;
+        seen[row] = true;
+        dense_oracle_dot_t const score = dense_indexer_score(inputs, query, row);
+        failures += dense_expect_dot(1 - static_cast<f64_t>(distances[rank]), score);
+        failures += expect(score.dot + 1e-4 * score.magnitude + 1e-6 >= threshold);
+    }
+    return failures;
+}
+
+/** Indexer search on one index under an exhaustive walk, every node addressing its own row. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+    requires(!dense_device_resident<index_type_>)
+std::size_t dense_expect_indexer_search(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
+    using scalar_t = typename index_type_::scalar_t;
+    std::size_t failures = 0;
+    std::size_t const nodes_count = dense_thread_nodes_k, queries_count = 4, wanted = 16;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    index_type_ index = make_index(ledger);
+    typename index_type_::dense_traversal_context_t context {{}};
+    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexer"));
     failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     std::vector<dense_node_id_t> assigned_ids(nodes_count);
     if (failed(index.insert(vectors.view(), {assigned_ids.data(), nodes_count}, context).status))
         return failures + expect(false);
     failures += expect_contiguous_ids(std::span {assigned_ids}, 0);
 
-    // Positions far apart, so the high table and both signs of the offset are exercised.
-    std::vector<u32_t> positions(nodes_count);
-    for (std::size_t node = 0; node != nodes_count; ++node) positions[node] = static_cast<u32_t>(node * 40'009);
-    std::size_t const pairs = rotary_dims / 2,
-                      high_rows = nodes_count * 40'009 / dense_rotary_phasors_t::low_rows_k + 1;
-    std::vector<dense_phasor_t> low(dense_rotary_phasors_t::low_rows_k * pairs), high(high_rows * pairs);
-    dense_rotary_phasors_t::fill(rotary_dims, theta, low, high);
-    dense_rotary_phasors_t const phasors {rotary_dims, low, high};
-
-    std::vector<f32_t> const widened = dense_widened_rows(vectors.view(), index_type_::vector_dtype_k);
-    auto rotated = [&](std::size_t row, std::size_t position) {
-        std::vector<f64_t> out(widened.begin() + row * dimensions, widened.begin() + (row + 1) * dimensions);
-        for (std::size_t pair = 0; pair != pairs; ++pair) {
-            f64_t const angle = static_cast<f64_t>(position) * std::pow(theta, -f64_t(pair) / f64_t(pairs));
-            f64_t const first = out[pair], second = out[pair + pairs];
-            out[pair] = first * std::cos(angle) - second * std::sin(angle);
-            out[pair + pairs] = second * std::cos(angle) + first * std::sin(angle);
-        }
-        return out;
-    };
+    dense_indexer_inputs<scalar_t> const inputs = dense_make_indexer_inputs(vectors.view(), queries_count);
     typename index_type_::search_config_t const exhaustive {
         static_cast<typename index_type_::small_size_t>(nodes_count)};
-    std::vector<dense_node_id_t> node_ids(nodes_count);
-    std::vector<dot_result_t> products(nodes_count);
-    for (std::size_t row = 0; row != rows_count; ++row) {
-        std::size_t const query_position = nodes_count * 40'009 / 2 + row;
-        dense_rotary_query<scalar_t> const query {vectors.view().row(row).as_vector(), query_position, phasors,
-                                                  positions};
-        auto const [multiplied, status] = index.multiply(query, std::span {node_ids}, std::span {products}, context,
-                                                         exhaustive);
+    std::vector<dense_node_id_t> node_ids(wanted);
+    std::vector<dense_distance_t> distances(wanted);
+    for (std::size_t query = 0; query != queries_count; ++query) {
+        auto const [searched, status] = index.search(vectors.view().row(query).as_vector(), inputs.heads().row(query),
+                                                     context, exhaustive);
         failures += expect(status == status_t::success_k);
-        std::vector<f64_t> const rotated_query = rotated(row, query_position);
-        for (std::size_t pair = 0; pair != min_of<std::size_t>(multiplied.count, nodes_count); ++pair) {
-            std::vector<f64_t> const rotated_key = rotated(node_ids[pair], positions[node_ids[pair]]);
-            failures += dense_expect_dot(products[pair],
-                                         dense_widened_dot(rotated_query.data(), rotated_key.data(), dimensions));
-        }
-    }
-
-    // Zero-centered heads, so the ReLU clamps some keys, under signed weights.
-    constexpr std::size_t heads_count = 3;
-    std::array<f32_t, heads_count> const weights {0.75f, -0.5f, 0.25f};
-    std::vector<f32_t> centered(widened.begin() + dimensions, widened.begin() + (heads_count + 1) * dimensions);
-    for (f32_t& value : centered) value -= 4;
-    std::vector<scalar_t> stored(centered.size());
-    [[maybe_unused]] nk_status_t const narrowed = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
-        centered.data(), nk_f32_k, stored.data(), index_type_::vector_dtype_k, centered.size(), nullptr);
-    assert(narrowed == nk_success_k && "The serial tier casts every dtype pair");
-    std::array<nk::vector_view<scalar_t>, heads_count> heads;
-    for (std::size_t head = 0; head != heads_count; ++head)
-        heads[head] = {stored.data() + head * dimensions, dimensions};
-    dense_indexer_query<scalar_t> const indexer {vectors.view().row(0).as_vector(), heads, weights};
-    auto const [multiplied, status] = index.multiply(indexer, std::span {node_ids}, std::span {products}, context,
-                                                     exhaustive);
-    failures += expect(status == status_t::success_k);
-    for (std::size_t pair = 0; pair != min_of<std::size_t>(multiplied.count, nodes_count); ++pair) {
-        dense_oracle_dot_t indexed {0, 0};
-        for (std::size_t head = 0; head != heads_count; ++head) {
-            dense_oracle_dot_t const oracle = dense_widened_dot(
-                centered.data() + head * dimensions, widened.data() + node_ids[pair] * dimensions, dimensions);
-            indexed.dot += weights[head] * max_of(oracle.dot, f64_t {});
-            indexed.magnitude += std::fabs(weights[head]) * oracle.magnitude;
-        }
-        failures += dense_expect_dot(products[pair], indexed);
+        std::size_t const kept = min_of(searched.count, wanted);
+        for (std::size_t rank = 0; rank != kept; ++rank)
+            node_ids[rank] = context.results[rank].node_id, distances[rank] = context.results[rank].distance;
+        failures += dense_expect_indexer_matches(inputs, query,
+                                                 std::span<dense_node_id_t const> {node_ids.data(), kept},
+                                                 std::span<dense_distance_t const> {distances.data(), kept});
     }
     return failures;
 }
 
-/** @ref dense_expect_corrected_scores for the dot kernel over floating-point keys, then the ledger must balance. */
+/** @ref dense_expect_indexer_search for the dot kernel over floating-point keys, then the ledger must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
     requires(!dense_device_resident<index_type_>)
-std::size_t test_dense_corrected_scores(make_index_type_ const& make_index, u64_t seed) {
+std::size_t test_dense_indexer_search(make_index_type_ const& make_index, u64_t seed) {
     if constexpr (kernel_ != nk_kernel_dot_k || nk::is_integral_dtype<typename index_type_::scalar_t>()) return 0;
     else {
         allocation_ledger_t ledger;
-        std::size_t const failures = dense_expect_corrected_scores<index_type_, kernel_>(make_index, ledger, seed);
+        std::size_t const failures = dense_expect_indexer_search<index_type_, kernel_>(make_index, ledger, seed);
         return failures + expect_eq(ledger.live_bytes.load(), 0);
     }
 }
@@ -2458,6 +2717,49 @@ std::size_t test_dense_indexes_products(u64_t seed) {
     return failures;
 }
 
+/** Sharded indexer search under an exhaustive walk: keys equal their rows, so the merged top of every query is
+ *  judged against the same @c f64 oracle whichever shard scored it. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+    requires ram_indexes<indexes_type_>
+std::size_t test_dense_indexes_indexer_search(u64_t seed) {
+    using scalar_t = typename indexes_type_::scalar_t;
+    if constexpr (kernel_ != nk_kernel_dot_k || nk::is_integral_dtype<scalar_t>()) return 0;
+    else {
+        using key_t = typename indexes_type_::key_t;
+        constexpr std::size_t rows_count = dense_thread_nodes_k, queries_count = 4, wanted = 16;
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        std::size_t failures = 0;
+
+        dense_indexes_executor<indexes_type_> driver;
+        if (failed(driver.status)) return failures + expect(false);
+        indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+        failures += expect(succeeded(place_shards(indexes)));
+        failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
+        auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_indexer"));
+        std::array<key_t, rows_count> keys;
+        for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(row);
+        failures += expect(
+            succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
+
+        nk::matrix_view<scalar_t> const queries = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
+        dense_indexer_inputs<scalar_t> const inputs = dense_make_indexer_inputs(vectors.view(), queries_count);
+        typename indexes_type_::search_config_t const exhaustive {
+            static_cast<typename indexes_type_::index_t::small_size_t>(rows_count)};
+        std::vector<key_t> found_keys(queries_count * wanted);
+        std::vector<dense_distance_t> found_distances(queries_count * wanted);
+        std::array<std::size_t, queries_count> counts;
+        auto const [searched, status] = indexes.search(queries, inputs.heads(), driver.executor, exhaustive, wanted,
+                                                       std::span {found_keys}, std::span {found_distances},
+                                                       std::span {counts});
+        failures += expect(succeeded(status));
+        for (std::size_t query = 0; query != queries_count; ++query)
+            failures += dense_expect_indexer_matches(
+                inputs, query, std::span<key_t const> {found_keys.data() + query * wanted, counts[query]},
+                std::span<dense_distance_t const> {found_distances.data() + query * wanted, counts[query]});
+        return failures;
+    }
+}
+
 /** Sharded MaxSim is a dot-kernel verb, so every other kernel has nothing to check. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
     requires(kernel_ != nk_kernel_dot_k)
@@ -2548,6 +2850,76 @@ std::size_t test_dense_indexes_maxsim(u64_t seed) {
 
     failures += expect(maxsim(queries(nk::range(std::size_t {0}, rows_per_query + 1), nk::slice), {}).status ==
                        status_t::shape_mismatch_k);
+    return failures;
+}
+
+/** Attention under an exhaustive walk against an @c f64 softmax over exactly its picks, rows keyed by their
+ *  own position: the merged picks are the exact top k across the shards, for every key and for fewer, each
+ *  logit is its pick's scaled dot, and a pick past the table refuses. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+    requires ram_indexes<indexes_type_>
+std::size_t test_dense_indexes_attend(u64_t seed) {
+    std::size_t failures = 0;
+    if constexpr (kernel_ == nk_kernel_dot_k) {
+        using index_t = typename indexes_type_::index_t;
+        using scalar_t = typename index_t::scalar_t;
+        using key_t = typename indexes_type_::key_t;
+
+        std::size_t const nodes_count = dense_thread_nodes_k, queries_count = 4;
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+        failures += expect(succeeded(place_shards(indexes)));
+        failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions}).status));
+
+        dense_indexes_executor<indexes_type_> driver;
+        if (failed(driver.status)) return failures + expect(false);
+        auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexes_attend"));
+        std::vector<key_t> keys(nodes_count);
+        for (std::size_t row = 0; row != nodes_count; ++row) keys[row] = static_cast<key_t>(row);
+        failures += expect(succeeded(
+            indexes.insert(std::span<key_t const> {keys.data(), nodes_count}, vectors.view(), driver.executor).status));
+
+        dense_attend_values<scalar_t> const table = dense_make_attend_values<scalar_t>(nodes_count);
+        auto const values = table.view(table.stored.data());
+        nk::matrix_view<scalar_t> const queries = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
+        f32_t const score_scale = dense_attend_scale(
+            dense_oracle_dots(dense_widened_rows(queries, index_t::vector_dtype_k),
+                              dense_widened_rows(vectors.view(), index_t::vector_dtype_k), dimensions));
+        std::vector<key_t> picks(queries_count * nodes_count);
+        std::vector<f32_t> logits(picks.size()), outputs(queries_count * table.columns);
+        std::vector<std::size_t> counts(queries_count);
+        std::vector<dense_softmax_state_t> carry(queries_count);
+
+        typename index_t::search_config_t const exhaustive {static_cast<typename index_t::small_size_t>(nodes_count)};
+        for (std::size_t const wanted : {nodes_count, std::size_t {16}}) {
+            auto const [attended, status] = indexes.attend(queries, driver.executor, exhaustive, values, score_scale,
+                                                           std::span {picks}.first(queries_count * wanted),
+                                                           std::span {logits}.first(queries_count * wanted),
+                                                           std::span {counts}, std::span {outputs}, std::span {carry});
+            failures += expect(succeeded(status));
+            failures += expect_eq(attended.count, queries_count * wanted);
+            for (std::size_t query = 0; query != queries_count; ++query) {
+                failures += expect_eq(counts[query], wanted);
+                auto const row = queries.row(query).as_vector();
+                std::span<key_t const> const landed {picks.data() + query * wanted, min_of(counts[query], wanted)};
+                failures += dense_expect_top_logits(vectors.view(), row, landed);
+                failures += dense_expect_attended_picks(
+                    vectors.view(), values, row, score_scale, landed,
+                    std::span<f32_t const> {outputs.data() + query * table.columns, table.columns}, carry[query]);
+                for (std::size_t pick = 0; pick != landed.size(); ++pick)
+                    failures += expect_near(logits[query * wanted + pick],
+                                            score_scale * static_cast<f64_t>(dense_native_dot(
+                                                              row, vectors.view().row(landed[pick]).as_vector())));
+            }
+        }
+
+        // Every key is picked, so the last one addressing past a shortened table refuses.
+        auto const shortened = values(nk::range(std::size_t {0}, nodes_count - 1), nk::slice);
+        auto const refused = indexes.attend(queries, driver.executor, exhaustive, shortened, score_scale,
+                                            std::span {picks}, std::span {logits}, std::span {counts},
+                                            std::span {outputs}, {});
+        failures += expect(refused.status == status_t::shape_mismatch_k);
+    }
     return failures;
 }
 

@@ -28,7 +28,7 @@
 #include <algorithm>   // `std::sort`, `std::unique`
 #include <array>       // `std::array` - handmade triples
 #include <atomic>      // `std::atomic` - per-thread failure counters & metric gates
-#include <bit>         // `std::bit_cast` - planting an id into a monolith
+#include <bit>         // `std::bit_cast` - planting an ID into a monolith
 #include <limits>      // `std::numeric_limits` - the widest node ID and the unarmed budgets
 #include <string>      // `std::string` - the metric token read back
 #include <string_view> // `std::string_view` - dtype names
@@ -217,7 +217,7 @@ basic_threads<fixture_type_> basic_make_threads(allocation_ledger_t& ledger, std
     return threads;
 }
 
-/** One index mirrors another across the first @p nodes_count ids: size, key,
+/** One index mirrors another across the first @p nodes_count IDs: size, key,
  *  degree, and the stored value under the fixture's own equality. */
 template <typename fixture_type_, typename index_type_>
 std::size_t basic_expect_mirrored(index_type_ const& mirrored, index_type_ const& original, std::size_t nodes_count) {
@@ -233,7 +233,7 @@ std::size_t basic_expect_mirrored(index_type_ const& mirrored, index_type_ const
     return failures;
 }
 
-/** The exact oracle's verdict on one search: every returned id must carry its true
+/** The exact oracle's verdict on one search: every returned ID must carry its true
  *  distance, and the best must match the graph-independent minimum. */
 template <typename fixture_type_, typename index_type_, typename query_type_>
 std::size_t basic_audit_search(index_type_ const& index, query_type_ const& query,
@@ -593,7 +593,7 @@ std::size_t test_basic_selectors(u64_t seed) {
     return failures;
 }
 
-/** Keyed lookups with planted duplicates, id → key staying authoritative, and the
+/** Keyed lookups with planted duplicates, ID → key staying authoritative, and the
  *  checked ID-readers answering @c malformed_k at & past the watermark. */
 template <typename fixture_type_>
 std::size_t test_basic_keys(u64_t seed) {
@@ -1853,7 +1853,7 @@ std::size_t test_basic_restarts(u64_t seed) {
 
 #pragma region Races
 
-/** Concurrent build on distinct-seeded contexts: dense unique ids, every thread's
+/** Concurrent build on distinct-seeded contexts: dense unique IDs, every thread's
  *  keys landing on its own values, and the payloads surviving the move intact. */
 template <typename fixture_type_>
 std::size_t test_basic_concurrent_build(u64_t seed) {
@@ -1885,7 +1885,7 @@ std::size_t test_basic_concurrent_build(u64_t seed) {
 
         failures += expect_eq(thread_failures.load(), 0u);
         failures += expect_eq(index.size(), nodes_count);
-        // Ids are dense & unique across threads - the watermark's dispensed-order turn.
+        // IDs are dense & unique across threads - the watermark's dispensed-order turn.
         std::vector<node_id_t> sorted_ids = assigned_ids;
         failures += expect_contiguous_ids(std::span {sorted_ids}, 0);
 
@@ -1906,7 +1906,7 @@ std::size_t test_basic_concurrent_build(u64_t seed) {
     return failures;
 }
 
-/** A reader thread races writers: every result id sits below a watermark sampled
+/** A reader thread races writers: every result ID sits below a watermark sampled
  *  after its search, distances ascend, and the checked ID-readers stay honest under
  *  any input while the graph grows underneath them. */
 template <typename fixture_type_>
@@ -2202,7 +2202,7 @@ std::size_t test_basic_overflow_race(u64_t seed) {
     return failures;
 }
 
-/** The reader's cursor: id-order iteration over the watermark, snapshot
+/** The reader's cursor: ID-order iteration over the watermark, snapshot
  *  discipline, edge-following, refresh widening, and a thread racing live mutators. */
 template <typename fixture_type_>
 std::size_t test_basic_cursor(u64_t seed) {

@@ -46,11 +46,6 @@ usearch_setup_target(usearch_bench_dense_ram_metric HOST)
 target_include_directories(usearch_bench_dense_ram_metric PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_bench_dense_ram_metric PRIVATE fmt::fmt)
 
-add_executable(usearch_bench_attention attention.cpp)
-usearch_setup_target(usearch_bench_attention HOST)
-target_include_directories(usearch_bench_attention PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(usearch_bench_attention PRIVATE fmt::fmt yyjson forkunion::static stringzilla::static)
-
 # The CUDA bench skips `usearch_setup_target`: its host-compiler flags don't survive the CUDA driver, so the target
 # wires the interface includes directly.
 if (USEARCH_BUILD_CUDA)

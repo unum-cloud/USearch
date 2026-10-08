@@ -144,6 +144,155 @@ std::size_t test_dense_multiply(make_index_type_ const& make_index, u64_t seed) 
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
+/** Device attention over the top-k picks against an @c f64 softmax over exactly those picks, with value rows
+ *  padded to 16 bytes so every kind loads whole fragments: an exhaustive walk picks the exact top k, and a short
+ *  table, misaligned rows, host values or outputs, and more picks than the frontier head search admits refuse. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+    requires dense_device_resident<index_type_>
+std::size_t dense_expect_attend(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
+    using scalar_t = typename index_type_::scalar_t;
+    using search_config_t = typename index_type_::search_config_t;
+    // Past an expansion of 512 the walk keeps a head of 64, so 65 picks are the narrowest it refuses.
+    constexpr std::size_t nodes_count = dense_thread_nodes_k, queries_count = 4, wanted = 16, beyond_head = 65;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+    index_type_ index = make_index(ledger);
+    typename index_type_::dense_traversal_context_t context {{}};
+    auto vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "attend"));
+    auto queries = make_vectors<scalar_t>(queries_count, dimensions, stream_key(seed, "attend", 1));
+    failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
+
+    dense_attend_values<scalar_t> const values = dense_make_attend_values<scalar_t>(nodes_count);
+    std::size_t const row_bytes = values.row_bytes(), pitch = round_up_to_multiple<std::size_t>(row_bytes, 16);
+    std::vector<byte_t> padded(nodes_count * pitch);
+    for (std::size_t row = 0; row != nodes_count; ++row)
+        std::memcpy(padded.data() + row * pitch, values.stored.data() + row * row_bytes, row_bytes);
+    auto shape = values.view(values.stored.data()).shape();
+    shape.strides[0] = static_cast<std::ptrdiff_t>(pitch);
+    auto const padded_view = [&](byte_t const* data) noexcept {
+        return nk::matrix_view<scalar_t> {reinterpret_cast<char const*>(data), shape};
+    };
+    std::size_t const outputs_bytes = queries_count * values.columns * sizeof(f32_t);
+    auto device_outputs = cuda_make_unique(cuda_device_allocator_t {}, outputs_bytes);
+    auto device_values = cuda_make_unique(cuda_device_allocator_t {}, padded.size());
+    if (!device_outputs || !device_values) return failures + expect(false);
+    failures += expect(cudaMemcpy(device_values.get(), padded.data(), padded.size(), cudaMemcpyHostToDevice) ==
+                       cudaSuccess);
+    auto const resident = padded_view(device_values.get());
+    nk::matrix_span<f32_t> const outputs {reinterpret_cast<f32_t*>(device_outputs.get()), queries_count,
+                                          values.columns};
+    std::vector<f32_t> found(queries_count * values.columns);
+    std::vector<dense_node_id_t> picks(queries_count * beyond_head);
+    std::vector<dense_softmax_state_t> carry(queries_count);
+    auto attend = [&](nk::matrix_view<scalar_t> values_view, nk::matrix_span<f32_t> outputs_span, std::size_t count,
+                      f32_t score_scale, search_config_t config) noexcept {
+        return index.attend(queries.view(), values_view,
+                            nk::matrix_span<dense_node_id_t> {picks.data(), queries_count, count}, outputs_span,
+                            std::span {carry}, score_scale, context, config);
+    };
+
+    // An empty index picks nothing: sentinel picks, zero rows and empty carries.
+    failures += expect(cudaMemset(outputs.data(), 0xFF, outputs_bytes) == cudaSuccess);
+    failures += expect(attend(resident, outputs, wanted, 1, {}).status == status_t::success_k);
+    failures += expect(cudaMemcpy(found.data(), outputs.data(), outputs_bytes, cudaMemcpyDeviceToHost) == cudaSuccess);
+    failures += expect(std::all_of(found.begin(), found.end(), [](f32_t value) { return value == 0; }));
+    failures += expect(std::all_of(picks.begin(), picks.begin() + queries_count * wanted,
+                                   [](dense_node_id_t id) { return id == dense_node_id_unknown_k; }));
+    for (dense_softmax_state_t const state : carry) failures += expect(state.partition == 0);
+
+    std::vector<dense_node_id_t> assigned_ids(nodes_count);
+    if (failed(index.insert(vectors.view(), {assigned_ids.data(), nodes_count}, context).status))
+        return failures + expect(false);
+    failures += expect_contiguous_ids(std::span {assigned_ids}, 0);
+
+    f32_t const score_scale = dense_attend_scale(
+        dense_oracle_dots(dense_widened_rows(queries.view(), index_type_::vector_dtype_k),
+                          dense_widened_rows(vectors.view(), index_type_::vector_dtype_k), dimensions));
+    auto const [attended, status] = attend(resident, outputs, wanted, score_scale, search_config_t {nodes_count});
+    failures += expect(status == status_t::success_k);
+    failures += expect_eq(attended.count, wanted);
+    failures += expect(cudaMemcpy(found.data(), outputs.data(), outputs_bytes, cudaMemcpyDeviceToHost) == cudaSuccess);
+    for (std::size_t query = 0; query != queries_count; ++query) {
+        auto const query_row = queries.view().row(query).as_vector();
+        std::span<dense_node_id_t const> const query_picks {picks.data() + query * wanted, wanted};
+        failures += dense_expect_top_logits(vectors.view(), query_row, query_picks);
+        failures += dense_expect_attended_picks(
+            vectors.view(), padded_view(padded.data()), query_row, score_scale, query_picks,
+            std::span<f32_t const> {found.data() + query * values.columns, values.columns}, carry[query]);
+    }
+
+    auto const shortened = resident(nk::range(std::size_t {0}, nodes_count - 1), nk::slice);
+    failures += expect(attend(shortened, outputs, wanted, score_scale, {}).status == status_t::shape_mismatch_k);
+    failures += expect(attend(padded_view(device_values.get() + 8), outputs, wanted, score_scale, {}).status ==
+                       status_t::unsupported_layout_k);
+    failures += expect(attend(padded_view(padded.data()), outputs, wanted, score_scale, {}).status ==
+                       status_t::device_error_k);
+    nk::matrix_span<f32_t> const host_outputs {found.data(), queries_count, values.columns};
+    failures += expect(attend(resident, host_outputs, wanted, score_scale, {}).status == status_t::device_error_k);
+    failures += expect(attend(resident, outputs, beyond_head, score_scale, search_config_t {1024}).status ==
+                       status_t::config_mismatch_k);
+    return failures;
+}
+
+/** @ref dense_expect_attend for the dot kernel, then the ledger it left must balance. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+    requires dense_device_resident<index_type_>
+std::size_t test_dense_attend(make_index_type_ const& make_index, u64_t seed) {
+    if constexpr (kernel_ != nk_kernel_dot_k) return 0;
+    else {
+        allocation_ledger_t ledger;
+        std::size_t const failures = dense_expect_attend<index_type_, kernel_>(make_index, ledger, seed);
+        return failures + expect_eq(ledger.live_bytes.load(), 0);
+    }
+}
+
+/** Device search under indexer heads against the @c f64 oracle, every node ID its stored row: a pool as wide as the
+ *  index walks every node, so each query lands exactly the top by `Σₕ wₕ·ReLU(qₕ·k)`, at `1 −` that score. */
+template <typename index_type_, typename make_index_type_>
+    requires dense_device_resident<index_type_>
+std::size_t dense_expect_indexer_search(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
+    using scalar_t = typename index_type_::scalar_t;
+    constexpr std::size_t nodes_count = dense_thread_nodes_k, queries_count = 4, wanted = 16;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+    index_type_ index = make_index(ledger);
+    typename index_type_::dense_traversal_context_t context {{}};
+    failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
+    auto const vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexer"));
+    std::vector<dense_node_id_t> assigned_ids(nodes_count);
+    if (failed(index.insert(vectors.view(), {assigned_ids.data(), nodes_count}, context).status))
+        return failures + expect(false);
+    failures += expect_contiguous_ids(std::span {assigned_ids}, 0);
+
+    auto const queries = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
+    dense_indexer_inputs<scalar_t> const inputs = dense_make_indexer_inputs(vectors.view(), queries_count);
+    typename index_type_::search_config_t const exhaustive {nodes_count, wanted};
+    std::array<dense_node_id_t, queries_count * wanted> node_ids;
+    std::array<dense_distance_t, queries_count * wanted> distances;
+    failures += expect(
+        index
+            .search(queries, inputs.heads(), nk::matrix_span<dense_node_id_t> {node_ids.data(), queries_count, wanted},
+                    nk::matrix_span<dense_distance_t> {distances.data(), queries_count, wanted}, context, exhaustive)
+            .status == status_t::success_k);
+    for (std::size_t query = 0; query != queries_count; ++query)
+        failures += dense_expect_indexer_matches(
+            inputs, query, std::span<dense_node_id_t const> {node_ids.data() + query * wanted, wanted},
+            std::span<dense_distance_t const> {distances.data() + query * wanted, wanted});
+    return failures;
+}
+
+/** @ref dense_expect_indexer_search for the dot kernel over floating-point keys, then the ledger must balance. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+    requires dense_device_resident<index_type_>
+std::size_t test_dense_indexer_search(make_index_type_ const& make_index, u64_t seed) {
+    if constexpr (kernel_ != nk_kernel_dot_k || nk::is_integral_dtype<typename index_type_::scalar_t>()) return 0;
+    else {
+        allocation_ledger_t ledger;
+        std::size_t const failures = dense_expect_indexer_search<index_type_>(make_index, ledger, seed);
+        return failures + expect_eq(ledger.live_bytes.load(), 0);
+    }
+}
+
 #pragma endregion Folds
 
 /** Composes one (dtype, kernel) cell's suite over the ledgered device allocator. */
@@ -169,6 +318,8 @@ std::size_t test_cuda_configuration(char const* name, u64_t seed) {
     failures_count += test_dense_health_audits<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_heal_islands<index_t>(make_index, seed);
     failures_count += test_dense_multiply<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_attend<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_indexer_search<index_t, kernel_>(make_index, seed);
     return report(name, failures_count);
 }
 

@@ -115,6 +115,18 @@ enum class cuda_address_space_t : u32_t {
     host_pinned_k,
 };
 
+/** Whether a kernel on device @p device reads @p pointer in place: that device's own memory, or
+ *  unified memory; host memory, pinned or not, and other devices' memory do not qualify. */
+inline bool is_resident_on(void const* pointer, int device) noexcept {
+    cudaPointerAttributes attributes {};
+    if (cudaPointerGetAttributes(&attributes, pointer) != cudaSuccess) {
+        [[maybe_unused]] cudaError_t const cleared = cudaGetLastError();
+        return false;
+    }
+    if (attributes.type == cudaMemoryTypeManaged) return true;
+    return attributes.type == cudaMemoryTypeDevice && attributes.device == device;
+}
+
 /** The device analog of @c std::allocator, with the ordering stream and the target device
  *  bound at construction; @c address_space_k fixes host visibility. */
 template <typename allocator_>
@@ -431,6 +443,9 @@ using cuda_pinned_allocator_t = cuda_pinned_allocator<byte_t>;
 /** Owned non-blocking stream; destruction drains it first. */
 struct cuda_stream_t {
     cuda_stream_t() noexcept { cudaStreamCreateWithFlags(&handle_, cudaStreamNonBlocking); }
+
+    /** The current device's legacy default stream, which nothing here owns or destroys. */
+    explicit cuda_stream_t(std::nullptr_t) noexcept {}
     cuda_stream_t(cuda_stream_t&& other) noexcept : handle_(std::exchange(other.handle_, nullptr)) {}
     cuda_stream_t(cuda_stream_t const&) = delete;
     cuda_stream_t& operator=(cuda_stream_t const&) = delete;
@@ -468,8 +483,9 @@ struct cuda_executor_t {
         /** The scratch a walk carves its state from, sized once by @ref reserve. */
         arena_t arena;
 
-        /** Opens a stream on the current device and binds the arena to it. */
-        explicit stream_t(int device) noexcept : device(device), arena(cuda_device_allocator_t {handle, device}) {}
+        /** Takes @p handle, opened on @p device, and binds the arena to it. */
+        stream_t(int device, cuda_stream_t&& handle) noexcept
+            : device(device), handle(std::move(handle)), arena(cuda_device_allocator_t {this->handle, device}) {}
     };
 
     cuda_executor_t() = default;
@@ -503,9 +519,21 @@ struct cuda_executor_t {
         if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
         for (int device : devices) {
             if (cudaSetDevice(device) != cudaSuccess) return {{}, status_t::device_error_k};
-            stream_t opened {device};
+            stream_t opened {device, cuda_stream_t {}};
             if (!opened.handle) return {{}, status_t::device_error_k};
             streams.push_back_reserved(std::move(opened));
+        }
+        return acquire(std::move(streams));
+    }
+
+    /** The twin of @ref spawn over each named device's legacy default stream, for a call that
+     *  names no executor; every use binds its device first, since a null stream is the current one's. */
+    static expected<cuda_executor_t> on_default_streams(std::span<int const> devices) noexcept {
+        growing_buffer<stream_t> streams {global_allocator};
+        if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
+        for (int device : devices) {
+            if (cudaSetDevice(device) != cudaSuccess) return {{}, status_t::device_error_k};
+            streams.push_back_reserved(stream_t {device, cuda_stream_t {nullptr}});
         }
         return acquire(std::move(streams));
     }

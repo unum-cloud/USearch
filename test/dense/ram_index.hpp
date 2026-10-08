@@ -75,7 +75,8 @@ static std::size_t test_configuration(char const* name, u64_t seed) {
     failures_count += test_dense_heal_islands<index_t>(make_index, seed);
     failures_count += test_dense_predicated_search<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_multiply<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_corrected_scores<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_attend<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_indexer_search<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_save_load_roundtrip<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_load_hostile<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_load_append<index_t, kernel_>(make_index, seed);

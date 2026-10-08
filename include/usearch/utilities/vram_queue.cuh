@@ -41,7 +41,7 @@ struct dense_cuda_scored_node_t {
 
     inline static constexpr u64_t expanded_bit_k = u64_t(1) << 32;
 
-    /** Dispensable ids: everything but the reserved all-ones sentinel. */
+    /** Dispensable IDs: everything but the reserved all-ones sentinel. */
     inline static constexpr std::size_t id_capacity_k = (u64_t(1) << 32) - 1u;
 
     static __device__ __forceinline__ dense_cuda_scored_node_t make(dense_distance_t distance,
@@ -416,7 +416,7 @@ struct dense_cuda_arena_frontier_t {
  */
 struct dense_cuda_visited_set_t {
 
-    /** Packed @b {epoch,id} slots: an entry is live only when its epoch matches
+    /** Packed @b {epoch,ID} slots: an entry is live only when its epoch matches
      *  this walk's, so "resetting" is bumping one register - the host zeroes the
      *  arena once per launch batch, and epoch zero marks never-used. */
     u64_t* slots_;

@@ -68,7 +68,11 @@ bool named(usearch_bytes_view_t name, char const* spelling) noexcept {
 
 extern "C" {
 
-USEARCH_EXPORT char const* usearch_version(void) { return rendered_version(); }
+USEARCH_EXPORT void usearch_version(int* major, int* minor, int* patch) {
+    *major = USEARCH_VERSION_MAJOR, *minor = USEARCH_VERSION_MINOR, *patch = USEARCH_VERSION_PATCH;
+}
+
+USEARCH_EXPORT char const* usearch_version_name(void) { return rendered_version(); }
 
 USEARCH_EXPORT char const* usearch_capabilities_compiled(void) {
     static char rendered[256] = {0};
@@ -86,32 +90,35 @@ USEARCH_EXPORT char const* usearch_capabilities_available(void) {
 
 USEARCH_EXPORT char const* usearch_status_name(usearch_status_t status) {
     switch (status) {
-    case usearch_success_k: return "success";
-    case usearch_error_out_of_memory_k: return "out-of-memory";
-    case usearch_error_shape_mismatch_k: return "shape-mismatch";
-    case usearch_error_unsupported_layout_k: return "unsupported-layout";
-    case usearch_error_unknown_kind_k: return "unknown-kind";
-    case usearch_error_read_only_k: return "read-only";
-    case usearch_error_io_k: return "io";
-    case usearch_error_device_k: return "device";
-    case usearch_error_malformed_input_k: return "malformed-input";
-    case usearch_error_internal_k: return "internal";
-    case usearch_error_overflow_k: return "overflow";
-    case usearch_error_uninitialized_k: return "uninitialized";
-    case usearch_error_config_mismatch_k: return "config-mismatch";
-    case usearch_error_contended_k: return "contended";
-    case usearch_error_cancelled_k: return "cancelled";
-    case usearch_error_unsupported_k: return "unsupported";
-    default: return "unrecognized";
+    case usearch_status_success_k: return "success";
+    case usearch_status_out_of_memory_k: return "out-of-memory";
+    case usearch_status_shape_mismatch_k: return "shape-mismatch";
+    case usearch_status_unsupported_layout_k: return "unsupported-layout";
+    case usearch_status_unknown_kind_k: return "unknown-kind";
+    case usearch_status_read_only_k: return "read-only";
+    case usearch_status_io_k: return "io";
+    case usearch_status_device_k: return "device";
+    case usearch_status_malformed_k: return "malformed";
+    case usearch_status_internal_k: return "internal";
+    case usearch_status_overflow_k: return "overflow";
+    case usearch_status_uninitialized_k: return "uninitialized";
+    case usearch_status_config_mismatch_k: return "config-mismatch";
+    case usearch_status_contended_k: return "contended";
+    case usearch_status_cancelled_k: return "cancelled";
+    case usearch_status_unsupported_k: return "unsupported";
+    case usearch_status_pending_k: return "pending";
+    case usearch_status_invalid_argument_k: return "invalid-argument";
+    // An unrecognized value spells like the status an unrecognized name reads back as.
+    default: return "invalid-argument";
     }
 }
 
 USEARCH_EXPORT usearch_status_t usearch_status_from_name(usearch_bytes_view_t name) {
-    for (int code = usearch_success_k; code <= usearch_error_unsupported_k; ++code) {
+    for (int code = usearch_status_success_k; code <= usearch_status_invalid_argument_k; ++code) {
         usearch_status_t const status = static_cast<usearch_status_t>(code);
         if (named(name, usearch_status_name(status))) return status;
     }
-    return usearch_error_internal_k;
+    return usearch_status_invalid_argument_k;
 }
 
 USEARCH_EXPORT char const* usearch_scalar_name(usearch_scalar_t scalar_kind) {
