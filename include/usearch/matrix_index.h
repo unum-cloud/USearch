@@ -71,7 +71,7 @@
  *  arbitrarily many concurrent searches, having nothing to mutate. Serialization is the one
  *  exception: saving demands a mutation-free window, though concurrent readers keep
  *  searching throughout. Per-call outputs - counts and the outcome - belong to their
- *  call and must not be shared between in-flight calls.
+ *  call and must not be shared between calls that are not final.
  *
  *  An insertion is all-or-nothing per call, and on a RAM handle its entries become visible at
  *  once, so a concurrent search sees every entry of the call or none of them.
@@ -224,7 +224,7 @@ typedef struct usearch_matrix_init_ram_t {
     /** Output for the new index. */
     usearch_matrix_index_t* index;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
     /** The kind comparing two matrices - @c usearch_matrix_metric_hausdorff_k for point
@@ -264,7 +264,7 @@ typedef struct usearch_matrix_init_vram_t {
     /** Output for the new index. */
     usearch_matrix_index_t* index;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
     /** The kind comparing two matrices. */
@@ -295,16 +295,16 @@ USEARCH_EXPORT void usearch_matrix_init_vram(usearch_matrix_init_vram_t* argumen
 /** The arguments of @c usearch_matrix_load_ram. */
 typedef struct usearch_matrix_load_ram_t {
 
-    /** Output for the new index, written once the call completes. */
+    /** Output for the new index, written by the time the call is final. */
     usearch_matrix_index_t* index;
 
     /** The executor the read fans out over, one shard per thread. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Checkpoint path - a monolith, or a manifest naming many. */
@@ -329,23 +329,23 @@ typedef struct usearch_matrix_load_ram_t {
  *
  *  Where the parts end up is the call's own memory domains, never the manifest's. A part
  *  carries its own length in its header, so a second load skips whatever already arrived
- *  whole and cancelling costs the part in flight rather than everything behind it.
+ *  whole and cancelling costs the part being read rather than everything behind it.
  */
 USEARCH_EXPORT void usearch_matrix_load_ram(usearch_matrix_load_ram_t* arguments);
 
 /** The arguments of @c usearch_matrix_load_vram. */
 typedef struct usearch_matrix_load_vram_t {
 
-    /** Output for the new index, written once the call completes. */
+    /** Output for the new index, written by the time the call is final. */
     usearch_matrix_index_t* index;
 
     /** The executor the upload runs on, one stream per device. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Checkpoint path - a monolith, or a manifest naming many. */
@@ -374,7 +374,7 @@ typedef struct usearch_matrix_view_ram_t {
     /** Output for the new, read-only index. */
     usearch_matrix_index_t* index;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
     /** Checkpoint path - a monolith, or a manifest naming many. */
@@ -386,7 +386,8 @@ typedef struct usearch_matrix_view_ram_t {
 USEARCH_EXPORT void usearch_matrix_view_ram(usearch_matrix_view_ram_t* arguments);
 
 /** Frees the resources associated with the index; @c NULL is safe, and it cannot fail, so takes
- *  no outcome. */
+ *  no outcome.
+ *  Waits until every deferred call naming the handle is final. */
 USEARCH_EXPORT void usearch_matrix_free(usearch_matrix_index_t index);
 
 /** The arguments of @c usearch_matrix_reserve. */
@@ -398,10 +399,10 @@ typedef struct usearch_matrix_reserve_t {
     /** The executor the growth runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The desired total entry capacity, including the current size. */
@@ -423,10 +424,10 @@ typedef struct usearch_matrix_clear_t {
     /** The executor the erasure runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 } usearch_matrix_clear_t;
 
@@ -457,10 +458,10 @@ typedef struct usearch_matrix_add_t {
     /** The executor to fan out over; its kind must match the residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Matrices to admit - the batch axis of @c keys and @c matrices. */
@@ -514,10 +515,10 @@ typedef struct usearch_matrix_refine_t {
     /** The executor to fan out over; its kind must match the residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The @b optional output for the number of entries whose edges changed; zero means settled. */
@@ -564,10 +565,10 @@ typedef struct usearch_matrix_search_t {
     /** The executor to fan out over; its kind must match the residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Query matrices to resolve; the outputs have @c count rows of @c matches.wanted entries. */
@@ -639,10 +640,10 @@ typedef struct usearch_matrix_count_t {
     /** The executor the lookup runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The key whose entries are counted. */
@@ -664,10 +665,10 @@ typedef struct usearch_matrix_get_t {
     /** The executor whose stream or thread copies the rows; its kind must match the residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The key whose entries are exported. */
@@ -710,10 +711,10 @@ typedef struct usearch_matrix_merge_t {
     /** The executor the merge fans out over, one donor per thread. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Donor handles to absorb. */
@@ -754,7 +755,7 @@ typedef struct usearch_matrix_cursor_init_t {
     /** The handle to be scanned. */
     usearch_matrix_index_t index;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 } usearch_matrix_cursor_init_t;
 
@@ -770,10 +771,10 @@ typedef struct usearch_matrix_cursor_next_t {
     /** The executor the pull runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The cursor to advance. */
@@ -801,7 +802,8 @@ typedef struct usearch_matrix_cursor_next_t {
  */
 USEARCH_EXPORT void usearch_matrix_cursor_next(usearch_matrix_cursor_next_t* arguments);
 
-/** Releases the cursor; @c NULL is safe. */
+/** Releases the cursor; @c NULL is safe.
+ *  Waits until every deferred call naming the handle is final. */
 USEARCH_EXPORT void usearch_matrix_cursor_free(usearch_matrix_cursor_t cursor);
 
 /** The arguments of @c usearch_matrix_save. */
@@ -813,10 +815,10 @@ typedef struct usearch_matrix_save_t {
     /** The executor the write fans out over, one shard per thread or stream. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Destination path, whose extension picks the layout. */
@@ -863,10 +865,10 @@ typedef struct usearch_matrix_metadata_read_t {
     /** The executor the read runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Checkpoint path - a monolith, or a manifest naming many. */
@@ -911,10 +913,10 @@ typedef struct usearch_matrix_describe_t {
     /** The executor the report runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Output, filled whole. */

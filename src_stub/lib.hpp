@@ -44,12 +44,19 @@
 #include <unordered_map> // `std::unordered_map`, `std::unordered_multimap`
 #include <vector>        // `std::vector`
 
-#include "usearch/types.h"
+#include "usearch/usearch.h" // every argument structure a deferred call copies
+
 #include "usearch/utilities/blocking_files.hpp" // `seekable_file_t`, `mapped_file_t` - the checkpoints' handles
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_arena` - the engine's arena, `contains` included
 #include "usearch/utilities/types.hpp"
 
 namespace us = unum::usearch;
+
+/** What @c usearch_arena_t owns: host memory that one call at a time rewinds and refills. */
+struct usearch_arena_handle_t {
+    us::growing_arena<> memory {us::global_allocator};
+    std::mutex serving;
+};
 
 namespace unum {
 namespace usearch {
@@ -94,9 +101,9 @@ inline bytes_view_t as_readable_bytes(usearch_bytes_view_t bytes) {
 
 #pragma region Outcomes
 
-/** Marks @p outcome running - every verb's first act, so a waiter never reads a stale status. */
-inline void propagate_pending(usearch_outcome_t* outcome) {
-    if (outcome) std::atomic_ref(outcome->status).store(usearch_status_pending_k, std::memory_order_relaxed);
+/** Marks @p outcome deferred - every verb's first act, so a waiter never reads a stale status. */
+inline void propagate_deferred(usearch_outcome_t* outcome) {
+    if (outcome) std::atomic_ref(outcome->status).store(usearch_status_deferred_k, std::memory_order_relaxed);
 }
 
 /** The one final write to @p outcome: the message, then the status with release ordering, waking
@@ -110,23 +117,23 @@ inline void propagate_error(usearch_status_t status, usearch_outcome_t* outcome,
 }
 
 /**
- *  @brief A verb's outcome while it runs: pending from construction, and published once at
+ *  @brief A verb's outcome while it runs: deferred from construction, and published once at
  *      destruction with whatever its guards recorded - success when none did.
  *
  *  Every verb declares it first, so it unwinds last: each lock the verb took is released and each
  *  output written before the final status lets a waiter free what the call named.
  */
-class pending_outcome_t {
+class deferred_outcome_t {
     usearch_outcome_t* published_;
     usearch_outcome_t recorded_ {usearch_status_success_k, nullptr};
 
   public:
-    explicit pending_outcome_t(usearch_outcome_t* published) noexcept : published_(published) {
-        propagate_pending(published_);
+    explicit deferred_outcome_t(usearch_outcome_t* published) noexcept : published_(published) {
+        propagate_deferred(published_);
     }
-    ~pending_outcome_t() noexcept { propagate_error(recorded_.status, published_, recorded_.message); }
-    pending_outcome_t(pending_outcome_t const&) = delete;
-    pending_outcome_t& operator=(pending_outcome_t const&) = delete;
+    ~deferred_outcome_t() noexcept { propagate_error(recorded_.status, published_, recorded_.message); }
+    deferred_outcome_t(deferred_outcome_t const&) = delete;
+    deferred_outcome_t& operator=(deferred_outcome_t const&) = delete;
 
     /** The private slot every guard records into, so a verb passes this wherever an outcome goes. */
     operator usearch_outcome_t*() noexcept { return &recorded_; }
@@ -198,7 +205,7 @@ inline bool reject_tape(usearch_tape_view_t tape, std::size_t count, usearch_out
 
 #pragma endregion Runs
 
-#pragma region Executors
+#pragma region Executors and Arenas
 
 /** Ticks the caller's handler and answers whether to carry on; a null handler always does. */
 inline bool keep_going(usearch_progress_callback_t progress, void* progress_state, std::size_t completed,
@@ -211,41 +218,77 @@ inline bool reject_cancelled(std::size_t completed, std::size_t total, usearch_o
     return reject_if(completed < total, usearch_status_cancelled_k, "The caller's handler stopped the work", outcome);
 }
 
-} // namespace stub
-} // namespace usearch
-} // namespace unum
+/** A copy of a submitted call's arguments; whatever it points to stays the caller's until final. */
+using deferred_arguments_t = std::variant<
+    usearch_dense_load_ram_t, usearch_dense_load_vram_t, usearch_dense_load_ram_buffer_t,
+    usearch_dense_load_vram_buffer_t, usearch_dense_view_nvme_t, usearch_dense_reserve_t, usearch_dense_clear_t,
+    usearch_dense_add_t, usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_search_t, usearch_dense_count_t,
+    usearch_dense_get_t, usearch_dense_merge_t, usearch_dense_cursor_next_t, usearch_dense_search_stream_next_t,
+    usearch_dense_save_t, usearch_dense_save_buffer_t, usearch_dense_metadata_read_t,
+    usearch_dense_metadata_read_buffer_t, usearch_dense_describe_t, usearch_dense_multiply_t, usearch_dense_attend_t,
+    usearch_dense_maxsim_t, usearch_sequence_load_ram_t, usearch_sequence_reserve_t, usearch_sequence_clear_t,
+    usearch_sequence_add_t, usearch_sequence_refine_t, usearch_sequence_search_t, usearch_sequence_count_t,
+    usearch_sequence_get_t, usearch_sequence_merge_t, usearch_sequence_cursor_next_t, usearch_sequence_save_t,
+    usearch_sequence_metadata_read_t, usearch_sequence_describe_t, usearch_matrix_load_ram_t,
+    usearch_matrix_load_vram_t, usearch_matrix_reserve_t, usearch_matrix_clear_t, usearch_matrix_add_t,
+    usearch_matrix_refine_t, usearch_matrix_search_t, usearch_matrix_count_t, usearch_matrix_get_t,
+    usearch_matrix_merge_t, usearch_matrix_cursor_next_t, usearch_matrix_save_t, usearch_matrix_metadata_read_t,
+    usearch_matrix_describe_t, usearch_geospatial_load_ram_t, usearch_geospatial_load_vram_t,
+    usearch_geospatial_reserve_t, usearch_geospatial_clear_t, usearch_geospatial_add_t, usearch_geospatial_refine_t,
+    usearch_geospatial_emplace_t, usearch_geospatial_search_t, usearch_geospatial_within_t, usearch_geospatial_count_t,
+    usearch_geospatial_get_t, usearch_geospatial_merge_t, usearch_geospatial_cursor_next_t, usearch_geospatial_save_t,
+    usearch_geospatial_metadata_read_t, usearch_geospatial_describe_t>;
 
-/**
- *  @brief A stand-in's executor: a handle that exists, remembers what was asked for, and drives
- *      nothing - every verb runs on the thread that called it.
- *
- *  Keeping the handle real rather than ignoring the parameter is what lets a binding suite
- *  exercise the lifetime it will meet against the engine - spawn, pass, drain, free. A null
- *  executor behaves exactly like this one, as the engine's runs on the caller's thread too.
- */
-struct usearch_executor_handle_t {
+/** A submitted call: its copied arguments and the verb that runs them. */
+struct deferred_call_t {
+    deferred_arguments_t arguments;
+    void (*verb)(void*);
+};
+
+/** A stand-in's executor: no threads, just the calls submitted to it, run in order at its next
+ *  drain, blocking call or free. */
+struct executor_t {
 
     /** Worker threads the caller asked for; honoured by remembering, never by spawning. */
     std::size_t threads = 1;
+
+    /** Submissions beyond this many finish @c usearch_status_contended_k. */
+    std::size_t deferred_limit = 64;
+
+    std::mutex guard;
+    std::vector<deferred_call_t> deferred;
 };
 
-#pragma endregion Executors
+/** Runs every call submitted to @p executor so far, oldest first. */
+inline void flush(executor_t& executor) {
+    std::vector<deferred_call_t> calls;
+    {
+        std::lock_guard<std::mutex> lock(executor.guard);
+        calls.swap(executor.deferred);
+    }
+    for (deferred_call_t& call : calls) std::visit([&](auto& arguments) { call.verb(&arguments); }, call.arguments);
+}
 
-#pragma region Arenas
-
-/** What @c usearch_arena_t owns: host memory that one call at a time rewinds and refills. */
-struct usearch_arena_handle_t {
-    us::growing_arena<> memory {us::global_allocator};
-    std::mutex busy;
-};
-
-namespace unum {
-namespace usearch {
-namespace stub {
+/** Every verb's first act: queues a copy of a deferred call and answers true, or runs the calls
+ *  submitted before a blocking one and answers false. */
+template <auto verb_, typename arguments_>
+bool deferred(arguments_* arguments) {
+    executor_t* const executor = arguments->executor;
+    if (!executor) return false;
+    if (arguments->completion != usearch_completion_deferred_k) return flush(*executor), false;
+    arguments_ copy = *arguments;
+    copy.completion = usearch_completion_blocking_k;
+    std::lock_guard<std::mutex> lock(executor->guard);
+    if (executor->deferred.size() == executor->deferred_limit)
+        return propagate_error(usearch_status_contended_k, arguments->outcome, "The deferred table is full"), true;
+    propagate_deferred(arguments->outcome);
+    executor->deferred.push_back({copy, [](void* erased) { verb_(static_cast<arguments_*>(erased)); }});
+    return true;
+}
 
 /** Claims the caller's arena for one call: creates it behind a null pointee, else rewinds it, which
  *  frees the previous call's outputs, so an @p input still inside it is refused. The caller adopts
- *  @c busy into a lock declared after its outcome, so it is released before the final store. */
+ *  @c serving into a lock declared after its outcome, so it is released before the final store. */
 inline usearch_arena_handle_t* claim_arena(usearch_arena_t* arena, void const* input, usearch_outcome_t* outcome) {
     if (!arena)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The arena pointer must not be null"),
@@ -253,17 +296,17 @@ inline usearch_arena_handle_t* claim_arena(usearch_arena_t* arena, void const* i
     if (!*arena) *arena = new (std::nothrow) usearch_arena_handle_t {};
     if (!*arena)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the arena"), nullptr;
-    if (!(*arena)->busy.try_lock())
+    if (!(*arena)->serving.try_lock())
         return propagate_error(usearch_status_contended_k, outcome, "The arena serves another call"), nullptr;
     if (input && (*arena)->memory.contains(input))
-        return (*arena)->busy.unlock(),
+        return (*arena)->serving.unlock(),
                propagate_error(usearch_status_invalid_argument_k, outcome, "An input lies inside the arena it rewinds"),
                nullptr;
     (*arena)->memory.clear();
     return *arena;
 }
 
-#pragma endregion Arenas
+#pragma endregion Executors and Arenas
 
 #pragma region Scalars
 
@@ -824,5 +867,7 @@ inline bool write_file(usearch_bytes_view_t path, bytes_view_t blob, usearch_out
 } // namespace stub
 } // namespace usearch
 } // namespace unum
+
+struct usearch_executor_handle_t : us::stub::executor_t {};
 
 #endif // UNUM_USEARCH_STUB_LIB_HPP

@@ -186,6 +186,20 @@ check_region_labels() {
         "            clang-format reflows a label carrying anything but letters, digits & spaces:"
 }
 
+# A `#pragma region` earns its markers only around a stretch worth folding: one shorter than 30 lines
+# belongs in its neighbour, so the outline stays a few meaningful sections rather than many tiny ones.
+check_region_lengths() {
+    local short
+    short=$(< "$staged_blob" awk '
+        /^[[:space:]]*#pragma[[:space:]]+region/ { opened[++depth] = NR; name[depth] = $0 }
+        /^[[:space:]]*#pragma[[:space:]]+endregion/ && depth {
+            if (NR - opened[depth] - 1 < 30) printf "line %d: %s\n", opened[depth], name[depth]
+            depth--
+        }')
+    [ -z "$short" ] || fail "$short" \
+        "$file has a #pragma region shorter than 30 lines - fold it into its neighbour:"
+}
+
 # A design justified by another project's design ages into a lie the moment that project moves,
 # and it tells a reader nothing about the code in front of them. State what it does and why.
 check_sibling_justification() {
@@ -1235,6 +1249,7 @@ judge_path() {
         check_ids_capitalized
         check_backward_references
         check_region_labels
+        check_region_lengths
         check_param_directions
         check_copydoc_in_backend
         check_markdown_doxygen

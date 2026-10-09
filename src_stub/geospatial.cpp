@@ -43,7 +43,9 @@
 using namespace unum::usearch;
 using namespace unum::usearch::stub;
 
-namespace {
+namespace unum {
+namespace usearch {
+namespace stub {
 
 #pragma region Storage
 
@@ -77,14 +79,12 @@ struct geospatial_index_options_t {
     std::size_t values_per_key;
 };
 
-} // namespace
+using geospatial_index_t = handle<geospatial_payload_t, geospatial_index_options_t>;
 
-struct usearch_geospatial_index_handle_t : handle<geospatial_payload_t, geospatial_index_options_t> {};
-
-struct usearch_geospatial_cursor_handle_t {
+struct geospatial_cursor_t {
 
     /** The handle the cursor was opened on, only ever compared with the one each pull passes. */
-    usearch_geospatial_index_handle_t const* opened_on;
+    geospatial_index_t const* opened_on;
 
     /** The next entry to hand out. */
     std::size_t position;
@@ -96,25 +96,23 @@ struct usearch_geospatial_cursor_handle_t {
     std::vector<us::i32_t> centimetres;
 
     /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
-    std::atomic_flag busy;
+    std::atomic_flag pulling;
 };
 
 /** A query converted once and reused: it keeps the caller's coordinates, since the axes
  *  a search selects are not known until the search itself. */
-struct usearch_geospatial_emplaced_handle_t {
+struct geospatial_emplaced_t {
 
     /** The index whose layout and speed govern conversion; it must outlive this. */
-    usearch_geospatial_index_handle_t* index;
+    geospatial_index_t* index;
 
     /** The query's positions, as many as its point count times the layout's width. */
     std::vector<double> points;
 };
 
-namespace {
-
 /** How many coordinates one position carries. Deliberately a switch rather than a cast
  *  of the enumerator, whose values are not the widths they name. */
-std::size_t layout_width(usearch_geospatial_layout_t layout) {
+static std::size_t layout_width(usearch_geospatial_layout_t layout) {
     switch (layout) {
     case usearch_geospatial_layout_surface_k: return 2;
     case usearch_geospatial_layout_elevated_k: return 3;
@@ -124,29 +122,28 @@ std::size_t layout_width(usearch_geospatial_layout_t layout) {
     }
 }
 
-bool layout_carries_altitude(usearch_geospatial_layout_t layout) {
+static bool layout_carries_altitude(usearch_geospatial_layout_t layout) {
     return layout == usearch_geospatial_layout_elevated_k || layout == usearch_geospatial_layout_elevated_timed_k;
 }
 
-bool layout_carries_time(usearch_geospatial_layout_t layout) {
+static bool layout_carries_time(usearch_geospatial_layout_t layout) {
     return layout == usearch_geospatial_layout_timed_k || layout == usearch_geospatial_layout_elevated_timed_k;
 }
 
 /** Whether the layout is frozen; a zeroed one makes every derived extent zero. */
-bool reject_unfrozen(usearch_geospatial_index_handle_t const& index, usearch_outcome_t* outcome) {
+static bool reject_unfrozen(geospatial_index_t const& index, usearch_outcome_t* outcome) {
     return reject_if(!layout_width(index.options.layout), usearch_status_uninitialized_k, "The layout was never frozen",
                      outcome);
 }
 
 /** Whether the mode is one this build scores at all. */
-bool known_mode(usearch_geospatial_mode_t mode) {
+static bool known_mode(usearch_geospatial_mode_t mode) {
     return mode == usearch_geospatial_mode_approach_k || mode == usearch_geospatial_mode_shape_k ||
            mode == usearch_geospatial_mode_coverage_k || mode == usearch_geospatial_mode_route_k;
 }
 
 /** Route scoring reads the ordering of a set, which only a path structure carries. */
-bool reject_mode(usearch_geospatial_index_handle_t const& index, usearch_geospatial_mode_t mode,
-                 usearch_outcome_t* outcome) {
+static bool reject_mode(geospatial_index_t const& index, usearch_geospatial_mode_t mode, usearch_outcome_t* outcome) {
     if (reject_if(!known_mode(mode), usearch_status_unknown_kind_k, "The scoring mode is not one this build knows",
                   outcome))
         return true;
@@ -157,7 +154,7 @@ bool reject_mode(usearch_geospatial_index_handle_t const& index, usearch_geospat
 }
 
 /** The exchange rate between the axes, which a tolerance names as a radius over a window. */
-double speed_of(usearch_geospatial_tolerance_t const* tolerance) {
+static double speed_of(usearch_geospatial_tolerance_t const* tolerance) {
     if (!tolerance || tolerance->metres <= 0 || tolerance->seconds <= 0) return derived_speed_k;
     return tolerance->metres / tolerance->seconds;
 }
@@ -165,8 +162,8 @@ double speed_of(usearch_geospatial_tolerance_t const* tolerance) {
 /** Whether the query was emplaced against this very index. The conversion a query holds
  *  is only meaningful under the layout it was built for, so crossing handles is rejected
  *  rather than scored. */
-bool reject_foreign(usearch_geospatial_index_handle_t const& index, usearch_geospatial_emplaced_t query,
-                    usearch_outcome_t* outcome) {
+static bool reject_foreign(geospatial_index_t const& index, geospatial_emplaced_t const* query,
+                           usearch_outcome_t* outcome) {
     if (reject_if(!query, usearch_status_invalid_argument_k, "The query is null", outcome)) return true;
     return reject_if(query->index != &index, usearch_status_config_mismatch_k,
                      "The query was emplaced against another index", outcome);
@@ -178,8 +175,8 @@ bool reject_foreign(usearch_geospatial_index_handle_t const& index, usearch_geos
 
 /** Converts one geodetic position into Earth-fixed metres under the selected axes, with
  *  the unselected components zeroed so they cancel on both sides of a comparison. */
-geospatial_position_t converted(std::span<double const> point, usearch_geospatial_layout_t layout,
-                                usearch_geospatial_axes_t axes, double speed) {
+static geospatial_position_t converted(std::span<double const> point, usearch_geospatial_layout_t layout,
+                                       usearch_geospatial_axes_t axes, double speed) {
     double const latitude = point[0] * M_PI / 180.0, longitude = point[1] * M_PI / 180.0;
     bool const with_altitude = layout_carries_altitude(layout) && axes != usearch_geospatial_axes_horizontal_k;
     bool const with_time = layout_carries_time(layout) && axes == usearch_geospatial_axes_full_k;
@@ -195,7 +192,7 @@ geospatial_position_t converted(std::span<double const> point, usearch_geospatia
     return converted_position;
 }
 
-double position_distance(geospatial_position_t const& first, geospatial_position_t const& second) {
+static double position_distance(geospatial_position_t const& first, geospatial_position_t const& second) {
     double squared = 0;
     for (std::size_t axis = 0; axis != first.size(); ++axis) {
         double const delta = first[axis] - second[axis];
@@ -205,23 +202,24 @@ double position_distance(geospatial_position_t const& first, geospatial_position
 }
 
 /** The converted form of a whole point set, which every mode below scores over. */
-void convert_set(std::span<double const> points, usearch_geospatial_layout_t layout, usearch_geospatial_axes_t axes,
-                 double speed, std::vector<geospatial_position_t>& positions) {
+static void convert_set(std::span<double const> points, usearch_geospatial_layout_t layout,
+                        usearch_geospatial_axes_t axes, double speed, std::vector<geospatial_position_t>& positions) {
     std::size_t const width = layout_width(layout);
     positions.clear();
     for (std::size_t point = 0; point * width != points.size(); ++point)
         positions.push_back(converted(points.subspan(point * width, width), layout, axes, speed));
 }
 
-void convert_stored(std::span<float const> stored, usearch_geospatial_layout_t layout, usearch_geospatial_axes_t axes,
-                    double speed, std::vector<double>& widened, std::vector<geospatial_position_t>& positions) {
+static void convert_stored(std::span<float const> stored, usearch_geospatial_layout_t layout,
+                           usearch_geospatial_axes_t axes, double speed, std::vector<double>& widened,
+                           std::vector<geospatial_position_t>& positions) {
     widened.assign(stored.begin(), stored.end());
     convert_set(widened, layout, axes, speed, positions);
 }
 
 /** The directed nearest-approach of every position in @p from to the whole of @p onto. */
-void directed(std::span<geospatial_position_t const> from, std::span<geospatial_position_t const> onto, double& nearest,
-              double& worst) {
+static void directed(std::span<geospatial_position_t const> from, std::span<geospatial_position_t const> onto,
+                     double& nearest, double& worst) {
     nearest = 0, worst = 0;
     if (from.empty() || onto.empty()) return;
     nearest = std::numeric_limits<double>::infinity();
@@ -236,8 +234,8 @@ void directed(std::span<geospatial_position_t const> from, std::span<geospatial_
 
 /** Scores one query set against one stored set under the selected mode. Route scoring
  *  pairs positions in order, which is what an ordered structure buys. */
-double distance(std::span<geospatial_position_t const> query, std::span<geospatial_position_t const> stored,
-                usearch_geospatial_mode_t mode) {
+static double distance(std::span<geospatial_position_t const> query, std::span<geospatial_position_t const> stored,
+                       usearch_geospatial_mode_t mode) {
     if (mode == usearch_geospatial_mode_route_k) {
         std::size_t const paired = std::min(query.size(), stored.size());
         double worst = 0;
@@ -264,10 +262,10 @@ struct geospatial_search_scratch_t {
 };
 
 /** One query's whole scan. The query converts once, then every entry scores against it. */
-void rank(usearch_geospatial_index_handle_t const& index, usearch_geospatial_emplaced_handle_t const& query,
-          usearch_geospatial_mode_t mode, usearch_geospatial_axes_t axes,
-          usearch_geospatial_tolerance_t const* tolerance, std::size_t rows, usearch_predicate_t predicate,
-          void* predicate_state, geospatial_search_scratch_t& scratch, std::vector<match_t>& ranked) {
+static void rank(geospatial_index_t const& index, geospatial_emplaced_t const& query, usearch_geospatial_mode_t mode,
+                 usearch_geospatial_axes_t axes, usearch_geospatial_tolerance_t const* tolerance, std::size_t rows,
+                 usearch_predicate_t predicate, void* predicate_state, geospatial_search_scratch_t& scratch,
+                 std::vector<match_t>& ranked) {
     double const speed = speed_of(tolerance);
     convert_set(query.points, index.options.layout, axes, speed, scratch.query_positions);
     us::stub::rank<geospatial_payload_t>(
@@ -283,7 +281,8 @@ void rank(usearch_geospatial_index_handle_t const& index, usearch_geospatial_emp
  *  @brief The body of a search, filtered when its @c predicate is set.
  *  @return Queries answered, short of @c count exactly when the handler cancelled.
  */
-std::size_t search_queries(usearch_geospatial_index_handle_t& index, usearch_geospatial_search_t const& arguments) {
+template <typename arguments_>
+static std::size_t search_queries(geospatial_index_t& index, arguments_ const& arguments) {
     std::size_t const rows = index.entries.size();
     std::size_t const count = arguments.count, wanted = arguments.matches.wanted;
     usearch_matches_span_t const& matches = arguments.matches;
@@ -342,18 +341,18 @@ struct geospatial_checkpoint_prefix_t {
 /** The per-entry overhead of the blob: the key, then the point count that follows it. */
 constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(us::u64_t);
 
-std::size_t payload_extent(usearch_geospatial_index_handle_t const& index, std::size_t rows) {
+static std::size_t payload_extent(geospatial_index_t const& index, std::size_t rows) {
     std::size_t extent = 0;
     for (std::size_t row = 0; row != rows; ++row)
         extent += record_overhead_k + index.entries[row].payload.size() * sizeof(float);
     return extent;
 }
 
-std::optional<std::size_t> serialized_bytes(usearch_geospatial_index_handle_t const& index, std::size_t rows) {
+static std::optional<std::size_t> serialized_bytes(geospatial_index_t const& index, std::size_t rows) {
     return blob_bytes(sizeof(geospatial_checkpoint_prefix_t), payload_extent(index, rows), 1);
 }
 
-void write_into(usearch_geospatial_index_handle_t const& index, std::size_t rows, bytes_span_t target) {
+static void write_into(geospatial_index_t const& index, std::size_t rows, bytes_span_t target) {
     geospatial_checkpoint_prefix_t prefix {};
     prefix.connectivity = index.options.connectivity;
     prefix.entries = rows;
@@ -379,7 +378,7 @@ void write_into(usearch_geospatial_index_handle_t const& index, std::size_t rows
 }
 
 /** Reads the prefix and checks the blob is long enough for what it claims. */
-bool parse_prefix(geospatial_checkpoint_prefix_t& prefix, bytes_view_t blob, usearch_outcome_t* outcome) {
+static bool parse_prefix(geospatial_checkpoint_prefix_t& prefix, bytes_view_t blob, usearch_outcome_t* outcome) {
     if (reject_if(blob.size() < sizeof(geospatial_checkpoint_prefix_t), usearch_status_malformed_k,
                   "The checkpoint ends early", outcome))
         return false;
@@ -389,14 +388,14 @@ bool parse_prefix(geospatial_checkpoint_prefix_t& prefix, bytes_view_t blob, use
 
 /** Adopts a checkpoint's configuration. The bound on entries per key is the loader's to choose,
  *  since no checkpoint records it. */
-void adopt(geospatial_index_options_t& options, geospatial_checkpoint_prefix_t const& prefix) {
+static void adopt(geospatial_index_options_t& options, geospatial_checkpoint_prefix_t const& prefix) {
     options.layout = prefix.layout;
     options.structure = prefix.structure;
     options.connectivity = prefix.connectivity;
 }
 
 /** Fills a fresh @p index from a checkpoint, which no other thread can see yet. */
-bool read_from(usearch_geospatial_index_handle_t& index, bytes_view_t blob, usearch_outcome_t* outcome) {
+static bool read_from(geospatial_index_t& index, bytes_view_t blob, usearch_outcome_t* outcome) {
     geospatial_checkpoint_prefix_t prefix {};
     if (!parse_prefix(prefix, blob, outcome)) return false;
     std::size_t const entries = prefix.entries;
@@ -438,8 +437,9 @@ bool read_from(usearch_geospatial_index_handle_t& index, bytes_view_t blob, usea
 }
 
 /** A new handle holding the checkpoint in @p blob, or null once the outcome records why not. */
-usearch_geospatial_index_handle_t* open_checkpoint(bytes_view_t blob, usearch_outcome_t* outcome) {
-    usearch_geospatial_index_handle_t* const index = new (std::nothrow) usearch_geospatial_index_handle_t();
+template <typename index_type_>
+static index_type_* open_checkpoint(bytes_view_t blob, usearch_outcome_t* outcome) {
+    index_type_* const index = new (std::nothrow) index_type_();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return nullptr;
     if (read_from(*index, blob, outcome)) return index;
     delete index;
@@ -448,12 +448,18 @@ usearch_geospatial_index_handle_t* open_checkpoint(bytes_view_t blob, usearch_ou
 
 #pragma endregion Serialization
 
-} // namespace
+} // namespace stub
+} // namespace usearch
+} // namespace unum
+
+struct usearch_geospatial_index_handle_t : geospatial_index_t {};
+struct usearch_geospatial_cursor_handle_t : geospatial_cursor_t {};
+struct usearch_geospatial_emplaced_handle_t : geospatial_emplaced_t {};
 
 extern "C" {
 
 void usearch_geospatial_init_ram(usearch_geospatial_init_ram_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     usearch_geospatial_index_handle_t* const index = new (std::nothrow) usearch_geospatial_index_handle_t();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return;
@@ -464,19 +470,20 @@ void usearch_geospatial_init_ram(usearch_geospatial_init_ram_t* arguments) {
 }
 
 void usearch_geospatial_init_vram(usearch_geospatial_init_vram_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA backends");
 }
 
 void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_load_ram>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob;
     if (!read_file(arguments->path, blob, outcome)) return;
-    usearch_geospatial_index_handle_t* const index = open_checkpoint(blob, outcome);
+    usearch_geospatial_index_handle_t* const index = open_checkpoint<usearch_geospatial_index_handle_t>(blob, outcome);
     if (!index) return;
     index->options.values_per_key = arguments->values_per_key;
     keep_going(arguments->progress, arguments->progress_state, 1, 1);
@@ -484,18 +491,20 @@ void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments) {
 }
 
 void usearch_geospatial_load_vram(usearch_geospatial_load_vram_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_load_vram>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA backends");
 }
 
 void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
     // Rows are still copied out of the mapping, so only the view's refusals are mirrored, not its zero cost.
-    usearch_geospatial_index_handle_t* const index = open_checkpoint(served.view(), outcome);
+    usearch_geospatial_index_handle_t* const index = open_checkpoint<usearch_geospatial_index_handle_t>(served.view(),
+                                                                                                        outcome);
     if (!index) return;
     index->served = std::move(served);
     *arguments->index = index;
@@ -504,7 +513,8 @@ void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments) {
 void usearch_geospatial_free(usearch_geospatial_index_t handle) { delete handle; }
 
 void usearch_geospatial_reserve(usearch_geospatial_reserve_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_reserve>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     usearch_geospatial_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
     std::unique_lock writers(index.mutex);
@@ -513,7 +523,8 @@ void usearch_geospatial_reserve(usearch_geospatial_reserve_t* arguments) {
 }
 
 void usearch_geospatial_clear(usearch_geospatial_clear_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_clear>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     usearch_geospatial_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
     std::unique_lock writers(index.mutex);
@@ -521,7 +532,8 @@ void usearch_geospatial_clear(usearch_geospatial_clear_t* arguments) {
 }
 
 void usearch_geospatial_describe(usearch_geospatial_describe_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_describe>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->description = {};
     usearch_geospatial_index_handle_t& index = *arguments->index;
     // Held shared like every other reader, so a size taken beside an insertion is not a data race.
@@ -537,7 +549,8 @@ void usearch_geospatial_describe(usearch_geospatial_describe_t* arguments) {
 }
 
 void usearch_geospatial_add(usearch_geospatial_add_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_add>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     usearch_geospatial_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
     usearch_geospatial_index_handle_t& index = *arguments->index;
@@ -579,7 +592,8 @@ void usearch_geospatial_add(usearch_geospatial_add_t* arguments) {
 }
 
 void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_refine>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->changed) *arguments->changed = 0;
     usearch_geospatial_index_handle_t& index = *arguments->index;
@@ -594,7 +608,8 @@ void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments) {
 }
 
 void usearch_geospatial_emplace(usearch_geospatial_emplace_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_emplace>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->emplaced = nullptr;
     usearch_geospatial_index_handle_t& index = *arguments->index;
     if (reject_unfrozen(index, outcome)) return;
@@ -612,7 +627,8 @@ void usearch_geospatial_emplace(usearch_geospatial_emplace_t* arguments) {
 void usearch_geospatial_emplaced_free(usearch_geospatial_emplaced_t handle) { delete handle; }
 
 void usearch_geospatial_search(usearch_geospatial_search_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_search>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     usearch_geospatial_index_handle_t& index = *arguments->index;
     std::size_t const count = arguments->count;
@@ -631,7 +647,8 @@ void usearch_geospatial_search(usearch_geospatial_search_t* arguments) {
 }
 
 void usearch_geospatial_within(usearch_geospatial_within_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_within>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     usearch_geospatial_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
     *arguments->keys = nullptr;
@@ -680,7 +697,7 @@ void usearch_geospatial_within(usearch_geospatial_within_t* arguments) {
     if (!total) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, nullptr, outcome);
     if (!arena) return;
-    std::unique_lock const held {arena->busy, std::adopt_lock};
+    std::unique_lock const held {arena->serving, std::adopt_lock};
     std::byte* const landing = arena->memory.allocate(total * (sizeof(usearch_key_t) + sizeof(usearch_distance_t)),
                                                       default_alignment_k);
     if (!landing) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
@@ -694,7 +711,8 @@ void usearch_geospatial_within(usearch_geospatial_within_t* arguments) {
 }
 
 void usearch_geospatial_count(usearch_geospatial_count_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_count>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->key_stats = {};
     usearch_geospatial_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
@@ -710,7 +728,8 @@ void usearch_geospatial_count(usearch_geospatial_count_t* arguments) {
 }
 
 void usearch_geospatial_get(usearch_geospatial_get_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_get>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->points = nullptr;
     *arguments->offsets = nullptr;
     if (arguments->written) *arguments->written = 0;
@@ -724,7 +743,7 @@ void usearch_geospatial_get(usearch_geospatial_get_t* arguments) {
     std::size_t const offsets_bytes = (rows.size() + 1) * sizeof(std::size_t);
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, nullptr, outcome);
     if (!arena) return;
-    std::unique_lock const held {arena->busy, std::adopt_lock};
+    std::unique_lock const held {arena->serving, std::adopt_lock};
     std::byte* const landing = arena->memory.allocate(offsets_bytes + total_scalars * sizeof(double),
                                                       default_alignment_k);
     if (!landing) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
@@ -742,7 +761,8 @@ void usearch_geospatial_get(usearch_geospatial_get_t* arguments) {
 }
 
 void usearch_geospatial_merge(usearch_geospatial_merge_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_merge>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     usearch_geospatial_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
 
@@ -774,7 +794,7 @@ void usearch_geospatial_merge(usearch_geospatial_merge_t* arguments) {
 }
 
 void usearch_geospatial_cursor_init(usearch_geospatial_cursor_init_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->cursor = nullptr;
     usearch_geospatial_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
@@ -785,7 +805,8 @@ void usearch_geospatial_cursor_init(usearch_geospatial_cursor_init_t* arguments)
 }
 
 void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_cursor_next>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->written = 0;
     usearch_geospatial_cursor_handle_t& cursor = *arguments->cursor;
     if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
@@ -798,7 +819,7 @@ void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments)
     if (reject_keys_span(keys, outcome)) return;
     if (reject_if(!point_counts, usearch_status_invalid_argument_k, "The point counts must name storage", outcome))
         return;
-    if (reject_if(cursor.busy.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
+    if (reject_if(cursor.pulling.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
                   "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
@@ -832,13 +853,14 @@ void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments)
     }
     cursor.position += written;
     *arguments->written = written;
-    cursor.busy.clear(std::memory_order_release);
+    cursor.pulling.clear(std::memory_order_release);
 }
 
 void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t handle) { delete handle; }
 
 void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_save>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     usearch_geospatial_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
     std::size_t const rows = index.entries.size();
@@ -854,7 +876,8 @@ void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {
 }
 
 void usearch_geospatial_metadata_read(usearch_geospatial_metadata_read_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_geospatial_metadata_read>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->metadata = {};
     std::vector<std::byte> blob;
     if (!read_file(arguments->path, blob, outcome)) return;

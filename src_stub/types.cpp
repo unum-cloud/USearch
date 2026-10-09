@@ -8,14 +8,8 @@
  *  The engine renders the capability strings from NumKong's dispatch mask in @c src/types.cpp. A
  *  stand-in dispatches to nothing, so it reports @c serial and says so wherever a binding asks.
  *
- *  Its executors are inert by the same logic. A handle is spawned, validated and freed exactly as
- *  the engine's is, so a binding suite exercises the whole lifetime, but no thread and no stream
- *  ever exists behind it: every verb runs to completion on the caller's thread before it returns,
- *  as the headers allow an executor without threads of its own to. Only the RAM constructors
- *  succeed, because those are the residencies this library implements at all.
- *
- *  Nothing here queues, so an in-flight table never fills: two threads driving one executor both
- *  run, where the engine may refuse the second with @c usearch_status_contended_k.
+ *  Its executors start no threads: a deferred call waits in the executor's queue until its next
+ *  drain, blocking call or free runs it on that caller's thread. Only the RAM constructors succeed.
  */
 #include "usearch/types.h"
 
@@ -40,50 +34,55 @@ usearch_status_t usearch_outcome_wait(usearch_outcome_t const* outcome) {
     if (!outcome) return usearch_status_invalid_argument_k;
     std::atomic_ref status(const_cast<usearch_status_t&>(outcome->status));
     usearch_status_t current = status.load(std::memory_order_acquire);
-    for (; current == usearch_status_pending_k; current = status.load(std::memory_order_acquire))
-        status.wait(usearch_status_pending_k, std::memory_order_acquire);
+    for (; current == usearch_status_deferred_k; current = status.load(std::memory_order_acquire))
+        status.wait(usearch_status_deferred_k, std::memory_order_acquire);
     return current;
 }
 
 void usearch_arena_free(usearch_arena_t arena) { delete arena; }
 
 void usearch_executor_for_ram(usearch_executor_for_ram_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
-    usearch_executor_handle_t* const executor = new (std::nothrow)
-        usearch_executor_handle_t {arguments->threads ? arguments->threads : 1};
+    usearch_executor_handle_t* const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (reject_if(!executor, usearch_status_out_of_memory_k, "The executor could not be allocated", outcome)) return;
+    if (arguments->threads) executor->threads = arguments->threads;
+    if (arguments->deferred_limit) executor->deferred_limit = arguments->deferred_limit;
     *arguments->executor = executor;
 }
 
 void usearch_executor_on_pool(usearch_executor_on_pool_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
     if (reject_if(!arguments->pool, usearch_status_invalid_argument_k, "The pool must not be null", outcome)) return;
     // The pool is borrowed and never driven, every verb running on the thread that called it.
     usearch_executor_handle_t* const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (reject_if(!executor, usearch_status_out_of_memory_k, "The executor could not be allocated", outcome)) return;
+    if (arguments->deferred_limit) executor->deferred_limit = arguments->deferred_limit;
     *arguments->executor = executor;
 }
 
 void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
     propagate_error(usearch_status_unsupported_k, outcome, "This build carries no NVMe residency");
 }
 
 void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
     propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA backends");
 }
 
 void usearch_executor_drain(usearch_executor_drain_t* arguments) {
-    // Nothing is ever queued, every verb having run on the thread that called it.
-    pending_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome);
+    if (arguments->executor) flush(*arguments->executor);
 }
 
-void usearch_executor_free(usearch_executor_t executor) { delete executor; }
+void usearch_executor_free(usearch_executor_t executor) {
+    if (executor) flush(*executor);
+    delete executor;
+}
 
 #pragma region Vocabulary
 
@@ -105,10 +104,9 @@ char const* usearch_status_name(usearch_status_t status) {
     case usearch_status_contended_k: return "contended";
     case usearch_status_cancelled_k: return "cancelled";
     case usearch_status_unsupported_k: return "unsupported";
-    case usearch_status_pending_k: return "pending";
+    case usearch_status_deferred_k: return "deferred";
     case usearch_status_invalid_argument_k: return "invalid-argument";
-    // An unrecognized value spells like the status an unrecognized name reads back as.
-    default: return "invalid-argument";
+    default: return "unrecognized";
     }
 }
 
@@ -166,6 +164,18 @@ usearch_residency_t usearch_residency_from_name(usearch_bytes_view_t name) {
     if (named(name, "vram")) return usearch_residency_vram_k;
     if (named(name, "nvme")) return usearch_residency_nvme_k;
     return usearch_residency_ram_k;
+}
+
+char const* usearch_mood_name(usearch_mood_t mood) {
+    switch (mood) {
+    case usearch_mood_parked_k: return "parked";
+    case usearch_mood_spinning_k: return "spinning";
+    default: return "unknown";
+    }
+}
+
+usearch_mood_t usearch_mood_from_name(usearch_bytes_view_t name) {
+    return named(name, "spinning") ? usearch_mood_spinning_k : usearch_mood_parked_k;
 }
 
 char const* usearch_cpu_class_name(usearch_cpu_class_t) { return "serial"; }

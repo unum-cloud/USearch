@@ -40,7 +40,9 @@
 using namespace unum::usearch;
 using namespace unum::usearch::stub;
 
-namespace {
+namespace unum {
+namespace usearch {
+namespace stub {
 
 #pragma region Storage
 
@@ -71,14 +73,12 @@ struct matrix_index_options_t {
     std::size_t values_per_key;
 };
 
-} // namespace
+using matrix_index_t = handle<matrix_payload_t, matrix_index_options_t>;
 
-struct usearch_matrix_index_handle_t : handle<matrix_payload_t, matrix_index_options_t> {};
-
-struct usearch_matrix_cursor_handle_t {
+struct matrix_cursor_t {
 
     /** The handle the cursor was opened on, only ever compared with the one each pull passes. */
-    usearch_matrix_index_handle_t const* opened_on;
+    matrix_index_t const* opened_on;
 
     /** The next entry to hand out. */
     std::size_t position;
@@ -87,18 +87,16 @@ struct usearch_matrix_cursor_handle_t {
     std::size_t limit;
 
     /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
-    std::atomic_flag busy;
+    std::atomic_flag pulling;
 };
 
-namespace {
-
 /** Whether the width is frozen; a zeroed one makes every derived extent zero. */
-bool reject_unfrozen(usearch_matrix_index_handle_t const& index, usearch_outcome_t* outcome) {
+static bool reject_unfrozen(matrix_index_t const& index, usearch_outcome_t* outcome) {
     return reject_if(!index.options.columns, usearch_status_uninitialized_k, "The geometry was never frozen", outcome);
 }
 
 /** Whether this stand-in scores the kind, or rejects it rather than approximating it. */
-bool reject_metric(usearch_matrix_index_handle_t const& index, usearch_outcome_t* outcome) {
+static bool reject_metric(matrix_index_t const& index, usearch_outcome_t* outcome) {
     bool const scored = index.options.metric == usearch_matrix_metric_chamfer_k ||
                         index.options.metric == usearch_matrix_metric_hausdorff_k;
     return reject_if(!scored, usearch_status_unknown_kind_k, "The stand-in implements chamfer and hausdorff only",
@@ -106,7 +104,7 @@ bool reject_metric(usearch_matrix_index_handle_t const& index, usearch_outcome_t
 }
 
 /** The height of a stored entry, which its payload's extent and the frozen width fix. */
-std::size_t rows_of(usearch_matrix_index_handle_t const& index, matrix_entry_t const& entry) {
+static std::size_t rows_of(matrix_index_t const& index, matrix_entry_t const& entry) {
     return entry.payload.size() / index.options.columns;
 }
 
@@ -114,7 +112,7 @@ std::size_t rows_of(usearch_matrix_index_handle_t const& index, matrix_entry_t c
 
 #pragma region Scoring
 
-double row_distance(std::span<double const> first, std::span<double const> second) {
+static double row_distance(std::span<double const> first, std::span<double const> second) {
     double squared = 0;
     for (std::size_t column = 0; column != first.size(); ++column) {
         double const delta = first[column] - second[column];
@@ -125,8 +123,8 @@ double row_distance(std::span<double const> first, std::span<double const> secon
 
 /** Every row of @p from finds its nearest partner in @p onto; the two kinds differ only
  *  in how those distances are aggregated, so both come off this one sweep. */
-void nearest_partners(std::span<double const> from, std::span<double const> onto, std::size_t columns, double& summed,
-                      double& worst) {
+static void nearest_partners(std::span<double const> from, std::span<double const> onto, std::size_t columns,
+                             double& summed, double& worst) {
     summed = 0, worst = 0;
     std::size_t const from_rows = from.size() / columns, onto_rows = onto.size() / columns;
     if (!onto_rows) return;
@@ -143,8 +141,7 @@ void nearest_partners(std::span<double const> from, std::span<double const> onto
 
 /** Scores one pair under the frozen kind. @c usearch_matrix_init_ram refuses a kind this
  *  build does not implement, so only the two best-partner kinds reach here. */
-double distance(usearch_matrix_index_handle_t const& index, std::span<double const> query,
-                std::span<double const> stored) {
+static double distance(matrix_index_t const& index, std::span<double const> query, std::span<double const> stored) {
     std::size_t const columns = index.options.columns;
     double forward_mean = 0, forward_worst = 0, reverse_mean = 0, reverse_worst = 0;
     nearest_partners(query, stored, columns, forward_mean, forward_worst);
@@ -155,13 +152,13 @@ double distance(usearch_matrix_index_handle_t const& index, std::span<double con
 
 /** Whether the kind is one this build implements. The transport and superposition kinds
  *  need a solver and an SVD, which a brute-force stand-in deliberately does not carry. */
-bool known_metric(usearch_matrix_metric_t metric) {
+static bool known_metric(usearch_matrix_metric_t metric) {
     return metric == usearch_matrix_metric_chamfer_k || metric == usearch_matrix_metric_hausdorff_k;
 }
 
 /** Widens entry @p entry of a tape into doubles, sized by its own row count. */
-void read_matrix(usearch_tape_view_t tape, std::size_t entry, std::size_t columns, usearch_scalar_t scalar_kind,
-                 std::vector<double>& values) {
+static void read_matrix(usearch_tape_view_t tape, std::size_t entry, std::size_t columns, usearch_scalar_t scalar_kind,
+                        std::vector<double>& values) {
     std::size_t const first_row = tape.offsets[entry], row_count = tape.offsets[entry + 1] - first_row;
     values.resize(row_count * columns);
     std::size_t const row_bytes = row_extent(scalar_kind, columns);
@@ -174,11 +171,11 @@ void read_matrix(usearch_tape_view_t tape, std::size_t entry, std::size_t column
  *  @brief The body of a search, filtered when @p predicate is set.
  *  @return Queries answered, short of @p count exactly when the handler cancelled.
  */
-std::size_t search_tape(usearch_matrix_index_handle_t& index, usearch_tape_view_t queries, std::size_t count,
-                        usearch_scalar_t scalar_kind, usearch_matches_span_t const& matches,
-                        std::size_t expansion_factor, usearch_matrix_traversal_stats_t* stats,
-                        usearch_predicate_t predicate, void* predicate_state, usearch_progress_callback_t progress,
-                        void* progress_state) {
+static std::size_t search_tape(matrix_index_t& index, usearch_tape_view_t queries, std::size_t count,
+                               usearch_scalar_t scalar_kind, usearch_matches_span_t const& matches,
+                               std::size_t expansion_factor, usearch_matrix_traversal_stats_t* stats,
+                               usearch_predicate_t predicate, void* predicate_state,
+                               usearch_progress_callback_t progress, void* progress_state) {
     std::size_t const rows = index.entries.size();
     std::size_t const columns = index.options.columns;
     std::size_t const wanted = matches.wanted;
@@ -244,18 +241,18 @@ struct matrix_checkpoint_prefix_t {
 /** The per-entry overhead of the blob: the key, then the row count that follows it. */
 constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(us::u64_t);
 
-std::size_t payload_extent(usearch_matrix_index_handle_t const& index, std::size_t rows) {
+static std::size_t payload_extent(matrix_index_t const& index, std::size_t rows) {
     std::size_t extent = 0;
     for (std::size_t row = 0; row != rows; ++row)
         extent += record_overhead_k + index.entries[row].payload.size() * sizeof(double);
     return extent;
 }
 
-std::optional<std::size_t> serialized_bytes(usearch_matrix_index_handle_t const& index, std::size_t rows) {
+static std::optional<std::size_t> serialized_bytes(matrix_index_t const& index, std::size_t rows) {
     return blob_bytes(sizeof(matrix_checkpoint_prefix_t), payload_extent(index, rows), 1);
 }
 
-void write_into(usearch_matrix_index_handle_t const& index, std::size_t rows, bytes_span_t target) {
+static void write_into(matrix_index_t const& index, std::size_t rows, bytes_span_t target) {
     matrix_checkpoint_prefix_t prefix {};
     prefix.columns = index.options.columns;
     prefix.rows = index.options.rows;
@@ -282,7 +279,7 @@ void write_into(usearch_matrix_index_handle_t const& index, std::size_t rows, by
 }
 
 /** Reads the prefix and checks the blob is long enough for what it claims. */
-bool parse_prefix(matrix_checkpoint_prefix_t& prefix, bytes_view_t blob, usearch_outcome_t* outcome) {
+static bool parse_prefix(matrix_checkpoint_prefix_t& prefix, bytes_view_t blob, usearch_outcome_t* outcome) {
     if (reject_if(blob.size() < sizeof(matrix_checkpoint_prefix_t), usearch_status_malformed_k,
                   "The checkpoint ends early", outcome))
         return false;
@@ -292,7 +289,7 @@ bool parse_prefix(matrix_checkpoint_prefix_t& prefix, bytes_view_t blob, usearch
 
 /** Adopts a checkpoint's configuration, answering whether its metric is one we implement. The
  *  bound on entries per key is the loader's to choose, since no checkpoint records it. */
-bool adopt(matrix_index_options_t& options, matrix_checkpoint_prefix_t const& prefix) {
+static bool adopt(matrix_index_options_t& options, matrix_checkpoint_prefix_t const& prefix) {
     if (!known_metric(prefix.metric)) return false;
     options.columns = prefix.columns;
     options.rows = prefix.rows;
@@ -303,7 +300,7 @@ bool adopt(matrix_index_options_t& options, matrix_checkpoint_prefix_t const& pr
 }
 
 /** Fills a fresh @p index from a checkpoint, which no other thread can see yet. */
-bool read_from(usearch_matrix_index_handle_t& index, bytes_view_t blob, usearch_outcome_t* outcome) {
+static bool read_from(matrix_index_t& index, bytes_view_t blob, usearch_outcome_t* outcome) {
     matrix_checkpoint_prefix_t prefix {};
     if (!parse_prefix(prefix, blob, outcome)) return false;
     std::size_t const entries = prefix.entries;
@@ -347,8 +344,9 @@ bool read_from(usearch_matrix_index_handle_t& index, bytes_view_t blob, usearch_
 }
 
 /** A new handle holding the checkpoint in @p blob, or null once the outcome records why not. */
-usearch_matrix_index_handle_t* open_checkpoint(bytes_view_t blob, usearch_outcome_t* outcome) {
-    usearch_matrix_index_handle_t* const index = new (std::nothrow) usearch_matrix_index_handle_t();
+template <typename index_type_>
+static index_type_* open_checkpoint(bytes_view_t blob, usearch_outcome_t* outcome) {
+    index_type_* const index = new (std::nothrow) index_type_();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return nullptr;
     if (read_from(*index, blob, outcome)) return index;
     delete index;
@@ -357,12 +355,17 @@ usearch_matrix_index_handle_t* open_checkpoint(bytes_view_t blob, usearch_outcom
 
 #pragma endregion Serialization
 
-} // namespace
+} // namespace stub
+} // namespace usearch
+} // namespace unum
+
+struct usearch_matrix_index_handle_t : matrix_index_t {};
+struct usearch_matrix_cursor_handle_t : matrix_cursor_t {};
 
 extern "C" {
 
 void usearch_matrix_init_ram(usearch_matrix_init_ram_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_if(!known_metric(arguments->metric), usearch_status_unknown_kind_k,
                   "The stand-in implements chamfer and hausdorff only", outcome))
@@ -379,19 +382,20 @@ void usearch_matrix_init_ram(usearch_matrix_init_ram_t* arguments) {
 }
 
 void usearch_matrix_init_vram(usearch_matrix_init_vram_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA backends");
 }
 
 void usearch_matrix_load_ram(usearch_matrix_load_ram_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_matrix_load_ram>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob;
     if (!read_file(arguments->path, blob, outcome)) return;
-    usearch_matrix_index_handle_t* const index = open_checkpoint(blob, outcome);
+    usearch_matrix_index_handle_t* const index = open_checkpoint<usearch_matrix_index_handle_t>(blob, outcome);
     if (!index) return;
     index->options.values_per_key = arguments->values_per_key;
     keep_going(arguments->progress, arguments->progress_state, 1, 1);
@@ -399,18 +403,19 @@ void usearch_matrix_load_ram(usearch_matrix_load_ram_t* arguments) {
 }
 
 void usearch_matrix_load_vram(usearch_matrix_load_vram_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_matrix_load_vram>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA backends");
 }
 
 void usearch_matrix_view_ram(usearch_matrix_view_ram_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
     // Rows are still copied out of the mapping, so only the view's refusals are mirrored, not its zero cost.
-    usearch_matrix_index_handle_t* const index = open_checkpoint(served.view(), outcome);
+    usearch_matrix_index_handle_t* const index = open_checkpoint<usearch_matrix_index_handle_t>(served.view(), outcome);
     if (!index) return;
     index->served = std::move(served);
     *arguments->index = index;
@@ -419,7 +424,8 @@ void usearch_matrix_view_ram(usearch_matrix_view_ram_t* arguments) {
 void usearch_matrix_free(usearch_matrix_index_t handle) { delete handle; }
 
 void usearch_matrix_reserve(usearch_matrix_reserve_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_matrix_reserve>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     usearch_matrix_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
     std::unique_lock writers(index.mutex);
@@ -428,7 +434,8 @@ void usearch_matrix_reserve(usearch_matrix_reserve_t* arguments) {
 }
 
 void usearch_matrix_clear(usearch_matrix_clear_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_matrix_clear>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     usearch_matrix_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
     std::unique_lock writers(index.mutex);
@@ -436,7 +443,8 @@ void usearch_matrix_clear(usearch_matrix_clear_t* arguments) {
 }
 
 void usearch_matrix_describe(usearch_matrix_describe_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_matrix_describe>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->description = {};
     usearch_matrix_index_handle_t& index = *arguments->index;
     // Held shared like every other reader, so a size taken beside an insertion is not a data race.
@@ -455,7 +463,8 @@ void usearch_matrix_describe(usearch_matrix_describe_t* arguments) {
 }
 
 void usearch_matrix_add(usearch_matrix_add_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_matrix_add>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     usearch_matrix_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
     usearch_matrix_index_handle_t& index = *arguments->index;
@@ -504,7 +513,8 @@ void usearch_matrix_add(usearch_matrix_add_t* arguments) {
 }
 
 void usearch_matrix_refine(usearch_matrix_refine_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_matrix_refine>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->changed) *arguments->changed = 0;
     usearch_matrix_index_handle_t& index = *arguments->index;
@@ -519,7 +529,8 @@ void usearch_matrix_refine(usearch_matrix_refine_t* arguments) {
 }
 
 void usearch_matrix_search(usearch_matrix_search_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_matrix_search>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     usearch_matrix_index_handle_t& index = *arguments->index;
     std::size_t const count = arguments->count;
@@ -538,7 +549,8 @@ void usearch_matrix_search(usearch_matrix_search_t* arguments) {
 }
 
 void usearch_matrix_count(usearch_matrix_count_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_matrix_count>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->key_stats = {};
     usearch_matrix_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
@@ -553,7 +565,8 @@ void usearch_matrix_count(usearch_matrix_count_t* arguments) {
 }
 
 void usearch_matrix_get(usearch_matrix_get_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_matrix_get>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->matrices = nullptr;
     *arguments->offsets = nullptr;
     if (arguments->written) *arguments->written = 0;
@@ -572,7 +585,7 @@ void usearch_matrix_get(usearch_matrix_get_t* arguments) {
     std::size_t const offsets_bytes = (rows.size() + 1) * sizeof(std::size_t);
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, nullptr, outcome);
     if (!arena) return;
-    std::unique_lock const held {arena->busy, std::adopt_lock};
+    std::unique_lock const held {arena->serving, std::adopt_lock};
     std::byte* const landing = arena->memory.allocate(offsets_bytes + total_rows * row_bytes, default_alignment_k);
     if (!landing) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
     std::size_t* const offsets = reinterpret_cast<std::size_t*>(landing);
@@ -593,7 +606,8 @@ void usearch_matrix_get(usearch_matrix_get_t* arguments) {
 }
 
 void usearch_matrix_merge(usearch_matrix_merge_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_matrix_merge>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     usearch_matrix_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
 
@@ -625,7 +639,7 @@ void usearch_matrix_merge(usearch_matrix_merge_t* arguments) {
 }
 
 void usearch_matrix_cursor_init(usearch_matrix_cursor_init_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->cursor = nullptr;
     usearch_matrix_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
@@ -636,7 +650,8 @@ void usearch_matrix_cursor_init(usearch_matrix_cursor_init_t* arguments) {
 }
 
 void usearch_matrix_cursor_next(usearch_matrix_cursor_next_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_matrix_cursor_next>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->written = 0;
     usearch_matrix_cursor_handle_t& cursor = *arguments->cursor;
     if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
@@ -648,7 +663,7 @@ void usearch_matrix_cursor_next(usearch_matrix_cursor_next_t* arguments) {
     if (reject_if(!arguments->row_counts, usearch_status_invalid_argument_k, "The row counts must name storage",
                   outcome))
         return;
-    if (reject_if(cursor.busy.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
+    if (reject_if(cursor.pulling.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
                   "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
@@ -662,13 +677,14 @@ void usearch_matrix_cursor_next(usearch_matrix_cursor_next_t* arguments) {
     }
     cursor.position += written;
     *arguments->written = written;
-    cursor.busy.clear(std::memory_order_release);
+    cursor.pulling.clear(std::memory_order_release);
 }
 
 void usearch_matrix_cursor_free(usearch_matrix_cursor_t handle) { delete handle; }
 
 void usearch_matrix_save(usearch_matrix_save_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_matrix_save>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     usearch_matrix_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
     std::size_t const rows = index.entries.size();
@@ -684,7 +700,8 @@ void usearch_matrix_save(usearch_matrix_save_t* arguments) {
 }
 
 void usearch_matrix_metadata_read(usearch_matrix_metadata_read_t* arguments) {
-    pending_outcome_t outcome(arguments->outcome);
+    if (deferred<usearch_matrix_metadata_read>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
     *arguments->metadata = {};
     std::vector<std::byte> blob;
     if (!read_file(arguments->path, blob, outcome)) return;

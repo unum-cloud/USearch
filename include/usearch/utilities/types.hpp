@@ -214,8 +214,8 @@ enum class [[nodiscard]] status_t : int {
     /** @brief The verb is declared for every residency but this one does not implement it. */
     unsupported_k = usearch_status_unsupported_k,
 
-    /** The call was submitted and has not finished; never a final status. */
-    pending_k = usearch_status_pending_k,
+    /** The call was submitted deferred and is not final yet; never a final status. */
+    deferred_k = usearch_status_deferred_k,
 
     /** An argument breaks the verb's contract, like a required pointer left null. */
     invalid_argument_k = usearch_status_invalid_argument_k,
@@ -291,7 +291,7 @@ constexpr char const* status_to_string(status_t status) noexcept {
     case status_t::contended_k: return "a synchronization contract was violated concurrently";
     case status_t::cancelled_k: return "a progress callback asked the operation to stop";
     case status_t::unsupported_k: return "this residency does not implement the verb";
-    case status_t::pending_k: return "the call was submitted and has not finished";
+    case status_t::deferred_k: return "the call was submitted deferred and is not final yet";
     case status_t::invalid_argument_k: return "an argument breaks the verb's contract";
     }
     return "an unrecognized status";

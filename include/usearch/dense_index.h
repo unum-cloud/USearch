@@ -75,12 +75,12 @@
  *  threading adds nothing. A viewed handle admits arbitrarily many concurrent searches, having
  *  nothing to mutate. Serialization is the one exception: saving demands a mutation-free window,
  *  though concurrent readers keep searching throughout. Per-call outputs - stats, counts, the
- *  outcome - belong to their call and must not be shared between in-flight calls.
+ *  outcome - belong to their call and must not be shared between calls that are not final.
  *
  *  The executor, not the handle, is what orders: a handle admits any number of concurrent
  *  callers, while calls on one executor run in the order they were submitted. Callers wanting
- *  genuine parallelism give each thread its own executor or share one and let it queue them, and
- *  a @c NULL executor runs the call on the caller's own thread.
+ *  genuine parallelism give each thread its own executor, and a @c NULL executor runs the call on
+ *  the caller's own thread.
  *
  *  @section dense_index_residencies Verbs per Residency
  *
@@ -221,7 +221,7 @@ typedef struct usearch_dense_init_ram_t {
     /** Output for the new index. */
     usearch_dense_index_t* index;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
     /** The metric kind used for distance calculations between vectors. */
@@ -253,7 +253,7 @@ typedef struct usearch_dense_init_vram_t {
     /** Output for the new index. */
     usearch_dense_index_t* index;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
     /** The metric kind used for distance calculations between vectors. */
@@ -281,16 +281,16 @@ USEARCH_EXPORT void usearch_dense_init_vram(usearch_dense_init_vram_t* arguments
 /** The arguments of @c usearch_dense_load_ram. */
 typedef struct usearch_dense_load_ram_t {
 
-    /** Output for the new index, written once the call completes. */
+    /** Output for the new index, written by the time the call is final. */
     usearch_dense_index_t* index;
 
     /** The executor the read fans out over, one shard per thread. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The manifest of a sharded checkpoint, or a single @c .safegraphs monolith. */
@@ -330,16 +330,16 @@ USEARCH_EXPORT void usearch_dense_load_ram(usearch_dense_load_ram_t* arguments);
 /** The arguments of @c usearch_dense_load_vram. */
 typedef struct usearch_dense_load_vram_t {
 
-    /** Output for the new index, written once the call completes. */
+    /** Output for the new index, written by the time the call is final. */
     usearch_dense_index_t* index;
 
     /** The executor the upload runs on, one stream per device. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The manifest of a sharded checkpoint, or a single @c .safegraphs monolith. */
@@ -365,16 +365,16 @@ USEARCH_EXPORT void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments
 /** The arguments of @c usearch_dense_load_ram_buffer. */
 typedef struct usearch_dense_load_ram_buffer_t {
 
-    /** Output for the new index, written once the call completes. */
+    /** Output for the new index, written by the time the call is final. */
     usearch_dense_index_t* index;
 
     /** The executor the copy fans out over. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Source holding one serialized monolith. */
@@ -405,16 +405,16 @@ USEARCH_EXPORT void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_
 /** The arguments of @c usearch_dense_load_vram_buffer. */
 typedef struct usearch_dense_load_vram_buffer_t {
 
-    /** Output for the new index, written once the call completes. */
+    /** Output for the new index, written by the time the call is final. */
     usearch_dense_index_t* index;
 
     /** The executor the upload runs on, one stream per device. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Source holding one serialized monolith, in host or device memory. */
@@ -443,7 +443,7 @@ typedef struct usearch_dense_view_ram_t {
     /** Output for the new, read-only index. */
     usearch_dense_index_t* index;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
     /** The manifest of a sharded checkpoint, or a single @c .safegraphs monolith. */
@@ -463,16 +463,16 @@ USEARCH_EXPORT void usearch_dense_view_ram(usearch_dense_view_ram_t* arguments);
 /** The arguments of @c usearch_dense_view_nvme. */
 typedef struct usearch_dense_view_nvme_t {
 
-    /** Output for the new, read-only index, written once the call completes. */
+    /** Output for the new, read-only index, written by the time the call is final. */
     usearch_dense_index_t* index;
 
     /** The NVMe executor whose rings read the checkpoint's headers. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The manifest of a sharded checkpoint, or a single @c .safegraphs monolith. */
@@ -493,6 +493,8 @@ USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments
  *  @brief Frees the resources associated with the index; @c NULL is safe, and it cannot fail, so
  *      takes no outcome.
  *  @param[inout] index The handle to be freed; invalid afterwards.
+ *
+ *  Waits until every deferred call naming the handle is final.
  */
 USEARCH_EXPORT void usearch_dense_free(usearch_dense_index_t index);
 
@@ -505,10 +507,10 @@ typedef struct usearch_dense_reserve_t {
     /** The executor the growth runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The desired total capacity, including the current size. */
@@ -527,10 +529,10 @@ typedef struct usearch_dense_clear_t {
     /** The executor the erasure runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 } usearch_dense_clear_t;
 
@@ -562,10 +564,10 @@ typedef struct usearch_dense_add_t {
     /** The executor driving the batch; its kind must match the handle's residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Rows to admit - the batch axis of @c keys and @c vectors. */
@@ -626,10 +628,10 @@ typedef struct usearch_dense_refine_t {
     /** The executor to fan out over; its kind must match the residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The @b optional output for the number of nodes whose neighbors changed; zero means settled. */
@@ -701,10 +703,10 @@ typedef struct usearch_dense_health_t {
     /** The executor to fan out over; its kind must match the residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Output for the audit; zeroed on failure. */
@@ -725,10 +727,10 @@ typedef struct usearch_dense_search_t {
     /** The executor driving the batch; its kind must match the handle's residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Queries to resolve; the outputs have @c count rows of @c matches.wanted entries. */
@@ -802,10 +804,10 @@ typedef struct usearch_dense_count_t {
     /** The executor the lookup runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The key whose entries are counted. */
@@ -833,10 +835,10 @@ typedef struct usearch_dense_get_t {
     /** The executor whose stream or thread copies the rows; its kind must match the residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The key whose entries are exported. */
@@ -875,10 +877,10 @@ typedef struct usearch_dense_merge_t {
     /** The executor the merge fans out over, one donor per thread or stream. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Donor handles to absorb. */
@@ -929,7 +931,7 @@ typedef struct usearch_dense_cursor_init_t {
     /** The handle to be scanned. */
     usearch_dense_index_t index;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 } usearch_dense_cursor_init_t;
 
@@ -945,10 +947,10 @@ typedef struct usearch_dense_cursor_next_t {
     /** The executor the pull runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The cursor to advance. */
@@ -974,7 +976,8 @@ typedef struct usearch_dense_cursor_next_t {
  */
 USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments);
 
-/** Releases the cursor; @c NULL is safe. */
+/** Releases the cursor; @c NULL is safe.
+ *  Waits until every deferred call naming the handle is final. */
 USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor);
 
 /** The arguments of @c usearch_dense_search_stream_init. */
@@ -986,7 +989,7 @@ typedef struct usearch_dense_search_stream_init_t {
     /** The handle to be queried. */
     usearch_dense_index_t index;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
     /** The single query row. */
@@ -1012,10 +1015,10 @@ typedef struct usearch_dense_search_stream_next_t {
     /** The executor the pull runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The stream to advance. */
@@ -1036,7 +1039,8 @@ typedef struct usearch_dense_search_stream_next_t {
  */
 USEARCH_EXPORT void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* arguments);
 
-/** Releases the stream and the walk state it keeps; @c NULL is safe. */
+/** Releases the stream and the walk state it keeps; @c NULL is safe.
+ *  Waits until every deferred call naming the handle is final. */
 USEARCH_EXPORT void usearch_dense_search_stream_free(usearch_dense_search_stream_t stream);
 
 /** The arguments of @c usearch_dense_save. */
@@ -1048,10 +1052,10 @@ typedef struct usearch_dense_save_t {
     /** The executor the write fans out over, one shard per thread or stream. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Destination path, whose extension picks the layout. */
@@ -1084,10 +1088,10 @@ typedef struct usearch_dense_save_buffer_t {
     /** The executor to fan out over; its kind must match the residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Output for the monolith's first byte, inside @c arena. */
@@ -1150,10 +1154,10 @@ typedef struct usearch_dense_metadata_read_t {
     /** The executor the read runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The manifest of a sharded checkpoint, or a single @c .safegraphs monolith. */
@@ -1177,10 +1181,10 @@ typedef struct usearch_dense_metadata_read_buffer_t {
     /** The executor the read runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Source holding one serialized monolith. */
@@ -1222,10 +1226,10 @@ typedef struct usearch_dense_describe_t {
     /** The executor the report runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Output, filled whole. */
@@ -1244,10 +1248,10 @@ typedef struct usearch_dense_multiply_t {
     /** The executor driving the batch; its kind must match the handle's residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Left-hand rows - the batch axis. */
@@ -1303,7 +1307,7 @@ typedef struct usearch_dense_multiply_t {
  *  indexed row at most once per left-hand row. A wider @c expansion_factor widens the emitted
  *  pattern, that breadth being what decides how much the walk touches.
  *
- *  How many pairs a walk scores is known only once it ends, so the call lands the keys and the
+ *  How many pairs a walk scores is known only once it finishes, so the call lands the keys and the
  *  scores in @c arena as a ragged output with Apache Arrow offsets, in one call. A non-zero
  *  @c wanted keeps the first pairs each row's walks scored, shard by shard in placement order,
  *  and @c required says how many there were.
@@ -1380,10 +1384,10 @@ typedef struct usearch_dense_attend_t {
     /** The executor driving the batch; its kind must match the handle's residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Query rows - the batch axis; row t · @c head_count + h is head h of token t. */
@@ -1501,10 +1505,10 @@ typedef struct usearch_dense_maxsim_t {
     /** The executor to fan out over; its kind must match the residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Queries - the batch axis; the outputs have @c count rows of @c matches.wanted entries. */

@@ -9,7 +9,7 @@ One header, `usearch/usearch.h`, pulls in every modality: `dense_index.h`, `sequ
 ## Quickstart
 
 Every verb takes one argument struct, initialized by designator, so every field left out keeps its default.
-Every call reports through an `outcome`, and every call on an executor blocks unless its `completion` says `usearch_completion_deferred_k`, so the outcome is final by the time the call returns.
+Every call reports through an `outcome`, and every call blocks unless its `completion` says `usearch_completion_deferred_k`, so the outcome is final by the time the call returns.
 
 ```c
 #include <stdio.h>               // For printing.
@@ -62,7 +62,7 @@ Messages are static strings, never freed, and `NULL` exactly on success.
 ## Executors and Asynchrony
 
 An executor owns the threads or device streams that run calls, and the traversal scratch they walk with.
-One executor serves any number of indexes, and calls on one executor run in submission order.
+One executor serves any number of indexes, and calls on one executor start in submission order.
 
 ```c
 int32_t const sockets[2] = {0, 1};
@@ -73,9 +73,9 @@ usearch_executor_for_ram(&(usearch_executor_for_ram_t){
 ```
 
 An application with its own ForkUnion pool lends it instead with `usearch_executor_on_pool`, and GPUs get `usearch_executor_for_vram` with the device ordinals and, optionally, the streams to run on.
-A `NULL` executor is accepted by every verb and runs the call on the caller's own thread, blocking, which suits size lookups and other short calls.
+A `NULL` executor is accepted by every verb and runs the call on the caller's own thread, final when it returns whatever its `completion`, which suits size lookups and other short calls.
 
-A deferred call returns once queued and keeps using its argument struct until its outcome is final, so many calls can be in flight at once, each with its own outcome:
+A deferred call returns once submitted and keeps using its argument struct until its outcome is final, so many calls can be deferred at once, each with its own outcome:
 
 ```c
 usearch_dense_search_t searches[4];
@@ -92,10 +92,12 @@ for (size_t shard = 0; shard != 4; ++shard) {
 for (size_t shard = 0; shard != 4; ++shard) usearch_outcome_wait(&outcomes[shard]);
 ```
 
-The status reads `usearch_status_pending_k` until the call ends, then the library stores the message and the final status with release ordering, and touches nothing the struct names after that; the caller reads it with acquire ordering, by waiting or polling.
-Each executor tracks a fixed number of deferred calls in flight, set by `in_flight_limit`.
+The status reads `usearch_status_deferred_k` until the call is final, then the library stores the message and the final status with release ordering, and touches nothing the struct names after that; the caller reads it with acquire ordering, by waiting or polling.
+Each executor tracks its deferred calls in a fixed table of `deferred_limit` slots.
 A deferred submission that finds the table full finishes at once with `usearch_status_contended_k`, so submitting never allocates, and blocking calls take no slot at all.
-`usearch_executor_drain` waits for everything submitted before it, then sets the executor's idle mood: `usearch_mood_chill_k` parks the threads, `usearch_mood_grind_k` keeps them spinning.
+A blocking call on an executor runs after every earlier call finishes and before any later one starts.
+`usearch_executor_drain` waits for everything submitted before it, then sets the executor's idle mood: `usearch_mood_parked_k` lets idle threads sleep, `usearch_mood_spinning_k` keeps them hot.
+Every `*_free` waits until each deferred call naming its handle is final, so a handle may be dropped at any moment.
 
 Long calls take a progress handler, which is also the only way to stop one:
 
@@ -383,11 +385,11 @@ These are the rules the interface is built toward, and where a verb still falls 
   Each verb takes one argument struct named after it, so `usearch_dense_search` takes a `usearch_dense_search_t`.
   Fields are set by designator, and every field left out keeps its default, so a call names only what it changes.
 - __Synchronous and asynchronous calls look the same.__
-  Every call reports through its `outcome`, and every call on an executor says how it completes: blocking by default, or `usearch_completion_deferred_k` to return once queued.
+  Every call reports through its `outcome`, and names its `completion`: blocking by default, or `usearch_completion_deferred_k` to return once submitted.
   Both are the same struct, so no verb has a second, asynchronous twin, and a thread pool, a GPU stream or a remote server can serve the same verbs without changing a call site.
 - __Executors run, indexes store.__
   An executor owns the threads or streams that run calls and the scratch they walk with, while an index owns only its data.
-  Calls on one executor run in submission order, and one executor can drive any number of indexes.
+  Calls on one executor start in submission order, and one executor can drive any number of indexes.
 - __Memory follows residency.__
   An index keeps its payload where its lifecycle verb put it, an executor keeps its scratch next to its threads or devices, and an arena lives where the executor that created it computes.
   So outputs only the library can size come back in RAM from a RAM executor and in VRAM from a VRAM executor, and moving them elsewhere is the caller's own copy.

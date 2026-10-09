@@ -22,7 +22,7 @@
  *  order. A viewed handle admits arbitrarily many concurrent searches, having nothing to
  *  mutate. Serialization is the one exception: saving demands a mutation-free window,
  *  though concurrent readers keep searching throughout. Per-call outputs - counts and the
- *  outcome - belong to their call and must not be shared between in-flight calls.
+ *  outcome - belong to their call and must not be shared between calls that are not final.
  *
  *  An insertion is all-or-nothing per call, and its entries become visible at once, so a
  *  concurrent search sees every entry of the call or none of them.
@@ -63,8 +63,8 @@ typedef struct usearch_sequence_cursor_handle_t* usearch_sequence_cursor_t;
  *
  *  The alignment kinds form a grid: global or local, against linear or affine gaps. All of
  *  them fill the same @b [|a|+1,|b|+1] table of cell @c D[i,j], the best score for the two
- *  prefixes ending at @c i and @c j, so every kind here is quadratic in time. Only the width
- *  in flight differs: the linear kinds carry one row, the affine kinds three.
+ *  prefixes ending at @c i and @c j, so every kind here is quadratic in time. Only the live width
+ *  differs: the linear kinds carry one row, the affine kinds three.
  *
  *  Only the global half can weigh the index's own edges. A local score is blind to everything
  *  outside its matched window, so every superstring of a sequence scores as that sequence
@@ -147,8 +147,8 @@ typedef enum usearch_sequence_metric_t {
      *  @brief Global alignment with affine gap costs - Needleman-Wunsch-Gotoh.
      *
      *  Charges a gap run @c o for opening and @c e for each symbol after, so one long gap is
-     *  cheaper than several short ones - the realistic model for an indel. Needs three tracks
-     *  in flight: the aligned cell and one per gap direction. Both gap tracks reopen from the
+     *  cheaper than several short ones - the realistic model for an indel. Needs three live tracks:
+     *  the aligned cell and one per gap direction. Both gap tracks reopen from the
      *  combined cell rather than from the aligned one, which is what lets a deletion become
      *  an insertion directly and keeps the kind a metric.
      *
@@ -211,7 +211,7 @@ typedef struct usearch_sequence_init_ram_t {
     /** Output for the new index. */
     usearch_sequence_index_t* index;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
     /** The scoring kind. */
@@ -237,16 +237,16 @@ USEARCH_EXPORT void usearch_sequence_init_ram(usearch_sequence_init_ram_t* argum
 /** The arguments of @c usearch_sequence_load_ram. */
 typedef struct usearch_sequence_load_ram_t {
 
-    /** Output for the new index, written once the call completes. */
+    /** Output for the new index, written by the time the call is final. */
     usearch_sequence_index_t* index;
 
     /** The executor the read fans out over, one shard per thread. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Checkpoint path - a monolith, or a manifest naming many. */
@@ -273,7 +273,7 @@ typedef struct usearch_sequence_load_ram_t {
  *
  *  Where the parts end up is the call's own memory domains, never the manifest's. A part
  *  carries its own length in its header, so a second load skips whatever already arrived
- *  whole and cancelling costs the part in flight rather than everything behind it.
+ *  whole and cancelling costs the part being read rather than everything behind it.
  */
 USEARCH_EXPORT void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments);
 
@@ -283,7 +283,7 @@ typedef struct usearch_sequence_view_ram_t {
     /** Output for the new, read-only index. */
     usearch_sequence_index_t* index;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
     /** Checkpoint path - a monolith, or a manifest naming many. */
@@ -298,7 +298,8 @@ typedef struct usearch_sequence_view_ram_t {
 USEARCH_EXPORT void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments);
 
 /** Frees the resources associated with the index; @c NULL is safe, and it cannot fail, so takes
- *  no outcome. */
+ *  no outcome.
+ *  Waits until every deferred call naming the handle is final. */
 USEARCH_EXPORT void usearch_sequence_free(usearch_sequence_index_t index);
 
 /** The arguments of @c usearch_sequence_reserve. */
@@ -310,10 +311,10 @@ typedef struct usearch_sequence_reserve_t {
     /** The executor the growth runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The desired total entry capacity, including the current size. */
@@ -335,10 +336,10 @@ typedef struct usearch_sequence_clear_t {
     /** The executor the erasure runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 } usearch_sequence_clear_t;
 
@@ -369,10 +370,10 @@ typedef struct usearch_sequence_add_t {
     /** The executor to fan out over; its kind must match the residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Sequences to admit - the batch axis of @c keys and @c sequences. */
@@ -423,10 +424,10 @@ typedef struct usearch_sequence_refine_t {
     /** The executor to fan out over; its kind must match the residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The @b optional output for the number of entries whose edges changed; zero means settled. */
@@ -473,10 +474,10 @@ typedef struct usearch_sequence_search_t {
     /** The executor to fan out over; its kind must match the residency. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Queries to resolve; the outputs have @c count rows of @c matches.wanted entries. */
@@ -546,10 +547,10 @@ typedef struct usearch_sequence_count_t {
     /** The executor the lookup runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The key whose entries are counted. */
@@ -571,10 +572,10 @@ typedef struct usearch_sequence_get_t {
     /** The executor whose thread copies the entries. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The key whose entries are exported. */
@@ -611,10 +612,10 @@ typedef struct usearch_sequence_merge_t {
     /** The executor the merge fans out over, one donor per thread. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Donor handles to absorb. */
@@ -655,7 +656,7 @@ typedef struct usearch_sequence_cursor_init_t {
     /** The handle to be scanned. */
     usearch_sequence_index_t index;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 } usearch_sequence_cursor_init_t;
 
@@ -671,10 +672,10 @@ typedef struct usearch_sequence_cursor_next_t {
     /** The executor the pull runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** The cursor to advance. */
@@ -700,7 +701,8 @@ typedef struct usearch_sequence_cursor_next_t {
  */
 USEARCH_EXPORT void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments);
 
-/** Releases the cursor; @c NULL is safe. */
+/** Releases the cursor; @c NULL is safe.
+ *  Waits until every deferred call naming the handle is final. */
 USEARCH_EXPORT void usearch_sequence_cursor_free(usearch_sequence_cursor_t cursor);
 
 /** The arguments of @c usearch_sequence_save. */
@@ -712,10 +714,10 @@ typedef struct usearch_sequence_save_t {
     /** The executor the write fans out over, one shard per thread. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Destination path, whose extension picks the layout. */
@@ -753,10 +755,10 @@ typedef struct usearch_sequence_metadata_read_t {
     /** The executor the read runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Checkpoint path - a monolith, or a manifest naming many. */
@@ -798,10 +800,10 @@ typedef struct usearch_sequence_describe_t {
     /** The executor the report runs on. */
     usearch_executor_t executor;
 
-    /** Output for the outcome, final once its status leaves @c usearch_status_pending_k. */
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
 
-    /** Whether the call blocks or returns once queued; zero blocks. */
+    /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
     /** Output, filled whole. */

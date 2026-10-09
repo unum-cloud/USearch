@@ -5,12 +5,12 @@
  *  @brief Unit tests for the pure-C ABI of USearch (`usearch/dense_index.h`).
  *
  *  Exercises the dense surface through the ABI every binding consumes: initialization and
- *  reservation, batch `add`, `search`, `multiply` and `attend`, retrieval by key into an arena, and the
- *  contract of `usearch_outcome_t`. Every call here blocks, so its outcome is final once it
- *  returns. Scoped to the verbs `src/` instantiates today - the header runs ahead of the
- *  implementation, and a smoke test that cannot link proves nothing. The harness is
- *  intentionally dependency-free so it can run in the same matrix as the C++ tests and on
- *  cross-compilation targets where only the C runtime is available.
+ *  reservation, batch `add`, `search`, `multiply` and `attend`, retrieval by key into an arena, the
+ *  contract of `usearch_outcome_t`, and deferred calls on an executor. A blocking call's outcome is
+ *  final once it returns; a deferred one is waited on or drained. Scoped to the verbs `src/`
+ *  instantiates today - the header runs ahead of the implementation, and a smoke test that cannot
+ *  link proves nothing. The harness is intentionally dependency-free so it can run in the same
+ *  matrix as the C++ tests and on cross-compilation targets where only the C runtime is available.
  *
  *  On startup we install a signal handler (see `install_crash_handlers`) that
  *  prints a native back-trace before re-raising, so CI logs pinpoint the
@@ -129,11 +129,12 @@ usearch_dense_index_t create_index(size_t const dimensions) {
     return index;
 }
 
-/** A RAM executor with every field derived. */
-usearch_executor_t create_executor(void) {
+/** A RAM executor tracking @p deferred_limit deferred calls, every other field derived. */
+usearch_executor_t create_executor(size_t const deferred_limit) {
     usearch_outcome_t outcome = {0};
     usearch_executor_t executor = NULL;
-    usearch_executor_for_ram(&(usearch_executor_for_ram_t) {.executor = &executor, .outcome = &outcome});
+    usearch_executor_for_ram(
+        &(usearch_executor_for_ram_t) {.executor = &executor, .outcome = &outcome, .deferred_limit = deferred_limit});
     expect(!outcome.message, outcome.message);
     return executor;
 }
@@ -152,7 +153,7 @@ void test_init(size_t const collection_size, size_t const dimensions) {
     usearch_outcome_t outcome = {0};
     usearch_dense_free(create_index(dimensions));
     usearch_dense_index_t const index = create_index(dimensions);
-    usearch_executor_t const executor = create_executor();
+    usearch_executor_t const executor = create_executor(0);
 
     usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = index,
                                                       .executor = executor,
@@ -184,7 +185,7 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
 
     usearch_outcome_t outcome = {0};
     usearch_dense_index_t const index = create_index(dimensions);
-    usearch_executor_t const executor = create_executor();
+    usearch_executor_t const executor = create_executor(0);
     usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = index,
                                                       .executor = executor,
                                                       .outcome = &outcome,
@@ -267,7 +268,7 @@ void test_count_and_get(size_t const dimensions) {
 
     usearch_outcome_t outcome = {0};
     usearch_dense_index_t const index = create_index(dimensions);
-    usearch_executor_t const executor = create_executor();
+    usearch_executor_t const executor = create_executor(0);
     usearch_dense_reserve(
         &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = 2});
     expect(!outcome.message, outcome.message);
@@ -363,7 +364,7 @@ void test_walks_name_their_index(size_t const dimensions) {
     usearch_outcome_t outcome = {0};
     usearch_dense_index_t const index = create_index(dimensions);
     usearch_dense_index_t const other = create_index(dimensions);
-    usearch_executor_t const executor = create_executor();
+    usearch_executor_t const executor = create_executor(0);
     size_t const row_bytes = dimensions * sizeof(float);
     float* const data = (float*)calloc(2 * dimensions, sizeof(float));
     data[0] = 1, data[dimensions + 1] = 1;
@@ -455,7 +456,7 @@ void test_multiply_packed(void) {
                                                         .dimensions = dimensions,
                                                         .connectivity = 16});
     expect(!outcome.message, outcome.message);
-    usearch_executor_t const executor = create_executor();
+    usearch_executor_t const executor = create_executor(0);
     usearch_dense_reserve(
         &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = rows_count});
     expect(!outcome.message, outcome.message);
@@ -570,7 +571,7 @@ void test_attend(void) {
                                                         .quantization = usearch_scalar_i8_k,
                                                         .dimensions = dimensions});
     expect(!outcome.message, outcome.message);
-    usearch_executor_t const executor = create_executor();
+    usearch_executor_t const executor = create_executor(0);
     usearch_dense_reserve(
         &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = tokens});
     expect(!outcome.message, outcome.message);
@@ -679,7 +680,7 @@ void test_outcome_contract(size_t const dimensions) {
     expect_eq(outcome.status, usearch_status_success_k, "A successful call must report success");
     expect(outcome.message == NULL, "A successful call must carry no message");
 
-    usearch_executor_t const executor = create_executor();
+    usearch_executor_t const executor = create_executor(0);
     outcome = (usearch_outcome_t) {usearch_status_io_k, "a stale message the call must overwrite"};
     usearch_dense_reserve(
         &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = 4});
@@ -713,7 +714,148 @@ void test_library_probes(void) {
     expect(usearch_capabilities_available() != NULL, "The available capabilities must be reported");
     usearch_status_t const unnamed = usearch_status_from_name((usearch_bytes_view_t) {(uint8_t const*)"no-such", 7});
     expect_eq(unnamed, usearch_status_invalid_argument_k, "An unrecognized status name is an invalid argument");
+    expect(strcmp(usearch_status_name(usearch_status_deferred_k), "deferred") == 0,
+           "The non-final status spells deferred");
+    expect(strcmp(usearch_status_name((usearch_status_t)999), "unrecognized") == 0,
+           "A value no status carries spells unrecognized");
+    usearch_mood_t const spinning = usearch_mood_from_name((usearch_bytes_view_t) {(uint8_t const*)"spinning", 8});
+    expect_eq(spinning, usearch_mood_spinning_k, "A mood reads back from its name");
+    expect(strcmp(usearch_mood_name(usearch_mood_parked_k), "parked") == 0, "A mood spells its name");
     printf("Test: Library Probes - PASSED\n");
+}
+
+enum { deferred_rows = 128, deferred_dimensions = 16, deferred_wanted = 4 };
+
+/** One search's outputs and outcome, which a deferred call borrows until final. */
+typedef struct search_outputs_t {
+    usearch_key_t keys[deferred_rows * deferred_wanted];
+    usearch_distance_t distances[deferred_rows * deferred_wanted];
+    size_t counts[deferred_rows];
+    usearch_outcome_t outcome;
+} search_outputs_t;
+
+/** An index holding @p rows under keys equal to their positions, filled through @p executor. */
+usearch_dense_index_t create_filled_index(float const* rows, usearch_executor_t executor) {
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t const index = create_index(deferred_dimensions);
+    usearch_key_t keys[deferred_rows];
+    for (size_t row = 0; row != deferred_rows; ++row) keys[row] = key_of(row);
+    usearch_dense_add(&(usearch_dense_add_t) {
+        .index = index,
+        .executor = executor,
+        .outcome = &outcome,
+        .count = deferred_rows,
+        .keys = {keys, sizeof(usearch_key_t)},
+        .vectors = {rows, deferred_dimensions * sizeof(float), deferred_dimensions, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+    return index;
+}
+
+/** Submits a search of every row of @p rows into @p outputs; its descriptor dies when this returns. */
+void search_every_row(usearch_dense_index_t index, usearch_executor_t executor, usearch_completion_t completion,
+                      float const* rows, search_outputs_t* outputs) {
+    usearch_dense_search(&(usearch_dense_search_t) {
+        .index = index,
+        .executor = executor,
+        .outcome = &outputs->outcome,
+        .completion = completion,
+        .count = deferred_rows,
+        .queries = {rows, deferred_dimensions * sizeof(float), deferred_dimensions, usearch_scalar_f32_k},
+        .matches = {outputs->keys, deferred_wanted * sizeof(usearch_key_t), outputs->distances,
+                    deferred_wanted * sizeof(usearch_distance_t), outputs->counts, deferred_rows, deferred_wanted}});
+}
+
+/** Waits for every call submitted to @p executor. */
+void drain(usearch_executor_t executor) {
+    usearch_outcome_t outcome = {0};
+    usearch_executor_drain(&(usearch_executor_drain_t) {.executor = executor, .outcome = &outcome});
+    expect(!outcome.message, outcome.message);
+}
+
+/** A deferred search stays deferred until a drain, then lands what a blocking one does, though its
+ *  descriptor died at submission; without an executor it is final when it returns. */
+void test_deferred_search(void) {
+    printf("Test: Deferred Search\n");
+    float* const rows = create_vectors(deferred_rows, deferred_dimensions);
+    usearch_executor_t const executor = create_executor(0);
+    usearch_dense_index_t const index = create_filled_index(rows, executor);
+    search_outputs_t* const blocking = (search_outputs_t*)calloc(1, sizeof(search_outputs_t));
+    search_outputs_t* const deferred = (search_outputs_t*)calloc(1, sizeof(search_outputs_t));
+    expect(blocking && deferred, "Failed to allocate outputs");
+
+    search_every_row(index, executor, usearch_completion_blocking_k, rows, blocking);
+    expect(!blocking->outcome.message, blocking->outcome.message);
+
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, deferred);
+    expect_eq(deferred->outcome.status, usearch_status_deferred_k, "A submitted call is deferred until drained");
+    drain(executor);
+    expect_eq(usearch_outcome_wait(&deferred->outcome), usearch_status_success_k, "A deferred search must succeed");
+    expect(memcmp(blocking->keys, deferred->keys, sizeof(blocking->keys)) == 0 &&
+               memcmp(blocking->distances, deferred->distances, sizeof(blocking->distances)) == 0 &&
+               memcmp(blocking->counts, deferred->counts, sizeof(blocking->counts)) == 0,
+           "A deferred search must land the matches a blocking one does");
+
+    memset(deferred, 0, sizeof(search_outputs_t));
+    search_every_row(index, NULL, usearch_completion_deferred_k, rows, deferred);
+    expect_eq(deferred->outcome.status, usearch_status_success_k,
+              "A call without an executor is final when it returns");
+    expect(memcmp(blocking->keys, deferred->keys, sizeof(blocking->keys)) == 0, "Every receiver must agree");
+
+    free(deferred);
+    free(blocking);
+    usearch_dense_free(index);
+    usearch_executor_free(executor);
+    free(rows);
+    printf("Test: Deferred Search - PASSED\n");
+}
+
+/** A submission past the deferred limit is refused at once, and a drain makes room again. */
+void test_deferred_limit(void) {
+    printf("Test: Deferred Limit\n");
+    float* const rows = create_vectors(deferred_rows, deferred_dimensions);
+    usearch_executor_t const executor = create_executor(1);
+    usearch_dense_index_t const index = create_filled_index(rows, executor);
+    search_outputs_t* const first = (search_outputs_t*)calloc(1, sizeof(search_outputs_t));
+    search_outputs_t* const second = (search_outputs_t*)calloc(1, sizeof(search_outputs_t));
+    expect(first && second, "Failed to allocate outputs");
+
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, first);
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, second);
+    expect_eq(second->outcome.status, usearch_status_contended_k, "A full deferred table must refuse at once");
+    drain(executor);
+    expect_eq(first->outcome.status, usearch_status_success_k, "The earlier call must finish at the drain");
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, second);
+    drain(executor);
+    expect_eq(second->outcome.status, usearch_status_success_k, "A drained table takes a call again");
+
+    free(second);
+    free(first);
+    usearch_dense_free(index);
+    usearch_executor_free(executor);
+    free(rows);
+    printf("Test: Deferred Limit - PASSED\n");
+}
+
+/** A blocking call on an executor runs every call submitted before it first. */
+void test_blocking_runs_after_earlier(void) {
+    printf("Test: Blocking Runs After Earlier\n");
+    float* const rows = create_vectors(deferred_rows, deferred_dimensions);
+    usearch_executor_t const executor = create_executor(0);
+    usearch_dense_index_t const index = create_filled_index(rows, executor);
+    search_outputs_t* const earlier = (search_outputs_t*)calloc(1, sizeof(search_outputs_t));
+    search_outputs_t* const later = (search_outputs_t*)calloc(1, sizeof(search_outputs_t));
+    expect(earlier && later, "Failed to allocate outputs");
+
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, earlier);
+    search_every_row(index, executor, usearch_completion_blocking_k, rows, later);
+    expect_eq(earlier->outcome.status, usearch_status_success_k, "An earlier deferred call must finish first");
+
+    free(later);
+    free(earlier);
+    usearch_dense_free(index);
+    usearch_executor_free(executor);
+    free(rows);
+    printf("Test: Blocking Runs After Earlier - PASSED\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -739,6 +881,9 @@ int main(int argc, char* argv[]) {
     test_walks_name_their_index(dimension_counts[0]);
     test_multiply_packed();
     test_attend();
+    test_deferred_search();
+    test_deferred_limit();
+    test_blocking_runs_after_earlier();
 
     printf("All tests passed!\n");
     return 0;
