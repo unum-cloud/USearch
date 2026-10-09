@@ -13,7 +13,8 @@
 
 #include <cstddef> // `std::size_t`
 
-#include <atomic>      // `std::atomic` - serializing the progress ticks
+#include <array>       // `std::array` - the value lookup's batch
+#include <atomic>      // `std::atomic_ref` - the outcome's status word
 #include <bit>         // `std::bit_cast` - the C key struct & `us::uuid_t` share sixteen bytes
 #include <mutex>       // `std::lock_guard` over the ticks' lock
 #include <span>        // `std::span` - the search verbs' landing planes
@@ -62,9 +63,9 @@ inline usearch_scalar_t usearch_scalar_of(nk_dtype_t dtype) noexcept {
     return usearch_scalar_unknown_k;
 }
 
-/** A checkpoint's kernel name lifted back onto the C metric vocabulary. */
-inline usearch_dense_metric_t usearch_metric_of(std::string_view kernel) noexcept {
-    switch (nk_kernel_named(kernel.data(), kernel.size())) {
+/** A kernel kind lifted back onto the C metric vocabulary. */
+inline usearch_dense_metric_t usearch_metric_of(nk_kernel_kind_t kernel) noexcept {
+    switch (kernel) {
     case nk_kernel_dot_k: return usearch_dense_metric_inner_k;
     case nk_kernel_angular_k: return usearch_dense_metric_angular_k;
     case nk_kernel_euclidean_k: return usearch_dense_metric_euclidean_k;
@@ -401,22 +402,28 @@ constexpr gpu_class_t gpu_class_of(int arch) noexcept {
 }
 #endif
 
-/** The one write path to @p error; the message is null exactly on success. */
-inline bool propagate_error(usearch_status_t status, usearch_error_t* error, char const* message) noexcept {
-    bool const succeeded = status == usearch_success_k;
-    if (error) *error = usearch_error_t {status, succeeded ? nullptr : message};
+/** Marks @p outcome as running; no waiter watches for this store, so it is relaxed. */
+inline void propagate_pending(usearch_outcome_t* outcome) noexcept {
+    outcome->message = nullptr;
+    std::atomic_ref<usearch_status_t> {outcome->status}.store(usearch_status_pending_k, std::memory_order_relaxed);
+}
+
+/** The one final write to @p outcome: the message, then the status every waiter acquires. The call
+ *  touches nothing it was passed after this, and the message is null exactly on success. */
+inline bool propagate_error(usearch_status_t status, usearch_outcome_t* outcome, char const* message) noexcept {
+    bool const succeeded = status == usearch_status_success_k;
+    outcome->message = succeeded ? nullptr : message;
+    std::atomic_ref<usearch_status_t> final_status {outcome->status};
+    final_status.store(status, std::memory_order_release);
+    final_status.notify_all();
     return succeeded;
 }
 
 /** The engine-side overload: the C++ mirror shares the ABI's values, so crossing is a cast, and an
  *  unnamed @p message falls back to the status's own static text. */
-inline bool propagate_error(status_t status, usearch_error_t* error, char const* message = nullptr) noexcept {
-    return propagate_error(static_cast<usearch_status_t>(status), error, message ? message : status_to_string(status));
-}
-
-/** Success needs no vocabulary crossing and no message. */
-inline void propagate_success(usearch_error_t* error) noexcept {
-    if (error) *error = usearch_error_t {usearch_success_k, nullptr};
+inline bool propagate_error(status_t status, usearch_outcome_t* outcome, char const* message = nullptr) noexcept {
+    return propagate_error(static_cast<usearch_status_t>(status), outcome,
+                           message ? message : status_to_string(status));
 }
 
 /** Adds one fan-out's telemetry into the caller's stats - accumulating, so chunked verbs report
@@ -433,13 +440,13 @@ inline void accumulate_stats(usearch_dense_traversal_stats_t* stats, result_type
 template <typename value_type_>
 concept carries_telemetry = requires(value_type_ const& value) { value.visited_members; };
 
-/** The one crossing for a fallible verb: folds telemetry into @p stats when the payload carries
- *  any, writes @p error, and answers whether @c .value is readable. */
+/** The one crossing for a fallible step: folds telemetry into @p stats when the payload carries
+ *  any, finishes @p outcome only on failure, and answers whether @c .value is readable. */
 template <typename value_type_>
-inline bool crossed(expected<value_type_> const& result, usearch_dense_traversal_stats_t* stats, usearch_error_t* error,
-                    char const* message = nullptr) noexcept {
+inline bool crossed(expected<value_type_> const& result, usearch_dense_traversal_stats_t* stats,
+                    usearch_outcome_t* outcome, char const* message = nullptr) noexcept {
     if constexpr (carries_telemetry<value_type_>) accumulate_stats(stats, result.value);
-    return propagate_error(result.status, error, message);
+    return result || propagate_error(result.status, outcome, message);
 }
 
 /** The C key struct and the engine's @c us::uuid_t share sixteen bytes - one bit cast in. */
@@ -483,6 +490,38 @@ struct key_predicate_t {
     admission_t operator()(us::uuid_t key) const noexcept {
         return static_cast<admission_t>(callback(std::bit_cast<usearch_key_t>(key), state));
     }
+};
+
+/** The C value lookup lifted onto the index's key vocabulary: one callback per scored batch, a NULL row
+ *  answering an empty view that refuses the call. */
+struct value_lookup_t {
+    usearch_value_lookup_t callback;
+    void* state;
+    std::size_t dimensions;
+
+    template <typename scalar_type_>
+    void operator()(std::span<us::uuid_t const> keys, std::span<nk::vector_view<scalar_type_>> rows) const noexcept {
+        std::array<usearch_key_t, 4> batch;
+        std::array<void const*, 4> found;
+        for (std::size_t lane = 0; lane != keys.size(); ++lane) batch[lane] = std::bit_cast<usearch_key_t>(keys[lane]);
+        callback(state, batch.data(), keys.size(), found.data());
+        for (std::size_t lane = 0; lane != keys.size(); ++lane)
+            rows[lane] = found[lane]
+                             ? nk::vector_view<scalar_type_> {static_cast<scalar_type_ const*>(found[lane]), dimensions}
+                             : nk::vector_view<scalar_type_> {};
+    }
+};
+
+/** The C device row lookup lifted onto the index's key vocabulary: one call per scored key, inside a GPU walk. */
+struct value_row_lookup_t {
+    usearch_value_row_t callback;
+    void* state;
+
+#if USEARCH_BUILD_CUDA
+    __device__ void const* operator()(us::uuid_t key) const noexcept {
+        return callback(state, std::bit_cast<usearch_key_t>(key));
+    }
+#endif
 };
 
 /** Serializes shard ticks from the executor's threads onto the C handler, which the contract
@@ -543,6 +582,9 @@ struct specialized_index {
     using distances_span_t = std::span<typename index_type_::distance_t>;
     using counts_span_t = std::span<std::size_t>;
 
+    /** What an attend resolves value rows through: a host callback per batch on RAM, a device call per key on GPU. */
+    using attend_lookup_t = std::conditional_t<is_ram_index<index_type_>, value_lookup_t, value_row_lookup_t>;
+
     index_type_& index;
 
     status_t emplace(fu_memory_domain_id_t memory_domain) noexcept
@@ -550,8 +592,8 @@ struct specialized_index {
     status_t emplace(int device) noexcept
         requires is_vram_index<index_type_>;
 
-    /** The device the first shard sits on - what the capability string names. */
-    int device() const noexcept
+    /** The device @p shard sits on; the first one's is what the capability string names. */
+    int device(std::size_t shard) const noexcept
         requires is_vram_index<index_type_>;
     std::size_t shards_count() const noexcept;
     std::size_t dimensions() const noexcept;
@@ -559,7 +601,7 @@ struct specialized_index {
     std::size_t size() const noexcept;
     std::size_t capacity() const noexcept;
     std::size_t memory_usage() const noexcept;
-    std::size_t storage_requirements() const noexcept;
+    expected<std::size_t> storage_requirements() const noexcept;
     std::size_t count(key_t const& key) const noexcept;
     std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted) const noexcept;
     status_t reserve(reserve_capacity_t config) noexcept;
@@ -584,6 +626,11 @@ struct specialized_index {
                                      search_config_t config, std::size_t wanted, keys_span_t keys,
                                      std::span<f64_t> scores, counts_span_t counts) noexcept
         requires(index_type_::kernel_kind_k == nk_kernel_dot_k);
+    expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
+                                     f32_t score_scale, std::span<f32_t> outputs,
+                                     std::span<us::dense_softmax_state_t> carry, executor_t& executor,
+                                     search_config_t config) noexcept
+        requires(index_type_::kernel_kind_k == nk_kernel_dot_k);
     status_t save(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
     status_t save(bytes_span_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept;
     status_t load(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
@@ -607,10 +654,10 @@ status_t specialized_index<index_type_>::emplace(int device) noexcept
     return index.emplace(device);
 }
 template <typename index_type_>
-int specialized_index<index_type_>::device() const noexcept
+int specialized_index<index_type_>::device(std::size_t shard) const noexcept
     requires is_vram_index<index_type_>
 {
-    return index.shard(0).device_specs().ordinal;
+    return index.shard(shard).device_specs().ordinal;
 }
 template <typename index_type_>
 std::size_t specialized_index<index_type_>::shards_count() const noexcept {
@@ -637,8 +684,8 @@ std::size_t specialized_index<index_type_>::memory_usage() const noexcept {
     return index.memory_usage();
 }
 template <typename index_type_>
-std::size_t specialized_index<index_type_>::storage_requirements() const noexcept {
-    return index.storage_requirements(save_config_t {}).value;
+expected<std::size_t> specialized_index<index_type_>::storage_requirements() const noexcept {
+    return index.storage_requirements(save_config_of({}));
 }
 template <typename index_type_>
 std::size_t specialized_index<index_type_>::count(key_t const& key) const noexcept {
@@ -702,6 +749,15 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
     requires(index_type_::kernel_kind_k == nk_kernel_dot_k)
 {
     return index.maxsim(queries, rows_per_query, executor, config, wanted, keys, scores, counts);
+}
+template <typename index_type_>
+expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
+    vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale,
+    std::span<f32_t> outputs, std::span<us::dense_softmax_state_t> carry, executor_t& executor,
+    search_config_t config) noexcept
+    requires(index_type_::kernel_kind_k == nk_kernel_dot_k)
+{
+    return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
 }
 template <typename index_type_>
 status_t specialized_index<index_type_>::save(std::string_view path, executor_t& executor,

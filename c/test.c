@@ -16,7 +16,7 @@
  *  prints a native back-trace before re-raising, so CI logs pinpoint the
  *  faulting frame instead of stopping at a bare exit code.
  */
-#include <math.h>    // `fabsf`
+#include <math.h>    // `fabsf`, `fabs`
 #include <signal.h>  // `signal`, `raise`, `SIGSEGV`
 #include <stdbool.h> // `bool`
 #include <stdint.h>  // `uint8_t`, `uint64_t`
@@ -532,12 +532,36 @@ void test_multiply_packed(void) {
     printf("Test: Multiply Packed Rows - PASSED\n");
 }
 
-/** A graph this small walks every key, so attention reproduces the exact softmax over the value rows
- *  the keys address, and a key past the last value row refuses the call rather than shrinking it. */
+/** The `int8_t` value table an attend test resolves keys through, its first @c rows resolvable. */
+typedef struct attend_values_t {
+    int8_t const* data;
+    size_t rows;
+    size_t columns;
+} attend_values_t;
+
+/** Resolves a key made by `key_of` to its row of the table, NULL past the resolvable rows. */
+static void attend_value_rows(void* state, usearch_key_t const* keys, size_t count, void const** rows) {
+    attend_values_t const* const values = (attend_values_t const*)state;
+    for (size_t key = 0; key != count; ++key) {
+        size_t const token = keys[key].bytes[15];
+        rows[key] = token < values->rows ? values->data + token * values->columns : NULL;
+    }
+}
+
+/** Stands in for a device row lookup, which a RAM handle refuses before calling it. */
+static void const* attend_value_row(void* state, usearch_key_t key) {
+    (void)state;
+    (void)key;
+    return NULL;
+}
+
+/** A graph this small walks every key, so attention reproduces the exact softmax over all of them, with one
+ *  head per walk and with two sharing it; heads that do not divide the rows, a key without a value row, a
+ *  device row lookup or no host one, and a distance kind refuse the call. */
 void test_attend(void) {
     printf("Test: Attend\n");
 
-    enum { tokens = 4, dimensions = 4, value_dimensions = 2 };
+    enum { tokens = 4, dimensions = 4, heads = 2 };
     usearch_outcome_t outcome = {0};
     usearch_dense_index_t index = NULL;
     usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
@@ -551,14 +575,14 @@ void test_attend(void) {
         &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = tokens});
     expect(!outcome.message, outcome.message);
 
-    // Token `t` scores a dot of `t` against a query of ones, and its value row is `{t, 1}`.
+    // Token `t` scores a dot of `t` against a query of ones, and its value row is `{t, 1, 0, 0}`.
     float rows[tokens * dimensions] = {0};
-    int8_t values[tokens * value_dimensions];
+    int8_t table[tokens * dimensions] = {0};
     usearch_key_t keys[tokens];
     for (size_t token = 0; token != tokens; ++token) {
         keys[token] = key_of(token);
         rows[token * dimensions + token] = (float)token;
-        values[token * value_dimensions] = (int8_t)token, values[token * value_dimensions + 1] = 1;
+        table[token * dimensions] = (int8_t)token, table[token * dimensions + 1] = 1;
     }
     usearch_dense_add(
         &(usearch_dense_add_t) {.index = index,
@@ -569,32 +593,69 @@ void test_attend(void) {
                                 .vectors = {rows, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
     expect(!outcome.message, outcome.message);
 
-    // A logit scale of ln 2 turns the dots into weights 1/8, 1/4, 1/2 and 1, summing to 1.875.
-    float const query[dimensions] = {1, 1, 1, 1};
-    float attended[value_dimensions] = {0};
-    usearch_dense_softmax_state_t carry = {0};
+    // A logit scale of ln 2 turns the ones' dots into weights 1/8, 1/4, 1/2 and 1, and the negated
+    // head's into the same weights in reverse, both summing to 1.875.
+    float const queries[heads * dimensions] = {1, 1, 1, 1, -1, -1, -1, -1};
+    float attended[heads * dimensions];
+    usearch_dense_softmax_state_t carry[heads];
+    attend_values_t values = {table, tokens, dimensions};
     usearch_dense_attend_t attend = {
         .index = index,
         .executor = executor,
         .outcome = &outcome,
-        .count = 1,
-        .queries = {query, sizeof(query), dimensions, usearch_scalar_f32_k},
-        .values = {values, tokens, value_dimensions, value_dimensions, usearch_scalar_i8_k},
-        .outputs = {attended, sizeof(attended), value_dimensions, 1, usearch_scalar_f32_k},
-        .carry = &carry,
+        .count = heads,
+        .queries = {queries, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
+        .value_lookup = attend_value_rows,
+        .value_lookup_state = &values,
+        .outputs = {attended, dimensions * sizeof(float), dimensions, heads, usearch_scalar_f32_k},
+        .carry = carry,
         .score_scale = 0.69314718f};
-    usearch_dense_attend(&attend);
-    expect(!outcome.message, outcome.message);
-    expect(fabsf(carry.maximum_score - 3 * 0.69314718f) < 1e-5f, "The carry must hold the largest logit");
-    expect(fabsf(carry.partition - 1.875f) < 1e-4f, "The carry must hold the partition");
-    expect(fabsf(attended[0] - 4.25f / 1.875f) < 1e-4f && fabsf(attended[1] - 1) < 1e-4f,
-           "Every key must weigh the value row it addresses");
+    for (size_t head_count = 1; head_count <= heads; ++head_count) {
+        attend.head_count = head_count;
+        memset(attended, 0xFF, sizeof(attended));
+        memset(carry, 0, sizeof(carry));
+        usearch_dense_attend(&attend);
+        expect(!outcome.message, outcome.message);
+        expect(fabsf(carry[0].maximum_score - 3 * 0.69314718f) < 1e-5f && fabsf(carry[1].maximum_score) < 1e-5f,
+               "Each head's carry must hold its own largest logit");
+        expect(fabsf(carry[0].partition - 1.875f) < 1e-4f && fabsf(carry[1].partition - 1.875f) < 1e-4f,
+               "Each head's carry must hold its partition over every key");
+        expect(fabsf(attended[0] - 4.25f / 1.875f) < 1e-4f && fabsf(attended[dimensions] - 1.375f / 1.875f) < 1e-4f,
+               "Every key must weigh the value row it resolves to");
+        expect(fabsf(attended[1] - 1) < 1e-4f && fabsf(attended[dimensions + 1] - 1) < 1e-4f && attended[2] == 0 &&
+                   attended[dimensions + 3] == 0,
+               "The attended rows must be normalized and as wide as the keys");
+    }
 
-    attend.values.rows = tokens - 1;
+    attend.head_count = 3;
     usearch_dense_attend(&attend);
-    expect_eq(outcome.status, usearch_status_shape_mismatch_k, "A key past the value rows must refuse the call");
+    expect_eq(outcome.status, usearch_status_shape_mismatch_k, "Heads that do not divide the rows must refuse");
+
+    attend.head_count = heads;
+    values.rows = tokens - 1;
+    usearch_dense_attend(&attend);
+    expect_eq(outcome.status, usearch_status_shape_mismatch_k, "A key without a value row must refuse the call");
+
+    // A RAM handle resolves rows on the host, so a device row lookup refuses, beside the host one or alone.
+    values.rows = tokens;
+    attend.value_row = attend_value_row;
+    usearch_dense_attend(&attend);
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "A RAM handle must refuse a second, device lookup");
+    attend.value_lookup = NULL;
+    usearch_dense_attend(&attend);
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "A RAM handle must refuse a device lookup alone");
+    attend.value_row = NULL;
+    usearch_dense_attend(&attend);
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "A RAM handle must refuse a missing value lookup");
+
+    usearch_dense_index_t const angular = create_index(dimensions);
+    attend.index = angular;
+    attend.value_lookup = attend_value_rows;
+    usearch_dense_attend(&attend);
+    expect_eq(outcome.status, usearch_status_config_mismatch_k, "A distance kind must refuse attention");
 
     usearch_executor_free(executor);
+    usearch_dense_free(angular);
     usearch_dense_free(index);
     printf("Test: Attend - PASSED\n");
 }

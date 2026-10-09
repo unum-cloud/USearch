@@ -88,14 +88,15 @@
  *  residency that lacks one answers @c usearch_status_unsupported_k rather than a missing symbol.
  *
  *  @c usearch_dense_add, @c usearch_dense_search, @c usearch_dense_count, @c usearch_dense_refine
- *  and the serialization family, except @c usearch_dense_save_buffer, answer on a RAM handle and
- *  on a VRAM one alike. A search with a @c predicate answers on RAM and is refused on VRAM with
+ *  and the serialization family, except @c usearch_dense_save_buffer, answer on a RAM handle and on
+ *  a VRAM one alike. A search with a @c predicate answers on RAM and is refused on VRAM with
  *  @c usearch_status_device_k, since a host predicate cannot narrow a device walk.
  *  @c usearch_dense_cursor_init answers on RAM only; VRAM rows are read back through a search.
- *  @c usearch_dense_get, @c usearch_dense_save_buffer, @c usearch_dense_multiply,
- *  @c usearch_dense_attend and @c usearch_dense_maxsim answer on RAM only, the first three
- *  waiting on device arenas. @c usearch_dense_search_stream_init and @c usearch_dense_merge are
- *  unsupported on both.
+ *  @c usearch_dense_get, @c usearch_dense_save_buffer, @c usearch_dense_multiply and
+ *  @c usearch_dense_maxsim answer on RAM only, the first three waiting on device arenas.
+ *  @c usearch_dense_attend answers on both, resolving value rows through @c value_lookup on RAM and
+ *  through the device-side @c value_row on VRAM.
+ *  @c usearch_dense_search_stream_init and @c usearch_dense_merge are unsupported on both.
  *
  *  @c usearch_dense_view_nvme answers @c usearch_status_unsupported_k: NVMe checkpoints carry no
  *  keys and no shard wrapper yet, so no C verb can answer on such a handle.
@@ -108,11 +109,11 @@
  *  @c usearch_dense_attend an online softmax over them, and @c usearch_dense_maxsim each row's
  *  best score, summed per key.
  *
- *  @c usearch_dense_multiply is an approximate `A × Bᵀ` in the shape of BLAS' `?GEMM`,
- *  with the indexed rows as `B`, and a sparse output: every pair the traversal scored, not only
+ *  @c usearch_dense_multiply is an approximate A × Bᵀ in the shape of BLAS' `?GEMM`,
+ *  with the indexed rows as B, and a sparse output: every pair the traversal scored, not only
  *  the nearest. Unlike a sparse `?GEMM`, the output pattern is not implied by the operands' own
  *  pattern - it is whatever the walk touched - so the product is dense-in, sparse-out, and its
- *  sparsity follows the dots: the walk ranks by `1 - dot`, so it skips the low and negative ones.
+ *  sparsity follows the dots: the walk ranks by 1 − dot, so it skips the low and negative ones.
  *
  *  @c usearch_dense_attend folds a softmax over that same walk. A running maximum, partition,
  *  and weighted value sum update per scored batch and rescale whenever the maximum moves - the
@@ -120,7 +121,8 @@
  *  key tiles. Softmax weights decay exponentially, so scoring a superset of the true top matches
  *  costs accuracy nothing, and neither verb pays for the ranking a search would. One index serves
  *  one layer's one key-value head: grouped-query and multi-head-latent attention already share
- *  their keys across query heads, so every query head is just another row of the queries.
+ *  their keys across query heads, so every query head is another row of the queries, and the
+ *  heads of one token share its walk.
  *
  *  @c usearch_dense_maxsim is late interaction, and it is what @c values_per_key above one is for.
  *  A document is one key holding its token rows, a query is a run of token rows, and the score is
@@ -1306,7 +1308,7 @@ typedef struct usearch_dense_multiply_t {
  *  @c wanted keeps the first pairs each row's walks scored, shard by shard in placement order,
  *  and @c required says how many there were.
  *
- *  Cost is not `O(m·n·k)` but roughly `O(count × expansion × connectivity × dimensions)`,
+ *  Cost is not O(m · n · k) but roughly O(count × expansion × connectivity × dimensions),
  *  sublinear in the indexed rows, which is the whole point of reading a product off a graph. The
  *  result is approximate, and the pairs the walk never reaches are the low and negative dots.
  *
@@ -1317,7 +1319,7 @@ typedef struct usearch_dense_multiply_t {
  *  @sa https://netlib.org/blas - `?GEMM` is the dense counterpart this is shaped after.
  *
  *  @code{.c}
- *  // BLAS: B is an operand, C is dense `m x n`, and every pair is computed.
+ *  // BLAS: B is an operand, C is dense m × n, and every pair is computed.
  *  cblas_sgemm(CblasRowMajor, CblasNoTrans, CblasTrans, m, n, k,
  *              1.0f, a, lda, b, ldb, 0.0f, c, ldc);
  *
@@ -1360,6 +1362,15 @@ typedef struct usearch_dense_softmax_state_t {
     float partition;
 } usearch_dense_softmax_state_t;
 
+/** Resolves @p count keys to their value rows, one row per key, as wide as the keys and stored like them;
+ *  a NULL row refuses the call. */
+typedef void (*usearch_value_lookup_t)(void* state, usearch_key_t const* keys, size_t count, void const** rows);
+
+/** Resolves one key to its value row on the device a GPU walk runs on, as wide as the keys and stored like them,
+ *  16-byte aligned; NULL refuses the call. A @c __device__ function the caller takes the address of with
+ *  @c cudaMemcpyFromSymbol, with @p state in memory that device reads. */
+typedef void const* (*usearch_value_row_t)(void* state, usearch_key_t key);
+
 /** The arguments of @c usearch_dense_attend. */
 typedef struct usearch_dense_attend_t {
 
@@ -1375,34 +1386,41 @@ typedef struct usearch_dense_attend_t {
     /** Whether the call blocks or returns once queued; zero blocks. */
     usearch_completion_t completion;
 
-    /** Query rows - the batch axis; every query head is one more row. */
+    /** Query rows - the batch axis; row t · @c head_count + h is head h of token t. */
     size_t count;
 
     /** The query rows. */
     usearch_rows_view_t queries;
 
-    /** The value rows, addressed by an entry's key, so @c values.rows bounds which keys can
-     *  contribute. Its width is the value dimensionality, independent of the key width the index
-     *  froze, but its scalar kind is the index's own: any other refuses with
-     *  @c usearch_status_config_mismatch_k. */
-    usearch_matrix_view_t values;
+    /** The @b optional query heads sharing the index's key-value head, and with it one walk per token;
+     *  it must divide @c count, and zero means one. */
+    size_t head_count;
 
-    /** Where the attended rows land, @c count of @c values.columns each. */
+    /** Resolves the keys of every scored batch to their value rows, once per batch, for a RAM handle. */
+    usearch_value_lookup_t value_lookup;
+
+    /** Opaque pointer forwarded into every @c value_lookup call. */
+    void* value_lookup_state;
+
+    /** Resolves every scored key to its value row inside the walk, for a GPU handle. */
+    usearch_value_row_t value_row;
+
+    /** Opaque pointer forwarded into every @c value_row call. */
+    void* value_row_state;
+
+    /** Where the attended rows land, @c count of them, as wide as the keys. */
     usearch_rows_span_t outputs;
 
     /** The @b optional online-softmax state, one per query row; @c NULL skips it. */
     usearch_dense_softmax_state_t* carry;
 
-    /** The @b optional candidate-pool breadth; zero derives. */
+    /** The @b optional candidate-pool breadth; zero derives. A wider pool walks further, folding more of
+     *  the tail. */
     size_t expansion_factor;
 
     /** The @b optional logit scale, conventionally the inverse square root of the head
      *  dimensionality; zero derives it from the index's frozen geometry. */
     float score_scale;
-
-    /** The @b optional residual-mass threshold the walk stops at, the mass-denominated
-     *  sibling of the radius a search terminates on; zero derives `2^-8`. */
-    float mass_tolerance;
 
     /** The @b optional handler, called with queries resolved; @c NULL skips it. */
     usearch_progress_callback_t progress;
@@ -1415,28 +1433,37 @@ typedef struct usearch_dense_attend_t {
 } usearch_dense_attend_t;
 
 /**
- *  @brief Softmax-weighted attention of a run of queries over the indexed keys, folded into the
- *      graph walk in a single pass - no match list is materialized, and each value row is
- *      gathered exactly once, at the moment its key was scored. @ref dense_index_linear_algebra
- *  @retval usearch_status_unsupported_k A VRAM handle, which folds no attention over its walk yet.
+ *  @brief Softmax attention of a run of query heads over every indexed key their graph walks score,
+ *      folded as Flash Attention folds key tiles. @ref dense_index_linear_algebra
+ *  @retval usearch_status_invalid_argument_k A RAM handle without @c value_lookup or with @c value_row, or a
+ *      GPU handle without @c value_row or with @c value_lookup.
+ *  @retval usearch_status_shape_mismatch_k @c head_count does not divide @c count, @c outputs holds
+ *      fewer rows than the call or rows of another width than the keys, or a lookup yields a NULL row.
  *
- *  The index holds the keys and @c values holds the value rows, addressed by key: an entry's key
- *  is its row offset into @c values, parked in the low bytes with the rest zeroed. Token positions
- *  already are such keys, so a context inserted in position order needs no mapping, and the
- *  publication watermark becomes the causal mask - a chunk of keys is attendable only once its
- *  insertion published. A key at or past @c values.rows is refused with
- *  @c usearch_status_shape_mismatch_k, never skipped: a missing row is a wrong softmax, not a
- *  smaller one.
+ *  One walk per token runs by a search's own frontier and stopping rule, ranking a key by the best
+ *  of the token's heads, so every head's own region is explored. Every key the walk scores folds into
+ *  each head's running maximum, partition and weighted value sum, rescaled whenever the maximum
+ *  rises - Flash Attention's online softmax, with the graph replacing the sweep over key tiles. No
+ *  top-k cut is taken: the long tail the walk scores is what brings the result toward exact dense
+ *  attention, and @c outputs comes back divided by the partition.
  *
- *  The recurrence is Flash Attention's online softmax, so @c outputs comes back already divided by
- *  its partition. What differs is the sweep: Flash Attention walks every key tile, this walks the
- *  graph and scores a magnitude-chosen subset. Softmax weights decay exponentially, so the logits
- *  it never scores carry negligible mass.
+ *  Rows of @c queries, @c outputs and @c carry are tasks: row t · @c head_count + h is head h of
+ *  token t. One index holds one layer's one key-value head, so the @c head_count query heads of
+ *  grouped-query attention share its keys and one walk per token; one head per token is plain
+ *  multi-head attention.
  *
- *  @c carry holds that recurrence's `m` and `l`, which is what folds this branch into another over
- *  the same queries - a dense recent window, or a second shard of one context - by partial-softmax
- *  rescaling. The two travel in one element because a maximum without its partition is a number
- *  nothing can rescale. Two branches over the same queries merge as:
+ *  The index stores no values, so only keys a walk scores are ever resolved to value rows. A RAM
+ *  handle takes @c value_lookup, called on the host once per scored batch; a GPU handle takes
+ *  @c value_row, called on the device once per scored key inside the walk. A value row is exactly as
+ *  wide as the keys and stored in the index's own scalar kind. A NULL row refuses the call with
+ *  @c usearch_status_shape_mismatch_k rather than skipping the key: a missing row is a wrong softmax,
+ *  not a smaller one.
+ *
+ *  Keep the recent window out of the index, inserting a token once it leaves the window, so the dense
+ *  window and the graph never share a key. @c carry holds the softmax's `m` and `l`, which is what
+ *  merges this branch with another over the same queries - the recent window, attention sinks, or a
+ *  second index of one context. The two travel in one element because a maximum without its partition
+ *  is a number nothing can rescale. Two branches over the same queries merge as:
  *
  *  m = max(m₁, m₂),  aᵢ = lᵢ · e^(mᵢ − m),  l = a₁ + a₂,  o = (a₁ · o₁ + a₂ · o₂) / l
  *
@@ -1446,22 +1473,21 @@ typedef struct usearch_dense_attend_t {
  *  A graph frozen under a distance kind refuses with @c usearch_status_config_mismatch_k.
  *
  *  Never writes to the graph, so any number of these may overlap with concurrent insertions -
- *  which is what streaming a growing context through this verb amounts to.
- *  @ref dense_index_concurrency
+ *  which is what streaming a growing context through this verb amounts to, the publication
+ *  watermark acting as the causal mask. @ref dense_index_concurrency
  *
  *  @code{.c}
- *  // One layer, one key-value head; grouped-query heads are just more rows of `queries`.
+ *  // One layer, one key-value head shared by 8 query heads: row t · 8 + h is head h of token t.
  *  usearch_outcome_t outcome = {0};
  *  usearch_dense_attend(&(usearch_dense_attend_t){
- *      .index = index, .executor = executor, .outcome = &outcome, .count = heads,
- *      .queries = {query_rows, key_dimensions * 2, key_dimensions, usearch_scalar_bf16_k},
- *      .values = {value_rows, tokens, value_dimensions, value_dimensions * 2, usearch_scalar_bf16_k},
- *      .outputs = {attended, value_dimensions * 2, value_dimensions, heads, usearch_scalar_bf16_k},
+ *      .index = index, .executor = executor, .outcome = &outcome, .count = tokens * 8,
+ *      .queries = {query_rows, dimensions * 2, dimensions, usearch_scalar_bf16_k}, .head_count = 8,
+ *      .value_lookup = value_rows_of, .value_lookup_state = value_cache,
+ *      .outputs = {attended_rows, dimensions * 2, dimensions, tokens * 8, usearch_scalar_bf16_k},
  *      .carry = carry});
  *
- *  // `carry` holds Flash Attention's `m` and `l` per query row, so a second branch over the
- *  // same queries folds in by the usual partial-softmax rescaling.
- *  rescale_against_recent_window(attended, carry, heads, value_dimensions);
+ *  // The recent window never entered the index, so it merges in by the same rule, counting no key twice.
+ *  merge_recent_window(attended_rows, carry, tokens * 8, dimensions);
  *  @endcode
  */
 USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments);

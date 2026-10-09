@@ -38,7 +38,7 @@
  */
 #include <cmath> // `std::sqrt`, `std::exp`
 
-#include <algorithm>     // `std::stable_sort`, `std::min`, `std::max`
+#include <algorithm>     // `std::stable_sort`, `std::min`, `std::max`, `std::find`
 #include <limits>        // `std::numeric_limits`
 #include <optional>      // `std::optional`
 #include <span>          // `std::span`
@@ -372,20 +372,6 @@ usearch_dense_index_handle_t* open_checkpoint(bytes_view_t blob, usearch_outcome
 }
 
 #pragma endregion Serialization
-
-#pragma region Attention
-
-/** The value matrix a key may address, past which the entry is skipped as unmapped. */
-constexpr std::size_t value_rows_limit_k = 1u << 30;
-
-/** An entry's key is its row offset into the value matrix, parked in the low bytes. */
-std::size_t value_offset(usearch_key_t const& key) {
-    std::size_t offset = 0;
-    for (unsigned byte_index = 8; byte_index != 16; ++byte_index) offset = (offset << 8) | key.bytes[byte_index];
-    return offset;
-}
-
-#pragma endregion Attention
 
 } // namespace
 
@@ -884,69 +870,63 @@ void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                   "A softmax weighs logits, so the kind must be inner product", outcome))
         return;
 
-    // The value table answers to no frozen width - its rows are addressed by key, and its own
-    // width is the value dimensionality - so it is checked for storage, kind and pitch, not geometry.
-    std::size_t const queries_count = arguments->count;
+    std::size_t const queries_count = arguments->count, head_count = std::max<std::size_t>(arguments->head_count, 1);
+    std::size_t const dimensions = index.options.dimensions;
     usearch_rows_view_t const& queries = arguments->queries;
-    usearch_matrix_view_t const& values = arguments->values;
     usearch_rows_span_t const& outputs = arguments->outputs;
     if (reject_view(queries, queries_count, index, outcome)) return;
-    if (reject_if(!values.data, usearch_status_invalid_argument_k, "The values must name storage", outcome)) return;
-    if (reject_scalar(values.scalar, outcome)) return;
-    if (reject_if(values.scalar != index.options.quantization, usearch_status_config_mismatch_k,
-                  "The values must be stored like the keys", outcome))
+    if (reject_span(outputs, dimensions, queries_count, outcome)) return;
+    if (reject_if(!arguments->value_lookup || arguments->value_row, usearch_status_invalid_argument_k,
+                  "A RAM handle takes only a value lookup, and a GPU handle only a value row", outcome))
         return;
-    std::size_t const value_dimensions = values.columns;
-    if (reject_span(outputs, value_dimensions, queries_count, outcome)) return;
-    std::size_t const values_natural = row_extent(values.scalar, value_dimensions);
-    if (reject_if(values.stride && values.stride < values_natural, usearch_status_unsupported_layout_k,
-                  "The values stride is shorter than one row", outcome))
+    if (reject_if(queries_count % head_count, usearch_status_shape_mismatch_k, "The heads must divide the rows",
+                  outcome))
         return;
 
+    // Exact attention weighs every entry, so every value row resolves once, up front.
     std::shared_lock readers(index.mutex);
     std::size_t const indexed = index.entries.size();
-    std::size_t const dimensions = index.options.dimensions;
+    std::vector<usearch_key_t> keys(indexed);
+    std::vector<void const*> value_rows(indexed);
+    for (std::size_t entry = 0; entry != indexed; ++entry) keys[entry] = index.entries[entry].key;
+    if (indexed) arguments->value_lookup(arguments->value_lookup_state, keys.data(), indexed, value_rows.data());
+    if (reject_if(std::find(value_rows.begin(), value_rows.end(), nullptr) != value_rows.end(),
+                  usearch_status_shape_mismatch_k, "A scored key resolved to no value row", outcome))
+        return;
+
     std::size_t const query_bytes = row_extent(queries.scalar, dimensions);
-    std::size_t const value_bytes = row_extent(values.scalar, value_dimensions);
-    std::size_t const output_bytes = row_extent(outputs.scalar, value_dimensions);
+    std::size_t const value_bytes = row_extent(index.options.quantization, dimensions);
+    std::size_t const output_bytes = row_extent(outputs.scalar, dimensions);
     double const scale = arguments->score_scale > 0 ? arguments->score_scale
                                                     : 1.0 / std::sqrt(std::max<double>(dimensions, 1));
-
-    std::vector<double> query_row(dimensions), value(value_dimensions), accumulated(value_dimensions);
-    std::size_t attended = 0;
-    for (std::size_t query = 0; query != queries_count; ++query) {
-        read_row(row_at<std::byte>(queries.data, query, queries.stride, query_bytes), queries.scalar, query_row);
-        // The online-softmax recurrence: a running maximum, a partition, and a weighted sum.
-        double maximum = std::numeric_limits<double>::lowest(), partition = 0;
-        std::fill(accumulated.begin(), accumulated.end(), 0.0);
-        for (std::size_t member = 0; member != indexed; ++member) {
-            dense_entry_t const& entry = index.entries[member];
-            // The table carries its own height, so a key past it is a wrong softmax rather
-            // than a smaller one - refuse it instead of skipping the row.
-            std::size_t const offset = value_offset(entry.key);
-            if (reject_if(offset >= values.rows, usearch_status_shape_mismatch_k,
-                          "An entry's key addresses a row past the value table", outcome))
-                return;
-            double const score = dot_product(query_row, entry.payload) * scale;
-            read_row(row_at<std::byte>(values.data, offset, values.stride, value_bytes), values.scalar, value);
-
-            double const shifted = std::max(maximum, score);
-            double const rescale = std::exp(maximum - shifted);
-            double const weight = std::exp(score - shifted);
-            partition = partition * rescale + weight;
-            for (std::size_t position = 0; position != value_dimensions; ++position)
-                accumulated[position] = accumulated[position] * rescale + weight * value[position];
-            maximum = shifted;
+    std::vector<double> query_row(dimensions), value(dimensions), accumulated(dimensions), logits(indexed);
+    std::size_t const tokens = queries_count / head_count;
+    std::size_t answered = 0;
+    for (std::size_t token = 0; token != tokens; ++token) {
+        for (std::size_t row = token * head_count; row != (token + 1) * head_count; ++row) {
+            read_row(row_at<std::byte>(queries.data, row, queries.stride, query_bytes), queries.scalar, query_row);
+            double maximum = std::numeric_limits<double>::lowest(), partition = 0;
+            for (std::size_t entry = 0; entry != indexed; ++entry) {
+                logits[entry] = scale * dot_product(query_row, index.entries[entry].payload);
+                maximum = std::max(maximum, logits[entry]);
+            }
+            std::fill(accumulated.begin(), accumulated.end(), 0.0);
+            for (std::size_t entry = 0; entry != indexed; ++entry) {
+                double const weight = std::exp(logits[entry] - maximum);
+                read_row(row_at<std::byte>(value_rows[entry], 0, 0, value_bytes), index.options.quantization, value);
+                partition += weight;
+                for (std::size_t position = 0; position != dimensions; ++position)
+                    accumulated[position] += weight * value[position];
+            }
+            for (double& position : accumulated) position = partition > 0 ? position / partition : 0.0;
+            write_row(row_at<std::byte>(outputs.data, row, outputs.stride, output_bytes), outputs.scalar, accumulated);
+            if (arguments->carry) arguments->carry[row] = {static_cast<float>(maximum), static_cast<float>(partition)};
+            if (stats) stats->computed_distances += indexed;
         }
-        for (std::size_t position = 0; position != value_dimensions; ++position)
-            accumulated[position] = partition > 0 ? accumulated[position] / partition : 0.0;
-        write_row(row_at<std::byte>(outputs.data, query, outputs.stride, output_bytes), outputs.scalar, accumulated);
-        if (arguments->carry) arguments->carry[query] = {static_cast<float>(maximum), static_cast<float>(partition)};
-        if (stats) stats->computed_distances += indexed;
-        ++attended;
-        if (!keep_going(arguments->progress, arguments->progress_state, attended, queries_count)) break;
+        ++answered;
+        if (!keep_going(arguments->progress, arguments->progress_state, answered, tokens)) break;
     }
-    reject_cancelled(attended, queries_count, outcome);
+    reject_cancelled(answered, tokens, outcome);
 }
 
 void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {

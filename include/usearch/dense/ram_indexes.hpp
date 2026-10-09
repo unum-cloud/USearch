@@ -53,21 +53,6 @@ struct dense_keyed_ids {
     auto operator()(dense_node_id_t node_id) const noexcept { return (*keys)[node_id]; }
 };
 
-/** The value row @p key addresses: an integer key is its own row, and a @c uuid_t parks it big-endian in
- *  its low eight bytes, so a set high byte addresses past every table. */
-template <typename key_type_>
-std::size_t dense_key_row(key_type_ const& key) noexcept {
-    if constexpr (std::is_integral_v<key_type_>) return static_cast<std::size_t>(key);
-    else {
-        u64_t high = 0, low = 0;
-        for (std::size_t byte = 0; byte != 8; ++byte) {
-            high = high << 8 | static_cast<u8_t>(key.bytes[byte]);
-            low = low << 8 | static_cast<u8_t>(key.bytes[8 + byte]);
-        }
-        return high ? std::numeric_limits<std::size_t>::max() : static_cast<std::size_t>(low);
-    }
-}
-
 /**
  *  @brief The sharded index: same-geometry CPU-resident shards viewed as one.
  *
@@ -709,7 +694,7 @@ struct dense_ram_indexes {
 
     /**
      *  @brief The batched @ref search under a lightning indexer, sharing its whole contract: every
-     *      distance is `1 −` its key's indexer score against the heads of its query row.
+     *      distance is 1 − its key's indexer score against the heads of its query row.
      *
      *  @param[in] heads The indexer heads of every query row.
      */
@@ -833,65 +818,67 @@ struct dense_ram_indexes {
     }
 
     /**
-     *  @brief Softmax attention of every query row over its k most relevant keys across the shards: the
-     *      merged @ref search ranking picks them, and one softmax per row gathers their value rows by key.
+     *  @brief Softmax attention of query heads over every key their walks score across the shards: each token
+     *      walks every shard in turn, folding into one running state per head, since the shards are disjoint
+     *      and online softmax is order-free, and its rows normalize once after the last shard.
      *
-     *  @param[in] queries The query rows, one walk per shard each.
-     *  @param[inout] executor The threads and their scratch; one query row occupies one at a time.
-     *  @param[in] config The per-shard walk configuration, applied uniformly.
-     *  @param[in] values The value rows, stored like the keys, each key addressing the row
-     *      @ref dense_key_row names.
+     *  @param[in] queries Row t · @p head_count + h is head h of token t; one walk per token and shard.
+     *  @param[in] head_count Query heads sharing this key-value head; it must divide the rows.
+     *  @param[in] value_lookup Resolves a scored batch's keys to their value rows, as wide as the keys and stored
+     *      like them: `void(std::span<key_t const>, std::span<vector_view_t>)`, one row per key. Keys come from
+     *      each shard's key column, so only scored nodes resolve; one without a row refuses with
+     *      @c shape_mismatch_k.
      *  @param[in] score_scale The factor turning a dot into a logit.
-     *  @param[out] attended The picked keys, @b [queries,k] row-major, nearest first.
-     *  @param[out] logits The picks' logits, parallel to @p attended.
-     *  @param[out] counts Picks landed per query row, at most k.
-     *  @param[out] outputs The attended rows, @b [queries,values.extent(1)] row-major.
-     *  @param[out] carry Each row's softmax state, one per query row; empty skips it.
-     *
-     *  A pick addressing a row past @c values.extent(0) refuses its query row with @c shape_mismatch_k.
+     *  @param[out] outputs The attended rows, one per query row, as wide as the keys.
+     *  @param[out] carry Every query row's softmax state, which merges this call with other branches.
+     *  @param[inout] executor The threads and their scratch; one token occupies one at a time.
+     *  @param[in] config The per-shard walk configuration, applied uniformly.
+     *  @return The query rows attended in @c count.
      */
-    expected<search_result_t> attend(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     vectors_view_t values, f32_t score_scale, std::span<key_t> attended,
-                                     std::span<f32_t> logits, std::span<std::size_t> counts, std::span<f32_t> outputs,
-                                     std::span<dense_softmax_state_t> carry) noexcept
+    template <typename value_lookup_type_>
+    expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
+                                     f32_t score_scale, std::span<f32_t> outputs,
+                                     std::span<dense_softmax_state_t> carry, executor_t& executor,
+                                     search_config_t config = {}) noexcept
         requires(kernel_kind_ == nk_kernel_dot_k)
     {
-        std::size_t const rows_count = queries.extent(0), columns = values.extent(1);
+        std::size_t const rows_count = queries.extent(0), columns = queries.extent(1);
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
-        if (counts.size() != rows_count || logits.size() != attended.size() ||
-            (rows_count && attended.size() % rows_count) || outputs.size() < rows_count * columns ||
-            (!carry.empty() && carry.size() != rows_count))
+        if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
+        if (outputs.size() != rows_count * columns || carry.size() != rows_count)
             return {{}, status_t::config_mismatch_k};
         if (!rows_count) return {{}, status_t::success_k};
-        std::size_t const wanted = attended.size() / rows_count;
 
-        auto attend_row = [&](std::size_t row, std::size_t, traversal_t& traversal) noexcept {
-            std::span<key_t> const keys_row {attended.data() + row * wanted, wanted};
-            std::span<f32_t> const logits_row {logits.data() + row * wanted, wanted};
-            std::size_t picked = 0;
+        auto attend_token = [&](std::size_t token, std::size_t, traversal_t& traversal) noexcept {
+            std::size_t const first = token * head_count;
+            dense_keyed_ids<keys_column_t> keyed;
+            auto shard_lookup = [&](std::span<dense_node_id_t const> nodes, std::span<vector_view_t> rows) noexcept {
+                std::array<key_t, 4> keys;
+                for (std::size_t lane = 0; lane != nodes.size(); ++lane) keys[lane] = keyed(nodes[lane]);
+                value_lookup(std::span<key_t const>(keys).first(nodes.size()), rows);
+            };
+            status_t status = status_t::success_k;
+            typename index_t::template attention_rescoring<decltype(shard_lookup)> const rescoring {
+                queries(nk::range(first, first + head_count), nk::slice),
+                shard_lookup,
+                score_scale,
+                outputs.subspan(first * columns, head_count * columns),
+                carry.subspan(first, head_count),
+                status};
+            rescoring.clear();
             for (shard_t const& one : shards_) {
-                auto const row_of = [&one](dense_node_id_t node) noexcept { return dense_key_row(one.keys[node]); };
-                dense_attend_prefetch_fold<scalar_t, cache_hints_type_, typename traversal_t::results_array_t,
-                                           decltype(row_of)>
-                    fold {values, traversal.results, wanted, row_of};
-                expected<search_result_t> const walked = one.index->search(queries.row(row).as_vector(), fold,
-                                                                           traversal, config);
+                keyed.keys = &one.keys;
+                expected<search_result_t> const walked = one.index->walk_(
+                    rescoring.queries.row(0).as_vector(), dummy_fold_t {}, rescoring, traversal, config);
                 if (!walked) return walked.status;
-                // The logits row holds the merged distances until the softmax inverts them.
-                picked = merge_search_results(to_span(traversal.results), one.keys, keys_row, logits_row, picked);
+                if (failed(status)) return status;
             }
-            counts[row] = picked;
-            // The dot kernel's distance is `1 − dot`, so the logit inverts it rather than re-scoring the key.
-            for (f32_t& logit : logits_row.first(picked)) logit = score_scale * (1 - logit);
-            auto const [softmax, status] = dense_attend_picks<scalar_t, capability_>(
-                picked, [&](std::size_t pick) noexcept { return logits_row[pick]; },
-                [&](std::size_t pick) noexcept { return dense_key_row(keys_row[pick]); }, values,
-                std::span<f32_t> {outputs.data() + row * columns, columns});
-            if (failed(status)) return status;
-            if (!carry.empty()) carry[row] = softmax;
+            rescoring.finish();
             return status_t::success_k;
         };
-        return for_each_row_(rows_count, executor, config, attend_row, counts);
+        expected<search_result_t> attended = for_each_row_(rows_count / head_count, executor, config, attend_token, {});
+        if (attended) attended.value.count = rows_count;
+        return attended;
     }
 
 #pragma endregion Search

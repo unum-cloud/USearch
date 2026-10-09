@@ -194,7 +194,35 @@ When compared to FAISS's `IndexFlatL2` in Google Colab, __[those kernels may off
 - `faiss.IndexFlatL2`: __55.3 ms__.
 - NumKong's `cdist`: __2.54 ms__.
 
-USearch itself reads the same walk as arithmetic through `multiply_into`, an approximate $A \times B^{T}$ that reports every pair the traversal scored, and `attend_into`, which folds a softmax over that walk for LLM context.
+USearch itself reads the same walk as arithmetic through `multiply_into`, an approximate $A \times B^{T}$ that reports every pair the traversal scored, and `attend_into`, FlashAttention folded into that walk for LLM context.
+
+## Exact vs. Approximate Attention
+
+Attention is a GEMM, a softmax and another GEMM, and `attend` runs all three inside one graph walk.
+The walk scores keys against the query, which is the first GEMM, but only for the keys it reaches.
+Every scored key enters an online softmax with a running maximum and partition, and its value row joins the weighted sum the moment it is scored, which is the second GEMM.
+So the long tail of keys the walk visits on its way counts too, not only the best matches, and an exhaustive walk is exact attention.
+
+- __Values stay with the caller.__
+  A lookup resolves each scored key to its value row in the caller's KV cache, as wide as the keys and stored like them.
+- __One index per key-value head.__
+  The query heads of a grouped-query attention group share one walk per token: it ranks nodes by the best head's logit and reads every key and value row once for all of them.
+- __Recent tokens stay out of the graph.__
+  A token is inserted once it leaves the dense window, so the window and the graph never count a key twice, and their outputs merge through the softmax carry, the maximum and partition of each head.
+
+[NumKong](https://github.com/ashvardanian/numkong)'s attention is the exact counterpart, and the two meet at that carry:
+
+- __Work.__
+  NumKong scores every key of a segment, streaming a packed KV cache in panels, so its cost grows with the context.
+  USearch scores the keys its walk reaches, so its cost grows with the walk, not with the context.
+- __Layout.__
+  NumKong first packs keys and values into a per-ISA layout.
+  USearch keeps the keys in its graph and reads values in place through the lookup.
+- __Shapes.__
+  NumKong covers ragged segments, any grouped-query ratio, causal and sliding-window bands, and head depths up to 256 on its SIMD paths, with wider heads on its serial kernel.
+  USearch takes any depth the index froze and any number of query heads sharing its key-value head, but no masks: causality comes from the publication watermark, and the window is whatever has not been inserted yet.
+- __Use.__
+  Dense attention fits the recent window and short contexts; the graph fits the far context of million-token windows; one partial-softmax merge combines both.
 
 ## One Modality per Domain
 

@@ -115,18 +115,6 @@ enum class cuda_address_space_t : u32_t {
     host_pinned_k,
 };
 
-/** Whether a kernel on device @p device reads @p pointer in place: that device's own memory, or
- *  unified memory; host memory, pinned or not, and other devices' memory do not qualify. */
-inline bool is_resident_on(void const* pointer, int device) noexcept {
-    cudaPointerAttributes attributes {};
-    if (cudaPointerGetAttributes(&attributes, pointer) != cudaSuccess) {
-        [[maybe_unused]] cudaError_t const cleared = cudaGetLastError();
-        return false;
-    }
-    if (attributes.type == cudaMemoryTypeManaged) return true;
-    return attributes.type == cudaMemoryTypeDevice && attributes.device == device;
-}
-
 /** The device analog of @c std::allocator, with the ordering stream and the target device
  *  bound at construction; @c address_space_k fixes host visibility. */
 template <typename allocator_>
@@ -184,6 +172,12 @@ struct cuda_virtual_memory_allocator {
 
     /** Copies the placement only, never a live reservation. */
     cuda_virtual_memory_allocator(cuda_virtual_memory_allocator const& other) noexcept : device_(other.device_) {}
+
+    /** Takes over a live reservation, so a table of them relocates without remapping. */
+    cuda_virtual_memory_allocator(cuda_virtual_memory_allocator&& other) noexcept
+        : base_(std::exchange(other.base_, 0)), virtual_address_bytes_(std::exchange(other.virtual_address_bytes_, 0)),
+          mapped_bytes_(std::exchange(other.mapped_bytes_, 0)), slab_bytes_(other.slab_bytes_), device_(other.device_) {
+    }
     template <typename other_>
     cuda_virtual_memory_allocator(cuda_virtual_memory_allocator<other_> const& other) noexcept
         : device_(other.device_) {}
@@ -549,10 +543,12 @@ struct cuda_executor_t {
         return status_t::success_k;
     }
 
-    /** Waits for every transfer and launch queued on every stream - the fleet's completion. */
+    /** Waits for every transfer and launch queued on every stream - the fleet's completion; binds each device
+     *  first, since a null stream is the current device's. */
     status_t drain() noexcept {
         for (stream_t& opened : streams_)
-            if (cudaStreamSynchronize(opened.handle) != cudaSuccess) return status_t::device_error_k;
+            if (cudaSetDevice(opened.device) != cudaSuccess || cudaStreamSynchronize(opened.handle) != cudaSuccess)
+                return status_t::device_error_k;
         return status_t::success_k;
     }
 

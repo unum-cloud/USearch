@@ -3602,12 +3602,18 @@ struct dense_quads_chain<nk_kernel_jaccard_k, nk::u1x8_t, caps_> {
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-/** Widens value rows to @c f32 and folds them into a running sum, with the kernels every CPU runs. */
+/** Widens value rows to @c f32, weighs them by base-2 exponentials and folds them into a running sum, with the
+ *  kernels every CPU runs. */
 struct serial_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_serial_k;
     static constexpr auto cast = nk_cast_serial;
     static constexpr auto scale = nk_each_scale_f32_serial;
     static constexpr auto blend = nk_each_blend_f32_serial;
+
+    /** Raises two to every one of @p values in place, as NumKong's attention weighs its logits. */
+    static void exp2(std::array<f32_t, 8>& values) noexcept {
+        for (f32_t& value : values) value = nk_f32_exp2_serial_(value);
+    }
 };
 
 struct haswell_elementwise_kit_t;
@@ -3625,11 +3631,16 @@ struct haswell_elementwise_kit_t {
     static constexpr auto cast = nk_cast_haswell;
     static constexpr auto scale = nk_each_scale_f32_haswell;
     static constexpr auto blend = nk_each_blend_f32_haswell;
+
+    static void exp2(std::array<f32_t, 8>& values) noexcept {
+        _mm256_storeu_ps(values.data(), nk_exp2_f32x8_haswell_(_mm256_loadu_ps(values.data())));
+    }
 };
-#endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_SKYLAKE
-struct skylake_elementwise_kit_t {
+
+/** Skylake's casts and arithmetic over Haswell's exponentials, as one tile fills a single AVX2 register. */
+struct skylake_elementwise_kit_t : haswell_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
     static constexpr auto cast = nk_cast_skylake;
     static constexpr auto scale = nk_each_scale_f32_skylake;
@@ -3654,6 +3665,7 @@ struct sapphire_elementwise_kit_t : icelake_elementwise_kit_t {
 #endif // NUMKONG_TARGET_SAPPHIRE
 #endif // NUMKONG_TARGET_ICELAKE
 #endif // NUMKONG_TARGET_SKYLAKE
+#endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_NEON
 struct neon_elementwise_kit_t {
@@ -3661,6 +3673,11 @@ struct neon_elementwise_kit_t {
     static constexpr auto cast = nk_cast_neon;
     static constexpr auto scale = nk_each_scale_f32_neon;
     static constexpr auto blend = nk_each_blend_f32_neon;
+
+    static void exp2(std::array<f32_t, 8>& values) noexcept {
+        vst1q_f32(values.data(), nk_exp2_f32x4_neon_(vld1q_f32(values.data())));
+        vst1q_f32(values.data() + 4, nk_exp2_f32x4_neon_(vld1q_f32(values.data() + 4)));
+    }
 };
 #endif // NUMKONG_TARGET_NEON
 
@@ -3670,6 +3687,11 @@ struct rvv_elementwise_kit_t {
     static constexpr auto cast = nk_cast_rvv;
     static constexpr auto scale = nk_each_scale_f32_rvv;
     static constexpr auto blend = nk_each_blend_f32_rvv;
+
+    static void exp2(std::array<f32_t, 8>& values) noexcept {
+        vfloat32m4_t const lanes = __riscv_vle32_v_f32m4(values.data(), values.size());
+        __riscv_vse32_v_f32m4(values.data(), nk_exp2_f32m4_rvv_(lanes, values.size()), values.size());
+    }
 };
 #endif // NUMKONG_TARGET_RVV
 
@@ -3679,6 +3701,11 @@ struct v128relaxed_elementwise_kit_t {
     static constexpr auto cast = nk_cast_v128relaxed;
     static constexpr auto scale = nk_each_scale_f32_v128relaxed;
     static constexpr auto blend = nk_each_blend_f32_v128relaxed;
+
+    static void exp2(std::array<f32_t, 8>& values) noexcept {
+        wasm_v128_store(values.data(), nk_exp2_f32x4_v128relaxed_(wasm_v128_load(values.data())));
+        wasm_v128_store(values.data() + 4, nk_exp2_f32x4_v128relaxed_(wasm_v128_load(values.data() + 4)));
+    }
 };
 #endif // NUMKONG_TARGET_V128RELAXED
 
@@ -3709,29 +3736,37 @@ struct dense_elementwise_chain {
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-/** Scales an @c f32 sum by @p correction, then adds @p count weighted value rows into it: each chunk
- *  of the sum stays in L1 while every row widens into it. */
+/** Scales each of @p heads @c f32 sums, at most eight, by its correction, then adds @p count value rows into it, each
+ *  row's weights one tile over the heads. Each chunk of the rows widens once and stays in L1 while every head
+ *  blends it. */
 template <nk::numeric_dtype scalar_type_, nk_capability_t caps_>
-void dense_values_step(f32_t* accumulated, std::size_t columns, char const* const* rows, f32_t const* weights,
-                       std::size_t count, f32_t correction) noexcept {
+void dense_values_step(f32_t* outputs, std::size_t heads, std::size_t columns, char const* const* rows,
+                       std::array<f32_t, 8> const* weights, std::array<f32_t, 8> const& corrections,
+                       std::size_t count) noexcept {
     using kit_t = typename dense_elementwise_chain<caps_>::kit_t;
     // A multiple of eight columns, so every chunk starts on a byte even for the packed kinds.
     constexpr std::size_t chunk_columns_k = 64;
     std::size_t const bits = nk_dtype_bits(scalar_type_::dtype());
-    std::array<f32_t, chunk_columns_k> widened;
+    std::array<std::array<f32_t, chunk_columns_k>, 4> widened;
+    assert(count <= widened.size() && heads <= corrections.size() && "Four nodes and eight heads per step");
     f32_t const one = 1, zero = 0;
     for (std::size_t first = 0; first < columns; first += chunk_columns_k) {
         std::size_t const width = min_of(chunk_columns_k, columns - first);
-        f32_t* const target = accumulated + first;
         [[maybe_unused]] nk_status_t status = nk_success_k;
-        if (correction != 1) status = kit_t::scale(target, width, &correction, &zero, target, nullptr);
-        assert(status == nk_success_k && "The serial tier scales on every CPU");
         for (std::size_t row = 0; row != count; ++row) {
-            status = kit_t::cast(rows[row] + first * bits / 8, scalar_type_::dtype(), widened.data(), nk_f32_k, width,
-                                 nullptr);
+            status = kit_t::cast(rows[row] + first * bits / 8, scalar_type_::dtype(), widened[row].data(), nk_f32_k,
+                                 width, nullptr);
             assert(status == nk_success_k && "The serial tier casts every dtype pair");
-            status = kit_t::blend(target, widened.data(), width, &one, &weights[row], target, nullptr);
-            assert(status == nk_success_k && "The serial tier blends on every CPU");
+        }
+        for (std::size_t head = 0; head != heads; ++head) {
+            f32_t* const target = outputs + head * columns + first;
+            if (corrections[head] != 1)
+                status = kit_t::scale(target, width, &corrections[head], &zero, target, nullptr);
+            assert(status == nk_success_k && "The serial tier scales on every CPU");
+            for (std::size_t row = 0; row != count; ++row) {
+                status = kit_t::blend(target, widened[row].data(), width, &one, &weights[row][head], target, nullptr);
+                assert(status == nk_success_k && "The serial tier blends on every CPU");
+            }
         }
     }
 }
@@ -3994,36 +4029,39 @@ template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype sca
 
 #pragma region Query Corrections
 
-/** Without heads, every node keeps the score the kit gave it. */
-template <nk_capability_t capability_, typename scalar_type_, typename node_id_type_, typename dot_type_,
-          std::size_t fan_out_>
-void dense_rescore(dummy_heads_t, nk::vector_view<scalar_type_>, std::array<node_id_type_, fan_out_> const&,
-                   std::array<nk::vector_view<scalar_type_>, fan_out_> const&, dense_scores<dot_type_, fan_out_>&,
-                   std::size_t) noexcept {}
+/** The walks' default rescoring: none, so every node keeps the score the kit gave it. */
+struct dummy_rescoring_t {
+    template <typename ids_type_, typename keys_type_, typename scores_type_>
+    void operator()(ids_type_ const&, keys_type_ const&, scores_type_&, std::size_t) const noexcept {}
+};
 
-/** Replaces each scored dot with `Σₕ wₕ·ReLU(qₕ·k)` and its distance with `1 − score`. The heads are those of
- *  the one query row being walked. */
-template <nk_capability_t capability_, typename scalar_type_, typename node_id_type_, typename dot_type_,
-          std::size_t fan_out_>
-void dense_rescore(dense_indexer_heads<scalar_type_> const& indexer, nk::vector_view<scalar_type_>,
-                   std::array<node_id_type_, fan_out_> const&,
-                   std::array<nk::vector_view<scalar_type_>, fan_out_> const& keys,
-                   dense_scores<dot_type_, fan_out_>& scores, std::size_t count) noexcept {
-    static_assert(!nk::is_integral_dtype<scalar_type_>(), "Indexer scoring needs floating-point keys");
-    std::array<dot_type_, fan_out_> indexed {};
-    for (std::size_t head = 0; head != indexer.heads.extent(0); ++head) {
-        dense_scores<dot_type_, fan_out_> const head_scores =
-            usearch::scores<nk_kernel_dot_k, capability_, scalar_type_>(
-                indexer.heads.row(head).as_vector(), no_norms_t {}, keys, std::array<no_norms_t, fan_out_> {});
-        dot_type_ const weight = dot_type_(indexer.weights(0, head));
-        for (std::size_t lane = 0; lane != count; ++lane)
-            indexed[lane] += weight * max_of(head_scores.dots[lane], dot_type_ {});
+/** Indexer heads as a walk's rescoring: each scored dot becomes Σₕ wₕ·ReLU(⟨qₕ, k⟩) and its distance 1 − score. */
+template <nk_capability_t capability_, typename scalar_type_>
+struct dense_indexer_rescoring {
+
+    /** The heads of the one query row being walked. */
+    dense_indexer_heads<scalar_type_> heads;
+
+    template <typename dot_type_, std::size_t fan_out_>
+    void operator()(std::array<dense_node_id_t, fan_out_> const&,
+                    std::array<nk::vector_view<scalar_type_>, fan_out_> const& keys,
+                    dense_scores<dot_type_, fan_out_>& scores, std::size_t count) const noexcept {
+        static_assert(!nk::is_integral_dtype<scalar_type_>(), "Indexer scoring needs floating-point keys");
+        std::array<dot_type_, fan_out_> indexed {};
+        for (std::size_t head = 0; head != heads.heads.extent(0); ++head) {
+            dense_scores<dot_type_, fan_out_> const head_scores =
+                usearch::scores<nk_kernel_dot_k, capability_, scalar_type_>(
+                    heads.heads.row(head).as_vector(), no_norms_t {}, keys, std::array<no_norms_t, fan_out_> {});
+            dot_type_ const weight = dot_type_(heads.weights(0, head));
+            for (std::size_t lane = 0; lane != count; ++lane)
+                indexed[lane] += weight * max_of(head_scores.dots[lane], dot_type_ {});
+        }
+        for (std::size_t lane = 0; lane != count; ++lane) {
+            scores.dots[lane] = indexed[lane];
+            scores.distances[lane] = 1 - indexed[lane];
+        }
     }
-    for (std::size_t lane = 0; lane != count; ++lane) {
-        scores.dots[lane] = indexed[lane];
-        scores.distances[lane] = 1 - indexed[lane];
-    }
-}
+};
 
 #pragma endregion Query Corrections
 

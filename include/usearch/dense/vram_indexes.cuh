@@ -24,6 +24,7 @@
 #include <atomic>      // `std::atomic` - the routing tally
 #include <memory>      // `std::unique_ptr` - an index holds atomics and never moves
 #include <mutex>       // `std::lock_guard`, `std::adopt_lock` - the one-batch-at-a-time hold
+#include <numbers>     // `std::numbers::log2e_v` - the base-2 flash merge
 #include <span>        // `std::span` - the caller's keys & the merged ranking
 #include <string_view> // `std::string_view` - the checkpoint paths
 #include <utility>     // `std::move` - handing a mapping to the buffer that outlives the load
@@ -41,6 +42,56 @@ namespace unum {
 namespace usearch {
 
 #if defined(__CUDACC__)
+
+/** A key-level value lookup seen through one shard's device key column, so the shard's walks resolve node IDs. */
+template <typename key_type_, typename value_lookup_type_>
+struct dense_cuda_keyed_lookup {
+
+    /** The shard's keys on its device, by node ID. */
+    key_type_ const* keys;
+
+    /** Resolves a key to its value row. */
+    value_lookup_type_ value_lookup;
+
+    __device__ __forceinline__ auto operator()(dense_node_id_t node_id) const noexcept {
+        return value_lookup(keys[node_id]);
+    }
+};
+
+/** Merges the normalized attended rows and carries of @p shards walks into the first's by the flash rule, a warp per
+ *  row: each rescales to the joint maximum and weighs by its share of the joint partition. Every shard holds a block
+ *  of @b [rows,columns] rows, then @b [rows] carries, the blocks lying back to back from @p blocks. */
+static __global__ void dense_cuda_merge_attention_kernel(byte_t* blocks, u32_t rows, u32_t columns, u32_t shards) {
+    u32_t const row = blockIdx.x * (blockDim.x / 32) + threadIdx.x / 32, lane = threadIdx.x % 32;
+    if (row >= rows) return;
+    std::size_t const outputs_bytes = std::size_t {rows} * columns * sizeof(f32_t);
+    std::size_t const block_bytes = outputs_bytes + rows * sizeof(dense_softmax_state_t);
+    auto const carry_of = [&](u32_t shard) noexcept -> dense_softmax_state_t& {
+        auto* const carries = reinterpret_cast<dense_softmax_state_t*>(blocks + shard * block_bytes + outputs_bytes);
+        return carries[row];
+    };
+    auto const row_of = [&](u32_t shard) noexcept {
+        return reinterpret_cast<f32_t*>(blocks + shard * block_bytes) + std::size_t {row} * columns;
+    };
+    f32_t maximum = carry_of(0).maximum_score, partition = 0;
+    for (u32_t shard = 1; shard != shards; ++shard) maximum = fmaxf(maximum, carry_of(shard).maximum_score);
+    // The carries keep natural-log maxima, so their gaps turn base-2 for the exponent.
+    auto const weight_of = [&](u32_t shard) noexcept {
+        dense_softmax_state_t const carry = carry_of(shard);
+        return carry.partition * exp2f((carry.maximum_score - maximum) * std::numbers::log2e_v<f32_t>);
+    };
+    for (u32_t shard = 0; shard != shards; ++shard) partition += weight_of(shard);
+    f32_t* const merged = row_of(0);
+    for (u32_t shard = 0; shard != shards; ++shard) {
+        f32_t const share = partition > 0 ? weight_of(shard) / partition : 0;
+        f32_t const* const partial = row_of(shard);
+        for (u32_t column = lane; column < columns; column += 32)
+            merged[column] = (shard ? merged[column] : 0) + share * partial[column];
+    }
+    // Every lane reads the first carry above before the leader replaces it.
+    __syncwarp();
+    if (lane == 0) carry_of(0) = {maximum, partition};
+}
 
 /**
  *  @brief The sharded index: same-geometry GPU-resident shards viewed as one.
@@ -105,7 +156,7 @@ struct dense_vram_indexes {
     using refine_result_t = typename index_t::refine_result_t;
     using health_result_t = typename index_t::health_result_t;
 
-    /** One shard: the graph on its device, the keys of its rows on the host, and the batch in
+    /** One shard: the graph on its device, the keys of its rows on the host and on the device, and the batch in
      *  flight on it. Placement is not repeated - the index reports it through @c device_specs. */
     struct shard_t {
 
@@ -114,6 +165,10 @@ struct dense_vram_indexes {
 
         /** The key of each of this shard's rows, indexed by node ID; a batch covers its rows before writing them. */
         keys_column_t keys;
+
+        /** The same keys on the shard's device, so a walk resolves its nodes to keys; reserved for every ID a shard
+         *  can hold, since address space is free and the base never moves under a walk, and mapped as it grows. */
+        cuda_virtual_memory_allocator<key_t> device_keys;
 
         /** The batch submitted on this shard, live until the fan-out drains - a fan-out submits on
          *  every device before awaiting any. */
@@ -174,7 +229,7 @@ struct dense_vram_indexes {
             return status_t::config_mismatch_k;
         for (shard_t const& one : shards_)
             if (one.index->device_specs().ordinal == shard->device_specs().ordinal) return status_t::config_mismatch_k;
-        return shards_.push_back(shard_t {std::move(shard), keys_column_t {allocator_}, {}});
+        return shards_.push_back(shard_t {std::move(shard), keys_column_t {allocator_}, {}, {}});
     }
 
     /** Empties every shard in place, keeping its device, geometry and capacity; a kept failure
@@ -231,11 +286,12 @@ struct dense_vram_indexes {
         return status_t::success_k;
     }
 
-    /** Bytes the index occupies - every shard's storage, its key column, and the shared locator
+    /** Bytes the index occupies - every shard's storage, its key columns, and the shared locator
      *  map; traversal scratch is the executor's. */
     std::size_t memory_usage() const noexcept {
         std::size_t bytes = sizeof(dense_vram_indexes) + locators_of_key_.memory_usage();
-        for (shard_t const& one : shards_) bytes += one.index->memory_usage() + one.keys.memory_usage();
+        for (shard_t const& one : shards_)
+            bytes += one.index->memory_usage() + one.keys.memory_usage() + one.device_keys.committed_bytes();
         return bytes;
     }
 
@@ -252,7 +308,8 @@ struct dense_vram_indexes {
         for (shard_t& one : shards_) {
             auto const [shard_capacity, status] = one.index->reserve(per_shard);
             if (failed(status)) return {capacity(), status};
-            if (status_t const covered = one.keys.cover(shard_capacity); failed(covered)) return {capacity(), covered};
+            if (status_t const covered = cover_keys_(one, shard_capacity); failed(covered))
+                return {capacity(), covered};
         }
         if (status_t const indexed = locators_of_key_.reserve(config.capacity); failed(indexed))
             return {capacity(), indexed};
@@ -413,6 +470,7 @@ struct dense_vram_indexes {
         status_t status = status_t::success_k;
         for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
             traversal_t& traversal = traversals[shard];
+            if (cudaSetDevice(traversal.device()) != cudaSuccess) return {merged, status_t::device_error_k};
             auto const [search_result, search_status] = shards_[shard].index->search(query_vector, traversal, config);
             if (failed(search_status)) {
                 status = search_status;
@@ -456,8 +514,8 @@ struct dense_vram_indexes {
         return search_(queries, executor, config, wanted, keys, distances, counts);
     }
 
-    /** The batched @c search ranked by a lightning indexer: every shard walks the queries under the same
-     *  @p heads, passed to it as is, so the merged distances are `1 − Σₕ wₕ·ReLU(qₕ·k)` whichever shard scored them. */
+    /** The batched @c search ranked by a lightning indexer: every shard walks the queries under the same @p heads,
+     *  passed to it as is, so the merged distances are 1 − Σₕ wₕ · ReLU(qₕ · k) whichever shard scored them. */
     expected<search_result_t> search(vectors_view_t queries, dense_indexer_heads<scalar_t> const& heads,
                                      executor_t& executor, search_config_t config, std::size_t wanted,
                                      std::span<key_t> keys, std::span<distance_t> distances,
@@ -520,7 +578,7 @@ struct dense_vram_indexes {
             return multiplied.status;
         };
         // Shards append in placement order until a row fills, so rows truncate exactly as on the host.
-        auto merge_shard = [&](std::size_t shard) noexcept {
+        auto merge_shard = [&](std::size_t shard, traversal_t const&) noexcept {
             for (std::size_t row = 0; row != rows_count; ++row) {
                 std::size_t const landed_offset = (row * shards + shard) * wanted;
                 std::size_t const kept = min_of(counts[row], wanted);
@@ -585,6 +643,86 @@ struct dense_vram_indexes {
         ranked.value.count = reduce(to_span(row_keys), to_span(row_distances), to_span(row_counts), keys, scores,
                                     counts);
         return ranked;
+    }
+
+    /**
+     *  @brief Grouped-query attention of every token over every shard: each shard folds the nodes its walks score
+     *      into per-head partial rows and carries on its own device, and the first shard's device merges them by
+     *      the flash rule, exact over the union.
+     *
+     *  @param[in] queries The query heads, in the shards' stored scalar type; row t · @p head_count + h is head h
+     *      of token t, and each token walks every shard once.
+     *  @param[in] head_count The query heads sharing this key-value head; it must divide the rows.
+     *  @param[in] value_lookup Device-callable: `value_lookup(key)` points at the key's value row on a 16-byte
+     *      boundary, as wide as the keys and stored like them, in memory every shard's device reads; a null row
+     *      refuses the call with @c shape_mismatch_k.
+     *  @param[in] score_scale The factor turning a dot into a logit.
+     *  @param[out] outputs The attended rows, @b [rows,dimensions] row-major, in host or device memory.
+     *  @param[out] carry Each row's softmax state over every shard, one per row, in host or device memory.
+     *  @param[inout] executor The contexts and streams, paired positionally with the shards.
+     *  @param[in] config The per-shard walk configuration, applied uniformly; @c count plays no part.
+     *  @return The query rows attended, and the traversal telemetry every shard spent.
+     */
+    template <typename value_lookup_type_>
+    expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
+                                     f32_t score_scale, std::span<f32_t> outputs,
+                                     std::span<dense_softmax_state_t> carry, executor_t& executor,
+                                     search_config_t config = {}) noexcept
+        requires(kernel_kind_ == nk_kernel_dot_k)
+    {
+        using shard_lookup_t = dense_cuda_keyed_lookup<key_t, std::remove_cvref_t<value_lookup_type_>>;
+        std::size_t const rows_count = queries.extent(0), shards = shards_.size();
+        if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
+        if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
+        if (outputs.size() != rows_count * dimensions() || carry.size() != rows_count)
+            return {{}, status_t::config_mismatch_k};
+        if (!rows_count) return {{}, status_t::success_k};
+        if (queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
+
+        // Shard 0 stages one block of rows and carries per shard, its own first and the others copied in.
+        std::size_t const block_bytes = outputs.size_bytes() + carry.size_bytes();
+        byte_t* blocks = nullptr;
+        auto attend_shard = [&](std::size_t shard, traversal_t& traversal) noexcept {
+            shard_lookup_t const lookup {shards_[shard].device_keys.base(), value_lookup};
+            expected<f32_t*> const landed = shards_[shard].index->submit_attend_(
+                queries, head_count, lookup, score_scale, traversal, config, shard ? 1 : shards);
+            if (!landed) return landed.status;
+            if (!shard) {
+                blocks = reinterpret_cast<byte_t*>(landed.value);
+                return status_t::success_k;
+            }
+            // On the shard's own stream, so the copy follows its walks.
+            return cudaMemcpyPeerAsync(blocks + shard * block_bytes, executor.device(0), landed.value,
+                                       executor.device(shard), block_bytes, traversal.stream()) == cudaSuccess
+                       ? status_t::success_k
+                       : status_t::device_error_k;
+        };
+        status_t merged = status_t::success_k;
+        auto merge_shard = [&](std::size_t shard, traversal_t const& traversal) noexcept {
+            // A shard whose walk met a node without its value row folded a wrong softmax.
+            if (traversal.missed()) merged = status_t::shape_mismatch_k;
+            if (shard + 1 != shards || failed(merged)) return;
+            // Every shard drained, so every block landed; the merge and the landing ride shard 0's stream.
+            cudaStream_t const stream = executor.stream(0).handle;
+            u32_t const rows = static_cast<u32_t>(rows_count);
+            if (cudaSetDevice(executor.device(0)) != cudaSuccess ||
+                failed(cuda_launch(dense_cuda_merge_attention_kernel,
+                                   divide_round_up<u32_t>(rows, dense_cuda_warps_per_block_k),
+                                   dense_cuda_warps_per_block_k * 32, 0, stream, blocks, rows,
+                                   static_cast<u32_t>(dimensions()), static_cast<u32_t>(shards))) ||
+                cudaMemcpyAsync(outputs.data(), blocks, outputs.size_bytes(), cudaMemcpyDefault, stream) !=
+                    cudaSuccess ||
+                cudaMemcpyAsync(carry.data(), blocks + outputs.size_bytes(), carry.size_bytes(), cudaMemcpyDefault,
+                                stream) != cudaSuccess ||
+                cudaStreamSynchronize(stream) != cudaSuccess)
+                merged = status_t::device_error_k;
+        };
+        expected<search_result_t> attended = for_each_shard_(executor, rows_count, config, attend_shard, merge_shard,
+                                                             {}, head_count, shards);
+        if (!attended) return attended;
+        if (failed(merged)) return {{}, merged};
+        attended.value.count = rows_count;
+        return attended;
     }
 
 #pragma endregion Search
@@ -948,7 +1086,8 @@ struct dense_vram_indexes {
                     if (landing.shard != shard || !rows) continue;
                     part_t const& part = parts_[landing.part];
                     keys_column_t& keys = owner_->shards_[shard].keys;
-                    if (status_t const covered = keys.cover(first + rows); failed(covered)) return covered;
+                    if (status_t const covered = cover_keys_(owner_->shards_[shard], first + rows); failed(covered))
+                        return covered;
                     auto [seats, seat_status] = owner_->locators_of_key_.claim(rows);
                     if (failed(seat_status)) return seat_status;
                     // The key column is chunked, so the part's keys land run by run.
@@ -971,6 +1110,11 @@ struct dense_vram_indexes {
                 // Every plan finishes, an empty one included, since finishing releases the claim.
                 if (cudaSetDevice(owner_->shards_[shard].index->device_specs().ordinal) != cudaSuccess)
                     return status_t::device_error_k;
+                if (status_t const uploaded = upload_keys_(owner_->shards_[shard], {plans_[shard].base, first},
+                                                           nullptr);
+                    failed(uploaded))
+                    return uploaded;
+                if (cudaStreamSynchronize(nullptr) != cudaSuccess) return status_t::device_error_k;
                 if (status_t const finished = plans_[shard].finish(); failed(finished)) return finished;
             }
             for (std::size_t shard = 0; shard != plans_.size(); ++shard)
@@ -1205,6 +1349,31 @@ struct dense_vram_indexes {
         return status_t::success_k;
     }
 
+    /** Covers rows below @p rows in both of @p one's key columns, reserving the device one at its first cover. */
+    static status_t cover_keys_(shard_t& one, std::size_t rows) noexcept {
+        if (status_t const covered = one.keys.cover(rows); failed(covered)) return covered;
+        if (!one.device_keys.reserved_bytes())
+            if (status_t const reserved = one.device_keys.reserve_range(index_t::max_node_count_k * sizeof(key_t),
+                                                                        one.index->device_specs().ordinal);
+                failed(reserved))
+                return reserved;
+        return one.device_keys.commit(rows * sizeof(key_t));
+    }
+
+    /** Copies @p rows of @p one's host key column into its device twin on @p stream, run by run, since the host
+     *  column is chunked. */
+    static status_t upload_keys_(shard_t& one, iota_view<std::size_t> rows, cudaStream_t stream) noexcept {
+        status_t uploaded = status_t::success_k;
+        std::size_t row = rows.first;
+        one.keys.for_each_span(rows, [&](std::span<key_t> run) noexcept {
+            if (succeeded(uploaded) && cudaMemcpyAsync(one.device_keys.base() + row, run.data(), run.size_bytes(),
+                                                       cudaMemcpyHostToDevice, stream) != cudaSuccess)
+                uploaded = status_t::device_error_k;
+            row += run.size();
+        });
+        return uploaded;
+    }
+
     /** The body of @c insert, run with the insertion gate held. */
     expected<insert_result_t> insert_gated_(std::span<key_t const> keys, vectors_view_t new_vectors,
                                             executor_t& executor, insert_config_t config) noexcept {
@@ -1238,14 +1407,25 @@ struct dense_vram_indexes {
             shard_t& one = shards_[launched];
             one.inserted = {};
             if (!taking) continue;
+            if (cudaSetDevice(traversals[launched].device()) != cudaSuccess) {
+                status = status_t::device_error_k;
+                break;
+            }
             dense_node_id_t const first_node = static_cast<dense_node_id_t>(one.index->size());
             // Batches run one at a time under the gate, so covering the rows this one takes is all a key needs.
-            if (status_t const covered = one.keys.cover(first_node + taking); failed(covered)) {
+            if (status_t const covered = cover_keys_(one, first_node + taking); failed(covered)) {
                 status = covered;
                 break;
             }
             for (std::size_t taken = 0; taken != taking; ++taken)
                 one.keys[first_node + static_cast<dense_node_id_t>(taken)] = keys[first + taken * shards];
+            // On the launch's own stream, so the device keys land before the rows they name publish.
+            if (status_t const uploaded = upload_keys_(one, {first_node, first_node + taking},
+                                                       traversals[launched].stream());
+                failed(uploaded)) {
+                status = uploaded;
+                break;
+            }
             one.inserted = one.index->insert(new_vectors(nk::range(first, rows, shards), nk::slice), {},
                                              traversals[launched], config, completion_t::deferred_k);
             // A mismatched first ID means a claimer outside the gate, which no key written here can name.
@@ -1361,7 +1541,7 @@ struct dense_vram_indexes {
                 queries, heads..., shard_ids, shard_distances, traversal, config, completion_t::deferred_k);
             return found.status;
         };
-        auto merge_shard = [&](std::size_t shard) noexcept {
+        auto merge_shard = [&](std::size_t shard, traversal_t const&) noexcept {
             dense_scored_node_t frame[dense_cuda_sorted_pool<16>::capacity_k];
             for (std::size_t query = 0; query != queries_count; ++query) {
                 std::size_t const landed_offset = (query * shards + shard) * config.count;
@@ -1379,7 +1559,8 @@ struct dense_vram_indexes {
 
     /** Claims @p executor, sizes one context per shard for @p rows_count rows under @p config and any indexer
      *  @p heads, queues @p submit on every shard before awaiting any, drains every queued stream, hands each drained
-     *  shard to @p merge, and sums the telemetry & the rows' @p counts; the first refusal is the one kept. */
+     *  shard and its context to @p merge, and sums the telemetry & the rows' @p counts; the first refusal is the one
+     *  kept. */
     template <typename submit_type_, typename merge_type_, typename... heads_types_>
     expected<search_result_t> for_each_shard_(executor_t& executor, std::size_t rows_count, search_config_t config,
                                               submit_type_&& submit, merge_type_&& merge,
@@ -1399,8 +1580,12 @@ struct dense_vram_indexes {
         std::size_t const shards = shards_.size();
         status_t first_refusal = status_t::success_k;
         std::size_t queued = 0;
+        // A launch fails on a stream of any device but the current one.
         for (; queued != shards; ++queued)
-            if (status_t const submitted = submit(queued, traversals[queued]); failed(submitted)) {
+            if (status_t const submitted = cudaSetDevice(traversals[queued].device()) == cudaSuccess
+                                               ? submit(queued, traversals[queued])
+                                               : status_t::device_error_k;
+                failed(submitted)) {
                 first_refusal = submitted;
                 break;
             }
@@ -1413,7 +1598,7 @@ struct dense_vram_indexes {
                 continue; // An undrained landing is unreadable - this shard merges nothing.
             }
             if (shard == queued) continue; // The refuser drained for the caller's sake, landed nothing.
-            merge(shard);
+            merge(shard, traversals[shard]);
         }
 
         // Every drained context's sink holds this call's spend on its shard.

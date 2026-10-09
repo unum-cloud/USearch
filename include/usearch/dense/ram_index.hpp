@@ -7,13 +7,13 @@
 #pragma once
 
 #include <cassert> // `assert`
-#include <cmath>   // `std::exp` - the softmax epilogue
 #include <cstring> // `std::memcpy`, `std::memset`
 
 #include <array>       // `std::array`
 #include <bit>         // `std::bit_width`, `std::bit_floor`, `std::has_single_bit`
 #include <functional>  // `std::identity` - the single index's resolver
 #include <limits>      // `std::numeric_limits`
+#include <numbers>     // `std::numbers::log2e_v`, `std::numbers::ln2_v` - the base-2 softmax
 #include <span>        // `std::span`
 #include <type_traits> // `std::has_unique_object_representations_v`
 
@@ -169,80 +169,6 @@ struct dense_multiply_fold {
         return walk_demand_t::continue_k;
     }
 };
-
-/** Prefetches the value row of every scored node that beats the pool's current k-th best, so the attention
- *  epilogue gathers its picks from cache. The pool is read before each quad merges into it. */
-template <nk::numeric_dtype scalar_type_, typename cache_hints_type_, typename pool_type_,
-          typename row_of_type_ = std::identity>
-struct dense_attend_prefetch_fold {
-
-    /** The value rows the picks address. */
-    nk::matrix_view<scalar_type_> values;
-
-    /** The walk's pool, ascending by distance. */
-    pool_type_ const& pool;
-
-    /** The picks the epilogue weighs - the "k". */
-    std::size_t picks;
-
-    /** Maps a walked node ID to its value row. */
-    row_of_type_ row_of = {};
-
-    template <typename dot_result_type_>
-    walk_demand_t absorb(std::span<dense_scored_node_t const> scored_nodes,
-                         std::span<dot_result_type_ const>) noexcept {
-        if constexpr (!std::is_same_v<cache_hints_type_, fu::standard_cache_hints_t>) {
-            cache_hints_type_ const hints;
-            bool const bounded = picks && pool.size() >= picks;
-            std::size_t const row_bytes = values.extent(1) * nk_dtype_bits(scalar_type_::dtype()) / 8;
-            for (dense_scored_node_t const scored : scored_nodes) {
-                if (bounded && !(scored.distance < pool[picks - 1].distance)) continue;
-                std::size_t const row = row_of(scored.node_id);
-                if (row >= values.extent(0)) continue;
-                char const* const bytes = values.row(row).byte_data();
-                for (std::size_t offset = 0; offset < row_bytes; offset += fu::default_alignment_k)
-                    hints(bytes + offset, fu::prefetch_line_k);
-            }
-        }
-        return walk_demand_t::continue_k;
-    }
-};
-
-/**
- *  @brief The softmax over @p count picks, written into @p output already divided by its partition.
- *
- *  @p logit_of names each pick's logit and @p row_of its value row, gathered once. A row past
- *  @c values.extent(0) refuses with @c shape_mismatch_k before anything is written.
- */
-template <nk::numeric_dtype scalar_type_, nk_capability_t capability_, typename logit_of_type_, typename row_of_type_>
-expected<dense_softmax_state_t> dense_attend_picks(std::size_t count, logit_of_type_&& logit_of, row_of_type_&& row_of,
-                                                   nk::matrix_view<scalar_type_> values,
-                                                   std::span<f32_t> output) noexcept {
-    dense_softmax_state_t state {std::numeric_limits<f32_t>::lowest(), 0};
-    for (std::size_t pick = 0; pick != count; ++pick) {
-        if (row_of(pick) >= values.extent(0)) return {state, status_t::shape_mismatch_k};
-        state.maximum_score = max_of(state.maximum_score, logit_of(pick));
-    }
-    std::memset(output.data(), 0, output.size_bytes());
-    constexpr std::size_t batch_k = 16;
-    std::array<char const*, batch_k> rows;
-    std::array<f32_t, batch_k> weights;
-    for (std::size_t first = 0; first < count; first += batch_k) {
-        std::size_t const batch = min_of(batch_k, count - first);
-        for (std::size_t lane = 0; lane != batch; ++lane) {
-            weights[lane] = std::exp(logit_of(first + lane) - state.maximum_score);
-            rows[lane] = values.row(row_of(first + lane)).byte_data();
-            state.partition += weights[lane];
-        }
-        dense_values_step<scalar_type_, capability_>(output.data(), output.size(), rows.data(), weights.data(), batch,
-                                                     1);
-    }
-    f32_t const normalizer = state.partition > 0 ? 1 / state.partition : 0, zero = 0;
-    [[maybe_unused]] nk_status_t const scaled = dense_elementwise_chain<capability_>::kit_t::scale(
-        output.data(), output.size(), &normalizer, &zero, output.data(), nullptr);
-    assert(scaled == nk_success_k && "The serial tier scales on every CPU");
-    return {state, status_t::success_k};
-}
 
 /** Per-thread traversal scratch: candidate queues, visited set, neighbor selection buffers and
  *  the running telemetry counters - one instance per scanning thread. */
@@ -467,6 +393,11 @@ struct dense_ram_index {
 
     template <typename, synchronization_t, typename>
     friend struct dense_ram_cursor;
+
+    // The sharded index walks every shard under one token's attention heads, so one running state spans them.
+    template <typename, nk_dtype_t, nk_kernel_kind_t, nk_capability_t, typename, template <typename> class, typename,
+              typename>
+    friend struct dense_ram_indexes;
 
     inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
 
@@ -1647,9 +1578,9 @@ struct dense_ram_index {
 
     /**
      *  @brief Finds the published nodes a lightning indexer scores highest for one query row - the
-     *      @c search contract, with every distance `1 −` the node's indexer score.
+     *      @c search contract, with every distance 1 − the node's indexer score.
      *
-     *  @param[in] query_vector The row the walk navigates by, conventionally `Σₕ wₕ·qₕ`.
+     *  @param[in] query_vector The row the walk navigates by, conventionally Σₕ wₕ·qₕ.
      *  @param[in] heads The indexer heads of this one query row.
      *  @param[inout] context The calling thread's scratch & telemetry: the matches end up in
      *      @c context.results, ascending by distance - the highest score first.
@@ -1659,11 +1590,8 @@ struct dense_ram_index {
                                      dense_traversal_context_t& context, search_config_t config = {}) noexcept
         requires(kernel_kind_ == nk_kernel_dot_k && !nk::is_integral_dtype<scalar_t>())
     {
-        if (config.synchronization != synchronization_t::concurrent_k)
-            return search_typed<synchronization_t::immutable_k>(query_vector, context, config, dummy_fold_t {},
-                                                                context.results, heads);
-        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config, dummy_fold_t {},
-                                                             context.results, heads);
+        return walk_(query_vector, dummy_fold_t {}, dense_indexer_rescoring<capability_, scalar_t> {heads}, context,
+                     config);
     }
 
     /**
@@ -1680,11 +1608,7 @@ struct dense_ram_index {
         requires dense_fold<std::remove_cvref_t<fold_type_>, dot_result_t>
     expected<search_result_t> search(vector_view_t query_vector, fold_type_&& fold, dense_traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
-        if (config.synchronization != synchronization_t::concurrent_k)
-            return search_typed<synchronization_t::immutable_k>(query_vector, context, config, fold, context.results,
-                                                                dummy_heads_t {});
-        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config, fold, context.results,
-                                                             dummy_heads_t {});
+        return walk_(query_vector, fold, dummy_rescoring_t {}, context, config);
     }
 
     /**
@@ -1716,9 +1640,9 @@ struct dense_ram_index {
         expected<search_result_t> const result =
             config.synchronization != synchronization_t::concurrent_k
                 ? search_typed<synchronization_t::immutable_k>(query_vector, context, config, filtering,
-                                                               context.refining_candidates, dummy_heads_t {})
+                                                               context.refining_candidates, dummy_rescoring_t {})
                 : search_typed<synchronization_t::concurrent_k>(query_vector, context, config, filtering,
-                                                                context.refining_candidates, dummy_heads_t {});
+                                                                context.refining_candidates, dummy_rescoring_t {});
         std::swap(context.results, context.refining_candidates);
         return result;
     }
@@ -1747,53 +1671,72 @@ struct dense_ram_index {
     }
 
     /**
-     *  @brief Softmax attention of one query row over its most relevant published nodes: @c search's walk
-     *      pools them, and the softmax weighs the best @p attended.size() of the pool, each value row
-     *      gathered once.
+     *  @brief Softmax attention of query heads over every node their token's walk scores, folded as Flash
+     *      Attention folds key tiles: the @p head_count heads of one token share one walk.
      *
-     *  @param[in] query The query row, in the index's own dtype & frozen dimensionality.
-     *  @param[inout] context The calling thread's scratch & telemetry; the pool stays in @c context.results.
-     *  @param[in] values One value row per node ID, stored like the keys, at least as many rows as the index holds.
+     *  The walk is @c search's own frontier and stopping rule, ranking a node by its best head as
+     *  1 − maxₕ⟨qₕ, k⟩, so every head's own region is explored. Each scored batch meets all the token's
+     *  heads at once: every head rescales its running maximum, partition and accumulator as its maximum rises,
+     *  and each value row is resolved once and added into every head.
+     *
+     *  @param[in] queries Row t · @p head_count + h is head h of token t, in the index's own dtype.
+     *  @param[in] head_count Query heads sharing this key-value head; it must divide the rows.
+     *  @param[in] value_lookup Resolves a scored batch's node IDs to their value rows, as wide as the keys and
+     *      stored like them: `void(std::span<node_id_t const>, std::span<vector_view_t>)`, one row per ID. A node
+     *      without a row refuses with @c shape_mismatch_k, since a missing row is a wrong softmax.
      *  @param[in] score_scale The factor turning a dot into a logit.
-     *  @param[out] attended The picks' node IDs, nearest first; its size is the "k".
-     *  @param[out] output The attended row, @c values.extent(1) wide.
-     *  @param[out] state The row's softmax carry, for recombining with other walks.
+     *  @param[out] outputs The attended rows, one per query row, as wide as the keys and divided by their
+     *      partitions.
+     *  @param[out] carry Every query row's softmax state, which merges this walk with other branches.
+     *  @param[inout] context The calling thread's scratch & telemetry.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
-     *  @return The picks landed in @p attended, in @c count - fewer than k only when the pool holds fewer.
+     *  @return The query rows attended in @c count.
      */
-    expected<search_result_t> attend(vector_view_t query, dense_traversal_context_t& context, vectors_view_t values,
-                                     f32_t score_scale, std::span<dense_node_id_t> attended, std::span<f32_t> output,
-                                     dense_softmax_state_t& state, search_config_t config = {}) noexcept
+    template <typename value_lookup_type_>
+    expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
+                                     f32_t score_scale, std::span<f32_t> outputs,
+                                     std::span<dense_softmax_state_t> carry, dense_traversal_context_t& context,
+                                     search_config_t config = {}) noexcept
         requires(kernel_kind_ == nk_kernel_dot_k)
     {
-        if (output.size() != values.extent(1)) return {{}, status_t::config_mismatch_k};
-        if (values.extent(0) < size()) return {{}, status_t::shape_mismatch_k};
-        dense_attend_prefetch_fold<scalar_t, cache_hints_type_, results_array_t> fold {values, context.results,
-                                                                                       attended.size()};
-        expected<search_result_t> walked = search(query, fold, context, config);
-        if (!walked) return walked;
-        results_array_t const& pool = context.results;
-        std::size_t const count = min_of(attended.size(), pool.size());
-        // The dot kernel's distance is `1 − dot`, so the logit inverts it rather than re-scoring the key.
-        auto const [softmax, status] = dense_attend_picks<scalar_t, capability_>(
-            count, [&](std::size_t pick) noexcept { return score_scale * (1 - pool[pick].distance); },
-            [&](std::size_t pick) noexcept { return std::size_t {pool[pick].node_id}; }, values, output);
-        if (failed(status)) return {walked.value, status};
-        for (std::size_t pick = 0; pick != count; ++pick) attended[pick] = pool[pick].node_id;
-        state = softmax;
-        walked.value.count = count;
-        return walked;
+        std::size_t const rows_count = queries.extent(0), columns = queries.extent(1);
+        if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
+        if (outputs.size() != rows_count * columns || carry.size() != rows_count)
+            return {{}, status_t::config_mismatch_k};
+        status_t status = status_t::success_k;
+        search_result_t attended;
+        for (std::size_t first = 0; first != rows_count; first += head_count) {
+            attention_rescoring<value_lookup_type_> const rescoring {
+                queries(nk::range(first, first + head_count), nk::slice),
+                value_lookup,
+                score_scale,
+                outputs.subspan(first * columns, head_count * columns),
+                carry.subspan(first, head_count),
+                status};
+            rescoring.clear();
+            expected<search_result_t> const walked = walk_(rescoring.queries.row(0).as_vector(), dummy_fold_t {},
+                                                           rescoring, context, config);
+            if (!walked) return {attended, walked.status};
+            if (failed(status)) return {attended, status};
+            rescoring.finish();
+            attended.visited_members += walked.value.visited_members;
+            attended.computed_distances += walked.value.computed_distances;
+            attended.restarts += walked.value.restarts;
+            attended.saturated_walks += walked.value.saturated_walks;
+        }
+        attended.count = rows_count;
+        return {attended, status_t::success_k};
     }
 
     /** The compile-time form of @c search() & @c search_if(): one whole-traversal instantiation per
-     *  @p synchronization_ contract, per fold type and per heads type, so a certified contract carries
-     *  no atomics and @c dummy_fold_t & @c dummy_heads_t inline away. The walk ends against @p bound
+     *  @p synchronization_ contract, per fold type and per rescoring type, so a certified contract carries
+     *  no atomics and @c dummy_fold_t & @c dummy_rescoring_t inline away. The walk ends against @p bound
      *  once it fills - @c context.results itself for every walk but a filtered one. */
-    template <synchronization_t synchronization_, typename fold_type_, typename heads_type_>
+    template <synchronization_t synchronization_, typename fold_type_, typename rescoring_type_>
         requires dense_fold<std::remove_cvref_t<fold_type_>, dot_result_t>
     expected<search_result_t> search_typed(vector_view_t query_vector, dense_traversal_context_t& context,
                                            search_config_t config, fold_type_&& fold, results_array_t const& bound,
-                                           heads_type_ const& heads) noexcept {
+                                           rescoring_type_ const& rescoring) noexcept {
         // Every distance kernel takes its width from the geometry, so a narrower query would be over-read.
         geometry_t const frozen = geometry();
         if (frozen && query_vector.size() != frozen.dimensions()) return {{}, status_t::config_mismatch_k};
@@ -1824,7 +1767,7 @@ struct dense_ram_index {
 
         vector_norms_t const query_norms = dense_norms(query_vector);
         status_t const walked = search_around<synchronization_>(query_vector, query_norms, first_invisible_id,
-                                                                expansion_factor, context, bound, fold, {}, heads);
+                                                                expansion_factor, context, bound, fold, {}, rescoring);
 
         // A refused walk still ranked what it reached; the counter says the ranking is short
         // because scratch ran out, not because the graph had nothing better.
@@ -3247,6 +3190,102 @@ struct dense_ram_index {
 
 #pragma region Search
 
+    /** One token's query heads as the walk's rescoring and its attention fold in one: a node ranks by its best
+     *  head as 1 − maxₕ⟨qₕ, k⟩, and every scored batch folds into each head's running softmax, in base 2 until
+     *  @c finish. Head zero navigates the walk; a node without a value row fails @c status. */
+    template <typename value_lookup_type_>
+    struct attention_rescoring {
+        vectors_view_t queries;
+        value_lookup_type_& value_lookup;
+        f32_t score_scale;
+        std::span<f32_t> outputs;
+        std::span<dense_softmax_state_t> carry;
+        status_t& status;
+
+        /** Empties every head's row and running state ahead of the token's first walk. */
+        void clear() const noexcept {
+            std::memset(outputs.data(), 0, outputs.size_bytes());
+            for (dense_softmax_state_t& state : carry) state = {std::numeric_limits<f32_t>::lowest(), 0};
+        }
+
+        /** Divides every head's row by its partition and turns its base-2 maximum into a natural-log one. */
+        void finish() const noexcept {
+            std::size_t const columns = queries.extent(1);
+            for (std::size_t head = 0; head != carry.size(); ++head) {
+                f32_t const normalizer = carry[head].partition > 0 ? 1 / carry[head].partition : 0, zero = 0;
+                f32_t* const row = outputs.data() + head * columns;
+                [[maybe_unused]] nk_status_t const scaled = dense_elementwise_chain<capability_>::kit_t::scale(
+                    row, columns, &normalizer, &zero, row, nullptr);
+                assert(scaled == nk_success_k && "The serial tier scales on every CPU");
+                carry[head].maximum_score *= std::numbers::ln2_v<f32_t>;
+            }
+        }
+
+        void operator()(std::array<node_id_t, 4> const& ids, std::array<vector_view_t, 4> const& keys,
+                        dense_scores<dot_result_t, 4>& scores, std::size_t count) const noexcept {
+            if (failed(status)) return;
+            std::size_t const columns = queries.extent(1), head_count = carry.size();
+            std::array<vector_view_t, 4> rows;
+            std::array<char const*, 4> rows_bytes;
+            value_lookup(std::span<node_id_t const>(ids).first(count), std::span(rows).first(count));
+            for (std::size_t lane = 0; lane != count; ++lane) {
+                if (rows[lane].size() != columns) {
+                    status = status_t::shape_mismatch_k;
+                    return;
+                }
+                rows_bytes[lane] = rows[lane].byte_data();
+            }
+            f32_t const logit_scale = score_scale * std::numbers::log2e_v<f32_t>;
+            for (std::size_t first = 0; first < head_count; first += 8) {
+                std::size_t const group = min_of<std::size_t>(8, head_count - first);
+                // One exp2 tile per scored node across the group's heads; the zeros past them exponentiate harmlessly.
+                std::array<std::array<f32_t, 8>, 4> weights {};
+                std::array<f32_t, 8> corrections {};
+                for (std::size_t head = 0; head != group; ++head) {
+                    dense_scores<dot_result_t, 4> const head_scores =
+                        first + head ? usearch::scores<nk_kernel_dot_k, capability_, scalar_t>(
+                                           queries.row(first + head).as_vector(), no_norms_t {}, keys,
+                                           std::array<no_norms_t, 4> {})
+                                     : scores;
+                    dense_softmax_state_t& state = carry[first + head];
+                    f32_t maximum = state.maximum_score;
+                    for (std::size_t lane = 0; lane != count; ++lane) {
+                        weights[lane][head] = logit_scale * static_cast<f32_t>(head_scores.dots[lane]);
+                        maximum = max_of(maximum, weights[lane][head]);
+                        scores.dots[lane] = max_of(scores.dots[lane], head_scores.dots[lane]);
+                    }
+                    for (std::size_t lane = 0; lane != count; ++lane) weights[lane][head] -= maximum;
+                    corrections[head] = state.maximum_score - maximum;
+                    state.maximum_score = maximum;
+                }
+                for (std::size_t lane = 0; lane != count; ++lane)
+                    dense_elementwise_chain<capability_>::kit_t::exp2(weights[lane]);
+                dense_elementwise_chain<capability_>::kit_t::exp2(corrections);
+                for (std::size_t head = 0; head != group; ++head) {
+                    dense_softmax_state_t& state = carry[first + head];
+                    state.partition *= corrections[head];
+                    for (std::size_t lane = 0; lane != count; ++lane) state.partition += weights[lane][head];
+                }
+                dense_values_step<scalar_t, capability_>(outputs.data() + first * columns, group, columns,
+                                                         rows_bytes.data(), weights.data(), corrections, count);
+            }
+            for (std::size_t lane = 0; lane != count; ++lane)
+                scores.distances[lane] = 1 - static_cast<dense_distance_t>(scores.dots[lane]);
+        }
+    };
+
+    /** The one dispatch of a walk under @p fold and @p rescoring onto @c search_typed, by the contract @p config
+     *  names, bounded by @c context.results. */
+    template <typename fold_type_, typename rescoring_type_>
+    expected<search_result_t> walk_(vector_view_t query_vector, fold_type_&& fold, rescoring_type_ const& rescoring,
+                                    dense_traversal_context_t& context, search_config_t config) noexcept {
+        if (config.synchronization != synchronization_t::concurrent_k)
+            return search_typed<synchronization_t::immutable_k>(query_vector, context, config, fold, context.results,
+                                                                rescoring);
+        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config, fold, context.results,
+                                                             rescoring);
+    }
+
     /**
      *  @brief Samples one 4-way batch of distinct, unvisited, published landmarks, scores them
      *      against the @p query, and queues them into the frontier & the result pool.
@@ -3259,11 +3298,12 @@ struct dense_ram_index {
      *  nodes are re-rolled, like the traversal itself.
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename fold_type_ = dummy_fold_t,
-              typename heads_type_ = dummy_heads_t>
+              typename rescoring_type_ = dummy_rescoring_t>
     expected<walk_step_t> sample_landmarks(vector_view_t query, vector_norms_t query_norms,
                                            node_id_t first_invisible_id, std::size_t expansion_factor,
                                            dense_traversal_context_t& context, std::span<node_id_t const>& seeds,
-                                           fold_type_&& fold = fold_type_ {}, heads_type_ const& heads = {}) noexcept {
+                                           fold_type_&& fold = fold_type_ {},
+                                           rescoring_type_ const& rescoring = {}) noexcept {
         results_array_t& results = context.results;
         frontier_queue_t& frontier = context.frontier;
         visited_set_t& visited = context.visited;
@@ -3314,7 +3354,7 @@ struct dense_ram_index {
         }
         dense_scores<dot_result_t, 4> landmark_scores = scores( //
             query, query_norms, landmarks_vectors, landmarks_norms);
-        dense_rescore<capability_>(heads, query, landmarks_ids, landmarks_vectors, landmark_scores, landmarks_in_batch);
+        rescoring(landmarks_ids, landmarks_vectors, landmark_scores, landmarks_in_batch);
         context.computed_distances += landmarks_in_batch;
         std::array<dense_scored_node_t, 4> landmarks_scored;
         for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane)
@@ -3350,14 +3390,15 @@ struct dense_ram_index {
      *      walk, except that a @c sated_k from it ends the walk successfully.
      *  @param[in] seeds Optional landmarks to start from ahead of the random draws - a
      *      re-selection hands in the node's own neighbors, so every one already wired competes.
-     *  @param[in] heads Optional indexer heads of this one query row, rescoring every scored node.
+     *  @param[in] rescoring Optional rescoring of every scored node in this one walk - an indexer's heads or
+     *      one token's attention heads.
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename fold_type_ = dummy_fold_t,
-              typename heads_type_ = dummy_heads_t>
+              typename rescoring_type_ = dummy_rescoring_t>
     status_t search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
                            std::size_t expansion_factor, dense_traversal_context_t& context,
                            results_array_t const& bound, fold_type_&& fold = fold_type_ {},
-                           std::span<node_id_t const> seeds = {}, heads_type_ const& heads = {}) noexcept {
+                           std::span<node_id_t const> seeds = {}, rescoring_type_ const& rescoring = {}) noexcept {
         results_array_t& results = context.results;
         frontier_queue_t& frontier = context.frontier;
         visited_set_t& visited = context.visited;
@@ -3368,7 +3409,7 @@ struct dense_ram_index {
         small_size_t const landmark_batches = divide_round_up<small_size_t>(node_connectivity, 4);
         for (small_size_t landmarks_batch = 0; landmarks_batch != landmark_batches; ++landmarks_batch) {
             auto const [seeding, seed_status] = sample_landmarks<synchronization_>(
-                query, query_norms, first_invisible_id, expansion_factor, context, seeds, fold, heads);
+                query, query_norms, first_invisible_id, expansion_factor, context, seeds, fold, rescoring);
             if (failed(seed_status)) return seed_status;
             if (seeding == walk_step_t::sated_k) return status_t::success_k;
             if (seeding == walk_step_t::exhausted_k) break; // Everything published is already visited.
@@ -3384,7 +3425,7 @@ struct dense_ram_index {
                 // drained frontier never reached.
                 if (bound.size() >= expansion_factor) break;
                 auto const [seeding, seed_status] = sample_landmarks<synchronization_>(
-                    query, query_norms, first_invisible_id, expansion_factor, context, seeds, fold, heads);
+                    query, query_norms, first_invisible_id, expansion_factor, context, seeds, fold, rescoring);
                 if (failed(seed_status)) return seed_status;
                 if (seeding == walk_step_t::sated_k) return status_t::success_k;
                 if (seeding == walk_step_t::exhausted_k) break; // Nothing fresh left to restart from.
@@ -3464,8 +3505,7 @@ struct dense_ram_index {
                 dense_scores<dot_result_t, 4> gathered_scores = scores( //
                     query, query_norms, gathered_vectors, gathered_norms,
                     vectors_quad_of(candidate_neighbors, neighbor_slot, first_invisible_id, gathered_vectors));
-                dense_rescore<capability_>(heads, query, gathered_ids, gathered_vectors, gathered_scores,
-                                           gathered_count);
+                rescoring(gathered_ids, gathered_vectors, gathered_scores, gathered_count);
                 context.computed_distances += gathered_count;
                 std::array<dense_scored_node_t, 4> scored_batch;
                 for (small_size_t lane = 0; lane != gathered_count; ++lane)
