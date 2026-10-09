@@ -273,7 +273,7 @@ python -X faulthandler -m pytest -x           # how the CI runs it
 The `seed` fixture hands a test 42, unless `USEARCH_SEED` names another seed or is `random`, which draws a fresh one per run.
 pytest prints every setting in its header, as `- Seed: <n>`, so a failure under a drawn seed reruns with that number.
 Under pytest-repeat, the fixture adds the repeat step to the seed, so repetitions differ and each one still reproduces.
-`USEARCH_DIMS` replaces the swept dimension counts, and `USEARCH_FILTER` keeps the tests whose node id matches it, as a regex or else as a substring.
+`USEARCH_DIMS` replaces the swept dimension counts, and `USEARCH_FILTER` keeps the tests whose node ID matches it, as a regex or else as a substring.
 A value that does not parse stops the run with `USEARCH_SEED="<value>" does not parse, expected an unsigned integer or random`.
 
 ```sh

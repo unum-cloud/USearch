@@ -141,7 +141,8 @@
   ],
   "files.associations": {
     "*.cu": "cpp",
-    "*.cuh": "cpp",
+    "*.cuh": "cuda-cpp",
+    "*.metal": "cpp",
     "*.tcc": "cpp",
     "__availability": "cpp",
     "__bit_reference": "cpp",

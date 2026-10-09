@@ -1,6 +1,6 @@
 #!/usr/bin/env -S uv run --quiet --script
 """
-USearch Dense Index Benchmark - the Python twin of `bench/dense.cpp`.
+USearch Dense Index Benchmark - the Python twin of `usearch_bench_dense_ram_index_search`.
 
 Measures ingest and search throughput, and sweeps the per-call expansion factor against
 recall - the sweep the new surface makes cheap, since the candidate pool rides the call

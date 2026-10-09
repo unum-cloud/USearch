@@ -10,42 +10,52 @@ Every result is a throughput, a latency and a recall under one explicit configur
 
 ## The Suite
 
-Four executables come out of `bench/CMakeLists.txt`, in two families that never share a binary or a CLI.
-The retrieval family builds, refines and searches, one binary per residency and cardinality.
-The indexer family loads a saved single index and measures how much of a lightning indexer's selection its walks recover.
+The index benchmarks of `bench/CMakeLists.txt` come in two families that never share a binary, beside the kernel microbenchmark under [Kernels](#kernels).
+Every index binary is named `usearch_bench_dense_<residency>_<arity>_<family>`: the residency is `ram` or `vram`, the arity a single `index` or sharded `indexes`, and the family `search` or `algebra`.
+Both families build the index the same way, from the same dataset, dtype, graph, refinement and checkpoint flags.
 
-- `usearch_bench_dense_ram_index` builds one `dense_ram_index` on one memory domain and isolates kernel kits, wait instructions, connectivity and expansion, per-thread staging and latency percentiles.
-- `usearch_bench_dense_ram_indexes` builds one `dense_ram_indexes` over every memory domain and isolates what the C interface drives: admission, rotation across shards, batched verbs and SafeGraphs checkpoints.
-- `usearch_bench_dense_vram_index` builds one `dense_vram_index` on one device and isolates batch-per-launch build and search, the kit generation ceiling and managed-memory planes.
+The search family searches the built index, by plain rows or by a lightning indexer's heads, and judges the hits.
 
-Each retrieval binary prints a `Machine` block, an `Insertions` block and a `Queries` block to standard output and nothing else, so a run is its transcript.
+- `usearch_bench_dense_ram_index_search` builds one `dense_ram_index` on one memory domain and isolates kernel kits, wait instructions, connectivity and expansion, per-thread staging and latency percentiles.
+- `usearch_bench_dense_ram_indexes_search` builds one `dense_ram_indexes` over every memory domain and isolates what the C interface drives: admission, rotation across shards, batched verbs and SafeGraphs checkpoints.
+- `usearch_bench_dense_vram_index_search` builds one `dense_vram_index` on one device and isolates batch-per-launch build and search, the kit generation ceiling and managed-memory planes.
+- `usearch_bench_dense_vram_indexes_search` builds one `dense_vram_indexes` with a shard per `--devices` ordinal and isolates what the C interface drives across GPUs: rotation across devices, scatter-gather search merged on the host, and SafeGraphs checkpoints.
+
+The algebra family measures the graph products `multiply` and the graph attention `attend` over the built index instead of searching it.
+
+- `usearch_bench_dense_ram_index_algebra` builds one `dense_ram_index` on one memory domain and isolates graph products and grouped-query graph attention over every key a walk scores, pair dumps and an exact softmax oracle.
+- `usearch_bench_dense_ram_indexes_algebra` builds one `dense_ram_indexes` over every memory domain and isolates the same verbs batched through the executor, every token's walks crossing every shard.
+- `usearch_bench_dense_vram_index_algebra` builds one `dense_vram_index` on one device and isolates the same graph products and graph attention on the device, judged against the same oracle.
+- `usearch_bench_dense_vram_indexes_algebra` builds one `dense_vram_indexes` with a shard per `--devices` ordinal and isolates the same verbs across GPUs, the shards' attention merged on the first device.
+
+Each search binary prints a `Machine` block, an `Insertions` block and a `Queries` block to standard output and nothing else, so a run is its transcript.
 The `Insertions` block reports the wall time, the throughput in IPS, the distances computed with the shares spent in refinement, the visited members and the restarts.
 The `Queries` block reports the throughput in QPS, the latency, the distances and members per query, and the judgment.
 
 ### Building
 
-Every number below comes from a Release build: the `release` preset for the CPU binaries, and `release_cuda` for the CUDA one, narrowed to the host GPU's family code, like `-DUSEARCH_CUDA_ARCHITECTURES=100f` on a B200 or B300.
+Every number below comes from a Release build: the `release` preset for the CPU binaries, and `release_cuda` for the CUDA ones, narrowed to the host GPU's family code, like `-DUSEARCH_CUDA_ARCHITECTURES=100f` on a B200 or B300.
 The CUDA bench compiles a generation's kits only when every listed architecture runs them, so the preset's own list measures the Ampere kits alone, whatever the GPU.
 The `profile` preset keeps the same optimization and adds the symbols `perf` needs; `dev` is the `-O2` iteration tree and measures nothing.
 
 ```sh
-cmake --preset release && cmake --build --preset release --target usearch_bench_dense_ram_index usearch_bench_dense_ram_indexes usearch_bench_attention
-cmake --preset release_cuda -DUSEARCH_CUDA_ARCHITECTURES=100f && cmake --build build_release_cuda --target usearch_bench_dense_vram_index
+cmake --preset release && cmake --build --preset release --target usearch_bench_dense_ram_index_search usearch_bench_dense_ram_indexes_search usearch_bench_dense_ram_index_algebra usearch_bench_dense_ram_indexes_algebra usearch_bench_dense_ram_metric
+cmake --preset release_cuda -DUSEARCH_CUDA_ARCHITECTURES=100f && cmake --build build_release_cuda --target usearch_bench_dense_vram_index_search usearch_bench_dense_vram_indexes_search usearch_bench_dense_vram_index_algebra usearch_bench_dense_vram_indexes_algebra
 ```
 
-Every binary lands at the top of its build tree, so the CPU ones are in `build_release/` and the CUDA one in `build_release_cuda/`.
+Every binary lands at the top of its build tree, so the CPU ones are in `build_release/` and the CUDA ones in `build_release_cuda/`.
 Every benchmark is memory-hungry at 100M and above, so run it under a cgroup cap rather than trusting it to refuse.
 
 ```sh
-systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- build_release/usearch_bench_dense_ram_indexes ...
+systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- build_release/usearch_bench_dense_ram_indexes_search ...
 ```
 
 ### Running
 
-The retrieval binaries share one dataset triple and one tuning vocabulary; `--help` prints the full list for each.
+The search binaries share one dataset triple and one tuning vocabulary, and the algebra binaries take the same build flags; `--help` prints the full list for each.
 
 ```sh
-build_release/usearch_bench_dense_ram_indexes \
+build_release/usearch_bench_dense_ram_indexes_search \
     --vectors data/sift-10m/base.10M.u8bin \
     --queries data/sift-10m/query.public.10K.u8bin \
     --neighbors data/sift-10m/groundtruth.public.10K.ibin \
@@ -77,10 +87,9 @@ build_release/usearch_bench_dense_ram_indexes \
 - `--first-vector` defaults to `0`: first dataset row viewed, to slice one file across runs; CPU only.
 - `--huge-pages` defaults to `0`: huge pages provisioned before launch; the run fails rather than measuring base pages; CPU only.
 - `--device` defaults to `0`: CUDA device ordinal; GPU only.
-- `--devices` defaults to none: ordinals for the multi-device pipeline, like `0,1`; GPU only.
-- `--merge` defaults to off: stitch the device shards into one graph after ingest; GPU only.
-- `--expansion-merge` defaults to `--expansion-add`: candidate pool while merging; GPU only.
-- `--managed-memory` defaults to off: managed-memory planes oversubscribing VRAM; GPU only.
+- `--devices` defaults to `--device` alone: one shard per ordinal, like `0,1`; `usearch_bench_dense_vram_indexes_search` and `usearch_bench_dense_vram_indexes_algebra` only.
+- `--merge` and `--expansion-merge` are reserved for stitching the device shards into one graph, and `usearch_bench_dense_vram_indexes_search` refuses them until `dense_vram_indexes` has a merge verb.
+- `--managed-memory` defaults to off: managed-memory planes oversubscribing VRAM; GPU only, refused by both `vram_indexes` binaries.
 - `--batch` defaults to `65536`: rows and queries per launch; GPU only.
 
 A bad value prints one line, like `--top-k="0" does not parse, expected a positive count`, and exits with status 1.
@@ -88,6 +97,22 @@ A bad value prints one line, like `--top-k="0" does not parse, expected a positi
 Recall is judged against `--neighbors` as recall@1, recall@k, overlap@k and ndcg@k.
 A ground truth is computed for the whole file, so `--max-vectors` reshapes the graph it describes and the harness drops it, printing a notice; `--self-recall` judges connectivity instead and needs no ground truth at all.
 Judge GPU builds through a reload: a search issued right after a bulk build runs against a device still settling, and the checkpoint path is exactly what the C interface exposes.
+
+### Indexer Heads
+
+Every search binary can rank its searches by a lightning indexer, as DeepSeek V4 and GLM 5 pick sparse-attention keys: a key scores `Σₕ wₕ·ReLU(qₕ·k)` and sits at distance `1 − score`.
+The indexer ranks floating-point keys under the dot kernel, and its walks navigate by the `--queries` rows when given, or by `Σₕ wₕ·qₕ` otherwise.
+
+- `--heads` defaults to none: every query's heads as consecutive rows of any `.fbin`-family file, cast to the stored dtype; needs `--weights`.
+- `--weights` defaults to none: one row of signed head weights per query in any `.fbin`-family file, with the model's scale folded in.
+- `--oracle-queries` defaults to `16`: queries an exact `f64` oracle judges when no `--neighbors` gives their truth.
+
+An indexer's selection is judged against the exact scan's top rows, saved once as `--neighbors`:
+
+```sh
+build_release/usearch_bench_dense_ram_index_search --vectors keys.bf16bin --heads queries.bf16bin --weights weights.fbin \
+    --neighbors truth-global.ibin --metric dot
+```
 
 ### Refinement
 
@@ -97,7 +122,7 @@ A heal follows, re-linking whatever no search can reach, and the report ends wit
 This is what a cheap ingestion pays for - a narrow `--expansion-add` topped with one or two wide passes, rather than one expensive build:
 
 ```sh
-build_release_cuda/usearch_bench_dense_vram_index \
+build_release_cuda/usearch_bench_dense_vram_index_search \
     --vectors data/sift-10m/base.10M.u8bin --queries data/sift-10m/query.public.10K.u8bin \
     --neighbors data/sift-10m/groundtruth.public.10K.ibin --stored-dtype u8 --metric euclidean \
     --connectivity 16 --expansion-add 32 --expansion-search 64 --max-refines 2 --expansion-refine 128
@@ -111,12 +136,37 @@ A checkpoint is a name under `--checkpoints-dir`, stamped with the dtype, the me
 The GPU builds a base an order of magnitude faster than the CPU, so the fast way to a large CPU graph is a GPU base topped up on the CPU: build the first rows on the device, save, then reload on the CPU and insert the rest.
 
 ```sh
-build_release_cuda/usearch_bench_dense_vram_index --vectors data/sift-100m/base.100M.u8bin --metric euclidean --max-vectors 90000000 --save sift90m
-build_release/usearch_bench_dense_ram_index --vectors data/sift-100m/base.100M.u8bin --queries ... --neighbors ... --metric euclidean --load sift90m --skip-vectors 90000000
+build_release_cuda/usearch_bench_dense_vram_index_search --vectors data/sift-100m/base.100M.u8bin --metric euclidean --max-vectors 90000000 --save sift90m
+build_release/usearch_bench_dense_ram_index_search --vectors data/sift-100m/base.100M.u8bin --queries ... --neighbors ... --metric euclidean --load sift90m --skip-vectors 90000000
 ```
 
 The second run reports `topping: 90000000 loaded rows`, inserts the remaining ten million, and judges the full graph against the 100M ground truth.
-Today this crosses only between `usearch_bench_dense_vram_index` and `usearch_bench_dense_ram_index`, which share one checkpoint layout; `usearch_bench_dense_ram_indexes` writes SafeGraphs and restores a checkpoint only when it covers every row of the view.
+Today this crosses only between the single-index binaries, which share one checkpoint layout; the sharded `_indexes_` binaries write SafeGraphs and restore a checkpoint only when it covers every row of the view.
+
+### Algebra
+
+The algebra binaries build the index exactly as the search binaries do, from the same dataset, dtype, executor, graph, refinement and checkpoint flags, and then run `multiply` and `attend` instead of the search phase.
+They pin the dot kernel, the only one both verbs are defined over, so `--metric` takes only `dot` and no ground truth is judged.
+They store only the dot kernel's dtypes, `bf16` through `u4`, so an `.fbin` file needs a `--stored-dtype`.
+
+```sh
+build_release/usearch_bench_dense_ram_index_algebra \
+    --vectors data/wiki-1m/base.1M.fbin \
+    --queries data/wiki-1m/query.public.100K.fbin \
+    --stored-dtype bf16 --oracle-queries 16
+```
+
+Every query row runs one `multiply`, reported as rows per second and scored pairs per row.
+Every `--head-count` consecutive rows then form one query's heads, which share one `attend` walk per shard, every key it scores entering each head's softmax, FlashAttention-style.
+Attend reports queries per second beside the keys scored per query, so runs compare at matched cost.
+The first `--oracle-queries` rows are then judged head by head: the relative L2 error of each attended row against exact `f64` attention over every viewed row.
+
+- `--values` defaults to a synthetic table: the `.bf16bin` value rows `attend` looks up by node or key, as wide as the keys.
+- `--head-count` defaults to `1`: the grouped-query heads per query; a trailing partial group is left out.
+- `--attend-scale` defaults to one over the root of the dimensions: the dot-to-logit factor.
+- `--oracle-queries` defaults to `16`: the queries judged against the exact oracle.
+- `--reference` defaults to none: `.f64bin` exact attention rows of the judged queries, skipping the host oracle's full pass.
+- `--pairs` defaults to none: a dump of every pair each judged query's `multiply` scored; CPU only.
 
 ### Kernels
 
@@ -206,7 +256,7 @@ Provision them before launch and declare them with `--huge-pages`, so a run that
 
 ```sh
 sudo sysctl -w vm.nr_hugepages=16384
-build_release/usearch_bench_dense_ram_indexes --huge-pages 16384 ...
+build_release/usearch_bench_dense_ram_indexes_search --huge-pages 16384 ...
 ```
 
 The pool splits per NUMA domain, so a single-domain run must fit its domain's share.
@@ -214,11 +264,11 @@ The pool splits per NUMA domain, so a single-domain run must fit its domain's sh
 ## Profiling
 
 ```sh
-sudo -E perf stat -d build_profile/usearch_bench_dense_ram_index ...
-sudo -E perf mem -d build_profile/usearch_bench_dense_ram_index ...
-sudo -E perf record -F 1000 build_profile/usearch_bench_dense_ram_index ...
-perf record -d -e arm_spe// -- build_profile/usearch_bench_dense_ram_index ...
-sudo perf stat -e 'faults,dTLB-loads,dTLB-load-misses,cache-misses,cache-references' build_profile/usearch_bench_dense_ram_index ...
+sudo -E perf stat -d build_profile/usearch_bench_dense_ram_index_search ...
+sudo -E perf mem -d build_profile/usearch_bench_dense_ram_index_search ...
+sudo -E perf record -F 1000 build_profile/usearch_bench_dense_ram_index_search ...
+perf record -d -e arm_spe// -- build_profile/usearch_bench_dense_ram_index_search ...
+sudo perf stat -e 'faults,dTLB-loads,dTLB-load-misses,cache-misses,cache-references' build_profile/usearch_bench_dense_ram_index_search ...
 ```
 
 A dTLB miss rate near 3% and a cache-miss rate near 7% are typical of a healthy 1M run; stalls closer to 90% are the signal to provision huge pages and revisit allocation alignment.

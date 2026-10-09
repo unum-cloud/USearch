@@ -5,15 +5,15 @@
  *  @brief The backend-neutral benchmarking surface shared by every dense-index residency - volatile
  *      in-RAM, GPU-resident, and persisted alike.
  *
- *  Only what every backend genuinely shares lives here: the CLI option set, the RetriEval
- *  checkpoint naming and layout, the dataset streaming trampoline, the telemetry aggregation,
- *  the post-clock result judgment, and the host-machine report. The run loops are backend
- *  property, so this header names no index and reads no index-specific members - the same
- *  surface compiles under host compilers and nvcc.
+ *  Only what every binary shares lives here: the CLI option set, the RetriEval checkpoint naming
+ *  and layout, the dataset streaming trampoline, and the process setup of the CPU binaries. The
+ *  search telemetry and judgment live in @c dense_search.cuh, the algebra surface in
+ *  @c dense_algebra.cuh. The run loops are backend property, so this header names no index and
+ *  reads no index-specific members - the same surface compiles under host compilers and nvcc.
  */
 #pragma once
 
-#include <cmath>   // `std::abs` for the rescale amplitude, `std::log2` for ranking gains
+#include <cmath>   // `std::abs` for the rescale amplitude
 #include <cstdio>  // `stdout` for the TTY probe
 #include <cstdlib> // `std::exit`
 #include <cstring> // `std::memcpy` - the checkpoint runs
@@ -22,8 +22,8 @@
 #include <unistd.h> // `isatty`
 #endif
 
-#include <algorithm>   // `std::nth_element`, `std::min`
-#include <atomic>      // `std::atomic`
+#include <algorithm>   // `std::ranges::find`, `std::copy_n`, `std::max`
+#include <charconv>    // `std::from_chars` - the `--memory-domain` ordinal
 #include <ranges>      // `std::views::iota`, `std::views::filter`, `std::views::transform`
 #include <span>        // `std::span`
 #include <string>      // `std::string`
@@ -124,16 +124,6 @@ constexpr char const* bit_name(capability_choice<capability_type_> const (&choic
     return floor;
 }
 
-/** The newest table bit of @p choices inside @p mask, or @p floor when none is. */
-template <typename capability_type_, std::size_t count_>
-constexpr capability_type_ highest_bit(capability_choice<capability_type_> const (&choices)[count_],
-                                       capability_type_ mask, capability_type_ floor) noexcept {
-    capability_type_ highest = floor;
-    for (capability_choice<capability_type_> const& choice : choices)
-        if (mask & choice.bit) highest = choice.bit;
-    return highest;
-}
-
 /** The index of the newest table row of @p choices inside @p mask, or @c count_ when the
  *  mask names none - the dispatch cascade's entry point into a table. */
 template <typename capability_type_, std::size_t count_>
@@ -186,11 +176,6 @@ int dispatch_value(decltype(value_) runtime, auto on_value, auto on_unknown) {
     if (runtime == value_) return on_value(std::integral_constant<decltype(value_), value_> {});
     if constexpr (sizeof...(rest_) == 0) return on_unknown(runtime);
     else return dispatch_value<rest_...>(runtime, on_value, on_unknown);
-}
-
-/** The file scalars the harness opens: what the RetriEval extensions name. */
-int dispatch_file_dtype(nk_dtype_t dtype, auto on_dtype, auto on_unknown) {
-    return dispatch_value<nk_f32_k, nk_bf16_k, nk_f16_k, nk_i8_k, nk_u8_k, nk_u1_k>(dtype, on_dtype, on_unknown);
 }
 
 /** Packed bits cast into no other storage: a bit file reaches the u1 shard when @p stored_dtypes_ lists one, and
@@ -256,7 +241,7 @@ inline constexpr nk_kernel_kind_t metrics_k[] = {nk_kernel_dot_k, nk_kernel_angu
  *  --skip-vectors      0                       Rows the loaded checkpoint already covers
  *  @endverbatim
  *
- *  The CPU binaries add @ref cpu_flags and the GPU binaries their own in @c dense/vram_index.cuh.
+ *  The CPU binaries add @ref cpu_flags and the GPU binaries their own in @c dense/vram_index_search.cuh.
  */
 struct settings_t {
 
@@ -361,6 +346,28 @@ struct settings_t {
     /** Rows and queries per GPU launch. */
     count_t batch {.value = 65536};
 
+    /** Any `.fbin`-family file of every query's indexer heads, consecutive rows per query; needs `--weights`. */
+    std::string_view heads_path;
+
+    /** Any `.fbin`-family file of one row of signed head weights per query, with the model's scale folded in. */
+    std::string_view weights_path;
+
+    /** Queries the exact oracle judges: an indexer search without `--neighbors`, and attention. */
+    count_t oracle_queries {.value = 16};
+
+    /** The file or block device the NVMe binary writes the graph to and searches from; absent lands it in the
+     *  checkpoints directory. */
+    std::string_view payload_path;
+
+    /** The NVMe binary's I/O engine as named: `posix`, or on Linux `aio`, `uring`, `uring-fixed` or `uring-polled`. */
+    std::string_view engine_name;
+
+    /** Whether the NVMe binary reads around the page cache: `O_DIRECT` on Linux, `F_NOCACHE` on macOS. */
+    switch_t direct = switch_t::absent_k;
+
+    /** Traversals every NVMe searching thread keeps in flight. */
+    count_t slots {.value = 64};
+
     /** Whether stdout is a terminal, probed once, so progress redraws one line instead of printing deciles. */
     bool terminal = false;
 };
@@ -389,6 +396,17 @@ inline std::array<flag_t, 17> common_flags(settings_t& settings) noexcept {
         {"--load", "name", "checkpoint name to restore, then insert the rows past --skip-vectors", &settings.load_name},
         {"--checkpoints-dir", "dir", "directory for checkpoint blobs; /tmp by default", &settings.checkpoints_dir},
         {"--skip-vectors", "count", "rows the loaded checkpoint already covers; 0 by default", &settings.skip_vectors},
+    }};
+}
+
+/** The flags every binary takes to rank its searches by a lightning indexer's heads instead of plain rows, and the
+ *  exact oracle judging them. */
+inline std::array<flag_t, 3> indexer_flags(settings_t& settings) noexcept {
+    return {{
+        {"--heads", "path", "any `.fbin`-family file, every query's indexer heads", &settings.heads_path},
+        {"--weights", "path", "any `.fbin`-family file, one row of head weights per query", &settings.weights_path},
+        {"--oracle-queries", "count", "queries the exact oracle judges without --neighbors; 16 by default",
+         &settings.oracle_queries},
     }};
 }
 
@@ -459,14 +477,19 @@ inline void resolve_common_names(settings_t& settings) {
 #endif
 }
 
-/** Parses the CPU binaries' flags into one @ref settings_t, resolving every name that needs no machine. On
- *  `--help` prints the usage and exits with status 0; on a bad flag prints one line and exits with status 1. */
-inline settings_t read_settings(int argc, char const* const* argv, std::string_view binary_name) {
+/** Parses the CPU binaries' flags, and the ones each of @p binary_flags adds, into one @ref settings_t, resolving
+ *  every name that needs no machine. On `--help` prints the usage and exits with status 0; on a bad flag prints one
+ *  line and exits with status 1. */
+template <typename... binary_flags_types_>
+settings_t read_settings(int argc, char const* const* argv, std::string_view binary_name,
+                         binary_flags_types_... binary_flags) {
     settings_t settings;
-    std::array<flag_t, 17> const common = common_flags(settings);
-    std::array<flag_t, 7> const cpu = cpu_flags(settings);
-    std::vector<flag_t> flags(common.begin(), common.end());
-    flags.insert(flags.end(), cpu.begin(), cpu.end());
+    std::vector<flag_t> flags;
+    auto const append = [&](auto const& added) { flags.insert(flags.end(), added.begin(), added.end()); };
+    append(common_flags(settings));
+    append(cpu_flags(settings));
+    append(indexer_flags(settings));
+    (append(binary_flags(settings)), ...);
     parse_or_exit(argc, argv, fmt::format("{} --vectors <path> [flags]", binary_name), flags);
     resolve_common_names(settings);
 
@@ -531,6 +554,17 @@ inline void print(settings_t const& settings) {
     fmt::println("- Checkpoints dir: {}", settings.checkpoints_dir);
     fmt::println("- Skip vectors: {}", settings.skip_vectors.value);
     fmt::println("- Huge pages: {}", settings.huge_pages.value);
+    if (!settings.heads_path.empty()) {
+        fmt::println("- Heads: {}", settings.heads_path);
+        fmt::println("- Weights: {}", settings.weights_path);
+        fmt::println("- Oracle queries: {}", settings.oracle_queries.value);
+    }
+    if (!settings.payload_path.empty() || !settings.engine_name.empty()) {
+        fmt::println("- Payload: {}", settings.payload_path.empty() ? "the checkpoints dir" : settings.payload_path);
+        fmt::println("- Engine: {}", settings.engine_name.empty() ? "posix" : settings.engine_name);
+        fmt::println("- Direct: {}", settings.direct == switch_t::present_k);
+        fmt::println("- Slots: {}", settings.slots.value);
+    }
 }
 
 /** The three matrix files one checkpointed slot spans - each a RetriEval-layout dump. */
@@ -687,276 +721,34 @@ static std::size_t save_checkpoint(settings_t const& settings, index_type_& inde
 
 #pragma endregion
 
-#pragma region Telemetry and Judgment
-
-/** Telemetry sums each thread accumulates privately, padded away from its neighbors. */
-struct alignas(default_alignment_k) telemetry_lane_t {
-
-    /** Frontier candidates whose neighbor lists were expanded. */
-    std::size_t visited_members = 0;
-
-    /** Total distance computations, padding lanes excluded. */
-    std::size_t computed_distances = 0;
-
-    /** Subset of @c computed_distances spent in diversity selection. */
-    std::size_t computed_distances_in_refines = 0;
-
-    /** Subset of @c computed_distances spent re-selecting while back-linking. */
-    std::size_t computed_distances_in_reverse_refines = 0;
-
-    /** Starvation restarts - a graph-connectivity health signal. */
-    std::size_t restarts = 0;
-
-    /** Walks a scratch refusal ended early on the CPU; the GPU folds its starved visited-set
-     *  claims here. */
-    std::size_t saturated_walks = 0;
-};
-
-/** Sums the per-thread telemetry after a phase; the lanes stay untouched. */
-inline telemetry_lane_t summed_lanes(std::vector<telemetry_lane_t> const& lanes) noexcept {
-    telemetry_lane_t sums;
-    for (telemetry_lane_t const& lane : lanes) {
-        sums.visited_members += lane.visited_members;
-        sums.computed_distances += lane.computed_distances;
-        sums.computed_distances_in_refines += lane.computed_distances_in_refines;
-        sums.computed_distances_in_reverse_refines += lane.computed_distances_in_reverse_refines;
-        sums.restarts += lane.restarts;
-        sums.saturated_walks += lane.saturated_walks;
-    }
-    return sums;
-}
-
-/** The backend-neutral judgment state every backend's phases fill: the merged hits with their distances and
- *  latencies, and the failure tally. */
-struct bench_results_t {
-
-    /** The @b [queries,top_k] merged global rows of every query's gathered hits. */
-    nk::matrix<u32_t> hit_rows;
-
-    /** The @b [queries,top_k] distances matching @c hit_rows entry-for-entry. */
-    nk::matrix<dense_distance_t> hit_distances;
-
-    /** Merged hits per query, sizing each row for the post-clock judgment. */
-    std::vector<u32_t> hit_counts;
-
-    /** Per-query end-to-end lookup latencies, in microseconds. */
-    std::vector<float> latencies_us;
-
-    /** Tasks that returned an error in either phase; any non-zero fails the run. */
-    std::size_t failed_tasks = 0;
-};
-
-/** What the refinement phase measured, whichever backend ran it: the passes, the audit that
- *  followed them, and the traversal telemetry they cost. */
-struct refinement_report_t {
-
-    /** Published nodes one pass sweeps. */
-    std::size_t nodes = 0;
-
-    /** The candidate pool every pass re-selects under. */
-    std::size_t expansion = 0;
-
-    /** Nodes each pass re-wired; its length is the passes that actually ran. */
-    std::span<std::size_t const> changed_per_pass;
-
-    /** Threads the passes fanned over; one on a device. */
-    std::size_t threads = 0;
-
-    /** Wall clock of the passes alone. */
-    double refining_seconds = 0;
-
-    /** Wall clock of the heal and its final audit. */
-    double healing_seconds = 0;
-
-    /** Traversal telemetry summed across the passes. */
-    telemetry_lane_t sums;
-
-    /** Nodes the heal's first audit found unreachable. */
-    std::size_t islands_found = 0;
-
-    /** Islands the heal wired into a reachable pick. */
-    std::size_t islands_reconnected = 0;
-
-    /** Nodes a search still reaches once the heal returned. */
-    std::size_t reachable_nodes = 0;
-
-    /** Level-synchronous sweeps the final audit took - a diameter proxy. */
-    std::size_t sweeps = 0;
-};
-
-/** Prints the refinement phase - the passes, their cost, and the reachability the heal left
- *  behind. */
-inline void report_refinement_metrics(refinement_report_t const& report) {
-    std::size_t const passes = report.changed_per_pass.size();
-    fmt::println("\nRefinement");
-    fmt::println("  passes: {} · expansion {}", passes, report.expansion);
-    fmt::println("  changed: {}", fmt::join(report.changed_per_pass, " → "));
-    fmt::println("  threads: {}", report.threads);
-    fmt::println("  wall: {:.2f} s refining · {:.2f} s healing", report.refining_seconds, report.healing_seconds);
-    fmt::println("  throughput: {} nodes/s", humanized(double(report.nodes * passes) / report.refining_seconds));
-    fmt::println("  distances: {}", humanized(report.sums.computed_distances));
-    fmt::println("  visited: {}", humanized(report.sums.visited_members));
-    fmt::println("  islands: {} found, {} reconnected", report.islands_found, report.islands_reconnected);
-    fmt::println("  reachable: {} of {} · {} sweeps", report.reachable_nodes, report.nodes, report.sweeps);
-}
-
-/** Prints the search phase's wall clock, throughput, latency percentiles and traversal
- *  telemetry; @p latencies_us reorders in place. */
-inline void report_search_metrics(settings_t const& settings, std::size_t query_count, double seconds,
-                                  std::size_t threads, telemetry_lane_t const& sums, std::span<float> latencies_us) {
-    auto percentile = [&](double share) {
-        std::size_t const rank = std::min(query_count - 1, std::size_t(share * double(query_count)));
-        std::nth_element(latencies_us.begin(), latencies_us.begin() + rank, latencies_us.end());
-        return latencies_us[rank];
-    };
-    fmt::println("\nQueries");
-    fmt::println("  queries: {} at top-{}{}", query_count, settings.top_k.value,
-                 settings.self_recall == switch_t::present_k ? " · self-recall" : "");
-    fmt::println("  threads: {}", threads);
-    fmt::println("  wall: {:.2f} s", seconds);
-    fmt::println("  throughput: {} QPS", humanized(double(query_count) / seconds));
-    // An empty latency span means a batch-shaped backend with no per-query clock.
-    if (latencies_us.empty())
-        fmt::println("  latency: {:.0f} µs mean per query, batch-uniform", seconds * 1e6 / double(query_count));
-    else
-        fmt::println("  latency: p50 {:.0f} µs · p90 {:.0f} µs · p99 {:.0f} µs", percentile(0.50), percentile(0.90),
-                     percentile(0.99));
-    fmt::println("  distances/query: {}", humanized(double(sums.computed_distances) / double(query_count)));
-    fmt::println("  visited/query: {}", humanized(double(sums.visited_members) / double(query_count)));
-    fmt::println("  restarts: {}", sums.restarts);
-    fmt::println("  saturated: {}", sums.saturated_walks);
-}
-
-/**
- *  @brief Precomputes the position-discount tables shared by every query's judgment, so
- *      per-query normalization is one lookup instead of a chain of @c log2 calls.
- *
- *  @param[out] discounts Per-position pay-offs: @c discounts[i] rewards a hit returned at position i.
- *  @param[out] ideal Prefix sums of @p discounts: @c ideal[i] is the gain of a perfect ranking
- *      of length i + 1.
- */
-inline void fill_discounts(std::span<double> discounts, std::span<double> ideal) noexcept {
-    double running = 0;
-    for (std::size_t position = 0; position != discounts.size(); ++position) {
-        discounts[position] = 1.0 / std::log2(double(position) + 2.0);
-        running += discounts[position];
-        if (position < ideal.size()) ideal[position] = running;
-    }
-}
-
-/** The verdicts of one query's judgment, produced together by @c judge_ranking. */
-struct ranking_verdict_t {
-
-    /** 1 when the true nearest neighbor appears among the returned keys. Averaged
-     *  over queries this is the production Recall@K - the probability of finding @b the
-     *  nearest neighbor within the top K - monotone in K, so Recall@1 never exceeds
-     *  Recall@10. */
-    std::size_t found_nearest = 0;
-
-    /** The intersection size between the returned and expected sets - "overlap",
-     *  the set-coverage metric big-ANN leaderboards report. Stricter than Recall@K and
-     *  not monotone against it. */
-    std::size_t overlap = 0;
-
-    /** Unnormalized discounted cumulative gain: every returned key present in the
-     *  expected set earns its position's discount, so early hits weigh more. */
-    double gain = 0;
-};
-
-/**
- *  @brief All ranking verdicts for one query in one sweep: the expected keys are sorted once,
- *      then every returned position pays one binary search - O(k·log k) where the naive
- *      nested probes go O(k²), which matters from top-100 recalls up.
- *
- *  @param[in] returned Keys the index produced, best first.
- *  @param[in] expected Ground-truth keys, ascending by true distance - @c expected[0] is the
- *      true nearest neighbor.
- *  @param[inout] scratch Clobbered workspace for sorting the expected keys; its length caps
- *      how many of them are judged.
- *  @param[in] discounts Position pay-offs from @c fill_discounts.
- */
-template <typename key_type_>
-ranking_verdict_t judge_ranking(std::span<key_type_ const> returned, std::span<key_type_ const> expected,
-                                std::span<key_type_> scratch, std::span<double const> discounts) noexcept {
-    std::size_t const expected_count = expected.size() < scratch.size() ? expected.size() : scratch.size();
-    for (std::size_t sorted = 0; sorted != expected_count; ++sorted) {
-        key_type_ const key = expected[sorted];
-        key_type_* const slot = lower_bound(scratch.subspan(0, sorted), key);
-        std::memmove(slot + 1, slot, (scratch.data() + sorted - slot) * sizeof(key_type_));
-        *slot = key;
-    }
-
-    ranking_verdict_t verdict;
-    if (!expected_count) return verdict;
-    key_type_ const expected_nearest = expected.front();
-    std::span<key_type_ const> const sorted {scratch.data(), expected_count};
-    for (std::size_t position = 0; position != returned.size(); ++position) {
-        key_type_ const key = returned[position];
-        verdict.found_nearest |= static_cast<std::size_t>(key == expected_nearest);
-        key_type_ const* const slot = lower_bound(sorted, key);
-        if (slot != sorted.data() + sorted.size() && *slot == key) {
-            verdict.overlap += 1;
-            if (position < discounts.size()) verdict.gain += discounts[position];
-        }
-    }
-    return verdict;
-}
-
-/** Judges the merged hits after the clocks stopped - self-recall against own rows, or
- *  recall/overlap/ndcg against the ground truth - one sweep per query either way. */
-inline void judge_hits(settings_t const& settings, bench_results_t const& results, nk::matrix_view<u32_t> ground_truth,
-                       std::size_t query_count) {
-    if (settings.self_recall == switch_t::present_k) {
-        std::size_t found_at_1 = 0, found_at_k = 0;
-        for (std::size_t query = 0; query != query_count; ++query) {
-            auto const returned = to_span(results.hit_rows.row(query).as_vector()).first(results.hit_counts[query]);
-            u32_t const own_row = static_cast<u32_t>(query);
-            found_at_1 += !returned.empty() && returned.front() == own_row;
-            bool within = false;
-            for (u32_t row : returned) within |= row == own_row;
-            found_at_k += within;
-        }
-        double const queries = double(query_count);
-        double const self_at_1 = 100.0 * double(found_at_1) / queries;
-        double const self_at_k = 100.0 * double(found_at_k) / queries;
-        fmt::println("  self-recall@1: {:.2f}%", self_at_1);
-        fmt::println("  self-recall@{}: {:.2f}%", settings.top_k.value, self_at_k);
-    }
-    else if (!ground_truth.empty()) {
-        std::size_t const judged_depth = std::min(settings.top_k.value, ground_truth.extent(1));
-        std::vector<u32_t> scratch(judged_depth);
-        std::vector<double> discounts(settings.top_k.value), ideal(settings.top_k.value);
-        fill_discounts(discounts, ideal);
-
-        std::size_t found_at_1 = 0, found_at_k = 0, shared = 0;
-        double gain = 0;
-        for (std::size_t query = 0; query != query_count; ++query) {
-            auto expected = ground_truth.row(query).as_vector();
-            auto const returned = to_span(results.hit_rows.row(query).as_vector()).first(results.hit_counts[query]);
-            found_at_1 += !returned.empty() && returned.front() == expected[0];
-            auto verdict = judge_ranking(std::span<u32_t const> {returned}, to_span(expected).first(judged_depth),
-                                         std::span<u32_t> {scratch}, std::span<double const> {discounts});
-            found_at_k += verdict.found_nearest;
-            shared += verdict.overlap;
-            gain += verdict.gain;
-        }
-
-        double const queries = double(query_count);
-        double const recall_at_1 = 100.0 * double(found_at_1) / queries;
-        double const recall_at_k = 100.0 * double(found_at_k) / queries;
-        double const overlap_at_k = 100.0 * double(shared) / (queries * double(judged_depth));
-        double const gain_at_k = 100.0 * gain / (queries * ideal[judged_depth - 1]);
-        fmt::println("  recall@1: {:.3f}%", recall_at_1);
-        fmt::println("  recall@{}: {:.3f}%", judged_depth, recall_at_k);
-        fmt::println("  overlap@{}: {:.3f}%", judged_depth, overlap_at_k);
-        fmt::println("  ndcg@{}: {:.3f}%", judged_depth, gain_at_k);
-    }
-    else { fmt::println("  recall: skipped, no ground-truth neighbors provided"); }
-}
-
-#pragma endregion
-
 #pragma region Dataset Streaming
+
+/** @p row widened into @p widened, through NumKong's serial casts. */
+template <typename scalar_type_>
+void widen_row(nk::vector_view<scalar_type_> row, std::span<f32_t> widened) noexcept {
+    [[maybe_unused]] nk_status_t const cast = nk_cast_serial(row.data(), scalar_type_::dtype(), widened.data(),
+                                                             nk_f32_k, widened.size(), nullptr);
+}
+
+/** @p rows in @c f32, multiplied by @p scale, landed in the stored scalar - the staging every row takes. */
+template <typename scalar_type_>
+std::vector<scalar_type_> stage_widened(std::vector<f32_t> rows, f32_t scale) {
+    for (f32_t& value : rows) value *= scale;
+    std::vector<scalar_type_> staged(rows.size());
+    [[maybe_unused]] nk_status_t const cast = nk_cast_serial(rows.data(), nk_f32_k, staged.data(),
+                                                             scalar_type_::dtype(), rows.size(), nullptr);
+    return staged;
+}
+
+/** Every row of @p rows landed in the stored scalar under @p scale, row-major. */
+template <typename scalar_type_, typename dataset_scalar_type_>
+std::vector<scalar_type_> stage_rows(nk::matrix_view<dataset_scalar_type_> rows, f32_t scale) {
+    std::size_t const dimensions = rows.extent(1);
+    std::vector<f32_t> widened(rows.extent(0) * dimensions);
+    for (std::size_t row = 0; row != rows.extent(0); ++row)
+        widen_row(rows.row(row).as_vector(), std::span {widened}.subspan(row * dimensions, dimensions));
+    return stage_widened<scalar_type_>(std::move(widened), scale);
+}
 
 /** NumKong's @c component_max of @p scalar_type_ - the largest magnitude one stored dimension carries - extended to
  *  the plain scalars, each its own component, whose largest is their @c finite_max. */
@@ -1059,10 +851,18 @@ struct streamed_dataset {
     }
 };
 
+/** The rows a search phase answers: every ingested row under self-recall, else the query rows. */
+template <typename streamed_dataset_type_>
+auto searched_rows(streamed_dataset_type_ const& streamed) noexcept {
+    return streamed.bench.settings.self_recall == switch_t::present_k ? streamed.vectors : streamed.queries;
+}
+
 #pragma endregion
 
+#pragma region Process Setup
+
 /** The machine as ForkUnion and NumKong see it: the topology and fabric every CPU binary probes, and the pool the
- *  single-index binary spawns on it, which @c main deletes. */
+ *  single-index binaries spawn on it, which @ref run_cpu_bench deletes. */
 struct machine_t {
     fu_topology_t topology = nullptr;
     fu_fabric_t fabric = nullptr;
@@ -1115,5 +915,127 @@ inline void print(machine_t const& machine) {
     fmt::println("- Scheduling: {}", scheduling_names);
     fmt::println("- Compute: {}", fmt::join(named_choices("serial", compute_choices_k, machine.compute), " "));
 }
+
+/** Bundles the launch state a CPU cascade threads through its compile-time hops: the dataset, the parsed CLI, and the
+ *  machine whose pool or topology the run spawns its threads on. */
+template <typename dataset_scalar_type_>
+struct bench_launch {
+    utilities::persisted_dataset<dataset_scalar_type_> const& dataset;
+    settings_t const& settings;
+    machine_t const& machine;
+};
+
+/** Whether the domains report the huge pages `--huge-pages` expects, which the launcher provisions outside the
+ *  process; prints why not. */
+inline bool huge_pages_provisioned(machine_t const& machine, settings_t const& settings) {
+    if (!settings.huge_pages.value) return true;
+    std::size_t volume = 0;
+    for (std::size_t domain = 0; domain != machine.memory_domains; ++domain) {
+        std::size_t domain_volume = 0;
+        if (fu_volume_huge_pages_in(machine.topology, domain, &domain_volume) != fu_success_k) continue;
+        volume += domain_volume;
+    }
+    if (!volume) fmt::println("--huge-pages expects {}, but the domains report none", settings.huge_pages.value);
+    return volume != 0;
+}
+
+/** Opens the RetriEval matrix @p path in the scalar its extension names, the hop lowering the file's dtype to the C++
+ *  wrapper a run is instantiated over, with the rows of @p queries_path and @p neighbors_path when named, and exits
+ *  with what @p on_dataset makes of it. */
+template <typename on_dataset_type_>
+int open_dataset(std::string_view path, std::string_view queries_path, std::string_view neighbors_path,
+                 on_dataset_type_&& on_dataset) {
+    return dispatch_value<nk_f32_k, nk_bf16_k, nk_f16_k, nk_i8_k, nk_u8_k, nk_u1_k>(
+        utilities::dtype_of_extension(path),
+        [&](auto dtype) {
+            auto [dataset, status] = utilities::persisted_dataset<typename nk::type_for<dtype.value>::type>::open(
+                path, queries_path, neighbors_path);
+            if (status != status_t::success_k) {
+                fmt::println("Failed to open {}", path);
+                return 1;
+            }
+            return on_dataset(dataset);
+        },
+        [&](auto dtype) {
+            fmt::println("Unsupported dtype {} of {}", dtype_name(dtype), path);
+            return 1;
+        });
+}
+
+/** The process every CPU binary on one ForkUnion pool runs around its cascade: reads the flags of @p binary_name and
+ *  the ones each of @p binary_flags adds, probes the machine, resolves the placement against it, spawns the pool,
+ *  prints both, then opens the dataset and exits with what @p on_launch makes of its @ref bench_launch. */
+template <typename on_launch_type_, typename... binary_flags_types_>
+int run_cpu_bench(int argc, char const* const* argv, char const* binary_name, on_launch_type_&& on_launch,
+                  binary_flags_types_... binary_flags) {
+    settings_t settings = read_settings(argc, argv, binary_name, binary_flags...);
+    machine_t machine = probe_machine();
+    if (!machine.topology || !machine.fabric ||
+        fu_pool_new(binary_name, settings.max_schedule, &machine.pool) != fu_success_k) {
+        fmt::println("Failed to inspect the topology or create the pool");
+        return 1;
+    }
+
+    // Resolve `--memory-domain`: empty means one machine-wide heap index, and a single ID
+    // pins memory & threads to that domain. This benchmark measures exactly one index - the
+    // multi-domain arrangement is the sharded `dense_ram_indexes` binaries'.
+    if (!settings.memory_domain_name.empty()) {
+        std::size_t domain = 0;
+        char const* const end = settings.memory_domain_name.data() + settings.memory_domain_name.size();
+        auto const [parsed_end, parse_status] = std::from_chars(settings.memory_domain_name.data(), end, domain);
+        if (parse_status != std::errc {} || parsed_end != end || domain >= machine.memory_domains) {
+            fmt::println(stderr, "--memory-domain=\"{}\" does not parse, expected a single domain below {}",
+                         settings.memory_domain_name, machine.memory_domains);
+            return 1;
+        }
+        settings.memory_domains.push_back(static_cast<fu_memory_domain_id_t>(domain));
+    }
+
+    // Default to 7/8 of the available logical cores: at full occupancy the strictly-ordered
+    // publication convoy serializes on scheduler latency, and throughput collapses by an order
+    // of magnitude. A single pinned domain carves the core budget from every compute domain
+    // whose local memory it is - several clusters can share one NUMA node.
+    bool spawned = false;
+    if (settings.memory_domains.size() == 1) {
+        if (!settings.threads.value) {
+            std::size_t local_cores = 0;
+            for (std::size_t compute_domain = 0; compute_domain != machine.compute_domains; ++compute_domain) {
+                std::size_t local_memory = 0, domain_cores = 0;
+                if (fu_local_memory_of(machine.topology, compute_domain, &local_memory) != fu_success_k) continue;
+                if (local_memory != static_cast<std::size_t>(settings.memory_domains.front())) continue;
+                if (fu_logical_cores_count_in(machine.topology, compute_domain, &domain_cores) != fu_success_k)
+                    continue;
+                local_cores += domain_cores;
+            }
+            settings.threads.value = std::max<std::size_t>(1, local_cores * 7 / 8);
+        }
+        spawned = fu_pool_spawn_near_memory_domain(machine.topology, machine.pool, settings.memory_domains.front(),
+                                                   settings.threads.value, fu_caller_inclusive_k) == fu_success_k;
+    }
+    else {
+        if (!settings.threads.value) settings.threads.value = std::max<std::size_t>(1, machine.logical_cores * 7 / 8);
+        spawned = fu_pool_spawn(machine.topology, machine.pool, settings.threads.value, fu_caller_inclusive_k) ==
+                  fu_success_k;
+    }
+    if (!spawned) {
+        fmt::println("Failed to spawn {} threads", settings.threads.value);
+        return 1;
+    }
+    print(machine);
+    print(settings);
+    if (!huge_pages_provisioned(machine, settings)) return 1;
+
+    int const exit_code = open_dataset(
+        settings.vectors_path, settings.queries_path, settings.neighbors_path,
+        [&]<typename dataset_scalar_type_>(utilities::persisted_dataset<dataset_scalar_type_> const& dataset) {
+            return on_launch(bench_launch<dataset_scalar_type_> {dataset, settings, machine});
+        });
+    fu_pool_delete(machine.pool);
+    fu_fabric_delete(machine.fabric);
+    fu_topology_delete(machine.topology);
+    return exit_code;
+}
+
+#pragma endregion
 
 } // namespace unum::usearch::bench

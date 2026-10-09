@@ -71,7 +71,7 @@ using counting_cuda_allocator_t = counting_cuda_allocator<byte_t>;
 
 static_assert(cuda_reservable_allocator<counting_cuda_allocator_t>);
 
-#pragma region Folds
+#pragma region Algebra
 
 /** Device graph products against the native dots: every scored pair is counted, a narrow row keeps its width
  *  while counting past it, a short row ends in sentinels, every kept pair names a distinct stored row with its
@@ -314,7 +314,7 @@ std::size_t test_dense_indexer_search(make_index_type_ const& make_index, u64_t 
     }
 }
 
-#pragma endregion Folds
+#pragma endregion Algebra
 
 /** Composes one (dtype, kernel) cell's suite over the ledgered device allocator. */
 template <nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>

@@ -80,6 +80,29 @@ check_ascii_arrows_prose() {
         "$file uses the ASCII '->' arrow - prose arrows are the Unicode →:"
 }
 
+# The abbreviation reads ID and IDs in prose, never id, ids, Id or Ids. Only comment text is weighed: code spans,
+# quoted strings, URLs, Doxygen parameter names and identifiers like `node_id`, `.id` or `->id` keep their spelling.
+ids_miscased_pattern='(^|[^[:alnum:]_.:])(id|ids|Id|Ids)([^[:alnum:]_(]|$)'
+check_ids_capitalized() {
+    local miscased
+    miscased=$(printf '%s\n' "$added" | awk '
+        { line = substr($0, 2); gsub(/https?:\/\/[^[:space:]]*/, "", line) }
+        line ~ /^[[:space:]]*(\/\/|\/\*|\*)/ { print line; next }
+        { position = index(line, "//"); if (position) print substr(line, position) }' |
+        sed -E 's/`[^`]*`//g; s/"[^"]*"//g; s/->/ _arrow_/g; s/@(p|c|a|ref|param|tparam)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*//g' |
+        grep -E "$ids_miscased_pattern" || true)
+    [ -z "$miscased" ] || fail "$miscased" "$file writes id or ids in a comment - the abbreviation is ID, plural IDs:"
+}
+
+# The same rule for Markdown prose, skipping fenced and indented code the added lines open themselves.
+check_ids_capitalized_prose() {
+    local miscased
+    miscased=$(printf '%s\n' "$added" | awk '/^\+[[:space:]]*```/ { fenced = !fenced; next } !fenced && !/^\+(    |\t)/' |
+        sed -E 's#https?://[^[:space:]]*##g; s/`[^`]*`//g; s/"[^"]*"//g; s/->/ _arrow_/g; s/^\+//' |
+        grep -E "$ids_miscased_pattern" || true)
+    [ -z "$miscased" ] || fail "$miscased" "$file writes id or ids - the abbreviation is ID, plural IDs:"
+}
+
 # A Unicode arrow glued to its neighbor - `key→id` - reads as one token to searchers and
 # renderers alike; the arrow always gets whitespace on both sides.
 check_glued_arrows() {
@@ -1209,6 +1232,7 @@ judge_path() {
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh)
         check_ascii_arrows
         check_glued_arrows
+        check_ids_capitalized
         check_backward_references
         check_region_labels
         check_param_directions
@@ -1270,8 +1294,11 @@ judge_path() {
         check_hand_minmax
         check_preferred_aliases
         ;;&
+    # The bindings' comments follow the same prose rules as the core's.
+    *.rs | *.go | *.swift | *.ts | *.js) check_ids_capitalized ;;
     *.md)
         check_ascii_arrows_prose
+        check_ids_capitalized_prose
         check_blank_line_runs
         check_glued_arrows
         check_sibling_justification
