@@ -1152,7 +1152,7 @@ static int DenseIndex_contains(PyObject* self, PyObject* key_object) {
 }
 
 static char const doc_DenseIndex_get[] =                                                          //
-    "get(key, /, *, outputs_dtype=Scalar.F32, arena=None) -> Vectors | None\n"                    //
+    "get(key, /, *, outputs_dtype=Scalar.F32, arena=None) -> DenseVectors | None\n"               //
     "\n"                                                                                          //
     "Every vector stored under `key`, in insertion order, or None when the key is absent.\n"      //
     "Calls `usearch_dense_get`.\n"                                                                //
@@ -1164,7 +1164,7 @@ static char const doc_DenseIndex_get[] =                                        
     "    else; None lands them in a fresh one.\n"                                                 //
     "\n"                                                                                          //
     "Returns:\n"                                                                                  //
-    "  Vectors: A writable (count, dimensions) matrix in the arena, keeping it alive, for\n"      //
+    "  DenseVectors: A writable (count, dimensions) matrix in the arena, keeping it alive, for\n" //
     "    the kinds `memoryview` can format - f64, f32, f16, i8, u8. Sub-byte and mini-float\n"    //
     "    kinds, `bf16` among them, leave as a (count, row_bytes) run of 'B' instead.\n"           //
     "  None: When the index holds no entry under `key`.";
@@ -1187,12 +1187,12 @@ static PyObject* get_answer(void* erased) {
     char const* const format = usearch_py_scalar_buffer_format(kind);
     if (format) {
         Py_ssize_t const shape[2] = {(Py_ssize_t)call->written, (Py_ssize_t)call->columns};
-        return usearch_py_arena_buffer(&VectorsType, call->call.arena, call->vectors, format,
+        return usearch_py_arena_buffer(&DenseVectorsType, call->call.arena, call->vectors, format,
                                        (Py_ssize_t)usearch_py_scalar_row_bytes(kind, 1), shape, 2);
     }
     Py_ssize_t const shape[2] = {(Py_ssize_t)call->written,
                                  (Py_ssize_t)usearch_py_scalar_row_bytes(kind, call->columns)};
-    return usearch_py_arena_buffer(&VectorsType, call->call.arena, call->vectors, "B", 1, shape, 2);
+    return usearch_py_arena_buffer(&DenseVectorsType, call->call.arena, call->vectors, "B", 1, shape, 2);
 }
 
 static usearch_py_verb_t const get_verb = {sizeof(get_call_t), get_submit, get_answer, usearch_py_call_release};
@@ -1249,34 +1249,34 @@ static PyObject* DenseIndex_subscript(PyObject* self, PyObject* key_object) {
 
 #pragma region Linear Algebra
 
-static char const doc_DenseIndex_multiply[] =                                                    //
-    "multiply(rows, wanted, /, *, expansion_factor=0, dtype=None, progress=None, stats=None,\n"  //
-    "    arena=None) -> Products\n"                                                              //
-    "\n"                                                                                         //
-    "Approximate sparse product of a matrix against the indexed rows - the linear algebra\n"     //
-    "sibling of `search`, reporting every pair the traversal scored rather than only the\n"      //
-    "nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.\n"    //
-    "How many a walk scores is known only once it ends, so the pairs come back ragged.\n"        //
-    "Calls `usearch_dense_multiply`.\n"                                                          //
-    "\n"                                                                                         //
-    "Args:\n"                                                                                    //
-    "  rows (buffer): An (R, dimensions) matrix of left-hand rows.\n"                            //
-    "  wanted (int): Upper bound on pairs kept per row, the first ones its walk scored;\n"       //
-    "    0 keeps every pair.\n"                                                                  //
-    "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it. A wider\n"        //
-    "    factor widens the emitted pattern, being what the walk's breadth decides.\n"            //
-    "  dtype (Scalar, optional): Names the left-hand scalar type when the buffer cannot.\n"      //
-    "  progress (callable, optional): Called with (completed, total) rows; returning False\n"    //
-    "    stops the batch and raises `CancelledError`, None carries on.\n"                        //
-    "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"         //
-    "  arena (Arena, optional): The arena to land the pairs in, which must export nothing\n"     //
-    "    else; None lands them in a fresh one.\n"                                                //
-    "\n"                                                                                         //
-    "Returns:\n"                                                                                 //
-    "  Products: `offsets`, an (R + 1,) memoryview of Apache Arrow offsets, row `i` spanning\n"  //
-    "    pairs `offsets[i]` up to `offsets[i + 1]`; `keys`, a (pairs, 16) run naming each\n"     //
-    "    pair's indexed row; `scores`, the (pairs,) float64 products; and `required`, the\n"     //
-    "    pairs scored before `wanted` cut any. `keys` and `scores` live in the arena and keep\n" //
+static char const doc_DenseIndex_multiply[] =                                                        //
+    "multiply(rows, wanted, /, *, expansion_factor=0, dtype=None, progress=None, stats=None,\n"      //
+    "    arena=None) -> DenseProducts\n"                                                             //
+    "\n"                                                                                             //
+    "Approximate sparse product of a matrix against the indexed rows - the linear algebra\n"         //
+    "sibling of `search`, reporting every pair the traversal scored rather than only the\n"          //
+    "nearest. Pairs arrive in traversal order rather than sorted, and carry no duplicates.\n"        //
+    "How many a walk scores is known only once it ends, so the pairs come back ragged.\n"            //
+    "Calls `usearch_dense_multiply`.\n"                                                              //
+    "\n"                                                                                             //
+    "Args:\n"                                                                                        //
+    "  rows (buffer): An (R, dimensions) matrix of left-hand rows.\n"                                //
+    "  wanted (int): Upper bound on pairs kept per row, the first ones its walk scored;\n"           //
+    "    0 keeps every pair.\n"                                                                      //
+    "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it. A wider\n"            //
+    "    factor widens the emitted pattern, being what the walk's breadth decides.\n"                //
+    "  dtype (Scalar, optional): Names the left-hand scalar type when the buffer cannot.\n"          //
+    "  progress (callable, optional): Called with (completed, total) rows; returning False\n"        //
+    "    stops the batch and raises `CancelledError`, None carries on.\n"                            //
+    "  stats (DenseTraversalStats, optional): Overwritten with this call's telemetry.\n"             //
+    "  arena (Arena, optional): The arena to land the pairs in, which must export nothing\n"         //
+    "    else; None lands them in a fresh one.\n"                                                    //
+    "\n"                                                                                             //
+    "Returns:\n"                                                                                     //
+    "  DenseProducts: `offsets`, an (R + 1,) memoryview of Apache Arrow offsets, row `i` spanning\n" //
+    "    pairs `offsets[i]` up to `offsets[i + 1]`; `keys`, a (pairs, 16) run naming each\n"         //
+    "    pair's indexed row; `scores`, the (pairs,) float64 products; and `required`, the\n"         //
+    "    pairs scored before `wanted` cut any. `keys` and `scores` live in the arena and keep\n"     //
     "    it alive.";
 
 /** A @c usearch_dense_multiply call; the result holds the offsets, the claimed arena the pairs. */

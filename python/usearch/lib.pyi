@@ -237,13 +237,13 @@ class _ArenaBuffer:
         ...
 
 @final
-class Vectors(_ArenaBuffer):
+class DenseVectors(_ArenaBuffer):
     """The rows `get` exported into an `Arena`: a (count, dimensions) matrix, or (count, row_bytes) of 'B'."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
 
 @final
-class Products:
+class DenseProducts:
     """The ragged sparse product `multiply` exported: per left row, every pair its walk scored."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
@@ -391,7 +391,7 @@ class On[IndexT]:
     def count(self: On[DenseIndex], key: _KeyLike, /) -> int: ...
     def get(
         self: On[DenseIndex], key: _KeyLike, /, *, outputs_dtype: Scalar = ..., arena: Arena | None = None
-    ) -> Vectors | None: ...
+    ) -> DenseVectors | None: ...
     def multiply(
         self: On[DenseIndex],
         rows: _Tensor,
@@ -403,7 +403,7 @@ class On[IndexT]:
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
         arena: Arena | None = None,
-    ) -> Products: ...
+    ) -> DenseProducts: ...
     def attend[OutputT: _Tensor](
         self: On[DenseIndex],
         queries: _Tensor,
@@ -504,7 +504,7 @@ class DeferredOn[IndexT]:
     def count(self: DeferredOn[DenseIndex], key: _KeyLike, /) -> Deferred[int]: ...
     def get(
         self: DeferredOn[DenseIndex], key: _KeyLike, /, *, outputs_dtype: Scalar = ..., arena: Arena | None = None
-    ) -> Deferred[Vectors | None]: ...
+    ) -> Deferred[DenseVectors | None]: ...
     def multiply(
         self: DeferredOn[DenseIndex],
         rows: _Tensor,
@@ -516,7 +516,7 @@ class DeferredOn[IndexT]:
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
         arena: Arena | None = None,
-    ) -> Deferred[Products]: ...
+    ) -> Deferred[DenseProducts]: ...
     def attend[OutputT: _Tensor](
         self: DeferredOn[DenseIndex],
         queries: _Tensor,
@@ -878,7 +878,7 @@ class DenseIndex:
         """How many entries share `key`. Calls `usearch_dense_count`."""
         ...
 
-    def get(self, key: _KeyLike, /, *, outputs_dtype: Scalar = ..., arena: Arena | None = None) -> Vectors | None:
+    def get(self, key: _KeyLike, /, *, outputs_dtype: Scalar = ..., arena: Arena | None = None) -> DenseVectors | None:
         """Every vector stored under `key`, or None. Calls `usearch_dense_get`."""
         ...
 
@@ -893,7 +893,7 @@ class DenseIndex:
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
         arena: Arena | None = None,
-    ) -> Products:
+    ) -> DenseProducts:
         """Every pair the walk scored, an approximate sparse product. Calls `usearch_dense_multiply`."""
         ...
 
@@ -995,7 +995,7 @@ class DenseIndex:
         """Whether any entry holds `key`. Python-only; calls `usearch_dense_count`."""
         ...
 
-    def __getitem__(self, key: _KeyLike, /) -> Vectors:
+    def __getitem__(self, key: _KeyLike, /) -> DenseVectors:
         """`get` that raises `KeyError` for an absent key. Python-only; calls `usearch_dense_get`."""
         ...
 

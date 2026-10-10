@@ -30,10 +30,10 @@ pub use dense_index::{
     DenseAttend, DenseAttendConfig, DenseCount, DenseCursor, DenseDescribe, DenseGet, DenseHealth, DenseIndex,
     DenseIndexDescription, DenseInsert, DenseInsertConfig, DenseLoadRamBufferConfig, DenseLoadRamConfig,
     DenseLoadVramBufferConfig, DenseLoadVramConfig, DenseMaxsim, DenseMaxsimConfig, DenseMerge, DenseMergeConfig,
-    DenseMetadata, DenseMetric, DenseMultiply, DenseMultiplyConfig, DenseOptions, DenseReachability, DenseRefine,
-    DenseRefineConfig, DenseReserve, DenseSave, DenseSaveBuffer, DenseSaveBufferConfig, DenseSaveConfig, DenseSearch,
-    DenseSearchConfig, DenseSearchStream, DenseSearchStreamInitConfig, DenseSoftmaxState, DenseTraversalStats,
-    DenseVerbs, DenseViewNvmeConfig, Monolith, Products, ValueLookup, Vectors,
+    DenseMetadata, DenseMetric, DenseMultiply, DenseMultiplyConfig, DenseOptions, DenseProducts, DenseReachability,
+    DenseRefine, DenseRefineConfig, DenseReserve, DenseSave, DenseSaveBuffer, DenseSaveBufferConfig, DenseSaveConfig,
+    DenseSearch, DenseSearchConfig, DenseSearchStream, DenseSearchStreamInitConfig, DenseSoftmaxState,
+    DenseTraversalStats, DenseVectors, DenseVerbs, DenseViewNvmeConfig, Monolith, ValueLookup,
 };
 pub use types::{
     capabilities_available, capabilities_compiled, rows, rows_mut, version, Arena, Blocking, Deferred, Deferring,

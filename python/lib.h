@@ -186,8 +186,8 @@ extern PyTypeObject MatchesType;
 extern PyTypeObject ExecutorType;
 extern PyTypeObject ArenaType;
 extern PyTypeObject ArenaBufferType;
-extern PyTypeObject VectorsType;
-extern PyTypeObject ProductsType;
+extern PyTypeObject DenseVectorsType;
+extern PyTypeObject DenseProductsType;
 extern PyTypeObject MonolithType;
 extern PyTypeObject DeferredType;
 extern PyTypeObject OnType;
@@ -655,7 +655,7 @@ void usearch_py_arena_unclaim(PyObject* arena);
 PyObject* usearch_py_arena_buffer(PyTypeObject* type, PyObject* arena, void* data, char const* format,
                                   Py_ssize_t item_bytes, Py_ssize_t const* shape, int rank);
 
-/** A new @c Products taking every one of its fields, or NULL dropping them all when any is NULL. */
+/** A new @c DenseProducts taking every one of its fields, or NULL dropping them all when any is NULL. */
 PyObject* usearch_py_products_steal(PyObject* offsets, PyObject* keys, PyObject* scores, size_t required);
 
 /**

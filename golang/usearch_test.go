@@ -4,6 +4,7 @@
 package usearch_test
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"testing"
@@ -46,8 +47,8 @@ func FuzzParseKey(f *testing.F) {
 	f.Fuzz(func(t *testing.T, text string) {
 		key, err := usearch.ParseKey(text)
 		if err != nil {
-			if status := usearch.StatusOf(err); status != usearch.MalformedInput {
-				t.Fatalf("%q was refused as %v", text, status)
+			if !errors.Is(err, usearch.StatusMalformed) {
+				t.Fatalf("%q was refused as %v", text, err)
 			}
 			if key != usearch.NilKey {
 				t.Fatalf("%q was refused yet yielded %v", text, key)
@@ -107,38 +108,67 @@ func ExampleParseKey() {
 func ExampleDenseIndex() {
 	options := usearch.DefaultDenseOptions()
 	options.Dimensions = 3
-	options.Metric = usearch.Euclidean
-	options.Quantization = usearch.F32
+	options.Metric = usearch.DenseMetricEuclidean
+	options.Quantization = usearch.ScalarF32
 
-	index, err := usearch.NewDenseIndex(&options)
+	index, err := usearch.DenseInitRam(options, nil)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer index.Close()
-
-	executor, err := usearch.NewRAMExecutor(nil, 0)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer executor.Close()
 
 	if err := index.Reserve(3); err != nil {
 		log.Fatal(err)
 	}
 	rows := []float32{1, 0, 0, 0, 1, 0, 0, 0, 1}
 	keys := []usearch.Key{usearch.KeyFromUint64(1), usearch.KeyFromUint64(2), usearch.KeyFromUint64(3)}
-	if _, err := index.Add(executor, keys, usearch.RowsOf(rows, 3), usearch.InsertionOptions{}, nil); err != nil {
+	if err := index.Insert(keys, usearch.RowsOf(rows, 3), nil); err != nil {
 		log.Fatal(err)
 	}
 
-	outputs := usearch.PackedMatchesSpan(1, 2)
-	query := usearch.RowsOf([]float32{0, 1, 0}, 3)
-	if err := index.Search(executor, query, &outputs, usearch.SearchOptions{}, nil); err != nil {
+	matches, err := index.Search(usearch.RowsOf([]float32{0, 1, 0}, 3), 2, nil)
+	if err != nil {
 		log.Fatal(err)
 	}
-	found, _ := outputs.MatchesOf(0)
+	found, _ := matches.Row(0)
 	fmt.Println(found[0])
 	// Output: 00000000-0000-0000-0000-000000000002
+}
+
+func ExampleDenseIndex_Deferred() {
+	options := usearch.DefaultDenseOptions()
+	options.Dimensions = 3
+	options.Metric = usearch.DenseMetricEuclidean
+	options.Quantization = usearch.ScalarF32
+
+	index, err := usearch.DenseInitRam(options, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer index.Close()
+	executor, err := usearch.ExecutorForRam(nil, 0, 0)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer executor.Close()
+
+	rows := []float32{1, 0, 0, 0, 1, 0, 0, 0, 1}
+	keys := []usearch.Key{usearch.KeyFromUint64(1), usearch.KeyFromUint64(2), usearch.KeyFromUint64(3)}
+	if err := index.On(executor).Insert(keys, usearch.RowsOf(rows, 3), nil); err != nil {
+		log.Fatal(err)
+	}
+
+	call := index.Deferred(executor).Search(usearch.RowsOf([]float32{0, 0, 1}, 3), 1, nil)
+	if err := executor.Drain(usearch.MoodParked); err != nil {
+		log.Fatal(err)
+	}
+	matches, err := call.Wait()
+	if err != nil {
+		log.Fatal(err)
+	}
+	found, _ := matches.Row(0)
+	fmt.Println(found[0])
+	// Output: 00000000-0000-0000-0000-000000000003
 }
 
 // endregion: Examples

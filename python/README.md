@@ -151,7 +151,7 @@ counts = np.zeros(len(queries), dtype=np.uint64)
 index.on(pool).search(queries, 10, out=usearch.Matches(keys, distances, counts))
 ```
 
-Outputs only the call can size land in a `usearch.Arena` and come back as zero-copy results that keep it alive: `get` answers `usearch.Vectors`, `multiply` answers `usearch.Products`, and `save_buffer` answers `usearch.Monolith`.
+Outputs only the call can size land in a `usearch.Arena` and come back as zero-copy results that keep it alive: `get` answers `usearch.DenseVectors`, `multiply` answers `usearch.DenseProducts`, and `save_buffer` answers `usearch.Monolith`.
 Pass `arena=` to reuse one across calls, so a steady loop allocates once; a call refuses with `ContendedError` while any result over the previous outputs is still alive, and a deferred call holds its arena until it is final:
 
 ```python
@@ -229,7 +229,7 @@ The first exception any callback raises outranks the outcome it turned into, whe
 ```python
 index.count(42)             # entries sharing this key
 42 in index                 # the same question, as a membership test
-index[42]                   # a (count, dimensions) `Vectors` over a copy of what is stored under it
+index[42]                   # a (count, dimensions) `DenseVectors` over a copy of what is stored under it
 index.describe()            # a DenseIndexDescription: .metadata, .size, .capacity, .memory_usage, .capabilities
 index.health()              # a DenseReachability: .audited, .reachable, .sweeps
 

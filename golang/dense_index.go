@@ -9,211 +9,172 @@
 package usearch
 
 import (
-	"runtime"
 	"runtime/cgo"
 	"unsafe"
 )
 
 /*
-#cgo CFLAGS: -I${SRCDIR}
-#cgo LDFLAGS: -L${SRCDIR} -lusearch_static
-#cgo linux LDFLAGS: -lstdc++ -lm
-#cgo darwin LDFLAGS: -lc++
-#cgo windows LDFLAGS: -lstdc++
-
 // Two unchecked promises, so each is asserted per verb rather than per group.
 //
 // `nocallback` says the C function can never re-enter Go, and cgo then skips the machinery that
-// makes a Go-to-C-to-Go crossing safe. It is claimed only where the signature carries no callback
-// at all - never for a verb taking a predicate or a progress handler, whether or not this binding
-// passes one today, since the promise is about the function and not the call site.
+// makes a Go-to-C-to-Go crossing safe. It is claimed only where the argument structure carries no
+// callback and no executor: a verb naming an executor without threads of its own first runs the
+// deferred calls it holds, whose callbacks re-enter Go on the calling thread.
 //
 // `noescape` says the call retains none of its pointer arguments, so Go may leave them on the
-// stack. A batch verb reads its matrix and writes its span within the call, and a predicate only
-// ever sees a key by value, so it cannot stash the query either. `usearch_dense_find` is the
-// exception and is absent below: its finder keeps scoring the query row after the call returns.
-#cgo noescape usearch_dense_count
-#cgo nocallback usearch_dense_count
-#cgo noescape usearch_dense_get
-#cgo nocallback usearch_dense_get
-#cgo noescape usearch_dense_size
-#cgo nocallback usearch_dense_size
-#cgo noescape usearch_dense_capacity
-#cgo nocallback usearch_dense_capacity
-#cgo noescape usearch_dense_dimensions
-#cgo nocallback usearch_dense_dimensions
-#cgo noescape usearch_dense_connectivity
-#cgo nocallback usearch_dense_connectivity
-#cgo noescape usearch_dense_memory_usage
-#cgo nocallback usearch_dense_memory_usage
-#cgo noescape usearch_dense_clear
-#cgo nocallback usearch_dense_clear
-#cgo noescape usearch_dense_reserve
-#cgo nocallback usearch_dense_reserve
-#cgo noescape usearch_dense_metadata
-#cgo nocallback usearch_dense_metadata
-#cgo noescape usearch_dense_metadata_buffer
-#cgo nocallback usearch_dense_metadata_buffer
-#cgo noescape usearch_dense_storage_requirements
-#cgo nocallback usearch_dense_storage_requirements
+// stack. Submission copies the argument structure, and everything the structure names is pinned,
+// which also keeps it on the heap until the call is final.
+#cgo noescape usearch_dense_init_ram
+#cgo nocallback usearch_dense_init_ram
+#cgo noescape usearch_dense_init_vram
+#cgo nocallback usearch_dense_init_vram
+#cgo noescape usearch_dense_view_ram
+#cgo nocallback usearch_dense_view_ram
+#cgo noescape usearch_dense_cursor_init
+#cgo nocallback usearch_dense_cursor_init
+#cgo noescape usearch_dense_search_stream_init
+#cgo nocallback usearch_dense_search_stream_init
 //
-// Retains nothing, but the signature admits a callback, so `noescape` alone.
-#cgo noescape usearch_dense_add
+// Retains nothing, but runs on an executor or admits a callback, so `noescape` alone.
+#cgo noescape usearch_dense_view_nvme
+#cgo noescape usearch_dense_reserve
+#cgo noescape usearch_dense_clear
+#cgo noescape usearch_dense_describe
+#cgo noescape usearch_dense_count
+#cgo noescape usearch_dense_get
+#cgo noescape usearch_dense_health
+#cgo noescape usearch_dense_metadata_read
+#cgo noescape usearch_dense_metadata_read_buffer
+#cgo noescape usearch_dense_load_ram
+#cgo noescape usearch_dense_load_vram
+#cgo noescape usearch_dense_load_ram_buffer
+#cgo noescape usearch_dense_load_vram_buffer
+#cgo noescape usearch_dense_insert
+#cgo noescape usearch_dense_refine
 #cgo noescape usearch_dense_search
-#cgo noescape usearch_dense_search_if
 #cgo noescape usearch_dense_maxsim
+#cgo noescape usearch_dense_multiply
+#cgo noescape usearch_dense_attend
+#cgo noescape usearch_dense_merge
 #cgo noescape usearch_dense_save
 #cgo noescape usearch_dense_save_buffer
-#cgo noescape usearch_dense_load
-#cgo noescape usearch_dense_load_buffer
+#cgo noescape usearch_dense_cursor_next
+#cgo noescape usearch_dense_search_stream_next
 
 #include "shim.h"
 */
 import "C"
 
-// region: Options
+// region: Geometry
 
 // DenseMetric names a distance kind supported out of the box, with SIMD kernels dispatched by
 // the machine's capabilities. All of them derive from a single inner-product kernel with
-// pre-computed magnitudes; Hamming and Jaccard are bit-level, over the packed sub-byte kinds.
+// pre-computed magnitudes; DenseMetricHamming and DenseMetricJaccard are bit-level, over the packed sub-byte kinds.
 //
-// The C layer's custom-callback escape hatch stays unexposed: a caller-supplied metric
-// forfeits the SIMD kernel chains and the magnitude cache both.
+// Arbitrary metrics belong to the C++ baseline tier, which forfeits the SIMD kernel chains and
+// the magnitude cache both.
+//
+// Mirrors usearch_dense_metric_t.
 type DenseMetric int32
 
 const (
-	// UnknownMetric tags a metric the library could not name.
-	UnknownMetric DenseMetric = 0
-	// Inner is the inner product.
-	Inner DenseMetric = 1
-	// Angular is the cosine distance.
-	Angular DenseMetric = 2
-	// Euclidean is the L2 distance.
-	Euclidean DenseMetric = 3
-	// Hamming counts differing bits.
-	Hamming DenseMetric = 4
-	// Jaccard is the bit-level Jaccard distance.
-	Jaccard DenseMetric = 5
+	// DenseMetricUnknown tags a metric the library could not name.
+	DenseMetricUnknown DenseMetric = C.usearch_dense_metric_unknown_k
+	// DenseMetricInner is the inner product.
+	DenseMetricInner DenseMetric = C.usearch_dense_metric_inner_k
+	// DenseMetricAngular is the cosine distance.
+	DenseMetricAngular DenseMetric = C.usearch_dense_metric_angular_k
+	// DenseMetricEuclidean is the L2 distance.
+	DenseMetricEuclidean DenseMetric = C.usearch_dense_metric_euclidean_k
+	// DenseMetricHamming counts differing bits.
+	DenseMetricHamming DenseMetric = C.usearch_dense_metric_hamming_k
+	// DenseMetricJaccard is the bit-level Jaccard distance.
+	DenseMetricJaccard DenseMetric = C.usearch_dense_metric_jaccard_k
 )
 
-// String renders the metric as its C enumerator's stem.
+// String renders the metric as the library spells it. Calls usearch_dense_metric_name.
 func (metric DenseMetric) String() string {
-	switch metric {
-	case Inner:
-		return "inner"
-	case Angular:
-		return "angular"
-	case Euclidean:
-		return "euclidean"
-	case Hamming:
-		return "hamming"
-	case Jaccard:
-		return "jaccard"
-	default:
-		return "unknown"
-	}
+	return C.GoString(C.usearch_dense_metric_name(C.usearch_dense_metric_t(metric)))
 }
 
-// DenseOptions holds the construction and loading options of a dense index.
+// DenseOptions holds the construction options of a dense index, the fields
+// usearch_dense_init_ram_t and usearch_dense_init_vram_t share.
 type DenseOptions struct {
-	// Dimensions is the width of the indexed vectors; zero defers the geometry to a later
-	// Load, which reads it off the checkpoint.
+	// Dimensions is the width of the indexed vectors; zero leaves the geometry unfrozen, so the
+	// index admits no rows.
 	Dimensions uint
 	// Metric is the distance kind used between vectors.
 	Metric DenseMetric
 	// Quantization is the scalar type vectors are stored and quantized into.
-	Quantization ScalarKind
+	Quantization Scalar
 	// Connectivity bounds the connections per node in the graph; zero derives.
 	Connectivity uint
 	// ValuesPerKey bounds how many entries may share one key; zero derives to one - unique
 	// keys. Above one is what late interaction needs, a document being one key holding its
 	// token rows.
 	ValuesPerKey uint
-	// Residency says where the payload lives, and what loading a checkpoint means.
-	Residency Residency
 }
 
-// DefaultDenseOptions is an angular BF16 index in RAM, with every optional field derived.
+// DefaultDenseOptions is an angular bf16 index, with every optional field derived.
 func DefaultDenseOptions() DenseOptions {
-	return DenseOptions{
-		Metric:       Angular,
-		Quantization: BF16,
-		Residency:    DefaultResidency(),
-	}
+	return DenseOptions{Metric: DenseMetricAngular, Quantization: ScalarBF16}
 }
 
-// toRaw lowers the options, leaving the custom-metric callback null.
-func (options *DenseOptions) toRaw(pinner *runtime.Pinner) (C.usearch_dense_options_t, error) {
-	var raw C.usearch_dense_options_t
-	raw.metric = C.usearch_dense_metric_t(options.Metric)
-	raw.quantization = C.usearch_scalar_t(options.Quantization)
-	raw.dimensions = C.size_t(options.Dimensions)
-	raw.values_per_key = C.size_t(options.ValuesPerKey)
-	raw.connectivity = C.size_t(options.Connectivity)
-	if err := writeResidency(options.Residency, &raw, pinner); err != nil {
-		return raw, err
-	}
-	return raw, nil
+// DenseMetadata is the geometry and metric a checkpoint froze - everything a reader learns
+// without opening it, and nothing a reader must choose for itself.
+//
+// ValuesPerKey is absent because it bounds a live handle's mutable state rather than anything
+// the serialized form carries, and the placement is absent because a checkpoint records where it
+// was written, never where a reader must keep it. Both stay yours to set in the load config.
+//
+// Mirrors usearch_dense_metadata_t.
+type DenseMetadata struct {
+	// Dimensions is the scalars per stored vector.
+	Dimensions uint
+	// Metric is the distance kind the checkpoint scores with.
+	Metric DenseMetric
+	// Quantization is the scalar type its rows are stored and quantized into.
+	Quantization Scalar
+	// Connectivity is the connections per node the graph was built with.
+	Connectivity uint
 }
 
-// denseOptionsFromRaw lifts a lowered options struct, refusing a tag this binding cannot name.
-func denseOptionsFromRaw(raw *C.usearch_dense_options_t) (DenseOptions, error) {
-	options := DenseOptions{
+func denseMetadataFromRaw(raw *C.usearch_dense_metadata_t) DenseMetadata {
+	return DenseMetadata{
 		Dimensions:   uint(raw.dimensions),
 		Metric:       DenseMetric(raw.metric),
-		Quantization: ScalarKind(raw.quantization),
+		Quantization: Scalar(raw.quantization),
 		Connectivity: uint(raw.connectivity),
-		ValuesPerKey: uint(raw.values_per_key),
 	}
-	if options.Metric < Inner || options.Metric > Jaccard {
-		return options, fail(UnknownKind, "the library names an unknown metric")
-	}
-	if !options.Quantization.known() {
-		return options, fail(UnknownKind, "the library names an unknown scalar kind")
-	}
-	residency, err := readResidency(raw)
-	if err != nil {
-		return options, err
-	}
-	options.Residency = residency
-	return options, nil
 }
 
-// reload lowers the options and lifts them straight back - the marshalling round trip, and the
-// only thing that exercises the union accessors in shim.c. A test file cannot name cgo types,
-// so the round trip is reachable only from here.
-func (options DenseOptions) reload() (DenseOptions, error) {
-	var pinner runtime.Pinner
-	defer pinner.Unpin()
-	raw, err := options.toRaw(&pinner)
-	if err != nil {
-		return DenseOptions{}, err
-	}
-	return denseOptionsFromRaw(&raw)
+// DenseIndexDescription is a live index's frozen metadata and current counters, each read once,
+// so under concurrent insertions they may come from slightly different moments.
+//
+// Mirrors usearch_dense_index_description_t.
+type DenseIndexDescription struct {
+	// Metadata is the frozen metric, quantization, dimensions and connectivity, as a checkpoint
+	// reports them.
+	Metadata DenseMetadata
+	// Size is the number of stored entries.
+	Size uint
+	// Capacity is the number of entries hosted without growing again.
+	Capacity uint
+	// MemoryUsage is the bytes the handle holds; traversal scratch is the executor's.
+	MemoryUsage uint
+	// Capabilities is the codename of the kernels the index dispatched to on this machine.
+	Capabilities string
 }
 
-// reloadTagged is reload with the three enum tags overwritten by whatever a newer library
-// might have written, so the lift path can be shown to reject them rather than guess.
-func (options DenseOptions) reloadTagged(metric, quantization, residency int32) (DenseOptions, error) {
-	var pinner runtime.Pinner
-	defer pinner.Unpin()
-	raw, err := options.toRaw(&pinner)
-	if err != nil {
-		return DenseOptions{}, err
-	}
-	raw.metric = C.usearch_dense_metric_t(metric)
-	raw.quantization = C.usearch_scalar_t(quantization)
-	raw.residency = C.usearch_residency_t(residency)
-	return denseOptionsFromRaw(&raw)
-}
+// endregion: Geometry
 
-// endregion: Options
+// region: Configs
 
-// region: Per-Call Settings & Telemetry
-
-// DenseStats is the traversal telemetry one call reports. Every call overwrites it rather
-// than accumulating, so a sweep over many batches sums them itself with Accumulate.
-type DenseStats struct {
+// DenseTraversalStats is the traversal telemetry one call reports. Every call overwrites it
+// rather than accumulating, so a sweep over many batches sums them itself with Accumulate.
+//
+// Mirrors usearch_dense_traversal_stats_t.
+type DenseTraversalStats struct {
 	// VisitedMembers counts the graph members the call visited.
 	VisitedMembers uint
 	// ComputedDistances counts the distances the call computed, diversity re-selections
@@ -224,177 +185,373 @@ type DenseStats struct {
 	Restarts uint
 }
 
-// Accumulate folds another call's telemetry into this one.
-func (stats *DenseStats) Accumulate(other DenseStats) {
+// Accumulate folds another call's telemetry into this one. Binding-only.
+func (stats *DenseTraversalStats) Accumulate(other DenseTraversalStats) {
 	stats.VisitedMembers += other.VisitedMembers
 	stats.ComputedDistances += other.ComputedDistances
 	stats.Restarts += other.Restarts
 }
 
-// report copies the telemetry out, when the caller asked for any.
-func report(sink *DenseStats, raw C.usearch_dense_traversal_stats_t) {
-	if sink == nil {
-		return
-	}
-	sink.VisitedMembers = uint(raw.visited_members)
-	sink.ComputedDistances = uint(raw.computed_distances)
-	sink.Restarts = uint(raw.restarts)
+// DenseReachability is one reachability audit: the population it judged, and how much of it a
+// search reaches.
+//
+// Mirrors usearch_dense_reachability_t.
+type DenseReachability struct {
+	// Audited counts the entries published when the audit started; compare Reachable against
+	// this, never a later size.
+	Audited uint
+	// Reachable counts those a search reaches; the rest no search finds until a refinement
+	// re-links them.
+	Reachable uint
+	// Sweeps counts the levels the sweep took to converge, a diameter proxy.
+	Sweeps uint
 }
 
-// InsertionOptions carries the optional per-call settings of Add and Refine. A zero value
-// derives every setting, which is what a null options pointer means to the C interface - so
-// there is one spelling of "decide for me" rather than a pointer around a type that already
-// has one.
-type InsertionOptions struct {
+// DenseSoftmaxState is the online-softmax carry of one query row, which folds one attention
+// call into another over the same queries.
+//
+// Mirrors usearch_dense_softmax_state_t.
+type DenseSoftmaxState struct {
+	// MaximumScore is the largest logit seen so far - the recurrence's m.
+	MaximumScore float32
+	// Partition is the sum of exponentials taken against that maximum - the recurrence's l.
+	Partition float32
+}
+
+// Each of these shares the layout of its C twin, size_t or float fields in order, so the library
+// writes the caller's struct in place.
+const _ = uint(unsafe.Sizeof(DenseTraversalStats{})) - uint(unsafe.Sizeof(C.usearch_dense_traversal_stats_t{}))
+const _ = uint(unsafe.Sizeof(C.usearch_dense_traversal_stats_t{})) - uint(unsafe.Sizeof(DenseTraversalStats{}))
+const _ = uint(unsafe.Sizeof(DenseReachability{})) - uint(unsafe.Sizeof(C.usearch_dense_reachability_t{}))
+const _ = uint(unsafe.Sizeof(C.usearch_dense_reachability_t{})) - uint(unsafe.Sizeof(DenseReachability{}))
+const _ = uint(unsafe.Sizeof(DenseSoftmaxState{})) - uint(unsafe.Sizeof(C.usearch_dense_softmax_state_t{}))
+const _ = uint(unsafe.Sizeof(C.usearch_dense_softmax_state_t{})) - uint(unsafe.Sizeof(DenseSoftmaxState{}))
+
+// stats lends optional telemetry as the pointer the C interface fills.
+func (call *call) stats(stats *DenseTraversalStats) *C.usearch_dense_traversal_stats_t {
+	if stats == nil {
+		return nil
+	}
+	return (*C.usearch_dense_traversal_stats_t)(unsafe.Pointer(pin(call, stats)))
+}
+
+// ValueLookup resolves the keys an attention walk scores to their value rows, all of them rows
+// of Values, which stays pinned until the call is final.
+//
+// Values must be as wide as the keys and stored in the index's own quantization, since the call
+// reads them as such; a key Row names no row of Values for, or values of another shape, refuse
+// the call with StatusShapeMismatch. Row runs on the executor's threads together, so it must be
+// safe for concurrent use, and a panic inside it answers no row.
+//
+// Mirrors usearch_value_lookup_t.
+type ValueLookup struct {
+	Values RowsView
+	Row    func(key Key) (row uint, found bool)
+}
+
+// DenseLoadRamConfig carries the optional settings of DenseLoadRam.
+//
+// Mirrors usearch_dense_load_ram_t.
+type DenseLoadRamConfig struct {
+	// Executor is the one the read fans out over; nil reads on the calling goroutine.
+	Executor *Executor
+	// MemoryDomains are the NUMA node IDs to place the parts on, part p landing whole on shard p
+	// modulo their count; empty derives every node the process may use.
+	MemoryDomains []int32
+	// ValuesPerKey bounds how many entries may share one key, which no checkpoint records; zero
+	// derives to one.
+	ValuesPerKey uint
+	// Progress reports the shards placed and stops wherever it says to; a stopped load creates no
+	// index.
+	Progress ProgressCallback
+}
+
+// DenseLoadVramConfig carries the optional settings of DenseLoadVram.
+//
+// Mirrors usearch_dense_load_vram_t.
+type DenseLoadVramConfig struct {
+	// Executor is the one the upload runs on; nil uploads on the default stream of each device.
+	Executor *Executor
+	// Devices are the CUDA ordinals to place the parts on, part p landing whole on device p modulo
+	// their count; empty derives one free device.
+	Devices []int32
+	// ValuesPerKey bounds how many entries may share one key; zero derives to one.
+	ValuesPerKey uint
+	// Progress reports the shards placed and stops wherever it says to.
+	Progress ProgressCallback
+}
+
+// DenseLoadRamBufferConfig carries the optional settings of DenseLoadRamBuffer.
+//
+// Mirrors usearch_dense_load_ram_buffer_t.
+type DenseLoadRamBufferConfig struct {
+	// Executor is the one the copy fans out over; nil copies on the calling goroutine.
+	Executor *Executor
+	// MemoryDomains are the NUMA node IDs to place shards on, the monolith landing whole on the
+	// first; empty derives every node the process may use.
+	MemoryDomains []int32
+	// ValuesPerKey bounds how many entries may share one key; zero derives to one.
+	ValuesPerKey uint
+	// Progress reports the bytes placed and stops wherever it says to.
+	Progress ProgressCallback
+}
+
+// DenseLoadVramBufferConfig carries the optional settings of DenseLoadVramBuffer.
+//
+// Mirrors usearch_dense_load_vram_buffer_t.
+type DenseLoadVramBufferConfig struct {
+	// Executor is the one the upload runs on; nil uploads on the default stream of each device.
+	Executor *Executor
+	// Devices are the CUDA ordinals to place shards on, the monolith landing whole on the first;
+	// empty derives one free device.
+	Devices []int32
+	// ValuesPerKey bounds how many entries may share one key; zero derives to one.
+	ValuesPerKey uint
+	// Progress reports the bytes placed and stops wherever it says to.
+	Progress ProgressCallback
+}
+
+// DenseViewNvmeConfig carries the optional settings of DenseViewNvme.
+//
+// Mirrors usearch_dense_view_nvme_t.
+type DenseViewNvmeConfig struct {
+	// Executor is the NVMe executor whose rings read the checkpoint's headers; nil reads on the
+	// calling goroutine.
+	Executor *Executor
+	// Paths are the devices or directories to serve the parts from; empty serves each where its
+	// manifest points.
+	Paths []string
+}
+
+// DenseMetadataReadConfig carries the optional settings of DenseMetadataRead.
+//
+// Mirrors usearch_dense_metadata_read_t.
+type DenseMetadataReadConfig struct {
+	// Executor is the one the read runs on; nil reads on the calling goroutine.
+	Executor *Executor
+}
+
+// DenseMetadataReadBufferConfig carries the optional settings of DenseMetadataReadBuffer.
+//
+// Mirrors usearch_dense_metadata_read_buffer_t.
+type DenseMetadataReadBufferConfig struct {
+	// Executor is the one the read runs on; nil reads on the calling goroutine.
+	Executor *Executor
+}
+
+// DenseInsertConfig carries the optional settings of Insert. A zero value derives every setting.
+//
+// Mirrors usearch_dense_insert_t.
+type DenseInsertConfig struct {
 	// ExpansionFactor is the candidate-pool breadth the build walk explores; zero derives it
 	// from the geometry.
 	ExpansionFactor uint
+	// Progress reports the rows inserted; every row is claimed before the first report, so a
+	// stop is ignored.
+	Progress ProgressCallback
+	// Stats is where the traversal telemetry lands, overwritten by the call.
+	Stats *DenseTraversalStats
 }
 
-// lower renders the settings as the struct the C interface reads.
-func (options InsertionOptions) lower() C.usearch_dense_insertion_options_t {
-	return C.usearch_dense_insertion_options_t{expansion_factor: C.size_t(options.ExpansionFactor)}
+// DenseRefineConfig carries the optional settings of Refine. A zero value derives every setting.
+//
+// Mirrors usearch_dense_refine_t.
+type DenseRefineConfig struct {
+	// ExpansionFactor is the candidate-pool breadth the re-selection walk explores; zero derives
+	// it from the geometry.
+	ExpansionFactor uint
+	// Progress reports the nodes swept and stops wherever it says to.
+	Progress ProgressCallback
+	// Stats is where the traversal telemetry lands, overwritten by the call.
+	Stats *DenseTraversalStats
 }
 
-// SearchOptions carries the optional per-call settings of the read-only walks - Search,
-// SearchIf and MaxSim. A zero value derives every setting, and the type stays distinct
-// from InsertionOptions even where the two agree field for field, so a knob either side gains
-// reaches that side alone.
-type SearchOptions struct {
+// DenseSearchConfig carries the optional settings of Search. A zero value derives every setting.
+//
+// Mirrors usearch_dense_search_t.
+type DenseSearchConfig struct {
+	// Matches lends the span the run lands in, at least as wide as the wanted count; nil
+	// allocates a fresh one.
+	Matches *MatchesSpan
 	// ExpansionFactor is the candidate-pool breadth the walk explores; zero derives it from
 	// the geometry.
 	ExpansionFactor uint
+	// Predicate admits only the keys it approves; nil admits everything. Non-matching entries
+	// still route the traversal, so recall does not collapse at low selectivity. A VRAM handle
+	// refuses one with StatusDevice.
+	Predicate Predicate
+	// Progress reports the queries resolved and stops wherever it says to; a stopped search
+	// reports StatusCancelled and leaves every output row indeterminate.
+	Progress ProgressCallback
+	// Stats is where the traversal telemetry lands, overwritten by the call.
+	Stats *DenseTraversalStats
 }
 
-// lower renders the settings as the struct the C interface reads.
-func (options SearchOptions) lower() C.usearch_dense_search_options_t {
-	return C.usearch_dense_search_options_t{expansion_factor: C.size_t(options.ExpansionFactor)}
+// DenseMaxsimConfig carries the optional settings of Maxsim. A zero value derives every setting.
+//
+// Mirrors usearch_dense_maxsim_t.
+type DenseMaxsimConfig struct {
+	// Matches lends the span the scored keys land in, at least as wide as the wanted count; nil
+	// allocates a fresh one.
+	Matches *MatchesSpan
+	// ExpansionFactor is the candidate-pool breadth the walk explores; zero derives it from
+	// the geometry.
+	ExpansionFactor uint
+	// Progress reports the queries resolved and stops wherever it says to.
+	Progress ProgressCallback
+	// Stats is where the traversal telemetry lands, overwritten by the call.
+	Stats *DenseTraversalStats
 }
 
-// endregion: Per-Call Settings & Telemetry
+// DenseMultiplyConfig carries the optional settings of Multiply. A zero value derives every
+// setting.
+//
+// Mirrors usearch_dense_multiply_t.
+type DenseMultiplyConfig struct {
+	// Arena is rewound and refilled with the products; nil lands them in a fresh one the result
+	// owns.
+	Arena *Arena
+	// Wanted bounds the pairs kept per left row, the first ones its walk scored; zero keeps every
+	// pair.
+	Wanted uint
+	// ExpansionFactor is the candidate-pool breadth, which widens the emitted pattern; zero
+	// derives it from the geometry.
+	ExpansionFactor uint
+	// Progress reports the rows resolved and stops wherever it says to.
+	Progress ProgressCallback
+	// Stats is where the traversal telemetry lands, overwritten by the call.
+	Stats *DenseTraversalStats
+}
+
+// DenseAttendConfig carries the optional settings of Attend. A zero value derives every setting.
+//
+// Mirrors usearch_dense_attend_t.
+type DenseAttendConfig struct {
+	// HeadCount is the query heads sharing the index's key-value head, and with it one walk per
+	// token: row t * HeadCount + h is head h of token t, so it must divide the rows; zero means one.
+	HeadCount uint
+	// Carry is where the online-softmax state lands, one entry per query row, which folds this
+	// call into another over the same queries by partial-softmax rescaling.
+	Carry []DenseSoftmaxState
+	// ExpansionFactor is the candidate-pool breadth; zero derives it. A wider pool walks further,
+	// folding more of the tail.
+	ExpansionFactor uint
+	// ScoreScale is the logit scale, conventionally the inverse square root of the head
+	// dimensionality; zero derives it from the index's frozen geometry.
+	ScoreScale float32
+	// Progress reports the queries resolved and stops wherever it says to.
+	Progress ProgressCallback
+	// Stats is where the traversal telemetry lands, overwritten by the call.
+	Stats *DenseTraversalStats
+}
+
+// DenseMergeConfig carries the optional settings of Merge.
+//
+// Mirrors usearch_dense_merge_t.
+type DenseMergeConfig struct {
+	// Progress reports the donors absorbed and stops wherever it says to.
+	Progress ProgressCallback
+}
+
+// DenseSaveConfig carries the optional settings of Save.
+//
+// Mirrors usearch_dense_save_t.
+type DenseSaveConfig struct {
+	// Progress reports the shards written and stops wherever it says to.
+	Progress ProgressCallback
+}
+
+// DenseSaveBufferConfig carries the optional settings of SaveBuffer.
+//
+// Mirrors usearch_dense_save_buffer_t.
+type DenseSaveBufferConfig struct {
+	// Arena is rewound and refilled with the monolith; nil lands it in a fresh one the result
+	// owns.
+	Arena *Arena
+	// Progress reports the bytes written and stops wherever it says to; a stopped save leaves no
+	// monolith.
+	Progress ProgressCallback
+}
+
+// DenseSearchStreamInitConfig carries the optional settings of SearchStream.
+//
+// Mirrors usearch_dense_search_stream_init_t.
+type DenseSearchStreamInitConfig struct {
+	// ExpansionFactor is the candidate-pool breadth the walk explores; zero derives it from the
+	// geometry.
+	ExpansionFactor uint
+}
+
+// endregion: Configs
 
 // region: Results
 
-// MatchesSpan is where a ranked run lands - three caller-owned slabs sized together, holding
-// a queries-by-wanted matrix of keys, the distances positionally paired with them, and one
-// match count per query.
+// DenseVectors is the rows Get exported, packed one per entry sharing the key, inside an arena,
+// shaped by the stride and columns the library reported.
+type DenseVectors struct {
+	landing
+	data    unsafe.Pointer
+	rows    uint
+	stride  uint
+	columns uint
+	scalar  Scalar
+}
+
+// Rows reports how many entries the key holds; zero when it is absent.
+func (vectors DenseVectors) Rows() uint { return vectors.rows }
+
+// Stride reports the byte pitch between consecutive rows.
+func (vectors DenseVectors) Stride() uint { return vectors.stride }
+
+// Columns reports the values in each row, as the library landed them.
+func (vectors DenseVectors) Columns() uint { return vectors.columns }
+
+// Scalar reports the scalar type the rows were exported as.
+func (vectors DenseVectors) Scalar() Scalar { return vectors.scalar }
+
+// DenseValues borrows the exported rows as one slab of values, rows end to end.
 //
-// The wanted count is the "k" in kANN and the row width of both matrices, and it follows from
-// the slab lengths rather than being asked for, so the space reserved and the count asked for
-// cannot disagree.
-type MatchesSpan struct {
-	keys      []Key
-	distances []Distance
-	counts    []uint
-	wanted    uint
+// Panics when Value is not the kind the rows were exported as - a caller's mistake rather than
+// a condition the library could report.
+func DenseValues[Value Element](vectors DenseVectors) []Value {
+	if scalar := scalarOf[Value](); scalar != vectors.scalar {
+		panic("usearch: rows exported as " + vectors.scalar.String() + " cannot be read as " + scalar.String())
+	}
+	var element Value
+	return unsafe.Slice((*Value)(vectors.data), vectors.rows*vectors.stride/uint(unsafe.Sizeof(element)))
 }
 
-// PackedMatchesSpan sizes the three slabs for a batch of queries, each reporting up to
-// wanted matches.
-func PackedMatchesSpan(queries, wanted uint) MatchesSpan {
-	return MatchesSpan{
-		keys:      make([]Key, queries*wanted),
-		distances: make([]Distance, queries*wanted),
-		counts:    make([]uint, queries),
-		wanted:    wanted,
-	}
+// DenseProducts is the ragged sparse product Multiply lands in an arena: per left row, every pair
+// its walk scored, in traversal order.
+type DenseProducts struct {
+	landing
+	offsets  []uint
+	keys     []Key
+	scores   []Distance
+	required uint
 }
 
-// MatchesSpanOf lends slabs the caller already owns - the path for a sweep that reuses one
-// set of buffers. Lengths that cannot be read as one shape are refused here, once.
-func MatchesSpanOf(keys []Key, distances []Distance, counts []uint) (MatchesSpan, error) {
-	if len(counts) == 0 {
-		return MatchesSpan{}, fail(ShapeMismatch, "a run must hold at least one query")
-	}
-	if len(keys) != len(distances) {
-		return MatchesSpan{}, fail(ShapeMismatch, "the key and distance slabs are not the same shape")
-	}
-	if len(keys) == 0 || len(keys)%len(counts) != 0 {
-		return MatchesSpan{}, fail(ShapeMismatch, "the slabs do not divide into one row per query")
-	}
-	wanted := uint(len(keys) / len(counts))
-	return MatchesSpan{keys: keys, distances: distances, counts: counts, wanted: wanted}, nil
-}
+// Rows reports how many left rows the call multiplied.
+func (products DenseProducts) Rows() uint { return uint(len(products.offsets)) - 1 }
 
-// Wanted reports the upper bound on matches per query.
-func (matches *MatchesSpan) Wanted() uint { return matches.wanted }
+// Required reports the pairs the walks scored across every row, before the wanted bound cut any.
+func (products DenseProducts) Required() uint { return products.required }
 
-// Queries reports how many queries the slabs were sized for.
-func (matches *MatchesSpan) Queries() uint { return uint(len(matches.counts)) }
-
-// Counts borrows the per-query match counts.
-func (matches *MatchesSpan) Counts() []uint { return matches.counts }
-
-// MatchesOf borrows one query's keys and distances, trimmed to the count that query reported.
-// Nothing is copied, and an out-of-range query yields two empty slices.
-func (matches *MatchesSpan) MatchesOf(query uint) ([]Key, []Distance) {
-	if query >= uint(len(matches.counts)) {
+// Row borrows one left row's pairs - a key naming each indexed row, and its product. An
+// out-of-range row yields two empty slices.
+func (products DenseProducts) Row(row uint) ([]Key, []Distance) {
+	if row >= products.Rows() {
 		return nil, nil
 	}
-	// The library reports the true extent, which may exceed the room reserved for it.
-	count := min(matches.counts[query], matches.wanted)
-	from := query * matches.wanted
-	return matches.keys[from : from+count], matches.distances[from : from+count]
+	from, to := products.offsets[row], products.offsets[row+1]
+	return products.keys[from:to], products.scores[from:to]
 }
 
-// validate checks the slabs hold a batch of the given size. The constructors already fixed the
-// width, so only the query count is open.
-func (matches *MatchesSpan) validate(queries uint) error {
-	if matches.wanted == 0 {
-		return fail(ShapeMismatch, "the outputs reserve no room for a single match")
-	}
-	if uint(len(matches.counts)) < queries {
-		return fail(ShapeMismatch, "the outputs hold fewer rows than there are queries")
-	}
-	return nil
-}
-
-// view lends a matrix as the input descriptor every batch verb reads.
-//
-// The width crosses with the rows, so the engine checks it against the frozen geometry and a
-// narrower row is refused rather than read past - which is why nothing on this side restates
-// that check.
-func (matrix Matrix) view(pinner *runtime.Pinner) C.usearch_matrix_view_t {
-	// The descriptor is Go memory holding a Go pointer, which cgo forbids handing to C unless
-	// the pointee is pinned - so the rows are pinned for the duration of the call.
-	if matrix.pointer != nil {
-		pinner.Pin(matrix.pointer)
-	}
-	return C.usearch_matrix_view_t{
-		data:         matrix.pointer,
-		rows:         C.size_t(matrix.rows),
-		columns:      C.size_t(matrix.dimensions),
-		stride_bytes: C.size_t(matrix.stride),
-		scalar_kind:  C.usearch_scalar_t(matrix.kind),
-	}
-}
-
-// span lends a matrix as the output descriptor a copying verb writes into.
-func (matrix Matrix) span(pinner *runtime.Pinner) C.usearch_matrix_span_t {
-	if matrix.pointer != nil {
-		pinner.Pin(matrix.pointer)
-	}
-	return C.usearch_matrix_span_t{
-		data:         matrix.pointer,
-		capacity:     C.size_t(matrix.rows),
-		columns:      C.size_t(matrix.dimensions),
-		stride_bytes: C.size_t(matrix.stride),
-		scalar_kind:  C.usearch_scalar_t(matrix.kind),
-	}
-}
-
-// span lends the three ranked outputs together. The strides stay zero, which the interface
-// reads as the natural width - one fewer number the caller and the engine can disagree about.
-func (matches *MatchesSpan) span(pinner *runtime.Pinner) C.usearch_matches_span_t {
-	pinner.Pin(unsafe.SliceData(matches.keys))
-	pinner.Pin(unsafe.SliceData(matches.distances))
-	pinner.Pin(unsafe.SliceData(matches.counts))
-	return C.usearch_matches_span_t{
-		keys:   (*C.usearch_key_t)(unsafe.Pointer(unsafe.SliceData(matches.keys))),
-		scores: (*C.usearch_distance_t)(unsafe.Pointer(unsafe.SliceData(matches.distances))),
-		counts: (*C.size_t)(unsafe.Pointer(unsafe.SliceData(matches.counts))),
-		wanted: C.size_t(matches.wanted),
-	}
+// Monolith is the serialized index SaveBuffer lands in an arena.
+type Monolith struct {
+	landing
+	// Bytes is the monolith, borrowed from the arena.
+	Bytes []byte
 }
 
 // endregion: Results
@@ -403,100 +560,44 @@ func (matches *MatchesSpan) span(pinner *runtime.Pinner) C.usearch_matches_span_
 
 // DenseIndex is a Vector Search Index over equidimensional dense representations.
 //
-// A handle may be shared across threads, so no method here takes a lock. On a RAM handle,
-// insertions and searches overlap freely: searches read only entries published behind the
-// visibility watermark and never write to the graph, while insertions synchronize through
-// per-node locks and publish in order. Serialization is the one exception, demanding a
-// mutation-free window, though concurrent readers keep searching throughout.
+// A handle may be shared across goroutines. On a RAM handle, insertions and searches overlap
+// freely: searches read only entries published behind the visibility watermark and never write
+// to the graph, while insertions synchronize through per-node locks and publish in order.
+// Serialization is the one exception, demanding a mutation-free window, though concurrent
+// readers keep searching throughout.
+//
+// Its verbs come from the embedded DenseIndexOn and run on the calling goroutine; On runs the same
+// verbs blocking on an executor, and Deferred submits them there.
+//
+// Mirrors usearch_dense_index_t.
 type DenseIndex struct {
+	DenseIndexOn
 	handle C.usearch_dense_index_t
 }
 
-// NewDenseIndex initializes an index for the residency its options select.
-func NewDenseIndex(options *DenseOptions) (*DenseIndex, error) {
-	var pinner runtime.Pinner
-	defer pinner.Unpin()
-	raw, err := options.toRaw(&pinner)
-	if err != nil {
-		return nil, err
-	}
-	var failure C.usearch_error_t
-	handle := C.usearch_dense_init(&raw, &failure)
-	if err := check(failure); err != nil {
-		return nil, err
-	}
-	if handle == nil {
-		return nil, fail(Internal, "the library returned no handle and no error")
-	}
-	return &DenseIndex{handle: handle}, nil
+// newDenseIndex is an index whose handle a lifecycle verb is about to fill.
+func newDenseIndex() *DenseIndex {
+	index := new(DenseIndex)
+	index.DenseIndexOn = DenseIndexOn{denseReceiver{index: index}}
+	return index
 }
 
-// DenseCheckpointMetadata is the geometry and metric a checkpoint froze - everything a reader
-// learns without opening it, and nothing a reader must choose for itself.
-//
-// ValuesPerKey is absent because it bounds a live handle's mutable state rather than anything
-// the serialized form carries, and the residency is absent because a checkpoint records where it
-// was written, never where a reader must keep it. Both stay yours to set in DenseOptions before
-// NewDenseIndex.
-type DenseCheckpointMetadata struct {
-	// Dimensions is the scalars per stored vector.
-	Dimensions uint
-	// Metric is the distance kind the checkpoint scores with.
-	Metric DenseMetric
-	// Quantization is the scalar type its rows are stored and quantized into.
-	Quantization ScalarKind
-	// Connectivity is the connections per node the graph was built with.
-	Connectivity uint
+// On is the receiver whose verbs block on executor, after the calls submitted there before them.
+// Binding-only.
+func (index *DenseIndex) On(executor *Executor) DenseIndexOn {
+	return DenseIndexOn{denseReceiver{index: index, executor: executor}}
 }
 
-// denseMetadataFromRaw lifts the four fields, refusing a kind this binding cannot name.
-func denseMetadataFromRaw(raw *C.usearch_dense_metadata_t) (DenseCheckpointMetadata, error) {
-	metadata := DenseCheckpointMetadata{
-		Dimensions:   uint(raw.dimensions),
-		Metric:       DenseMetric(raw.metric),
-		Quantization: ScalarKind(raw.quantization),
-		Connectivity: uint(raw.connectivity),
-	}
-	if metadata.Metric < Inner || metadata.Metric > Jaccard {
-		return metadata, fail(UnknownKind, "the checkpoint names an unknown metric")
-	}
-	if !metadata.Quantization.known() {
-		return metadata, fail(UnknownKind, "the checkpoint names an unknown scalar kind")
-	}
-	return metadata, nil
+// Deferred is the receiver whose verbs submit their calls to executor, each answering a Deferred
+// from the same arguments. Binding-only.
+func (index *DenseIndex) Deferred(executor *Executor) DenseIndexDeferredOn {
+	return DenseIndexDeferredOn{denseReceiver{index: index, executor: executor}}
 }
 
-// DenseMetadata reads a checkpoint's geometry and metric without loading it - from the
-// manifest's summary when the path names one, so no shard is opened.
-func DenseMetadata(path string) (DenseCheckpointMetadata, error) {
-	var raw C.usearch_dense_metadata_t
-	var failure C.usearch_error_t
-	C.usearch_dense_metadata(borrow(path), &raw, &failure)
-	runtime.KeepAlive(path)
-	if err := check(failure); err != nil {
-		return DenseCheckpointMetadata{}, err
-	}
-	return denseMetadataFromRaw(&raw)
-}
-
-// DenseMetadataBuffer reads geometry and metric out of a serialized monolith buffer.
-func DenseMetadataBuffer(buffer []byte) (DenseCheckpointMetadata, error) {
-	if len(buffer) == 0 {
-		return DenseCheckpointMetadata{}, fail(MalformedInput, "the buffer is empty")
-	}
-	var raw C.usearch_dense_metadata_t
-	var failure C.usearch_error_t
-	C.usearch_dense_metadata_buffer(borrowBytes(buffer), &raw, &failure)
-	runtime.KeepAlive(buffer)
-	if err := check(failure); err != nil {
-		return DenseCheckpointMetadata{}, err
-	}
-	return denseMetadataFromRaw(&raw)
-}
-
-// Free releases the index. It is idempotent, and a freed handle must not be used again.
-func (index *DenseIndex) Free() error {
-	if index.handle == nil {
+// Close releases the index, waiting for every deferred call naming it. It is idempotent, and a
+// closed handle must not be used again. Calls usearch_dense_free.
+func (index *DenseIndex) Close() error {
+	if index == nil || index.handle == nil {
 		return nil
 	}
 	C.usearch_dense_free(index.handle)
@@ -504,218 +605,358 @@ func (index *DenseIndex) Free() error {
 	return nil
 }
 
-// Close implements io.Closer by releasing the index.
-func (index *DenseIndex) Close() error { return index.Free() }
+// DenseInitRam creates an empty, mutable index in host memory, one shard per NUMA node
+// memoryDomains names; empty derives every node the process may use. Calls usearch_dense_init_ram.
+func DenseInitRam(options DenseOptions, memoryDomains []int32) (*DenseIndex, error) {
+	lent := open[*DenseIndex]()
+	index := newDenseIndex()
+	C.usearch_dense_init_ram(&C.usearch_dense_init_ram_t{
+		index:          pin(&lent.call, &index.handle),
+		outcome:        lent.outcome,
+		metric:         C.usearch_dense_metric_t(options.Metric),
+		quantization:   C.usearch_scalar_t(options.Quantization),
+		dimensions:     C.size_t(options.Dimensions),
+		connectivity:   C.size_t(options.Connectivity),
+		values_per_key: C.size_t(options.ValuesPerKey),
+		ram:            lent.ram(memoryDomains),
+	})
+	lent.result = func() *DenseIndex { return index }
+	return block(lent)
+}
+
+// DenseInitVram creates an empty, mutable index in device memory, sharded across the CUDA
+// ordinals devices names and never replicated; empty derives one free device. Calls
+// usearch_dense_init_vram.
+func DenseInitVram(options DenseOptions, devices []int32) (*DenseIndex, error) {
+	lent := open[*DenseIndex]()
+	index := newDenseIndex()
+	C.usearch_dense_init_vram(&C.usearch_dense_init_vram_t{
+		index:          pin(&lent.call, &index.handle),
+		outcome:        lent.outcome,
+		metric:         C.usearch_dense_metric_t(options.Metric),
+		quantization:   C.usearch_scalar_t(options.Quantization),
+		dimensions:     C.size_t(options.Dimensions),
+		connectivity:   C.size_t(options.Connectivity),
+		values_per_key: C.size_t(options.ValuesPerKey),
+		vram:           lent.vram(devices),
+	})
+	lent.result = func() *DenseIndex { return index }
+	return block(lent)
+}
+
+// DenseLoadRam copies a checkpoint into a new, mutable index in host memory. The path names a
+// manifest of a sharded checkpoint or a single .safegraphs monolith. Calls usearch_dense_load_ram.
+func DenseLoadRam(path string, config *DenseLoadRamConfig) (*DenseIndex, error) {
+	if config == nil {
+		config = new(DenseLoadRamConfig)
+	}
+	executor, refusal := config.Executor.lower()
+	if refusal != nil {
+		return nil, refusal
+	}
+	lent := open[*DenseIndex]()
+	index := newDenseIndex()
+	progress, progressState := lent.progress(config.Progress)
+	C.usearch_dense_load_ram(&C.usearch_dense_load_ram_t{
+		index:          pin(&lent.call, &index.handle),
+		executor:       executor,
+		outcome:        lent.outcome,
+		path:           lent.text(path),
+		ram:            lent.ram(config.MemoryDomains),
+		values_per_key: C.size_t(config.ValuesPerKey),
+		progress:       progress,
+		progress_state: progressState,
+	})
+	lent.result = func() *DenseIndex { return index }
+	return block(lent)
+}
+
+// DenseLoadVram copies a checkpoint into a new, mutable index in device memory, with the placement
+// rules of DenseLoadRam. Calls usearch_dense_load_vram.
+func DenseLoadVram(path string, config *DenseLoadVramConfig) (*DenseIndex, error) {
+	if config == nil {
+		config = new(DenseLoadVramConfig)
+	}
+	executor, refusal := config.Executor.lower()
+	if refusal != nil {
+		return nil, refusal
+	}
+	lent := open[*DenseIndex]()
+	index := newDenseIndex()
+	progress, progressState := lent.progress(config.Progress)
+	C.usearch_dense_load_vram(&C.usearch_dense_load_vram_t{
+		index:          pin(&lent.call, &index.handle),
+		executor:       executor,
+		outcome:        lent.outcome,
+		path:           lent.text(path),
+		vram:           lent.vram(config.Devices),
+		values_per_key: C.size_t(config.ValuesPerKey),
+		progress:       progress,
+		progress_state: progressState,
+	})
+	lent.result = func() *DenseIndex { return index }
+	return block(lent)
+}
+
+// DenseLoadRamBuffer copies a monolith from a buffer into a new, mutable index in host memory, as
+// DenseLoadRam does a path. Calls usearch_dense_load_ram_buffer.
+func DenseLoadRamBuffer(buffer []byte, config *DenseLoadRamBufferConfig) (*DenseIndex, error) {
+	if config == nil {
+		config = new(DenseLoadRamBufferConfig)
+	}
+	executor, refusal := config.Executor.lower()
+	if refusal != nil {
+		return nil, refusal
+	}
+	lent := open[*DenseIndex]()
+	index := newDenseIndex()
+	progress, progressState := lent.progress(config.Progress)
+	C.usearch_dense_load_ram_buffer(&C.usearch_dense_load_ram_buffer_t{
+		index:          pin(&lent.call, &index.handle),
+		executor:       executor,
+		outcome:        lent.outcome,
+		buffer:         lent.bytes(buffer),
+		ram:            lent.ram(config.MemoryDomains),
+		values_per_key: C.size_t(config.ValuesPerKey),
+		progress:       progress,
+		progress_state: progressState,
+	})
+	lent.result = func() *DenseIndex { return index }
+	return block(lent)
+}
+
+// DenseLoadVramBuffer copies a monolith from a buffer into a new, mutable index in device memory.
+// Calls usearch_dense_load_vram_buffer.
+func DenseLoadVramBuffer(buffer []byte, config *DenseLoadVramBufferConfig) (*DenseIndex, error) {
+	if config == nil {
+		config = new(DenseLoadVramBufferConfig)
+	}
+	executor, refusal := config.Executor.lower()
+	if refusal != nil {
+		return nil, refusal
+	}
+	lent := open[*DenseIndex]()
+	index := newDenseIndex()
+	progress, progressState := lent.progress(config.Progress)
+	C.usearch_dense_load_vram_buffer(&C.usearch_dense_load_vram_buffer_t{
+		index:          pin(&lent.call, &index.handle),
+		executor:       executor,
+		outcome:        lent.outcome,
+		buffer:         lent.bytes(buffer),
+		vram:           lent.vram(config.Devices),
+		values_per_key: C.size_t(config.ValuesPerKey),
+		progress:       progress,
+		progress_state: progressState,
+	})
+	lent.result = func() *DenseIndex { return index }
+	return block(lent)
+}
+
+// DenseViewRam serves a checkpoint in place through a memory mapping, as a read-only index
+// whose mutating verbs report StatusReadOnly; the files must stay unmodified while it lives.
+// Calls usearch_dense_view_ram.
+func DenseViewRam(path string) (*DenseIndex, error) {
+	lent := open[*DenseIndex]()
+	index := newDenseIndex()
+	C.usearch_dense_view_ram(&C.usearch_dense_view_ram_t{
+		index:   pin(&lent.call, &index.handle),
+		outcome: lent.outcome,
+		path:    lent.text(path),
+	})
+	lent.result = func() *DenseIndex { return index }
+	return block(lent)
+}
+
+// DenseViewNvme serves a checkpoint in place from NVMe drives, read through the executor's
+// submission rings, as a read-only index. Until NVMe checkpoints carry keys, it reports
+// StatusUnsupported. Calls usearch_dense_view_nvme.
+func DenseViewNvme(path string, config *DenseViewNvmeConfig) (*DenseIndex, error) {
+	if config == nil {
+		config = new(DenseViewNvmeConfig)
+	}
+	executor, refusal := config.Executor.lower()
+	if refusal != nil {
+		return nil, refusal
+	}
+	lent := open[*DenseIndex]()
+	index := newDenseIndex()
+	C.usearch_dense_view_nvme(&C.usearch_dense_view_nvme_t{
+		index:    pin(&lent.call, &index.handle),
+		executor: executor,
+		outcome:  lent.outcome,
+		path:     lent.text(path),
+		nvme:     lent.nvme(config.Paths),
+	})
+	lent.result = func() *DenseIndex { return index }
+	return block(lent)
+}
+
+// DenseMetadataRead reads a checkpoint's geometry and metric without loading it - from the
+// manifest's summary when the path names one, so no shard is opened. Calls
+// usearch_dense_metadata_read.
+func DenseMetadataRead(path string, config *DenseMetadataReadConfig) (DenseMetadata, error) {
+	if config == nil {
+		config = new(DenseMetadataReadConfig)
+	}
+	executor, refusal := config.Executor.lower()
+	if refusal != nil {
+		return DenseMetadata{}, refusal
+	}
+	lent := open[DenseMetadata]()
+	raw := pin(&lent.call, new(C.usearch_dense_metadata_t))
+	C.usearch_dense_metadata_read(&C.usearch_dense_metadata_read_t{
+		executor: executor,
+		outcome:  lent.outcome,
+		path:     lent.text(path),
+		metadata: raw,
+	})
+	lent.result = func() DenseMetadata { return denseMetadataFromRaw(raw) }
+	return block(lent)
+}
+
+// DenseMetadataReadBuffer reads geometry and metric out of a serialized monolith buffer. Calls
+// usearch_dense_metadata_read_buffer.
+func DenseMetadataReadBuffer(buffer []byte, config *DenseMetadataReadBufferConfig) (DenseMetadata, error) {
+	if config == nil {
+		config = new(DenseMetadataReadBufferConfig)
+	}
+	executor, refusal := config.Executor.lower()
+	if refusal != nil {
+		return DenseMetadata{}, refusal
+	}
+	lent := open[DenseMetadata]()
+	raw := pin(&lent.call, new(C.usearch_dense_metadata_t))
+	C.usearch_dense_metadata_read_buffer(&C.usearch_dense_metadata_read_buffer_t{
+		executor: executor,
+		outcome:  lent.outcome,
+		buffer:   lent.bytes(buffer),
+		metadata: raw,
+	})
+	lent.result = func() DenseMetadata { return denseMetadataFromRaw(raw) }
+	return block(lent)
+}
+
+// endregion: Index
+
+// region: Receivers
+
+// denseReceiver is an index and the executor its verbs run on, nil for the calling goroutine.
+type denseReceiver struct {
+	index    *DenseIndex
+	executor *Executor
+}
+
+// lower reports the handles a verb hands across, refusing a closed index before C dereferences it.
+func (receiver denseReceiver) lower() (C.usearch_dense_index_t, C.usearch_executor_t, *Error) {
+	if receiver.index == nil || receiver.index.handle == nil {
+		return nil, nil, fail(StatusUninitialized, "the index is closed or was never initialized")
+	}
+	executor, refusal := receiver.executor.lower()
+	return receiver.index.handle, executor, refusal
+}
+
+// DenseIndexOn is the receiver whose verbs block until their call is final: on the calling goroutine
+// when embedded in a DenseIndex, and on an executor when DenseIndex.On makes it. Binding-only.
+type DenseIndexOn struct {
+	denseReceiver
+}
+
+// DenseIndexDeferredOn is the receiver whose verbs submit their calls to an executor and answer a
+// Deferred, offering every verb of DenseIndexOn with the same arguments but the blocking-only sugar,
+// cursors and streams. Binding-only.
+//
+// The library reads a deferred call's inputs and writes its outputs until the call is final, so
+// the slices a verb is handed must not change until then.
+type DenseIndexDeferredOn struct {
+	denseReceiver
+}
 
 // Reserve claims capacity for a number of incoming vectors ahead of insertion. The capacity
-// is the desired total, including the current size.
-func (index *DenseIndex) Reserve(capacity uint) error {
-	if err := index.live(); err != nil {
-		return err
-	}
-	var failure C.usearch_error_t
-	C.usearch_dense_reserve(index.handle, C.size_t(capacity), &failure)
-	return check(failure)
+// is the desired total, including the current size. Calls usearch_dense_reserve.
+func (on DenseIndexOn) Reserve(capacity uint) error {
+	_, err := block(on.reserve(C.usearch_completion_blocking_k, capacity))
+	return err
 }
 
-// Clear erases all entries, keeping the reserved capacity and the frozen geometry.
-func (index *DenseIndex) Clear() error {
-	if err := index.live(); err != nil {
-		return err
-	}
-	var failure C.usearch_error_t
-	C.usearch_dense_clear(index.handle, &failure)
-	return check(failure)
+// Reserve submits DenseIndexOn.Reserve. Calls usearch_dense_reserve.
+func (on DenseIndexDeferredOn) Reserve(capacity uint) *Deferred[struct{}] {
+	return submitted(on.reserve(C.usearch_completion_deferred_k, capacity))
 }
 
-// Size reports the number of stored entries.
-func (index *DenseIndex) Size() (uint, error) {
-	if err := index.live(); err != nil {
-		return 0, err
-	}
-	var failure C.usearch_error_t
-	return readIntegerProperty(C.usearch_dense_size(index.handle, &failure), failure)
+// Clear erases all entries, keeping the reserved capacity and the frozen geometry. No other verb
+// may overlap it on the same handle. Calls usearch_dense_clear.
+func (on DenseIndexOn) Clear() error {
+	_, err := block(on.clear(C.usearch_completion_blocking_k))
+	return err
 }
 
-// Capacity reports the reserved capacity in entries.
-func (index *DenseIndex) Capacity() (uint, error) {
-	if err := index.live(); err != nil {
-		return 0, err
-	}
-	var failure C.usearch_error_t
-	return readIntegerProperty(C.usearch_dense_capacity(index.handle, &failure), failure)
+// Clear submits DenseIndexOn.Clear. Calls usearch_dense_clear.
+func (on DenseIndexDeferredOn) Clear() *Deferred[struct{}] {
+	return submitted(on.clear(C.usearch_completion_deferred_k))
 }
 
-// Dimensions reports the frozen width of the stored vectors.
-func (index *DenseIndex) Dimensions() (uint, error) {
-	if err := index.live(); err != nil {
-		return 0, err
-	}
-	var failure C.usearch_error_t
-	return readIntegerProperty(C.usearch_dense_dimensions(index.handle, &failure), failure)
+// Describe reports the frozen metadata and the current counters in one call. Calls
+// usearch_dense_describe.
+func (on DenseIndexOn) Describe() (DenseIndexDescription, error) {
+	return block(on.describe(C.usearch_completion_blocking_k))
 }
 
-// Connectivity reports the frozen connections-per-node bound of the graph.
-func (index *DenseIndex) Connectivity() (uint, error) {
-	if err := index.live(); err != nil {
-		return 0, err
-	}
-	var failure C.usearch_error_t
-	return readIntegerProperty(C.usearch_dense_connectivity(index.handle, &failure), failure)
+// Describe submits DenseIndexOn.Describe. Calls usearch_dense_describe.
+func (on DenseIndexDeferredOn) Describe() *Deferred[DenseIndexDescription] {
+	return submitted(on.describe(C.usearch_completion_deferred_k))
 }
 
-// MemoryUsage reports the memory the index occupies, in bytes.
-func (index *DenseIndex) MemoryUsage() (uint, error) {
-	if err := index.live(); err != nil {
-		return 0, err
-	}
-	var failure C.usearch_error_t
-	return readIntegerProperty(C.usearch_dense_memory_usage(index.handle, &failure), failure)
+// Count reports how many entries are stored under a key; zero means the index holds none.
+// Calls usearch_dense_count.
+func (on DenseIndexOn) Count(key Key) (uint, error) {
+	return block(on.count(C.usearch_completion_blocking_k, key))
 }
 
-// StorageRequirements reports the expected serialized size in bytes: every shard file, plus the
-// manifest when the index spans more than one.
-func (index *DenseIndex) StorageRequirements() (uint, error) {
-	if err := index.live(); err != nil {
-		return 0, err
-	}
-	var failure C.usearch_error_t
-	return readIntegerProperty(C.usearch_dense_storage_requirements(index.handle, &failure), failure)
+// Count submits DenseIndexOn.Count. Calls usearch_dense_count.
+func (on DenseIndexDeferredOn) Count(key Key) *Deferred[uint] {
+	return submitted(on.count(C.usearch_completion_deferred_k, key))
 }
 
-// Capabilities reports the capability codename the index dispatched to on this machine.
-func (index *DenseIndex) Capabilities() (string, error) {
-	if err := index.live(); err != nil {
-		return "", err
-	}
-	var failure C.usearch_error_t
-	raw := C.usearch_dense_capabilities(index.handle, &failure)
-	if err := check(failure); err != nil {
-		return "", err
-	}
-	if raw == nil {
-		return "", fail(Internal, "the library reported no capabilities and no error")
-	}
-	return C.GoString(raw), nil
+// Contains reports whether the index holds at least one entry under a key. Binding-only, over
+// usearch_dense_count.
+func (on DenseIndexOn) Contains(key Key) (bool, error) {
+	counted, err := on.Count(key)
+	return counted != 0, err
 }
 
-// Add inserts a matrix of vectors under their keys - the native batch operation, where a
+// Get exports every vector stored under a key, one row per entry sharing the key, in insertion
+// order, converted to the given scalar kind - one call, however many there turn out to be.
+//
+// A nil arena lands the rows in a fresh one the result owns until its Close; a lent arena is
+// rewound, and the rows stay valid until it serves another call. Calls usearch_dense_get.
+func (on DenseIndexOn) Get(key Key, scalar Scalar, arena *Arena) (DenseVectors, error) {
+	return block(on.get(C.usearch_completion_blocking_k, key, scalar, arena))
+}
+
+// Get submits DenseIndexOn.Get. Calls usearch_dense_get.
+func (on DenseIndexDeferredOn) Get(key Key, scalar Scalar, arena *Arena) *Deferred[DenseVectors] {
+	return submitted(on.get(C.usearch_completion_deferred_k, key, scalar, arena))
+}
+
+// Insert adds a matrix of vectors under their keys - the native batch operation, where a
 // single vector is a one-row matrix. Overlaps safely with concurrent searches on the same
 // handle.
 //
 // The input scalar type is independent of the stored quantization; the library converts on
-// ingest. An expansion of zero derives the candidate-pool breadth, and a nil stats skips
-// telemetry.
+// ingest.
 //
-// Returns the row count on success and zero on failure: a batch is all-or-nothing, since
-// every fallible step runs before the first entry identity is claimed. An accelerator fault
-// severe enough to poison the device context is the sole exception, reporting DeviceFailure
-// and latching the index unusable rather than partially applied.
-func (index *DenseIndex) Add(executor *Executor, keys []Key, vectors Matrix, options InsertionOptions,
-	stats *DenseStats) (uint, error) {
-	if err := index.live(); err != nil {
-		return 0, err
-	}
-	pool, err := executor.live()
-	if err != nil {
-		return 0, err
-	}
-	if len(keys) == 0 && vectors.Rows() == 0 {
-		return 0, nil
-	}
-
-	lowered := options.lower()
-	var pinner runtime.Pinner
-	defer pinner.Unpin()
-	view := vectors.view(&pinner)
-	run := borrowKeys(keys)
-	var rawStats C.usearch_dense_traversal_stats_t
-	var failure C.usearch_error_t
-	added := C.usearch_dense_add(index.handle, pool, run, &view, &lowered, nil, nil, &rawStats, &failure)
-	runtime.KeepAlive(keys)
-	runtime.KeepAlive(vectors)
-	if err := check(failure); err != nil {
-		return 0, err
-	}
-	report(stats, rawStats)
-	return uint(added), nil
+// A batch is all-or-nothing and becomes visible at once, since every fallible step runs before
+// the first entry identity is claimed. A VRAM call that fails after its first launch publishes
+// none of its rows, and leaves the handle refusing every later mutation. Calls
+// usearch_dense_insert.
+func (on DenseIndexOn) Insert(keys []Key, vectors RowsView, config *DenseInsertConfig) error {
+	_, err := block(on.insert(C.usearch_completion_blocking_k, keys, vectors, config))
+	return err
 }
 
-// Search resolves a matrix of queries into caller-owned outputs - the native batch path,
-// parallelized internally.
-//
-// Never writes to the graph, so any number of these may overlap with concurrent insertions.
-func (index *DenseIndex) Search(executor *Executor, queries Matrix, matches *MatchesSpan,
-	options SearchOptions, stats *DenseStats) error {
-	return index.searchDispatch(executor, queries, matches, options, stats, nil)
-}
-
-// SearchIf is the filtered sibling of Search, admitting only the keys admits approves.
-// Non-matching entries still route the traversal, so recall does not collapse at low
-// selectivity.
-//
-// The predicate runs on the library's worker threads, so it must be safe for concurrent use.
-func (index *DenseIndex) SearchIf(executor *Executor, queries Matrix, matches *MatchesSpan,
-	options SearchOptions, stats *DenseStats, admits func(Key) bool) error {
-	if admits == nil {
-		return fail(MalformedInput, "the admission predicate is nil")
-	}
-	return index.searchDispatch(executor, queries, matches, options, stats, admits)
-}
-
-func (index *DenseIndex) searchDispatch(executor *Executor, queries Matrix, matches *MatchesSpan,
-	options SearchOptions, stats *DenseStats, admits func(Key) bool) error {
-	if err := index.live(); err != nil {
-		return err
-	}
-	pool, err := executor.live()
-	if err != nil {
-		return err
-	}
-	if err := matches.validate(queries.Rows()); err != nil {
-		return err
-	}
-	if queries.Rows() == 0 {
-		return nil
-	}
-
-	lowered := options.lower()
-	var pinner runtime.Pinner
-	defer pinner.Unpin()
-	view := queries.view(&pinner)
-	span := matches.span(&pinner)
-	var rawStats C.usearch_dense_traversal_stats_t
-	var failure C.usearch_error_t
-
-	if admits == nil {
-		C.usearch_dense_search(index.handle, pool, &view, &span, &lowered, nil, nil, &rawStats, &failure)
-	} else {
-		// The predicate crosses as an opaque handle rather than a Go pointer, since the
-		// closure it names holds Go pointers the cgo rules forbid handing to C. The state
-		// pointer addresses the handle itself, which is an integer and holds no pointers.
-		state := cgo.NewHandle(admits)
-		defer state.Delete()
-		C.usearch_dense_search_if(index.handle, pool, &view, &span, &lowered,
-			C.usearch_go_admits(), unsafe.Pointer(&state), nil, nil, &rawStats, &failure)
-	}
-	runtime.KeepAlive(queries)
-	runtime.KeepAlive(matches.keys)
-	runtime.KeepAlive(matches.distances)
-	runtime.KeepAlive(matches.counts)
-	if err := check(failure); err != nil {
-		return err
-	}
-	report(stats, rawStats)
-	return nil
-}
-
-//export usearchDenseAdmits
-func usearchDenseAdmits(key C.usearch_key_t, state unsafe.Pointer) C.usearch_admission_t {
-	admits := (*cgo.Handle)(state).Value().(func(Key) bool)
-	if admits(keyFromRaw(key)) {
-		return C.usearch_admit_k
-	}
-	return C.usearch_reject_k
+// Insert submits DenseIndexOn.Insert. Calls usearch_dense_insert.
+func (on DenseIndexDeferredOn) Insert(keys []Key, vectors RowsView, config *DenseInsertConfig) *Deferred[struct{}] {
+	return submitted(on.insert(C.usearch_completion_deferred_k, keys, vectors, config))
 }
 
 // Refine re-selects the neighbors of every stored entry against the finished graph, improving
@@ -723,208 +964,780 @@ func usearchDenseAdmits(key C.usearch_key_t, state unsafe.Pointer) C.usearch_adm
 //
 // A build step rather than a repair: a cheap insertion pass followed by one refinement reaches
 // a better graph, in less total time, than a single expensive insertion pass - so a wide
-// expansion factor belongs here rather than in Add. Returns the nodes whose edges changed, so
+// expansion factor belongs here rather than in Insert. Returns the nodes whose edges changed, so
 // a caller loops until that falls below whatever change rate they consider settled.
 //
-// Searches may run throughout; insertions may not.
-func (index *DenseIndex) Refine(executor *Executor, options InsertionOptions, stats *DenseStats) (uint, error) {
-	if err := index.live(); err != nil {
-		return 0, err
-	}
-	pool, err := executor.live()
-	if err != nil {
-		return 0, err
-	}
-	lowered := options.lower()
-	var rawStats C.usearch_dense_traversal_stats_t
-	var failure C.usearch_error_t
-	changed := C.usearch_dense_refine(index.handle, pool, &lowered, nil, nil, &rawStats, &failure)
-	if err := check(failure); err != nil {
-		return 0, err
-	}
-	report(stats, rawStats)
-	return uint(changed), nil
+// On a RAM handle searches may run throughout; insertions may not. A stop is a time budget
+// rather than a failure, so it reports no status. Calls usearch_dense_refine.
+func (on DenseIndexOn) Refine(config *DenseRefineConfig) (uint, error) {
+	return block(on.refine(C.usearch_completion_blocking_k, config))
 }
 
-// MaxSim scores multi-row queries against multi-row entries by late interaction: every
+// Refine submits DenseIndexOn.Refine. Calls usearch_dense_refine.
+func (on DenseIndexDeferredOn) Refine(config *DenseRefineConfig) *Deferred[uint] {
+	return submitted(on.refine(C.usearch_completion_deferred_k, config))
+}
+
+// Health audits how much of the graph a search reaches: forward reachability from as many
+// landmarks as one search draws, swept level by level. Read-only, so concurrent insertions merely
+// leave fresh entries unaudited. Calls usearch_dense_health.
+func (on DenseIndexOn) Health() (DenseReachability, error) {
+	return block(on.health(C.usearch_completion_blocking_k))
+}
+
+// Health submits DenseIndexOn.Health. Calls usearch_dense_health.
+func (on DenseIndexDeferredOn) Health() *Deferred[DenseReachability] {
+	return submitted(on.health(C.usearch_completion_deferred_k))
+}
+
+// Search resolves a matrix of queries into up to wanted nearest matches apiece - the native batch
+// path, parallelized internally, and filtered when the config carries a predicate.
+//
+// Never writes to the graph, so any number of these may overlap with concurrent insertions.
+// Calls usearch_dense_search.
+func (on DenseIndexOn) Search(queries RowsView, wanted uint, config *DenseSearchConfig) (MatchesSpan, error) {
+	return block(on.search(C.usearch_completion_blocking_k, queries, wanted, config))
+}
+
+// Search submits DenseIndexOn.Search. Calls usearch_dense_search.
+func (on DenseIndexDeferredOn) Search(queries RowsView, wanted uint, config *DenseSearchConfig) *Deferred[MatchesSpan] {
+	return submitted(on.search(C.usearch_completion_deferred_k, queries, wanted, config))
+}
+
+// Maxsim scores multi-row queries against multi-row entries by late interaction: every
 // query row takes its best match within a key, and those maxima sum to that key's score.
 //
 // A document is one key holding its token rows, which is what ValuesPerKey above one exists
 // for. rowsPerQuery is the token count each query occupies, queries holds them end to end, and
-// the outputs are sized over documents rather than rows. Runs on an inner-product index alone.
+// wanted counts documents rather than rows. Runs on an inner-product index alone.
 //
-// See https://arxiv.org/abs/2004.12832 - ColBERT, which introduced this scoring.
-func (index *DenseIndex) MaxSim(executor *Executor, queries Matrix, rowsPerQuery uint,
-	products *MatchesSpan, options SearchOptions, stats *DenseStats) error {
-	if err := index.live(); err != nil {
-		return err
-	}
-	pool, err := executor.live()
-	if err != nil {
-		return err
-	}
-	if rowsPerQuery == 0 || queries.Rows()%rowsPerQuery != 0 {
-		return fail(ShapeMismatch, "the query rows do not divide into whole queries")
-	}
-	if err := products.validate(queries.Rows() / rowsPerQuery); err != nil {
-		return err
-	}
-	lowered := options.lower()
-	var pinner runtime.Pinner
-	defer pinner.Unpin()
-	view := queries.view(&pinner)
-	span := products.span(&pinner)
-	var rawStats C.usearch_dense_traversal_stats_t
-	var failure C.usearch_error_t
-	C.usearch_dense_maxsim(index.handle, pool, &view, C.size_t(rowsPerQuery), &span, &lowered,
-		nil, nil, &rawStats, &failure)
-	runtime.KeepAlive(queries)
-	runtime.KeepAlive(products.keys)
-	runtime.KeepAlive(products.distances)
-	runtime.KeepAlive(products.counts)
-	if err := check(failure); err != nil {
-		return err
-	}
-	report(stats, rawStats)
-	return nil
+// See https://arxiv.org/abs/2004.12832 - ColBERT, which introduced this scoring. Calls
+// usearch_dense_maxsim.
+func (on DenseIndexOn) Maxsim(queries RowsView, rowsPerQuery, wanted uint, config *DenseMaxsimConfig) (MatchesSpan, error) {
+	return block(on.maxsim(C.usearch_completion_blocking_k, queries, rowsPerQuery, wanted, config))
 }
 
-// Count reports how many entries are stored under a key; zero means the index holds none.
-func (index *DenseIndex) Count(key Key) (uint, error) {
-	if err := index.live(); err != nil {
-		return 0, err
-	}
-	var failure C.usearch_error_t
-	counted := C.usearch_dense_count(index.handle, key.toRaw(), &failure)
-	if err := check(failure); err != nil {
-		return 0, err
-	}
-	return uint(counted), nil
+// Maxsim submits DenseIndexOn.Maxsim. Calls usearch_dense_maxsim.
+func (on DenseIndexDeferredOn) Maxsim(queries RowsView, rowsPerQuery, wanted uint,
+	config *DenseMaxsimConfig) *Deferred[MatchesSpan] {
+	return submitted(on.maxsim(C.usearch_completion_deferred_k, queries, rowsPerQuery, wanted, config))
 }
 
-// Contains reports whether the index holds at least one entry under a key.
-func (index *DenseIndex) Contains(key Key) (bool, error) {
-	counted, err := index.Count(key)
-	return counted != 0, err
-}
-
-// Get retrieves the vectors stored under a key into the matrix, one row per entry sharing the
-// key, in insertion order.
+// Multiply is the approximate sparse product of a matrix against the indexed rows - the linear
+// algebra sibling of Search, reporting every pair the traversal scored rather than only the
+// nearest. Pairs arrive in traversal order rather than sorted, and the pairs the walk never
+// reaches are the low and negative products. Runs on an inner-product index alone.
 //
-// Returns the true number of entries, never the number written: a count above the matrix's
-// row capacity means the copy was truncated, so size for that many and call again. Count is
-// the same number without the copy.
-func (index *DenseIndex) Get(key Key, vectors Matrix) (uint, error) {
-	if err := index.live(); err != nil {
-		return 0, err
-	}
-	var pinner runtime.Pinner
-	defer pinner.Unpin()
-	span := vectors.span(&pinner)
-	var failure C.usearch_error_t
-	entries := C.usearch_dense_get(index.handle, key.toRaw(), &span, &failure)
-	runtime.KeepAlive(vectors)
-	if err := check(failure); err != nil {
-		return 0, err
-	}
-	return uint(entries), nil
+// The arena works as Get's does. Calls usearch_dense_multiply.
+func (on DenseIndexOn) Multiply(left RowsView, config *DenseMultiplyConfig) (DenseProducts, error) {
+	return block(on.multiply(C.usearch_completion_blocking_k, left, config))
+}
+
+// Multiply submits DenseIndexOn.Multiply. Calls usearch_dense_multiply.
+func (on DenseIndexDeferredOn) Multiply(left RowsView, config *DenseMultiplyConfig) *Deferred[DenseProducts] {
+	return submitted(on.multiply(C.usearch_completion_deferred_k, left, config))
+}
+
+// Attend is softmax attention of every query row over every indexed key its walk scores, folded
+// as Flash Attention folds key tiles, with no top-k cut, landing one row per query in outputs,
+// already divided by the partition.
+//
+// The index holds one layer's keys for one key-value head and no values, so lookup resolves every
+// scored key to its value row. Runs on an inner-product index alone, since a softmax needs logits.
+//
+// See https://arxiv.org/abs/2205.14135 - Flash Attention, whose recurrence this reuses. Calls
+// usearch_dense_attend.
+func (on DenseIndexOn) Attend(queries RowsView, lookup ValueLookup, outputs RowsView, config *DenseAttendConfig) error {
+	_, err := block(on.attend(C.usearch_completion_blocking_k, queries, lookup, outputs, config))
+	return err
+}
+
+// Attend submits DenseIndexOn.Attend. Calls usearch_dense_attend.
+func (on DenseIndexDeferredOn) Attend(queries RowsView, lookup ValueLookup, outputs RowsView,
+	config *DenseAttendConfig) *Deferred[struct{}] {
+	return submitted(on.attend(C.usearch_completion_deferred_k, queries, lookup, outputs, config))
+}
+
+// Merge absorbs every donor into this index, wiring cross-links via landmark stitching - cheaper
+// than re-inserting their vectors one by one, while readers keep searching throughout.
+//
+// The donors are consumed whether or not the merge succeeds, and every later verb on them reports
+// StatusUninitialized; a stopped merge keeps the donors already absorbed and frees the rest. No
+// residency absorbs donors yet, so the engine answers StatusUnsupported. Calls usearch_dense_merge.
+func (on DenseIndexOn) Merge(donors []*DenseIndex, config *DenseMergeConfig) error {
+	_, err := block(on.merge(C.usearch_completion_blocking_k, donors, config))
+	return err
+}
+
+// Merge submits DenseIndexOn.Merge. Calls usearch_dense_merge.
+func (on DenseIndexDeferredOn) Merge(donors []*DenseIndex, config *DenseMergeConfig) *Deferred[struct{}] {
+	return submitted(on.merge(C.usearch_completion_deferred_k, donors, config))
 }
 
 // Save writes the index under a path, in the layout its extension picks - one .safegraphs
 // monolith, or a .safegraphs.json manifest beside its shards. Demands a mutation-free window;
-// concurrent readers keep searching throughout.
-func (index *DenseIndex) Save(executor *Executor, path string) error {
-	if err := index.live(); err != nil {
-		return err
-	}
-	pool, err := executor.live()
-	if err != nil {
-		return err
-	}
-	var failure C.usearch_error_t
-	C.usearch_dense_save(index.handle, pool, borrow(path), nil, nil, &failure)
-	runtime.KeepAlive(path)
-	return check(failure)
+// concurrent readers keep searching throughout. Calls usearch_dense_save.
+func (on DenseIndexOn) Save(path string, config *DenseSaveConfig) error {
+	_, err := block(on.save(C.usearch_completion_blocking_k, path, config))
+	return err
 }
 
-// Load reads a checkpoint into this handle, shard by shard, with the handle's residency
-// deciding the behavior: materialize into RAM, upload to the device, or open in place on
-// disk. A handle whose geometry was left zeroed freezes it here, from the checkpoint's own
-// headers.
-func (index *DenseIndex) Load(executor *Executor, path string) error {
-	if err := index.live(); err != nil {
-		return err
-	}
-	pool, err := executor.live()
-	if err != nil {
-		return err
-	}
-	var failure C.usearch_error_t
-	C.usearch_dense_load(index.handle, pool, borrow(path), nil, nil, &failure)
-	runtime.KeepAlive(path)
-	return check(failure)
+// Save submits DenseIndexOn.Save. Calls usearch_dense_save.
+func (on DenseIndexDeferredOn) Save(path string, config *DenseSaveConfig) *Deferred[struct{}] {
+	return submitted(on.save(C.usearch_completion_deferred_k, path, config))
 }
 
-// SaveBuffer writes the index into a caller-owned buffer as one monolith. Size the buffer
-// with StorageRequirements.
-func (index *DenseIndex) SaveBuffer(executor *Executor, buffer []byte) error {
-	if err := index.live(); err != nil {
-		return err
-	}
-	if len(buffer) == 0 {
-		return fail(ShapeMismatch, "the buffer is empty")
-	}
-	pool, err := executor.live()
-	if err != nil {
-		return err
-	}
-	var failure C.usearch_error_t
-	C.usearch_dense_save_buffer(index.handle, pool, lendBytes(buffer), nil, nil, &failure)
-	runtime.KeepAlive(buffer)
-	return check(failure)
+// SaveBuffer serializes the index as one monolith, a size only the call itself can discover.
+//
+// The arena works as Get's does. Calls usearch_dense_save_buffer.
+func (on DenseIndexOn) SaveBuffer(config *DenseSaveBufferConfig) (Monolith, error) {
+	return block(on.saveBuffer(C.usearch_completion_blocking_k, config))
 }
 
-// LoadBuffer reads a monolith from a buffer into this handle, with the residency deciding the
-// behavior like Load. A residency that opens in place demands the buffer outlive the handle.
-func (index *DenseIndex) LoadBuffer(executor *Executor, buffer []byte) error {
-	if err := index.live(); err != nil {
-		return err
-	}
-	if len(buffer) == 0 {
-		return fail(MalformedInput, "the buffer is empty")
-	}
-	pool, err := executor.live()
-	if err != nil {
-		return err
-	}
-	var failure C.usearch_error_t
-	C.usearch_dense_load_buffer(index.handle, pool, borrowBytes(buffer), nil, nil, &failure)
-	runtime.KeepAlive(buffer)
-	return check(failure)
+// SaveBuffer submits DenseIndexOn.SaveBuffer. Calls usearch_dense_save_buffer.
+func (on DenseIndexDeferredOn) SaveBuffer(config *DenseSaveBufferConfig) *Deferred[Monolith] {
+	return submitted(on.saveBuffer(C.usearch_completion_deferred_k, config))
 }
 
-// endregion: Index
+// endregion: Receivers
 
-// region: Helpers
+// region: Calls
 
-// live reports whether the handle still names an index.
-func (index *DenseIndex) live() error {
-	if index == nil || index.handle == nil {
-		return fail(Uninitialized, "the index is freed or was never initialized")
+func (receiver denseReceiver) reserve(completion C.usearch_completion_t, capacity uint) *lent[struct{}] {
+	lent := open[struct{}]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
 	}
+	C.usearch_dense_reserve(&C.usearch_dense_reserve_t{
+		index:      index,
+		executor:   executor,
+		outcome:    lent.outcome,
+		completion: completion,
+		capacity:   C.size_t(capacity),
+	})
+	return lent
+}
+
+func (receiver denseReceiver) clear(completion C.usearch_completion_t) *lent[struct{}] {
+	lent := open[struct{}]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	C.usearch_dense_clear(&C.usearch_dense_clear_t{
+		index:      index,
+		executor:   executor,
+		outcome:    lent.outcome,
+		completion: completion,
+	})
+	return lent
+}
+
+func (receiver denseReceiver) describe(completion C.usearch_completion_t) *lent[DenseIndexDescription] {
+	lent := open[DenseIndexDescription]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	raw := pin(&lent.call, new(C.usearch_dense_index_description_t))
+	C.usearch_dense_describe(&C.usearch_dense_describe_t{
+		index:       index,
+		executor:    executor,
+		outcome:     lent.outcome,
+		completion:  completion,
+		description: raw,
+	})
+	lent.result = func() DenseIndexDescription {
+		return DenseIndexDescription{
+			Metadata:     denseMetadataFromRaw(&raw.metadata),
+			Size:         uint(raw.size),
+			Capacity:     uint(raw.capacity),
+			MemoryUsage:  uint(raw.memory_usage),
+			Capabilities: C.GoString(raw.capabilities),
+		}
+	}
+	return lent
+}
+
+func (receiver denseReceiver) count(completion C.usearch_completion_t, key Key) *lent[uint] {
+	lent := open[uint]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	entries := pin(&lent.call, new(C.size_t))
+	C.usearch_dense_count(&C.usearch_dense_count_t{
+		index:      index,
+		executor:   executor,
+		outcome:    lent.outcome,
+		completion: completion,
+		key:        key.toRaw(),
+		entries:    entries,
+	})
+	lent.result = func() uint { return uint(*entries) }
+	return lent
+}
+
+func (receiver denseReceiver) get(completion C.usearch_completion_t, key Key, scalar Scalar,
+	arena *Arena) *lent[DenseVectors] {
+	lent := open[DenseVectors]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	arena, landing := land(arena)
+	lent.discard = func() { _ = landing.Close() }
+	exported := pin(&lent.call, new(struct {
+		data                     unsafe.Pointer
+		written, stride, columns C.size_t
+	}))
+	C.usearch_dense_get(&C.usearch_dense_get_t{
+		index:      index,
+		executor:   executor,
+		outcome:    lent.outcome,
+		completion: completion,
+		key:        key.toRaw(),
+		scalar:     C.usearch_scalar_t(scalar),
+		vectors:    &exported.data,
+		written:    &exported.written,
+		stride:     &exported.stride,
+		columns:    &exported.columns,
+		arena:      pin(&lent.call, &arena.handle),
+	})
+	lent.result = func() DenseVectors {
+		return DenseVectors{
+			landing: landing,
+			data:    exported.data,
+			rows:    uint(exported.written),
+			stride:  uint(exported.stride),
+			columns: uint(exported.columns),
+			scalar:  scalar,
+		}
+	}
+	return lent
+}
+
+func (receiver denseReceiver) insert(completion C.usearch_completion_t, keys []Key, vectors RowsView,
+	config *DenseInsertConfig) *lent[struct{}] {
+	if config == nil {
+		config = new(DenseInsertConfig)
+	}
+	lent := open[struct{}]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	// The call has one count, so only this side sees the keys and the rows disagree.
+	if uint(len(keys)) != vectors.rows {
+		return lent.refuse(fail(StatusShapeMismatch, "the key count does not match the vector row count"))
+	}
+	progress, progressState := lent.progress(config.Progress)
+	C.usearch_dense_insert(&C.usearch_dense_insert_t{
+		index:            index,
+		executor:         executor,
+		outcome:          lent.outcome,
+		completion:       completion,
+		count:            C.size_t(vectors.rows),
+		keys:             lent.keys(keys),
+		vectors:          vectors.lower(&lent.call),
+		expansion_factor: C.size_t(config.ExpansionFactor),
+		progress:         progress,
+		progress_state:   progressState,
+		stats:            lent.stats(config.Stats),
+	})
+	return lent
+}
+
+func (receiver denseReceiver) refine(completion C.usearch_completion_t, config *DenseRefineConfig) *lent[uint] {
+	if config == nil {
+		config = new(DenseRefineConfig)
+	}
+	lent := open[uint]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	changed := pin(&lent.call, new(C.size_t))
+	progress, progressState := lent.progress(config.Progress)
+	C.usearch_dense_refine(&C.usearch_dense_refine_t{
+		index:            index,
+		executor:         executor,
+		outcome:          lent.outcome,
+		completion:       completion,
+		changed:          changed,
+		expansion_factor: C.size_t(config.ExpansionFactor),
+		progress:         progress,
+		progress_state:   progressState,
+		stats:            lent.stats(config.Stats),
+	})
+	lent.result = func() uint { return uint(*changed) }
+	return lent
+}
+
+func (receiver denseReceiver) health(completion C.usearch_completion_t) *lent[DenseReachability] {
+	lent := open[DenseReachability]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	reachability := pin(&lent.call, new(DenseReachability))
+	C.usearch_dense_health(&C.usearch_dense_health_t{
+		index:        index,
+		executor:     executor,
+		outcome:      lent.outcome,
+		completion:   completion,
+		reachability: (*C.usearch_dense_reachability_t)(unsafe.Pointer(reachability)),
+	})
+	lent.result = func() DenseReachability { return *reachability }
+	return lent
+}
+
+// landed picks the span a ranked call lands in: the one the caller lent, or a fresh one.
+func landed(lent *MatchesSpan, queries, wanted uint) MatchesSpan {
+	if lent != nil {
+		return *lent
+	}
+	return packedMatches(queries, wanted)
+}
+
+func (receiver denseReceiver) search(completion C.usearch_completion_t, queries RowsView, wanted uint,
+	config *DenseSearchConfig) *lent[MatchesSpan] {
+	if config == nil {
+		config = new(DenseSearchConfig)
+	}
+	lent := open[MatchesSpan]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	matches := landed(config.Matches, queries.rows, wanted)
+	span, refusal := matches.lower(&lent.call, wanted)
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	predicate, predicateState := lent.predicate(config.Predicate)
+	progress, progressState := lent.progress(config.Progress)
+	C.usearch_dense_search(&C.usearch_dense_search_t{
+		index:            index,
+		executor:         executor,
+		outcome:          lent.outcome,
+		completion:       completion,
+		count:            C.size_t(queries.rows),
+		queries:          queries.lower(&lent.call),
+		matches:          span,
+		expansion_factor: C.size_t(config.ExpansionFactor),
+		predicate:        predicate,
+		predicate_state:  predicateState,
+		progress:         progress,
+		progress_state:   progressState,
+		stats:            lent.stats(config.Stats),
+	})
+	lent.result = func() MatchesSpan { return matches }
+	return lent
+}
+
+func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries RowsView, rowsPerQuery, wanted uint,
+	config *DenseMaxsimConfig) *lent[MatchesSpan] {
+	if config == nil {
+		config = new(DenseMaxsimConfig)
+	}
+	lent := open[MatchesSpan]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	// The call counts queries, so only this side sees the matrix's rows fail to divide.
+	if rowsPerQuery == 0 || queries.rows%rowsPerQuery != 0 {
+		return lent.refuse(fail(StatusShapeMismatch, "the query rows do not divide into whole queries"))
+	}
+	count := queries.rows / rowsPerQuery
+	matches := landed(config.Matches, count, wanted)
+	span, refusal := matches.lower(&lent.call, wanted)
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	progress, progressState := lent.progress(config.Progress)
+	C.usearch_dense_maxsim(&C.usearch_dense_maxsim_t{
+		index:            index,
+		executor:         executor,
+		outcome:          lent.outcome,
+		completion:       completion,
+		count:            C.size_t(count),
+		queries:          queries.lower(&lent.call),
+		rows_per_query:   C.size_t(rowsPerQuery),
+		matches:          span,
+		expansion_factor: C.size_t(config.ExpansionFactor),
+		progress:         progress,
+		progress_state:   progressState,
+		stats:            lent.stats(config.Stats),
+	})
+	lent.result = func() MatchesSpan { return matches }
+	return lent
+}
+
+func (receiver denseReceiver) multiply(completion C.usearch_completion_t, left RowsView,
+	config *DenseMultiplyConfig) *lent[DenseProducts] {
+	if config == nil {
+		config = new(DenseMultiplyConfig)
+	}
+	lent := open[DenseProducts]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	arena, landing := land(config.Arena)
+	lent.discard = func() { _ = landing.Close() }
+	offsets := make([]uint, left.rows+1)
+	exported := pin(&lent.call, new(struct {
+		keys     *C.usearch_key_t
+		scores   *C.usearch_distance_t
+		required C.size_t
+	}))
+	progress, progressState := lent.progress(config.Progress)
+	C.usearch_dense_multiply(&C.usearch_dense_multiply_t{
+		index:            index,
+		executor:         executor,
+		outcome:          lent.outcome,
+		completion:       completion,
+		count:            C.size_t(left.rows),
+		left:             left.lower(&lent.call),
+		offsets:          (*C.size_t)(unsafe.Pointer(lend(&lent.call, offsets))),
+		keys:             &exported.keys,
+		scores:           &exported.scores,
+		arena:            pin(&lent.call, &arena.handle),
+		required:         &exported.required,
+		wanted:           C.size_t(config.Wanted),
+		expansion_factor: C.size_t(config.ExpansionFactor),
+		progress:         progress,
+		progress_state:   progressState,
+		stats:            lent.stats(config.Stats),
+	})
+	lent.result = func() DenseProducts {
+		pairs := offsets[left.rows]
+		return DenseProducts{
+			landing:  landing,
+			offsets:  offsets,
+			keys:     unsafe.Slice((*Key)(unsafe.Pointer(exported.keys)), pairs),
+			scores:   unsafe.Slice((*Distance)(unsafe.Pointer(exported.scores)), pairs),
+			required: uint(exported.required),
+		}
+	}
+	return lent
+}
+
+func (receiver denseReceiver) attend(completion C.usearch_completion_t, queries RowsView, lookup ValueLookup,
+	outputs RowsView, config *DenseAttendConfig) *lent[struct{}] {
+	if config == nil {
+		config = new(DenseAttendConfig)
+	}
+	lent := open[struct{}]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	if lookup.Row == nil {
+		return lent.refuse(fail(StatusInvalidArgument, "the value lookup names no row function"))
+	}
+	// The carry pointer has no length, so only this side can see it fall short.
+	if config.Carry != nil && uint(len(config.Carry)) < queries.rows {
+		return lent.refuse(fail(StatusShapeMismatch, "the softmax carry holds fewer entries than there are queries"))
+	}
+	lent.pinner.Pin(lookup.Values.pointer)
+	progress, progressState := lent.progress(config.Progress)
+	C.usearch_dense_attend(&C.usearch_dense_attend_t{
+		index:              index,
+		executor:           executor,
+		outcome:            lent.outcome,
+		completion:         completion,
+		count:              C.size_t(queries.rows),
+		queries:            queries.lower(&lent.call),
+		head_count:         C.size_t(config.HeadCount),
+		value_lookup:       C.usearch_go_looks_up_values(),
+		value_lookup_state: lent.callback(lookup),
+		outputs:            outputs.lowerSpan(&lent.call),
+		carry:              (*C.usearch_dense_softmax_state_t)(unsafe.Pointer(lend(&lent.call, config.Carry))),
+		expansion_factor:   C.size_t(config.ExpansionFactor),
+		score_scale:        C.float(config.ScoreScale),
+		progress:           progress,
+		progress_state:     progressState,
+		stats:              lent.stats(config.Stats),
+	})
+	return lent
+}
+
+//export usearchLooksUpValues
+func usearchLooksUpValues(state unsafe.Pointer, keys *C.usearch_key_t, count C.size_t, scalar C.usearch_scalar_t,
+	columns C.size_t, rows *unsafe.Pointer) {
+	lookup := (*cgo.Handle)(state).Value().(ValueLookup)
+	values := lookup.Values
+	found := unsafe.Slice(rows, count)
+	// The library reads rows of its own shape, so values of another one answer no row at all.
+	shaped := Scalar(scalar) == values.scalar && uint(columns) == values.dimensions
+	for position, key := range unsafe.Slice((*Key)(unsafe.Pointer(keys)), count) {
+		found[position] = nil
+		if !shaped {
+			continue
+		}
+		if row, ok := lookup.find(key); ok && row < values.rows {
+			found[position] = unsafe.Add(values.pointer, row*values.stride)
+		}
+	}
+}
+
+// find names the row of Values holding a key's value; a panic inside Row answers none.
+func (lookup ValueLookup) find(key Key) (row uint, found bool) {
+	defer func() { _ = recover() }() // a panic unwinding through C frames would skip their unlocks
+	return lookup.Row(key)
+}
+
+func (receiver denseReceiver) merge(completion C.usearch_completion_t, donors []*DenseIndex,
+	config *DenseMergeConfig) *lent[struct{}] {
+	if config == nil {
+		config = new(DenseMergeConfig)
+	}
+	lent := open[struct{}]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	for _, donor := range donors {
+		if donor == nil || donor.handle == nil {
+			return lent.refuse(fail(StatusUninitialized, "a donor is closed or was never initialized"))
+		}
+	}
+	// The library nulls each slot it absorbs, so freeing the rest once the call is final consumes
+	// every donor whatever the outcome.
+	handles := make([]C.usearch_dense_index_t, len(donors))
+	for position, donor := range donors {
+		handles[position], donor.handle = donor.handle, nil
+	}
+	lent.discard = func() {
+		for _, handle := range handles {
+			C.usearch_dense_free(handle)
+		}
+	}
+	progress, progressState := lent.progress(config.Progress)
+	C.usearch_dense_merge(&C.usearch_dense_merge_t{
+		index:          index,
+		executor:       executor,
+		outcome:        lent.outcome,
+		completion:     completion,
+		count:          C.size_t(len(handles)),
+		donors:         lend(&lent.call, handles),
+		progress:       progress,
+		progress_state: progressState,
+	})
+	return lent
+}
+
+func (receiver denseReceiver) save(completion C.usearch_completion_t, path string,
+	config *DenseSaveConfig) *lent[struct{}] {
+	if config == nil {
+		config = new(DenseSaveConfig)
+	}
+	lent := open[struct{}]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	progress, progressState := lent.progress(config.Progress)
+	C.usearch_dense_save(&C.usearch_dense_save_t{
+		index:          index,
+		executor:       executor,
+		outcome:        lent.outcome,
+		completion:     completion,
+		path:           lent.text(path),
+		progress:       progress,
+		progress_state: progressState,
+	})
+	return lent
+}
+
+func (receiver denseReceiver) saveBuffer(completion C.usearch_completion_t,
+	config *DenseSaveBufferConfig) *lent[Monolith] {
+	if config == nil {
+		config = new(DenseSaveBufferConfig)
+	}
+	lent := open[Monolith]()
+	index, executor, refusal := receiver.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	arena, landing := land(config.Arena)
+	lent.discard = func() { _ = landing.Close() }
+	exported := pin(&lent.call, new(struct {
+		bytes  *C.uint8_t
+		length C.size_t
+	}))
+	progress, progressState := lent.progress(config.Progress)
+	C.usearch_dense_save_buffer(&C.usearch_dense_save_buffer_t{
+		index:          index,
+		executor:       executor,
+		outcome:        lent.outcome,
+		completion:     completion,
+		bytes:          &exported.bytes,
+		length:         &exported.length,
+		arena:          pin(&lent.call, &arena.handle),
+		progress:       progress,
+		progress_state: progressState,
+	})
+	lent.result = func() Monolith {
+		return Monolith{landing: landing, Bytes: unsafe.Slice((*byte)(unsafe.Pointer(exported.bytes)), exported.length)}
+	}
+	return lent
+}
+
+// endregion: Calls
+
+// region: Cursors & Streams
+
+// DenseCursor is a row scan over the index contents, pulled blocking on the executor of the
+// receiver that opened it. Each shard's publication watermark is read as the walk enters that
+// shard, so a row once passed is never revisited.
+//
+// Mirrors usearch_dense_cursor_t.
+type DenseCursor struct {
+	handle   C.usearch_dense_cursor_t
+	receiver denseReceiver
+}
+
+// Cursor opens a row scan over the current contents. Calls usearch_dense_cursor_init.
+func (on DenseIndexOn) Cursor() (*DenseCursor, error) {
+	index, _, refusal := on.lower()
+	if refusal != nil {
+		return nil, refusal
+	}
+	lent := open[*DenseCursor]()
+	// cgo inspects the whole object behind a lent pointer, so the handle lands apart from the receiver's.
+	handle := pin(&lent.call, new(C.usearch_dense_cursor_t))
+	C.usearch_dense_cursor_init(&C.usearch_dense_cursor_init_t{
+		cursor:  handle,
+		index:   index,
+		outcome: lent.outcome,
+	})
+	lent.result = func() *DenseCursor { return &DenseCursor{handle: *handle, receiver: on.denseReceiver} }
+	return block(lent)
+}
+
+// NextKeys copies the next keys into keys, returning how many were written; zero means the walk
+// is exhausted. Calls usearch_dense_cursor_next.
+func (cursor *DenseCursor) NextKeys(keys []Key) (uint, error) {
+	return cursor.NextBatch(keys, RowsView{})
+}
+
+// NextBatch copies the next entries into keys and vectors, which needs room for as many rows as
+// there are keys, in the scalar kind and width it was built with, returning the rows written;
+// zero means the walk is exhausted. Calls usearch_dense_cursor_next.
+func (cursor *DenseCursor) NextBatch(keys []Key, vectors RowsView) (uint, error) {
+	index, executor, refusal := cursor.receiver.lower()
+	if refusal == nil && cursor.handle == nil {
+		refusal = fail(StatusInvalidArgument, "the cursor is closed")
+	}
+	if refusal != nil {
+		return 0, refusal
+	}
+	lent := open[uint]()
+	written := pin(&lent.call, new(C.size_t))
+	C.usearch_dense_cursor_next(&C.usearch_dense_cursor_next_t{
+		index:      index,
+		executor:   executor,
+		outcome:    lent.outcome,
+		completion: C.usearch_completion_blocking_k,
+		cursor:     cursor.handle,
+		keys:       lent.keysSpan(keys),
+		vectors:    vectors.lowerSpan(&lent.call),
+		written:    written,
+	})
+	lent.result = func() uint { return uint(*written) }
+	return block(lent)
+}
+
+// Close releases the cursor. It is idempotent. Calls usearch_dense_cursor_free.
+func (cursor *DenseCursor) Close() error {
+	if cursor == nil || cursor.handle == nil {
+		return nil
+	}
+	C.usearch_dense_cursor_free(cursor.handle)
+	cursor.handle = nil
 	return nil
 }
 
-// readIntegerProperty pairs one of the handle's integer properties with its error slot, which
-// every geometry and footprint getter above shares the shape of; Capabilities is the one
-// property that answers text instead. cgo renders a C function as a Go wrapper that cannot be
-// taken as a value, so each getter calls its own symbol and hands the two results here rather
-// than passing the function in.
-func readIntegerProperty(reading C.size_t, failure C.usearch_error_t) (uint, error) {
-	if err := check(failure); err != nil {
-		return 0, err
-	}
-	return uint(reading), nil
+// DenseSearchStream is a resumable nearest-neighbor walk over one query, pulled blocking on the
+// executor of the receiver that opened it. Ordering beyond the expansion horizon is best-effort
+// nearest, not globally exact.
+//
+// Mirrors usearch_dense_search_stream_t.
+type DenseSearchStream struct {
+	handle   C.usearch_dense_search_stream_t
+	receiver denseReceiver
 }
 
-// endregion: Helpers
+// SearchStream opens a resumable search for a one-row query, so callers that post-filter
+// aggressively pull until satisfied instead of guessing the wanted count upfront. No residency
+// implements the stream yet, so the engine answers StatusUnsupported. Calls
+// usearch_dense_search_stream_init.
+func (on DenseIndexOn) SearchStream(query RowsView, config *DenseSearchStreamInitConfig) (*DenseSearchStream, error) {
+	if config == nil {
+		config = new(DenseSearchStreamInitConfig)
+	}
+	index, _, refusal := on.lower()
+	if refusal == nil && query.rows != 1 {
+		refusal = fail(StatusShapeMismatch, "a stream walks exactly one query row")
+	}
+	if refusal != nil {
+		return nil, refusal
+	}
+	lent := open[*DenseSearchStream]()
+	handle := pin(&lent.call, new(C.usearch_dense_search_stream_t))
+	C.usearch_dense_search_stream_init(&C.usearch_dense_search_stream_init_t{
+		stream:           handle,
+		index:            index,
+		outcome:          lent.outcome,
+		query:            query.lower(&lent.call),
+		expansion_factor: C.size_t(config.ExpansionFactor),
+	})
+	lent.result = func() *DenseSearchStream { return &DenseSearchStream{handle: *handle, receiver: on.denseReceiver} }
+	return block(lent)
+}
+
+// Next pulls the next-nearest matches into keys and distances, as many as they hold, returning
+// how many were written; zero means the walk is drained. Calls usearch_dense_search_stream_next.
+func (stream *DenseSearchStream) Next(keys []Key, distances []Distance) (uint, error) {
+	index, executor, refusal := stream.receiver.lower()
+	if refusal == nil && stream.handle == nil {
+		refusal = fail(StatusInvalidArgument, "the stream is closed")
+	}
+	if refusal == nil && len(keys) != len(distances) {
+		refusal = fail(StatusShapeMismatch, "the key and distance slabs are not the same shape")
+	}
+	if refusal != nil {
+		return 0, refusal
+	}
+	lent := open[uint]()
+	matches := MatchesSpan{keys: keys, scores: distances, counts: make([]uint, 1), columns: uint(len(keys))}
+	span, _ := matches.lower(&lent.call, matches.columns)
+	C.usearch_dense_search_stream_next(&C.usearch_dense_search_stream_next_t{
+		index:      index,
+		executor:   executor,
+		outcome:    lent.outcome,
+		completion: C.usearch_completion_blocking_k,
+		stream:     stream.handle,
+		matches:    span,
+	})
+	lent.result = func() uint { return matches.counts[0] }
+	return block(lent)
+}
+
+// Close releases the stream and the walk state it keeps. It is idempotent. Calls
+// usearch_dense_search_stream_free.
+func (stream *DenseSearchStream) Close() error {
+	if stream == nil || stream.handle == nil {
+		return nil
+	}
+	C.usearch_dense_search_stream_free(stream.handle)
+	stream.handle = nil
+	return nil
+}
+
+// endregion: Cursors & Streams

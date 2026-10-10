@@ -43,8 +43,10 @@ from usearch import (
     DenseIndexDescription,
     DenseMetadata,
     DenseMetric,
+    DenseProducts,
     DenseReachability,
     DenseTraversalStats,
+    DenseVectors,
     Executor,
     InvalidArgumentError,
     Key,
@@ -53,7 +55,6 @@ from usearch import (
     Monolith,
     Mood,
     On,
-    Products,
     ReadOnlyError,
     Residency,
     Scalar,
@@ -61,7 +62,6 @@ from usearch import (
     Status,
     UninitializedError,
     UnknownKindError,
-    Vectors,
 )
 from usearch.eval import random_vectors, self_recall
 from usearch.keys import integers_to_keys, keys_to_integers
@@ -695,7 +695,7 @@ def test_get_returns_the_stored_rows(executor):
     index.on(executor).insert([1, 2], vectors)
 
     rows = index.get(1, outputs_dtype=Scalar.F32)
-    assert isinstance(rows, Vectors) and not hasattr(rows, "__cuda_array_interface__")
+    assert isinstance(rows, DenseVectors) and not hasattr(rows, "__cuda_array_interface__")
     retrieved = np.asarray(rows)
     assert retrieved.shape == (1, 8)
     assert np.allclose(retrieved[0], vectors[0], atol=1e-6)
@@ -1090,7 +1090,7 @@ def test_multiply_reports_every_scored_pair(executor):
     named = keys_to_integers(products.keys)
     scores = np.asarray(products.scores)
 
-    assert isinstance(products, Products) and len(products) == len(rows)
+    assert isinstance(products, DenseProducts) and len(products) == len(rows)
     assert offsets.shape == (len(rows) + 1,)
     assert offsets[0] == 0 and offsets[-1] == len(scores) == products.required
     assert np.all(np.diff(offsets) > 0)

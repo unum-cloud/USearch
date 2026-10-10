@@ -2191,32 +2191,32 @@ PyTypeObject ExecutorType = {
 
 #pragma region Arenas
 
-static char const doc_Arena[] =                                                              //
-    "Arena()\n"                                                                              //
-    "\n"                                                                                     //
-    "The memory a verb lands the outputs only it can size in - `get`, `multiply` and\n"      //
-    "`save_buffer` - handed back to the next call so a steady loop allocates once.\n"        //
-    "\n"                                                                                     //
-    "The outputs leave as zero-copy `Vectors`, `Products` or `Monolith` results that keep\n" //
-    "the arena alive. Passing it to another call rewinds it, so that call raises\n"          //
-    "`ContendedError` while any result over the previous outputs is still alive; drop\n"     //
-    "them, or pass another arena. A verb handed none uses a fresh one that its outputs\n"    //
-    "alone keep alive. A deferred call holds its arena until it is final.\n"                 //
-    "\n"                                                                                     //
-    "The memory lives where the executor of the call that first filled it computes, and a\n" //
-    "call on an executor of another residency raises `DeviceError`. Results over device\n"   //
-    "memory export `__cuda_array_interface__` and refuse the host buffer protocol.\n"        //
-    "\n"                                                                                     //
-    "Example:\n"                                                                             //
-    "  >>> from array import array\n"                                                        //
-    "  >>> index = usearch.DenseIndex.init_ram(dimensions=2)\n"                              //
-    "  >>> index.reserve(2)\n"                                                               //
-    "  >>> index.insert([1], array('d', [0.1, 0.2]))\n"                                      //
-    "  >>> index.insert([2], array('d', [0.3, 0.4]))\n"                                      //
-    "  >>> arena = usearch.Arena()\n"                                                        //
-    "  >>> first = index.get(1, arena=arena)\n"                                              //
-    "  >>> del first\n"                                                                      //
-    "  >>> memoryview(index.get(2, arena=arena)).shape\n"                                    //
+static char const doc_Arena[] =                                                                        //
+    "Arena()\n"                                                                                        //
+    "\n"                                                                                               //
+    "The memory a verb lands the outputs only it can size in - `get`, `multiply` and\n"                //
+    "`save_buffer` - handed back to the next call so a steady loop allocates once.\n"                  //
+    "\n"                                                                                               //
+    "The outputs leave as zero-copy `DenseVectors`, `DenseProducts` or `Monolith` results that keep\n" //
+    "the arena alive. Passing it to another call rewinds it, so that call raises\n"                    //
+    "`ContendedError` while any result over the previous outputs is still alive; drop\n"               //
+    "them, or pass another arena. A verb handed none uses a fresh one that its outputs\n"              //
+    "alone keep alive. A deferred call holds its arena until it is final.\n"                           //
+    "\n"                                                                                               //
+    "The memory lives where the executor of the call that first filled it computes, and a\n"           //
+    "call on an executor of another residency raises `DeviceError`. Results over device\n"             //
+    "memory export `__cuda_array_interface__` and refuse the host buffer protocol.\n"                  //
+    "\n"                                                                                               //
+    "Example:\n"                                                                                       //
+    "  >>> from array import array\n"                                                                  //
+    "  >>> index = usearch.DenseIndex.init_ram(dimensions=2)\n"                                        //
+    "  >>> index.reserve(2)\n"                                                                         //
+    "  >>> index.insert([1], array('d', [0.1, 0.2]))\n"                                                //
+    "  >>> index.insert([2], array('d', [0.3, 0.4]))\n"                                                //
+    "  >>> arena = usearch.Arena()\n"                                                                  //
+    "  >>> first = index.get(1, arena=arena)\n"                                                        //
+    "  >>> del first\n"                                                                                //
+    "  >>> memoryview(index.get(2, arena=arena)).shape\n"                                              //
     "  (1, 2)";
 
 static PyObject* Arena_tp_new(PyTypeObject* type, PyObject* args, PyObject* keywords) {
@@ -2394,8 +2394,8 @@ PyTypeObject ArenaBufferType = {
     .tp_getset = ArenaBuffer_getset,
 };
 
-static char const doc_Vectors[] =                                                            //
-    "Vectors\n"                                                                              //
+static char const doc_DenseVectors[] =                                                       //
+    "DenseVectors\n"                                                                         //
     "\n"                                                                                     //
     "The rows `get` exported into an `Arena`, which it keeps alive and blocks from reuse.\n" //
     "\n"                                                                                     //
@@ -2403,10 +2403,10 @@ static char const doc_Vectors[] =                                               
     "row_bytes) run of 'B' for the rest. Host rows export the writable buffer protocol;\n"   //
     "device rows export `__cuda_array_interface__` instead.";
 
-PyTypeObject VectorsType = {
+PyTypeObject DenseVectorsType = {
     PyVarObject_HEAD_INIT(NULL, 0) //
-        .tp_name = "usearch.Vectors",
-    .tp_doc = doc_Vectors,
+        .tp_name = "usearch.DenseVectors",
+    .tp_doc = doc_DenseVectors,
     .tp_basicsize = sizeof(ArenaBuffer),
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_base = &ArenaBufferType,
@@ -2450,7 +2450,7 @@ PyObject* usearch_py_arena_buffer(PyTypeObject* type, PyObject* arena, void* dat
 }
 
 /** The ragged pairs `multiply` scored: offsets in host memory around keys and scores left in an arena. */
-typedef struct Products {
+typedef struct DenseProducts {
     PyObject ob_base;
 
     /** The (queries + 1,) memoryview of Apache Arrow offsets. */
@@ -2464,10 +2464,10 @@ typedef struct Products {
 
     /** The pairs scored before the bound cut any, an @c int. */
     PyObject* required;
-} Products;
+} DenseProducts;
 
-static char const doc_Products[] =                                                           //
-    "Products\n"                                                                             //
+static char const doc_DenseProducts[] =                                                      //
+    "DenseProducts\n"                                                                        //
     "\n"                                                                                     //
     "The ragged sparse product `multiply` exported: per left row, every pair its walk\n"     //
     "scored, in traversal order, ragged by Apache Arrow offsets.\n"                          //
@@ -2480,7 +2480,7 @@ static char const doc_Products[] =                                              
 
 PyObject* usearch_py_products_steal(PyObject* offsets, PyObject* keys, PyObject* scores, size_t required) {
     PyObject* const required_object = offsets && keys && scores ? PyLong_FromSize_t(required) : NULL;
-    Products* const products = required_object ? PyObject_New(Products, &ProductsType) : NULL;
+    DenseProducts* const products = required_object ? PyObject_New(DenseProducts, &DenseProductsType) : NULL;
     if (!products) {
         Py_XDECREF(required_object);
         Py_XDECREF(scores);
@@ -2495,7 +2495,7 @@ PyObject* usearch_py_products_steal(PyObject* offsets, PyObject* keys, PyObject*
     return (PyObject*)products;
 }
 
-static void Products_dealloc(Products* self) {
+static void DenseProducts_dealloc(DenseProducts* self) {
     Py_DECREF(self->required);
     Py_DECREF(self->scores);
     Py_DECREF(self->keys);
@@ -2503,7 +2503,7 @@ static void Products_dealloc(Products* self) {
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-static Py_ssize_t Products_length(Products* self) {
+static Py_ssize_t DenseProducts_length(DenseProducts* self) {
     Py_buffer const* const offsets = PyMemoryView_GET_BUFFER(self->offsets);
     return offsets->len / (Py_ssize_t)sizeof(size_t) - 1;
 }
@@ -2517,10 +2517,10 @@ static PyObject* arena_buffer_slice(ArenaBuffer const* whole, size_t begin, size
                                    whole->format, whole->item_bytes, shape, whole->rank);
 }
 
-static PyObject* Products_row(Products* self, PyObject* row_object) {
+static PyObject* DenseProducts_row(DenseProducts* self, PyObject* row_object) {
     Py_ssize_t const row = PyNumber_AsSsize_t(row_object, PyExc_IndexError);
     if (row == -1 && PyErr_Occurred()) return NULL;
-    if (row < 0 || row >= Products_length(self)) {
+    if (row < 0 || row >= DenseProducts_length(self)) {
         PyErr_SetString(PyExc_IndexError, "row index out of range");
         return NULL;
     }
@@ -2534,37 +2534,39 @@ static PyObject* Products_row(Products* self, PyObject* row_object) {
     return pair;
 }
 
-static PyObject* Products_repr(Products* self) {
-    return PyUnicode_FromFormat("Products(rows=%zd, required=%S)", Products_length(self), self->required);
+static PyObject* DenseProducts_repr(DenseProducts* self) {
+    return PyUnicode_FromFormat("DenseProducts(rows=%zd, required=%S)", DenseProducts_length(self), self->required);
 }
 
-static PyMethodDef Products_methods[] = {
-    {"row", (PyCFunction)Products_row, METH_O, "The (keys, scores) of left row `i`, viewing the arena. Python-only."},
+static PyMethodDef DenseProducts_methods[] = {
+    {"row", (PyCFunction)DenseProducts_row, METH_O,
+     "The (keys, scores) of left row `i`, viewing the arena. Python-only."},
     {NULL, NULL, 0, NULL},
 };
 
-static PyMemberDef Products_members[] = {
-    {"offsets", Py_T_OBJECT_EX, offsetof(Products, offsets), Py_READONLY, "(rows + 1,) Apache Arrow offsets."},
-    {"keys", Py_T_OBJECT_EX, offsetof(Products, keys), Py_READONLY, "(pairs, 16) identities of the indexed rows."},
-    {"scores", Py_T_OBJECT_EX, offsetof(Products, scores), Py_READONLY, "(pairs,) float64 products."},
-    {"required", Py_T_OBJECT_EX, offsetof(Products, required), Py_READONLY, "Pairs scored before the bound cut any."},
+static PyMemberDef DenseProducts_members[] = {
+    {"offsets", Py_T_OBJECT_EX, offsetof(DenseProducts, offsets), Py_READONLY, "(rows + 1,) Apache Arrow offsets."},
+    {"keys", Py_T_OBJECT_EX, offsetof(DenseProducts, keys), Py_READONLY, "(pairs, 16) identities of the indexed rows."},
+    {"scores", Py_T_OBJECT_EX, offsetof(DenseProducts, scores), Py_READONLY, "(pairs,) float64 products."},
+    {"required", Py_T_OBJECT_EX, offsetof(DenseProducts, required), Py_READONLY,
+     "Pairs scored before the bound cut any."},
     {NULL, 0, 0, 0, NULL},
 };
 
-static PySequenceMethods Products_as_sequence = {.sq_length = (lenfunc)Products_length};
+static PySequenceMethods DenseProducts_as_sequence = {.sq_length = (lenfunc)DenseProducts_length};
 
-PyTypeObject ProductsType = {
+PyTypeObject DenseProductsType = {
     PyVarObject_HEAD_INIT(NULL, 0) //
-        .tp_name = "usearch.Products",
-    .tp_doc = doc_Products,
-    .tp_basicsize = sizeof(Products),
+        .tp_name = "usearch.DenseProducts",
+    .tp_doc = doc_DenseProducts,
+    .tp_basicsize = sizeof(DenseProducts),
     .tp_flags = Py_TPFLAGS_DEFAULT,
     .tp_new = NULL, // Returned by `multiply`, never constructed by name.
-    .tp_dealloc = (destructor)Products_dealloc,
-    .tp_repr = (reprfunc)Products_repr,
-    .tp_as_sequence = &Products_as_sequence,
-    .tp_methods = Products_methods,
-    .tp_members = Products_members,
+    .tp_dealloc = (destructor)DenseProducts_dealloc,
+    .tp_repr = (reprfunc)DenseProducts_repr,
+    .tp_as_sequence = &DenseProducts_as_sequence,
+    .tp_methods = DenseProducts_methods,
+    .tp_members = DenseProducts_members,
 };
 
 #pragma endregion Arenas

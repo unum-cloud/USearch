@@ -2,16 +2,12 @@
  *  @file golang/shim.h
  *  @author Ash Vardanian
  *  @date August 16, 2026
- *  @brief Declarations the Go binding needs and the C header cannot give it: accessors for the
- *      anonymous residency union inside @c usearch_dense_options_t, and the Go-side admission
- *      trampoline the filtered search installs as a C callback.
+ *  @brief Declarations the Go binding needs and the C header cannot give it: the Go-side
+ *      trampolines a filtered search, a progress handler, and an attention's value lookup
+ *      install as C callbacks.
  *
- *  cgo renders an anonymous union as unnamed storage no Go expression can address, so the
- *  union is crossed through these functions rather than reconstructed field by field. Only
- *  the union is opaque - each arm is a named struct cgo handles like any other, so the arms
- *  travel whole and nothing here takes the union apart. The definitions live in @c shim.c
- *  because a Go file carrying an @c //export directive may hold only declarations in its
- *  preamble.
+ *  The definitions live in @c shim.c because a Go file carrying an @c //export directive may hold
+ *  only declarations in its preamble.
  */
 #ifndef UNUM_USEARCH_GO_SHIM_H
 #define UNUM_USEARCH_GO_SHIM_H
@@ -22,37 +18,25 @@
 extern "C" {
 #endif
 
-/** Tags @p options as RAM-resident and fills that arm of the union. */
-void usearch_go_write_ram(usearch_dense_options_t* options, usearch_ram_options_t ram);
-
-/** Tags @p options as VRAM-resident and fills that arm of the union. */
-void usearch_go_write_vram(usearch_dense_options_t* options, usearch_vram_options_t vram);
-
-/** Tags @p options as NVMe-resident and fills that arm of the union. */
-void usearch_go_write_nvme(usearch_dense_options_t* options, usearch_nvme_options_t nvme);
-
-/** Reads the RAM arm; the caller checks @c options->residency first. */
-usearch_ram_options_t usearch_go_read_ram(usearch_dense_options_t const* options);
-
-/** Reads the VRAM arm; the caller checks @c options->residency first. */
-usearch_vram_options_t usearch_go_read_vram(usearch_dense_options_t const* options);
-
-/** Reads the NVMe arm; the caller checks @c options->residency first. */
-usearch_nvme_options_t usearch_go_read_nvme(usearch_dense_options_t const* options);
-
 /**
- *  @brief The admission callback Go defines and C calls - the one symbol here that crosses in
- *      that direction, which is why it alone wears Go's spelling.
+ *  @brief The callbacks Go defines and C calls - the symbols here that cross in that direction,
+ *      which is why they alone wear Go's spelling.
  *
  *  cgo emits a C symbol named exactly as the Go function, and Go spells an unexported function
- *  in camel case, so the name is not this file's to choose. Everything else here is C that Go
- *  calls, and reads as C.
+ *  in camel case, so the names are not this file's to choose. cgo also drops @c const from the
+ *  pointers it declares, so the value lookup reaches C through an adapter in @c shim.c. Everything
+ *  else here is C that Go calls, and reads as C.
  */
-usearch_admission_t usearchDenseAdmits(usearch_key_t key, void* state);
+usearch_admission_t usearchAdmits(usearch_key_t key, void* state);
+usearch_continuation_t usearchContinues(size_t completed, size_t total, void* state);
+void usearchLooksUpValues(void* state, usearch_key_t* keys, size_t count, usearch_scalar_t scalar, size_t columns,
+                          void** rows);
 
-/** Hands back @c usearchDenseAdmits as a function pointer. cgo renders a C function as
- *  a Go wrapper rather than an address, so the pointer has to be taken on this side. */
+/** Hands back the trampolines above as function pointers. cgo renders a C function as a Go
+ *  wrapper rather than an address, so the pointers have to be taken on this side. */
 usearch_predicate_t usearch_go_admits(void);
+usearch_progress_callback_t usearch_go_continues(void);
+usearch_value_lookup_t usearch_go_looks_up_values(void);
 
 #ifdef __cplusplus
 }

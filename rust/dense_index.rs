@@ -1099,13 +1099,13 @@ impl<Holder> Accepts<DenseSaveBufferConfig<'static, Holder>> for Deferring where
 /// The rows [`DenseVerbs::get`] exported into an arena, which `Holder` owns or borrows.
 ///
 /// Rust-only.
-pub struct Vectors<Value: Element, Holder = Arena> {
+pub struct DenseVectors<Value: Element, Holder = Arena> {
     holder: Holder,
     /// Lives in the arena `holder` keeps, so it is only lent out for as long as `self` is borrowed.
     rows: MatrixView<'static, Value>,
 }
 
-impl<Value: Element, Holder> Vectors<Value, Holder> {
+impl<Value: Element, Holder> DenseVectors<Value, Holder> {
     /// One row per entry under the key, in insertion order, at the pitch the library reported.
     pub fn view(&self) -> MatrixView<'_, Value> { self.rows }
 
@@ -1117,7 +1117,7 @@ impl<Value: Element, Holder> Vectors<Value, Holder> {
 /// borrows: per left row, every pair its walk scored, in traversal order.
 ///
 /// Rust-only.
-pub struct Products<Holder = Arena> {
+pub struct DenseProducts<Holder = Arena> {
     holder: Holder,
     offsets: Vec<usize>,
     keys: Exported<Key>,
@@ -1126,7 +1126,7 @@ pub struct Products<Holder = Arena> {
     required: usize,
 }
 
-impl<Holder> Products<Holder> {
+impl<Holder> DenseProducts<Holder> {
     /// Left rows the call multiplied.
     pub fn queries(&self) -> usize { self.offsets.len() - 1 }
 
@@ -1134,7 +1134,7 @@ impl<Holder> Products<Holder> {
     pub fn required(&self) -> usize { self.required }
 
     /// The pairs of one left row - a key naming each indexed row and its product - or `None`
-    /// when `row` is not below [`Products::queries`].
+    /// when `row` is not below [`DenseProducts::queries`].
     pub fn row(&self, row: usize) -> Option<MatchesRow<'_>> {
         let offsets = self.offsets.get(row..row + 2)?;
         let keys = unsafe { arena_slice(self.keys.0, self.written) };
@@ -2047,7 +2047,7 @@ pub struct DenseGet<Value, Holder> {
 
 impl<Value: Element, Holder: BorrowMut<Arena>> Calling for DenseGet<Value, Holder> {
     type Arguments = usearch_dense_get_t;
-    type Output = Vectors<Value, Holder>;
+    type Output = DenseVectors<Value, Holder>;
 
     fn arguments(
         &mut self,
@@ -2071,7 +2071,7 @@ impl<Value: Element, Holder: BorrowMut<Arena>> Calling for DenseGet<Value, Holde
 
     unsafe fn call(arguments: *mut Self::Arguments) { usearch_dense_get(arguments) }
 
-    fn finish(self) -> Result<Vectors<Value, Holder>> {
+    fn finish(self) -> Result<DenseVectors<Value, Holder>> {
         // An absent key leaves no rows and a null pointer, which a zero-row view never reads.
         let data = NonNull::new(self.vectors.0).unwrap_or(NonNull::dangling()).as_ptr();
         let element = core::mem::size_of::<Value>() as isize;
@@ -2079,7 +2079,7 @@ impl<Value: Element, Holder: BorrowMut<Arena>> Calling for DenseGet<Value, Holde
             MatrixView::from_raw_parts(data, &[self.written, self.columns], &[self.stride as isize, element])
         }
         .map_err(|_| fail(Status::Internal, "the library returned an untraversable slab"))?;
-        Ok(Vectors {
+        Ok(DenseVectors {
             holder: self.holder,
             rows,
         })
@@ -2310,7 +2310,7 @@ pub struct DenseMultiply<'config, Left, Holder> {
 
 impl<Left: RowsView, Holder: BorrowMut<Arena>> Calling for DenseMultiply<'_, Left, Holder> {
     type Arguments = usearch_dense_multiply_t;
-    type Output = Products<Holder>;
+    type Output = DenseProducts<Holder>;
 
     fn arguments(
         &mut self,
@@ -2343,8 +2343,8 @@ impl<Left: RowsView, Holder: BorrowMut<Arena>> Calling for DenseMultiply<'_, Lef
 
     unsafe fn call(arguments: *mut Self::Arguments) { usearch_dense_multiply(arguments) }
 
-    fn finish(self) -> Result<Products<Holder>> {
-        Ok(Products {
+    fn finish(self) -> Result<DenseProducts<Holder>> {
+        Ok(DenseProducts {
             holder: self.config.arena,
             offsets: self.offsets,
             keys: self.keys,
