@@ -429,7 +429,8 @@ typedef struct usearch_tape_view_t {
  *
  *  Carries no query count of its own: the call already fixed it, and a second copy is a second
  *  thing to disagree. The strides stay because a caller may land results inside a wider host
- *  matrix, which @c wanted alone cannot express, and a zero stride is refused.
+ *  matrix, which @c wanted alone cannot express, and a stride shorter than its row is refused.
+ *  A zero @c wanted lands only the counts, ignoring @c keys, @c scores and both strides.
  *
  *  What @c scores hold is each verb's own: a search writes distances nearest-first, whichever kind
  *  the index froze - the inner kind as @c 1 @c - @c dot - while the linear-algebra verbs write
@@ -742,7 +743,7 @@ USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena);
  *  executor that orders, never the index. A blocking call runs alone: after every earlier call
  *  finishes, and before any later one starts. An executor without threads of its own -
  *  caller-inclusive, single-thread, or WebAssembly - runs a deferred call at submission or holds it
- *  until its next drain, blocking call or free.
+ *  until its wait, its executor's next drain or blocking call, or the free of a handle it names.
  *
  *  Every executor tracks its deferred calls in a fixed table of @c deferred_limit slots, so
  *  submitting never allocates. A deferred submission that finds the table full finishes
@@ -932,6 +933,7 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments);
  *  @param[inout] executor The handle to be freed; invalid afterwards.
  *
  *  Waits until every deferred call naming the handle is final.
+ *  Waits until every call running on the executor, blocking or deferred, is final.
  *  Never call it from inside a progress handler, a predicate, or a host function the executor
  *  runs, since it would drain itself.
  */

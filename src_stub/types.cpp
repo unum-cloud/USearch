@@ -8,15 +8,116 @@
  *  The engine renders the capability strings from NumKong's dispatch mask in @c src/types.cpp. A
  *  stand-in dispatches to nothing, so it reports @c serial and says so wherever a binding asks.
  *
- *  Its executors start no threads: a deferred call waits in the executor's queue until its next
- *  drain, blocking call or free runs it on that caller's thread. Only the RAM constructors succeed.
+ *  Its executors start no threads: a deferred call is held in one stub-wide list until its wait, its
+ *  executor's next drain or blocking call, or the free of a handle it uses runs it on that caller's
+ *  thread. Only the RAM constructors succeed.
  */
+#include <algorithm>          // `std::find`, `std::find_if`, `std::any_of`, `std::count_if`
+#include <condition_variable> // `std::condition_variable`
+#include <iterator>           // `std::next`
+#include <list>               // `std::list`
+#include <mutex>              // `std::mutex`, `std::lock_guard`, `std::unique_lock`
+#include <variant>            // `std::visit`
+#include <vector>             // `std::vector`
+
 #include "usearch/types.h"
 
 #include "lib.hpp"
 
 using namespace unum::usearch;
 using namespace unum::usearch::stub;
+
+namespace unum {
+namespace usearch {
+namespace stub {
+
+#pragma region Calls
+
+/** Every call given to any executor that is not yet final, in one list, so a wait or a free finds the
+ *  calls using its handle without asking each executor. */
+struct calls_t {
+    std::mutex guard;
+
+    /** Signalled whenever a running call becomes final. */
+    std::condition_variable finished;
+
+    /** Deferred calls no drain has started yet. */
+    std::list<call_t> held;
+
+    /** Calls running on some caller's thread right now. */
+    std::list<call_t> running;
+};
+
+static calls_t calls;
+
+void submit_deferred(call_t call, usearch_outcome_t* outcome) {
+    executor_t const* const executor = call.deferred_on;
+    auto const in_slot_of_executor = [=](call_t const& listed) { return listed.deferred_on == executor; };
+    std::lock_guard<std::mutex> lock(calls.guard);
+    std::size_t const slots_taken = std::count_if(calls.held.begin(), calls.held.end(), in_slot_of_executor) +
+                                    std::count_if(calls.running.begin(), calls.running.end(), in_slot_of_executor);
+    if (slots_taken == executor->deferred_limit)
+        return propagate_error(usearch_status_contended_k, outcome, "The deferred table is full");
+    propagate_deferred(outcome);
+    calls.held.push_back(std::move(call));
+}
+
+/** Runs a call already listed as running, then delists it and wakes every waiter. */
+static void run_listed(std::list<call_t>::iterator call) {
+    std::visit([&](auto& arguments) { call->verb(&arguments); }, call->arguments);
+    std::lock_guard<std::mutex> lock(calls.guard);
+    calls.running.erase(call);
+    calls.finished.notify_all();
+}
+
+void run_blocking(call_t call) {
+    std::list<call_t>::iterator running;
+    {
+        std::lock_guard<std::mutex> lock(calls.guard);
+        running = calls.running.insert(calls.running.end(), std::move(call));
+    }
+    run_listed(running);
+}
+
+void drain(executor_t const* executor) {
+    std::vector<std::list<call_t>::iterator> started;
+    {
+        std::lock_guard<std::mutex> lock(calls.guard);
+        for (auto call = calls.held.begin(); call != calls.held.end();) {
+            auto const next = std::next(call);
+            if (call->deferred_on == executor)
+                calls.running.splice(calls.running.end(), calls.held, call), started.push_back(call);
+            call = next;
+        }
+    }
+    for (auto const call : started) run_listed(call);
+}
+
+void wait_for_calls_using(void const* handle) {
+    if (!handle) return;
+    auto const uses_handle = [=](call_t const& call) {
+        return std::find(call.handles.begin(), call.handles.end(), handle) != call.handles.end();
+    };
+    std::unique_lock<std::mutex> lock(calls.guard);
+    for (;;) {
+        auto const held = std::find_if(calls.held.begin(), calls.held.end(), uses_handle);
+        if (held != calls.held.end()) {
+            // Draining runs verbs that take this lock themselves, so it runs outside it.
+            executor_t const* const executor = held->deferred_on;
+            lock.unlock();
+            drain(executor);
+            lock.lock();
+        }
+        else if (std::any_of(calls.running.begin(), calls.running.end(), uses_handle)) calls.finished.wait(lock);
+        else return;
+    }
+}
+
+#pragma endregion Calls
+
+} // namespace stub
+} // namespace usearch
+} // namespace unum
 
 extern "C" {
 
@@ -32,6 +133,7 @@ char const* usearch_capabilities_available(void) { return "serial"; }
 
 usearch_status_t usearch_outcome_wait(usearch_outcome_t const* outcome) {
     if (!outcome) return usearch_status_invalid_argument_k;
+    wait_for_calls_using(outcome);
     std::atomic_ref status(const_cast<usearch_status_t&>(outcome->status));
     usearch_status_t current = status.load(std::memory_order_acquire);
     for (; current == usearch_status_deferred_k; current = status.load(std::memory_order_acquire))
@@ -39,7 +141,10 @@ usearch_status_t usearch_outcome_wait(usearch_outcome_t const* outcome) {
     return current;
 }
 
-void usearch_arena_free(usearch_arena_t arena) { delete arena; }
+void usearch_arena_free(usearch_arena_t arena) {
+    wait_for_calls_using(arena);
+    delete arena;
+}
 
 void usearch_executor_for_ram(usearch_executor_for_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
@@ -76,11 +181,11 @@ void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments) {
 
 void usearch_executor_drain(usearch_executor_drain_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
-    if (arguments->executor) flush(*arguments->executor);
+    if (arguments->executor) drain(arguments->executor);
 }
 
 void usearch_executor_free(usearch_executor_t executor) {
-    if (executor) flush(*executor);
+    wait_for_calls_using(executor);
     delete executor;
 }
 

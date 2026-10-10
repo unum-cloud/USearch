@@ -1375,7 +1375,8 @@ typedef struct usearch_dense_softmax_state_t {
 /** Resolves @p count keys to their value rows, one row per key, @p columns values of @p scalar each;
  *  a NULL row refuses the call. A host function for a RAM handle; for a VRAM one, a @c __device__
  *  function whose address comes from @c cudaMemcpyFromSymbol, its @p state and rows 16-byte aligned
- *  in memory that device reads. */
+ *  in memory that device reads.
+ *  No driver query tells the two kinds apart, so passing the wrong one is undefined, never refused. */
 typedef void (*usearch_value_lookup_t)(void* state, usearch_key_t const* keys, size_t count, usearch_scalar_t scalar,
                                        size_t columns, void const** rows);
 

@@ -251,6 +251,17 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     for (size_t row = 0; row != collection_size; ++row)
         expect(counts[row] == 0 || found_keys[row].bytes[15] % 2 == 0, "A predicate must narrow the matches");
 
+    // A zero `wanted` lands only the counts, so the key and distance outputs and their strides stay unset.
+    memset(counts, 0xFF, collection_size * sizeof(size_t));
+    usearch_dense_search(&(usearch_dense_search_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = collection_size,
+                                                    .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
+                                                    .matches = {.counts = counts, .capacity = collection_size}});
+    expect(!outcome.message, outcome.message);
+    for (size_t row = 0; row != collection_size; ++row) expect_eq(counts[row], 0, "A zero `wanted` lands zero counts");
+
     free(counts);
     free(found_distances);
     free(found_keys);
@@ -831,7 +842,7 @@ void drain(usearch_executor_t executor) {
     expect(!outcome.message, outcome.message);
 }
 
-/** A deferred search stays deferred until a drain, then lands what a blocking one does, though its
+/** A deferred search stays deferred until waited on, then lands what a blocking one does, though its
  *  descriptor died at submission; without an executor it is final when it returns. */
 void test_deferred_search(void) {
     printf("Test: Deferred Search\n");
@@ -846,9 +857,8 @@ void test_deferred_search(void) {
     expect(!blocking->outcome.message, blocking->outcome.message);
 
     search_every_row(index, executor, usearch_completion_deferred_k, rows, deferred);
-    expect_eq(deferred->outcome.status, usearch_status_deferred_k, "A submitted call is deferred until drained");
-    drain(executor);
-    expect_eq(usearch_outcome_wait(&deferred->outcome), usearch_status_success_k, "A deferred search must succeed");
+    expect_eq(deferred->outcome.status, usearch_status_deferred_k, "A submitted call is deferred until waited on");
+    expect_eq(usearch_outcome_wait(&deferred->outcome), usearch_status_success_k, "A waited search must finish");
     expect(memcmp(blocking->keys, deferred->keys, sizeof(blocking->keys)) == 0 &&
                memcmp(blocking->distances, deferred->distances, sizeof(blocking->distances)) == 0 &&
                memcmp(blocking->counts, deferred->counts, sizeof(blocking->counts)) == 0,
@@ -893,6 +903,27 @@ void test_deferred_limit(void) {
     usearch_executor_free(executor);
     free(rows);
     printf("Test: Deferred Limit - PASSED\n");
+}
+
+/** Freeing an index finishes the deferred calls naming it before its memory goes. */
+void test_free_finishes_deferred(void) {
+    printf("Test: Free Finishes Deferred\n");
+    float* const rows = create_vectors(deferred_rows, deferred_dimensions);
+    usearch_executor_t const executor = create_executor(0);
+    usearch_dense_index_t const index = create_filled_index(rows, executor);
+    search_outputs_t* const outputs = (search_outputs_t*)calloc(1, sizeof(search_outputs_t));
+    expect(outputs, "Failed to allocate outputs");
+
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, outputs);
+    usearch_dense_free(index);
+    expect_eq(outputs->outcome.status, usearch_status_success_k, "A free must finish the calls naming the handle");
+    for (size_t row = 0; row != deferred_rows; ++row)
+        expect_eq(outputs->counts[row], deferred_wanted, "A call finished by a free lands its matches");
+
+    free(outputs);
+    usearch_executor_free(executor);
+    free(rows);
+    printf("Test: Free Finishes Deferred - PASSED\n");
 }
 
 /** A blocking call on an executor runs every call submitted before it first. */
@@ -943,6 +974,7 @@ int main(int argc, char* argv[]) {
     test_attend();
     test_deferred_search();
     test_deferred_limit();
+    test_free_finishes_deferred();
     test_blocking_runs_after_earlier();
 
     printf("All tests passed!\n");

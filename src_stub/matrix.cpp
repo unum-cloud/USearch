@@ -388,7 +388,7 @@ void usearch_matrix_init_vram(usearch_matrix_init_vram_t* arguments) {
 }
 
 void usearch_matrix_load_ram(usearch_matrix_load_ram_t* arguments) {
-    if (deferred<usearch_matrix_load_ram>(arguments)) return;
+    if (through_executor<usearch_matrix_load_ram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
@@ -403,7 +403,7 @@ void usearch_matrix_load_ram(usearch_matrix_load_ram_t* arguments) {
 }
 
 void usearch_matrix_load_vram(usearch_matrix_load_vram_t* arguments) {
-    if (deferred<usearch_matrix_load_vram>(arguments)) return;
+    if (through_executor<usearch_matrix_load_vram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA backends");
@@ -421,10 +421,13 @@ void usearch_matrix_view_ram(usearch_matrix_view_ram_t* arguments) {
     *arguments->index = index;
 }
 
-void usearch_matrix_free(usearch_matrix_index_t handle) { delete handle; }
+void usearch_matrix_free(usearch_matrix_index_t handle) {
+    wait_for_calls_using(handle);
+    delete handle;
+}
 
 void usearch_matrix_reserve(usearch_matrix_reserve_t* arguments) {
-    if (deferred<usearch_matrix_reserve>(arguments)) return;
+    if (through_executor<usearch_matrix_reserve>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_matrix_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
@@ -434,7 +437,7 @@ void usearch_matrix_reserve(usearch_matrix_reserve_t* arguments) {
 }
 
 void usearch_matrix_clear(usearch_matrix_clear_t* arguments) {
-    if (deferred<usearch_matrix_clear>(arguments)) return;
+    if (through_executor<usearch_matrix_clear>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_matrix_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
@@ -443,7 +446,7 @@ void usearch_matrix_clear(usearch_matrix_clear_t* arguments) {
 }
 
 void usearch_matrix_describe(usearch_matrix_describe_t* arguments) {
-    if (deferred<usearch_matrix_describe>(arguments)) return;
+    if (through_executor<usearch_matrix_describe>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->description = {};
     usearch_matrix_index_handle_t& index = *arguments->index;
@@ -463,7 +466,7 @@ void usearch_matrix_describe(usearch_matrix_describe_t* arguments) {
 }
 
 void usearch_matrix_insert(usearch_matrix_insert_t* arguments) {
-    if (deferred<usearch_matrix_insert>(arguments)) return;
+    if (through_executor<usearch_matrix_insert>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_matrix_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
@@ -513,7 +516,7 @@ void usearch_matrix_insert(usearch_matrix_insert_t* arguments) {
 }
 
 void usearch_matrix_refine(usearch_matrix_refine_t* arguments) {
-    if (deferred<usearch_matrix_refine>(arguments)) return;
+    if (through_executor<usearch_matrix_refine>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->changed) *arguments->changed = 0;
@@ -529,7 +532,7 @@ void usearch_matrix_refine(usearch_matrix_refine_t* arguments) {
 }
 
 void usearch_matrix_search(usearch_matrix_search_t* arguments) {
-    if (deferred<usearch_matrix_search>(arguments)) return;
+    if (through_executor<usearch_matrix_search>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     usearch_matrix_index_handle_t& index = *arguments->index;
@@ -549,7 +552,7 @@ void usearch_matrix_search(usearch_matrix_search_t* arguments) {
 }
 
 void usearch_matrix_count(usearch_matrix_count_t* arguments) {
-    if (deferred<usearch_matrix_count>(arguments)) return;
+    if (through_executor<usearch_matrix_count>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->key_stats = {};
     usearch_matrix_index_handle_t& index = *arguments->index;
@@ -565,7 +568,7 @@ void usearch_matrix_count(usearch_matrix_count_t* arguments) {
 }
 
 void usearch_matrix_get(usearch_matrix_get_t* arguments) {
-    if (deferred<usearch_matrix_get>(arguments)) return;
+    if (through_executor<usearch_matrix_get>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->matrices = nullptr;
     *arguments->offsets = nullptr;
@@ -608,7 +611,7 @@ void usearch_matrix_get(usearch_matrix_get_t* arguments) {
 }
 
 void usearch_matrix_merge(usearch_matrix_merge_t* arguments) {
-    if (deferred<usearch_matrix_merge>(arguments)) return;
+    if (through_executor<usearch_matrix_merge>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_matrix_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
@@ -652,7 +655,7 @@ void usearch_matrix_cursor_init(usearch_matrix_cursor_init_t* arguments) {
 }
 
 void usearch_matrix_cursor_next(usearch_matrix_cursor_next_t* arguments) {
-    if (deferred<usearch_matrix_cursor_next>(arguments)) return;
+    if (through_executor<usearch_matrix_cursor_next>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->written = 0;
     usearch_matrix_cursor_handle_t& cursor = *arguments->cursor;
@@ -682,10 +685,13 @@ void usearch_matrix_cursor_next(usearch_matrix_cursor_next_t* arguments) {
     cursor.pulling.clear(std::memory_order_release);
 }
 
-void usearch_matrix_cursor_free(usearch_matrix_cursor_t handle) { delete handle; }
+void usearch_matrix_cursor_free(usearch_matrix_cursor_t handle) {
+    wait_for_calls_using(handle);
+    delete handle;
+}
 
 void usearch_matrix_save(usearch_matrix_save_t* arguments) {
-    if (deferred<usearch_matrix_save>(arguments)) return;
+    if (through_executor<usearch_matrix_save>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_matrix_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
@@ -702,7 +708,7 @@ void usearch_matrix_save(usearch_matrix_save_t* arguments) {
 }
 
 void usearch_matrix_metadata_read(usearch_matrix_metadata_read_t* arguments) {
-    if (deferred<usearch_matrix_metadata_read>(arguments)) return;
+    if (through_executor<usearch_matrix_metadata_read>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->metadata = {};
     std::vector<std::byte> blob;

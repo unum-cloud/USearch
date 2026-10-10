@@ -40,11 +40,12 @@
 #include <span>          // `std::span`
 #include <string>        // `std::string`
 #include <string_view>   // `std::string_view` - a byte run read as text
-#include <type_traits>   // `std::is_nothrow_move_constructible_v`
+#include <type_traits>   // `std::is_nothrow_move_constructible_v`, `std::is_pointer_v`, `std::remove_pointer_t`
 #include <unordered_map> // `std::unordered_map`, `std::unordered_multimap`
+#include <variant>       // `std::variant`
 #include <vector>        // `std::vector`
 
-#include "usearch/usearch.h" // every argument structure a deferred call copies
+#include "usearch/usearch.h" // every argument structure a call copies
 
 #include "usearch/utilities/blocking_files.hpp" // `seekable_file_t`, `mapped_file_t` - the checkpoints' handles
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_arena` - the engine's arena, `contains` included
@@ -203,10 +204,6 @@ inline bool reject_tape(usearch_tape_view_t tape, std::size_t count, usearch_out
     return false;
 }
 
-#pragma endregion Runs
-
-#pragma region Executors and Arenas
-
 /** Ticks the caller's handler and answers whether to carry on; a null handler always does. */
 inline bool keep_going(usearch_progress_callback_t progress, void* progress_state, std::size_t completed,
                        std::size_t total) {
@@ -218,8 +215,12 @@ inline bool reject_cancelled(std::size_t completed, std::size_t total, usearch_o
     return reject_if(completed < total, usearch_status_cancelled_k, "The caller's handler stopped the work", outcome);
 }
 
-/** A copy of a submitted call's arguments; whatever it points to stays the caller's until final. */
-using deferred_arguments_t = std::variant<
+#pragma endregion Runs
+
+#pragma region Executors and Arenas
+
+/** The copied arguments of any verb that takes an executor; whatever they point to stays the caller's until final. */
+using call_arguments_t = std::variant<
     usearch_dense_load_ram_t, usearch_dense_load_vram_t, usearch_dense_load_ram_buffer_t,
     usearch_dense_load_vram_buffer_t, usearch_dense_view_nvme_t, usearch_dense_reserve_t, usearch_dense_clear_t,
     usearch_dense_insert_t, usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_search_t,
@@ -240,14 +241,8 @@ using deferred_arguments_t = std::variant<
     usearch_geospatial_cursor_next_t, usearch_geospatial_save_t, usearch_geospatial_metadata_read_t,
     usearch_geospatial_describe_t>;
 
-/** A submitted call: its copied arguments and the verb that runs them. */
-struct deferred_call_t {
-    deferred_arguments_t arguments;
-    void (*verb)(void*);
-};
-
-/** A stand-in's executor: no threads, just the calls submitted to it, run in order at its next
- *  drain, blocking call or free. */
+/** A stand-in's executor: no threads, so every call it is given runs on the thread of a caller -
+ *  the one that submits it blocking, drains the executor, waits on the call, or frees a handle it uses. */
 struct executor_t {
 
     /** Worker threads the caller asked for; honoured by remembering, never by spawning. */
@@ -255,36 +250,68 @@ struct executor_t {
 
     /** Submissions beyond this many finish @c usearch_status_contended_k. */
     std::size_t deferred_limit = 64;
-
-    std::mutex guard;
-    std::vector<deferred_call_t> deferred;
 };
 
-/** Runs every call submitted to @p executor so far, oldest first. */
-inline void flush(executor_t& executor) {
-    std::vector<deferred_call_t> calls;
-    {
-        std::lock_guard<std::mutex> lock(executor.guard);
-        calls.swap(executor.deferred);
-    }
-    for (deferred_call_t& call : calls) std::visit([&](auto& arguments) { call.verb(&arguments); }, call.arguments);
+/** A call given to an executor, waiting to run or running on some caller's thread. */
+struct call_t {
+
+    /** The executor whose deferred slot the call holds; null for a blocking call, which takes none. */
+    executor_t const* deferred_on;
+
+    /** A copy of the arguments with a null executor, so running them goes straight to the verb's body. */
+    call_arguments_t arguments;
+    void (*verb)(void*);
+
+    /** The call's outcome, its executor, and every index, cursor, stream and arena it reads or writes:
+     *  the addresses a wait or a free looks for before it returns. */
+    std::vector<void const*> handles;
+};
+
+/** Holds a deferred @p call until its executor drains, or finishes it contended once that executor
+ *  holds @c deferred_limit calls that are not yet final. */
+void submit_deferred(call_t call, usearch_outcome_t* outcome);
+
+/** Runs a blocking @p call on the calling thread, listed while it runs so a free of a handle it uses waits. */
+void run_blocking(call_t call);
+
+/** Runs every deferred call held for @p executor, oldest first, on the calling thread. */
+void drain(executor_t const* executor);
+
+/** Returns once no call uses @p handle, draining the executors that still hold one - what every wait
+ *  and every free does first. */
+void wait_for_calls_using(void const* handle);
+
+/** Collects @c call_t::handles from a verb's @p arguments. An output slot - a pointer to a handle
+ *  the call creates - holds nothing yet, so it is skipped. */
+template <typename arguments_>
+std::vector<void const*> handles_used_by(arguments_ const& arguments) {
+    std::vector<void const*> handles {arguments.outcome, arguments.executor};
+    auto const add = [&](auto handle) {
+        if constexpr (!std::is_pointer_v<std::remove_pointer_t<decltype(handle)>>) handles.push_back(handle);
+    };
+    if constexpr (requires { arguments.index; }) add(arguments.index);
+    if constexpr (requires { arguments.cursor; }) add(arguments.cursor);
+    if constexpr (requires { arguments.stream; }) add(arguments.stream);
+    if constexpr (requires { arguments.arena; })
+        if (arguments.arena) handles.push_back(*arguments.arena);
+    return handles;
 }
 
-/** Every verb's first act: queues a copy of a deferred call and answers true, or runs the calls
- *  submitted before a blocking one and answers false. */
+/** Every verb's first act. A call without an executor answers false and runs the verb's body in
+ *  place. A call with one is copied without it and answers true: a deferred copy is held for the
+ *  executor, a blocking one runs right after the deferred calls submitted before it. */
 template <auto verb_, typename arguments_>
-bool deferred(arguments_* arguments) {
+bool through_executor(arguments_* arguments) {
     executor_t* const executor = arguments->executor;
     if (!executor) return false;
-    if (arguments->completion != usearch_completion_deferred_k) return flush(*executor), false;
     arguments_ copy = *arguments;
-    copy.completion = usearch_completion_blocking_k;
-    std::lock_guard<std::mutex> lock(executor->guard);
-    if (executor->deferred.size() == executor->deferred_limit)
-        return propagate_error(usearch_status_contended_k, arguments->outcome, "The deferred table is full"), true;
-    propagate_deferred(arguments->outcome);
-    executor->deferred.push_back({copy, [](void* erased) { verb_(static_cast<arguments_*>(erased)); }});
-    return true;
+    copy.executor = nullptr;
+    call_t call {nullptr, copy, [](void* erased) { verb_(static_cast<arguments_*>(erased)); },
+                 handles_used_by(*arguments)};
+    if (arguments->completion != usearch_completion_deferred_k)
+        return drain(executor), run_blocking(std::move(call)), true;
+    call.deferred_on = executor;
+    return submit_deferred(std::move(call), arguments->outcome), true;
 }
 
 /** Claims the caller's arena for one call: creates it behind a null pointee, else rewinds it, which

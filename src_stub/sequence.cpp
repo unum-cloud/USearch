@@ -510,7 +510,7 @@ void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments) {
 }
 
 void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments) {
-    if (deferred<usearch_sequence_load_ram>(arguments)) return;
+    if (through_executor<usearch_sequence_load_ram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
@@ -538,10 +538,13 @@ void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments) {
     *arguments->index = index;
 }
 
-void usearch_sequence_free(usearch_sequence_index_t handle) { delete handle; }
+void usearch_sequence_free(usearch_sequence_index_t handle) {
+    wait_for_calls_using(handle);
+    delete handle;
+}
 
 void usearch_sequence_reserve(usearch_sequence_reserve_t* arguments) {
-    if (deferred<usearch_sequence_reserve>(arguments)) return;
+    if (through_executor<usearch_sequence_reserve>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_sequence_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
@@ -551,7 +554,7 @@ void usearch_sequence_reserve(usearch_sequence_reserve_t* arguments) {
 }
 
 void usearch_sequence_clear(usearch_sequence_clear_t* arguments) {
-    if (deferred<usearch_sequence_clear>(arguments)) return;
+    if (through_executor<usearch_sequence_clear>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_sequence_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
@@ -560,7 +563,7 @@ void usearch_sequence_clear(usearch_sequence_clear_t* arguments) {
 }
 
 void usearch_sequence_describe(usearch_sequence_describe_t* arguments) {
-    if (deferred<usearch_sequence_describe>(arguments)) return;
+    if (through_executor<usearch_sequence_describe>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->description = {};
     usearch_sequence_index_handle_t& index = *arguments->index;
@@ -576,7 +579,7 @@ void usearch_sequence_describe(usearch_sequence_describe_t* arguments) {
 }
 
 void usearch_sequence_insert(usearch_sequence_insert_t* arguments) {
-    if (deferred<usearch_sequence_insert>(arguments)) return;
+    if (through_executor<usearch_sequence_insert>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_sequence_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
@@ -616,7 +619,7 @@ void usearch_sequence_insert(usearch_sequence_insert_t* arguments) {
 }
 
 void usearch_sequence_refine(usearch_sequence_refine_t* arguments) {
-    if (deferred<usearch_sequence_refine>(arguments)) return;
+    if (through_executor<usearch_sequence_refine>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->changed) *arguments->changed = 0;
@@ -632,7 +635,7 @@ void usearch_sequence_refine(usearch_sequence_refine_t* arguments) {
 }
 
 void usearch_sequence_search(usearch_sequence_search_t* arguments) {
-    if (deferred<usearch_sequence_search>(arguments)) return;
+    if (through_executor<usearch_sequence_search>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     usearch_sequence_index_handle_t& index = *arguments->index;
@@ -648,7 +651,7 @@ void usearch_sequence_search(usearch_sequence_search_t* arguments) {
 }
 
 void usearch_sequence_count(usearch_sequence_count_t* arguments) {
-    if (deferred<usearch_sequence_count>(arguments)) return;
+    if (through_executor<usearch_sequence_count>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->key_stats = {};
     usearch_sequence_index_handle_t& index = *arguments->index;
@@ -664,7 +667,7 @@ void usearch_sequence_count(usearch_sequence_count_t* arguments) {
 }
 
 void usearch_sequence_get(usearch_sequence_get_t* arguments) {
-    if (deferred<usearch_sequence_get>(arguments)) return;
+    if (through_executor<usearch_sequence_get>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->sequences = nullptr;
     *arguments->offsets = nullptr;
@@ -696,7 +699,7 @@ void usearch_sequence_get(usearch_sequence_get_t* arguments) {
 }
 
 void usearch_sequence_merge(usearch_sequence_merge_t* arguments) {
-    if (deferred<usearch_sequence_merge>(arguments)) return;
+    if (through_executor<usearch_sequence_merge>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_sequence_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
@@ -740,7 +743,7 @@ void usearch_sequence_cursor_init(usearch_sequence_cursor_init_t* arguments) {
 }
 
 void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments) {
-    if (deferred<usearch_sequence_cursor_next>(arguments)) return;
+    if (through_executor<usearch_sequence_cursor_next>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->written = 0;
     usearch_sequence_cursor_handle_t& cursor = *arguments->cursor;
@@ -767,10 +770,13 @@ void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments) {
     cursor.pulling.clear(std::memory_order_release);
 }
 
-void usearch_sequence_cursor_free(usearch_sequence_cursor_t handle) { delete handle; }
+void usearch_sequence_cursor_free(usearch_sequence_cursor_t handle) {
+    wait_for_calls_using(handle);
+    delete handle;
+}
 
 void usearch_sequence_save(usearch_sequence_save_t* arguments) {
-    if (deferred<usearch_sequence_save>(arguments)) return;
+    if (through_executor<usearch_sequence_save>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_sequence_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
@@ -787,7 +793,7 @@ void usearch_sequence_save(usearch_sequence_save_t* arguments) {
 }
 
 void usearch_sequence_metadata_read(usearch_sequence_metadata_read_t* arguments) {
-    if (deferred<usearch_sequence_metadata_read>(arguments)) return;
+    if (through_executor<usearch_sequence_metadata_read>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->metadata = {};
     std::vector<std::byte> blob;

@@ -425,7 +425,7 @@ void usearch_dense_init_vram(usearch_dense_init_vram_t* arguments) {
 }
 
 void usearch_dense_load_ram(usearch_dense_load_ram_t* arguments) {
-    if (deferred<usearch_dense_load_ram>(arguments)) return;
+    if (through_executor<usearch_dense_load_ram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
@@ -440,14 +440,14 @@ void usearch_dense_load_ram(usearch_dense_load_ram_t* arguments) {
 }
 
 void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments) {
-    if (deferred<usearch_dense_load_vram>(arguments)) return;
+    if (through_executor<usearch_dense_load_vram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA backends");
 }
 
 void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments) {
-    if (deferred<usearch_dense_load_ram_buffer>(arguments)) return;
+    if (through_executor<usearch_dense_load_ram_buffer>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
@@ -461,7 +461,7 @@ void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments) {
 }
 
 void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments) {
-    if (deferred<usearch_dense_load_vram_buffer>(arguments)) return;
+    if (through_executor<usearch_dense_load_vram_buffer>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA backends");
@@ -480,16 +480,19 @@ void usearch_dense_view_ram(usearch_dense_view_ram_t* arguments) {
 }
 
 void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments) {
-    if (deferred<usearch_dense_view_nvme>(arguments)) return;
+    if (through_executor<usearch_dense_view_nvme>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     propagate_error(usearch_status_unsupported_k, outcome, "NVMe checkpoints carry no keys and no shard wrapper yet");
 }
 
-void usearch_dense_free(usearch_dense_index_t handle) { delete handle; }
+void usearch_dense_free(usearch_dense_index_t handle) {
+    wait_for_calls_using(handle);
+    delete handle;
+}
 
 void usearch_dense_reserve(usearch_dense_reserve_t* arguments) {
-    if (deferred<usearch_dense_reserve>(arguments)) return;
+    if (through_executor<usearch_dense_reserve>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_dense_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
@@ -500,7 +503,7 @@ void usearch_dense_reserve(usearch_dense_reserve_t* arguments) {
 }
 
 void usearch_dense_clear(usearch_dense_clear_t* arguments) {
-    if (deferred<usearch_dense_clear>(arguments)) return;
+    if (through_executor<usearch_dense_clear>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_dense_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
@@ -509,7 +512,7 @@ void usearch_dense_clear(usearch_dense_clear_t* arguments) {
 }
 
 void usearch_dense_describe(usearch_dense_describe_t* arguments) {
-    if (deferred<usearch_dense_describe>(arguments)) return;
+    if (through_executor<usearch_dense_describe>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->description = {};
     usearch_dense_index_handle_t& index = *arguments->index;
@@ -526,7 +529,7 @@ void usearch_dense_describe(usearch_dense_describe_t* arguments) {
 }
 
 void usearch_dense_insert(usearch_dense_insert_t* arguments) {
-    if (deferred<usearch_dense_insert>(arguments)) return;
+    if (through_executor<usearch_dense_insert>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     usearch_dense_index_handle_t& index = *arguments->index;
@@ -562,7 +565,7 @@ void usearch_dense_insert(usearch_dense_insert_t* arguments) {
 }
 
 void usearch_dense_refine(usearch_dense_refine_t* arguments) {
-    if (deferred<usearch_dense_refine>(arguments)) return;
+    if (through_executor<usearch_dense_refine>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->changed) *arguments->changed = 0;
@@ -578,7 +581,7 @@ void usearch_dense_refine(usearch_dense_refine_t* arguments) {
 }
 
 void usearch_dense_health(usearch_dense_health_t* arguments) {
-    if (deferred<usearch_dense_health>(arguments)) return;
+    if (through_executor<usearch_dense_health>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->reachability = {};
     usearch_dense_index_handle_t& index = *arguments->index;
@@ -589,7 +592,7 @@ void usearch_dense_health(usearch_dense_health_t* arguments) {
 }
 
 void usearch_dense_search(usearch_dense_search_t* arguments) {
-    if (deferred<usearch_dense_search>(arguments)) return;
+    if (through_executor<usearch_dense_search>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     usearch_dense_index_handle_t& index = *arguments->index;
@@ -606,7 +609,7 @@ void usearch_dense_search(usearch_dense_search_t* arguments) {
 }
 
 void usearch_dense_count(usearch_dense_count_t* arguments) {
-    if (deferred<usearch_dense_count>(arguments)) return;
+    if (through_executor<usearch_dense_count>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->entries = 0;
     usearch_dense_index_handle_t& index = *arguments->index;
@@ -615,7 +618,7 @@ void usearch_dense_count(usearch_dense_count_t* arguments) {
 }
 
 void usearch_dense_get(usearch_dense_get_t* arguments) {
-    if (deferred<usearch_dense_get>(arguments)) return;
+    if (through_executor<usearch_dense_get>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->vectors = nullptr;
     if (arguments->written) *arguments->written = 0;
@@ -642,7 +645,7 @@ void usearch_dense_get(usearch_dense_get_t* arguments) {
 }
 
 void usearch_dense_merge(usearch_dense_merge_t* arguments) {
-    if (deferred<usearch_dense_merge>(arguments)) return;
+    if (through_executor<usearch_dense_merge>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_dense_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
@@ -683,7 +686,7 @@ void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
 }
 
 void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
-    if (deferred<usearch_dense_cursor_next>(arguments)) return;
+    if (through_executor<usearch_dense_cursor_next>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->written = 0;
     usearch_dense_cursor_handle_t& cursor = *arguments->cursor;
@@ -712,7 +715,10 @@ void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
     cursor.pulling.clear(std::memory_order_release);
 }
 
-void usearch_dense_cursor_free(usearch_dense_cursor_t handle) { delete handle; }
+void usearch_dense_cursor_free(usearch_dense_cursor_t handle) {
+    wait_for_calls_using(handle);
+    delete handle;
+}
 
 void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
@@ -740,7 +746,7 @@ void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* argume
 }
 
 void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* arguments) {
-    if (deferred<usearch_dense_search_stream_next>(arguments)) return;
+    if (through_executor<usearch_dense_search_stream_next>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_dense_search_stream_handle_t& stream = *arguments->stream;
     if (reject_if(arguments->index != stream.opened_on, usearch_status_invalid_argument_k,
@@ -761,10 +767,13 @@ void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* argume
     stream.pulling.clear(std::memory_order_release);
 }
 
-void usearch_dense_search_stream_free(usearch_dense_search_stream_t handle) { delete handle; }
+void usearch_dense_search_stream_free(usearch_dense_search_stream_t handle) {
+    wait_for_calls_using(handle);
+    delete handle;
+}
 
 void usearch_dense_save(usearch_dense_save_t* arguments) {
-    if (deferred<usearch_dense_save>(arguments)) return;
+    if (through_executor<usearch_dense_save>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_dense_index_handle_t& index = *arguments->index;
     // Saving is a reader: it demands only that nothing move or erase rows under it.
@@ -783,7 +792,7 @@ void usearch_dense_save(usearch_dense_save_t* arguments) {
 }
 
 void usearch_dense_save_buffer(usearch_dense_save_buffer_t* arguments) {
-    if (deferred<usearch_dense_save_buffer>(arguments)) return;
+    if (through_executor<usearch_dense_save_buffer>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->bytes = nullptr;
     *arguments->length = 0;
@@ -807,7 +816,7 @@ void usearch_dense_save_buffer(usearch_dense_save_buffer_t* arguments) {
 }
 
 void usearch_dense_metadata_read(usearch_dense_metadata_read_t* arguments) {
-    if (deferred<usearch_dense_metadata_read>(arguments)) return;
+    if (through_executor<usearch_dense_metadata_read>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->metadata = {};
     std::vector<std::byte> blob;
@@ -819,7 +828,7 @@ void usearch_dense_metadata_read(usearch_dense_metadata_read_t* arguments) {
 }
 
 void usearch_dense_metadata_read_buffer(usearch_dense_metadata_read_buffer_t* arguments) {
-    if (deferred<usearch_dense_metadata_read_buffer>(arguments)) return;
+    if (through_executor<usearch_dense_metadata_read_buffer>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->metadata = {};
     dense_checkpoint_prefix_t prefix {};
@@ -829,7 +838,7 @@ void usearch_dense_metadata_read_buffer(usearch_dense_metadata_read_buffer_t* ar
 }
 
 void usearch_dense_multiply(usearch_dense_multiply_t* arguments) {
-    if (deferred<usearch_dense_multiply>(arguments)) return;
+    if (through_executor<usearch_dense_multiply>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     *arguments->keys = nullptr;
@@ -888,7 +897,7 @@ void usearch_dense_multiply(usearch_dense_multiply_t* arguments) {
 }
 
 void usearch_dense_attend(usearch_dense_attend_t* arguments) {
-    if (deferred<usearch_dense_attend>(arguments)) return;
+    if (through_executor<usearch_dense_attend>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_dense_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
@@ -959,7 +968,7 @@ void usearch_dense_attend(usearch_dense_attend_t* arguments) {
 }
 
 void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
-    if (deferred<usearch_dense_maxsim>(arguments)) return;
+    if (through_executor<usearch_dense_maxsim>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_dense_traversal_stats_t* const stats = arguments->stats;
     reset(stats);

@@ -476,7 +476,7 @@ void usearch_geospatial_init_vram(usearch_geospatial_init_vram_t* arguments) {
 }
 
 void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments) {
-    if (deferred<usearch_geospatial_load_ram>(arguments)) return;
+    if (through_executor<usearch_geospatial_load_ram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
@@ -491,7 +491,7 @@ void usearch_geospatial_load_ram(usearch_geospatial_load_ram_t* arguments) {
 }
 
 void usearch_geospatial_load_vram(usearch_geospatial_load_vram_t* arguments) {
-    if (deferred<usearch_geospatial_load_vram>(arguments)) return;
+    if (through_executor<usearch_geospatial_load_vram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA backends");
@@ -510,10 +510,13 @@ void usearch_geospatial_view_ram(usearch_geospatial_view_ram_t* arguments) {
     *arguments->index = index;
 }
 
-void usearch_geospatial_free(usearch_geospatial_index_t handle) { delete handle; }
+void usearch_geospatial_free(usearch_geospatial_index_t handle) {
+    wait_for_calls_using(handle);
+    delete handle;
+}
 
 void usearch_geospatial_reserve(usearch_geospatial_reserve_t* arguments) {
-    if (deferred<usearch_geospatial_reserve>(arguments)) return;
+    if (through_executor<usearch_geospatial_reserve>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_geospatial_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
@@ -523,7 +526,7 @@ void usearch_geospatial_reserve(usearch_geospatial_reserve_t* arguments) {
 }
 
 void usearch_geospatial_clear(usearch_geospatial_clear_t* arguments) {
-    if (deferred<usearch_geospatial_clear>(arguments)) return;
+    if (through_executor<usearch_geospatial_clear>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_geospatial_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
@@ -532,7 +535,7 @@ void usearch_geospatial_clear(usearch_geospatial_clear_t* arguments) {
 }
 
 void usearch_geospatial_describe(usearch_geospatial_describe_t* arguments) {
-    if (deferred<usearch_geospatial_describe>(arguments)) return;
+    if (through_executor<usearch_geospatial_describe>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->description = {};
     usearch_geospatial_index_handle_t& index = *arguments->index;
@@ -549,7 +552,7 @@ void usearch_geospatial_describe(usearch_geospatial_describe_t* arguments) {
 }
 
 void usearch_geospatial_insert(usearch_geospatial_insert_t* arguments) {
-    if (deferred<usearch_geospatial_insert>(arguments)) return;
+    if (through_executor<usearch_geospatial_insert>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_geospatial_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
@@ -592,7 +595,7 @@ void usearch_geospatial_insert(usearch_geospatial_insert_t* arguments) {
 }
 
 void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments) {
-    if (deferred<usearch_geospatial_refine>(arguments)) return;
+    if (through_executor<usearch_geospatial_refine>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->changed) *arguments->changed = 0;
@@ -608,7 +611,7 @@ void usearch_geospatial_refine(usearch_geospatial_refine_t* arguments) {
 }
 
 void usearch_geospatial_emplace(usearch_geospatial_emplace_t* arguments) {
-    if (deferred<usearch_geospatial_emplace>(arguments)) return;
+    if (through_executor<usearch_geospatial_emplace>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->emplaced = nullptr;
     usearch_geospatial_index_handle_t& index = *arguments->index;
@@ -627,7 +630,7 @@ void usearch_geospatial_emplace(usearch_geospatial_emplace_t* arguments) {
 void usearch_geospatial_emplaced_free(usearch_geospatial_emplaced_t handle) { delete handle; }
 
 void usearch_geospatial_search(usearch_geospatial_search_t* arguments) {
-    if (deferred<usearch_geospatial_search>(arguments)) return;
+    if (through_executor<usearch_geospatial_search>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     usearch_geospatial_index_handle_t& index = *arguments->index;
@@ -647,7 +650,7 @@ void usearch_geospatial_search(usearch_geospatial_search_t* arguments) {
 }
 
 void usearch_geospatial_within(usearch_geospatial_within_t* arguments) {
-    if (deferred<usearch_geospatial_within>(arguments)) return;
+    if (through_executor<usearch_geospatial_within>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_geospatial_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
@@ -711,7 +714,7 @@ void usearch_geospatial_within(usearch_geospatial_within_t* arguments) {
 }
 
 void usearch_geospatial_count(usearch_geospatial_count_t* arguments) {
-    if (deferred<usearch_geospatial_count>(arguments)) return;
+    if (through_executor<usearch_geospatial_count>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->key_stats = {};
     usearch_geospatial_index_handle_t& index = *arguments->index;
@@ -728,7 +731,7 @@ void usearch_geospatial_count(usearch_geospatial_count_t* arguments) {
 }
 
 void usearch_geospatial_get(usearch_geospatial_get_t* arguments) {
-    if (deferred<usearch_geospatial_get>(arguments)) return;
+    if (through_executor<usearch_geospatial_get>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->points = nullptr;
     *arguments->offsets = nullptr;
@@ -763,7 +766,7 @@ void usearch_geospatial_get(usearch_geospatial_get_t* arguments) {
 }
 
 void usearch_geospatial_merge(usearch_geospatial_merge_t* arguments) {
-    if (deferred<usearch_geospatial_merge>(arguments)) return;
+    if (through_executor<usearch_geospatial_merge>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_geospatial_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
@@ -807,7 +810,7 @@ void usearch_geospatial_cursor_init(usearch_geospatial_cursor_init_t* arguments)
 }
 
 void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments) {
-    if (deferred<usearch_geospatial_cursor_next>(arguments)) return;
+    if (through_executor<usearch_geospatial_cursor_next>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->written = 0;
     usearch_geospatial_cursor_handle_t& cursor = *arguments->cursor;
@@ -858,10 +861,13 @@ void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments)
     cursor.pulling.clear(std::memory_order_release);
 }
 
-void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t handle) { delete handle; }
+void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t handle) {
+    wait_for_calls_using(handle);
+    delete handle;
+}
 
 void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {
-    if (deferred<usearch_geospatial_save>(arguments)) return;
+    if (through_executor<usearch_geospatial_save>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_geospatial_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
@@ -878,7 +884,7 @@ void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {
 }
 
 void usearch_geospatial_metadata_read(usearch_geospatial_metadata_read_t* arguments) {
-    if (deferred<usearch_geospatial_metadata_read>(arguments)) return;
+    if (through_executor<usearch_geospatial_metadata_read>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->metadata = {};
     std::vector<std::byte> blob;
