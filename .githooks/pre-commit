@@ -200,6 +200,52 @@ check_region_lengths() {
         "$file has a #pragma region shorter than 30 lines - fold it into its neighbour:"
 }
 
+# Namespaces mirror directories. A nameless `namespace {` hides helpers in a scope no path names, and a
+# namespace no directory backs, like `stub::matrix` for `src_stub/matrix.cpp`, invents structure the tree
+# does not have. Allowed names: `unum`, `usearch`, the sibling libraries' roots, a directory on the file's
+# path (`src_stub` answers for `stub`), and a directory beside the file.
+check_namespace_directories() {
+    local directory=${file%/*} allowed name misplaced=""
+    [ "$directory" = "$file" ] && directory=.
+    allowed=" unum usearch ashvardanian numkong stringzilla forkunion smashtable "
+    for name in $(printf '%s\n' "$directory" | tr '/' '\n'); do allowed="$allowed$name ${name##*_} "; done
+    for name in $(git ls-tree -d --name-only HEAD "$directory/" 2> /dev/null); do allowed="$allowed${name##*/} "; done
+    while IFS=: read -r line opened; do
+        if [ -z "$opened" ]; then
+            misplaced="${misplaced}line $line: a nameless namespace
+"
+            continue
+        fi
+        for name in $(printf '%s\n' "$opened" | tr ':' '\n'); do
+            [ -z "$name" ] && continue
+            case "$allowed" in
+            *" $name "*) ;;
+            *) misplaced="${misplaced}line $line: namespace $name
+" ;;
+            esac
+        done
+    done < <(awk '/^[[:space:]]*namespace([[:space:]]+[A-Za-z_][A-Za-z0-9_:]*)?[[:space:]]*\{/ {
+            opened = $0; sub(/^[[:space:]]*namespace[[:space:]]*/, "", opened); sub(/[[:space:]]*\{.*/, "", opened)
+            print NR ":" opened }' "$staged_blob")
+    [ -z "$misplaced" ] || fail "${misplaced%$'\n'}" \
+        "$file opens a namespace no directory backs - use the directory's namespace, and \`static\` for file-local helpers:"
+}
+
+# Rust modules mirror files. An inline `mod name { .. }` or a `#[path = ..]` remap names a module no file
+# backs; only the unit tests, `#[cfg(test)] mod tests`, stay inline.
+check_rust_modules() {
+    local inline
+    inline=$(awk '
+        /^[[:space:]]*#\[cfg\(test\)\]/ { testing = NR; next }
+        /^[[:space:]]*#\[path[[:space:]]*=/ { printf "line %d: #[path] remap\n", NR }
+        /^[[:space:]]*(pub(\([a-z]+\))?[[:space:]]+)?mod[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*\{/ {
+            name = $0; sub(/.*mod[[:space:]]+/, "", name); sub(/[[:space:]]*\{.*/, "", name)
+            if (!(name == "tests" && testing == NR - 1)) printf "line %d: inline mod %s\n", NR, name
+        }' "$staged_blob")
+    [ -z "$inline" ] || fail "$inline" \
+        "$file declares a module no file backs - move its items to the file root or into their own file:"
+}
+
 # A design justified by another project's design ages into a lie the moment that project moves,
 # and it tells a reader nothing about the code in front of them. State what it does and why.
 check_sibling_justification() {
@@ -1250,6 +1296,7 @@ judge_path() {
         check_backward_references
         check_region_labels
         check_region_lengths
+        check_namespace_directories
         check_param_directions
         check_copydoc_in_backend
         check_markdown_doxygen
@@ -1359,7 +1406,10 @@ judge_path() {
             fi
         fi
         ;;
-    *.rs) check_rust_use_groups usearch "$file" < "$staged_blob" || rejection_count=$((rejection_count + 1)) ;;
+    *.rs)
+        check_rust_use_groups usearch "$file" < "$staged_blob" || rejection_count=$((rejection_count + 1))
+        check_rust_modules
+        ;;
     esac
 
     # An integer quotient compared against zero says `a < b` the long way round, and it reads as a
