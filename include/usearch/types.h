@@ -741,7 +741,8 @@ USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena);
  *  Calls on one executor start in submission order, and handles stay freely concurrent - it is the
  *  executor that orders, never the index. A blocking call runs alone: after every earlier call
  *  finishes, and before any later one starts. An executor without threads of its own -
- *  caller-inclusive, single-thread, or WebAssembly - runs even a deferred call at submission.
+ *  caller-inclusive, single-thread, or WebAssembly - runs a deferred call at submission or holds it
+ *  until its next drain, blocking call or free.
  *
  *  Every executor tracks its deferred calls in a fixed table of @c deferred_limit slots, so
  *  submitting never allocates. A deferred submission that finds the table full finishes

@@ -608,22 +608,18 @@ typedef struct attend_values_t {
     int8_t const* data;
     size_t rows;
     size_t columns;
+    usearch_scalar_t scalar;
 } attend_values_t;
 
 /** Resolves a key made by `key_of` to its row of the table, NULL past the resolvable rows. */
-static void attend_value_rows(void* state, usearch_key_t const* keys, size_t count, void const** rows) {
+static void attend_value_rows(void* state, usearch_key_t const* keys, size_t count, usearch_scalar_t scalar,
+                              size_t columns, void const** rows) {
     attend_values_t const* const values = (attend_values_t const*)state;
+    expect(scalar == values->scalar && columns == values->columns, "The lookup must learn the stored row shape");
     for (size_t key = 0; key != count; ++key) {
         size_t const token = keys[key].bytes[15];
         rows[key] = token < values->rows ? values->data + token * values->columns : NULL;
     }
-}
-
-/** Stands in for a device row lookup, which a RAM handle refuses before calling it. */
-static void const* attend_value_row(void* state, usearch_key_t key) {
-    (void)state;
-    (void)key;
-    return NULL;
 }
 
 /** A graph this small walks every key, so attention reproduces the exact softmax over all of them, with one
@@ -669,7 +665,7 @@ void test_attend(void) {
     float const queries[heads * dimensions] = {1, 1, 1, 1, -1, -1, -1, -1};
     float attended[heads * dimensions];
     usearch_dense_softmax_state_t carry[heads];
-    attend_values_t values = {table, tokens, dimensions};
+    attend_values_t values = {table, tokens, dimensions, usearch_scalar_i8_k};
     usearch_dense_attend_t attend = {
         .index = index,
         .executor = executor,
@@ -707,17 +703,10 @@ void test_attend(void) {
     usearch_dense_attend(&attend);
     expect_eq(outcome.status, usearch_status_shape_mismatch_k, "A key without a value row must refuse the call");
 
-    // A RAM handle resolves rows on the host, so a device row lookup refuses, beside the host one or alone.
     values.rows = tokens;
-    attend.value_row = attend_value_row;
-    usearch_dense_attend(&attend);
-    expect_eq(outcome.status, usearch_status_invalid_argument_k, "A RAM handle must refuse a second, device lookup");
     attend.value_lookup = NULL;
     usearch_dense_attend(&attend);
-    expect_eq(outcome.status, usearch_status_invalid_argument_k, "A RAM handle must refuse a device lookup alone");
-    attend.value_row = NULL;
-    usearch_dense_attend(&attend);
-    expect_eq(outcome.status, usearch_status_invalid_argument_k, "A RAM handle must refuse a missing value lookup");
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "A missing value lookup must refuse the call");
 
     usearch_dense_index_t const angular = create_index(dimensions);
     attend.index = angular;

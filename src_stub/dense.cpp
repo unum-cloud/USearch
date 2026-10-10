@@ -543,7 +543,6 @@ void usearch_dense_insert(usearch_dense_insert_t* arguments) {
                   "The batch could not be accommodated", outcome))
         return;
 
-    std::size_t const watermark = index.entries.size();
     std::size_t const dimensions = index.options.dimensions;
     std::size_t const row_bytes = row_extent(vectors.scalar, dimensions);
     std::vector<double> payload(dimensions);
@@ -552,13 +551,8 @@ void usearch_dense_insert(usearch_dense_insert_t* arguments) {
         read_row(row_at<std::byte>(vectors.data, row, vectors.stride, row_bytes), vectors.scalar, payload);
         index.append(key_at(arguments->keys, row), payload);
         ++published;
-        if (!keep_going(arguments->progress, arguments->progress_state, published, count)) break;
-    }
-    // The batch is all-or-nothing, a cancellation included, so a stopped run unwinds to the
-    // watermark rather than leaving a prefix published.
-    if (published != count) {
-        index.unwind(watermark);
-        return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the batch");
+        // Every row is claimed before the first report, so the handler only reports.
+        keep_going(arguments->progress, arguments->progress_state, published, count);
     }
     if (arguments->stats) {
         arguments->stats->visited_members = published;
@@ -910,8 +904,7 @@ void usearch_dense_attend(usearch_dense_attend_t* arguments) {
     usearch_rows_span_t const& outputs = arguments->outputs;
     if (reject_view(queries, queries_count, index, outcome)) return;
     if (reject_span(outputs, dimensions, queries_count, outcome)) return;
-    if (reject_if(!arguments->value_lookup || arguments->value_row, usearch_status_invalid_argument_k,
-                  "A RAM handle takes only a value lookup, and a GPU handle only a value row", outcome))
+    if (reject_if(!arguments->value_lookup, usearch_status_invalid_argument_k, "The value lookup must be set", outcome))
         return;
     if (reject_if(queries_count % head_count, usearch_status_shape_mismatch_k, "The heads must divide the rows",
                   outcome))
@@ -923,7 +916,9 @@ void usearch_dense_attend(usearch_dense_attend_t* arguments) {
     std::vector<usearch_key_t> keys(indexed);
     std::vector<void const*> value_rows(indexed);
     for (std::size_t entry = 0; entry != indexed; ++entry) keys[entry] = index.entries[entry].key;
-    if (indexed) arguments->value_lookup(arguments->value_lookup_state, keys.data(), indexed, value_rows.data());
+    if (indexed)
+        arguments->value_lookup(arguments->value_lookup_state, keys.data(), indexed, index.options.quantization,
+                                dimensions, value_rows.data());
     if (reject_if(std::find(value_rows.begin(), value_rows.end(), nullptr) != value_rows.end(),
                   usearch_status_shape_mismatch_k, "A scored key resolved to no value row", outcome))
         return;

@@ -96,8 +96,8 @@
  *  @c usearch_dense_cursor_init answers on RAM only; VRAM rows are read back through a search.
  *  @c usearch_dense_get, @c usearch_dense_save_buffer, @c usearch_dense_multiply and
  *  @c usearch_dense_maxsim answer on RAM only, the first three waiting on device arenas.
- *  @c usearch_dense_attend answers on both, resolving value rows through @c value_lookup on RAM and
- *  through the device-side @c value_row on VRAM.
+ *  @c usearch_dense_attend answers on both, resolving value rows through @c value_lookup, a host
+ *  function on RAM and a device one on VRAM.
  *  @c usearch_dense_search_stream_init and @c usearch_dense_merge are unsupported on both.
  *
  *  @c usearch_dense_view_nvme answers @c usearch_status_unsupported_k: NVMe checkpoints carry no
@@ -1372,14 +1372,12 @@ typedef struct usearch_dense_softmax_state_t {
     float partition;
 } usearch_dense_softmax_state_t;
 
-/** Resolves @p count keys to their value rows, one row per key, as wide as the keys and stored like them;
- *  a NULL row refuses the call. */
-typedef void (*usearch_value_lookup_t)(void* state, usearch_key_t const* keys, size_t count, void const** rows);
-
-/** Resolves one key to its value row on the device a GPU walk runs on, as wide as the keys and stored like them,
- *  16-byte aligned; NULL refuses the call. A @c __device__ function the caller takes the address of with
- *  @c cudaMemcpyFromSymbol, with @p state in memory that device reads. */
-typedef void const* (*usearch_value_row_t)(void* state, usearch_key_t key);
+/** Resolves @p count keys to their value rows, one row per key, @p columns values of @p scalar each;
+ *  a NULL row refuses the call. A host function for a RAM handle; for a VRAM one, a @c __device__
+ *  function whose address comes from @c cudaMemcpyFromSymbol, its @p state and rows 16-byte aligned
+ *  in memory that device reads. */
+typedef void (*usearch_value_lookup_t)(void* state, usearch_key_t const* keys, size_t count, usearch_scalar_t scalar,
+                                       size_t columns, void const** rows);
 
 /** The arguments of @c usearch_dense_attend. */
 typedef struct usearch_dense_attend_t {
@@ -1406,17 +1404,11 @@ typedef struct usearch_dense_attend_t {
      *  it must divide @c count, and zero means one. */
     size_t head_count;
 
-    /** Resolves the keys of every scored batch to their value rows, once per batch, for a RAM handle. */
+    /** Resolves the keys of every scored batch to their value rows, on the host or the device. */
     usearch_value_lookup_t value_lookup;
 
     /** Opaque pointer forwarded into every @c value_lookup call. */
     void* value_lookup_state;
-
-    /** Resolves every scored key to its value row inside the walk, for a GPU handle. */
-    usearch_value_row_t value_row;
-
-    /** Opaque pointer forwarded into every @c value_row call. */
-    void* value_row_state;
 
     /** Where the attended rows land, @c count of them, as wide as the keys. */
     usearch_rows_span_t outputs;
@@ -1445,8 +1437,7 @@ typedef struct usearch_dense_attend_t {
 /**
  *  @brief Softmax attention of a run of query heads over every indexed key their graph walks score,
  *      folded as Flash Attention folds key tiles. @ref dense_index_linear_algebra
- *  @retval usearch_status_invalid_argument_k A RAM handle without @c value_lookup or with @c value_row, or a
- *      GPU handle without @c value_row or with @c value_lookup.
+ *  @retval usearch_status_invalid_argument_k @c value_lookup is NULL.
  *  @retval usearch_status_shape_mismatch_k @c head_count does not divide @c count, @c outputs holds
  *      fewer rows than the call or rows of another width than the keys, or a lookup yields a NULL row.
  *
@@ -1463,9 +1454,9 @@ typedef struct usearch_dense_attend_t {
  *  multi-head attention.
  *
  *  The index stores no values, so only keys a walk scores are ever resolved to value rows. A RAM
- *  handle takes @c value_lookup, called on the host once per scored batch; a GPU handle takes
- *  @c value_row, called on the device once per scored key inside the walk. A value row is exactly as
- *  wide as the keys and stored in the index's own scalar kind. A NULL row refuses the call with
+ *  handle calls @c value_lookup on the host once per scored batch; a GPU handle calls it on the
+ *  device inside the walk. A value row is exactly as wide as the keys and stored in the index's own
+ *  scalar kind, which every call states as @c columns and @c scalar. A NULL row refuses the call with
  *  @c usearch_status_shape_mismatch_k rather than skipping the key: a missing row is a wrong softmax,
  *  not a smaller one.
  *

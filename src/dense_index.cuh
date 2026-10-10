@@ -2448,18 +2448,15 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
 
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            constexpr bool on_ram = is_ram_index<variant_type_>;
             if constexpr (variant_type_::kernel_kind_k != nk_kernel_dot_k)
                 propagate_error(usearch_status_config_mismatch_k, outcome,
                                 "A softmax weighs logits, so the kind must be inner product");
-            else if (on_ram ? !arguments->value_lookup || arguments->value_row
-                            : !arguments->value_row || arguments->value_lookup)
-                propagate_error(usearch_status_invalid_argument_k, outcome,
-                                "A RAM handle takes only a value lookup, and a GPU handle only a value row");
+            else if (!arguments->value_lookup)
+                propagate_error(usearch_status_invalid_argument_k, outcome, "The value lookup must be set");
             else {
-                typename specialized_index<variant_type_>::attend_lookup_t value_lookup;
-                if constexpr (on_ram) value_lookup = {arguments->value_lookup, arguments->value_lookup_state, columns};
-                else value_lookup = {arguments->value_row, arguments->value_row_state};
+                typename specialized_index<variant_type_>::attend_lookup_t const value_lookup {
+                    arguments->value_lookup, arguments->value_lookup_state,
+                    usearch_scalar_of(variant_type_::vector_dtype_k), columns};
                 // Outputs stage as `f32` and narrow one row at a time; the carry stages beside them.
                 auto make_sink = [&](std::size_t chunk, status_t& staged) noexcept {
                     growing_buffer<f32_t> staged_outputs {global_allocator};

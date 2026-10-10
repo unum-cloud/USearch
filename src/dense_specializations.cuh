@@ -534,6 +534,7 @@ struct key_predicate_t {
 struct value_lookup_t {
     usearch_value_lookup_t callback;
     void* state;
+    usearch_scalar_t scalar;
     std::size_t dimensions;
 
     template <typename scalar_type_>
@@ -541,7 +542,7 @@ struct value_lookup_t {
         std::array<usearch_key_t, 4> batch;
         std::array<void const*, 4> found;
         for (std::size_t lane = 0; lane != keys.size(); ++lane) batch[lane] = std::bit_cast<usearch_key_t>(keys[lane]);
-        callback(state, batch.data(), keys.size(), found.data());
+        callback(state, batch.data(), keys.size(), scalar, dimensions, found.data());
         for (std::size_t lane = 0; lane != keys.size(); ++lane)
             rows[lane] = found[lane]
                              ? nk::vector_view<scalar_type_> {static_cast<scalar_type_ const*>(found[lane]), dimensions}
@@ -549,14 +550,19 @@ struct value_lookup_t {
     }
 };
 
-/** The C device row lookup lifted onto the index's key vocabulary: one call per scored key, inside a GPU walk. */
-struct value_row_lookup_t {
-    usearch_value_row_t callback;
+/** The C value lookup called on the device, one scored key at a time inside a GPU walk. */
+struct device_value_lookup_t {
+    usearch_value_lookup_t callback;
     void* state;
+    usearch_scalar_t scalar;
+    std::size_t dimensions;
 
 #if USEARCH_BUILD_CUDA
     __device__ void const* operator()(us::uuid_t key) const noexcept {
-        return callback(state, std::bit_cast<usearch_key_t>(key));
+        usearch_key_t const scored = std::bit_cast<usearch_key_t>(key);
+        void const* row = nullptr;
+        callback(state, &scored, 1, scalar, dimensions, &row);
+        return row;
     }
 #endif
 };
@@ -647,7 +653,7 @@ struct specialized_index {
     using counts_span_t = std::span<std::size_t>;
 
     /** What an attend resolves value rows through: a host callback per batch on RAM, a device call per key on GPU. */
-    using attend_lookup_t = std::conditional_t<is_ram_index<index_type_>, value_lookup_t, value_row_lookup_t>;
+    using attend_lookup_t = std::conditional_t<is_ram_index<index_type_>, value_lookup_t, device_value_lookup_t>;
 
     index_type_& index;
 
