@@ -1,131 +1,110 @@
 /**
- *  The CUDA index's row protocol from `include/usearch/dense/vram_index.cuh`: no device watermark,
- *  one warp per node, slot zero of every row the combined lock and first-neighbor word; a search
- *  walk also skips every ID at or past the host watermark it launched under, which
- *  `dense_vram_index_claims.pml` models, and the reader here is a walk that admits node 1. A
- *  warp is two lanes here, the leader and one follower, each a thread of the memory model with
- *  its own view; `__syncwarp` is the only step that merges views, `__shfl_sync` copies a value
- *  and merges nothing, which is what the PTX ISA promises of each.
+ *  @brief The CUDA index's rows: publication by one release, the bounded slot-zero lock, the
+ *      back-link's sweep and append, and a traversal warp whose follower lanes read behind a shuffle.
+ *
+ *  From `include/usearch/dense/vram_index.cuh`: no device watermark, one warp per node, slot zero
+ *  of every row the combined lock and first-neighbor word; a search walk also skips every ID at or
+ *  past the host watermark it launched under, which `dense_vram_index_claims.pml` models, and the
+ *  reader here is a walk that admits node 1. A warp is two lanes here, the leader and one follower,
+ *  each a thread of the memory model with its own view; `__syncwarp` is the only step that merges
+ *  views, `__shfl_sync` copies a value and merges nothing, which is what the PTX ISA promises of
+ *  each.
  *
  *  Row 0 is published by an earlier batch, made visible to every lane by the launch edge. The
- *  inserter warp lands node 1: the follower writes the payload word (it stands for the vector
- *  row and the own tail slots, which follow the same path), the warp syncs, the leader
- *  release-stores slot zero - node 0 when the walk found it, a self-loop otherwise. It then
+ *  inserter warp lands node 1: the follower writes the payload word, which stands for the vector
+ *  row and the own tail slots that follow the same path, the warp syncs, and the leader
+ *  release-stores slot zero, node 0 when the walk found it and a self-loop otherwise. It then
  *  back-links into row 0: the leader's bounded acquire exchange of the sentinel, broadcast by
  *  shuffle; a published-empty row takes the newcomer as its head, otherwise the follower sweeps
- *  slot one and the empty slot is appended into by the leader, or the full row is rewritten by
- *  the follower. A single-lane prior holder appends node 2 into the same row, so the inserter's
- *  sweep may follow an edit its leader's exchange acquired. The reader warp walks row 0: the
- *  leader acquires slot zero with one retry on the sentinel, broadcasts it, the follower loads
- *  slot one, the warp syncs on its staging and each lane reads its neighbor's payload plainly.
+ *  slot one and the empty slot is appended into by the leader, or the full row is rewritten by the
+ *  follower. A single-lane prior holder appends node 2 into the same row, so the inserter's sweep
+ *  may follow an edit its leader's exchange acquired. The reader warp walks row 0: the leader
+ *  acquires slot zero with one retry on the sentinel, broadcasts it, the follower loads slot one,
+ *  the warp syncs on its staging and each lane reads its neighbor's payload plainly.
  *
- *  Invariants:
- *  - (a) an id a lane read from a published row names a node it sees published, with the
- *    payload it sees whole. The follower's slot-one load acquires, pairing with the release
- *    fence every lock holder places between its lock and its slot stores; `-Dwithout_tail_acquire`
- *    drops the acquire and `-Dwithout_tail_fence` the fence, and either fails: the follower
- *    reads an edit newer than the unlock its leader acquired, and the payload behind it stale;
- *  - (b) a lock holder's edit is whole to a reader that acquired its unlock: the follower's
- *    slot-one read is at least the write that unlock published. `-Dwithout_syncwarp_after_broadcast`
- *    reads slot one straight after the shuffle, as the header did before its `__syncwarp`, and
- *    it fails;
- *  - (c) an assigned id ends published, self-loop or not, whether or not its reverse edge landed;
- *  - (d) an append lands in a slot that is empty: the sweep that found it followed the unlock
- *    the exchange acquired. `-Dwithout_syncwarp_after_lock` sweeps straight after the lock's
- *    shuffle, as the header did before its `__syncwarp`, and it fails - the prior holder's link
- *    is overwritten.
- *  `-Dwithout_fixes` is the header before those four edits: all four drops at once.
+ *  An ID a lane read from a published row names a node it sees published, with the payload it sees
+ *  whole; a lock holder's edit is whole to a reader that acquired its unlock, so the follower's
+ *  slot-one read is at least the write that unlock published; an assigned ID ends published,
+ *  self-loop or not, whether or not its reverse edge landed; and an append lands in a slot that is
+ *  empty, since the sweep that found it followed the unlock the exchange acquired.
+ *
+ *  @verify pass sc,rc11
+ *  @verify pass sc syncwarp_after_broadcast=false syncwarp_after_lock=false tail_order=order_relaxed tail_fence=false
+ *  @verify fail rc11 syncwarp_after_broadcast=false: a traversal's follower lanes sync with the
+ *      leader after the shuffle; loading their tail slots straight after it, a lane reads a slot
+ *      older than the unlock its leader acquired, and the warp assembles a row no holder ever wrote
+ *  @verify fail rc11 syncwarp_after_lock=false: a back-linker's follower lanes sync with the leader
+ *      after the lock's shuffle; sweeping the locked row straight after it, a stale sentinel names a
+ *      slot the previous holder just filled, and the append overwrites that holder's link
+ *  @verify fail rc11 tail_order=order_relaxed: the follower's slot-one load acquires, pairing with
+ *      the release fence every lock holder places between its lock and its slot stores; relaxed, it
+ *      returns an edit newer than the unlock its leader acquired, which carries nothing, and the ID
+ *      it found names a node whose payload it then reads stale. No syncwarp closes this one, since
+ *      no lane acquired that edit
+ *  @verify fail rc11 tail_fence=false: every lock holder places a release fence between its lock and
+ *      its slot stores, which the follower's acquiring slot-one load pairs with; without it, the
+ *      follower reads an edit newer than the unlock its leader acquired, and the payload behind it
+ *      stale
+ *  @verify fail rc11 syncwarp_after_broadcast=false syncwarp_after_lock=false tail_order=order_relaxed tail_fence=false:
+ *      the header before the four edits holds sequentially, since each one orders memory and
+ *      nothing else, and under `rc11` a follower reads a node's payload stale behind an edit newer
+ *      than the unlock its leader acquired
  */
+#define thread_count 5
+#define location_count 4
+#define history_depth 6
 #include "weak_memory.pml"
 
-// The threads, by role, apart from the processes that play them.
-#define inserter_leader_thread 0
-#define inserter_follower_thread 1
-#define reader_leader_thread 2
-#define reader_follower_thread 3
-#define prior_holder_thread 4
+// The warps: warp w runs its leader lane as thread 2w and its follower as 2w + 1; the prior holder is thread 4.
 #define inserter_warp 0
 #define reader_warp 1
+#define leader_of(w) ((w) * 2)
+#define follower_of(w) ((w) * 2 + 1)
 
 // The words: a row is its slot zero, the lock, and one tail slot; the newcomer also owns a payload word.
 #define row_lock(id) ((id) * 2)
 #define row_tail(id) ((id) * 2 + 1)
 #define payload(id) ((id) * 2 + 1)
 
-// The values rows carry: the sentinel is the all-ones id in silicon, and the initial payload
-// word is what a stale read returns.
+// The values rows carry: the sentinel is the all-ones ID in silicon, and the initial payload word
+// is what a stale read returns.
 #define sentinel 0
 #define node(id) (1 + (id))
 #define written 7
 
-#ifdef without_fixes
-#define without_syncwarp_after_broadcast
-#define without_syncwarp_after_lock
-#define without_tail_acquire
-#define without_tail_fence
+// The knobs: the header's choices, each overridden by a `@verify` line that replays its counterexample.
+#ifndef syncwarp_after_broadcast
+#define syncwarp_after_broadcast true
 #endif
-#ifdef without_tail_acquire
-#define tail_order order_relaxed
-#else
+#ifndef syncwarp_after_lock
+#define syncwarp_after_lock true
+#endif
+#ifndef tail_order
 #define tail_order order_acquire
+#endif
+#ifndef tail_fence
+#define tail_fence true
 #endif
 
 bool launched;
-byte links;      // the walk's selection: 1 links the newcomer to node 0, 0 publishes it empty
+byte links;       // the walk's selection: 1 links the newcomer to node 0, 0 publishes it empty
 byte arrivals[2]; // per warp, the lanes' barrier arrivals so far
 int broadcast_lock, broadcast_first; // the shuffled words: no view moves with them
 bool lock_ready, first_ready;
 bool slot1_empty; // the sweep's ballot
 byte lock_skips, locked_drops;
-#if memory != sequential
-byte view_thread;         // scratch for the launch edge
-byte published_at;        // the history index of the newcomer's publication
+byte published_at;                  // the history index of the newcomer's publication
 byte tail_at_unlock[history_depth]; // per slot-zero write, the slot-one write it published
-byte leader_read;         // the slot-zero write the reader's leader acquired
-#endif
+byte leader_read;                   // the slot-zero write the reader's leader acquired
 
-// `__syncwarp`: the k-th barrier of warp w completes when both lanes arrived k times, and the
-// last arrival merges both lanes' views both ways - `bar.warp.sync` orders memory among its
-// participants. `acquired` moves too, so a later acquire fence on either lane folds what the
-// other's relaxed loads picked up; nothing here exercises that.
-#if memory != sequential
-inline merge_views(a, b) {
-    for (view_location : 0 .. location_count - 1) {
-        if
-        :: current[thread_index(a, view_location)] > current[thread_index(b, view_location)] ->
-            current[thread_index(b, view_location)] = current[thread_index(a, view_location)]
-        :: else -> current[thread_index(a, view_location)] = current[thread_index(b, view_location)]
-        fi;
-        if
-        :: acquired[thread_index(a, view_location)] > acquired[thread_index(b, view_location)] ->
-            acquired[thread_index(b, view_location)] = acquired[thread_index(a, view_location)]
-        :: else -> acquired[thread_index(a, view_location)] = acquired[thread_index(b, view_location)]
-        fi
-    };
-    view_location = 0
-}
-// the CUDA API edge: everything an earlier batch wrote is visible to every lane of this launch
-inline launch_edge() {
-    atomic {
-        for (view_thread : 0 .. thread_count - 1) {
-            for (view_location : 0 .. location_count - 1) {
-                current[thread_index(view_thread, view_location)] = newest[view_location]
-            }
-        };
-        view_thread = 0;
-        view_location = 0
-    }
-}
-#else
-inline merge_views(a, b) { skip }
-inline launch_edge() { skip }
-#endif
-inline syncwarp(w, a, b, phase) {
+// `__syncwarp`: the k-th barrier of warp w completes when both lanes arrived k times, and the last
+// arrival merges both lanes' views both ways, since `bar.warp.sync` orders memory among its participants
+inline syncwarp(w, phase) {
     phase = phase + 1;
     atomic {
         arrivals[w] = arrivals[w] + 1;
         if
-        :: arrivals[w] == 2 * phase -> merge_views(a, b)
+        :: arrivals[w] == 2 * phase -> merge_view(leader_of(w), follower_of(w)); merge_view(follower_of(w), leader_of(w))
         :: else
         fi
     };
@@ -136,53 +115,46 @@ inline syncwarp(w, a, b, phase) {
 inline unlock(t, first_value) {
     atomic {
         store(t, row_lock(0), order_release, first_value);
-#if memory != sequential
-        tail_at_unlock[newest[row_lock(0)]] = newest[row_tail(0)]
-#endif
+        tail_at_unlock[newest_write(row_lock(0))] = newest_write(row_tail(0))
     }
 }
 
 // a lane scoring node 1: it must see the node published and its payload as written
 inline see_node1(t, seen) {
     atomic {
-#if memory != sequential
-        assert(current[thread_index(t, row_lock(1))] >= published_at);
-#else
-        assert(newest_value(row_lock(1)) != sentinel);
-#endif
+        assert(memory != sc || newest_value(row_lock(1)) != sentinel);
+        assert(seen_write(t, row_lock(1)) >= published_at);
         load(t, payload(1), order_relaxed, seen);
         assert(seen == written)
     }
 }
 
-active proctype inserter_leader_lane() {
+proctype inserter_leader_lane(byte t) {
     int first_link, displaced;
     byte phase, attempt;
-    // the host: row 0 published by an earlier batch, then the launch edge
+    // the host: row 0 published by an earlier batch, then the CUDA API edge to every lane of this launch
     if
-    :: true -> store(inserter_leader_thread, row_lock(0), order_relaxed, node(0)) // published-empty
-    :: true -> store(inserter_leader_thread, row_lock(0), order_relaxed, node(3)) // headed by an older node
+    :: true -> store(t, row_lock(0), order_relaxed, node(0)) // published-empty
+    :: true -> store(t, row_lock(0), order_relaxed, node(3)) // headed by an older node
     fi;
-    launch_edge();
+    atomic { see_newest(0); see_newest(1); see_newest(2); see_newest(3); see_newest(4) };
     if
     :: true -> links = 0
     :: true -> links = 1
     fi;
     launched = true;
     // the newcomer: the lanes' payload writes, the syncwarp, the one release that publishes
-    syncwarp(inserter_warp, inserter_leader_thread, inserter_follower_thread, phase);
+    syncwarp(inserter_warp, phase);
     first_link = (links -> node(0) : node(1)); // a self-loop encodes published-empty
     atomic {
-        store(inserter_leader_thread, row_lock(1), order_release, first_link);
-#if memory != sequential
-        published_at = newest[row_lock(1)]
-#endif
+        store(t, row_lock(1), order_release, first_link);
+        published_at = newest_write(row_lock(1))
     };
     if
     :: links == 1 ->
         // back_link_neighbors: the bounded lock, the shuffle, the sweep, the edit, the unlock
 lock:
-        read_modify_write_if(inserter_leader_thread, row_lock(0), order_acquire, displaced != sentinel, displaced, sentinel);
+        read_modify_write_if(t, row_lock(0), order_acquire, displaced != sentinel, displaced, sentinel);
         if
         :: displaced == sentinel && attempt == 0 -> attempt = 1; goto lock
         :: else
@@ -190,37 +162,39 @@ lock:
         atomic { broadcast_lock = displaced; lock_ready = true };
         if
         :: displaced == sentinel -> lock_skips++
-        :: displaced == node(0) -> unlock(inserter_leader_thread, node(1)) // published-empty: the newcomer heads it
+        :: displaced == node(0) -> unlock(t, node(1)) // published-empty: the newcomer heads it
         :: else ->
-#ifndef without_syncwarp_after_lock
-            syncwarp(inserter_warp, inserter_leader_thread, inserter_follower_thread, phase);
-#endif
-            syncwarp(inserter_warp, inserter_leader_thread, inserter_follower_thread, phase); // after the sweep
-#ifndef without_tail_fence
-            fence_release(inserter_leader_thread);
-#endif
+            if
+            :: syncwarp_after_lock -> syncwarp(inserter_warp, phase)
+            :: else
+            fi;
+            syncwarp(inserter_warp, phase); // after the sweep
+            if
+            :: tail_fence -> fence_release(t)
+            :: else
+            fi;
             if
             :: slot1_empty ->
                 atomic {
-                    assert(newest_value(row_tail(0)) == sentinel); // (d)
-                    store(inserter_leader_thread, row_tail(0), order_relaxed, node(1))
+                    assert(newest_value(row_tail(0)) == sentinel); // the append lands in an empty slot
+                    store(t, row_tail(0), order_relaxed, node(1))
                 };
-                syncwarp(inserter_warp, inserter_leader_thread, inserter_follower_thread, phase)
-            :: else -> syncwarp(inserter_warp, inserter_leader_thread, inserter_follower_thread, phase) // the rewrite
+                syncwarp(inserter_warp, phase)
+            :: else -> syncwarp(inserter_warp, phase) // the rewrite
             fi;
-            unlock(inserter_leader_thread, displaced)
+            unlock(t, displaced)
         fi
     :: else
     fi;
-    assert(newest_value(row_lock(1)) != sentinel) // (c)
+    assert(newest_value(row_lock(1)) != sentinel) // the newcomer ends published
 }
 
-active proctype inserter_follower_lane() {
+proctype inserter_follower_lane(byte t) {
     int displaced, slot1;
     byte phase;
     (launched);
-    store(inserter_follower_thread, payload(1), order_relaxed, written);
-    syncwarp(inserter_warp, inserter_leader_thread, inserter_follower_thread, phase);
+    store(t, payload(1), order_relaxed, written);
+    syncwarp(inserter_warp, phase);
     if
     :: links == 1 ->
         (lock_ready);
@@ -228,20 +202,22 @@ active proctype inserter_follower_lane() {
         if
         :: displaced == sentinel || displaced == node(0)
         :: else ->
-#ifndef without_syncwarp_after_lock
-            syncwarp(inserter_warp, inserter_leader_thread, inserter_follower_thread, phase);
-#endif
-            load(inserter_follower_thread, row_tail(0), tail_order, slot1); // the sweep of slot one, an acquire as every slot load
-            slot1_empty = (slot1 == sentinel);
-            syncwarp(inserter_warp, inserter_leader_thread, inserter_follower_thread, phase);
-#ifndef without_tail_fence
-            fence_release(inserter_follower_thread);
-#endif
             if
-            :: slot1_empty -> syncwarp(inserter_warp, inserter_leader_thread, inserter_follower_thread, phase)
+            :: syncwarp_after_lock -> syncwarp(inserter_warp, phase)
+            :: else
+            fi;
+            load(t, row_tail(0), tail_order, slot1); // the sweep of slot one, an acquire as every slot load
+            slot1_empty = (slot1 == sentinel);
+            syncwarp(inserter_warp, phase);
+            if
+            :: tail_fence -> fence_release(t)
+            :: else
+            fi;
+            if
+            :: slot1_empty -> syncwarp(inserter_warp, phase)
             :: else -> // full: the re-selection keeps the newcomer in this lane's slot
-                store(inserter_follower_thread, row_tail(0), order_relaxed, node(1));
-                syncwarp(inserter_warp, inserter_leader_thread, inserter_follower_thread, phase)
+                store(t, row_tail(0), order_relaxed, node(1));
+                syncwarp(inserter_warp, phase)
             fi
         fi
     :: else
@@ -249,39 +225,38 @@ active proctype inserter_follower_lane() {
 }
 
 // another back-linker on row 0, one lane: its edit is what the inserter's sweep may miss
-active proctype prior_holder_lane() {
+proctype prior_holder_lane(byte t) {
     int displaced;
     byte attempt;
     (launched);
 lock:
-    read_modify_write_if(prior_holder_thread, row_lock(0), order_acquire, displaced != sentinel, displaced, sentinel);
+    read_modify_write_if(t, row_lock(0), order_acquire, displaced != sentinel, displaced, sentinel);
     if
     :: displaced == sentinel && attempt == 0 -> attempt = 1; goto lock
     :: else
     fi;
     if
     :: displaced == sentinel -> lock_skips++
-    :: displaced == node(0) -> unlock(prior_holder_thread, node(2))
+    :: displaced == node(0) -> unlock(t, node(2))
     :: else ->
         // every lock holder's slot stores follow its release fence
-#ifndef without_tail_fence
-        fence_release(prior_holder_thread);
-#endif
-        store(prior_holder_thread, row_tail(0), order_relaxed, node(2));
-        unlock(prior_holder_thread, displaced)
+        if
+        :: tail_fence -> fence_release(t)
+        :: else
+        fi;
+        store(t, row_tail(0), order_relaxed, node(2));
+        unlock(t, displaced)
     fi
 }
 
-active proctype reader_leader_lane() {
+proctype reader_leader_lane(byte t) {
     int first, seen;
     byte phase, attempt;
     (launched);
 peek:
     atomic {
-        load(reader_leader_thread, row_lock(0), order_acquire, first);
-#if memory != sequential
-        leader_read = current[thread_index(reader_leader_thread, row_lock(0))]
-#endif
+        load(t, row_lock(0), order_acquire, first);
+        leader_read = seen_write(t, row_lock(0))
     };
     if
     :: first == sentinel && attempt == 0 -> attempt = 1; goto peek
@@ -291,18 +266,19 @@ peek:
     if
     :: first == sentinel -> locked_drops++
     :: else ->
-#ifndef without_syncwarp_after_broadcast
-        syncwarp(reader_warp, reader_leader_thread, reader_follower_thread, phase);
-#endif
-        syncwarp(reader_warp, reader_leader_thread, reader_follower_thread, phase); // the staging's syncwarp
         if
-        :: first == node(1) -> see_node1(reader_leader_thread, seen)
+        :: syncwarp_after_broadcast -> syncwarp(reader_warp, phase)
+        :: else
+        fi;
+        syncwarp(reader_warp, phase); // the staging's syncwarp
+        if
+        :: first == node(1) -> see_node1(t, seen)
         :: else
         fi
     fi
 }
 
-active proctype reader_follower_lane() {
+proctype reader_follower_lane(byte t) {
     int first, tail, seen;
     byte phase;
     (first_ready);
@@ -310,19 +286,28 @@ active proctype reader_follower_lane() {
     if
     :: first == sentinel
     :: else ->
-#ifndef without_syncwarp_after_broadcast
-        syncwarp(reader_warp, reader_leader_thread, reader_follower_thread, phase);
-#endif
-        atomic {
-            load(reader_follower_thread, row_tail(0), tail_order, tail);
-#if memory != sequential
-            assert(current[thread_index(reader_follower_thread, row_tail(0))] >= tail_at_unlock[leader_read]); // (b)
-#endif
-        };
-        syncwarp(reader_warp, reader_leader_thread, reader_follower_thread, phase);
         if
-        :: tail == node(1) -> see_node1(reader_follower_thread, seen)
+        :: syncwarp_after_broadcast -> syncwarp(reader_warp, phase)
+        :: else
+        fi;
+        atomic {
+            load(t, row_tail(0), tail_order, tail);
+            assert(seen_write(t, row_tail(0)) >= tail_at_unlock[leader_read]) // the edit is whole
+        };
+        syncwarp(reader_warp, phase);
+        if
+        :: tail == node(1) -> see_node1(t, seen)
         :: else
         fi
     fi
+}
+
+init {
+    atomic {
+        run inserter_leader_lane(0);
+        run inserter_follower_lane(1);
+        run reader_leader_lane(2);
+        run reader_follower_lane(3);
+        run prior_holder_lane(4)
+    }
 }

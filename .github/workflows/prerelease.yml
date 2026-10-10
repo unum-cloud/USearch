@@ -182,23 +182,8 @@ jobs:
       - name: Test C/C++
         run: ctest --preset debug
 
-  verify_models:
-    name: Check Promela models
-    runs-on: ubuntu-26.04
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-      - name: Pull Git submodules
-        run: git submodule update --init --recursive
-      - name: Install Spin
-        run: |
-          sudo apt update
-          sudo apt install -y spin
-      - name: Check the models
-        run: verification/check.sh
-
   verify_clients:
-    name: Check GenMC clients
+    name: Check Promela models and GenMC clients
     runs-on: ubuntu-26.04
     steps:
       - name: Checkout
@@ -213,14 +198,14 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: MPI-SWS/genmc
-          ref: fe124db203f6d1a626057d72f07e25409075d809
+          ref: 9f6c4c0772d0c42b325681581acc6a0f3eb9b5f7
           path: genmc
       - name: Restore the GenMC build
         id: genmc
         uses: actions/cache@v6
         with:
           path: genmc/build
-          key: genmc-fe124db-clang-20
+          key: genmc-9f6c4c0-clang-20
       - name: Build GenMC
         if: steps.genmc.outputs.cache-hit != 'true'
         run: |
@@ -231,6 +216,7 @@ jobs:
         env:
           GENMC: ${{ github.workspace }}/genmc/build/bin/genmc
           GENMC_CLANG: clang++-20
+          CPLUS_INCLUDE_PATH: ${{ github.workspace }}/forkunion/include
 
   test_ubuntu_clang:
     name: Test on Ubuntu with Clang 20

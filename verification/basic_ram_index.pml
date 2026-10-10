@@ -1,42 +1,57 @@
 /**
- *  The basic index's public calls interleaved on one reserved index, at the protocol layer:
- *  `insert` batches under the shared side of the gate, a certified `search`, `plan_save` and
- *  `health` on the unique side, and `plan_load` on the unique side of an empty index. The
- *  gate is the abstract shared mutex - `basic_shared_mutex.pml` covers the blind add and the
- *  back-off - and memory is sequentially consistent: this model composes the calls, the ones
+ *  @brief The basic index's public calls interleaved on one index, and a failed load's leftovers.
+ *
+ *  At the protocol layer: `insert` batches under the shared side of the gate, a certified `search`,
+ *  `plan_save` and `health` on the unique side, and `plan_load` on the unique side of an empty
+ *  index. The gate is the abstract shared mutex, `basic_shared_mutex.pml` covers the blind add and
+ *  the back-off, and memory is sequentially consistent: this model composes the calls, the ones
  *  below it order the words.
  *
- *  Two adders each bring one or two values into a capacity of three, so an overflow is
- *  reachable; two loaders each bring two into an empty index, so they and the adders race for
- *  the first publication, and a load may fail after wiring its rows and registering its keys.
+ *  Two adders each bring one or two values into a capacity of three, so an overflow is reachable;
+ *  two loaders each bring two into an empty index, so they and the adders race for the first
+ *  publication, and a load may fail after wiring its rows and registering its keys.
  *
  *  Invariants, checked in every reachable state by the monitor and at the calls' exits:
- *  - `visible <= dispensed <= claimed <= capacity`, and every id below `visible` is published;
+ *  - `visible <= dispensed <= claimed <= capacity`, and every ID below `visible` is published;
  *  - an adder past the gate has its whole batch claimed before it dispenses, and takes the
  *    watermark turn in dispensed order, so the prefix is hole-free;
  *  - the unique side finds no adder inside and a settled prefix, `visible == dispensed`;
  *  - a load succeeds only on an index nothing was ever dispensed into;
  *  - a certified search saw no acquisition of the gate and the same watermark twice;
- *  - a row is wired from nothing: `insert` clears its row before wiring, so a failed load's
- *    leftover never reaches a published node. `-Dwithout_row_clear` skips the clear;
- *  - a key is registered once: a plan that dies before `finish` wipes the keys its steps
- *    registered, whether its steps fell short or nobody finished it, so an unpublished
- *    load's entries never meet a retry's or an insert's. `-Dwithout_map_clear` skips the wipe;
- *  - a hold is dropped once: a successful `finish` spends the plan, so a second call answers a
- *    status instead of unlocking again. `-Dtwice_finished` unlocks twice, and the gate names it
- *    or an adder walks in on a loader's hold;
- *  - the certified search's second refusal at entry, an unsettled prefix, is subsumed: an
- *    unlocked gate has no adder inside, so `visible == dispensed`, which the entry asserts.
+ *  - a row is wired from nothing, and a key is registered once;
+ *  - the certified search's second refusal at entry, an unsettled prefix, is subsumed: an unlocked
+ *    gate has no adder inside, so `visible == dispensed`, which the entry asserts.
+ *
+ *  @verify pass sc
+ *  @verify fail sc row_clear=false: `insert` clears its row before wiring it, so a failed load's
+ *      leftover wiring never reaches a published node; without the clear, an adder wires a row a
+ *      dead load already wired
+ *  @verify fail sc map_clear=false: `load_plan_t::load` registers keys as it decodes, and a plan
+ *      that dies before `finish` wipes them under its hold, whether its steps fell short or nobody
+ *      finished it; without the wipe, an `insert` dispenses an ID the failed load's keys still name
+ *  @verify fail sc spends_plan=false: a successful `finish` spends the plan, so a second call
+ *      answers a status; without it, the second call drops a hold the spent plan does not own, and
+ *      the gate's assertion names it or an adder walks in on a loader's hold
  */
-// The scenario's sizes: two adders bringing one or two values each overflow the capacity.
+// The sizes: two adders bringing one or two values each overflow the capacity.
 #define capacity 3
-#define adders 2
-#define loaded_rows 2 // what the loader brings into an empty index
+#define loaded_rows 2 // what a loader brings into an empty index
+
+// The knobs: the header's choices, each overridden by a `@verify` line that replays its counterexample.
+#ifndef row_clear
+#define row_clear true
+#endif
+#ifndef map_clear
+#define map_clear true
+#endif
+#ifndef spends_plan
+#define spends_plan true
+#endif
 
 byte claimed, dispensed, visible;
 bool published[capacity];
 bool wired[capacity]; // the row holds a wiring, published or a failed load's leftover
-bool keyed[capacity]; // the key map holds the id
+bool keyed[capacity]; // the key map holds the ID
 byte holders;
 bool unique;
 byte generation;
@@ -77,11 +92,11 @@ inline settled_prefix() {
     }
 }
 
-active proctype monitor() {
+proctype monitor() {
     assert(visible <= dispensed && dispensed <= claimed && claimed <= capacity)
 }
 
-active [adders] proctype adder() {
+proctype adder() {
     byte batch, id, value, first_invisible;
     bool claimed_batch;
     select(batch : 1 .. 2);
@@ -104,11 +119,12 @@ active [adders] proctype adder() {
         };
         // identity after the walk, the row from nothing, then the watermark turn in dispensed order
         atomic { id = dispensed; dispensed++ };
-#ifndef without_row_clear
-        wired[id] = false;
-#endif
+        if
+        :: row_clear -> wired[id] = false
+        :: else
+        fi;
         assert(!wired[id]);
-        assert(!keyed[id]); // no failed load's key names this id
+        assert(!keyed[id]); // no failed load's key names this ID
         atomic { wired[id] = true; published[id] = true };
         (visible == id);
         visible = id + 1
@@ -119,7 +135,7 @@ refused:
     skip
 }
 
-active proctype searcher() {
+proctype searcher() {
     byte entry, first_invisible, id;
     atomic {
         if
@@ -142,22 +158,23 @@ contended:
     skip
 }
 
-active proctype saver() {
+proctype saver() {
     byte id;
     bool succeeded;
     try_lock(succeeded);
     if
-    :: succeeded -> settled_prefix(); unlock();
-#ifdef twice_finished
-        // a second `finish` on a spent plan drops a hold it no longer owns: either the assertion
-        // names it, or an adder walks in through the gate a loader now holds
-        unlock()
-#endif
+    :: succeeded ->
+        settled_prefix();
+        unlock();
+        if
+        :: !spends_plan -> unlock()
+        :: else
+        fi
     :: else
     fi
 }
 
-active [2] proctype loader() {
+proctype loader() {
     byte id, decoded;
     bool succeeded;
     try_lock(succeeded);
@@ -174,11 +191,12 @@ active [2] proctype loader() {
             :: decoded ->
                 for (id : 0 .. loaded_rows - 1) { published[id] = true };
                 atomic { claimed = loaded_rows; dispensed = loaded_rows; visible = loaded_rows }
-            :: else
+            :: else ->
                 // the dying plan wipes the keys its steps registered, still under its hold
-#ifndef without_map_clear
-                for (id : 0 .. loaded_rows - 1) { keyed[id] = false }
-#endif
+                if
+                :: map_clear -> for (id : 0 .. loaded_rows - 1) { keyed[id] = false }
+                :: else
+                fi
             fi
         :: else
         fi;
@@ -186,3 +204,5 @@ active [2] proctype loader() {
     :: else
     fi
 }
+
+init { atomic { run monitor(); run adder(); run adder(); run searcher(); run saver(); run loader(); run loader() } }

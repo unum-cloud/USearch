@@ -366,8 +366,8 @@ struct basic_shared_mutex {
         }
         // Pairs with the acquire fence before a certified probe's exit snapshot: a row read that
         // returned a store made under this hold proves the acquisition to that snapshot, which
-        // can then no longer read the word from before it. The ISAs order the hold after an
-        // acquiring read-modify-write on their own; the fence says so to the C++ model.
+        // can then no longer read the word from before it. Arm and POWER need the fence as much as
+        // the C++ model does: an acquire orders the add's read before the row stores, not its write.
         std::atomic_thread_fence(std::memory_order_release);
         annotate_lock_shared_acquired(&word);
     }

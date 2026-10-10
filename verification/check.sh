@@ -1,202 +1,178 @@
 #!/usr/bin/env bash
-# Runs every Promela model under the memory models it is meant for, and compares Spin's verdict
-# with the expected one: `pass` means no assertion fails, `fail` means the model admits the
-# outcome the assertion forbids - the variants that drop a fence or shrink a modulus. The memory
-# models and the runner's functions live in ForkUnion's `verification/`.
-# Needs `spin` and a C compiler; a GenMC on the path, or named by `GENMC`, also runs the clients.
+# Runs every `@verify` line of every Promela scenario and GenMC client and compares each verdict
+# with the expected one: `pass` means the search completed with no error, `fail` that an assertion
+# was violated, `stuck` that a process waits forever. Needs `spin` and a C compiler; a GenMC on the
+# path, or named by `GENMC`, also runs the clients.
 
 set -u
+build=$(mktemp -d)
+trap 'rm -rf "$build"' EXIT
+harness=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd) # `genmc.hpp` lives beside this file, wherever it is run from
+# Every verdict runs in its own directory in the background, `VERIFY_JOBS` at a time - four by
+# default, since each pan holds a hash table of its own; `finish` prints them in the order they
+# were queued, so the output reads like a serial run.
+jobs_limit=${VERIFY_JOBS:-4}
+queued=0
+
+throttle() { while [ "$(jobs -rp | wc -l)" -ge "$jobs_limit" ]; do sleep 0.1; done; }
+
+# section <title>: a heading, printed in its turn
+section() {
+    mkdir -p "$build/$queued"
+    echo "$1" >"$build/$queued/result"
+    queued=$((queued + 1))
+}
+
+# verify <model.pml> <expected> <spin defines...>
+verify() {
+    local model=$1 expected=$2 dir=$build/$queued
+    shift 2
+    mkdir -p "$dir"
+    queued=$((queued + 1))
+    throttle
+    (
+        local verdict
+        if ! (cd "$dir" && spin -a "$@" "$OLDPWD/$model" >pan.out 2>&1 &&
+            cc -O2 -DSAFETY -DCOLLAPSE -DVECTORSZ=4096 -w -o pan pan.c >>pan.out 2>&1); then verdict=broken
+        else
+            (cd "$dir" && ./pan -m1000000 -w26 >>pan.out 2>&1)
+            # A cut-short search, a knob defined twice, or a write or index past a scenario's shape proves nothing
+            if grep -qE "macro redefined|max search depth too small|invalid array index|violated.*history_full" "$dir/pan.out"; then verdict=broken
+            elif grep -q "errors: 0" "$dir/pan.out"; then verdict=pass
+            elif grep -q "pan:1: assertion violated" "$dir/pan.out"; then verdict=fail
+            elif grep -q "pan:1: invalid end state" "$dir/pan.out"; then verdict=stuck
+            else verdict=broken; fi
+        fi
+        report "$verdict" "$expected" "$model $*" "$dir/pan.out" >"$dir/result"
+    ) &
+}
+
+report() { # report <verdict> <expected> <label> <log>
+    if [ "$1" = "$2" ]; then echo "  ok    $3"
+    else echo "  WRONG $3 : expected $2, got $1"; sed -n 1,12p "$4"; touch "$(dirname "$4")/wrong"; fi
+}
+
+# finish: waits for every verdict, prints them in order, and exits with the count of wrong ones
+finish() {
+    wait
+    local index failed=0
+    for ((index = 0; index < queued; index++)); do
+        cat "$build/$index/result"
+        [ -e "$build/$index/wrong" ] && failed=$((failed + 1))
+    done
+    exit $failed
+}
+
+# GenMC ships a freestanding C library whose headers shadow the platform's - `atomic` without
+# `std::atomic_ref`, `stdio.h` without `EOF` - and puts its include directory behind the caller's.
+# The clients need the real standard library, so a directory of forwarders for the shadowed
+# names goes first. The compiler asked is the one GenMC was built with, `clang++` by default.
+genmc_ready() {
+    genmc=${GENMC:-$(command -v genmc || true)}
+    [ -n "$genmc" ] || { section "  skip  GenMC is not installed; set GENMC to its executable"; return 1; }
+    local compiler=${GENMC_CLANG:-clang++} directories libcxx="" libc=""
+    directories=$(echo | "$compiler" -x c++ -E -v - 2>&1 | sed -n '/<...> search starts here/,/End of search list/p' | grep '^ /' | awk '{print $1}')
+    for directory in $directories; do
+        [ -z "$libcxx" ] && [ -f "$directory/atomic" ] && libcxx=$directory && continue
+        [ -z "$libc" ] && [ -f "$directory/stdio.h" ] && libc=$directory
+    done
+    shadow=$build/shadow
+    mkdir -p "$shadow"
+    local name guard
+    for name in atomic thread cassert cstdio cstdlib; do printf '#include "%s/%s"\n' "$libcxx" "$name" >"$shadow/$name"; done
+    for name in assert.h pthread.h; do printf '#include "%s/%s"\n' "$libc" "$name" >"$shadow/$name"; done
+    for name in stdio.h stdlib.h errno.h; do
+        guard=_LIBCPP_$(echo "$name" | tr 'a-z.' 'A-Z_')
+        printf '#define %s\n#include "%s/%s"\n' "$guard" "$libc" "$name" >"$shadow/$name"
+    done
+}
+
+# GenMC treats a weak compare-exchange as one that may fail spuriously, so a read-first retry
+# loop never ends for it; `--unroll` gives every loop that many turns.
+genmc_unroll=${GENMC_UNROLL:-3}
+
+# Runs a command with a wall-clock limit, since an exhaustive exploration that grows past a few
+# minutes is a client to shrink, not a result to wait for.
+limited() { # limited <seconds> <command...>
+    local seconds=$1
+    shift
+    "$@" &
+    local pid=$!
+    (sleep "$seconds" && kill "$pid" 2>/dev/null) &
+    local watchdog=$!
+    wait "$pid" 2>/dev/null
+    local status=$?
+    pkill -P "$watchdog" 2>/dev/null
+    kill "$watchdog" 2>/dev/null
+    return $status
+}
+
+# verify_client <client.cpp> <expected> <memory model> <entry>: GenMC exits 0 when it found no
+# error and 42 when it found one; `--check-liveness` makes a wait that never ends one of them.
+verify_client() {
+    local client=$1 expected=$2 memory=$3 entry=$4 dir=$build/$queued unroll=$genmc_unroll
+    mkdir -p "$dir"
+    queued=$((queued + 1))
+    throttle
+    (
+        local verdict
+        limited "${GENMC_SECONDS:-300}" "$genmc" --"$memory" --check-liveness --disable-estimation --unroll="$unroll" \
+            --program-entry-function="$entry" -- -std=c++23 -I"$shadow" -I"$harness" -I../include -I"$harness/../include" \
+            "$client" >"$dir/genmc.out" 2>&1
+        case $? in
+        0) if grep -q "complete executions explored: 0" "$dir/genmc.out"; then verdict=broken; else verdict=pass; fi ;;
+        42) if grep -q "Liveness violation" "$dir/genmc.out"; then verdict=stuck; else verdict=fail; fi ;;
+        *) verdict=broken ;;
+        esac
+        report "$verdict" "$expected" "$client $memory $entry" "$dir/genmc.out" >"$dir/result"
+    ) &
+}
+
+# verify_all [file...]: every `@verify` line of the given scenarios and clients, or of every one
+# here and one directory down, then the verdicts in order. A line names the expected verdict and
+# the memory models, then knob overrides for a scenario or the entry for a client. Every knob the
+# files declare must be set on some line, and every knob a line sets must be declared.
+verify_all() {
+    local files=("$@") file expected memories rest memory declared used unmatched entries field entry
+    genmc_ready
+    [ ${#files[@]} -gt 0 ] || files=(*.pml */*.pml *.cpp */*.cpp)
+    declared=$(sed -n 's/^#ifndef \([a-z0-9_]*\)$/\1/p' "${files[@]}" */protocol.pml *.pml 2>/dev/null | grep -vx memory | sort -u)
+    used=$(sed -n 's/^ \*  @verify [a-z]* [a-z0-9,]* \([^:]*\).*/\1/p' "${files[@]}" 2>/dev/null | tr ' ' '\n' | sed -n 's/=.*//p' | sort -u)
+    [ $# -gt 0 ] && declared=$(comm -12 <(echo "$declared") <(echo "$used"))
+    unmatched=$(comm -3 <(echo "$declared") <(echo "$used") | xargs)
+    # A client's knobs are its `knobs_t` fields, each named by some entry, and every entry exists
+    for file in "${files[@]}"; do
+        [[ $file == *.cpp ]] && grep -qs '^ \*  @verify' "$file" || continue
+        entries=$(sed -n 's/^ \*  @verify [a-z]* [a-z0-9,]* \([a-z0-9_]*\).*/\1/p' "$file" | sort -u)
+        for field in $(sed -n '/^struct knobs_t {/,/^};/s/^ *[a-z_:]* \([a-z0-9_]*\) = .*;$/\1/p' "$file"); do
+            grep -q "_${field}_" <<<"$entries" || unmatched="$unmatched $file:$field"
+        done
+        for entry in $entries; do grep -q "^extern \"C\" int $entry()" "$file" || unmatched="$unmatched $file:$entry"; done
+    done
+    mkdir -p "$build/$queued"
+    if [ -z "$unmatched" ]; then echo "  ok    every knob is declared and set, every entry exists" >"$build/$queued/result"
+    else
+        echo "  WRONG knobs or entries declared or set alone: $unmatched" >"$build/$queued/result"
+        touch "$build/$queued/wrong"
+    fi
+    queued=$((queued + 1))
+    for file in "${files[@]}"; do
+        grep -qs '^ \*  @verify' "$file" || continue
+        [[ $file == *.cpp && -z "${genmc:-}" ]] && continue
+        section "$file: $(sed -n 's/^ \*  @brief //p' "$file" | head -1)"
+        while read -r expected memories rest; do
+            for memory in ${memories//,/ }; do
+                case $file in
+                *.pml) verify "$file" "$expected" -Dmemory="$memory" $(for knob in $rest; do echo "-D$knob"; done) ;;
+                *.cpp) verify_client "$file" "$expected" "$memory" "$rest" ;;
+                esac
+            done
+        done < <(sed -n 's/^ \*  @verify \([^:]*\).*/\1/p' "$file")
+    done
+    finish
+}
+
+# Sourced, it only defines the functions above; run directly, it checks the directory it lives in.
+[ "${BASH_SOURCE[0]}" = "$0" ] || return 0
 cd "$(dirname "$0")"
-forkunion=../forkunion
-[ -e "$forkunion/verification/check.sh" ] || forkunion=${FORKUNION:?the forkunion submodule is not checked out; set FORKUNION to a ForkUnion checkout}
-export CPATH=$(cd "$forkunion/verification" && pwd) # where `weak_memory.pml` finds the model without the submodule
-source "$forkunion/verification/check.sh"
-
-section "basic_shared_mutex.pml: the gate, its certified probes, the wrap and the missing release"
-verify basic_shared_mutex.pml pass -Dmemory=sequential
-verify basic_shared_mutex.pml fail -Dmemory=sequential -Dgeneration_modulus=2
-verify basic_shared_mutex.pml pass
-verify basic_shared_mutex.pml fail -Dwithout_release_fence
-verify basic_shared_mutex.pml fail -Dmemory=sequential -Dwithout_backoff_cap
-
-section "dense_ram_index_watermark.pml: dispensing, publication, the settlement probe, the appender, the keys, the cursor, the load fan-out, two savers and batched commits"
-verify dense_ram_index_watermark.pml pass -Dmemory=sequential
-verify dense_ram_index_watermark.pml pass
-verify dense_ram_index_watermark.pml fail -Dwithout_watermark_release
-verify dense_ram_index_watermark.pml fail -Dwithout_release_fence
-verify dense_ram_index_watermark.pml pass -Dmemory=sequential -Dscenario=appender
-verify dense_ram_index_watermark.pml pass -Dscenario=appender
-verify dense_ram_index_watermark.pml pass -Dmemory=far -Dscenario=appender
-verify dense_ram_index_watermark.pml fail -Dmemory=far -Dscenario=appender -Dwithout_appender_release
-verify dense_ram_index_watermark.pml fail -Dmemory=sequential -Dscenario=appender -Dtwice_finished
-verify dense_ram_index_watermark.pml pass -Dmemory=sequential -Dscenario=keyed
-verify dense_ram_index_watermark.pml pass -Dscenario=keyed
-verify dense_ram_index_watermark.pml fail -Dmemory=sequential -Dscenario=keyed -Dwithout_key_before_turn
-verify dense_ram_index_watermark.pml fail -Dmemory=sequential -Dscenario=keyed -Dwithout_watermark_filter
-verify dense_ram_index_watermark.pml pass -Dmemory=sequential -Dscenario=cursor
-verify dense_ram_index_watermark.pml pass -Dscenario=cursor
-verify dense_ram_index_watermark.pml fail -Dscenario=cursor -Dwithout_watermark_release
-verify dense_ram_index_watermark.pml pass -Dmemory=sequential -Dscenario=steps
-verify dense_ram_index_watermark.pml pass -Dscenario=steps
-verify dense_ram_index_watermark.pml pass -Dmemory=far -Dscenario=steps
-verify dense_ram_index_watermark.pml fail -Dscenario=steps -Dwithout_covered_release
-verify dense_ram_index_watermark.pml pass -Dmemory=sequential -Dscenario=savers
-verify dense_ram_index_watermark.pml pass -Dscenario=savers
-verify dense_ram_index_watermark.pml fail -Dscenario=savers -Dwithout_release_fence
-verify dense_ram_index_watermark.pml pass -Dmemory=sequential -Dscenario=batched
-verify dense_ram_index_watermark.pml pass -Dscenario=batched
-verify dense_ram_index_watermark.pml fail -Dmemory=sequential -Dscenario=batched -Dwithout_range_turn
-verify dense_ram_index_watermark.pml fail -Dscenario=batched -Dwithout_range_turn
-verify dense_ram_index_watermark.pml fail -Dmemory=sequential -Dscenario=batched -Dwithout_own_range_check
-verify dense_ram_index_watermark.pml fail -Dscenario=batched -Dwithout_own_range_check
-
-section "dense_vram_index_claims.pml: the host's claim under its mutex, the planes' growth, the watermark turned after the drain as a search bound, the neighbor filter, and the device's admission ramp"
-verify dense_vram_index_claims.pml pass -Dmemory=sequential
-verify dense_vram_index_claims.pml pass
-verify dense_vram_index_claims.pml fail -Dwithout_watermark_release
-verify dense_vram_index_claims.pml fail -Dwithout_size_acquire
-verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_claiming_mutex
-verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_unclaim_on_rejection
-verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_base_under_claim
-verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_abandon_unlock
-verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_drain_before_turn
-verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_neighbor_filter
-
-section "dense_vram_indexes.pml: the mutation gate, keys before the turn, a commit across the shards, and a load beside a batch"
-verify dense_vram_indexes.pml pass -Dmemory=sequential
-verify dense_vram_indexes.pml pass
-verify dense_vram_indexes.pml fail -Dmemory=sequential -Dwithout_gate
-verify dense_vram_indexes.pml fail -Dmemory=sequential -Dwithout_key_before_turn
-verify dense_vram_indexes.pml fail -Dwithout_key_before_turn
-verify dense_vram_indexes.pml fail -Dwithout_watermark_release
-verify dense_vram_indexes.pml fail -Dmemory=sequential -Dwithout_commit_sequence
-verify dense_vram_indexes.pml pass -Dmemory=sequential -Dscenario=loading
-verify dense_vram_indexes.pml pass -Dscenario=loading
-verify dense_vram_indexes.pml fail -Dmemory=sequential -Dscenario=loading -Dwithout_load_gate
-verify dense_vram_indexes.pml fail -Dmemory=sequential -Dscenario=loading -Dwithout_load_key_before_finish
-
-section "executor.pml: the one-caller hold, the arena rewind, and the fan-out"
-verify executor.pml pass -Dmemory=sequential
-verify executor.pml pass
-verify executor.pml fail -Dmemory=sequential -Dwithout_hold
-
-section "nvme_ring.pml: the io_uring words, the wrap, and the deferred posting"
-verify nvme_ring.pml pass -Dmemory=sequential
-verify nvme_ring.pml pass
-verify nvme_ring.pml fail -Dwithout_sq_tail_release
-verify nvme_ring.pml fail -Dwithout_cq_tail_acquire
-verify nvme_ring.pml pass -Dscenario=deferred
-verify nvme_ring.pml fail -Dscenario=deferred -Dwithout_cq_tail_acquire
-
-section "dense_vram_index_locks.pml: the CUDA rows, their slot-zero locks, and what a warp's follower lanes see"
-verify dense_vram_index_locks.pml pass -Dmemory=sequential
-verify dense_vram_index_locks.pml pass -Dmemory=sequential -Dwithout_fixes
-verify dense_vram_index_locks.pml pass
-verify dense_vram_index_locks.pml fail -Dwithout_syncwarp_after_broadcast
-verify dense_vram_index_locks.pml fail -Dwithout_syncwarp_after_lock
-verify dense_vram_index_locks.pml fail -Dwithout_tail_acquire
-verify dense_vram_index_locks.pml fail -Dwithout_tail_fence
-verify dense_vram_index_locks.pml fail -Dwithout_fixes
-
-section "dense_ram_index_capacity.pml: the chunk election and its flag, the grower's take, release_capacity's order, a second reservation above the physical rows, two reservations, and an abandoned load plan"
-verify dense_ram_index_capacity.pml pass -Dmemory=sequential
-verify dense_ram_index_capacity.pml pass
-verify dense_ram_index_capacity.pml pass -Dmemory=far
-verify dense_ram_index_capacity.pml fail -Dmemory=far -Dwithout_deflation_release
-verify dense_ram_index_capacity.pml pass -Dmemory=sequential -Dscenario=regrow
-verify dense_ram_index_capacity.pml pass -Dscenario=regrow
-verify dense_ram_index_capacity.pml pass -Dmemory=far -Dscenario=regrow
-verify dense_ram_index_capacity.pml fail -Dmemory=sequential -Dscenario=regrow -Dwithout_deficit_growth
-verify dense_ram_index_capacity.pml pass -Dmemory=sequential -Dscenario=reservers
-verify dense_ram_index_capacity.pml pass -Dscenario=reservers
-verify dense_ram_index_capacity.pml pass -Dmemory=far -Dscenario=reservers
-verify dense_ram_index_capacity.pml pass -Dmemory=sequential -Dscenario=reservers -Dsame_geometry
-verify dense_ram_index_capacity.pml fail -Dmemory=far -Dscenario=reservers -Dwithout_deflation_release
-verify dense_ram_index_capacity.pml fail -Dmemory=sequential -Dscenario=reservers -Dwithout_whole_release
-verify dense_ram_index_capacity.pml fail -Dscenario=reservers -Dwithout_take_release
-verify dense_ram_index_capacity.pml pass -Dmemory=sequential -Dscenario=loaders
-verify dense_ram_index_capacity.pml pass -Dscenario=loaders
-verify dense_ram_index_capacity.pml pass -Dmemory=far -Dscenario=loaders
-verify dense_ram_index_capacity.pml fail -Dmemory=sequential -Dscenario=loaders -Dwithout_abandon_release
-
-section "dense_ram_indexes.pml: the shards' claims, the key columns' cover, keys before the turn, the monolith save's watermark per shard, the load path's keys, and a commit across the shards"
-verify dense_ram_indexes.pml pass -Dmemory=sequential
-verify dense_ram_indexes.pml pass
-verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_key_before_watermark
-verify dense_ram_indexes.pml fail -Dwithout_key_before_watermark
-verify dense_ram_indexes.pml fail -Dwithout_watermark_release
-verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_release
-verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_claim_consume
-verify dense_ram_indexes.pml pass -Dmemory=sequential -Dscenario=covering
-verify dense_ram_indexes.pml pass -Dscenario=covering
-verify dense_ram_indexes.pml pass -Dmemory=far -Dscenario=covering
-verify dense_ram_indexes.pml fail -Dmemory=sequential -Dscenario=covering -Dwithout_cover
-verify dense_ram_indexes.pml fail -Dscenario=covering -Dwithout_dispense_acq_rel
-verify dense_ram_indexes.pml pass -Dmemory=sequential -Dscenario=saving
-verify dense_ram_indexes.pml pass -Dscenario=saving
-verify dense_ram_indexes.pml fail -Dmemory=sequential -Dscenario=saving -Dwhole_batches
-verify dense_ram_indexes.pml fail -Dscenario=saving -Dwhole_batches
-verify dense_ram_indexes.pml pass -Dmemory=sequential -Dscenario=loading
-verify dense_ram_indexes.pml pass -Dscenario=loading
-verify dense_ram_indexes.pml pass -Dmemory=far -Dscenario=loading
-verify dense_ram_indexes.pml fail -Dmemory=sequential -Dscenario=loading -Dwithout_keys_before_finish
-verify dense_ram_indexes.pml fail -Dscenario=loading -Dwithout_keys_before_finish
-verify dense_ram_indexes.pml pass -Dmemory=sequential -Dscenario=committed
-verify dense_ram_indexes.pml pass -Dscenario=committed
-verify dense_ram_indexes.pml fail -Dmemory=sequential -Dscenario=committed -Dwithout_commit_sequence
-verify dense_ram_indexes.pml fail -Dscenario=committed -Dwithout_commit_sequence
-verify dense_ram_indexes.pml fail -Dmemory=sequential -Dscenario=committed -Dconcurrent_commits
-verify dense_ram_indexes.pml fail -Dscenario=committed -Dconcurrent_commits
-verify dense_ram_indexes.pml pass -Dmemory=sequential -Dscenario=committed -Dconcurrent_commits -Dcounted_sequence
-verify dense_ram_indexes.pml pass -Dscenario=committed -Dconcurrent_commits -Dcounted_sequence
-verify dense_ram_indexes.pml fail -Dmemory=sequential -Dscenario=committed -Dconcurrent_commits -Dcounted_sequence -Dwithout_ordered_dispense
-verify dense_ram_indexes.pml fail -Dscenario=committed -Dconcurrent_commits -Dcounted_sequence -Dwithout_ordered_dispense
-
-section "basic_ram_index_rows.pml: the rows under their mutex, what the gate carries, the traversal's frontier, and the load path's steps"
-verify basic_ram_index_rows.pml pass -Dmemory=sequential
-verify basic_ram_index_rows.pml pass
-verify basic_ram_index_rows.pml fail -Dwithout_watermark_release
-verify basic_ram_index_rows.pml fail -Dwithout_row_lock_acquire
-verify basic_ram_index_rows.pml fail -Dwithout_row_unlock_release
-verify basic_ram_index_rows.pml fail -Dwithout_unlock_shared_release
-verify basic_ram_index_rows.pml fail -Dmemory=sequential -Dwithout_watermark_filter
-verify basic_ram_index_rows.pml pass -Dmemory=sequential -Dscenario=steps
-verify basic_ram_index_rows.pml pass -Dscenario=steps
-verify basic_ram_index_rows.pml pass -Dmemory=far -Dscenario=steps
-verify basic_ram_index_rows.pml fail -Dscenario=steps -Dwithout_covered_release
-verify basic_ram_index_rows.pml fail -Dmemory=far -Dscenario=steps -Dwithout_covered_release
-verify basic_ram_index_rows.pml fail -Dscenario=steps -Dwithout_counters_before_watermark
-
-section "basic_ram_index.pml: add, search, save, health and load interleaved on one index, and a failed load's leftovers"
-verify basic_ram_index.pml pass
-verify basic_ram_index.pml fail -Dwithout_row_clear
-verify basic_ram_index.pml fail -Dwithout_map_clear
-verify basic_ram_index.pml fail -Dtwice_finished
-
-section "ram_tables.pml: the multimap's seats, its slot claim, what a prober sees beside a published state, and the chunks it grows"
-verify ram_tables.pml pass -Dmemory=sequential
-verify ram_tables.pml pass
-verify ram_tables.pml pass -Dmemory=far
-verify ram_tables.pml fail -Dwithout_publish_release
-verify ram_tables.pml fail -Dwithout_probe_acquire
-verify ram_tables.pml fail -Dmemory=sequential -Dwithout_cover_refusal
-verify ram_tables.pml pass -Dmemory=sequential -Dscenario=growth
-verify ram_tables.pml pass -Dscenario=growth
-verify ram_tables.pml pass -Dmemory=far -Dscenario=growth
-verify ram_tables.pml fail -Dscenario=growth -Dwithout_cover_release
-verify ram_tables.pml fail -Dscenario=growth -Dwithout_directory_acquire
-verify ram_tables.pml fail -Dscenario=growth -Dwithout_walk_acquire
-
-section "GenMC clients over the real headers"
-if genmc_ready; then
-    verify_client basic_shared_mutex.cpp pass -I../include -I"$forkunion/include"
-    verify_client dense_ram_index_watermark.cpp pass -I../include -I"$forkunion/include"
-    verify_client dense_ram_index_watermark.cpp fail -I../include -I"$forkunion/include" -Dwithout_release_fence
-    verify_client dense_ram_index_watermark.cpp pass -I../include -I"$forkunion/include" -Dscenario=batched
-    verify_client dense_ram_index_watermark.cpp fail -I../include -I"$forkunion/include" -Dscenario=batched -Dwithout_range_turn
-    verify_client dense_ram_index_watermark.cpp fail -I../include -I"$forkunion/include" -Dscenario=batched -Dwithout_own_range_check
-    verify_client dense_ram_index_capacity.cpp pass -I../include -I"$forkunion/include"
-    verify_client dense_ram_index_capacity.cpp fail -I../include -I"$forkunion/include" -Dwithout_ordered_release
-fi
-
-finish
+verify_all "$@"

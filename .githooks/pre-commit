@@ -979,8 +979,11 @@ check_include_groups() {
                 else rank = 4
                 if (quoted && rank != 5 && rank != 6) {
                     directory = file; sub(/[^\/]*$/, "", directory); found = ""
+                    # `dir/../` collapses, so a file one directory down finds a header beside its parent
+                    beside = directory header
+                    while (sub(/[^\/.][^\/]*\/\.\.\//, "", beside)) {}
                     search = "git ls-files \":(glob)**/" header "\""
-                    if (touched && !system("git cat-file -e \":" directory header "\" 2>/dev/null")) found = directory header
+                    if (touched && !system("git cat-file -e \":" beside "\" 2>/dev/null")) found = beside
                     else if (touched) { search | getline found; close(search) }
                     if (touched && found == "")
                         printf "line %d: \"%s\" is not in this repository - write <%s>\n", FNR, header, header
