@@ -11,12 +11,12 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from math import ceil
 from time import perf_counter_ns
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 
 import numkong as nk
-from usearch import DenseIndex, Stats
+from usearch import DenseIndex, DenseMetric, DenseTraversalStats, On
 from usearch.keys import integers_to_keys, keys_to_integers
 
 # `integers_to_keys` and `keys_to_integers` are re-exported so a caller reaching for the recall
@@ -32,20 +32,29 @@ __all__ = [
     "self_recall",
 ]
 
+# The NumKong spelling of every metric the index scores, which the two libraries share.
+_NUMKONG_METRICS: dict[DenseMetric, Literal["inner", "angular", "euclidean", "hamming", "jaccard"]] = {
+    DenseMetric.INNER: "inner",
+    DenseMetric.ANGULAR: "angular",
+    DenseMetric.EUCLIDEAN: "euclidean",
+    DenseMetric.HAMMING: "hamming",
+    DenseMetric.JACCARD: "jaccard",
+}
+
 # Metrics over packed bits, where generation produces bit vectors rather than gaussians.
-_BITWISE_METRICS = ("hamming", "jaccard")
+_BITWISE_METRICS = (DenseMetric.HAMMING, DenseMetric.JACCARD)
 
 # NumKong scores `inner` as the raw dot product while the index scores it as `1 - dot`, so the
 # two rank a candidate list in opposite directions. Every other metric agrees on direction, and
 # ranking is all an oracle needs - a monotone difference in magnitude changes no ordering.
-_DESCENDING_METRICS = ("inner",)
+_DESCENDING_METRICS = (DenseMetric.INNER,)
 
 
 def random_vectors(
     count: int,
     dimensions: int,
     *,
-    metric: str = "angular",
+    metric: DenseMetric = DenseMetric.ANGULAR,
     seed: int = 0,
 ) -> np.ndarray:
     """Reproducible `float32` rows for the given metric.
@@ -64,14 +73,14 @@ def random_vectors(
     return (rows / norms).astype(np.float32)
 
 
-def exact_matches(vectors, queries, wanted: int, *, metric: str = "angular") -> np.ndarray:
+def exact_matches(vectors, queries, wanted: int, *, metric: DenseMetric = DenseMetric.ANGULAR) -> np.ndarray:
     """Brute-force ground truth, scored by the kernels the index itself dispatches to.
 
     Scores the ``(Q, dimensions)`` queries against the ``(N, dimensions)`` matrix the index was
-    built over, in one of the index's own metric names, and returns a ``(Q, wanted)`` matrix of
-    row offsets into *vectors*, nearest first.
+    built over, in the index's own metric, and returns a ``(Q, wanted)`` matrix of row offsets
+    into *vectors*, nearest first.
     """
-    scores = np.asarray(nk.cdist(queries, vectors, metric, out_dtype="float64"))
+    scores = np.asarray(nk.cdist(queries, vectors, _NUMKONG_METRICS[metric], out_dtype="float64"))
     if metric in _DESCENDING_METRICS:
         scores = -scores
     wanted = min(wanted, scores.shape[1])
@@ -104,44 +113,50 @@ class SearchStats:
         return self.count_matches / self.count_queries
 
 
-def index_keys(index: DenseIndex) -> np.ndarray:
-    """Every identity the index holds, as a (size, 16) matrix, walked through one snapshot."""
-    batches = [np.asarray(batch).copy() for batch in index.cursor()]
+def index_keys(index: DenseIndex | On[DenseIndex]) -> np.ndarray:
+    """Every identity the index holds, as a (size, 16) matrix, walked through one cursor."""
+    batches = [np.asarray(batch) for batch in index.cursor()]
     if not batches:
         return np.zeros((0, 16), dtype=np.uint8)
     return np.concatenate(batches, axis=0)
 
 
-def self_recall(index: DenseIndex, sample: float | int = 1.0, count: int = 1, **kwargs) -> SearchStats:
+def self_recall(
+    index: DenseIndex | On[DenseIndex],
+    sample: float | int = 1.0,
+    count: int = 1,
+    *,
+    keys=None,
+    vectors=None,
+    expansion_factor: int = 0,
+    stats: DenseTraversalStats | None = None,
+) -> SearchStats:
     """Queries the index with its own vectors, which must find themselves.
 
     The weakest recall test there is, and the cheapest: it needs no ground truth. Use
     ``exact_matches`` when the question is how the index ranks against the exact answer.
 
-    The *sample* is a share when a float and a count when an integer, and *count* is how many
-    matches each query retrieves. Every other keyword reaches ``index.search``, so an
-    ``executor`` is passed through here, and a ``stats`` given here is what the returned
-    telemetry reads off.
+    The *index* is the index or any blocking receiver - ``index.on(executor)`` runs every call on
+    that executor. The *sample* is a share when a float and a count when an integer, and *count*
+    is how many matches each query retrieves. The *keys* and *vectors* default to everything the
+    index holds, and the *stats* given here is what the returned telemetry reads off.
     """
-    if len(index) == 0:
+    size = index.describe().size
+    if size == 0:
         return SearchStats(0, 0, 0, 0, 0)
 
-    keys = kwargs.pop("keys", None)
     keys = np.asarray(index_keys(index) if keys is None else keys)
     if sample != 1.0:
         wanted = int(ceil(len(keys) * sample)) if isinstance(sample, float) else sample
         chosen = np.random.default_rng(0).choice(len(keys), wanted, replace=False)
         keys = keys[chosen]
 
-    vectors = kwargs.pop("vectors", None)
     if vectors is None:
-        vectors = np.concatenate([np.asarray(index[row]) for row in keys], axis=0)
+        vectors = np.concatenate([np.asarray(index.get(row)) for row in keys], axis=0)
     vectors = np.atleast_2d(np.asarray(vectors))
 
-    stats = kwargs.pop("stats", None)
-    if stats is None:
-        stats = Stats()
-    matches = index.search(vectors, count, stats=stats, **kwargs)
+    stats = DenseTraversalStats() if stats is None else stats
+    matches = index.search(vectors, count, expansion_factor=expansion_factor, stats=stats)
 
     expected = keys_to_integers(keys)
     found = keys_to_integers(matches.keys)
@@ -153,7 +168,7 @@ def self_recall(index: DenseIndex, sample: float | int = 1.0, count: int = 1, **
         count_matches += int(np.any(row == expected[query_index]))
 
     return SearchStats(
-        index_size=len(index),
+        index_size=size,
         count_queries=len(keys),
         count_matches=count_matches,
         visited_members=stats.visited_members,
@@ -161,7 +176,7 @@ def self_recall(index: DenseIndex, sample: float | int = 1.0, count: int = 1, **
     )
 
 
-def measure_seconds(callable_to_time: Callable) -> tuple[float, Any]:
+def measure_seconds(callable_to_time: Callable[[], Any]) -> tuple[float, Any]:
     """Times one call with the monotonic clock, returning the seconds and whatever it returned."""
     before = perf_counter_ns()
     result = callable_to_time()

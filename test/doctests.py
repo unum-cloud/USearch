@@ -21,13 +21,15 @@ _OPTION_FLAGS = doctest.NORMALIZE_WHITESPACE | doctest.IGNORE_EXCEPTION_DETAIL
 # `testmod` on the package, so each type is searched directly.
 _DOCUMENTED = [
     "Key",
-    "Stats",
     "Match",
     "Matches",
     "Error",
     "Executor",
     "Arena",
+    "Deferred",
+    "On",
     "DenseIndex",
+    "DenseTraversalStats",
     "version",
     "capabilities_compiled",
     "capabilities_available",

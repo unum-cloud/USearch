@@ -9,14 +9,27 @@ Run:
 
 from __future__ import annotations
 
+import copy
+import pickle
 import uuid
+from enum import IntEnum
 
 import numpy as np
 import pytest
 from base import batch_sizes, matches_outputs
 
 import usearch
-from usearch import Error, Key, MalformedError, Matches, ShapeMismatchError, Stats
+from usearch import (
+    DenseTraversalStats,
+    Error,
+    InputOutputError,
+    Key,
+    MalformedError,
+    Matches,
+    ShapeMismatchError,
+    Status,
+    UnsupportedLayoutError,
+)
 from usearch.keys import integers_to_keys, keys_to_integers
 
 # region Library
@@ -45,6 +58,21 @@ def test_placeholder_modalities_announce_themselves(modality: str):
     """A modality the library has not instantiated says so rather than failing obscurely."""
     with pytest.raises(NotImplementedError):
         getattr(usearch, modality)()
+
+
+@pytest.mark.parametrize("name", ["Status", "Mood", "DenseMetric", "Scalar", "Residency"])
+def test_modes_are_int_enums_of_the_package(name: str):
+    """Statuses and modes mirror the C enumerators value for value, so nothing compares as a string."""
+    enum = getattr(usearch, name)
+    assert issubclass(enum, IntEnum)
+    assert enum.__module__ == "usearch" and enum.__name__ == name
+    assert pickle.loads(pickle.dumps(next(iter(enum)))) is next(iter(enum))
+
+
+def test_status_values_follow_the_header():
+    """`DEFERRED` is the one non-final status, right after `SUCCESS`, and the failures follow it."""
+    assert (Status.SUCCESS, Status.DEFERRED) == (0, 1)
+    assert min(status for status in Status if status not in (Status.SUCCESS, Status.DEFERRED)) == 2
 
 
 # endregion Library
@@ -85,6 +113,22 @@ def test_key_hashes_as_the_integer_it_equals(value: int):
     assert hash(Key(value)) == hash(value)
     assert {value: "stored"}[Key(value)] == "stored"
     assert len({Key(value), value}) == 1
+    assert Key(value) == uuid.UUID(int=value) and hash(Key(value)) == hash(uuid.UUID(int=value))
+
+
+def test_key_never_equals_what_merely_parses_into_it():
+    """Text and bytes hash as themselves, so a key equal to them would break every dict holding both."""
+    key = Key(5)
+    assert key != str(key)
+    assert key != key.bytes
+    assert len({key, str(key), key.bytes}) == 3
+
+
+def test_key_pickles_and_copies():
+    """A key crosses `multiprocessing` and `copy` as its sixteen bytes."""
+    key = Key(2**100 + 7)
+    assert pickle.loads(pickle.dumps(key)) == key
+    assert copy.deepcopy(key) == key
 
 
 def test_key_orders_by_identity():
@@ -107,7 +151,7 @@ def test_key_malformed_text_carries_a_status():
     """A binding-side rejection raises the class the engine would for the same fault."""
     with pytest.raises(MalformedError) as raised:
         Key("not-a-key")
-    assert raised.value.status == "malformed"
+    assert raised.value.status is Status.MALFORMED
 
 
 @pytest.mark.parametrize("count", batch_sizes)
@@ -142,7 +186,7 @@ def test_matches_derives_its_width(queries: int, wanted: int):
     assert np.asarray(matches.keys).shape == (queries, wanted, 16)
     assert np.asarray(matches.distances).shape == (queries, wanted)
     assert np.asarray(matches.counts).shape == (queries,)
-    assert f"wanted={wanted}" in repr(matches)
+    assert repr(matches) == f"Matches(queries={queries}, wanted={wanted})"
 
 
 def test_matches_reads_through_to_the_buffers():
@@ -155,8 +199,10 @@ def test_matches_reads_through_to_the_buffers():
 
     row = matches[0]
     assert len(row) == 1
-    assert int(row[0].key) == 42
-    assert row[0].distance == 0.25
+    key, distance = row[0]
+    assert int(key) == int(row[0].key) == 42
+    assert distance == row[0].distance == 0.25
+    assert pickle.loads(pickle.dumps(row[0])) == row[0]
 
 
 def test_matches_keeps_its_buffers_alive():
@@ -181,6 +227,14 @@ def test_matches_refuses_disagreeing_buffers(outputs: tuple):
         Matches(*outputs)
 
 
+def test_matches_refuses_misaligned_buffers():
+    """The engine writes distances and counts through typed pointers, so a buffer sliced off its alignment is refused."""
+    keys, distances, counts = matches_outputs(1, 2)
+    misaligned = memoryview(bytearray(2 * 8 + 1))[1:]
+    with pytest.raises(UnsupportedLayoutError):
+        Matches(keys, misaligned, counts)
+
+
 def test_matches_takes_three_buffers():
     """A run is three outputs, so anything else is refused where it is written."""
     with pytest.raises(TypeError):
@@ -193,18 +247,28 @@ def test_matches_takes_three_buffers():
 
 
 def test_stats_start_empty():
-    """A fresh `Stats` has counted nothing."""
-    stats = Stats()
+    """A fresh `DenseTraversalStats` has counted nothing."""
+    stats = DenseTraversalStats()
     assert stats.visited_members == 0
     assert stats.computed_distances == 0
     assert stats.restarts == 0
-    assert "Stats(" in repr(stats)
+    assert repr(stats) == "DenseTraversalStats(visited_members=0, computed_distances=0, restarts=0)"
+
+
+def test_stats_add_into_a_total():
+    """A sweep sums its readings with `+=`, which keeps the total the same object."""
+    total, reading = DenseTraversalStats(), DenseTraversalStats()
+    alias = total
+    total += reading
+    assert total is alias and total.visited_members == 0
+    with pytest.raises(TypeError):
+        total += 1
 
 
 def test_stats_takes_no_arguments():
-    """`Stats` is a reading a call fills, not a value; it is only ever constructed empty."""
+    """`DenseTraversalStats` is a reading a call fills, not a value; it is only ever constructed empty."""
     with pytest.raises(TypeError):
-        Stats(1)
+        DenseTraversalStats(1)
 
 
 def test_error_is_a_runtime_error():
@@ -213,32 +277,15 @@ def test_error_is_a_runtime_error():
 
 
 def test_every_failing_status_raises_its_own_class():
-    """One `Error` subclass per final failing status of the C ABI, each naming the status it mirrors."""
-    raised = {
-        name: getattr(usearch, name).status
+    """One `Error` subclass per final failing status of the C ABI, deriving the built-in naming the same fault."""
+    subclasses = {
+        name
         for name in dir(usearch)
-        if isinstance(getattr(usearch, name), type) and issubclass(getattr(usearch, name), Error)
-        if name != "Error"
+        if isinstance(getattr(usearch, name), type) and issubclass(getattr(usearch, name), Error) and name != "Error"
     }
-    assert set(raised.values()) == {
-        "out-of-memory",
-        "shape-mismatch",
-        "unsupported-layout",
-        "unknown-kind",
-        "read-only",
-        "io",
-        "device",
-        "malformed",
-        "internal",
-        "overflow",
-        "uninitialized",
-        "config-mismatch",
-        "contended",
-        "cancelled",
-        "unsupported",
-        "invalid-argument",
-    }
-    assert len(raised) == len(set(raised.values()))
+    assert len(subclasses) == len(Status) - 2, "success and deferred never raise"
+    assert issubclass(ShapeMismatchError, ValueError)
+    assert issubclass(InputOutputError, OSError)
 
 
 # endregion Telemetry & Failures

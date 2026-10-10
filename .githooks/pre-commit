@@ -246,6 +246,17 @@ check_rust_modules() {
         "$file declares a module no file backs - move its items to the file root or into their own file:"
 }
 
+# Tests assert what a value is, not what its rendering happens to contain. A substring of a repr or a
+# message passes on a wrong value that spells the fragment and breaks on a harmless rewording; compare the
+# whole repr, the fields, the exception type or the very object raised instead.
+check_substring_assertions() {
+    local fragments
+    fragments=$(printf '%s\n' "$added" | grep -nE \
+        'pytest\.raises\([^)]*match=|["'"'"'] in (repr|str)\(|(repr|str)\([^)]*\)\.(startswith|endswith)\(|\.to_string\(\)\.(contains|starts_with|ends_with)\(|\.message\.(contains|starts_with|ends_with)\(' || true)
+    [ -z "$fragments" ] || fail "$fragments" \
+        "$file asserts on a fragment of a repr or a message - compare the whole value, its fields, or the exception:"
+}
+
 # A design justified by another project's design ages into a lie the moment that project moves,
 # and it tells a reader nothing about the code in front of them. State what it does and why.
 check_sibling_justification() {
@@ -335,6 +346,15 @@ check_doxygen_in_line_comments() {
         grep -E '//[^/!].*[[:space:]]@(brief|param|tparam|returns?|ref|see|note|c|p|b)\b' || true)
     [ -z "$tagged" ] || fail "$tagged" \
         "$file uses a Doxygen command in a // comment, which Doxygen never parses - quote code in backticks:"
+}
+
+# A `//!` trailer documents nothing an editor shows on hover, and C and C++ have no use for it: a member
+# takes a `/** ... */` line above it, and a note on a statement is a plain `//` comment.
+check_doxygen_trailers() {
+    local trailers
+    trailers=$(printf '%s\n' "$added" | grep -nE '//!' || true)
+    [ -z "$trailers" ] || fail "$trailers" \
+        "$file documents with a //! trailer - write /** ... */ above a member, or // after a statement:"
 }
 
 # An `@section` line reads as a heading only when air surrounds it: the comment lines directly
@@ -948,10 +968,13 @@ check_include_groups() {
     misgrouped=$(awk -v project="$project_include_prefix" -v file="$file" '
         BEGIN {
             split("cassert cctype cerrno cfenv cfloat cinttypes climits clocale cmath csetjmp csignal cstdarg " \
-                  "cstddef cstdint cstdio cstdlib cstring ctime cuchar cwchar cwctype", names, " ")
+                  "cstddef cstdint cstdio cstdlib cstring ctime cuchar cwchar cwctype " \
+                  "assert.h ctype.h errno.h fenv.h float.h inttypes.h limits.h locale.h math.h setjmp.h signal.h " \
+                  "stdarg.h stdatomic.h stdbool.h stddef.h stdint.h stdio.h stdlib.h string.h time.h uchar.h " \
+                  "wchar.h wctype.h", names, " ")
             for (n in names) clibrary[names[n]] = 1
-            split("dirent.h dlfcn.h errno.h fcntl.h ftw.h poll.h pthread.h sched.h signal.h stdio.h stdlib.h " \
-                  "string.h time.h unistd.h io.h windows.h bcrypt.h malloc.h", names, " ")
+            split("dirent.h dlfcn.h fcntl.h ftw.h poll.h pthread.h sched.h unistd.h io.h windows.h bcrypt.h " \
+                  "malloc.h", names, " ")
             for (n in names) platform[names[n]] = 1
             split("forkunion numkong smashtable stringzilla uform usearch ustore", names, " ")
             for (n in names) sibling[names[n]] = 1
@@ -970,6 +993,8 @@ check_include_groups() {
                 quoted = ($0 ~ /include[[:space:]]*"/)
                 sub(/^[^<"]*[<"]/, "", header); sub(/[>"].*$/, "", header)
                 root = header; sub(/[\/.].*$/, "", root)
+                # CPython must precede every standard header it reconfigures, so it leads outside the groups.
+                if (header == "Python.h") next
                 touched = (FNR in added)
                 if (root == project) rank = 6
                 else if (header in clibrary) rank = 1
@@ -1305,6 +1330,7 @@ judge_path() {
         check_markdown_doxygen
         check_doxygen_glued
         check_doxygen_in_line_comments
+        check_doxygen_trailers
         check_section_spacing
         check_docblock_spacing
         check_lone_brief
@@ -1371,6 +1397,7 @@ judge_path() {
     *.py | *.pyi)
         check_sibling_justification
         check_python_version_probe
+        check_substring_assertions
         ;;
     python/*.c | python/*.h) check_cpython_format_shortcuts ;;
     .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
@@ -1412,6 +1439,7 @@ judge_path() {
     *.rs)
         check_rust_use_groups usearch "$file" < "$staged_blob" || rejection_count=$((rejection_count + 1))
         check_rust_modules
+        check_substring_assertions
         ;;
     esac
 

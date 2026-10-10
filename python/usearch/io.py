@@ -1,136 +1,76 @@
-import os
+"""The `fbin`, `ibin` and sibling matrix formats: an int32 row count, an int32 column count, then the rows."""
+
+from __future__ import annotations
+
 import struct
 
 import numpy as np
+import numpy.typing as npt
+
+# The extension names the scalar type, since the header carries only the shape.
+_EXTENSION_DTYPES: dict[str, type[np.generic]] = {
+    ".fbin": np.float32,
+    ".f32bin": np.float32,
+    ".dbin": np.float64,
+    ".hbin": np.float16,
+    ".ibin": np.int32,
+    ".i32bin": np.int32,
+    ".bbin": np.uint8,
+    ".i8bin": np.int8,
+}
 
 
-def numpy_scalar_size(dtype) -> int:
-    return {
-        np.float64: 8,
-        np.int64: 8,
-        np.uint64: 8,
-        np.float32: 4,
-        np.int32: 4,
-        np.uint32: 4,
-        np.float16: 2,
-        np.int16: 2,
-        np.uint16: 2,
-        np.int8: 1,
-        np.uint8: 1,
-    }[dtype]
-
-
-def guess_numpy_dtype_from_filename(filename) -> type | None:
-    if filename.endswith(".fbin"):
-        return np.float32
-    elif filename.endswith(".dbin"):
-        return np.float64
-    elif filename.endswith(".hbin"):
-        return np.float16
-    elif filename.endswith(".ibin"):
-        return np.int32
-    elif filename.endswith(".bbin"):
-        return np.uint8
-    elif filename.endswith(".i8bin"):
-        return np.int8
-    elif filename.endswith(".i32bin"):
-        return np.int32
-    elif filename.endswith(".f32bin"):
-        return np.float32
-    else:
-        return None
+def _dtype_for(filename: str) -> type[np.generic] | None:
+    """The scalar type the extension of *filename* names, or None when it names none."""
+    return next((dtype for suffix, dtype in _EXTENSION_DTYPES.items() if filename.endswith(suffix)), None)
 
 
 def load_matrix(
     filename: str,
     start_row: int = 0,
     count_rows: int | None = None,
+    *,
     view: bool = False,
-    dtype: type | None = None,
-) -> np.ndarray | None:
-    """Reads a matrix from an ``.ibin``, ``.bbin``, ``.hbin``, ``.fbin``, ``.dbin``, ``.i8bin``,
-    or ``.i32bin`` file.
+    dtype: npt.DTypeLike | None = None,
+) -> np.ndarray:
+    """Reads a matrix from an ``.fbin``, ``.f32bin``, ``.dbin``, ``.hbin``, ``.ibin``, ``.i32bin``, ``.bbin``,
+    or ``.i8bin`` file.
 
-    Reads *count_rows* vectors starting at *start_row*, or every vector when *count_rows* is
-    None. Setting *view* memory-maps the file rather than loading it into RAM, which is how a
-    dataset larger than memory is read.
+    Reads *count_rows* rows starting at *start_row*, or every row when *count_rows* is None. Setting
+    *view* memory-maps the file rather than loading it into RAM, which is how a dataset larger than
+    memory is read. Raises `FileNotFoundError` for a missing file and `ValueError` for an extension
+    naming no scalar type or a file whose size its header contradicts.
     """
     if dtype is None:
-        dtype = guess_numpy_dtype_from_filename(filename)
+        dtype = _dtype_for(filename)
         if dtype is None:
-            raise Exception("Unknown file type")
-    scalar_size = numpy_scalar_size(dtype)
+            raise ValueError(f"the extension of {filename} names no scalar type; pass `dtype=`")
+    scalar = np.dtype(dtype)
 
-    if not os.path.exists(filename):
-        return None
+    with open(filename, "rb") as file:
+        rows, columns = (int(extent) for extent in np.fromfile(file, count=2, dtype=np.int32))
+        file.seek(0, 2)
+        expected = 8 + rows * columns * scalar.itemsize
+        if file.tell() != expected:
+            raise ValueError(f"{filename} holds {file.tell():,} bytes, but its header declares {expected:,}")
 
-    with open(filename, "rb") as f:
-        rows, cols = np.fromfile(f, count=2, dtype=np.int32).astype(np.uint64)
-
-        # Validate file size matches expected data size
-        f.seek(0, 2)  # Go to end
-        file_size = f.tell()
-        expected_size = 8 + (rows * cols * scalar_size)  # Header + data
-
-        if file_size != expected_size:
-            if file_size < expected_size:
-                raise ValueError(
-                    f"File {filename} is truncated. Expected {expected_size:,} bytes, got {file_size:,} bytes"
-                )
-            else:
-                raise ValueError(
-                    f"File {filename} is larger than expected. Expected {expected_size:,} bytes, got {file_size:,} bytes"
-                )
-
-        f.seek(8)  # Back to start of data
-        rows = (rows - start_row) if count_rows is None else count_rows
-        row_offset = start_row * scalar_size * cols
-
+        count = rows - start_row if count_rows is None else count_rows
+        offset = 8 + start_row * columns * scalar.itemsize
         if view:
-            return np.memmap(
-                f,
-                dtype=dtype,
-                mode="r",
-                offset=8 + row_offset,
-                shape=(rows, cols),
-            )
-        else:
-            return np.fromfile(
-                f,
-                count=rows * cols,
-                dtype=dtype,
-                offset=row_offset,
-            ).reshape(rows, cols)
+            return np.memmap(file, dtype=scalar, mode="r", offset=offset, shape=(count, columns))
+        file.seek(offset)
+        return np.fromfile(file, count=count * columns, dtype=scalar).reshape(count, columns)
 
 
-def save_matrix(vectors: np.ndarray, filename: str):
-    """Writes a matrix to an ``.ibin``, ``.bbin``, ``.hbin``, ``.fbin``, ``.dbin``, ``.i8bin``,
-    ``.i32bin``, or ``.f32bin`` file.
+def save_matrix(vectors: np.ndarray, filename: str) -> None:
+    """Writes a matrix to an ``.fbin``, ``.f32bin``, ``.dbin``, ``.hbin``, ``.ibin``, ``.i32bin``, ``.bbin``,
+    or ``.i8bin`` file.
 
-    The extension decides the scalar type, so it must agree with the matrix's own dtype.
+    An extension naming a scalar type converts the rows into it; any other keeps the matrix's own.
     """
-    if filename.endswith(".fbin"):
-        dtype = np.float32
-    elif filename.endswith(".dbin"):
-        dtype = np.float64
-    elif filename.endswith(".hbin"):
-        dtype = np.float16
-    elif filename.endswith(".ibin"):
-        dtype = np.int32
-    elif filename.endswith(".bbin"):
-        dtype = np.uint8
-    elif filename.endswith(".i8bin"):
-        dtype = np.int8
-    elif filename.endswith(".i32bin"):
-        dtype = np.int32
-    elif filename.endswith(".f32bin"):
-        dtype = np.float32
-    else:
-        dtype = vectors.dtype
-
-    assert len(vectors.shape) == 2, "Input array must have 2 dimensions"
-    with open(filename, "wb") as f:
-        count, dim = vectors.shape
-        f.write(struct.pack("<i", count))
-        f.write(struct.pack("<i", dim))
-        vectors.astype(dtype).flatten().tofile(f)
+    if vectors.ndim != 2:
+        raise ValueError(f"expected a matrix, got {vectors.ndim} dimensions")
+    dtype = _dtype_for(filename) or vectors.dtype
+    with open(filename, "wb") as file:
+        file.write(struct.pack("<ii", *vectors.shape))
+        vectors.astype(dtype).tofile(file)

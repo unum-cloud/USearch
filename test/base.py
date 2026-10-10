@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 import usearch
-from usearch import DenseIndex, Executor
+from usearch import DenseIndex, DenseMetric, Executor, Scalar
 from usearch.eval import exact_matches, random_vectors
 from usearch.keys import integers_to_keys, keys_to_integers
 
@@ -108,22 +108,22 @@ batch_sizes: list[int] = [1, 7, 1024]
 
 # Every scalar type the index stores, widest dynamic range first - floats descending, then
 # signed integers, then unsigned. The order every dtype-indexed list in the project takes.
-quantizations: list[str] = [
-    "f64",
-    "f32",
-    "bf16",
-    "f16",
-    "e5m2",
-    "e4m3",
-    "e3m2",
-    "e2m3",
-    "i8",
-    "u8",
+quantizations: list[Scalar] = [
+    Scalar.F64,
+    Scalar.F32,
+    Scalar.BF16,
+    Scalar.F16,
+    Scalar.E5M2,
+    Scalar.E4M3,
+    Scalar.E3M2,
+    Scalar.E2M3,
+    Scalar.I8,
+    Scalar.U8,
 ]
 
 # The metrics over real-valued rows; the bitwise pair takes packed bits and is swept separately.
-spatial_metrics: list[str] = ["inner", "angular", "euclidean"]
-bitwise_metrics: list[str] = ["hamming", "jaccard"]
+spatial_metrics: list[DenseMetric] = [DenseMetric.INNER, DenseMetric.ANGULAR, DenseMetric.EUCLIDEAN]
+bitwise_metrics: list[DenseMetric] = [DenseMetric.HAMMING, DenseMetric.JACCARD]
 
 # The input scalar types a caller is most likely to hand us, none of which need be the stored one.
 input_dtypes = [np.float64, np.float32, np.float16, np.int8, np.uint8]
@@ -135,24 +135,24 @@ input_dtypes = [np.float64, np.float32, np.float16, np.int8, np.uint8]
 # Recall floors for a self-query at the default expansion over `_RECALL_ROWS` rows. Quantization
 # is the only thing that moves them: a stored `e2m3` row keeps three mantissa bits, so ties it
 # cannot distinguish are resolved arbitrarily.
-_RECALL_FLOORS: dict[str, float] = {
-    "f64": 0.99,
-    "f32": 0.99,
-    "bf16": 0.98,
-    "f16": 0.98,
-    "e5m2": 0.85,
-    "e4m3": 0.90,
-    "e3m2": 0.70,
-    "e2m3": 0.60,
-    "i8": 0.90,
-    "u8": 0.85,
-    "u1x8": 0.60,
+_RECALL_FLOORS: dict[Scalar, float] = {
+    Scalar.F64: 0.99,
+    Scalar.F32: 0.99,
+    Scalar.BF16: 0.98,
+    Scalar.F16: 0.98,
+    Scalar.E5M2: 0.85,
+    Scalar.E4M3: 0.90,
+    Scalar.E3M2: 0.70,
+    Scalar.E2M3: 0.60,
+    Scalar.I8: 0.90,
+    Scalar.U8: 0.85,
+    Scalar.U1X8: 0.60,
 }
 
 _RECALL_ROWS = 512
 
 
-def recall_floor(quantization: str) -> float:
+def recall_floor(quantization: Scalar) -> float:
     """The share of true nearest neighbors a build in this scalar type must still return."""
     return _RECALL_FLOORS.get(quantization, 0.90)
 
@@ -160,21 +160,21 @@ def recall_floor(quantization: str) -> float:
 # Absolute and relative tolerances for a distance checked against the oracle, by the scalar type
 # the index stored. Integers get an absolute slack and no relative one, since their error is a
 # rounding step rather than a fraction.
-_DISTANCE_TOLERANCES: dict[str, tuple[float, float]] = {
-    "f64": (1e-6, 1e-6),
-    "f32": (1e-4, 1e-4),
-    "bf16": (1e-1, 1e-1),
-    "f16": (1e-2, 1e-2),
-    "e5m2": (0.3, 0.3),
-    "e4m3": (0.2, 0.2),
-    "e3m2": (0.5, 0.5),
-    "e2m3": (0.5, 0.5),
-    "i8": (0.1, 0.1),
-    "u8": (0.1, 0.1),
+_DISTANCE_TOLERANCES: dict[Scalar, tuple[float, float]] = {
+    Scalar.F64: (1e-6, 1e-6),
+    Scalar.F32: (1e-4, 1e-4),
+    Scalar.BF16: (1e-1, 1e-1),
+    Scalar.F16: (1e-2, 1e-2),
+    Scalar.E5M2: (0.3, 0.3),
+    Scalar.E4M3: (0.2, 0.2),
+    Scalar.E3M2: (0.5, 0.5),
+    Scalar.E2M3: (0.5, 0.5),
+    Scalar.I8: (0.1, 0.1),
+    Scalar.U8: (0.1, 0.1),
 }
 
 
-def distance_tolerances(quantization: str) -> tuple[float, float]:
+def distance_tolerances(quantization: Scalar) -> tuple[float, float]:
     """The `(atol, rtol)` a distance in this stored scalar type may drift from the oracle."""
     return _DISTANCE_TOLERANCES.get(quantization, (0.5, 0.5))
 
@@ -201,19 +201,19 @@ def build_index(
     dimensions: int,
     executor: Executor,
     *,
-    metric: str = "angular",
-    quantization: str = "f32",
+    metric: DenseMetric = DenseMetric.ANGULAR,
+    quantization: Scalar = Scalar.F32,
     seed: int = 0,
     **options,
 ) -> tuple[DenseIndex, np.ndarray]:
-    """A reserved index holding *count* reproducible rows under the identities ``0..count``.
+    """A reserved index holding *count* reproducible rows under the identities ``0..count``, inserted on *executor*.
 
     Returns the index and the rows it was built from, so a caller can query with either.
     """
-    index = DenseIndex.for_ram(dimensions=dimensions, metric=metric, quantization=quantization, **options)
+    index = DenseIndex.init_ram(dimensions=dimensions, metric=metric, quantization=quantization, **options)
     index.reserve(count)
     vectors = random_vectors(count, dimensions, metric=metric, seed=seed)
-    index.add(integers_to_keys(np.arange(count, dtype=np.uint64)), vectors, executor=executor)
+    index.on(executor).insert(integers_to_keys(np.arange(count, dtype=np.uint64)), vectors)
     assert len(index) == count
     return index, vectors
 
@@ -227,10 +227,12 @@ def matches_outputs(queries: int, wanted: int) -> tuple[np.ndarray, np.ndarray, 
     )
 
 
-def measured_recall(index: DenseIndex, vectors, queries, wanted: int, executor: Executor, *, metric: str) -> float:
+def measured_recall(
+    index: DenseIndex, vectors, queries, wanted: int, executor: Executor, *, metric: DenseMetric
+) -> float:
     """The share of true nearest neighbors the index returned, against the NumKong oracle."""
     truth = exact_matches(vectors, queries, wanted, metric=metric)
-    found = keys_to_integers(index.search(queries, wanted, executor=executor).keys)
+    found = keys_to_integers(index.on(executor).search(queries, wanted).keys)
     hits = sum(len(set(found[row]) & set(truth[row])) for row in range(len(truth)))
     return hits / (len(truth) * wanted)
 

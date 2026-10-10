@@ -30,3 +30,9 @@ def test_matrix_roundtrip(tmp_path, rows: int, columns: int, extension: str, dty
     save_matrix(original, path)
     assert np.array_equal(original, load_matrix(path))
     os.remove(path)
+
+
+def test_missing_matrix_raises(tmp_path):
+    """A missing file is a `FileNotFoundError`, never a silent None."""
+    with pytest.raises(FileNotFoundError):
+        load_matrix(str(tmp_path / "absent.fbin"))

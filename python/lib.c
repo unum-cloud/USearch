@@ -16,25 +16,40 @@ static char const doc_module[] =                                                
     "is a batch over buffer-protocol inputs, so a memory-mapped dataset reaches the index\n"                  //
     "with no reshape and no copy, and NumPy is never required.";
 
+/** One type the module readies, the name it exports it under, and the layout of a struct sequence. */
 static struct {
+
+    /** NULL for a type exported only through the views a verb returns. */
     char const* name;
     PyTypeObject* type;
+
+    /** NULL for every type but a struct sequence. */
+    PyStructSequence_Desc* layout;
 } const module_types[] = {
-    {"Key", &KeyType},
-    {"Stats", &StatsType},
-    {"Match", &MatchType},
-    {"Matches", &MatchesType},
-    {"Executor", &ExecutorType},
-    {"Arena", &ArenaType},
-    {NULL, &ArenaBufferType}, //! Exported by the views a verb returns, never constructed by name.
+    {"Key", &KeyType, NULL},
+    {"Match", &MatchType, &usearch_py_match_desc},
+    {"Matches", &MatchesType, NULL},
+    {"Executor", &ExecutorType, NULL},
+    {"Arena", &ArenaType, NULL},
+    {NULL, &ArenaBufferType, NULL},
+    {"Vectors", &VectorsType, NULL},
+    {"Products", &ProductsType, NULL},
+    {"Monolith", &MonolithType, NULL},
+    {"Deferred", &DeferredType, NULL},
+    {"On", &OnType, NULL},
+    {"DeferredOn", &DeferredOnType, NULL},
 
-    {"DenseIndex", &DenseIndexType},
-    {NULL, &DenseCursorType},       //! Returned by `cursor`, never constructed by name.
-    {NULL, &DenseSearchStreamType}, //! Returned by `search_stream`, likewise.
+    {"DenseIndex", &DenseIndexType, NULL},
+    {"DenseMetadata", &DenseMetadataType, &usearch_py_dense_metadata_desc},
+    {"DenseIndexDescription", &DenseIndexDescriptionType, &usearch_py_dense_index_description_desc},
+    {"DenseReachability", &DenseReachabilityType, &usearch_py_dense_reachability_desc},
+    {"DenseTraversalStats", &DenseTraversalStatsType, NULL},
+    {"DenseCursor", &DenseCursorType, NULL},
+    {"DenseSearchStream", &DenseSearchStreamType, NULL},
 
-    {"SequenceIndex", &SequenceIndexType},
-    {"MatrixIndex", &MatrixIndexType},
-    {"GeospatialIndex", &GeospatialIndexType},
+    {"SequenceIndex", &SequenceIndexType, NULL},
+    {"MatrixIndex", &MatrixIndexType, NULL},
+    {"GeospatialIndex", &GeospatialIndexType, NULL},
 };
 
 static PyMethodDef module_methods[] = {
@@ -53,8 +68,11 @@ static PyModuleDef module_definition = {
 
 PyMODINIT_FUNC PyInit_lib(void) {
     size_t const types_count = usearch_py_table_size_(module_types);
-    for (size_t type_index = 0; type_index != types_count; ++type_index)
-        if (PyType_Ready(module_types[type_index].type) < 0) return NULL;
+    for (size_t type_index = 0; type_index != types_count; ++type_index) {
+        PyTypeObject* const type = module_types[type_index].type;
+        PyStructSequence_Desc* const layout = module_types[type_index].layout;
+        if ((layout ? PyStructSequence_InitType2(type, layout) : PyType_Ready(type)) < 0) return NULL;
+    }
 
     PyObject* const module = PyModule_Create(&module_definition);
     if (!module) return NULL;
@@ -65,22 +83,14 @@ PyMODINIT_FUNC PyInit_lib(void) {
     PyUnstable_Module_SetGIL(module, Py_MOD_GIL_NOT_USED);
 #endif
 
-    if (usearch_py_register_error_types(module) < 0) goto failed;
-    if (PyModule_AddStringConstant(module, "__version__", usearch_version_name()) < 0) goto failed;
+    if (usearch_py_register_error_types(module) < 0 || usearch_py_register_enums(module) < 0 ||
+        PyModule_AddStringConstant(module, "__version__", usearch_version_name()) < 0)
+        goto failed;
 
     for (size_t type_index = 0; type_index != types_count; ++type_index) {
         char const* const name = module_types[type_index].name;
-        if (!name) continue;
-        PyTypeObject* const type = module_types[type_index].type;
-        Py_INCREF(type);
-        // Only a successful `PyModule_AddObject` steals the reference, so undo just this one
-        // and let the dying module release the types it already owns.
-        if (PyModule_AddObject(module, name, (PyObject*)type) < 0) {
-            Py_DECREF(type);
-            goto failed;
-        }
+        if (name && PyModule_AddObjectRef(module, name, (PyObject*)module_types[type_index].type) < 0) goto failed;
     }
-
     return module;
 
 failed:

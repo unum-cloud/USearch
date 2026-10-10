@@ -16,7 +16,7 @@ def integers_to_keys(values) -> np.ndarray:
     """Packs integer identities into the ``(N, 16)`` big-endian rows every batch verb takes.
 
     Takes anything NumPy reads as unsigned integers, one identity per row, and returns a
-    ``uint8`` matrix ready for ``add``, ``search``, and their siblings.
+    ``uint8`` matrix ready for ``insert``, ``search``, and their siblings.
     """
     packed = np.ascontiguousarray(values, dtype=">u8").reshape(-1, 1)
     rows = np.zeros((packed.shape[0], 16), dtype=np.uint8)
@@ -25,7 +25,7 @@ def integers_to_keys(values) -> np.ndarray:
 
 
 def keys_to_integers(keys) -> np.ndarray:
-    """Unpacks the low eight bytes of each identity, the half integer keys park in.
+    """Unpacks the low eight bytes of each identity, the half integer keys sit in.
 
     Takes an ``(..., 16)`` buffer of identity bytes, such as ``Matches.keys``, and returns a
     ``uint64`` array shaped like it without the trailing axis. An identity using its high eight
@@ -34,6 +34,6 @@ def keys_to_integers(keys) -> np.ndarray:
     """
     raw = np.asarray(keys)
     if raw[..., :8].any():
-        raise ValueError("An identity using its high eight bytes has no 64-bit integer form")
+        raise ValueError("an identity using its high eight bytes has no 64-bit integer form")
     low = np.ascontiguousarray(raw[..., 8:])
     return low.view(">u8").reshape(raw.shape[:-1])
