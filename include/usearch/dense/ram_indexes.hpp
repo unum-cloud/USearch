@@ -1196,7 +1196,10 @@ struct dense_ram_indexes {
      *  @param[in] config The layout, alignment, synchronization contract and provenance.
      *
      *  Under @c concurrent_k contention is detected, not excluded: a row landing mid-save
-     *  reports @c contended_k.
+     *  reports @c contended_k. A settled save holds every batch on all of its shards or on none:
+     *  a batch dispenses on every shard before it publishes on any, so a shard still awaiting its
+     *  publication refuses its plan, and every shard's plan opens here, before any @c finish
+     *  re-checks.
      */
     expected<save_plan_t> plan_save(std::string_view path, save_config_t const& config) noexcept {
         if (status_t const ready = saveable_(config); failed(ready)) return {{}, ready};

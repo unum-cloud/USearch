@@ -17,13 +17,16 @@
  *  back-links into row 0: the leader's bounded acquire exchange of the sentinel, broadcast by
  *  shuffle; a published-empty row takes the newcomer as its head, otherwise the follower sweeps
  *  slot one and the empty slot is appended into by the leader, or the full row is rewritten by the
- *  follower. A single-lane prior holder appends node 2 into the same row, so the inserter's sweep
- *  may follow an edit its leader's exchange acquired. The reader warp walks row 0: the leader
- *  acquires slot zero with one retry on the sentinel, broadcasts it, the follower loads slot one,
- *  the warp syncs on its staging and each lane reads its neighbor's payload plainly.
+ *  follower. A single-lane prior holder inserts node 2: its walk draws landmarks below its own ID,
+ *  so it may draw node 1, admitted by an acquire of node 1's own slot zero, and then it appends
+ *  node 2 into row 0, so the inserter's sweep may follow an edit its leader's exchange acquired.
+ *  The reader warp walks row 0: the leader acquires slot zero with one retry on the sentinel,
+ *  broadcasts it, the follower loads slot one, the warp syncs on its staging and each lane reads
+ *  its neighbor's payload plainly.
  *
- *  An ID a lane read from a published row names a node it sees published, with the payload it sees
- *  whole; a lock holder's edit is whole to a reader that acquired its unlock, so the follower's
+ *  An ID a lane read from a published row, or a landmark it drew through the node's own slot zero,
+ *  names a node it sees published, with the payload it sees whole; a lock holder's edit is whole
+ *  to a reader that acquired its unlock, so the follower's
  *  slot-one read is at least the write that unlock published; an assigned ID ends published,
  *  self-loop or not, whether or not its reverse edge landed; and an append lands in a slot that is
  *  empty, since the sweep that found it followed the unlock the exchange acquired.
@@ -41,6 +44,9 @@
  *      returns an edit newer than the unlock its leader acquired, which carries nothing, and the ID
  *      it found names a node whose payload it then reads stale. No syncwarp closes this one, since
  *      no lane acquired that edit
+ *  @verify fail rc11 publish_order=order_relaxed: the newcomer's slot-zero release carries the
+ *      payload its lanes wrote before the warp synced; relaxed, a peer insertion that draws the node
+ *      as a landmark sees it published and reads its payload stale
  *  @verify fail rc11 tail_fence=false: every lock holder places a release fence between its lock and
  *      its slot stores, which the follower's acquiring slot-one load pairs with; without it, the
  *      follower reads an edit newer than the unlock its leader acquired, and the payload behind it
@@ -85,6 +91,9 @@
 #ifndef tail_fence
 #define tail_fence true
 #endif
+#ifndef publish_order
+#define publish_order order_release
+#endif
 
 bool launched;
 byte links;       // the walk's selection: 1 links the newcomer to node 0, 0 publishes it empty
@@ -96,6 +105,7 @@ byte lock_skips, locked_drops;
 byte published_at;                  // the history index of the newcomer's publication
 byte tail_at_unlock[history_depth]; // per slot-zero write, the slot-one write it published
 byte leader_read;                   // the slot-zero write the reader's leader acquired
+hidden int drawn;                   // scratch: the landmark draw's slot zero, checked in the same step
 
 // `__syncwarp`: the k-th barrier of warp w completes when both lanes arrived k times, and the last
 // arrival merges both lanes' views both ways, since `bar.warp.sync` orders memory among its participants
@@ -147,7 +157,7 @@ proctype inserter_leader_lane(byte t) {
     syncwarp(inserter_warp, phase);
     first_link = (links -> node(0) : node(1)); // a self-loop encodes published-empty
     atomic {
-        store(t, row_lock(1), order_release, first_link);
+        store(t, row_lock(1), publish_order, first_link);
         published_at = newest_write(row_lock(1))
     };
     if
@@ -224,11 +234,19 @@ proctype inserter_follower_lane(byte t) {
     fi
 }
 
-// another back-linker on row 0, one lane: its edit is what the inserter's sweep may miss
+// another insertion, one lane: its walk may draw node 1 as a landmark, gated on node 1's slot
+// zero, and its back-link into row 0 is the edit the inserter's sweep may miss
 proctype prior_holder_lane(byte t) {
     int displaced;
     byte attempt;
     (launched);
+    atomic {
+        load(t, row_lock(1), order_acquire, drawn);
+        if
+        :: drawn != sentinel -> see_node1(t, drawn)
+        :: else
+        fi
+    };
 lock:
     read_modify_write_if(t, row_lock(0), order_acquire, displaced != sentinel, displaced, sentinel);
     if

@@ -1681,10 +1681,10 @@ struct dense_ram_index {
      *      are what a snapshot holds; norms re-derive on load.
      *
      *  A checkpointing reader, not a mutator: concurrent searches keep running on every arm.
-     *  Under @c concurrent_k the neighbor words are read through relaxed atomics and @ref finish
-     *  probes for settlement across the whole plan, since a later insert back-linking itself
-     *  edits an earlier row; the certified arms read plain, and a violated certification surfaces
-     *  as @c contended_k rather than a silently torn snapshot.
+     *  Under @c concurrent_k every row is copied under its slot-zero lock, as writers edit it, and
+     *  @ref finish probes for settlement across the whole plan, since a later insert back-linking
+     *  itself edits an earlier row; the certified arms read plain, and a violated certification
+     *  surfaces as @c contended_k rather than a silently torn snapshot.
      */
     struct [[nodiscard]] save_plan_t {
 
@@ -1716,7 +1716,7 @@ struct dense_ram_index {
 
         /** The index being snapshotted into @p columns under @p synchronization, its IDs shifted
          *  by @p id_shift; only @ref plan_save calls it. */
-        save_plan_t(dense_ram_index const& index, columns_t columns, synchronization_t synchronization,
+        save_plan_t(dense_ram_index& index, columns_t columns, synchronization_t synchronization,
                     node_id_t id_shift) noexcept
             : columns(columns), id_shift(id_shift), synchronization(synchronization), index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
@@ -1729,8 +1729,8 @@ struct dense_ram_index {
         save_plan_t(save_plan_t const&) = delete;
         save_plan_t& operator=(save_plan_t const&) = delete;
 
-        /** A save owns nothing - no rows claimed, no lock taken - so a dying plan leaves the index
-         *  as it found it. */
+        /** A save owns nothing - no rows claimed, no lock held between steps - so a dying plan
+         *  leaves the index as it found it. */
         ~save_plan_t() noexcept = default;
 
         /** One step of the plan: one storage chunk's share of the rows under the watermark. */
@@ -1822,8 +1822,16 @@ struct dense_ram_index {
             node_id_t const* source = index_->neighbors_chunks_[location.chunk].view().row(location.offset).data();
             node_id_t* staged = scratch.data();
             if (synchronization == synchronization_t::concurrent_k)
-                for (std::size_t word = 0; word != step_slots; ++word)
-                    staged[word] = atomic_ref<node_id_t const>(source[word]).load(std::memory_order_relaxed);
+                for (std::size_t row = 0; row != rows.size(); ++row) {
+                    neighbors_ref_t const neighbors = index_->neighbors_for(
+                        chunk_schedule_t::locate(static_cast<node_id_t>(rows.first + row)));
+                    node_id_t* const staged_row = staged + row * connectivity;
+                    // A refinement relocks published rows and moves no counter `finish` re-reads.
+                    staged_row[0] = neighbors.lock();
+                    for (small_size_t slot = 1; slot != neighbors.capacity(); ++slot)
+                        staged_row[slot] = neighbors.load_slot(slot);
+                    neighbors.unlock(staged_row[0]);
+                }
             else std::memcpy(staged, source, step_slots * sizeof(node_id_t));
             for (std::size_t word = 0; word != step_slots; ++word)
                 staged[word] = staged[word] < visible ? static_cast<node_id_t>(staged[word] + id_shift)
@@ -1863,7 +1871,7 @@ struct dense_ram_index {
 
         /** The index being snapshotted; null in the empty plan a refused @ref plan_save returns,
          *  and once @c finish succeeded. */
-        dense_ram_index const* index_ = nullptr;
+        dense_ram_index* index_ = nullptr;
     };
 
     /**
@@ -1879,7 +1887,7 @@ struct dense_ram_index {
      *  @param[in] id_shift What an ID under the watermark moves by - the row this shard starts at.
      */
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
-                                    node_id_t id_shift = 0) const noexcept {
+                                    node_id_t id_shift = 0) noexcept {
         geometry_t const frozen = geometry();
         if (!frozen) return {{}, status_t::config_mismatch_k};
         save_plan_t plan {*this, columns, synchronization, id_shift};
@@ -1896,8 +1904,7 @@ struct dense_ram_index {
 
     /** Serializes every row under the watermark into @p columns on the calling thread - the
      *  one-shot over @ref plan_save for a caller with no threads to fan the steps out over. */
-    status_t save(columns_t columns, synchronization_t synchronization,
-                  nk::matrix_span<node_id_t> scratch) const noexcept {
+    status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch) noexcept {
         auto [plan, status] = plan_save(columns, synchronization);
         if (failed(status)) return status;
         for (typename save_plan_t::step_t const step : plan.steps())

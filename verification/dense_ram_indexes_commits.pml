@@ -23,6 +23,18 @@
  *      bracket, which is safe only because the dispensing mutex keeps two commits' ranges in one
  *      order on every shard; dispensing each shard on its own, the ranges cross between the
  *      shards, and each commit waits for a turn only the other's store gives
+ *  @verify fail rc11 closing_order=order_relaxed: the closing add releases both watermark stores
+ *      to a searcher that acquires it; relaxed, it only extends the opening add's release
+ *      sequence, which carries neither, and the searcher accepts a closed word beside one shard's
+ *      new watermark and the other's old one
+ *  @verify fail rc11 before_order=order_relaxed: `snapshot_` acquires the word before the
+ *      watermarks, so a closed word it reads carries both stores; relaxed, the searcher reads the
+ *      closed word, then one shard's new watermark and the other's old one, and the unmoved word
+ *      accepts the half
+ *  @verify fail rc11 size_order=order_relaxed: each shard's `size()` acquires its watermark, which
+ *      carries the opening add sequenced before the store; relaxed, the searcher reads one shard's
+ *      new watermark beside the other's old one, re-reads the word as it was before the commit
+ *      opened, and accepts the half
  */
 #define thread_count 3
 #define location_count 7
@@ -55,6 +67,15 @@
 #endif
 #ifndef dispensing_mutex
 #define dispensing_mutex true
+#endif
+#ifndef closing_order
+#define closing_order order_release
+#endif
+#ifndef before_order
+#define before_order order_acquire
+#endif
+#ifndef size_order
+#define size_order order_acquire
 #endif
 
 // the word's step after the turns: the counted word's carry into its high part, or the parity's
@@ -102,10 +123,10 @@ proctype committer(byte t) {
     :: else
     fi;
     for (shard : 0 .. shards - 1) {
-        store(t, last_visible_id(shard), order_release, part(t, shard) + 1)
+        end_turn(t, last_visible_id(shard), order_release, part(t, shard) + 1)
     };
     if
-    :: commit_sequence -> read_modify_write(t, sequence_word, order_release, sequence, sequence + sequence_unit - 1)
+    :: commit_sequence -> read_modify_write(t, sequence_word, closing_order, sequence, sequence + sequence_unit - 1)
     :: else
     fi
 }
@@ -116,9 +137,9 @@ proctype searcher(byte t) {
     byte shard, id, commit;
     int before, after, watermarks[shards], seen;
 retry:
-    load(t, sequence_word, order_acquire, before);
+    load(t, sequence_word, before_order, before);
     for (shard : 0 .. shards - 1) {
-        load(t, last_visible_id(shard), order_acquire, watermarks[shard])
+        load(t, last_visible_id(shard), size_order, watermarks[shard])
     };
     load(t, sequence_word, order_relaxed, after);
     if

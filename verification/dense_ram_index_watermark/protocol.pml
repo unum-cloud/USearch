@@ -2,16 +2,19 @@
  *  The dense index's publication protocol from `include/usearch/dense/ram_index.hpp`: identity
  *  dispensed from `next_dispensed_id_`, rows written and unlocked below it, the hole-free
  *  `last_visible_id_` watermark advanced in dispensed order, and the readers that rest on the
- *  watermark: a traversal, a cursor, and a concurrent save with its settlement probe.
+ *  watermark: a traversal, a cursor, and a concurrent save with its settlement probe, beside a
+ *  refinement that relocks published rows.
  *
  *  A row is slot zero, which locks and publishes it, and one tail slot. Every scenario beside this
- *  file defines its shape, `named_rows` for the key column `on_assigned` writes, and `appended_rows`
- *  for rows that arrive only through the load path's `finish`.
+ *  file defines its shape, `named_rows` for the key column `on_assigned` writes, `appended_rows`
+ *  for rows that arrive only through the load path's `finish`, and `refined_rows` for row 0's
+ *  second tail slot, which a refinement rewrites beside the first.
  */
 #include "../weak_memory.pml"
 #include "../watermark_turn.pml"
 
-// The words, by the index member each stands for; the key column and the load plan's tally come last.
+// The words, by the index member each stands for; the key column, the load plan's tally and row 0's
+// second tail slot come last.
 #define next_dispensed_id 0
 #define last_visible_id 1
 #define last_allocated_id 2
@@ -19,6 +22,7 @@
 #define row_tail(id) (4 + (id) * 2)
 #define key(id) (7 + (id))
 #define covered 9
+#define second_tail 10
 #define rows 2
 
 // The values rows and keys carry: the sentinel is the all-ones ID in silicon, and a slot names an ID.
@@ -26,6 +30,7 @@
 #define published(id) (10 + (id))
 #define edited(id) (20 + (id))
 #define named(id) (30 + (id))
+#define refined(id) (40 + (id))
 #define id_of(word) ((word) % 10)
 
 // The knobs: the header's choices, each overridden by a `@verify` line that replays its counterexample.
@@ -50,15 +55,28 @@
 #ifndef spends_plan
 #define spends_plan true
 #endif
+#ifndef lock_recheck
+#define lock_recheck false
+#endif
+#ifndef save_locks_rows
+#define save_locks_rows true
+#endif
+#ifndef snapshot_check
+#define snapshot_check true
+#endif
+#ifndef refresh_order
+#define refresh_order order_acquire
+#endif
 
-bool editing;            // row 0 is under its lock
+bool editing[rows];      // the rows under their locks
 byte published_at[rows]; // the history index of each row's publication
+byte dispensed_at[rows]; // the history index of each ID's dispense, which its hosting chunk precedes
 
 // a traversal's read of slot zero below the watermark it acquired, and of the key column behind it
 inline read_published(t, id, seen) {
     atomic {
         load(t, row_lock(id), order_acquire, seen);
-        assert(memory != sc || seen != sentinel || editing);
+        assert(memory != sc || seen != sentinel || editing[id]);
         assert(seen_write(t, row_lock(id)) >= published_at[id])
     };
     if
@@ -67,11 +85,38 @@ inline read_published(t, id, seen) {
     fi
 }
 
+// `neighbors_ref::lock`: the peek waits out a holder, then the exchange takes the row unless it
+// displaces the sentinel a peer locked with in between
+inline lock(t, id, displaced) {
+    do
+    :: (newest_value(row_lock(id)) != sentinel);
+        atomic {
+            read_modify_write(t, row_lock(id), order_acq_rel, displaced, sentinel);
+            editing[id] = editing[id] || displaced != sentinel
+        };
+        if
+        :: displaced != sentinel -> break
+        :: else
+        fi
+    od
+}
+
+// `neighbors_ref::unlock`: the release store of slot zero, which republishes the tail written under the lock
+inline unlock(t, id, first) {
+    atomic {
+        store(t, row_lock(id), order_release, first);
+        editing[id] = false
+    }
+}
+
 // `insert` of one row: identity, the key in `on_assigned`, the walk, the publication, the back-link, the turn
 inline insert(t) {
     int id, first_invisible, seen, displaced, watermark;
     // identity, one ID per node, chaining the hosting chunk's growth through the dispenser
-    read_modify_write(t, next_dispensed_id, order_acq_rel, id, id + 1);
+    atomic {
+        read_modify_write(t, next_dispensed_id, order_acq_rel, id, id + 1);
+        dispensed_at[id] = newest_write(next_dispensed_id)
+    };
     if
     :: named_rows && key_before_turn -> store(t, key(id), order_relaxed, named(id))
     :: else
@@ -94,20 +139,9 @@ inline insert(t) {
         :: back_link_fence -> fence_release(t)
         :: else
         fi;
-lock_row:
-        atomic {
-            read_modify_write(t, row_lock(0), order_acq_rel, displaced, sentinel);
-            editing = editing || displaced != sentinel
-        };
-        if
-        :: displaced == sentinel -> (newest_value(row_lock(0)) != sentinel); goto lock_row
-        :: else
-        fi;
+        lock(t, 0, displaced);
         store(t, row_tail(0), order_relaxed, edited(id));
-        atomic {
-            store(t, row_lock(0), order_release, edited(id));
-            editing = false
-        }
+        unlock(t, 0, edited(id))
     :: else
     fi;
     take_turn(t, last_visible_id, id, id + 1, watermark_order, watermark);
@@ -131,6 +165,18 @@ inline search(t, watermark) {
     fi
 }
 
+// `dense_ram_cursor::follow` of a staged ID: `seek` refuses it at or past the cursor's snapshot,
+// else locates its row through the chunk directory, which a reader reaches only behind the ID's
+// dispense, and reads it as a traversal does
+inline follow(t, staged, visible_count, seen) {
+    if
+    :: id_of(staged) < visible_count || !snapshot_check ->
+        assert(seen_write(t, next_dispensed_id) >= dispensed_at[id_of(staged)]);
+        read_published(t, id_of(staged), seen)
+    :: else
+    fi
+}
+
 // a row the load path lands: the tail and slot zero relaxed, published by the release that follows
 inline land_row(t, id) {
     store(t, row_tail(id), order_relaxed, published(id));
@@ -146,12 +192,45 @@ inline finish_load(t) {
     store(t, last_visible_id, watermark_order, 2)
 }
 
-// `plan_save` and `finish` under `concurrent_k`: three acquire loads, the row copies relaxed, the
-// acquire fence that pairs with the one heading `back_link_neighbors`, and the relaxed re-check
+// `refine_one_` on row 0, without its walk, which writes nothing: the lock, the tail rewritten
+// relaxed, and the unlock with the first neighbor the re-selection kept, the value the lock
+// displaced; then `back_link_neighbors` into row 1, which names row 0 already: the release fence,
+// the lock, and the unlock with the value it held
+inline refine(t) {
+    int displaced;
+    lock(t, 0, displaced);
+    store(t, row_tail(0), order_relaxed, refined(0));
+    store(t, second_tail, order_relaxed, refined(0));
+    unlock(t, 0, displaced);
+    fence_release(t);
+    lock(t, 1, displaced);
+    unlock(t, 1, displaced)
+}
+
+// a save's copy of one row: slot zero and the tail under the row's lock, or both relaxed
+inline copy_row(t, id, lock_copy, tail_copy, second_copy) {
+    if
+    :: save_locks_rows -> lock(t, id, lock_copy)
+    :: else -> load(t, row_lock(id), order_relaxed, lock_copy)
+    fi;
+    load(t, row_tail(id), order_relaxed, tail_copy);
+    if
+    :: refined_rows && id == 0 -> load(t, second_tail, order_relaxed, second_copy)
+    :: else
+    fi;
+    if
+    :: save_locks_rows -> unlock(t, id, lock_copy)
+    :: else
+    fi
+}
+
+// `plan_save` and `finish` under `concurrent_k`: three acquire loads, every row copied under its
+// lock, the acquire fence that pairs with the one heading `back_link_neighbors`, and the relaxed
+// re-check
 inline save(t) {
     byte covered_rows;
     int visible, dispensed, allocated, again;
-    int lock_copy_0, tail_copy_0, lock_copy_1, tail_copy_1;
+    int lock_copy_0, tail_copy_0, second_copy, lock_copy_1, tail_copy_1;
     // plan_save: the watermark, refused while an insert is mid-flight
     load(t, last_visible_id, order_acquire, visible);
     load(t, next_dispensed_id, order_acquire, dispensed);
@@ -163,11 +242,11 @@ inline save(t) {
     fi;
     // the copies, each tallied on this plan alone
     if
-    :: visible > 0 -> load(t, row_lock(0), order_relaxed, lock_copy_0); load(t, row_tail(0), order_relaxed, tail_copy_0); covered_rows++
+    :: visible > 0 -> copy_row(t, 0, lock_copy_0, tail_copy_0, second_copy); covered_rows++
     :: else
     fi;
     if
-    :: visible > 1 -> load(t, row_lock(1), order_relaxed, lock_copy_1); load(t, row_tail(1), order_relaxed, tail_copy_1); covered_rows++
+    :: visible > 1 -> copy_row(t, 1, lock_copy_1, tail_copy_1, second_copy); covered_rows++
     :: else
     fi;
     // finish: the tally whole, then the fence, then the re-check
@@ -188,9 +267,33 @@ inline save(t) {
     :: again != allocated -> goto contended
     :: else
     fi;
-    // settled: whole rows, none locked
+    // the slot-zero words re-read, refused where a copy caught one held or it moved since
     if
-    :: visible > 0 -> assert(lock_copy_0 != sentinel && lock_copy_0 == tail_copy_0)
+    :: lock_recheck ->
+        if
+        :: visible > 0 ->
+            load(t, row_lock(0), order_relaxed, again);
+            if
+            :: lock_copy_0 == sentinel || again != lock_copy_0 -> goto contended
+            :: else
+            fi
+        :: else
+        fi;
+        if
+        :: visible > 1 ->
+            load(t, row_lock(1), order_relaxed, again);
+            if
+            :: lock_copy_1 == sentinel || again != lock_copy_1 -> goto contended
+            :: else
+            fi
+        :: else
+        fi
+    :: else
+    fi;
+    // settled: whole rows, none locked, and a refined row's tail slots from one rewrite
+    if
+    :: visible > 0 ->
+        assert(lock_copy_0 != sentinel && (refined_rows -> tail_copy_0 == second_copy : lock_copy_0 == tail_copy_0))
     :: else
     fi;
     if

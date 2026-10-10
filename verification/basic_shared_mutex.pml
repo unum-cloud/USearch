@@ -23,6 +23,16 @@
  *      prober reads a store made under the lock while its exit probe still reads the untouched word,
  *      a torn edit certified as quiet. `basic_shared_mutex.cpp` replays it under IMM too, so Arm
  *      and POWER need the fence as much as the C++ model does
+ *  @verify fail rc11 probe_fence=false: the certified walk's acquire fence before its exit probe is
+ *      the other half of that pair, so a row read that met a store made under the lock moves the
+ *      exit probe past the lock's add; without it, the exit probe reads the untouched word and
+ *      certifies the torn pair
+ *  @verify fail rc11 unlock_shared_order=order_relaxed: `unlock_shared` subtracts its holder with a
+ *      release, which carries the edits made under the shared side to the unique side; relaxed, the
+ *      unique taker reads a mutator's pair torn
+ *  @verify fail rc11 try_lock_order=order_relaxed: `try_lock` takes the unique side with an acquire
+ *      compare-exchange, the other half of that pair; relaxed, the unique taker reads a mutator's
+ *      pair torn
  *  @verify stuck sc backoff_cap=false: a mutator backing off behind a unique holder waits capped,
  *      so it re-checks on its own; armed on the word alone, its monitor arms after the holder already
  *      left, and the mutator waits forever. The same shape governs the deficit wait in
@@ -54,6 +64,15 @@
 #endif
 #ifndef backoff_cap
 #define backoff_cap true
+#endif
+#ifndef unlock_shared_order
+#define unlock_shared_order order_release
+#endif
+#ifndef try_lock_order
+#define try_lock_order order_acquire
+#endif
+#ifndef probe_fence
+#define probe_fence true
 #endif
 
 byte reading;   // mutators inside their section
@@ -90,7 +109,7 @@ lock_shared:
     store(t, row(t, 1), order_relaxed, t + 1);
     reading--;
     // unlock_shared: one release subtract
-    read_modify_write(t, gate, order_release, observed, observed - 1)
+    read_modify_write(t, gate, unlock_shared_order, observed, observed - 1)
 }
 
 proctype unique_taker(byte t) {
@@ -102,7 +121,7 @@ try_lock:
     if
     :: holders_of(observed) == 0 && !unique_of(observed) ->
         atomic {
-            compare_exchange(t, gate, order_acquire, observed, stepped(observed) | unique_bit, succeeded);
+            compare_exchange(t, gate, try_lock_order, observed, stepped(observed) | unique_bit, succeeded);
             if :: succeeded && walking -> disturbed = true :: else fi
         };
         if
@@ -137,7 +156,10 @@ proctype prober(byte t) {
     load(t, row(1, 0), order_relaxed, first_of_1);
     load(t, row(1, 1), order_relaxed, second_of_1);
     // the fence keeps the walk's reads from sinking below the reload, as the header says
-    fence_acquire(t);
+    if
+    :: probe_fence -> fence_acquire(t)
+    :: else
+    fi;
     atomic {
         load(t, gate, order_acquire, exit);
         walking = false;

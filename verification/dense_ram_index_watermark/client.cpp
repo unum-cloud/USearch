@@ -11,14 +11,11 @@
  *  chunk fills are beyond GenMC's graph, see `dense_ram_index_capacity/client.cpp`.
  *
  *  Two inserters dispense IDs 0 and 1, publish their rows, and the second back-links into row
- *  0. A saver plans, copies the rows relaxed, and re-checks the counters after an acquire fence.
- *  A settled copy holds whole rows and no locked one. The same scenario is `inserters.pml`.
+ *  0. A saver plans, copies each row under its lock, and re-checks the counters after an acquire
+ *  fence. A settled copy holds whole rows and no locked one. The same scenario is `inserters.pml`.
  *
  *  @verify pass sc,rc11,imm inserters
- *  @verify fail rc11,imm inserters_back_link_fence_false: the release fence heading
- *      `back_link_neighbors` carries the relaxed tail stores into the save's re-check; without it,
- *      a settled copy pairs a new tail with an old slot zero, in compiled code on Arm and POWER too
- *  @verify pass sc inserters_back_link_fence_false
+ *  @verify pass sc,rc11,imm inserters_back_link_fence_false
  */
 #include <atomic> // `std::memory_order`, `std::atomic_thread_fence`
 
@@ -52,6 +49,18 @@ u32_t last_visible_id = 0;
 /** Two rows of two words: slot zero locks and publishes, slot one is the tail. */
 u32_t rows[2][2] = {{sentinel_k, 0}, {sentinel_k, 0}};
 
+/** `neighbors_ref::lock`: the peek waits out a holder, then the claim. A contender's failed exchange
+ *  and the holder's unlock are writes GenMC cannot order, so the claim is a strong compare-exchange
+ *  from the value the peek read, which writes nothing when it fails. */
+u32_t lock_row(u32_t& slot) noexcept {
+    u32_t displaced;
+    do {
+        while ((displaced = atomic_ref<u32_t>(slot).load(std::memory_order_acquire)) == sentinel_k) {}
+    } while (!atomic_ref<u32_t>(slot).compare_exchange_strong(displaced, sentinel_k, std::memory_order_acq_rel,
+                                                              std::memory_order_relaxed));
+    return displaced;
+}
+
 template <knobs_t const& knobs_>
 void* insert(void*) noexcept {
     u32_t const id = atomic_ref<u32_t>(next_dispensed_id).fetch_add(1, std::memory_order_acq_rel);
@@ -62,7 +71,7 @@ void* insert(void*) noexcept {
 
     if (first_invisible) {
         if constexpr (knobs_.back_link_fence) std::atomic_thread_fence(std::memory_order_release);
-        while (atomic_ref<u32_t>(rows[0][0]).exchange(sentinel_k, std::memory_order_acq_rel) == sentinel_k) {}
+        lock_row(rows[0][0]);
         atomic_ref<u32_t>(rows[0][1]).store(20 + id, std::memory_order_relaxed);
         atomic_ref<u32_t>(rows[0][0]).store(20 + id, std::memory_order_release);
     }
@@ -78,8 +87,9 @@ void* save(void*) noexcept {
     if (visible != dispensed) return nullptr;
     u32_t copies[2][2];
     for (u32_t id = 0; id != visible; ++id) {
-        copies[id][0] = atomic_ref<u32_t>(rows[id][0]).load(std::memory_order_relaxed);
+        copies[id][0] = lock_row(rows[id][0]);
         copies[id][1] = atomic_ref<u32_t>(rows[id][1]).load(std::memory_order_relaxed);
+        atomic_ref<u32_t>(rows[id][0]).store(copies[id][0], std::memory_order_release);
     }
     std::atomic_thread_fence(std::memory_order_acquire);
     bool const settled = atomic_ref<u32_t>(last_visible_id).load(std::memory_order_relaxed) == visible &&

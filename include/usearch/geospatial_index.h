@@ -71,7 +71,8 @@
  *  counts, the outcome - belong to their call and must not be shared between calls that are not final.
  *
  *  An insertion is all-or-nothing per call, and on a RAM handle its entries become visible at
- *  once, so a concurrent search sees every entry of the call or none of them.
+ *  once, so a concurrent search sees every entry of the call or none of them. Their keys land
+ *  right after, so a key lookup only finds entries a search already sees.
  *
  *  Entries are permanent. No verb removes one, so an index only ever grows until it is
  *  cleared wholesale, and a key's entries accumulate up to the @c values_per_key bound its
@@ -562,7 +563,7 @@ typedef struct usearch_geospatial_insert_t {
  *  An insertion is all-or-nothing per call. Every fallible step runs before the first entry
  *  identity is claimed, so a rejected call publishes nothing - a cancelled one included, which
  *  reports @c usearch_status_cancelled_k - and on a RAM handle the entries of an accepted one
- *  become visible at once.
+ *  become visible at once, their keys right after.
  *
  *  A key already holding @c values_per_key entries rejects the whole call, since a smaller retry
  *  cannot help.

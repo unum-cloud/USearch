@@ -226,7 +226,7 @@ struct basic_keep_diverse_t {
 
 /** Any link-selection heuristic: carries its own neighbors-per-node budget as
  *  @c connectivity, reads the ascending pool in @c context.results, resolves values
- *  through the index's @c published_value_of - every pooled ID is published - scores
+ *  through the index's @c published_value_of - every pooled ID is published or wired - scores
  *  pairs through the @p metric, and fills @c context.selected_neighbors. A selector
  *  may also write @c context.staged_distances - and nothing else: @c staged_ids and
  *  @c reverse_ids belong to the calling traversal. */
@@ -523,15 +523,17 @@ struct basic_ram_cursor;
  *  calls cost microseconds to milliseconds here, so brief per-node locks are noise -
  *  the only hard rule is that no metric verb ever runs while any row lock is held - the
  *  shared mutex is deliberately held across whole batches, so a parked metric starves
- *  stop-the-world verbs, never peers.
+ *  stop-the-world verbs, and delays the publication of the batches dispensed after its own.
  *
- *  Concurrency runs on plain primitives: batch capacity is claimed by @c fetch_add,
- *  identity is dispensed per node right before its watermark turn, nodes become visible
- *  through a watermark advanced in dispensed order, and a node's key lands in the
- *  multimap only after its watermark turn - so a findable key always names a published
- *  node. Keys need not be unique: every holder of a key stays addressable through
- *  @c find_each, and ID → key stays authoritative. Node IDs are never recycled and
- *  removals are deleted, keeping every reader's stale ID valid forever.
+ *  Concurrency runs on plain primitives: batch capacity is claimed by @c fetch_add, one
+ *  more add dispenses the batch's whole ID range, and one turn of a watermark advanced in
+ *  dispensed order publishes that range at once, so a search, a cursor or an ID lookup sees
+ *  all of a batch or none of it. A batch's keys land in the multimap only after its turn, so
+ *  a key an insert made findable names a published node; a load registers its keys before
+ *  @c finish publishes, while the caller keeps readers out. Keys need not be unique: every
+ *  holder of a key stays addressable through @c find_each, and ID → key stays authoritative.
+ *  Node IDs are never recycled and removals are deleted, keeping every reader's stale ID
+ *  valid forever.
  *
  *  @tparam value_type_ any payload satisfying @c basic_value; immovable once published.
  *  @tparam key_type_ trivially-copyable caller-visible identity.
@@ -579,10 +581,11 @@ struct basic_ram_index {
 
     using neighbors_buffer_t = growing_buffer<node_id_t, allocator_t>;
 
-    /** One node record: the payload, its key, the neighbors it links to, and the
-     *  mutex guarding those neighbors. The value & key are written before publication
-     *  and never change; only @c neighbors mutates after - wired by inserts, grown or
-     *  trimmed by manual linking - with its own @c size() as the live degree. */
+    /** One node record: the payload, its key, the neighbors it links to, the mutex
+     *  guarding those neighbors, and whether an insert wired them. The value & key are
+     *  written before the row is wired and never change; only @c neighbors mutates after -
+     *  grown or re-selected by later inserts' back-links, grown or trimmed by manual linking -
+     *  with its own @c size() as the live degree. */
     struct node_t {
 
         /** Mutable so ID-addressed const readers, like @c degree_of, may briefly
@@ -591,6 +594,11 @@ struct basic_ram_index {
         value_t value {};
         key_t key {};
         neighbors_buffer_t neighbors;
+
+        /** Release-stored once an insert wired the row, ahead of its batch's turn, so another batch's
+         *  walk may admit it early; a load never sets it, since its rows are reached below the
+         *  watermark alone, and IDs are never reused, so it never clears. */
+        bool wired {false};
 
         // No default form: it would seed the row with the default allocator, silently
         // escaping whatever allocator the index was constructed with.
@@ -685,20 +693,21 @@ struct basic_ram_index {
      *  @c exclusive_k instantiation compiles the per-node locks out for single-threaded builds; an
      *  @c immutable_k one is rejected at compile time.
      *
-     *  Per value: walk the graph scoring against the caller's still-unmoved value, claim
-     *  an ID from the dispenser, move the value & key into the claimed record, wire the
-     *  selected neighbors, take the watermark turn, publish the key, then back-link -
-     *  locking one neighbor at a time, never during a metric verb. A full reverse row
-     *  re-selects down to the selector's budget - manual over-wiring is advisory here
-     *  and may be pruned back.
+     *  One add dispenses the batch's whole ID range. Per value: walk the graph scoring against
+     *  the caller's still-unmoved value, move the value & key into its record, wire the selected
+     *  neighbors, mark the row wired, then back-link - locking one neighbor at a time, never
+     *  during a metric verb. The walk admits the published nodes and the rows other inserts
+     *  wired ahead of their turns, this batch's earlier rows among them. One watermark turn then
+     *  publishes the whole range, and the keys land last. A full reverse row re-selects down to
+     *  the selector's budget - manual over-wiring is advisory here and may be pruned back.
      *
      *  @param[in] incoming_values The batch to consume - moved from on success only.
      *  @param[in] keys Caller identities, parallel to @p incoming_values.
      *  @param[inout] metric This thread's scoring instance; weights may be shared,
      *      staging scratch must be thread-private.
      *  @param[out] assigned_ids Caller-owned output: either empty, or exactly one slot per
-     *      incoming value, receiving that value's dispensed node ID - generally
-     *      non-contiguous across concurrently inserting threads.
+     *      incoming value, receiving that value's dispensed node ID - one contiguous range
+     *      per batch, in batch order.
      *  @param[inout] context The calling thread's scratch & telemetry, reused across batches.
      *  @param[in] selector The link-selection heuristic, carrying its own
      *      neighbors-per-node budget - a per-call value, so heuristics & budgets swap per
@@ -748,56 +757,62 @@ struct basic_ram_index {
                                                                 capacity, std::memory_order_acq_rel);
         if (capacity - claimed < incoming_count) return {{}, status_t::overflow_k};
 
+        // One add dispenses the range one turn will publish, so nothing past it may fail; the walks run
+        // between the two, so a slow scorer delays the batches dispensed after this one.
+        node_id_t const first_new_id = atomic_ref<node_id_t>(next_dispensed_id_)
+                                           .fetch_add(static_cast<node_id_t>(incoming_count),
+                                                      std::memory_order_acq_rel);
+        iota_view<node_id_t> const range {first_new_id, static_cast<node_id_t>(first_new_id + incoming_count)};
+
         basic_traversal_telemetry_t const telemetry_before = context.telemetry;
-        for (std::size_t incoming_index = 0; incoming_index != incoming_count; ++incoming_index) {
+        for (node_id_t const new_node_id : range) {
+            std::size_t const incoming_index = new_node_id - range.first;
             value_t& incoming = incoming_values[incoming_index];
             context.results.clear();
             context.frontier.clear();
             context.visited.clear();
 
-            // Walk against the caller's still-unmoved value; a virgin index skips the walk
-            // and the first node publishes with an empty neighbors list.
-            node_id_t const first_invisible_id =
-                atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
-            // Capacity for this row is already claimed, so a refused walk wires a thinner
-            // node rather than abandoning an ID nothing will ever publish.
-            if (first_invisible_id)
-                search_around_<synchronization_>(incoming, metric, first_invisible_id, expansion_factor, fan_out,
-                                                 connectivity, context, dummy_fold_t {});
+            // Walk against the caller's still-unmoved value; the first node of a virgin index
+            // has nothing to walk to and publishes with an empty neighbors list. The ID is
+            // already dispensed, so a refused walk wires a thinner node rather than abandoning it.
+            if (new_node_id) {
+                node_id_t const first_invisible_id =
+                    atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
+                search_around_<synchronization_>(incoming, metric,
+                                                 dispensed_admission_t {this, first_invisible_id, new_node_id},
+                                                 expansion_factor, fan_out, connectivity, context, dummy_fold_t {});
+            }
             selector(*this, metric, context);
 
-            // Identity is dispensed here, after the metric-bound walk, so one slow scorer
-            // never convoys other publishers through the watermark.
-            node_id_t const new_node_id =
-                atomic_ref<node_id_t>(next_dispensed_id_).fetch_add(1, std::memory_order_acq_rel);
             node_t& record = nodes_array_[new_node_id];
             record.value = std::move(incoming);
             record.key = keys[incoming_index];
             context.reverse_ids.clear();
             std::size_t const selected_count = min_of(context.selected_neighbors.size(), connectivity);
-            // A failed load leaves its unpublished rows wired; this one starts from nothing.
+            // A failed load leaves its unpublished rows filled; this one starts from nothing.
             record.neighbors.clear();
-            // A refused row growth wires a thinner node - the claimed ID must still publish.
+            // A refused row growth wires a thinner node - the dispensed ID must still publish.
             std::size_t const wired_count = succeeded(record.neighbors.reserve(selected_count)) ? selected_count : 0;
             for (std::size_t link = 0; link != wired_count; ++link) {
                 record.neighbors.push_back_reserved(context.selected_neighbors[link].node_id);
                 context.reverse_ids.push_back_reserved(context.selected_neighbors[link].node_id);
             }
             if (report_assigned_ids) assigned_ids[incoming_index] = new_node_id;
-
-            // Take the watermark turn strictly in dispensed order - each thread holds at
-            // most one unpublished ID, so the wait is bounded by one wiring per peer.
-            for (node_id_t watermark = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
-                 watermark != new_node_id;
-                 watermark = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire))
-                wait_t {}(&last_visible_id_, watermark, 0u, wait_uncapped_t {});
-            atomic_ref<node_id_t>(last_visible_id_).store(new_node_id + 1, std::memory_order_release);
-
-            // Post-turn: the key becomes findable only for a published node, in a seat claimed up front.
-            key_map_.insert(seats, record.key, new_node_id);
+            atomic_ref<bool>(record.wired).store(true, std::memory_order_release);
 
             back_link_<synchronization_>(new_node_id, metric, selector, context);
         }
+
+        // Take the turn strictly in dispensed order: every range dispensed ahead of this one has
+        // published, which keeps the visible prefix hole-free. Holds no row lock while waiting.
+        for (node_id_t watermark = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
+             watermark != range.first;
+             watermark = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire))
+            wait_t {}(&last_visible_id_, watermark, 0u, wait_uncapped_t {});
+        atomic_ref<node_id_t>(last_visible_id_).store(range.bound, std::memory_order_release);
+
+        // Post-turn: keys become findable only for published nodes, in seats claimed up front.
+        for (node_id_t const new_node_id : range) key_map_.insert(seats, keys[new_node_id - range.first], new_node_id);
 
         insert_result_t result;
         result.telemetry = context.telemetry - telemetry_before;
@@ -969,8 +984,8 @@ struct basic_ram_index {
         if (!first_invisible_id) return {};
 
         basic_traversal_telemetry_t const telemetry_before = context.telemetry;
-        search_around_<synchronization_>(query, metric, first_invisible_id, expansion_factor, fan_out,
-                                         connectivity_32_k, context, fold);
+        search_around_<synchronization_>(query, metric, snapshot_admission_t {first_invisible_id}, expansion_factor,
+                                         fan_out, connectivity_32_k, context, fold);
 
         // A refused walk still ranked whatever it reached; the telemetry says the ranking is
         // short because scratch ran out, not because the graph had nothing better.
@@ -1022,9 +1037,10 @@ struct basic_ram_index {
         return {&nodes_array_[node_id].value, status_t::success_k};
     }
 
-    /** The payload under a @b published @p node_id, unchecked: for traversal-contract
-     *  callers - selectors and the walks themselves - whose IDs come from the published
-     *  pool, where the watermark gate of @c value_of would re-prove a known fact. */
+    /** The payload under a @b published or wired @p node_id, unchecked: for traversal-contract
+     *  callers - selectors and the walks themselves - whose IDs come from the walk's admitted
+     *  pool, where the watermark gate of @c value_of would re-prove a known fact or refuse a
+     *  row another insert wired ahead of its turn. */
     value_t const& published_value_of(node_id_t node_id) const noexcept { return nodes_array_[node_id].value; }
 
     /** The out-degree of @p node_id: the same watermark gate as @c key_of, then the
@@ -1561,17 +1577,58 @@ struct basic_ram_index {
         return {degree, status_t::success_k};
     }
 
+    /** What a search walks: the IDs below its watermark snapshot, published for every reader. */
+    struct snapshot_admission_t {
+
+        /** The watermark snapshot. */
+        node_id_t first_invisible_id = 0;
+
+        /** Whether the walk may locate @p node_id. */
+        bool admits(node_id_t node_id) const noexcept { return node_id < first_invisible_id; }
+
+        /** Landmarks come from the IDs below this bound, the snapshot. */
+        node_id_t sampling_bound() const noexcept { return first_invisible_id; }
+    };
+
+    /** What an insertion walks: the IDs below its snapshot, and past it every row whose @c wired flag
+     *  shows it wired. The acquire of that flag carries the row's value and neighbors, so batches wired
+     *  side by side link to each other rather than forming islands. */
+    struct dispensed_admission_t {
+
+        /** The index the walk reads. */
+        basic_ram_index const* index = nullptr;
+
+        /** The watermark snapshot. */
+        node_id_t first_invisible_id = 0;
+
+        /** The walking row. */
+        node_id_t node_id = 0;
+
+        /** Whether the walk may locate @p candidate_id. */
+        bool admits(node_id_t candidate_id) const noexcept {
+            if (candidate_id < first_invisible_id) return true;
+            return atomic_ref<bool const>(index->nodes_array_[candidate_id].wired).load(std::memory_order_acquire);
+        }
+
+        /** Landmarks come from the IDs below this bound: each was dispensed ahead of the walking row,
+         *  so most are wired already. */
+        node_id_t sampling_bound() const noexcept { return node_id; }
+    };
+
     /**
      *  @brief Scores up to @p wanted fresh stochastic landmarks in one builder round,
      *      seeding the results & frontier. Visited collisions probe forward cyclically,
      *      staying exact.
-     *  @return @c advanced_k, @c exhausted_k once nothing fresh stages - every published node visited,
+     *  @return @c advanced_k, @c exhausted_k once nothing fresh stages - every admitted node visited,
      *      or the metric refusing the first one - or @c sated_k once the fold asks the walk to end. A
      *      failed status means scratch could not grow, counted as a saturated walk.
+     *
+     *  Draws stay below the bound @p admission sets. Past the snapshot a row may stay unwired for the
+     *  whole walk, so the re-rolls of unadmitted draws stop once they outnumber the IDs there.
      */
-    template <typename metric_type_, typename query_type_, typename fold_type_>
+    template <typename metric_type_, typename query_type_, typename admission_type_, typename fold_type_>
     expected<walk_step_t> sample_landmarks_(query_type_ const& query, metric_type_& metric,
-                                            node_id_t first_invisible_id, std::size_t wanted,
+                                            admission_type_ const& admission, std::size_t wanted,
                                             std::size_t expansion_factor, traversal_context_t& context,
                                             fold_type_&& fold) const noexcept {
         if (status_t const seen = context.visited.reserve(context.visited.size() + wanted); failed(seen)) {
@@ -1580,10 +1637,18 @@ struct basic_ram_index {
         }
         context.staged_ids.clear();
         metric.reset(query);
+        // `visited` may also hold IDs no draw names, like a later batch's rows, so the size check
+        // can only under-sample, never let the probe loop spin.
+        node_id_t const sampling_bound = admission.sampling_bound();
+        node_id_t unwired_draws = 0;
         while (context.staged_ids.size() != wanted &&
-               context.visited.size() < static_cast<std::size_t>(first_invisible_id)) {
-            node_id_t draw = uniform_below<node_id_t> {first_invisible_id}(context.random_generator);
-            while (context.visited.contains(draw)) draw = draw + 1 == first_invisible_id ? 0 : draw + 1;
+               context.visited.size() < static_cast<std::size_t>(sampling_bound)) {
+            node_id_t draw = uniform_below<node_id_t> {sampling_bound}(context.random_generator);
+            while (context.visited.contains(draw)) draw = draw + 1 == sampling_bound ? 0 : draw + 1;
+            if (!admission.admits(draw)) {
+                if (++unwired_draws == sampling_bound - admission.first_invisible_id) break;
+                continue;
+            }
             if (metric.push(published_value_of(draw)) == basic_metric_staging_t::refused_k)
                 break; // Unmarked, so a later round may retry it.
             [[maybe_unused]] membership_t const marked = context.visited.insert(draw);
@@ -1607,10 +1672,10 @@ struct basic_ram_index {
     }
 
     /** One round's expansion half: peels up to @p fan_out frontier entries within
-     *  the stopping radius, copies their rows, and pushes the watermark- and
+     *  the stopping radius, copies their rows, and pushes the admission- and
      *  visited-filtered union into the metric, compacted in @c context.staged_ids. */
-    template <synchronization_t synchronization_, typename metric_type_, typename query_type_>
-    walk_step_t expand_frontier_(query_type_ const& query, metric_type_& metric, node_id_t first_invisible_id,
+    template <synchronization_t synchronization_, typename metric_type_, typename query_type_, typename admission_type_>
+    walk_step_t expand_frontier_(query_type_ const& query, metric_type_& metric, admission_type_ const& admission,
                                  std::size_t expansion_factor, std::size_t fan_out,
                                  traversal_context_t& context) const noexcept {
         context.staged_ids.clear();
@@ -1638,9 +1703,9 @@ struct basic_ram_index {
             std::size_t kept = segment_start;
             for (std::size_t position = segment_start; position != segment_start + degree; ++position) {
                 node_id_t const neighbor_id = context.staged_ids[position];
-                // The translation frontier: an ID at or above the snapshot has no
+                // The translation frontier: an ID the admission refuses has no
                 // happens-before edge to its record, so a later query picks it up.
-                if (neighbor_id >= first_invisible_id) continue;
+                if (!admission.admits(neighbor_id)) continue;
                 if (context.visited.contains(neighbor_id)) continue;
                 if (metric.push(published_value_of(neighbor_id)) == basic_metric_staging_t::refused_k) {
                     context.staged_ids.resize_reserved(kept);
@@ -1660,16 +1725,18 @@ struct basic_ram_index {
      *      nearest frontier entries and score the staged union in one builder round - every
      *      scored round, seeds included, reaching the fold before the pool.
      *
-     *  The walk never fails hard: an exhausted published set, a refused staging or a sated fold
-     *  ends it normally, and a refused re-table ends it early with the ranking it has and counts a
-     *  saturated walk - an insertion wires the thinner row regardless, and a search reports
-     *  the count so the caller can widen the scratch. Frontier starvation with an unfilled
-     *  pool re-seeds and counts a restart. The frontier-admission rule: a candidate enters
-     *  the frontier iff it improved the results pool, or the frontier would otherwise be
-     *  empty - the seedings.
+     *  The walk locates only the IDs @p admission admits: a search's snapshot, or an insertion's
+     *  snapshot widened by the rows wired ahead of their turns. It never fails hard: an exhausted
+     *  admitted set, a refused staging or a sated fold ends it normally, and a refused re-table ends
+     *  it early with the ranking it has and counts a saturated walk - an insertion wires the thinner
+     *  row regardless, and a search reports the count so the caller can widen the scratch. Frontier
+     *  starvation with an unfilled pool re-seeds and counts a restart. The frontier-admission rule: a
+     *  candidate enters the frontier iff it improved the results pool, or the frontier would
+     *  otherwise be empty - the seedings.
      */
-    template <synchronization_t synchronization_, typename metric_type_, typename query_type_, typename fold_type_>
-    void search_around_(query_type_ const& query, metric_type_& metric, node_id_t first_invisible_id,
+    template <synchronization_t synchronization_, typename metric_type_, typename query_type_, typename admission_type_,
+              typename fold_type_>
+    void search_around_(query_type_ const& query, metric_type_& metric, admission_type_ const& admission,
                         std::size_t expansion_factor, std::size_t fan_out, std::size_t connectivity,
                         traversal_context_t& context, fold_type_&& fold) const noexcept {
         while (true) {
@@ -1678,14 +1745,14 @@ struct basic_ram_index {
             if (context.frontier.empty()) {
                 if (context.results.size() >= expansion_factor) return;
                 bool const restarting = !context.results.empty();
-                expected<walk_step_t> const seeded = sample_landmarks_(query, metric, first_invisible_id, connectivity,
+                expected<walk_step_t> const seeded = sample_landmarks_(query, metric, admission, connectivity,
                                                                        expansion_factor, context, fold);
                 if (failed(seeded.status) || seeded.value != walk_step_t::advanced_k) return;
                 context.telemetry.restarts += restarting;
                 continue;
             }
-            walk_step_t const expanded = expand_frontier_<synchronization_>(query, metric, first_invisible_id,
-                                                                            expansion_factor, fan_out, context);
+            walk_step_t const expanded = expand_frontier_<synchronization_>(query, metric, admission, expansion_factor,
+                                                                            fan_out, context);
             if (expanded == walk_step_t::exhausted_k) return;
             walk_step_t const ranked = rank_round_(metric, expansion_factor, context, fold);
             if (expanded == walk_step_t::saturated_k || ranked != walk_step_t::advanced_k) return;
@@ -1721,8 +1788,8 @@ struct basic_ram_index {
         return walk_step_t::advanced_k;
     }
 
-    /** Wires the reverse edges of the freshly published node, walking the links
-     *  snapshotted in @c context.reverse_ids: per neighbor - lock, append when room
+    /** Wires the reverse edges of the freshly wired node before its batch's turn, walking
+     *  the links snapshotted in @c context.reverse_ids: per neighbor - lock, append when room
      *  remains at zero metric cost; otherwise copy the full row, unlock, re-select
      *  off-lock through the selector, relock, and apply only if the row is still the
      *  one copied - a lost race falls back to append-if-room, never a re-score. */
@@ -1732,13 +1799,7 @@ struct basic_ram_index {
         constexpr bool locked_k = synchronization_ == synchronization_t::concurrent_k;
         std::size_t const connectivity = selector.connectivity;
         value_t const& new_value = published_value_of(new_node_id);
-        // The newcomer published before this pass, so a racing manual link may have wired
-        // it already - every append re-checks under the same lock, or edges duplicate.
-        auto already_linked = [new_node_id](node_t const& node) noexcept {
-            for (std::size_t position = 0; position != node.neighbors.size(); ++position)
-                if (node.neighbors[position] == new_node_id) return true;
-            return false;
-        };
+        // `link` names only published IDs and the newcomer publishes after this pass, so no row holds it yet.
         for (std::size_t reverse = 0; reverse != context.reverse_ids.size(); ++reverse) {
             node_id_t const neighbor_id = context.reverse_ids[reverse];
             node_t& node = nodes_array_[neighbor_id];
@@ -1746,18 +1807,12 @@ struct basic_ram_index {
             if constexpr (locked_k) node.mutex.lock();
             if (node.neighbors.size() < connectivity) {
                 // A refused growth loses one reverse link - tolerated, like refused staging.
-                if (!already_linked(node) && succeeded(node.neighbors.reserve(node.neighbors.size() + 1)))
+                if (succeeded(node.neighbors.reserve(node.neighbors.size() + 1)))
                     node.neighbors.push_back_reserved(new_node_id);
                 if constexpr (locked_k) node.mutex.unlock();
                 continue;
             }
             std::size_t const degree = node.neighbors.size();
-            // A manual link may have wired the newcomer since it published; re-selecting
-            // would carry the edge twice.
-            if (already_linked(node)) {
-                if constexpr (locked_k) node.mutex.unlock();
-                continue;
-            }
             context.staged_ids.clear();
             if (failed(context.staged_ids.reserve(degree))) {
                 if constexpr (locked_k) node.mutex.unlock();
@@ -1802,7 +1857,7 @@ struct basic_ram_index {
                 for (std::size_t kept = 0; kept != kept_count; ++kept)
                     node.neighbors.push_back_reserved(context.selected_neighbors[kept].node_id);
             }
-            else if (node.neighbors.size() < connectivity && !already_linked(node) &&
+            else if (node.neighbors.size() < connectivity &&
                      succeeded(node.neighbors.reserve(node.neighbors.size() + 1))) {
                 node.neighbors.push_back_reserved(new_node_id);
             }
@@ -1881,8 +1936,8 @@ struct basic_ram_index {
      *  never writes and the count never overshoots. */
     alignas(default_alignment_k) std::size_t claimed_count_ {0};
 
-    /** Node-ID dispenser; IDs are claimed after the walk, right before publication.
-     *  Its per-insert RMW gets its own line, so it never invalidates the watermark line
+    /** Node-ID dispenser; one add hands a batch its whole range before the first walk.
+     *  Its per-batch RMW gets its own line, so it never invalidates the watermark line
      *  every search snapshots. */
     alignas(default_alignment_k) node_id_t next_dispensed_id_ {0};
 

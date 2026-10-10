@@ -12,7 +12,10 @@
  *  `grow_rows_` when the planes are short, the launch, which carries the host's view to the device
  *  and is accepted or rejected, the release store of the claim on acceptance alone, the release
  *  unlock; then an accepted batch drains and takes its turn, `publish_`: a wait until the watermark
- *  reaches its first ID, then a release store of its end. A loader runs `plan_load` and `finish`:
+ *  reaches its first ID, then a release store of its end. The first inserter's drain may fail
+ *  instead: `fail_` keeps the failure in `status_` with an `acq_rel` exchange, and its rows stay
+ *  invisible; `publish_` acquires `status_` on every turn of its wait and returns a kept failure
+ *  rather than wait for a batch that never turns. A loader runs `plan_load` and `finish`:
  *  `lock_if_free`, `contended_k` when the claim is held, else the growth, the rows landed, the
  *  relaxed restore of `published_rows`, the release store of the claim, the unlock, and the turn;
  *  or it dies before `finish`. A searcher takes its bound from `size()`, an acquire load of the
@@ -28,8 +31,9 @@
  *  one word with the same orders.
  *
  *  The bound a searcher acquired lies inside the planes it sees mapped, and so does every ID the
- *  device is assigned. Every row below the bound landed. One grower and one claim holder run at a
- *  time, the loader's verdict names the claim's state, and the claimed ranges are disjoint and lie
+ *  device is assigned. Every row below the bound landed, and a row the walk reads landed in a
+ *  batch that turned. One grower and one claim holder run at a time, every batch and load ends,
+ *  the loader's verdict names the claim's state, and the claimed ranges are disjoint and lie
  *  inside the planes when each claim is stored. `far` is not run: the posted add is x86's, and the
  *  ramp's add runs on the GPU.
  *
@@ -54,15 +58,17 @@
  *      in claim order, so every row under a search's bound landed; turned first, the searcher reads
  *      a row still in flight
  *  @verify fail sc neighbor_filter=false: the walk follows no ID at or past the bound, since an
- *      in-flight batch's back-links name its rows inside visible ones; unfiltered, it reaches a row
+ *      in-flight batch's back-links name its rows inside visible ones; unfiltered, it reads a row
  *      whose batch has not turned
+ *  @verify stuck sc failure_ends_wait=false: `publish_` ends a turn's wait on the failure an earlier
+ *      batch kept; waiting on, the batch claimed after one whose drain failed waits forever for a
+ *      turn that never comes
  */
 #define thread_count 5
-#define location_count 6
+#define location_count 7
 #define history_depth 10
 #define device_thread 4 // the thread every launch hands the host's view to
 #include "weak_memory.pml"
-#include "watermark_turn.pml"
 
 // The words, by the index member each stands for; the planes' extent stands for `capacity()`, and
 // row 0's tail for the slot a back-link appends into, zero while it names no row.
@@ -72,6 +78,11 @@
 #define published_rows 3
 #define last_visible_id 4
 #define row_zero_tail 5
+#define status 6
+
+// The statuses `status_` keeps: none, or the first failure that left claimed rows unpublished.
+#define success 0
+#define device_error 1
 
 // The sizes.
 #define rows_per_batch 2
@@ -103,6 +114,9 @@
 #endif
 #ifndef neighbor_filter
 #define neighbor_filter true
+#endif
+#ifndef failure_ends_wait
+#define failure_ends_wait true
 #endif
 
 byte inserters_done;
@@ -169,9 +183,26 @@ inline claim_range(who, first, rows) {
     range_first[who] = first
 }
 
+// publish_: a wait until the watermark reaches `from`, then the release store of `to`; a failure
+// an earlier batch kept ends the wait first, since that batch never turns
+inline publish(t, from, to, watermark, kept) {
+    do
+    :: load(t, last_visible_id, order_acquire, watermark);
+        if
+        :: watermark == from -> store(t, last_visible_id, watermark_order, to); break
+        :: else ->
+            load(t, status, order_acquire, kept);
+            if
+            :: failure_ends_wait && kept != success -> break
+            :: else -> (newest_value(last_visible_id) != watermark || failure_ends_wait && newest_value(status) != success)
+            fi
+        fi
+    od
+}
+
 proctype inserter(byte t) {
     bool accepted;
-    int observed, first_id, total, mapped, watermark;
+    int observed, first_id, total, mapped, watermark, kept;
     if
     :: claiming_mutex -> lock_claiming(t, observed)
     :: else
@@ -207,17 +238,18 @@ proctype inserter(byte t) {
     :: claiming_mutex -> unlock_claiming(t)
     :: else
     fi;
-    // the blocking insert: the drain, every row landed, then the turn
+    // the blocking insert: the drain, every row landed, then the turn; the first inserter's drain may
+    // fail instead, keeping its failure and leaving its rows invisible
     if
-    :: accepted ->
+    :: accepted && drain_before_turn ->
+        (!pending[t]);
         if
-        :: drain_before_turn ->
-            (!pending[t]);
-            take_turn(t, last_visible_id, first_id, total, watermark_order, watermark)
-        :: else ->
-            take_turn(t, last_visible_id, first_id, total, watermark_order, watermark);
-            (!pending[t])
+        :: true -> publish(t, first_id, total, watermark, kept)
+        :: t == 0 -> read_modify_write(t, status, order_acq_rel, kept, device_error)
         fi
+    :: accepted && !drain_before_turn ->
+        publish(t, first_id, total, watermark, kept);
+        (!pending[t])
     :: else
     fi;
     inserters_done++
@@ -226,7 +258,7 @@ proctype inserter(byte t) {
 // plan_load and finish: the claim if free, the growth, the rows landed, the restored count, the
 // claim's release, and the turn once the mutex is dropped
 proctype loader(byte t) {
-    int observed, base, total, mapped, watermark;
+    int observed, base, total, mapped, watermark, kept;
     if
     :: !base_under_claim -> load(t, claimed_rows, order_acquire, base)
     :: else
@@ -271,14 +303,15 @@ proctype loader(byte t) {
         :: else
         fi;
         if
-        :: claimed[2] -> take_turn(t, last_visible_id, base, total, watermark_order, watermark)
+        :: claimed[2] -> publish(t, base, total, watermark, kept)
         :: else
         fi
     fi
 }
 
 // submit_search_: the bound is size(), every row below it is read, and the walk follows row 0's
-// tail, which a back-link of any batch may name, only below the bound
+// tail, which a back-link of any batch may name, only below the bound; a row the walk reads landed
+// in a batch that turned
 proctype searcher(byte t) {
     int bound, mapped, id;
     load(t, last_visible_id, size_order, bound);
@@ -292,7 +325,10 @@ proctype searcher(byte t) {
     if
     :: bound > 0 ->
         load(t, row_zero_tail, order_relaxed, id);
-        assert(id == 0 || neighbor_filter && id >= bound || id < newest_value(last_visible_id))
+        if
+        :: id != 0 && (id < bound || !neighbor_filter) -> assert(filled[id] && id < newest_value(last_visible_id))
+        :: else
+        fi
     :: else
     fi
 }

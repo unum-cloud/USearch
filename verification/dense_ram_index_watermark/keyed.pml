@@ -15,9 +15,10 @@
  */
 #define thread_count 4
 #define location_count 9
-#define history_depth 4
+#define history_depth 7
 #define named_rows true
 #define appended_rows false
+#define refined_rows false
 #include "protocol.pml"
 
 proctype inserter(byte t) { insert(t) }

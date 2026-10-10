@@ -5,7 +5,7 @@
  *  and dispenser, never refused on an idle index, writes the shard's keys at the base, then bumps
  *  the dispenser and releases the watermark.
  *
- *  @verify pass sc,rc11,far
+ *  @verify pass sc,rc11
  *  @verify fail sc,rc11 keys_before_finish=false: the load path lands every shard's keys before
  *      `finish` releases the dispenser and the watermark; after them, the searcher reads an unset
  *      key below the watermark it acquired
@@ -34,8 +34,7 @@ proctype loader(byte t) {
         :: !keys_before_finish -> land_keys(t, shard, visible)
         :: else
         fi
-    };
-    landed(t)
+    }
 }
 
 proctype searcher(byte t) { search(t) }

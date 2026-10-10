@@ -1,6 +1,8 @@
 /**
- *  The io_uring words of `dense_uring_ring_t` behind `dense_nvme_index`, from
- *  `include/usearch/dense/nvme_index.hpp`: the submission ring's head and tail, the completion
+ *  @brief The io_uring words of `dense_uring_ring_t` behind `dense_nvme_index`: the engine and the
+ *      kernel over both rings, with every completion posted as soon as its entry is consumed.
+ *
+ *  From `include/usearch/dense/nvme_index.hpp`: the submission ring's head and tail, the completion
  *  ring's head and tail, and the entries between them, shared with the kernel through the orders
  *  the ring documentation asks for.
  *
@@ -15,16 +17,27 @@
  *  that index, never the initial value and never a stale one from the previous lap. Every request
  *  is consumed and reaped exactly once, and a head never passes its tail.
  *
+ *  Under `IORING_SETUP_DEFER_TASKRUN` the kernel posts completions only while the engine is inside
+ *  its blocking enter, which narrows when they land and changes nothing about what is seen, so a
+ *  kernel that posts at any step covers it.
+ *
  *  The acquire on the submission head and the release on the completion head guard the shape
  *  where a slot is reused before its reader is done, which RC11 forbids by construction, so no knob
  *  can fail on them here: with no eventual visibility in the model either, a relaxed head read can
  *  stay stale forever, and the run ends with a stuck engine rather than a failed assertion. They
  *  stay in the header, since the kernel is not a C++ thread.
  *
- *  Every scenario beside this file defines `defer_taskrun`, whether the kernel posts completions
- *  only while the engine is inside its blocking enter.
+ *  @verify pass sc,rc11
+ *  @verify fail rc11 sq_tail_order=order_relaxed: `enter` publishes the submission tail with a
+ *      release that carries the entries; relaxed, the kernel consumes an entry before its payload
+ *      landed
+ *  @verify fail rc11 cq_tail_order=order_relaxed: `pump` acquires the completion tail, which carries
+ *      the kernel's entries; relaxed, the engine reaps a completion stale
  */
-#include "../weak_memory.pml"
+#define thread_count 2
+#define location_count 8
+#define history_depth 4
+#include "weak_memory.pml"
 
 // The words: the four ring words, then the entries of each ring.
 #define sq_head 0
@@ -46,13 +59,9 @@
 #define cq_tail_order order_acquire
 #endif
 
-bool entering; // the engine is inside a blocking enter, which is when a deferred ring posts
-
 // `pump` and `pop`: the wait on the completion tail, then every completion up to the tail
 inline reap(t, reaped, tail, seen) {
-    entering = true;
     (newest_value(cq_tail) != reaped);
-    entering = false;
     load(t, cq_tail, cq_tail_order, tail);
     do
     :: reaped != tail ->
@@ -66,7 +75,7 @@ inline reap(t, reaped, tail, seen) {
 
 // the engine: `next_submission` takes the head with acquire and writes the entry in place, `enter`
 // publishes the tail, and a full ring or the last request reaps
-inline submit_and_reap(t) {
+proctype engine(byte t) {
     int head, tail, seen;
     byte posted, reaped;
     do
@@ -85,7 +94,7 @@ inline submit_and_reap(t) {
 }
 
 // the kernel: the waits sit in the guards, so it never commits to one ring while it owes the other
-inline consume_and_complete(t) {
+proctype kernel(byte t) {
     int tail, head, seen;
     byte consumed, completed;
     do
@@ -100,7 +109,7 @@ inline consume_and_complete(t) {
             store(t, sq_head, order_release, consumed)
         :: else -> break
         od
-    :: completed < consumed && (!defer_taskrun || entering) && completed - newest_value(cq_head) < depth ->
+    :: completed < consumed && completed - newest_value(cq_head) < depth ->
         // the completion ring: room from the head with acquire, the entry, the tail with release
         load(t, cq_head, order_acquire, head);
         if
@@ -114,3 +123,5 @@ inline consume_and_complete(t) {
     od;
     assert(newest_value(sq_head) <= newest_value(sq_tail) && newest_value(cq_head) <= newest_value(cq_tail))
 }
+
+init { atomic { run engine(0); run kernel(1) } }

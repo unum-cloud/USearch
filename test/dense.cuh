@@ -1026,24 +1026,27 @@ std::size_t dense_expect_moved_plan_refuses(index_type_& index, typename index_t
 }
 
 /** A load plan that dies before its finish releases the rows it claimed, once even when
- *  moved: the next plan appends at the same base and lands the whole checkpoint. */
+ *  moved: the next plan appends at the same base, in the rows the reservation hosts, and lands
+ *  the whole checkpoint. */
 template <typename index_type_, typename node_id_type_, typename make_index_type_>
 std::size_t dense_expect_abandoned_load(make_index_type_ const& make_index, allocation_ledger_t& ledger,
                                         typename index_type_::columns_view_t source, std::size_t nodes_count,
                                         std::size_t dimensions, iota_view<node_id_type_> local) {
     std::size_t failures = 0;
     index_type_ abandoned = make_index(ledger);
-    failures += expect(abandoned.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
+    auto const [reserved_rows, reserve_status] = abandoned.reserve({nodes_count, connectivity_16_k, dimensions});
+    failures += expect(reserve_status == status_t::success_k);
     failures += dense_expect_moved_plan_refuses(abandoned, source, nodes_count, local);
     failures += expect_eq(abandoned.size(), 0u);
     failures += expect_eq(abandoned.load(source, nodes_count, local), status_t::success_k);
     failures += expect_eq(abandoned.size(), nodes_count);
+    failures += expect_eq(abandoned.capacity(), reserved_rows); // The released rows hosted the load.
     return failures;
 }
 
 /** A save plan refuses a step past its watermark, and a finish with nothing landed. */
 template <typename index_type_, typename scalar_type_, typename node_id_type_>
-std::size_t dense_expect_save_plan_misuse(index_type_ const& index, nk::matrix<scalar_type_>& saved_vectors,
+std::size_t dense_expect_save_plan_misuse(index_type_& index, nk::matrix<scalar_type_>& saved_vectors,
                                           nk::matrix<node_id_type_>& saved_neighbors,
                                           nk::matrix<node_id_type_>& scratch) {
     std::size_t failures = 0;
@@ -1102,6 +1105,9 @@ std::size_t dense_expect_load_hostile(make_index_type_ const& make_index, alloca
     failures += expect(growing.reserve({1, connectivity_16_k, dimensions}).status == status_t::success_k);
     failures += expect_eq(growing.load(source, nodes_count, local), status_t::success_k);
     failures += expect_eq(growing.size(), nodes_count);
+    // A reservation one row above the hosted ones grows them, though that one row fits the free rows.
+    std::size_t const hosted_rows = growing.capacity();
+    failures += expect(growing.reserve({hosted_rows + 1, connectivity_16_k, dimensions}).value > hosted_rows);
 
     // Out-of-range neighbor IDs load as sentinels - the interchange admits any - and the
     // translation frontier keeps them from ever surfacing in a search.

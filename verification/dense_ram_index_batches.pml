@@ -4,35 +4,51 @@
  *
  *  Two commits of two rows each. A commit's leader dispenses, hands the range to a helper as the
  *  executor's fan-out would, each wires one row, the helper joins with a release the leader
- *  acquires, and the leader takes one turn from the range's first ID to its end. A row's walk
- *  admits the rows below its snapshot, and past it a row of its own range, or of the other commit
- *  once an acquire of the dispenser shows it dispensed, only once an acquire of that row's slot zero
- *  shows it published; it back-links into row 0 behind the fence whenever it reached it, so commits
- *  in flight together link to each other rather than forming islands. The searcher acquires the
- *  watermark, which never lies strictly inside a range, reads every row below it as published, and
- *  follows row 0's tail only below its snapshot, so a back-link into a later commit's rows never
- *  leads into them.
+ *  acquires, and the leader takes one turn from the range's first ID to its end. A row's wirer
+ *  stores its payload, the vector and norms it lands, relaxed ahead of the release of slot zero
+ *  that publishes it. A row's walk admits the rows below its snapshot, and past it a row of its own
+ *  range, or of the other commit once an acquire of the dispenser shows it dispensed, only once an
+ *  acquire of that row's slot zero shows it published; it back-links into row 0 behind the fence
+ *  whenever it reached it, so commits in flight together link to each other rather than forming
+ *  islands. The searcher acquires the watermark, which never lies strictly inside a range, reads
+ *  every row below it, and follows row 0's tail only below its snapshot, so a back-link into a
+ *  later commit's rows never leads into them. Every row a reader admits, it reads with its payload
+ *  whole.
  *
  *  @verify pass sc,rc11
- *  @verify fail sc,rc11 range_turn=false: one turn per range keeps a batch whole; a turn per row lets
+ *  @verify stuck sc watermark_wakes=false: `await_turn_` waits uncapped, so the store that ends each
+ *      turn must wake it, as every store to a monitored line does; behind a waiter only a notify
+ *      wakes, with none after the watermark store, the later commit waits forever for a turn that
+ *      came
+ *  @verify stuck sc recheck=false: the monitored wait re-reads the watermark after arming; without
+ *      it, a turn that ends between the waiter's load and its arming wakes nobody, and the later
+ *      commit blocks forever
+ *  @verify fail sc range_turn=false:one turn per range keeps a batch whole; a turn per row lets
  *      the searcher see half a commit
  *  @verify fail sc,rc11 own_range_check=false: a walk admits a row of its own range only once an
- *      acquire of its slot zero shows it published; unchecked, it reads the sibling before its wirer
- *      unlocked it
+ *      acquire of its slot zero shows it published; unchecked, it reads the sibling's payload before
+ *      its wirer published it
+ *  @verify fail rc11 admission_order=order_relaxed: a walk admits a row past its snapshot by an
+ *      acquire of its slot zero, which carries the payload stored before the release; relaxed, the
+ *      walk sees the row published and reads its payload stale
+ *  @verify fail rc11 publish_order=order_relaxed: slot zero's release carries the payload its wirer
+ *      stored before it; relaxed, a walk that admits the row through its slot zero reads the payload
+ *      stale
  */
 #define thread_count 5
-#define location_count 9
-#define history_depth 11
+#define location_count 13
+#define history_depth 7
 #include "weak_memory.pml"
 #include "watermark_turn.pml"
 
 // The words, by the index member each stands for; the four rows keep slot zero alone, but for row
-// 0's tail, which the back-links edit.
+// 0's tail, which the back-links edit, and each row's payload comes last.
 #define next_dispensed_id 0
 #define last_visible_id 1
 #define row_lock(id) (2 + (id))
 #define row_tail(id) 6
 #define joined(commit) (7 + (commit))
+#define payload(id) (9 + (id))
 #define range_rows 2
 #define rows 4
 
@@ -49,23 +65,38 @@
 #ifndef own_range_check
 #define own_range_check true
 #endif
+#ifndef admission_order
+#define admission_order order_acquire
+#endif
+#ifndef publish_order
+#define publish_order order_release
+#endif
 
 byte range_first[2];     // the range each commit dispensed, handed to its helper
 bool dispatched[2];      // the fan-out's dispatch, which carries no row
-bool wired[rows];        // each row unlocked, set with the unlock
-byte published_at[rows]; // the history index of each row's publication
+hidden int payload_read; // scratch: a payload a reader read, checked in the same step
 
-// a read of a row a walk admitted: unlocked before it, and in the reader's view
-inline read_wired(t, id, seen) {
+// a read of a row a reader admitted: the payload its wirer stored before publishing it
+inline read_payload(t, id) {
     atomic {
-        load(t, row_lock(id), order_acquire, seen);
-        assert(wired[id]);
-        assert(seen_write(t, row_lock(id)) >= published_at[id])
+        load(t, payload(id), order_relaxed, payload_read);
+        assert(payload_read == published(id))
+    }
+}
+
+// a walk's admission of a row past its snapshot: slot zero shows it published, then its payload
+inline admit(t, id, seen) {
+    atomic {
+        load(t, row_lock(id), admission_order, seen);
+        if
+        :: seen != sentinel -> read_payload(t, id)
+        :: else
+        fi
     }
 }
 
 // one row of a commit: the walk below the snapshot and over the published rows dispensed before it
-// began, slot zero's release, then the back-link into row 0 when the walk reached it
+// began, the payload and slot zero's release, then the back-link into row 0 when the walk reached it
 inline wire(t, id, sibling) {
     byte other;
     int first_invisible, first_undispensed, seen, displaced;
@@ -74,37 +105,28 @@ inline wire(t, id, sibling) {
     load(t, next_dispensed_id, order_acquire, first_undispensed);
     linked = first_invisible > 0;
     if
-    :: linked -> read_wired(t, 0, seen)
+    :: linked -> read_payload(t, 0)
     :: else
     fi;
     // past the snapshot, the other commit's first row, once dispensed and its slot zero shows it published
     other = (id < range_rows -> range_rows : 0);
     if
     :: !linked && other < first_undispensed ->
-        load(t, row_lock(other), order_acquire, seen);
-        if
-        :: seen != sentinel -> read_wired(t, other, seen); linked = other == 0
-        :: else
-        fi
+        admit(t, other, seen);
+        linked = other == 0 && seen != sentinel
     :: else
     fi;
     if
-    :: own_range_check ->
-        load(t, row_lock(sibling), order_acquire, seen);
-        if
-        :: seen != sentinel -> read_wired(t, sibling, seen)
-        :: else
-        fi
-    :: else -> read_wired(t, sibling, seen)
+    :: own_range_check -> admit(t, sibling, seen)
+    :: else -> read_payload(t, sibling)
     fi;
     if
     :: id == 0 -> store(t, row_tail(0), order_relaxed, published(0))
     :: else
     fi;
     atomic {
-        store(t, row_lock(id), order_release, published(id));
-        wired[id] = true;
-        published_at[id] = newest_write(row_lock(id))
+        store(t, payload(id), order_relaxed, published(id));
+        store(t, row_lock(id), publish_order, published(id))
     };
     if
     :: linked ->
@@ -160,22 +182,22 @@ proctype helper(byte t; byte commit) {
     store(t, joined(commit), order_release, 1)
 }
 
-// a search: the watermark acquired, never inside a range, every row below it published, and the
-// walk through row 0's tail, which a later commit's back-link may name, filtered by the snapshot
+// a search: the watermark acquired, never inside a range, every row below it read, and the walk
+// through row 0's tail, which a later commit's back-link may name, filtered by the snapshot
 proctype searcher(byte t) {
     byte id;
-    int watermark, seen, found;
+    int watermark, found;
     load(t, last_visible_id, order_acquire, watermark);
     assert(watermark % range_rows == 0);
     do
     :: id == watermark -> break
-    :: else -> read_wired(t, id, seen); id++
+    :: else -> read_payload(t, id); id++
     od;
     if
     :: watermark > 0 ->
         load(t, row_tail(0), order_relaxed, found);
         if
-        :: id_of(found) < watermark -> read_wired(t, id_of(found), seen)
+        :: id_of(found) < watermark -> read_payload(t, id_of(found))
         :: else
         fi
     :: else

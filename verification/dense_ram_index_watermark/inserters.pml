@@ -6,22 +6,22 @@
  *  release, the publication; the second, when it saw the first below the watermark, back-links into
  *  row 0: a release fence, the slot-zero lock exchange, a relaxed tail store, the release unlock.
  *  The searcher acquires the watermark and reads every row below it. The saver runs `plan_save` and
- *  `finish` under `concurrent_k`: three acquire loads, the row copies as relaxed loads, an acquire
+ *  `finish` under `concurrent_k`: three acquire loads, every row copied under its lock, an acquire
  *  fence, and the relaxed re-check of the three counters; a settled save copied no locked row and
- *  no torn edit.
+ *  no torn edit. The lock's exchange acquires the back-link's unlock, which carries its dispense
+ *  into the re-check, so the save rests on the release fence heading `back_link_neighbors` no more.
  *
  *  @verify pass sc,rc11
  *  @verify fail rc11 watermark_order=order_relaxed: the watermark's release carries every row below
  *      it; without it, the searcher reads a row below the watermark it acquired unpublished
- *  @verify fail rc11 back_link_fence=false: the release fence heading `back_link_neighbors` carries
- *      the relaxed tail stores into the save's re-check; without it, a settled copy holds a new tail
- *      beside an old slot zero
+ *  @verify pass rc11 back_link_fence=false
  */
 #define thread_count 4
 #define location_count 7
-#define history_depth 4
+#define history_depth 7
 #define named_rows false
 #define appended_rows false
+#define refined_rows false
 #include "protocol.pml"
 
 proctype inserter(byte t) { insert(t) }

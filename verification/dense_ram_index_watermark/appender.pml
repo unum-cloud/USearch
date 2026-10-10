@@ -14,9 +14,10 @@
  */
 #define thread_count 3
 #define location_count 7
-#define history_depth 2
+#define history_depth 4
 #define named_rows false
 #define appended_rows true
+#define refined_rows false
 #include "protocol.pml"
 
 proctype loader(byte t) {

@@ -27,9 +27,6 @@
 #define first_geometry 1
 #define second_geometry 2
 
-// Rounds a terminating `reserve` may take: one to grow, one to read the grown capacity back.
-#define reserve_rounds 2
-
 // The knobs: the header's choices, each overridden by a `@verify` line that replays its counterexample.
 #ifndef take_order
 #define take_order order_acq_rel
@@ -40,12 +37,6 @@
 #ifndef waits_for_whole
 #define waits_for_whole true
 #endif
-#ifndef deficit_growth
-#define deficit_growth true
-#endif
-#ifndef release_on_abandon
-#define release_on_abandon true
-#endif
 #ifndef same_geometry
 #define same_geometry false
 #endif
@@ -53,8 +44,8 @@
 byte growing; // threads inside `create_next_chunk`
 
 // The inlines below name their callers' locals: `whole`, `old_remaining`, `reverted`,
-// `seen_chunks`, `added`, `unclaimed`, and for `reserve` also `deficit`, `first` and `rounds`,
-// since a local an inline declares costs a step every time the inline runs.
+// `seen_chunks`, `added` and `unclaimed`, since a local an inline declares costs a step every time
+// the inline runs.
 
 // `release_capacity`: the deflation, then an add that lands only on a whole counter; the guard
 // stands in for the header's acquire loads before the wait
@@ -120,25 +111,4 @@ inline capacity(t, claimed_rows, total) {
     :: unclaimed > 0 -> total = total + unclaimed
     :: else
     fi
-}
-
-// `reserve`: grow until the rows are there, claiming every free row along with the deficit so the
-// subtract elects a grower, and releasing the whole claim
-inline reserve(t, target, claimed_rows, total) {
-    rounds = 0;
-    do
-    :: capacity(t, claimed_rows, total);
-        if
-        :: total >= target -> break
-        :: else ->
-            rounds++;
-            assert(rounds <= reserve_rounds);
-            if
-            :: deficit_growth -> deficit = target - claimed_rows
-            :: else -> deficit = target - total
-            fi;
-            claim(t, deficit, first);
-            release_capacity(t, deficit)
-        fi
-    od
 }
