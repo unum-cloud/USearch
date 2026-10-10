@@ -733,6 +733,7 @@ void usearch_geospatial_get(usearch_geospatial_get_t* arguments) {
     *arguments->points = nullptr;
     *arguments->offsets = nullptr;
     if (arguments->written) *arguments->written = 0;
+    if (arguments->columns) *arguments->columns = 0;
     usearch_geospatial_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
     std::size_t const width = layout_width(index.options.layout);
@@ -758,6 +759,7 @@ void usearch_geospatial_get(usearch_geospatial_get_t* arguments) {
     *arguments->points = coordinates;
     *arguments->offsets = offsets;
     if (arguments->written) *arguments->written = rows.size();
+    if (arguments->columns) *arguments->columns = width;
 }
 
 void usearch_geospatial_merge(usearch_geospatial_merge_t* arguments) {

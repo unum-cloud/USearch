@@ -859,6 +859,9 @@ typedef struct usearch_dense_get_t {
     /** The @b optional output for the bytes between consecutive rows of @c vectors. */
     size_t* stride;
 
+    /** The @b optional output for the values in each row the call landed. */
+    size_t* columns;
+
     /** Memory for @c vectors: reused when it points to an arena, created when it points to @c NULL. */
     usearch_arena_t* arena;
 } usearch_dense_get_t;

@@ -367,7 +367,7 @@ void test_count_and_get(size_t const dimensions) {
     expect_eq(entries, 0, "The key was never inserted");
 
     float* retrieved = NULL;
-    size_t written = 0, stride = 0;
+    size_t written = 0, stride = 0, columns = 0;
     usearch_arena_t arena = NULL;
     usearch_dense_get(&(usearch_dense_get_t) {.index = index,
                                               .executor = executor,
@@ -377,10 +377,12 @@ void test_count_and_get(size_t const dimensions) {
                                               .vectors = (void**)&retrieved,
                                               .written = &written,
                                               .stride = &stride,
+                                              .columns = &columns,
                                               .arena = &arena});
     expect(!outcome.message, outcome.message);
     expect_eq(written, 1, "Retrieval must report the true entry count");
     expect_eq(stride, row_bytes, "Retrieval must report the pitch of the rows it packed");
+    expect_eq(columns, dimensions, "Retrieval must report the width of the rows it packed");
     expect(retrieved != NULL, "Retrieval must land the rows in the arena");
     for (size_t position = 0; position != dimensions; ++position)
         expect(fabsf(retrieved[position] - data[position]) <= fabsf(data[position]) / 128,

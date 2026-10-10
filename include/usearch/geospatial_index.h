@@ -866,6 +866,9 @@ typedef struct usearch_geospatial_get_t {
     /** The @b optional output for the entries written; zero when the key is absent. */
     size_t* written;
 
+    /** The @b optional output for the values in each row the call landed. */
+    size_t* columns;
+
     /** Memory for @c points and @c offsets: reused when it points to an arena, created when it
      *  points to @c NULL. */
     usearch_arena_t* arena;

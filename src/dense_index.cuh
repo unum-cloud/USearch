@@ -2173,6 +2173,7 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
     *arguments->vectors = nullptr;
     if (arguments->written) *arguments->written = 0;
     if (arguments->stride) *arguments->stride = 0;
+    if (arguments->columns) *arguments->columns = 0;
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) {
             if constexpr (!is_ram_index<variant_type_>)
@@ -2209,6 +2210,7 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
                 *arguments->vectors = rows;
                 if (arguments->written) *arguments->written = min_of(exported.value, entries);
                 if (arguments->stride) *arguments->stride = row_bytes;
+                if (arguments->columns) *arguments->columns = dimensions;
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },

@@ -689,6 +689,9 @@ typedef struct usearch_matrix_get_t {
     /** The @b optional output for the bytes between consecutive rows of @c matrices. */
     size_t* stride;
 
+    /** The @b optional output for the values in each row the call landed. */
+    size_t* columns;
+
     /** Memory for @c matrices and @c offsets: reused when it points to an arena, created when it
      *  points to @c NULL. */
     usearch_arena_t* arena;

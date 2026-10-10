@@ -571,6 +571,7 @@ void usearch_matrix_get(usearch_matrix_get_t* arguments) {
     *arguments->offsets = nullptr;
     if (arguments->written) *arguments->written = 0;
     if (arguments->stride) *arguments->stride = 0;
+    if (arguments->columns) *arguments->columns = 0;
     usearch_matrix_index_handle_t& index = *arguments->index;
     usearch_scalar_t const scalar = arguments->scalar;
     if (reject_scalar(scalar, outcome)) return;
@@ -603,6 +604,7 @@ void usearch_matrix_get(usearch_matrix_get_t* arguments) {
     *arguments->offsets = offsets;
     if (arguments->written) *arguments->written = rows.size();
     if (arguments->stride) *arguments->stride = row_bytes;
+    if (arguments->columns) *arguments->columns = columns;
 }
 
 void usearch_matrix_merge(usearch_matrix_merge_t* arguments) {
