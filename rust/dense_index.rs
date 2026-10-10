@@ -4276,6 +4276,32 @@ mod tests {
         Ok(())
     }
 
+    /// Awaiting a deferred call stays pending while it is not final and answers what `wait` would.
+    #[test]
+    fn an_awaited_call_is_pending_until_final() -> Result<()> {
+        use core::future::{Future, IntoFuture};
+        use core::pin::pin;
+        use core::task::{Context, Poll, Waker};
+
+        const DIMENSIONS: usize = 16;
+        let (index, _, slab) = populated_index(64, DIMENSIONS, DenseMetric::Angular, Scalar::F32)?;
+        let queries = Matrix::<f32>::from_slice(&slab[..DIMENSIONS], &[1, DIMENSIONS]).unwrap();
+        let executor = executor();
+        let mut awaited = pin!(index.deferred(&executor).search(queries, 3)?.into_future());
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(awaited.as_mut().poll(&mut context).is_pending());
+        executor.drain(Mood::Parked)?;
+        let Poll::Ready(matches) = awaited.as_mut().poll(&mut context) else {
+            panic!("a drained call must be final");
+        };
+        assert_eq!(
+            matches?.row(0),
+            index.search(&rows(&slab[..DIMENSIONS], DIMENSIONS)?, 3)?.row(0)
+        );
+        assert!(matches!(awaited.as_mut().poll(&mut context), Poll::Ready(Err(_))));
+        Ok(())
+    }
+
     /// An owned arena and owned outputs travel with the call and come back with its result.
     #[test]
     fn a_deferred_call_hands_back_what_it_owned() -> Result<()> {

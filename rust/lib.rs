@@ -38,5 +38,5 @@ pub use dense_index::{
 pub use types::{
     capabilities_available, capabilities_compiled, rows, rows_mut, version, Arena, Blocking, Deferred, Deferring,
     Distance, Element, Error, Executor, Key, Match, Matches, MatchesRow, MatchesSpan, Mood, On, Predicate,
-    ProgressCallback, Result, Scalar, Status,
+    ProgressCallback, Result, Scalar, Status, Wait,
 };

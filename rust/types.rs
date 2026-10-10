@@ -12,12 +12,15 @@
 
 use core::ffi::{c_char, c_int, c_void, CStr};
 use core::fmt;
+use core::future::{Future, IntoFuture};
 use core::marker::PhantomData;
 use core::mem::ManuallyDrop;
 use core::ops::ControlFlow;
+use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::str::FromStr;
 use core::sync::atomic::{AtomicI32, Ordering};
+use core::task::{Context, Poll};
 use std::path::{Path, PathBuf};
 
 use numkong::{bf16, e2m3, e3m2, e4m3, e5m2, f16, i4x2, u1x8, u4x2};
@@ -1546,7 +1549,8 @@ struct Lent<Verb: Calling> {
 /// library reads until the call is final.
 ///
 /// [`Deferred::status`] polls without blocking, and [`Deferred::wait`] blocks until the call is
-/// final and hands back what it produced. Dropping an unfinished one waits for it, then frees the box.
+/// final and hands back what it produced, while `.await` polls it from async code. Dropping an
+/// unfinished one waits for it, then frees the box.
 /// `'index` is the borrow of the [`On`] that submitted it.
 ///
 /// Rust-only; waiting and dropping call `usearch_outcome_wait`.
@@ -1599,6 +1603,39 @@ impl<Verb: Calling> fmt::Debug for Deferred<'_, Verb> {
 
 // Safety: the box moves with the `Deferred`, and until its call is final only the library reaches it.
 unsafe impl<Verb: Calling + Send> Send for Deferred<'_, Verb> {}
+
+impl<'index, Verb: Calling> IntoFuture for Deferred<'index, Verb> {
+    type Output = Result<Verb::Output>;
+    type IntoFuture = Wait<'index, Verb>;
+
+    fn into_future(self) -> Wait<'index, Verb> { Wait(Some(self)) }
+}
+
+/// A [`Deferred`] being awaited: every poll reads its status, and one not yet final asks to be polled again.
+///
+/// The C library has no wake-up, so an executor re-polls it while other tasks run, spinning only
+/// when nothing else is ready; [`Deferred::wait`] blocks without spinning.
+///
+/// Rust-only; the final poll calls `usearch_outcome_wait`, which returns at once.
+#[must_use = "an awaited call does nothing unless polled"]
+pub struct Wait<'index, Verb: Calling>(Option<Deferred<'index, Verb>>);
+
+impl<Verb: Calling> Future for Wait<'_, Verb> {
+    type Output = Result<Verb::Output>;
+
+    fn poll(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let awaited = &mut self.get_mut().0;
+        match awaited.take() {
+            None => Poll::Ready(Err(fail(Status::InvalidArgument, "the call was already awaited"))),
+            Some(call) if call.status() == Err(Status::Deferred) => {
+                *awaited = Some(call);
+                context.waker().wake_by_ref();
+                Poll::Pending
+            }
+            Some(call) => Poll::Ready(call.wait()),
+        }
+    }
+}
 
 // endregion: Receivers
 

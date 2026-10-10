@@ -63,8 +63,10 @@ let call = index.deferred(&executor).search(queries, 10)?;    // Deferred<'_, De
 if call.status() == Err(Status::Deferred) {
     // other work
 }
-let matches = call.wait()?;
+let matches = call.await?;                                    // or: call.wait()?
 ```
+
+Inside an `async` block, `.await` polls the call's status until it is final, so other tasks run meanwhile, while `wait` blocks the thread without spinning.
 
 An executor without threads of its own may hold a deferred call until its next `drain`, blocking call or drop, so `drain` it before a `wait` there.
 `status` answers `Ok(())` once the call succeeded, `Err(Status::Deferred)` while it is not final, and its failure otherwise.
@@ -362,7 +364,7 @@ The crate is a thin layer over the C ABI in `include/usearch/`, and every rule b
   A blocking call allocates no box and takes no lock; a deferred one allocates one box holding its outcome, argument struct, inputs and arena until the call is final.
 - __A `Deferred` has no life of its own.__
   `status` is an acquire load of the outcome word, `wait` blocks in `usearch_outcome_wait`, and dropping an unfinished one waits the same way before freeing its box.
-  The crate starts no thread; a `Deferred` borrows its index, so waiting off-thread goes through a scoped thread, as `std::thread::scope(|scope| scope.spawn(move || call.wait()).join())` does.
+  The crate starts no thread: `.await` polls the status word, since the library has no wake-up, and a `Deferred` borrows its index, so waiting off-thread goes through a scoped thread, as `std::thread::scope(|scope| scope.spawn(move || call.wait()).join())` does.
 - __Statuses and modes are enums.__
   `Status`, `Mood`, `DenseMetric` and `Scalar` carry the C enumerators' values, leaving success and the unknown kinds to `Result` and `Option`, so nothing is compared as a string.
   Their `Display` and `FromStr` spell the names the C tables own.
