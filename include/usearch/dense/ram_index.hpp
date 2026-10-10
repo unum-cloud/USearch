@@ -59,6 +59,11 @@ struct dense_ram_cursor;
  *  lock in their leading slot, placing locks at the start of independent cache lines; the rest
  *  of the book-keeping is a handful of atomics, none of them compare-and-swap.
  *
+ *  A batch publishes whole: one add dispenses its rows' IDs as one range, and one watermark turn
+ *  makes every row visible, so a reader sees all of a batch or none of it. The turns run in
+ *  dispensed order, so the publication gap is bounded by the batches in flight, and a small batch
+ *  waits behind an earlier, larger batch's wiring before its turn.
+ *
  *  @section dense_ram_index_persistence Persistence
  *
  *  Not meant to be reached from disk - io_uring and SPDK reimplementations cover that.
@@ -493,8 +498,6 @@ struct dense_ram_index {
     /** Allocator instance handed to every neighbors chunk. */
     [[no_unique_address]] neighbors_allocator_t neighbors_allocator_;
 
-#pragma region Placement
-
     dense_ram_index(dense_ram_index const&) noexcept = delete;
     dense_ram_index& operator=(dense_ram_index const&) noexcept = delete;
 
@@ -515,8 +518,6 @@ struct dense_ram_index {
           norms_chunks_(vectors_allocator, round_up_to_multiple(sizeof(norms_chunk_t), default_alignment_k)),
           neighbors_chunks_(neighbors_allocator, round_up_to_multiple(sizeof(neighbors_chunk_t), default_alignment_k)) {
     }
-
-#pragma endregion Placement
 
 #pragma region Measures
 
@@ -820,14 +821,14 @@ struct dense_ram_index {
     /**
      *  @brief Inserts a batch of @p new_vectors, reporting each one's assigned node ID.
      *
-     *  Per claimed node the flow is: land the payload, walk the graph for candidates, wire & publish.
-     *  All fallible scratch allocations happen before the ID claim - once IDs are claimed, this
-     *  thread must roll forward to publication. @ref dense_ram_index_concurrency
+     *  One add dispenses the batch's IDs; every row lands its payload, walks the graph for candidates
+     *  and is wired, then one watermark turn publishes them all. All fallible scratch allocations
+     *  happen before the dispense; once IDs are dispensed, this thread must roll forward to
+     *  publication. @ref dense_ram_index_concurrency
      *
      *  @param[in] new_vectors The batch to insert, one row per vector, in the frozen geometry.
      *  @param[out] assigned_ids Either empty, or one slot per incoming vector receiving its node
-     *      ID. One batch's IDs are generally @b not contiguous - identity is assigned per node,
-     *      interleaved across concurrently inserting threads.
+     *      ID. One batch's IDs are contiguous, in the order of its rows.
      *  @param[inout] context The calling thread's scratch & telemetry, reused across batches.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
@@ -916,8 +917,8 @@ struct dense_ram_index {
         node_id_t base() const noexcept { return base_; }
         explicit operator bool() const noexcept { return rows_ != 0; }
 
-        /** Marks the rows as taken, so destruction releases nothing - what an insertion
-         *  spread over several threads calls once every row has claimed an ID. */
+        /** Marks the rows as taken, so destruction releases nothing; dispensing their IDs and a load
+         *  plan's @c finish call it. */
         void consume() noexcept { rows_ = 0; }
 
       private:
@@ -969,7 +970,8 @@ struct dense_ram_index {
      *      half of an insertion that cannot fail, so a batch spanning several indexes commits or is
      *      refused as a whole. Consumes @p claim; telemetry accrues in @p context.
      *
-     *  @p on_assigned fires per row with the assigned node ID, before the walk and before
+     *  One add dispenses the claim's IDs, every row is wired, and one watermark turn publishes them
+     *  together. @p on_assigned fires per row with the assigned node ID, before the walk and before
      *  publication - so an outer layer's per-ID state, like a key column, is written ahead of the
      *  watermark turn and no reachable node can be observed without it.
      */
@@ -977,85 +979,19 @@ struct dense_ram_index {
     void insert(capacity_claim_t&& claim, vectors_view_t new_vectors, node_ids_span_t assigned_ids,
                 dense_traversal_context_t& context, insert_config_t config = {},
                 callback_type_&& on_assigned = {}) noexcept {
-        // Consumed: from here every row dispenses an ID, and a dispensed ID is never returnable.
-        claim.consume();
-        std::size_t const incoming_vectors_count = new_vectors.extent(0);
+        assert(claim.rows() == new_vectors.extent(0) && "A claim holds exactly its batch's rows");
+        // An empty range takes no turn: its first ID opens the next range too, which may publish first.
+        if (!claim) return;
         bool const report_assigned_ids = assigned_ids.size() != 0;
-        geometry_t const frozen = geometry();
-        std::size_t const node_connectivity = frozen.connectivity();
-        std::size_t const expansion_factor = non_zero_expansion_factor(config);
-
-        // Sub-byte types pack several dimensions per storage value - count storage bytes.
-        std::size_t const vector_bytes = stored_row_values(frozen) * sizeof(scalar_t);
-
-        for (small_size_t incoming_index = 0; incoming_index != incoming_vectors_count; ++incoming_index) {
-            // Identity is dispensed per node, so each thread holds at most one unpublished ID and
-            // the publication gap stays bounded by the thread count. The `acq_rel` order chains
-            // the hosting chunk's growth through the all-RMW dispenser to this thread.
-            node_id_t const new_node_id =
-                atomic_ref<node_id_t>(next_dispensed_id_).fetch_add(1, std::memory_order_acq_rel);
-            location_t const new_location = chunk_schedule_t::locate(new_node_id);
-            if (report_assigned_ids) assigned_ids[incoming_index] = new_node_id;
+        iota_view<node_id_t> const range = dispense_(std::move(claim));
+        for (node_id_t const new_node_id : range) {
+            std::size_t const row = new_node_id - range.first;
+            if (report_assigned_ids) assigned_ids[row] = new_node_id;
             on_assigned(new_node_id);
-
-            // The scratch structures persist across iterations and calls - reset them for this node.
-            context.results.clear();
-            context.refining_candidates.clear();
-            context.frontier.clear();
-            context.visited.clear();
-
-            // Norms derive from the owned copy - the exact bytes future distance computations
-            // stream. Both sides share `scalar_t`, so this is a byte move, never a conversion.
-            vector_view_t const incoming_vector = new_vectors.row(incoming_index).as_vector();
-            vector_span_t const owned_vector = vector_span_for(new_location);
-            std::memcpy(owned_vector.byte_data(), incoming_vector.byte_data(), vector_bytes);
-            vector_norms_t const new_norms = dense_norms(owned_vector);
-            if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>) norm_ref_for(new_location) = new_norms;
-
-            // Every ID strictly below the watermark is published - the safe bound for landmark
-            // sampling. On a virgin index the node publishes with no neighbors, and later
-            // entries wire back to it.
-            node_id_t const first_invisible_id =
-                atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
-            // The row is already claimed, so a refused walk wires a thinner node rather than
-            // abandoning an ID nothing will ever publish.
-            if (first_invisible_id != 0 &&
-                failed(search_around(vector_view_t(owned_vector), new_norms, first_invisible_id, expansion_factor,
-                                     context, context.results)))
-                ++context.saturated_walks;
-
-            // No reader can arrive before slot 0 turns non-sentinel, so relaxed stores into slots
-            // 1.. need no lock and the untouched tail keeps its sentinel termination.
-            selection_t& selected = context.selected_neighbors;
-            std::size_t const refine_distances = select_diverse(context.results, node_connectivity, selected, context);
-            context.computed_distances += refine_distances;
-            context.computed_distances_in_refines += refine_distances;
-            neighbors_ref_t const new_neighbors = neighbors_for(new_location);
-            small_size_t const selected_count = static_cast<small_size_t>(selected.size());
-            for (small_size_t slot = 1; slot < selected_count; ++slot)
-                new_neighbors.store_slot(slot, selected[slot].node_id);
-
-            // Slot 0 takes the nearest diverse neighbor, or the node's own ID when the graph
-            // offered none - the self-loop encoding of "published, zero neighbors", distinct from
-            // the all-ones sentinel. The release store is what makes the payload visible.
-            node_id_t const first_link_id = selected_count ? selected[0].node_id : new_node_id;
-            new_neighbors.unlock(first_link_id);
-
-            // Back-link before the watermark turn: past this ID no thread edits a published row on
-            // its behalf, which the snapshot's settlement probe rests on. Every neighbor lock is
-            // released inside, so the spin below holds none.
-            back_link_neighbors(new_node_id, owned_vector, new_norms, selected, context);
-
-            // The turn runs strictly in dispensed order, keeping the visible prefix hole-free;
-            // each thread holds at most one unpublished ID, so the wait is bounded by one wiring
-            // per other in-flight thread.
-            for (node_id_t watermark = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
-                 watermark != new_node_id;
-                 watermark = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire))
-                // Uncapped: every predecessor's publication store wakes us to re-check.
-                wait_type_ {}(&last_visible_id_, watermark, 0u, fu::wait_uncapped_t {});
-            atomic_ref<node_id_t>(last_visible_id_).store(new_node_id + 1, std::memory_order_release);
+            wire_(new_node_id, new_vectors.row(row).as_vector(), context, config);
         }
+        await_turn_(range);
+        publish_(range);
     }
 
 #pragma endregion Insertion
@@ -1591,7 +1527,7 @@ struct dense_ram_index {
         requires(kernel_kind_ == nk_kernel_dot_k && !nk::is_integral_dtype<scalar_t>())
     {
         return walk_(query_vector, dummy_fold_t {}, dense_indexer_rescoring<capability_, scalar_t> {heads}, context,
-                     config);
+                     config, static_cast<node_id_t>(size()));
     }
 
     /**
@@ -1608,7 +1544,7 @@ struct dense_ram_index {
         requires dense_fold<std::remove_cvref_t<fold_type_>, dot_result_t>
     expected<search_result_t> search(vector_view_t query_vector, fold_type_&& fold, dense_traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
-        return walk_(query_vector, fold, dummy_rescoring_t {}, context, config);
+        return walk_(query_vector, fold, dummy_rescoring_t {}, context, config, static_cast<node_id_t>(size()));
     }
 
     /**
@@ -1632,19 +1568,7 @@ struct dense_ram_index {
     template <typename predicate_type_>
     expected<search_result_t> search_if(vector_view_t query_vector, predicate_type_&& predicate,
                                         dense_traversal_context_t& context, search_config_t config = {}) noexcept {
-        // Matches admit into the re-selection buffer, idle during any search and reserved beside the
-        // navigation pool; it bounds the walk once full, then swaps into `context.results`.
-        context.refining_candidates.clear();
-        dense_filtering_fold<std::remove_reference_t<predicate_type_>, results_array_t> filtering {
-            predicate, context.refining_candidates, non_zero_expansion_factor(config)};
-        expected<search_result_t> const result =
-            config.synchronization != synchronization_t::concurrent_k
-                ? search_typed<synchronization_t::immutable_k>(query_vector, context, config, filtering,
-                                                               context.refining_candidates, dummy_rescoring_t {})
-                : search_typed<synchronization_t::concurrent_k>(query_vector, context, config, filtering,
-                                                                context.refining_candidates, dummy_rescoring_t {});
-        std::swap(context.results, context.refining_candidates);
-        return result;
+        return walk_if_(query_vector, predicate, context, config, static_cast<node_id_t>(size()));
     }
 
     /**
@@ -1715,7 +1639,7 @@ struct dense_ram_index {
                 status};
             rescoring.clear();
             expected<search_result_t> const walked = walk_(rescoring.queries.row(0).as_vector(), dummy_fold_t {},
-                                                           rescoring, context, config);
+                                                           rescoring, context, config, static_cast<node_id_t>(size()));
             if (!walked) return {attended, walked.status};
             if (failed(status)) return {attended, status};
             rescoring.finish();
@@ -1737,48 +1661,14 @@ struct dense_ram_index {
     expected<search_result_t> search_typed(vector_view_t query_vector, dense_traversal_context_t& context,
                                            search_config_t config, fold_type_&& fold, results_array_t const& bound,
                                            rescoring_type_ const& rescoring) noexcept {
-        // Every distance kernel takes its width from the geometry, so a narrower query would be over-read.
-        geometry_t const frozen = geometry();
-        if (frozen && query_vector.size() != frozen.dimensions()) return {{}, status_t::config_mismatch_k};
-        std::size_t const expansion_factor = non_zero_expansion_factor(config);
-
-        // The same reservations `insert` makes, which also size the buffer `search_if` admits into.
-        if (status_t const sized = reserve_queues_(context, queue_sizes_(expansion_factor, connectivity()));
-            failed(sized))
-            return {{}, sized};
-        context.results.clear();
-        context.frontier.clear();
-        context.visited.clear();
-
         // Everything strictly below the watermark is published. A mutation-free contract needs no
         // acquire - the caller's own synchronization already ordered every publication.
         constexpr std::memory_order watermark_order_k = synchronization_ == synchronization_t::concurrent_k
                                                             ? std::memory_order_acquire
                                                             : std::memory_order_relaxed;
         node_id_t const first_invisible_id = atomic_ref<node_id_t>(last_visible_id_).load(watermark_order_k);
-        // An unfrozen geometry read before a racing first insert left the query width unchecked.
-        if (first_invisible_id == 0 || !frozen) return {{}, status_t::success_k};
-
-        // Snapshot the context's running telemetry, to report this query's share on return.
-        std::size_t const visited_members_before = context.visited_members;
-        std::size_t const computed_distances_before = context.computed_distances;
-        std::size_t const restarts_before = context.restarts;
-        std::size_t const saturated_walks_before = context.saturated_walks;
-
-        vector_norms_t const query_norms = dense_norms(query_vector);
-        status_t const walked = search_around<synchronization_>(query_vector, query_norms, first_invisible_id,
-                                                                expansion_factor, context, bound, fold, {}, rescoring);
-
-        // A refused walk still ranked what it reached; the counter says the ranking is short
-        // because scratch ran out, not because the graph had nothing better.
-        if (failed(walked)) ++context.saturated_walks;
-        search_result_t result;
-        result.count = bound.size();
-        result.visited_members = context.visited_members - visited_members_before;
-        result.computed_distances = context.computed_distances - computed_distances_before;
-        result.restarts = context.restarts - restarts_before;
-        result.saturated_walks = context.saturated_walks - saturated_walks_before;
-        return {result, status_t::success_k};
+        return search_below_<synchronization_>(query_vector, context, config, fold, bound, rescoring,
+                                               first_invisible_id);
     }
 
 #pragma endregion Search
@@ -2535,11 +2425,11 @@ struct dense_ram_index {
     /**
      *  @brief Claims storage capacity for @p count new nodes, growing chunks when needed.
      *  @return The first row of the claim - only meaningful on @c success_k, and rarely needed:
-     *      identity is dispensed separately at wiring time.
+     *      identity is dispensed separately.
      *
      *  Spins while other threads are mid-growth, covering all interleavings of the capacity state
-     *  machine. Claims @b storage only, never identity: node IDs are dispensed one-by-one from
-     *  @c next_dispensed_id_ at wiring time. On success, enough sentinel-filled rows exist for
+     *  machine. Claims @b storage only, never identity: node IDs are dispensed per batch from
+     *  @c next_dispensed_id_ by @ref dispense_. On success, enough sentinel-filled rows exist for
      *  @p count dispenses, and the caller must roll forward to wiring & publishing them all -
      *  claimed capacity cannot be released once IDs are dispensed against it, or the
      *  visibility watermark would stall forever. @ref dense_ram_index_concurrency
@@ -3102,6 +2992,93 @@ struct dense_ram_index {
         }
     }
 
+    /** Dispenses one range of IDs for every row @p claim holds with one add, and consumes the claim;
+     *  a batch publishes that range whole. Every ID it hands out must be published, so nothing after
+     *  it may fail. */
+    iota_view<node_id_t> dispense_(capacity_claim_t&& claim) noexcept {
+        node_id_t const rows = static_cast<node_id_t>(claim.rows());
+        claim.consume();
+        // The `acq_rel` order chains the hosting chunks' growth through the all-RMW dispenser to this thread.
+        node_id_t const first = atomic_ref<node_id_t>(next_dispensed_id_).fetch_add(rows, std::memory_order_acq_rel);
+        return {first, static_cast<node_id_t>(first + rows)};
+    }
+
+    /**
+     *  @brief Wires the dispensed row @p new_node_id: lands @p new_vector and its norms, walks the graph,
+     *      writes the neighbors and unlocks slot zero, then back-links. Moves no watermark, so the
+     *      row's range publishes whole through @ref publish_.
+     *
+     *  The walk admits the rows below its watermark snapshot and the rows dispensed before it began
+     *  whose slot zero shows them published. The row is already dispensed, so a refused walk wires a
+     *  thinner node rather than abandoning an ID nothing will ever publish.
+     */
+    void wire_(node_id_t new_node_id, vector_view_t new_vector, dense_traversal_context_t& context,
+               insert_config_t config) noexcept {
+        geometry_t const frozen = geometry();
+        location_t const new_location = chunk_schedule_t::locate(new_node_id);
+
+        // The scratch structures persist across rows and calls - reset them for this one.
+        context.results.clear();
+        context.refining_candidates.clear();
+        context.frontier.clear();
+        context.visited.clear();
+
+        // Norms derive from the owned copy - the exact bytes future distance computations
+        // stream. Both sides share `scalar_t`, so this is a byte move, never a conversion.
+        vector_span_t const owned_vector = vector_span_for(new_location);
+        std::memcpy(owned_vector.byte_data(), new_vector.byte_data(), stored_row_values(frozen) * sizeof(scalar_t));
+        vector_norms_t const new_norms = dense_norms(owned_vector);
+        if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>) norm_ref_for(new_location) = new_norms;
+
+        // The first row of a virgin index finds nothing to walk to and publishes with no neighbors;
+        // later rows wire back to it.
+        node_id_t const first_invisible_id = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
+        node_id_t const first_undispensed_id =
+            atomic_ref<node_id_t>(next_dispensed_id_).load(std::memory_order_acquire);
+        dispensed_admission_t const admission {this, first_invisible_id, first_undispensed_id, new_node_id};
+        if (failed(search_around(vector_view_t(owned_vector), new_norms, admission, non_zero_expansion_factor(config),
+                                 context, context.results)))
+            ++context.saturated_walks;
+
+        // No reader can arrive before slot 0 turns non-sentinel, so relaxed stores into slots
+        // 1.. need no lock and the untouched tail keeps its sentinel termination.
+        selection_t& selected = context.selected_neighbors;
+        std::size_t const refine_distances = select_diverse(context.results, frozen.connectivity(), selected, context);
+        context.computed_distances += refine_distances;
+        context.computed_distances_in_refines += refine_distances;
+        neighbors_ref_t const new_neighbors = neighbors_for(new_location);
+        small_size_t const selected_count = static_cast<small_size_t>(selected.size());
+        for (small_size_t slot = 1; slot < selected_count; ++slot)
+            new_neighbors.store_slot(slot, selected[slot].node_id);
+
+        // Slot 0 takes the nearest diverse neighbor, or the node's own ID when the graph
+        // offered none - the self-loop encoding of "published, zero neighbors", distinct from
+        // the all-ones sentinel. The release store is what makes the payload visible.
+        node_id_t const first_link_id = selected_count ? selected[0].node_id : new_node_id;
+        new_neighbors.unlock(first_link_id);
+
+        // Back-link before the range's turn: once it publishes, no thread edits a published row on
+        // its behalf, which the snapshot's settlement probe rests on. Every neighbor lock is
+        // released inside, so the turn's wait holds none.
+        back_link_neighbors(new_node_id, owned_vector, new_norms, selected, context);
+    }
+
+    /** Waits for @p range 's turn: every range dispensed ahead of it has published, which keeps the
+     *  visible prefix hole-free. Holds no lock while waiting. */
+    void await_turn_(iota_view<node_id_t> range) noexcept {
+        for (node_id_t watermark = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
+             watermark != range.first;
+             watermark = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire))
+            // Uncapped: every predecessor's publication store wakes us to re-check.
+            wait_type_ {}(&last_visible_id_, watermark, 0u, fu::wait_uncapped_t {});
+    }
+
+    /** Publishes every row of @p range at once, its turn having come: one release store moves the
+     *  watermark past them. */
+    void publish_(iota_view<node_id_t> range) noexcept {
+        atomic_ref<node_id_t>(last_visible_id_).store(range.bound, std::memory_order_release);
+    }
+
 #pragma endregion Insertion
 
 #pragma region Refinement
@@ -3158,8 +3135,8 @@ struct dense_ram_index {
         [[maybe_unused]] membership_t const self_marked = context.visited.insert(node_id);
         small_size_t const staged_count = stage_neighbors_(own_neighbors, node_id, context);
         std::span<node_id_t const> const seeds {context.staged_ids.data(), staged_count};
-        if (failed(search_around(own_vector, own_norms, first_invisible_id, expansion_factor, context, context.results,
-                                 dummy_fold_t {}, seeds)))
+        if (failed(search_around(own_vector, own_norms, snapshot_admission_t {first_invisible_id}, expansion_factor,
+                                 context, context.results, dummy_fold_t {}, seeds)))
             ++context.saturated_walks;
 
         selection_t& selected = context.selected_neighbors;
@@ -3274,17 +3251,127 @@ struct dense_ram_index {
         }
     };
 
-    /** The one dispatch of a walk under @p fold and @p rescoring onto @c search_typed, by the contract @p config
-     *  names, bounded by @c context.results. */
+    /** The body of @c search_typed below the watermark snapshot @p first_invisible_id the caller took:
+     *  the index's own, or one consistent across shards. */
+    template <synchronization_t synchronization_, typename fold_type_, typename rescoring_type_>
+    expected<search_result_t> search_below_(vector_view_t query_vector, dense_traversal_context_t& context,
+                                            search_config_t config, fold_type_&& fold, results_array_t const& bound,
+                                            rescoring_type_ const& rescoring, node_id_t first_invisible_id) noexcept {
+        // Every distance kernel takes its width from the geometry, so a narrower query would be over-read.
+        geometry_t const frozen = geometry();
+        if (frozen && query_vector.size() != frozen.dimensions()) return {{}, status_t::config_mismatch_k};
+        std::size_t const expansion_factor = non_zero_expansion_factor(config);
+
+        // The same reservations `insert` makes, which also size the buffer `search_if` admits into.
+        if (status_t const sized = reserve_queues_(context, queue_sizes_(expansion_factor, connectivity()));
+            failed(sized))
+            return {{}, sized};
+        context.results.clear();
+        context.frontier.clear();
+        context.visited.clear();
+
+        // An unfrozen geometry read before a racing first insert left the query width unchecked.
+        if (first_invisible_id == 0 || !frozen) return {{}, status_t::success_k};
+
+        // Snapshot the context's running telemetry, to report this query's share on return.
+        std::size_t const visited_members_before = context.visited_members;
+        std::size_t const computed_distances_before = context.computed_distances;
+        std::size_t const restarts_before = context.restarts;
+        std::size_t const saturated_walks_before = context.saturated_walks;
+
+        vector_norms_t const query_norms = dense_norms(query_vector);
+        status_t const walked = search_around<synchronization_>(query_vector, query_norms,
+                                                                snapshot_admission_t {first_invisible_id},
+                                                                expansion_factor, context, bound, fold, {}, rescoring);
+
+        // A refused walk still ranked what it reached; the counter says the ranking is short
+        // because scratch ran out, not because the graph had nothing better.
+        if (failed(walked)) ++context.saturated_walks;
+        search_result_t result;
+        result.count = bound.size();
+        result.visited_members = context.visited_members - visited_members_before;
+        result.computed_distances = context.computed_distances - computed_distances_before;
+        result.restarts = context.restarts - restarts_before;
+        result.saturated_walks = context.saturated_walks - saturated_walks_before;
+        return {result, status_t::success_k};
+    }
+
+    /** The one dispatch of a walk under @p fold and @p rescoring onto @c search_below_, by the contract @p config
+     *  names, below the watermark snapshot @p first_invisible_id and bounded by @c context.results. */
     template <typename fold_type_, typename rescoring_type_>
     expected<search_result_t> walk_(vector_view_t query_vector, fold_type_&& fold, rescoring_type_ const& rescoring,
-                                    dense_traversal_context_t& context, search_config_t config) noexcept {
+                                    dense_traversal_context_t& context, search_config_t config,
+                                    node_id_t first_invisible_id) noexcept {
         if (config.synchronization != synchronization_t::concurrent_k)
-            return search_typed<synchronization_t::immutable_k>(query_vector, context, config, fold, context.results,
-                                                                rescoring);
-        return search_typed<synchronization_t::concurrent_k>(query_vector, context, config, fold, context.results,
-                                                             rescoring);
+            return search_below_<synchronization_t::immutable_k>(query_vector, context, config, fold, context.results,
+                                                                 rescoring, first_invisible_id);
+        return search_below_<synchronization_t::concurrent_k>(query_vector, context, config, fold, context.results,
+                                                              rescoring, first_invisible_id);
     }
+
+    /** The filtered walk behind @c search_if, below the watermark snapshot @p first_invisible_id. */
+    template <typename predicate_type_>
+    expected<search_result_t> walk_if_(vector_view_t query_vector, predicate_type_& predicate,
+                                       dense_traversal_context_t& context, search_config_t config,
+                                       node_id_t first_invisible_id) noexcept {
+        // Matches admit into the re-selection buffer, idle during any search and reserved beside the
+        // navigation pool; it bounds the walk once full, then swaps into `context.results`.
+        context.refining_candidates.clear();
+        dense_filtering_fold<predicate_type_, results_array_t> filtering {predicate, context.refining_candidates,
+                                                                          non_zero_expansion_factor(config)};
+        expected<search_result_t> const result =
+            config.synchronization != synchronization_t::concurrent_k
+                ? search_below_<synchronization_t::immutable_k>(query_vector, context, config, filtering,
+                                                                context.refining_candidates, dummy_rescoring_t {},
+                                                                first_invisible_id)
+                : search_below_<synchronization_t::concurrent_k>(query_vector, context, config, filtering,
+                                                                 context.refining_candidates, dummy_rescoring_t {},
+                                                                 first_invisible_id);
+        std::swap(context.results, context.refining_candidates);
+        return result;
+    }
+
+    /** What a search walks: the IDs below its watermark snapshot, published for every reader. */
+    struct snapshot_admission_t {
+
+        /** The watermark snapshot. */
+        node_id_t first_invisible_id = 0;
+
+        /** Whether the walk may locate @p node_id. */
+        bool admits(node_id_t node_id) const noexcept { return node_id < first_invisible_id; }
+
+        /** Landmarks come from the IDs below this bound, the snapshot. */
+        node_id_t sampling_bound() const noexcept { return first_invisible_id; }
+    };
+
+    /** What an insertion walks: the IDs below its snapshot, and past it every row dispensed before the walk
+     *  began whose slot zero shows it published. The acquire of the dispenser carried those rows' chunks to
+     *  the walk, so batches wired side by side link to each other rather than forming islands. */
+    struct dispensed_admission_t {
+
+        /** The index the walk reads. */
+        dense_ram_index* index = nullptr;
+
+        /** The watermark snapshot. */
+        node_id_t first_invisible_id = 0;
+
+        /** The dispenser as the walk began: no row at or past it is reachable. */
+        node_id_t first_undispensed_id = 0;
+
+        /** The walking row. */
+        node_id_t node_id = 0;
+
+        /** Whether the walk may locate @p candidate_id; the acquire of its slot zero carries its payload. */
+        bool admits(node_id_t candidate_id) const noexcept {
+            if (candidate_id < first_invisible_id) return true;
+            if (candidate_id >= first_undispensed_id) return false;
+            return index->neighbors_for(chunk_schedule_t::locate(candidate_id)).peek_first() != dense_node_id_unknown_k;
+        }
+
+        /** Landmarks come from the IDs below this bound, every one dispensed ahead of the walking row, which
+         *  rows wired in dispensed order have mostly published. */
+        node_id_t sampling_bound() const noexcept { return node_id; }
+    };
 
     /**
      *  @brief Samples one 4-way batch of distinct, unvisited, published landmarks, scores them
@@ -3293,14 +3380,17 @@ struct dense_ram_index {
      *      @c sated_k once the fold asks the walk to end - the last two end the walk rather than
      *      failing it. A failed status means scratch could not grow.
      *
-     *  Uniform draws that collide with @c visited fall back to cyclic linear probing over the ID
-     *  space, so every call makes strict progress without retry budgets. Only transiently locked
-     *  nodes are re-rolled, like the traversal itself.
+     *  Uniform draws that collide with @c visited fall back to cyclic linear probing below the
+     *  bound @p admission sets, so every call makes strict progress without retry budgets. Only
+     *  transiently locked nodes are re-rolled, like the traversal itself; past the snapshot a row
+     *  may stay unpublished for the whole walk, so those re-rolls stop once they outnumber the IDs
+     *  there.
      */
-    template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename fold_type_ = dummy_fold_t,
+    template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
+              typename admission_type_ = snapshot_admission_t, typename fold_type_ = dummy_fold_t,
               typename rescoring_type_ = dummy_rescoring_t>
     expected<walk_step_t> sample_landmarks(vector_view_t query, vector_norms_t query_norms,
-                                           node_id_t first_invisible_id, std::size_t expansion_factor,
+                                           admission_type_ const& admission, std::size_t expansion_factor,
                                            dense_traversal_context_t& context, std::span<node_id_t const>& seeds,
                                            fold_type_&& fold = fold_type_ {},
                                            rescoring_type_ const& rescoring = {}) noexcept {
@@ -3315,28 +3405,35 @@ struct dense_ram_index {
 
         if (status_t const seen = visited.reserve(visited.size() + landmarks_ids.size()); failed(seen))
             return {walk_step_t::exhausted_k, seen};
-        // `visited` may also hold above-watermark IDs discovered through fresh back-linking, so the
-        // size check is conservative: it can only under-sample, never let the probe loop spin.
-        while (landmarks_in_batch != landmarks_ids.size() && visited.size() < first_invisible_id) {
+        // `visited` may also hold IDs no draw names, like an insertion's later siblings, so the size
+        // check is conservative: it can only under-sample, never let the probe loop spin.
+        node_id_t const sampling_bound = admission.sampling_bound();
+        node_id_t unpublished_draws = 0;
+        while (landmarks_in_batch != landmarks_ids.size() && visited.size() < sampling_bound) {
             // Caller-staged seeds go first, each taken once and skipped when unpublished or
             // already visited; past them, draw uniformly and probe forward cyclically.
             node_id_t landmark_node_id;
             if (!seeds.empty()) {
                 landmark_node_id = seeds.front();
                 seeds = seeds.subspan(1);
-                if (landmark_node_id >= first_invisible_id || visited.contains(landmark_node_id)) continue;
+                if (!admission.admits(landmark_node_id) || visited.contains(landmark_node_id)) continue;
             }
             else {
-                landmark_node_id = uniform_below<node_id_t> {first_invisible_id}(context.random_generator);
+                landmark_node_id = uniform_below<node_id_t> {sampling_bound}(context.random_generator);
                 while (visited.contains(landmark_node_id))
-                    landmark_node_id = landmark_node_id + 1 == first_invisible_id ? 0 : landmark_node_id + 1;
+                    landmark_node_id = landmark_node_id + 1 == sampling_bound ? 0 : landmark_node_id + 1;
             }
 
             location_t const landmark_location = chunk_schedule_t::locate(landmark_node_id);
             // Published nodes may be transiently locked for re-linking - re-roll those. Under a
             // mutation-free contract every sampled node is published & unlocked - no probe needed.
             if constexpr (synchronization_ == synchronization_t::concurrent_k)
-                if (neighbors_for(landmark_location).peek_first() == dense_node_id_unknown_k) continue;
+                if (neighbors_for(landmark_location).peek_first() == dense_node_id_unknown_k) {
+                    if (landmark_node_id >= admission.first_invisible_id &&
+                        ++unpublished_draws == sampling_bound - admission.first_invisible_id)
+                        break;
+                    continue;
+                }
 
             [[maybe_unused]] membership_t const marked = visited.insert(landmark_node_id);
             landmarks_ids[landmarks_in_batch] = landmark_node_id;
@@ -3380,7 +3477,8 @@ struct dense_ram_index {
      *  A refused re-table ends the walk early with the ranking it has and says so in the status,
      *  which the callers count as a saturated walk rather than a failure.
      *
-     *  @param[in] first_invisible_id The caller's watermark snapshot, bounding the readable ID space.
+     *  @param[in] admission What the walk may locate and draw landmarks from: the IDs below the
+     *      caller's watermark snapshot, and for an insertion the published rows dispensed before it.
      *  @param[in] expansion_factor Breadth of the candidate pool - the walk's stopping radius.
      *  @param[inout] context Scratch & telemetry; must arrive pre-reserved & pre-cleared, and ends
      *      with up to @p expansion_factor nearest published candidates in @c context.results.
@@ -3393,9 +3491,10 @@ struct dense_ram_index {
      *  @param[in] rescoring Optional rescoring of every scored node in this one walk - an indexer's heads or
      *      one token's attention heads.
      */
-    template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename fold_type_ = dummy_fold_t,
+    template <synchronization_t synchronization_ = synchronization_t::concurrent_k,
+              typename admission_type_ = snapshot_admission_t, typename fold_type_ = dummy_fold_t,
               typename rescoring_type_ = dummy_rescoring_t>
-    status_t search_around(vector_view_t query, vector_norms_t query_norms, node_id_t first_invisible_id,
+    status_t search_around(vector_view_t query, vector_norms_t query_norms, admission_type_ const& admission,
                            std::size_t expansion_factor, dense_traversal_context_t& context,
                            results_array_t const& bound, fold_type_&& fold = fold_type_ {},
                            std::span<node_id_t const> seeds = {}, rescoring_type_ const& rescoring = {}) noexcept {
@@ -3409,7 +3508,7 @@ struct dense_ram_index {
         small_size_t const landmark_batches = divide_round_up<small_size_t>(node_connectivity, 4);
         for (small_size_t landmarks_batch = 0; landmarks_batch != landmark_batches; ++landmarks_batch) {
             auto const [seeding, seed_status] = sample_landmarks<synchronization_>(
-                query, query_norms, first_invisible_id, expansion_factor, context, seeds, fold, rescoring);
+                query, query_norms, admission, expansion_factor, context, seeds, fold, rescoring);
             if (failed(seed_status)) return seed_status;
             if (seeding == walk_step_t::sated_k) return status_t::success_k;
             if (seeding == walk_step_t::exhausted_k) break; // Everything published is already visited.
@@ -3425,7 +3524,7 @@ struct dense_ram_index {
                 // drained frontier never reached.
                 if (bound.size() >= expansion_factor) break;
                 auto const [seeding, seed_status] = sample_landmarks<synchronization_>(
-                    query, query_norms, first_invisible_id, expansion_factor, context, seeds, fold, rescoring);
+                    query, query_norms, admission, expansion_factor, context, seeds, fold, rescoring);
                 if (failed(seed_status)) return seed_status;
                 if (seeding == walk_step_t::sated_k) return status_t::success_k;
                 if (seeding == walk_step_t::exhausted_k) break; // Nothing fresh left to restart from.
@@ -3483,10 +3582,10 @@ struct dense_ram_index {
                         list_ended = true;
                         break;
                     }
-                    // Translation-frontier invariant: only IDs below the watermark snapshot may be
-                    // located. A fresher one has no happens-before edge to its hosting chunk yet,
-                    // so skip it; a later traversal with a fresher snapshot meets it safely.
-                    if (neighbor_id >= first_invisible_id) continue;
+                    // Translation-frontier invariant: only IDs below the watermark snapshot, or the published
+                    // rows dispensed before an insertion's walk, may be located. A fresher one has no
+                    // happens-before edge to its hosting chunk yet, so skip it; a later traversal meets it.
+                    if (!admission.admits(neighbor_id)) continue;
                     if (visited.contains(neighbor_id)) continue;
                     location_t const neighbor_location = chunk_schedule_t::locate(neighbor_id);
                     gathered_ids[gathered_count] = neighbor_id;
@@ -3504,7 +3603,8 @@ struct dense_ram_index {
                 }
                 dense_scores<dot_result_t, 4> gathered_scores = scores( //
                     query, query_norms, gathered_vectors, gathered_norms,
-                    vectors_quad_of(candidate_neighbors, neighbor_slot, first_invisible_id, gathered_vectors));
+                    vectors_quad_of(candidate_neighbors, neighbor_slot, admission.first_invisible_id,
+                                    gathered_vectors));
                 rescoring(gathered_ids, gathered_vectors, gathered_scores, gathered_count);
                 context.computed_distances += gathered_count;
                 std::array<dense_scored_node_t, 4> scored_batch;
@@ -3574,14 +3674,13 @@ struct dense_ram_index {
      *  the chunks; typically incremented in batches. */
     alignas(default_alignment_k) node_id_t last_allocated_id_ {0};
 
-    /** The ID dispenser: the identifier the next wired node receives. Incremented one-by-one at
-     *  wiring time, so IDs follow the global wiring-start order and each thread holds at most one
-     *  unpublished ID. @ref dense_ram_index_concurrency */
+    /** The ID dispenser: the first identifier of the next batch's range. One add per batch moves
+     *  it past every row of that batch, so a batch's IDs are contiguous. @ref dense_ram_index_concurrency */
     alignas(default_alignment_k) node_id_t next_dispensed_id_ {0};
 
     /** The visibility watermark: every ID strictly below it is published, its vector, norms &
      *  neighbors readable - the safe bound for random landmark sampling. Advanced strictly in
-     *  dispensed order by each publisher taking its turn. @ref dense_ram_index_concurrency */
+     *  dispensed order by each batch taking its turn. @ref dense_ram_index_concurrency */
     alignas(default_alignment_k) node_id_t last_visible_id_ {0};
 
     /** Read-mostly after the freeze - kept off the watermark's line with the other cold members. */

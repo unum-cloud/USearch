@@ -261,6 +261,72 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     printf("Test: Add & Search - PASSED\n");
 }
 
+/** What a progress handler heard over one call. */
+typedef struct progress_reports_t {
+    size_t calls;
+    size_t completed;
+    size_t total;
+    bool ascending;
+} progress_reports_t;
+
+/** Records one report, checking the counts only grow and never pass the total. */
+static usearch_continuation_t record_progress(size_t completed, size_t total, void* state) {
+    progress_reports_t* const reports = (progress_reports_t*)state;
+    reports->ascending = reports->ascending && completed > reports->completed && completed <= total;
+    reports->calls++;
+    reports->completed = completed;
+    reports->total = total;
+    return usearch_continue_k;
+}
+
+/** A batch the handler hears about in several steps still lands whole: every step is reported in
+ *  order up to the whole batch, and every row is published. */
+void test_add_progress(void) {
+    printf("Test: Add Progress\n");
+
+    // Wider than two of the engine's 4096-row steps, so its handler hears more than one report.
+    enum { rows_count = 2 * 4096 + 1, dimensions = 16 };
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t const index = create_index(dimensions);
+    usearch_executor_t const executor = create_executor(0);
+    usearch_dense_reserve(
+        &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = rows_count});
+    expect(!outcome.message, outcome.message);
+
+    float* const data = create_vectors(rows_count, dimensions);
+    usearch_key_t* const keys = (usearch_key_t*)malloc(rows_count * sizeof(usearch_key_t));
+    expect(keys, "Failed to allocate keys");
+    for (size_t row = 0; row != rows_count; ++row) keys[row] = key_of(row);
+
+    progress_reports_t reports = {0, 0, 0, true};
+    usearch_dense_add(
+        &(usearch_dense_add_t) {.index = index,
+                                .executor = executor,
+                                .outcome = &outcome,
+                                .count = rows_count,
+                                .keys = {keys, sizeof(usearch_key_t)},
+                                .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
+                                .progress = record_progress,
+                                .progress_state = &reports});
+    expect(!outcome.message, outcome.message);
+    expect(reports.ascending && reports.calls > 1, "Every step must be reported, in order");
+    expect(reports.completed == rows_count && reports.total == rows_count, "The last report must cover the batch");
+
+    usearch_dense_index_description_t description = {0};
+    usearch_dense_describe(&(usearch_dense_describe_t) {.index = index,
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect_eq(description.size, rows_count, "A reported batch must publish every row");
+
+    free(keys);
+    free(data);
+    usearch_executor_free(executor);
+    usearch_dense_free(index);
+    printf("Test: Add Progress - PASSED\n");
+}
+
 /** Reads entries back by key. `usearch_dense_get` sizes its own output, landing every row under
  *  the key in an arena and reporting how many there were. */
 void test_count_and_get(size_t const dimensions) {
@@ -877,6 +943,7 @@ int main(int argc, char* argv[]) {
             test_init(collection_sizes[size_index], dimension_counts[dimension_index]);
             test_add_and_search(collection_sizes[size_index], dimension_counts[dimension_index]);
         }
+    test_add_progress();
     test_count_and_get(dimension_counts[0]);
     test_walks_name_their_index(dimension_counts[0]);
     test_multiply_packed();

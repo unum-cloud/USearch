@@ -11,6 +11,7 @@
  */
 #pragma once
 
+#include <cassert> // `assert` - the CPU casts never refuse
 #include <cstddef> // `std::size_t`
 
 #include <array>       // `std::array` - the value lookup's batch
@@ -405,7 +406,7 @@ constexpr gpu_class_t gpu_class_of(int arch) noexcept {
 /** Marks @p outcome as running; no waiter watches for this store, so it is relaxed. */
 inline void propagate_pending(usearch_outcome_t* outcome) noexcept {
     outcome->message = nullptr;
-    std::atomic_ref<usearch_status_t> {outcome->status}.store(usearch_status_pending_k, std::memory_order_relaxed);
+    std::atomic_ref<usearch_status_t> {outcome->status}.store(usearch_status_deferred_k, std::memory_order_relaxed);
 }
 
 /** The one final write to @p outcome: the message, then the status every waiter acquires. The call
@@ -451,6 +452,42 @@ inline bool crossed(expected<value_type_> const& result, usearch_dense_traversal
 
 /** The C key struct and the engine's @c us::uuid_t share sixteen bytes - one bit cast in. */
 inline us::uuid_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<us::uuid_t>(key); }
+
+/** One strided C matrix's rank-2 shape: NumKong counts the last extent in logical dimensions, so
+ *  a packed row is as wide as the index; a zero stride means contiguous rows. */
+template <typename scalar_type_>
+inline nk::shape_storage_<2> rows_shape_of(std::size_t rows_count, std::size_t stride,
+                                           std::size_t dimensions) noexcept {
+    std::size_t const row_values = divide_round_up<std::size_t>(dimensions, nk::dimensions_per_value<scalar_type_>());
+    std::ptrdiff_t const row_bytes = static_cast<std::ptrdiff_t>(stride ? stride : row_values * sizeof(scalar_type_));
+    return {{rows_count, dimensions}, {row_bytes, static_cast<std::ptrdiff_t>(sizeof(scalar_type_))}, 2};
+}
+
+/** Whether rows reach an arm only through @p staged: a foreign scalar converts, and a zero stride,
+ *  which repeats the first row, is materialized into the rows an arm walks. */
+template <typename multi_type_>
+inline bool stages_rows(nk_dtype_t source_dtype, std::size_t row_bytes) noexcept {
+    return source_dtype != multi_type_::vector_dtype_k || !row_bytes;
+}
+
+/** A chunk's rows in @p multi_type_ 's stored scalar: the caller's own when they match, else cast
+ *  into @p staged from its row @p staged_first on. */
+template <typename multi_type_>
+inline nk::matrix_view<typename multi_type_::scalar_t> stored_rows_of( //
+    char const* rows, std::size_t rows_count, std::size_t row_bytes, nk_dtype_t source_dtype, std::size_t dimensions,
+    nk::matrix<typename multi_type_::scalar_t>& staged, std::size_t staged_first = 0) noexcept {
+    using scalar_t = typename multi_type_::scalar_t;
+    if (!stages_rows<multi_type_>(source_dtype, row_bytes))
+        return {rows, rows_shape_of<scalar_t>(rows_count, row_bytes, dimensions)};
+    for (std::size_t row = 0; row != rows_count; ++row) {
+        [[maybe_unused]] nk_status_t const cast = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
+            rows + row * row_bytes, source_dtype, staged.span().row(staged_first + row).as_vector().byte_data(),
+            multi_type_::vector_dtype_k, dimensions, nullptr);
+        assert(cast == nk_success_k && "The serial tier casts every dtype pair");
+    }
+    return {staged.span().row(staged_first).as_vector().byte_data(),
+            rows_shape_of<scalar_t>(rows_count, 0, dimensions)};
+}
 
 #pragma endregion Scaffolding
 
@@ -559,6 +596,33 @@ struct shard_ticks_t {
     }
 };
 
+/** One insertion's C rows and its handler: yields a chunk in an arm's stored scalar, and reports
+ *  each chunk once it lands. Every row is claimed before the first report and a dispensed row
+ *  cannot be withdrawn, so the handler's answer is ignored. */
+struct insertion_rows_t {
+    char const* data;
+    std::size_t row_bytes;
+    nk_dtype_t source_dtype;
+    usearch_progress_callback_t progress;
+    void* progress_state;
+
+    /** Rows @b [first,first+taking) as @p index stores them, staged into @p staged from its row
+     *  @p staged_first on when the caller's own differ. */
+    template <typename multi_type_>
+    nk::matrix_view<typename multi_type_::scalar_t> operator()(multi_type_ const& index, std::size_t first,
+                                                               std::size_t taking,
+                                                               nk::matrix<typename multi_type_::scalar_t>& staged,
+                                                               std::size_t staged_first) const noexcept {
+        return stored_rows_of<multi_type_>(data + first * row_bytes, taking, row_bytes, source_dtype,
+                                           index.dimensions(), staged, staged_first);
+    }
+
+    /** Tells the handler, if any, that @p landed of @p total rows landed. */
+    void report(std::size_t landed, std::size_t total) const noexcept {
+        if (progress) progress(landed, total, progress_state);
+    }
+};
+
 /** One arm's verbs, fixed to the C layer's callback types and wrapped as non-template members of a
  *  view over the index: an explicit instantiation compiles exactly these bodies in the arm's unit,
  *  and an @c extern one keeps every arm body out of the dispatch unit. The members are defined
@@ -606,7 +670,9 @@ struct specialized_index {
     std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted) const noexcept;
     status_t reserve(reserve_capacity_t config) noexcept;
     status_t clear() noexcept;
-    expected<insert_result_t> add(std::span<key_t const> keys, vectors_view_t rows, executor_t& executor,
+
+    /** Lands @p rows under @p keys through one plan, a step per chunk, and publishes them all at once. */
+    expected<insert_result_t> add(std::span<key_t const> keys, insertion_rows_t const& rows, executor_t& executor,
                                   insert_config_t config) noexcept;
     expected<refine_result_t> refine(executor_t& executor, refine_config_t config, shard_ticks_t& ticks) noexcept;
     expected<health_result_t> health(executor_t& executor) noexcept;
@@ -706,8 +772,36 @@ status_t specialized_index<index_type_>::clear() noexcept {
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::insert_result_t> specialized_index<index_type_>::add(
-    std::span<key_t const> keys, vectors_view_t rows, executor_t& executor, insert_config_t config) noexcept {
-    return index.insert(keys, rows, executor, config);
+    std::span<key_t const> keys, insertion_rows_t const& rows, executor_t& executor, insert_config_t config) noexcept {
+    using scalar_t = typename index_type_::scalar_t;
+    std::size_t const count = keys.size();
+    bool const staging = stages_rows<index_type_>(rows.source_dtype, rows.row_bytes);
+    // Only a handler or a staged copy splits the call, and one plan still publishes every chunk at once.
+    std::size_t const chunk = rows.progress || staging ? min_of(count, increment_rows_k) : count;
+    // A device step reads its rows until `finish`, so device chunks stage side by side rather than over each other.
+    std::size_t const staged_rows = is_ram_index<index_type_> ? chunk : count;
+    nk::matrix<scalar_t> staged;
+    if (staging) {
+        auto zeros = nk::matrix<scalar_t>::zeros({staged_rows, index.dimensions()});
+        if (!zeros)
+            return {{}, zeros.status == nk::status_t::bad_alloc_k ? status_t::bad_alloc_k : status_t::shape_mismatch_k};
+        staged = std::move(zeros.value);
+    }
+
+    auto [plan, status] = index.plan_insert(count, executor, config);
+    if (failed(status)) return {{}, status};
+    for (std::size_t landed = 0; landed != count;) {
+        std::size_t const taking = min_of(chunk, count - landed);
+        std::size_t const staged_first = is_ram_index<index_type_> ? 0 : landed;
+        vectors_view_t const chunk_rows = rows(index, landed, taking, staged, staged_first);
+        std::span<key_t const> const chunk_keys = keys.subspan(landed, taking);
+        if constexpr (is_ram_index<index_type_>) plan.insert(landed, chunk_keys, chunk_rows);
+        else if (failed(plan.insert(landed, chunk_keys, chunk_rows))) break;
+        landed += taking;
+        rows.report(landed, count);
+    }
+    // After a failed device step, `finish` publishes nothing and reports the failure the plan kept.
+    return plan.finish();
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::refine_result_t> specialized_index<index_type_>::refine(

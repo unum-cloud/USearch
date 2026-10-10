@@ -1,15 +1,15 @@
 /**
  *  The dense index's publication protocol from `include/usearch/dense/ram_index.hpp`: identity
- *  dispensed one id at a time from `next_dispensed_id_`, rows written and unlocked below it, the
- *  hole-free `last_visible_id_` watermark advanced in dispensed order, and the readers that
+ *  dispensed one range per batch from `next_dispensed_id_`, rows written and unlocked below it,
+ *  the hole-free `last_visible_id_` watermark advanced in dispensed order, and the readers that
  *  rest on the watermark - a traversal, a cursor, and a concurrent save with its settlement probe.
  *
- *  Two inserters dispense ids 0 and 1. Each writes its own row's tail relaxed and slot zero
- *  with a release, the publication; the second, when it saw the first below the watermark,
- *  back-links into row 0: a release fence, the slot-zero lock exchange, a relaxed tail store,
- *  the release unlock. A searcher acquires the watermark and reads every row below it. A saver
- *  runs `plan_save` and `finish` under `concurrent_k`: three acquire loads, the row copies as
- *  relaxed loads, an acquire fence, and the relaxed re-check of the three counters.
+ *  Two inserters of one row each dispense IDs 0 and 1. Each writes its own row's tail relaxed
+ *  and slot zero with a release, the publication; the second, when it saw the first below the
+ *  watermark, back-links into row 0: a release fence, the slot-zero lock exchange, a relaxed
+ *  tail store, the release unlock. A searcher acquires the watermark and reads every row below
+ *  it. A saver runs `plan_save` and `finish` under `concurrent_k`: three acquire loads, the row
+ *  copies as relaxed loads, an acquire fence, and the relaxed re-check of the three counters.
  *
  *  Invariants:
  *  - publication: a row below the watermark a reader acquired is visible to it as published.
@@ -46,31 +46,63 @@
  *    release is what carries the rows into the watermark: `-Dwithout_covered_release` makes
  *    it relaxed, and the searcher finds a row below the watermark unpublished;
  *  - `-Dscenario=savers`: two concurrent saves on the searcher's and the saver's threads, each
- *    with its own plan and its own covered tallies; `-Dwithout_release_fence` fails for either.
+ *    with its own plan and its own covered tallies; `-Dwithout_release_fence` fails for either;
+ *  - `-Dscenario=batched`: a batch's commit, which dispenses its whole range with one add
+ *    and moves the watermark once. Two commits of two rows each; a commit's leader dispenses,
+ *    hands the range to a helper as the executor's fan-out would, each wires one row, the helper
+ *    joins with a release the leader acquires, and the leader takes one turn from the range's
+ *    first ID to its end. A row's walk admits the rows below its snapshot, and past it a row of
+ *    its own range, or of the other commit once an acquire of the dispenser shows it dispensed,
+ *    only once an acquire of that row's slot zero shows it published; it back-links into row 0
+ *    behind the fence whenever it reached it, so commits in flight together link to each other.
+ *    The searcher acquires the watermark, which never lies strictly inside a range, reads every
+ *    row below it as published, and follows row 0's tail only below its snapshot, so a back-link
+ *    into a later commit's rows never leads into them. `-Dwithout_range_turn` takes a turn per
+ *    row, and the searcher sees half a commit; `-Dwithout_own_range_check` admits the sibling row
+ *    unchecked, and a walk reads it before its wirer unlocked it.
  */
 #include "weak_memory.pml"
 
 // The scenarios: two inserters, the load path's appender, the keyed rows and their walk, the
-// cursor, the load fan-out, or two savers.
+// cursor, the load fan-out, two savers, or two batched commits.
 #define inserters 1
 #define appender 2
 #define keyed 3
 #define cursor 4
 #define steps 5
 #define savers 6
+#define batched 7
 #ifndef scenario
 #define scenario inserters
 #endif
 
-// The threads, by role, apart from the processes that play them; the inserters, the steps and the savers name themselves as they start.
+// The threads, by role, apart from the processes that play them; the inserters, the steps, the
+// savers and the commits name themselves as they start.
 #define loader_thread 0
+#if scenario == batched
+#define leader_thread(commit) ((commit) * 2)
+#define helper_thread(commit) ((commit) * 2 + 1)
+#define searcher_thread 4
+#else
 #define searcher_thread 2
+#endif
 #define saver_thread 3
 #define cursor_thread 3
 #define finisher_thread 3
 
 // The words, by the index member each stands for; a row is its lock word and one tail slot.
 // The key column and the load plan's tally take the last words in turn: no scenario has both.
+// The commits' four rows keep slot zero alone, but for row 0's tail, which the back-links edit.
+#if scenario == batched
+#define range_rows 2
+#define rows 4
+#define next_dispensed_id 0
+#define last_visible_id 1
+#define row_lock(id) (2 + (id))
+#define row_tail(id) 6
+#define joined(commit) (7 + (commit))
+#else
+#define rows 2
 #define next_dispensed_id 0
 #define last_visible_id 1
 #define last_allocated_id 2
@@ -78,6 +110,7 @@
 #define row_tail(id) (4 + (id) * 2)
 #define key(id) (7 + (id))
 #define covered 7
+#endif
 
 // The values rows and keys carry: the sentinel is the all-ones id in silicon, and a slot names an id.
 #define sentinel 0
@@ -120,7 +153,7 @@ byte steps_started;
 byte savers_started;
 bool editing; // row 0 is under its lock
 #if memory != sequential
-byte published_at[2]; // the history index of each row's publication
+byte published_at[rows]; // the history index of each row's publication
 #endif
 
 // a traversal's read of slot zero below the watermark it acquired, and of the key column behind it
@@ -139,7 +172,159 @@ inline read_published(t, id, seen) {
 #endif
 }
 
-#if scenario == appender
+#if scenario == batched
+byte commits_started;
+byte helpers_started;
+byte range_first[2];  // the range each commit dispensed, handed to its helper
+bool dispatched[2];   // the fan-out's dispatch, which carries no row
+bool wired[rows];     // each row unlocked, set with the unlock
+
+// a read of a row a walk admitted: unlocked before it, and in the reader's view
+inline read_wired(t, id, seen) {
+    atomic {
+        load(t, row_lock(id), order_acquire, seen);
+        assert(wired[id]);
+#if memory != sequential
+        assert(current[thread_index(t, row_lock(id))] >= published_at[id]);
+#endif
+    }
+}
+
+// the watermark turn from @p from to @p to, strictly in dispensed order
+inline take_turn(t, from, to) {
+    (newest_value(last_visible_id) == from);
+    do
+    :: load(t, last_visible_id, order_acquire, watermark);
+       if
+       :: watermark == from -> break
+       :: else
+       fi
+    od;
+    store(t, last_visible_id, watermark_order, to)
+}
+
+// one row of a commit: the walk below the snapshot and over the published rows dispensed before it
+// began, slot zero's release, then the back-link into row 0 when the walk reached it
+inline wire(t, id, sibling) {
+    load(t, last_visible_id, order_acquire, first_invisible);
+    load(t, next_dispensed_id, order_acquire, first_undispensed);
+    linked = first_invisible > 0;
+    if
+    :: linked -> read_wired(t, 0, seen)
+    :: else
+    fi;
+    // past the snapshot, the other commit's first row, once dispensed and its slot zero shows it published
+    other = (id < range_rows -> range_rows : 0);
+    if
+    :: !linked && other < first_undispensed ->
+        load(t, row_lock(other), order_acquire, seen);
+        if
+        :: seen != sentinel -> read_wired(t, other, seen); linked = other == 0
+        :: else
+        fi
+    :: else
+    fi;
+#ifdef without_own_range_check
+    read_wired(t, sibling, seen);
+#else
+    load(t, row_lock(sibling), order_acquire, seen);
+    if
+    :: seen != sentinel -> read_wired(t, sibling, seen)
+    :: else
+    fi;
+#endif
+    if
+    :: id == 0 -> store(t, row_tail(0), order_relaxed, published(0))
+    :: else
+    fi;
+    atomic {
+        store(t, row_lock(id), order_release, published(id));
+        wired[id] = true;
+#if memory != sequential
+        published_at[id] = newest[row_lock(id)]
+#endif
+    };
+    if
+    :: linked ->
+#ifndef without_release_fence
+        fence_release(t);
+#endif
+        do
+        :: read_modify_write(t, row_lock(0), order_acq_rel, displaced, sentinel);
+           if
+           :: displaced != sentinel -> break
+           :: else -> (newest_value(row_lock(0)) != sentinel)
+           fi
+        od;
+        store(t, row_tail(0), order_relaxed, edited(id));
+        store(t, row_lock(0), order_release, edited(id))
+    :: else
+    fi
+}
+
+// a commit's leader: the whole range from one add, its own row, the helper's join, then one turn
+active [2] proctype committer() {
+    byte me, other;
+    int first, first_invisible, first_undispensed, seen, displaced, watermark, joins;
+    bool linked;
+    atomic { me = commits_started; commits_started++ };
+    read_modify_write(leader_thread(me), next_dispensed_id, order_acq_rel, first, first + range_rows);
+    atomic { range_first[me] = first; dispatched[me] = true };
+    wire(leader_thread(me), first, first + 1);
+#ifdef without_range_turn
+    take_turn(leader_thread(me), first, first + 1);
+#endif
+    (newest_value(joined(me)) != 0);
+    do
+    :: load(leader_thread(me), joined(me), order_acquire, joins);
+       if
+       :: joins != 0 -> break
+       :: else
+       fi
+    od;
+#ifndef without_range_turn
+    take_turn(leader_thread(me), first, first + range_rows);
+#endif
+}
+
+// the executor's second worker on a commit's range: the range's second row, then the join
+active [2] proctype helper() {
+    byte me, other;
+    int first, first_invisible, first_undispensed, seen, displaced, watermark;
+    bool linked;
+    atomic { me = helpers_started; helpers_started++ };
+    dispatched[me];
+    first = range_first[me];
+    wire(helper_thread(me), first + 1, first);
+#ifdef without_range_turn
+    take_turn(helper_thread(me), first + 1, first + 2);
+#endif
+    store(helper_thread(me), joined(me), order_release, 1)
+}
+
+// a search: the watermark acquired, never inside a range, every row below it published, and the
+// walk through row 0's tail, which a later commit's back-link may name, filtered by the snapshot
+active proctype searcher() {
+    byte id;
+    int watermark, seen, found;
+    load(searcher_thread, last_visible_id, order_acquire, watermark);
+    assert(watermark % range_rows == 0);
+    id = 0;
+    do
+    :: id == watermark -> break
+    :: else -> read_wired(searcher_thread, id, seen); id++
+    od;
+    if
+    :: watermark > 0 ->
+        load(searcher_thread, row_tail(0), order_relaxed, found);
+        if
+        :: admitted(id_of(found), watermark) -> read_wired(searcher_thread, id_of(found), seen)
+        :: else
+        fi
+    :: else
+    fi
+}
+#elif scenario == appender
 // the load path's `finish`: rows landed, the dispenser bumped without a return, the watermark released
 active proctype loader() {
     store(loader_thread, row_tail(0), order_relaxed, published(0));
@@ -248,7 +433,7 @@ turn:
 }
 #endif
 
-#if scenario != savers
+#if scenario != savers && scenario != batched
 active proctype searcher() {
     int watermark, seen, found;
     load(searcher_thread, last_visible_id, order_acquire, watermark);
@@ -315,7 +500,7 @@ seek:
 past_end:
     skip
 }
-#elif scenario != steps
+#elif scenario != steps && scenario != batched
 active [saver_count] proctype saver() {
     byte me, covered_rows;
     int visible, dispensed, allocated, again;

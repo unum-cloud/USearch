@@ -9,14 +9,14 @@ The memory models and the runners live in [`forkunion/verification`](../forkunio
 - `basic_ram_index_rows.pml`: the basic index's rows, the row mutex, what the gate's shared and unique sides carry, the traversal's translation frontier, and the load path's steps, tally and counter order.
 - `basic_ram_index.pml`: `insert`, certified `search`, `plan_save`, `health` and `plan_load` interleaved on one index, sequentially consistent, and a failed load's leftovers, the composition of the models above.
 - `ram_tables.pml`: `chunked_multimap`, the seats bounding every probe chain, the acquire slot claim, whether a prober can read a published slot half-written, and `-Dscenario=growth` for the chunks a claim covers.
-- `dense_ram_index_watermark.pml`: the dense index's dispenser, rows, back-link fence, watermark turn, and the concurrent save's settlement probe; `-Dscenario=appender` for the load path's `finish`, `keyed` for the key column and the walk's frontier, `cursor` for `dense_ram_cursor`, `steps` for the load fan-out's tally, `savers` for two saves at once, and `-Dtwice_finished` for a load plan published twice.
-- `dense_ram_index_watermark.cpp`: the same counters under GenMC, spelled over the ForkUnion reference the index binds.
+- `dense_ram_index_watermark.pml`: the dense index's dispenser, rows, back-link fence, watermark turn, and the concurrent save's settlement probe; `-Dscenario=appender` for the load path's `finish`, `keyed` for the key column and the walk's frontier, `cursor` for `dense_ram_cursor`, `steps` for the load fan-out's tally, `savers` for two saves at once, `batched` for a batch's commit dispensing its range with one add and taking one turn, and `-Dtwice_finished` for a load plan published twice.
+- `dense_ram_index_watermark.cpp`: the same counters under GenMC, spelled over the ForkUnion reference the index binds, and `-Dscenario=batched` for the commit with its helper joined before the turn.
 - `dense_ram_index_capacity.pml`: `claim_capacity`'s grower election, `release_capacity`'s order and its wait for a whole counter, `-Dscenario=regrow` for a second `reserve` above the physical rows, `reserve` against a concurrent `reserve`, and `-Dscenario=loaders` for a load plan that dies before `finish`.
 - `dense_ram_index_capacity.cpp`: the same counters under GenMC, with the race detector on the plain chunk directory.
-- `dense_ram_indexes.pml`: the sharded index, the shards' claims and their release, `-Dscenario=covering` for the key columns' cover after every claim, keys before the watermark turn, the search merge over the key columns, the monolith save's per-shard watermark, and the load path's keys under `finish`.
-- `dense_vram_index_claims.pml`: the CUDA index's host side, the claim under its spin mutex, the planes grown before it, `size()` as a search's sampling bound, the load's claim, and the admission ramp behind a rejected launch; `-Dwithout_abandon_unlock` keeps a dead load plan's mutex.
+- `dense_ram_indexes.pml`: the sharded index, the shards' claims and their release, `-Dscenario=covering` for the key columns' cover after every claim, keys before the watermark turn, the search merge over the key columns, the monolith save's per-shard watermark, the load path's keys under `finish`, and `-Dscenario=committed` for a commit across the shards, its ranges dispensed in one order and its stores behind one sequence word.
+- `dense_vram_index_claims.pml`: the CUDA index's host side, the claim under its spin mutex, the planes grown before it, the watermark each batch turns after its drain as a search's bound, the walk's filter on it, the load's claim and turn, and the admission ramp behind a rejected launch; `-Dwithout_abandon_unlock` keeps a dead load plan's mutex.
 - `dense_vram_index_locks.pml`: the CUDA index's rows, publication by one release, the bounded slot-zero lock, the back-link's sweep and append, and a traversal warp whose follower lanes read behind a shuffle.
-- `dense_vram_indexes.pml`: the sharded CUDA index, the mutation gate answering `contended_k`, keys written before a shard's claim publishes the row, and a load beside a batch; `-Dscenario=loading` for the load.
+- `dense_vram_indexes.pml`: the sharded CUDA index, the mutation gate answering `contended_k`, keys written before a shard's turn publishes the row, a batch's turns on every shard inside one commit of the sequence word, and a load beside a batch; `-Dscenario=loading` for the load.
 - `nvme_ring.pml`: the NVMe index's io_uring words, the submission and completion rings' heads and tails, the entries between them, the wrap, and the deferred posting; `-Dscenario=deferred` for `DEFER_TASKRUN`.
 - `executor.pml`: `forkunion_executor_t`, the one-caller hold through `claim`, the arena rewind in `reserve`, and the fan-out no second caller may rewind under.
 
@@ -43,7 +43,7 @@ The CUDA index's follower lanes stand outside their leader's acquire.
 Three shapes fail under the view model and pass sequentially.
 A traversal's follower lanes load their tail slots straight after the shuffle, so a lane may read a slot older than the unlock its leader acquired and the warp assembles a row no holder ever wrote; `-Dwithout_syncwarp_after_broadcast`.
 A back-linker's follower lanes sweep the locked row the same way, so a stale sentinel names a slot the previous holder just filled, and the append overwrites that holder's link; `-Dwithout_syncwarp_after_lock`.
-And a follower's relaxed tail load may return an edit newer than the unlock its leader acquired, which carries nothing, so the id it found names a node whose payload it then reads stale; no syncwarp closes that one, since no lane acquired that edit.
+And a follower's relaxed tail load may return an edit newer than the unlock its leader acquired, which carries nothing, so the ID it found names a node whose payload it then reads stale; no syncwarp closes that one, since no lane acquired that edit.
 The header now carries the model's default: a `__syncwarp()` after each shuffle, acquire loads on the tail slots, and one release fence per lock hold between the lock and the slot stores.
 `-Dwithout_tail_acquire` and `-Dwithout_tail_fence` each keep the last counterexample, and `-Dwithout_fixes` is the header as it was, carrying none of the three.
 
@@ -56,7 +56,7 @@ The load path's `finish` has its counters in the right order, the claim and iden
 The steps' tally add releases for the finisher's acquire, which is what puts the steps' records behind the watermark; `-Dwithout_covered_release` loses them under the view model and, posted, under far memory.
 
 A failed load left its keys behind.
-`load_plan_t::load` registers keys as it decodes, and a plan that failed kept them until the next `plan_load` wiped the map, so an `insert` in between dispensed ids the failed attempt's keys still named and spent the map's seats on the leftovers.
+`load_plan_t::load` registers keys as it decodes, and a plan that failed kept them until the next `plan_load` wiped the map, so an `insert` in between dispensed IDs the failed attempt's keys still named and spent the map's seats on the leftovers.
 The plan now wipes the keys it registered when it dies before `finish`, whether its steps fell short or nobody finished it, still under its hold, and `insert` clears its row before wiring; `basic_ram_index.pml` carries both as `-Dwithout_map_clear` and `-Dwithout_row_clear`.
 A successful `finish` spends the plan, so a second call answers a status instead of dropping a hold the plan no longer owns; `-Dtwice_finished` unlocks twice and the gate's assertion names it, or an adder walks in on a loader's hold.
 
@@ -82,20 +82,21 @@ That take releases now, and `-Dwithout_take_release` keeps the stale read.
 
 The sharded index claims on one shard at a time, and its watermark is per shard.
 `dense_ram_indexes.pml` runs two batch adders and a single-row adder against two shards of two rows: the shard's counter is the only word a row claims, and once every adder is done each shard's claim word equals its dispenser, unless `-Dwithout_release` skips the release after a refused fan-out.
-A key lands in `on_assigned` before the watermark turn, so every id below a watermark a searcher acquired resolves through the key column; `-Dwithout_key_before_watermark` moves it after and fails under every model, `-Dwithout_watermark_release` fails under the view model.
+A key lands in `on_assigned` before the watermark turn, so every ID below a watermark a searcher acquired resolves through the key column; `-Dwithout_key_before_watermark` moves it after and fails under every model, `-Dwithout_watermark_release` fails under the view model.
 The monolith save takes one `plan_save` per shard, and a settled plan copies no unset key below its watermark; `-Dwhole_batches`, which asks the watermark to capture a batch's rows on shard zero and shard one together, fails under every model, since nothing joins the two watermarks, and the README says so rather than the code.
 The load path lands keys before `finish` releases the dispenser and the watermark, and `-Dwithout_keys_before_finish` keeps the counterexample.
 The single-row `insert` did not consume its claim on success, so every landed row released one seat and the shard claimed one row more than it holds; it consumes now, and `-Dwithout_claim_consume` keeps the old header.
 The shards' key columns were a second contended word beside each shard's capacity counter: a `fetch_add_if_at_most` on the key column, then the claim, with two releases to keep aligned.
-The shard's claim is now the only claim a row makes, and a shard refuses only past the rows its ids reach.
+The shard's claim is now the only claim a row makes, and a shard refuses only past the rows its IDs reach.
 Its key column is a `chunked_column` on the shard's own chunk schedule, and every claimer covers it to what the shard hosts after the claim, before dispensing.
-The id a claimer dispenses may lie past its own rows, in a chunk only a later claimer covered, but that claimer dispensed first, and the dispenser's acquire-release carries its cover along; `dense_ram_indexes.pml -Dscenario=covering` holds three adders on one shard, and `-Dwithout_cover` and `-Dwithout_dispense_acq_rel` each write a key into a chunk never seen published.
+The ID a claimer dispenses may lie past its own rows, in a chunk only a later claimer covered, but that claimer dispensed first, and the dispenser's acquire-release carries its cover along; `dense_ram_indexes.pml -Dscenario=covering` holds three adders on one shard, and `-Dwithout_cover` and `-Dwithout_dispense_acq_rel` each write a key into a chunk never seen published.
 `reserve` called a second time, above the physical rows, spun forever: a deficit that fits in the free rows is granted without a growth, released, and read back unchanged.
 It now claims from the claimed rows up to the request, so the counter crosses and one growth covers it; `dense_ram_index_capacity.pml -Dscenario=regrow` bounds the rounds, and `-Dwithout_deficit_growth` keeps the old deficit and over-runs them.
 
-The CUDA index's host side rests on one mutex and one release.
+The CUDA index's host side rests on one mutex and one watermark turn per batch.
 `dense_vram_index_claims.pml` holds two inserters, a loader, a searcher, and a device serving the accepted batches' rows through the admission ramp in any order.
-The claim's release store pairs with the acquire in `size()`, so a search's sampling bound lies inside the planes the claim grew; `-Dwithout_claim_release` and `-Dwithout_size_acquire` each let the searcher read a bound past the planes' extent.
+The turn's release store pairs with the acquire in `size()`, so a search's bound lies inside the planes the claim grew; `-Dwithout_watermark_release` and `-Dwithout_size_acquire` each let the searcher read a bound past the planes' extent.
+A batch turns the watermark only after its drain and in claim order, so every row under a search's bound landed, and the walk follows no ID at or past the bound, since an in-flight batch's back-links name its rows inside visible ones; `-Dwithout_drain_before_turn` and `-Dwithout_neighbor_filter` each let a search reach a row still in flight.
 The mutex keeps the growers and the claims apart, and storing the claim only once the launch is accepted keeps a rejected grid from starving the next batch's ramp; `-Dwithout_claiming_mutex` claims one range twice, and `-Dwithout_unclaim_on_rejection` leaves the device waiting for rows nobody publishes.
 The model also found `plan_load` reading its base from `size()` before `lock_if_free`, so a batch claimed between the two lines overlapped the loaded rows and `finish` could lower the claim beneath it; the base is read under the claim now, and `-Dwithout_base_under_claim` keeps the old order.
 The planes' committed extent, which `capacity()` reads outside the claim, was a plain word the grower advanced under the mutex; it is released by the grower and acquired by every reader now, in both plane allocators.
@@ -105,7 +106,9 @@ The sharded CUDA index gated its batches and not its load.
 `insert` takes the executor's hold and then `mutating_`, so two batches never interleave their claims; the load's opening, now `gate_load_`, took only the executor's, so a batch through a second executor passed the gate, and its keys raced the load's.
 `dense_vram_indexes.pml` runs two batches, a searcher and a loader over two shards, and found three things in the load: the missing gate, an emptiness check made at the entry and not under the hold, and each shard published before its keys were written, the order the RAM twin had already corrected.
 The load takes the gate now, checks emptiness under it, and writes each shard's keys before its plan finishes; `-Dwithout_load_gate` and `-Dwithout_load_key_before_finish` keep the two that race.
-The batches no longer admit rows against the key planes: the shards grow as they claim, the gate serializes the key columns' covers along with the claims, and searches bound on each shard's claim, whose release and acquire `-Dwithout_claim_release` shows to carry the keys.
+The batches no longer admit rows against the key planes: the shards grow as they claim, and the gate serializes the key columns' covers along with the claims.
+Searches bound on each shard's watermark, which a batch turns on every shard inside one commit of a counted sequence word, as on the RAM shards; `-Dwithout_key_before_turn` writes the keys after the commit, and `-Dwithout_commit_sequence` takes a snapshot between two shards' turns.
+The turn's release carries more than the keys: it is what brings the commit's opening add to the snapshot's re-read, and `-Dwithout_watermark_release` passes a torn snapshot under the view model.
 
 The NVMe index's ring words carry exactly the orders the io_uring documentation asks for.
 `nvme_ring.pml` runs an engine and a kernel over two rings of depth two and three requests, so each ring wraps once: the tail releases and the tail acquires carry the entries, and `-Dwithout_sq_tail_release` lets the kernel consume an entry before its payload landed while `-Dwithout_cq_tail_acquire` lets the engine reap a completion stale.
@@ -115,6 +118,13 @@ Deferred posting changes when completions land and nothing about what is seen.
 
 The executor's hold is what keeps a second caller from rewinding the arenas under a fan-out.
 `executor.pml` runs two callers and two workers: `claim` answers `contended_k` rather than waiting, the holder rewinds every arena and fans out, and each worker reads the arena its holder wrote; `-Dwithout_hold` lets the second caller rewind under the first one's fan-out.
+
+A batch becomes visible whole on one index with no new atomics: `insert` dispenses the batch's range with one add and takes one watermark turn for it, which `dense_ram_index_watermark.pml -Dscenario=batched` holds under every model.
+Past its snapshot, a row's walk reads a row of its own range, or of any batch an acquire of the dispenser shows dispensed, only once an acquire of slot zero shows it published, so batches wired side by side link to each other rather than forming islands; `-Dwithout_own_range_check` reads a sibling before its unlock.
+Across shards it needs a counted sequence word.
+A batch dispenses its shards' ranges under one mutex, waits for every shard's turn, then stores the watermarks between one add on the word and a second add of the unit less one, so the low part counts the batches between their stores; a reader acquires the word, waits out a non-zero low part, snapshots the watermarks and retries if the word moved.
+A parity word made odd before the stores and even after holds for one commit and fails for two: one commit's add makes it odd, the other's even again, and `dense_ram_indexes.pml -Dscenario=committed -Dconcurrent_commits` accepts a snapshot holding one shard's part; `-Dcounted_sequence` holds under every model.
+The waits sit outside the word's bracket, which is safe only because no two batches' ranges cross order between the shards; `-Dwithout_ordered_dispense` lets each shard dispense on its own, and two commits deadlock, each waiting for a turn only the other's store gives.
 
 ## What is not covered
 
@@ -133,7 +143,8 @@ Nothing here runs on silicon; litmus tests for the instruction-set references be
 ```sh
 ./check.sh                                   # Spin only, GenMC skipped when absent
 GENMC=~/genmc/build/bin/genmc ./check.sh     # both
+FORKUNION=~/ForkUnion ./check.sh             # a ForkUnion checkout, when the submodule is not
 ```
 
 Every `verify` line names a model, the expected verdict and the defines, so a new variant is one line.
-The suite's 129 verdicts take about four minutes serially and about a minute four at a time, which is the default; a client that runs past `GENMC_SECONDS` is a client to shrink.
+The suite's 159 verdicts take about five minutes four at a time, which is the default; a client that runs past `GENMC_SECONDS` is a client to shrink.

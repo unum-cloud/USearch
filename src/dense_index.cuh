@@ -1653,41 +1653,6 @@ static usearch_arena_handle_t* claim_arena(usearch_arena_t* arena, void const* i
     return *arena;
 }
 
-/** One strided C matrix's rank-2 shape: NumKong counts the last extent in logical dimensions, so
- *  a packed row is as wide as the index; a zero stride means contiguous rows. */
-template <typename scalar_type_>
-static nk::shape_storage_<2> rows_shape_of(std::size_t rows_count, std::size_t stride,
-                                           std::size_t dimensions) noexcept {
-    std::size_t const row_values = divide_round_up<std::size_t>(dimensions, nk::dimensions_per_value<scalar_type_>());
-    std::ptrdiff_t const row_bytes = static_cast<std::ptrdiff_t>(stride ? stride : row_values * sizeof(scalar_type_));
-    return {{rows_count, dimensions}, {row_bytes, static_cast<std::ptrdiff_t>(sizeof(scalar_type_))}, 2};
-}
-
-/** Whether rows reach an arm only through @p staged: a foreign scalar converts, and a zero stride,
- *  which repeats the first row, is materialized into the rows an arm walks. */
-template <typename multi_type_>
-static bool stages_rows(nk_dtype_t source_dtype, std::size_t row_bytes) noexcept {
-    return source_dtype != multi_type_::vector_dtype_k || !row_bytes;
-}
-
-/** A chunk's rows in @p multi_type_ 's stored scalar: the caller's own when they match, else cast
- *  into @p staged. */
-template <typename multi_type_>
-static nk::matrix_view<typename multi_type_::scalar_t> stored_rows_of( //
-    char const* rows, std::size_t rows_count, std::size_t row_bytes, nk_dtype_t source_dtype, std::size_t dimensions,
-    nk::matrix<typename multi_type_::scalar_t>& staged) noexcept {
-    using scalar_t = typename multi_type_::scalar_t;
-    if (!stages_rows<multi_type_>(source_dtype, row_bytes))
-        return {rows, rows_shape_of<scalar_t>(rows_count, row_bytes, dimensions)};
-    for (std::size_t row = 0; row != rows_count; ++row) {
-        [[maybe_unused]] nk_status_t const cast = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
-            rows + row * row_bytes, source_dtype, staged.span().row(row).as_vector().byte_data(),
-            multi_type_::vector_dtype_k, dimensions, nullptr);
-        assert(cast == nk_success_k && "The serial tier casts every dtype pair");
-    }
-    return {reinterpret_cast<char const*>(staged.data()), rows_shape_of<scalar_t>(rows_count, 0, dimensions)};
-}
-
 /** Bytes one packed row of @p dimensions spans in @p dtype. */
 static std::size_t packed_row_bytes(nk_dtype_t dtype, std::size_t dimensions) noexcept {
     return divide_round_up<std::size_t>(nk_dtype_bits(dtype) * dimensions, 8);
@@ -2101,7 +2066,6 @@ USEARCH_EXPORT void usearch_dense_add(usearch_dense_add_t* arguments) {
             typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
                                                                              call_executor, outcome);
             if (!executor) return;
-            using scalar_t = typename variant_type_::scalar_t;
             using key_t = typename variant_type_::key_t;
             typename variant_type_::insert_config_t insert_config {};
             insert_config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
@@ -2119,40 +2083,16 @@ USEARCH_EXPORT void usearch_dense_add(usearch_dense_add_t* arguments) {
                 uuids = {gathered_keys.data(), count};
             }
 
-            // Only a handler or a staged copy splits the batch; otherwise it is one all-or-nothing call.
             std::size_t const dimensions = specialized_index {variant}.dimensions();
-            std::size_t const row_bytes = vectors.stride;
-            if (row_bytes && row_bytes < packed_row_bytes(source_dtype, dimensions))
+            if (vectors.stride && vectors.stride < packed_row_bytes(source_dtype, dimensions))
                 return propagate_error(usearch_status_unsupported_layout_k, outcome,
                                        "The stride is shorter than one row"),
                        void();
-            bool const staging = stages_rows<variant_type_>(source_dtype, row_bytes);
-            char const* const rows_base = static_cast<char const*>(vectors.data);
-            std::size_t const chunk = progress || staging ? min_of(count, increment_rows_k) : count;
-            nk::matrix<scalar_t> staged;
-            if (staging) {
-                auto zeros = nk::matrix<scalar_t>::zeros({chunk, dimensions});
-                if (!zeros)
-                    return propagate_error(zeros.status == nk::status_t::bad_alloc_k ? usearch_status_out_of_memory_k
-                                                                                     : usearch_status_shape_mismatch_k,
-                                           outcome, "Failed to stage the converted rows"),
-                           void();
-                staged = std::move(zeros.value);
-            }
-            std::size_t published = 0;
-            while (published != count) {
-                std::size_t const taking = min_of(chunk, count - published);
-                nk::matrix_view<scalar_t> const rows = stored_rows_of<variant_type_>(
-                    rows_base + published * row_bytes, taking, row_bytes, source_dtype, dimensions, staged);
-                auto const inserted = specialized_index {variant}.add(uuids.subspan(published, taking), rows, *executor,
-                                                                      insert_config);
-                if (!crossed(inserted, stats, outcome)) return;
-                published += taking;
-                if (progress && progress(published, count, arguments->progress_state) == usearch_cancel_k)
-                    return propagate_error(usearch_status_cancelled_k, outcome, "The handler stopped the insertion"),
-                           void();
-            }
-            propagate_error(usearch_status_success_k, outcome, nullptr);
+            insertion_rows_t const rows {static_cast<char const*>(vectors.data), vectors.stride, source_dtype, progress,
+                                         arguments->progress_state};
+            expected<typename variant_type_::insert_result_t> const inserted = specialized_index {variant}.add(
+                uuids, rows, *executor, insert_config);
+            if (crossed(inserted, stats, outcome)) propagate_error(usearch_status_success_k, outcome, nullptr);
         },
         arguments->index->variants);
 }
@@ -2275,10 +2215,6 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
         arguments->index->variants);
 }
 
-#pragma endregion Insertion and Search
-
-#pragma region Search Streams
-
 USEARCH_EXPORT void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* arguments) {
     propagate_pending(arguments->outcome);
     *arguments->stream = nullptr;
@@ -2292,9 +2228,9 @@ USEARCH_EXPORT void usearch_dense_search_stream_next(usearch_dense_search_stream
 
 USEARCH_EXPORT void usearch_dense_search_stream_free(usearch_dense_search_stream_t) {}
 
-#pragma endregion Search Streams
+#pragma endregion Insertion and Search
 
-#pragma region Cursors
+#pragma region Cursors and Merging
 
 USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
     usearch_outcome_t* const outcome = arguments->outcome;
@@ -2382,16 +2318,12 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
 
 USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor) { delete cursor; }
 
-#pragma endregion Cursors
-
-#pragma region Merging
-
 USEARCH_EXPORT void usearch_dense_merge(usearch_dense_merge_t* arguments) {
     propagate_pending(arguments->outcome);
     propagate_error(usearch_status_unsupported_k, arguments->outcome, "No residency absorbs donor handles yet");
 }
 
-#pragma endregion Merging
+#pragma endregion Cursors and Merging
 
 #pragma region Linear Algebra
 
@@ -2700,8 +2632,8 @@ USEARCH_EXPORT usearch_status_t usearch_outcome_wait(usearch_outcome_t const* ou
     // The status word is written by the library and only read here, so the cast never races a store.
     std::atomic_ref<usearch_status_t> status {const_cast<usearch_status_t&>(outcome->status)};
     usearch_status_t seen = status.load(std::memory_order_acquire);
-    for (; seen == usearch_status_pending_k; seen = status.load(std::memory_order_acquire))
-        status.wait(usearch_status_pending_k, std::memory_order_acquire);
+    for (; seen == usearch_status_deferred_k; seen = status.load(std::memory_order_acquire))
+        status.wait(usearch_status_deferred_k, std::memory_order_acquire);
     return seen;
 }
 

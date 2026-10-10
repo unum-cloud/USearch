@@ -2010,6 +2010,13 @@ std::size_t dense_expect_concurrent_build(make_index_type_ const& make_index, al
 
     failures += expect_eq(thread_failures.load(), 0u);
     failures += expect_eq(index.size(), nodes_count);
+    // One batch's IDs come from one dispense: contiguous, in the order of its rows.
+    std::size_t scattered_ids = 0;
+    for (std::size_t row = 0; row != nodes_count; ++row) {
+        std::size_t const offset = row % dense_thread_nodes_k;
+        scattered_ids += assigned_ids[row] != assigned_ids[row - offset] + offset;
+    }
+    failures += expect_eq(scattered_ids, 0u);
     failures += expect_contiguous_ids(std::span {assigned_ids}, 0);
 
     if constexpr (kernel_ != nk_kernel_dot_k)
@@ -2099,6 +2106,8 @@ std::size_t dense_expect_concurrent_search(make_index_type_ const& make_index, a
             if (status != status_t::success_k) thread_failures.fetch_add(1);
             thread_failures.fetch_add(
                 scored_failures(threads.contexts[0].results.data(), result.count, index.size(), expansion_bound));
+            // Every writer inserts its slice as one batch, which publishes whole.
+            if (index.size() % dense_thread_nodes_k) thread_failures.fetch_add(1);
             if (predicated)
                 for (std::size_t match = 0; match != result.count; ++match)
                     if (threads.contexts[0].results[match].node_id % 2 != 1) thread_failures.fetch_add(1);
@@ -2871,10 +2880,11 @@ std::size_t test_dense_indexes_concurrent_add(u64_t seed) {
     return failures;
 }
 
-/** A reader thread races one executor-driven batched @c insert into the shards, asserting
+/** A reader thread races executor-driven batched @c insert calls into the shards, asserting
  *  the key-visibility invariant: a search may reach a node the moment it publishes, so
  *  the key it resolves must already be written - never the key column's zero-fill, never
- *  outside the assigned range. RAM only: a VRAM index admits no search during a mutation. */
+ *  outside the assigned range. Every batch spans both shards yet shows whole or not at all.
+ *  RAM only: a VRAM index admits no search during a mutation. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
     requires ram_indexes<indexes_type_>
 std::size_t test_dense_indexes_search_race(u64_t seed) {
@@ -2904,9 +2914,12 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
     std::atomic<std::size_t> thread_failures {0};
     pool.for_threads([&](std::size_t thread) noexcept {
         if (thread == 0) {
-            auto [result, status] = indexes.insert(std::span<key_t const> {keys.data(), nodes_count}, vectors.view(),
-                                                   executor);
-            if (status != status_t::success_k) thread_failures.fetch_add(1);
+            for (std::size_t first = 0; first != nodes_count; first += dense_thread_nodes_k) {
+                auto [result, status] = indexes.insert(
+                    std::span<key_t const> {keys.data() + first, dense_thread_nodes_k},
+                    vectors(nk::range(first, first + dense_thread_nodes_k), nk::slice), executor);
+                if (status != status_t::success_k) thread_failures.fetch_add(1);
+            }
             writer_done.store(true, std::memory_order_release);
             assert_no_locks_held();
             return;
@@ -2931,6 +2944,7 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
             for (std::size_t match = 0; match != result.count; ++match)
                 if (found_keys[match] < key_t {1} || found_keys[match] > static_cast<key_t>(nodes_count))
                     thread_failures.fetch_add(1);
+            if (indexes.size() % dense_thread_nodes_k) thread_failures.fetch_add(1);
         }
         assert_no_locks_held();
     });

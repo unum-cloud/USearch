@@ -18,7 +18,7 @@
 #include "genmc.hpp"
 
 namespace us = unum::usearch;
-using gate_t = us::basic_shared_mutex<us::dummy_waiter_t, std::atomic_ref>;
+using gate_t = us::basic_shared_mutex<us::dummy_waiter_t>;
 
 gate_t gate;
 int rows[2] = {0, 0};

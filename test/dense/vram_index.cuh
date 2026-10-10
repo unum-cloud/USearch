@@ -109,6 +109,7 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
 
     auto assigned_ids = nk::vector<dense_node_id_t>::zeros(rows_count).value;
     failures += expect(index.insert(vectors.view(), assigned_ids.span(), context).status == status_t::success_k);
+    failures += expect_eq(index.size(), rows_count);
 
     search_config_t const exhaustive {static_cast<typename index_type_::small_size_t>(rows_count)};
     for (std::size_t const wanted : {rows_count, std::size_t {4}}) {
@@ -344,8 +345,6 @@ std::size_t test_cuda_configuration(char const* name, u64_t seed) {
     return report(name, failures_count);
 }
 
-#pragma region Suite Entry Points
-
 /** Per-dtype CUDA suite entries the shard translation units define and the suite's
  *  @c main composes explicitly; each returns its shard's failure count. */
 std::size_t check_vram_index_bf16(settings_t const& settings);
@@ -359,7 +358,5 @@ std::size_t check_vram_index_i4(settings_t const& settings);
 std::size_t check_vram_index_u8(settings_t const& settings);
 std::size_t check_vram_index_u4(settings_t const& settings);
 std::size_t check_vram_index_u1(settings_t const& settings);
-
-#pragma endregion Suite Entry Points
 
 } // namespace unum::usearch::test::dense

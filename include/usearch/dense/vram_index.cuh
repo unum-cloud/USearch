@@ -580,14 +580,16 @@ __device__ __forceinline__ u32_t dense_cuda_sample_landmarks( //
 /** Continues a greedy best-first walk toward the query over whatever the frontier holds - one warp,
  *  one traversal; pre-staged entries compete with the landmark seeds drawn here and must already be
  *  visited. Read-only on the graph: no locks taken, transiently locked candidates dropped after a
- *  bounded retry. */
+ *  bounded retry, and no neighbor at or past @p first_invisible_id followed, since a batch's back-links
+ *  splice its IDs into visible rows before the host turns its watermark. */
 template <dense_cuda_kit kit_, u32_t resident_blocks_ = dense_cuda_resident_blocks_per_multiprocessor_k,
           typename frontier_, typename fold_ = dummy_fold_t, typename rescoring_ = dense_cuda_no_rescoring>
 __device__ __forceinline__ void dense_cuda_search_ahead( //
     dense_cuda_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
-    typename kit_::norms_t query_state, dense_node_id_t sampling_bound, dense_cuda_visited_set_t& visited,
-    dense_cuda_gathered<typename kit_::dot_t>& gathered, dense_cuda_warp_context<frontier_>& context, int lane,
-    fold_&& fold = fold_ {}, rescoring_ const& rescoring = rescoring_ {}) noexcept {
+    typename kit_::norms_t query_state, dense_node_id_t sampling_bound, dense_node_id_t first_invisible_id,
+    dense_cuda_visited_set_t& visited, dense_cuda_gathered<typename kit_::dot_t>& gathered,
+    dense_cuda_warp_context<frontier_>& context, int lane, fold_&& fold = fold_ {},
+    rescoring_ const& rescoring = rescoring_ {}) noexcept {
 
     constexpr u32_t restarts_cap_k = 8;
     frontier_& frontier = context.frontier;
@@ -642,7 +644,8 @@ __device__ __forceinline__ void dense_cuda_search_ahead( //
             dense_node_id_t const neighbor_id = lane == 0                                   ? first_value
                                                 : static_cast<u32_t>(lane) < row.capacity() ? row.load_slot(lane)
                                                                                             : dense_node_id_unknown_k;
-            bool const usable = neighbor_id != dense_node_id_unknown_k && neighbor_id != candidate.id();
+            // The bound never exceeds the ID space, so it rejects the sentinel too.
+            bool const usable = neighbor_id < first_invisible_id && neighbor_id != candidate.id();
             bool const fresh = visited.test_and_set(neighbor_id, lane, usable);
             unsigned const fresh_mask = __ballot_sync(0xFFFFFFFFu, fresh);
             u32_t const ordinal = __popc(fresh_mask & ((1u << lane) - 1));
@@ -658,7 +661,7 @@ __device__ __forceinline__ void dense_cuda_search_ahead( //
                 u32_t const slot = slot_base + lane;
                 dense_node_id_t const wide_id = slot < planes.connectivity ? row.load_slot(slot)
                                                                            : dense_node_id_unknown_k;
-                bool const wide_usable = wide_id != dense_node_id_unknown_k && wide_id != candidate.id();
+                bool const wide_usable = wide_id < first_invisible_id && wide_id != candidate.id();
                 bool const wide_fresh = visited.test_and_set(wide_id, lane, wide_usable);
                 unsigned const wide_mask = __ballot_sync(0xFFFFFFFFu, wide_fresh);
                 u32_t const wide_ordinal = __popc(wide_mask & ((1u << lane) - 1));
@@ -680,12 +683,14 @@ template <dense_cuda_kit kit_, u32_t resident_blocks_ = dense_cuda_resident_bloc
           typename frontier_, typename fold_ = dummy_fold_t, typename rescoring_ = dense_cuda_no_rescoring>
 __device__ __forceinline__ void dense_cuda_search_around( //
     dense_cuda_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
-    typename kit_::norms_t query_state, dense_node_id_t sampling_bound, dense_cuda_visited_set_t& visited,
-    dense_cuda_gathered<typename kit_::dot_t>& gathered, dense_cuda_warp_context<frontier_>& context, int lane,
-    fold_&& fold = fold_ {}, rescoring_ const& rescoring = rescoring_ {}) noexcept {
+    typename kit_::norms_t query_state, dense_node_id_t sampling_bound, dense_node_id_t first_invisible_id,
+    dense_cuda_visited_set_t& visited, dense_cuda_gathered<typename kit_::dot_t>& gathered,
+    dense_cuda_warp_context<frontier_>& context, int lane, fold_&& fold = fold_ {},
+    rescoring_ const& rescoring = rescoring_ {}) noexcept {
     context.frontier.reset(lane);
     dense_cuda_search_ahead<kit_, resident_blocks_>( //
-        planes, query_span, query_state, sampling_bound, visited, gathered, context, lane, fold, rescoring);
+        planes, query_span, query_state, sampling_bound, first_invisible_id, visited, gathered, context, lane, fold,
+        rescoring);
 }
 
 /** Runtime-strided view over the warp's shared vector cache - rows of @c row_fragments_ fragments
@@ -1124,8 +1129,8 @@ struct dense_cuda_search_view {
 
     u32_t queries_count;
 
-    /** Published-node ceiling for landmark sampling, read off @c size() at launch; the walk itself
-     *  gates on slot-0 publication words. */
+    /** The watermark snapshotted at launch: landmarks are drawn below it and no neighbor at or past it is
+     *  followed, while the walk still gates on slot-0 words, which concurrent back-linkers lock. */
     u32_t sampling_bound;
 
     /** Bytes of the per-warp dynamic-shared slice - the query span. */
@@ -1207,7 +1212,7 @@ __device__ __forceinline__ void dense_cuda_insert_one( //
     // Walk the watermark - a virgin index publishes an empty node instead.
     if (new_node_id != 0)
         dense_cuda_search_around<kit_>( //
-            planes, query_span, query_state, new_node_id, visited, gathered, context, lane);
+            planes, query_span, query_state, new_node_id, view.end_id, visited, gathered, context, lane);
     else context.frontier.reset(lane);
 
     // The own row needs no lock: no reader arrives before the slot-0 release below flips the sentinel.
@@ -1232,17 +1237,19 @@ __device__ __forceinline__ void dense_cuda_insert_one( //
 
 /**
  *  @brief One warp inserts one node, and warps never synchronize beyond per-neighbor slot-0
- *      locks: no watermark, no publication order, no compare-and-swap.
+ *      locks: no device watermark, no publication order, no compare-and-swap.
  *
  *  @section dense_vram_index_concurrency Concurrency & Publication
  *
  *  IDs are batch-local: the host claims a dense range, and each warp assigns itself the next
- *  offset within it, so sibling batches never cross-claim. A node is usable exactly when its
- *  slot 0 acquire-loads a non-sentinel; a self-loop there means published-empty, and every
- *  give-up path still publishes one, so an assigned ID never stalls anyone. Landmark sampling
- *  probes past unpublished hits, so out-of-order publication costs retries, never
+ *  offset within it, so sibling batches never cross-claim. To an inserting walk a node is usable
+ *  exactly when its slot 0 acquire-loads a non-sentinel; a self-loop there means published-empty,
+ *  and every give-up path still publishes one, so an assigned ID never stalls anyone. Landmark
+ *  sampling probes past unpublished hits, so out-of-order publication costs retries, never
  *  correctness. The admission ramp holds a node until @c published + max(32, published)
- *  covers its ID, bounding lock contention while the graph is small.
+ *  covers its ID, bounding lock contention while the graph is small. Searches see a batch only
+ *  once the host has drained it and turned the watermark past it, a whole batch at a time and in
+ *  claim order, and follow no neighbor at or past the watermark they launched under.
  */
 template <dense_cuda_kit kit_, u32_t pool_slots_>
 __global__ void __launch_bounds__(dense_cuda_warps_per_block_k * 32, dense_cuda_resident_blocks_per_multiprocessor_k)
@@ -1379,7 +1386,7 @@ __device__ __forceinline__ void dense_cuda_refine_one( //
 
     // Walk the graph past the seeds, then re-select the neighbors from the whole pool.
     dense_cuda_search_ahead<kit_>( //
-        planes, query_span, query_state, view.sampling_bound, visited, gathered, context, lane);
+        planes, query_span, query_state, view.sampling_bound, view.sampling_bound, visited, gathered, context, lane);
     u32_t const selected_count = dense_cuda_select_diverse<kit_>( //
         planes, cache, cache_norms, gathered.ids, selection.selected_ids, context, lane);
 
@@ -1926,7 +1933,8 @@ __device__ __forceinline__ void dense_cuda_walk_one( //
     typename sink_::fold_t fold = sink.open(query_index, context, lane);
     rescoring_ const rescoring = rescorings.for_query(query_index, context);
     dense_cuda_search_around<kit_, resident_blocks_>( //
-        view.planes, query_span, query_state, view.sampling_bound, visited, gathered, context, lane, fold, rescoring);
+        view.planes, query_span, query_state, view.sampling_bound, view.sampling_bound, visited, gathered, context,
+        lane, fold, rescoring);
     sink.close(fold, context, query_index, lane);
     context.telemetry.tail_drops = context.frontier.dropped();
     context.telemetry.visited_saturations = visited.saturations_;
@@ -2288,12 +2296,13 @@ struct dense_cuda_traversal_context {
  *  @brief Vector Search index for a single uniform latency memory space on NVIDIA GPUs.
  *
  *  Speaks the RAM-resident dense index's verbs, with two divergences: a batch's IDs are one
- *  contiguous range, and publication is unordered - see @ref dense_vram_index_concurrency.
+ *  contiguous range, and its rows publish unordered on the device, turning visible to searches a
+ *  whole batch at a time; see @ref dense_vram_index_concurrency.
  *  The first successful @c reserve freezes the geometry and the virtual-address ceiling;
  *  physical slabs map on demand, and fresh neighbors are sentinel-filled before any ID
  *  covering them can be assigned. The planes grow only while @c claiming_ is held, and the
- *  claim counter and the kept status are the only mutable host state; the published-row count
- *  is device memory no host thread dereferences.
+ *  claim counter, the watermark and the kept status are the only mutable host state; the
+ *  published-row count is device memory no host thread dereferences.
  */
 template <                                                                      //
     nk_dtype_t vector_dtype_ = nk_i8_k,                                         //
@@ -2368,8 +2377,6 @@ struct dense_vram_index {
         return static_cast<u32_t>(geometry);
     }
 
-#pragma region Placement
-
     /** One allocator per plane concern, each carrying its device placement; the index pins itself
      *  to the vectors allocator's device and demands the neighbors allocator agree. */
     dense_vram_index(vectors_allocator_t const& vectors_allocator = {},
@@ -2379,14 +2386,11 @@ struct dense_vram_index {
     dense_vram_index(dense_vram_index const&) = delete;
     dense_vram_index& operator=(dense_vram_index const&) = delete;
 
-#pragma endregion Placement
-
 #pragma region Measures
 
-    /** Claimed rows, the only dense bound under unordered publication; the sampler probes past
-     *  unpublished IDs by protocol. */
+    /** Rows visible to searches: the watermark every walk samples below and filters neighbors by. */
     std::size_t size() const noexcept {
-        return standard_atomic_ref<std::size_t const>(claimed_rows_).load(std::memory_order_acquire);
+        return standard_atomic_ref<std::size_t const>(last_visible_id_).load(std::memory_order_acquire);
     }
 
     /** The first failure that left claimed rows unpublished, kept for the index's lifetime; it
@@ -2553,7 +2557,7 @@ struct dense_vram_index {
         u32_t published = 0;
         if (cudaMemcpy(&published, published_rows_.get(), sizeof(u32_t), cudaMemcpyDeviceToHost) != cudaSuccess)
             return status_t::device_error_k;
-        return published == size() ? status_t::success_k : status_t::device_error_k;
+        return published == claimed_() ? status_t::success_k : status_t::device_error_k;
     }
 
 #pragma endregion Measures
@@ -2664,7 +2668,8 @@ struct dense_vram_index {
     }
 
     /** Telemetry of one @c insert() batch. IDs are the contiguous range
-     *  @b [first_id,first_id+count) - the assigned order of the incoming rows. */
+     *  @b [first_id,first_id+count) - the assigned order of the incoming rows - and @c new_size is the
+     *  range's end. */
     struct [[nodiscard]] insert_result_t {
         std::size_t new_size = 0;
         dense_node_id_t first_id = dense_node_id_unknown_k;
@@ -2688,17 +2693,22 @@ struct dense_vram_index {
         std::size_t computed_distances_in_reverse_refines = 0;
     };
 
-    /** Inserts @p new_vectors under the contiguous ID range @b [size(),size()+rows), every transfer
-     *  and the launch riding the context's stream. Blocking drains that stream and reports
-     *  telemetry; deferred returns once queued, and the caller drains before reading anything, the
-     *  host batch included. */
+    /** Inserts @p new_vectors under the contiguous ID range @b [first_id,first_id+rows) after every row claimed
+     *  before, every transfer and the launch riding the context's stream, then drains that stream, turns the
+     *  watermark over the range once every earlier batch has, and reports telemetry. */
     expected<insert_result_t> insert(vectors_view_t new_vectors, node_ids_span_t assigned_ids,
-                                     dense_traversal_context_t& context, insert_config_t config = {},
-                                     completion_t completion = completion_t::blocking_k) noexcept {
+                                     dense_traversal_context_t& context, insert_config_t config = {}) noexcept {
+        // Zeroed per call rather than per launch, so the launches of a sharded plan on one context add up.
+        if (context && context.device() == device_.ordinal &&
+            cudaMemsetAsync(context.telemetry_.get(), 0, sizeof(dense_cuda_telemetry_block_t), context.stream()) !=
+                cudaSuccess)
+            return {{}, status_t::device_error_k};
         expected<insert_result_t> inserted = submit_insert_(new_vectors, assigned_ids, context, config);
-        if (completion == completion_t::deferred_k || !inserted || !new_vectors.extent(0)) return inserted;
+        if (!inserted || !new_vectors.extent(0)) return inserted;
         if (status_t const drained = context.drain(); failed(drained))
             return {{inserted.value.new_size, inserted.value.first_id}, fail_(drained)};
+        if (status_t const published = publish_(inserted.value.first_id, new_vectors.extent(0)); failed(published))
+            return {{inserted.value.new_size, inserted.value.first_id}, published};
         dense_cuda_telemetry_block_t const spent = context.spent();
         inserted.value.visited_members = spent.hops;
         inserted.value.computed_distances = spent.scored;
@@ -2806,7 +2816,7 @@ struct dense_vram_index {
                                      nk::matrix_span<dense_distance_t> result_distances,
                                      dense_traversal_context_t& context, search_config_t config = {},
                                      completion_t completion = completion_t::blocking_k) noexcept {
-        return settle_(submit_search_(queries, dummy_heads_t {}, result_ids, result_distances, context, config),
+        return settle_(submit_search_(queries, result_ids, result_distances, context, config, size()),
                        queries.extent(0), context, completion);
     }
 
@@ -2820,34 +2830,15 @@ struct dense_vram_index {
                                      completion_t completion = completion_t::blocking_k) noexcept
         requires(kernel_kind_ == nk_kernel_dot_k && !nk::is_integral_dtype<scalar_t>())
     {
-        return settle_(submit_search_(queries, heads, result_ids, result_distances, context, config), queries.extent(0),
-                       context, completion);
+        return settle_(submit_search_(queries, result_ids, result_distances, context, config, size(), heads),
+                       queries.extent(0), context, completion);
     }
 
     /** One query in, the nearest matches ascending in @c context.results - the correctness path; a
      *  one-query grid never fills the machine, the batched overload does. */
     expected<search_result_t> search(vector_view_t query_vector, dense_traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
-        context.results.count_ = 0;
-        if (!size()) return {{}, status_t::success_k}; // An empty index matches nothing, touches nothing.
-        // Up to the expansion factor, defaulting to twice the connectivity, clipped to the landing and the graph.
-        u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
-        u32_t const count = min_of<u32_t>(min_of<u32_t>(dense_traversal_context_t::results_capacity_k, expansion),
-                                          static_cast<u32_t>(size()));
-        dense_node_id_t staged_ids[dense_traversal_context_t::results_capacity_k];
-        dense_distance_t staged_distances[dense_traversal_context_t::results_capacity_k];
-        vectors_view_t const one_query {query_vector.data(), {1, query_vector.size()}};
-        config.count = count;
-        expected<search_result_t> result = search(one_query, nk::matrix_span<dense_node_id_t> {staged_ids, {1, count}},
-                                                  nk::matrix_span<dense_distance_t> {staged_distances, {1, count}},
-                                                  context, config);
-        if (!result) return result;
-        std::size_t live = 0;
-        for (; live != count && staged_ids[live] != dense_node_id_unknown_k; ++live)
-            context.results.entries_[live] = dense_scored_node_t {staged_ids[live], staged_distances[live]};
-        context.results.count_ = live;
-        result.value.count = live;
-        return result;
+        return search_(query_vector, context, config, size());
     }
 
     /** Filtered search is banned on the device index: a host predicate cannot run inside the walk,
@@ -2880,8 +2871,9 @@ struct dense_vram_index {
                                        completion_t completion = completion_t::blocking_k) noexcept
         requires(kernel_kind_ == nk_kernel_dot_k)
     {
-        expected<search_result_t> landed = settle_(submit_multiply_(left, node_ids, products, counts, context, config),
-                                                   left.extent(0), context, completion);
+        expected<search_result_t> landed = settle_(
+            submit_multiply_(left, node_ids, products, counts, context, config, size()), left.extent(0), context,
+            completion);
         if (landed && completion == completion_t::blocking_k)
             for (u32_t const scored : counts) landed.value.count += scored;
         return landed;
@@ -2919,7 +2911,7 @@ struct dense_vram_index {
         if (outputs.size() != rows_count * dimensions() || carry.size() != rows_count)
             return {{}, status_t::config_mismatch_k};
         expected<f32_t*> const landed = submit_attend_(queries, head_count, value_lookup, score_scale, context, config,
-                                                       1);
+                                                       1, size());
         if (!landed || !rows_count) return {{}, landed.status};
         cudaStream_t const stream = context.stream();
         if (cudaMemcpyAsync(outputs.data(), landed.value, outputs.size_bytes(), cudaMemcpyDefault, stream) !=
@@ -3074,7 +3066,7 @@ struct dense_vram_index {
         /** Page-locked host bytes: one batch of packed vector rows, then its neighbor IDs. */
         bounce_t bounce {cuda_pinned_allocator_t {}};
 
-        /** Rows under the watermark - the claimed rows at planning. */
+        /** Rows under the watermark at planning. */
         node_id_t visible = 0;
 
         /** Rows one batch carries - a bounce's worth, or every row when fewer. */
@@ -3257,7 +3249,7 @@ struct dense_vram_index {
     }
 
     /**
-     *  @brief One load in flight: the rows claimed after the published ones, the planes grown to
+     *  @brief One load in flight: the rows it appends past every claimed one, the planes grown to
      *      hold them, and the batches they span, each filled through one pinned bounce and
      *      uploaded on the stream; @ref finish derives the norms and publishes.
      *
@@ -3429,9 +3421,10 @@ struct dense_vram_index {
         }
 
         /** Publishes the appended rows once every batch's vectors and neighbors landed: the norms
-         *  derive on the device, the row count lands last, and the claim lifts. A success spends
-         *  the plan, so a second call answers @c uninitialized_k instead of publishing twice; a
-         *  refusal leaves it whole, so the missing steps can still land. */
+         *  derive on the device, the row count lands, the claim lifts, and the watermark turns over
+         *  the rows once every earlier batch has. A success spends the plan, so a second call answers
+         *  @c uninitialized_k instead of publishing twice, and so does a turn refused by a failure an
+         *  earlier batch kept; any other refusal leaves it whole, so the missing steps can still land. */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (standard_atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != rows ||
@@ -3451,8 +3444,8 @@ struct dense_vram_index {
                 standard_atomic_ref<std::size_t>(index_->claimed_rows_).store(base + rows, std::memory_order_release);
                 claiming_.unlock();
             }
-            index_ = nullptr;
-            return status_t::success_k;
+            dense_vram_index* const index = std::exchange(index_, nullptr);
+            return rows ? index->publish_(base, rows) : status_t::success_k;
         }
 
       private:
@@ -3466,7 +3459,7 @@ struct dense_vram_index {
     };
 
     /**
-     *  @brief Opens a load of @p rows from @p columns after the published ones on @p stream: takes
+     *  @brief Opens a load of @p rows from @p columns past every claimed one on @p stream: takes
      *      the claim, grows the planes to hold them - the fresh neighbor rows arrive
      *      sentinel-filled - and sizes one bounce.
      *
@@ -3497,12 +3490,13 @@ struct dense_vram_index {
         if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (!rows)
-            return {load_plan_t {*this, {}, {}, stream, {}, static_cast<node_id_t>(size()), 0}, status_t::success_k};
+            return {load_plan_t {*this, {}, {}, stream, {}, static_cast<node_id_t>(claimed_()), 0},
+                    status_t::success_k};
         if (!claiming_.lock_if_free()) return {{}, status_t::contended_k};
         std::unique_lock<fu::spin_mutex_t> claiming {claiming_, std::adopt_lock};
         // Read under the claim: a batch claiming between an earlier read and the claim would
         // overlap the loaded rows, and `finish` would then lower the claim beneath it.
-        node_id_t const base = static_cast<node_id_t>(size());
+        node_id_t const base = static_cast<node_id_t>(claimed_());
         if (rows > max_node_count_k - base) return {{}, status_t::overflow_k};
         load_plan_t plan {*this, {}, {}, stream, std::move(claiming), base, rows};
         std::size_t const batch_bytes = plan.batch_rows * (packed_row_bytes() + connectivity() * sizeof(node_id_t));
@@ -3526,19 +3520,21 @@ struct dense_vram_index {
 
   private:
 
-    /** The sharded index submits its shards' attends without landing them, and merges them on its first device. */
+    /** The sharded index walks its shards under one snapshot of their watermarks, merges their attends on its first
+     *  device, and publishes or fails their batches together. */
     template <typename, nk_dtype_t, nk_kernel_kind_t, cuda_arch_t, typename>
     friend struct dense_vram_indexes;
 
 #pragma region Insertion
 
     /** The submission half of @c insert: claims, stages, launches, and returns with the IDs, which
-     *  are dense and known at claim time. Back-to-back submissions on one context are serialized by
-     *  its stream; across devices they overlap freely. */
+     *  are dense and known at claim time, the rows invisible until the caller drains and publishes
+     *  them. Back-to-back submissions on one context are serialized by its stream and add into its
+     *  telemetry, which the caller zeroes; across devices they overlap freely. */
     expected<insert_result_t> submit_insert_(vectors_view_t new_vectors, node_ids_span_t assigned_ids,
                                              dense_traversal_context_t& context, insert_config_t config) noexcept {
         std::size_t const rows = new_vectors.extent(0);
-        if (!rows) return {{size(), static_cast<dense_node_id_t>(size())}, status_t::success_k};
+        if (!rows) return {{claimed_(), static_cast<dense_node_id_t>(claimed_())}, status_t::success_k};
         if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (new_vectors.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
         if (assigned_ids.size() && assigned_ids.size() != rows) return {{}, status_t::config_mismatch_k};
@@ -3588,9 +3584,7 @@ struct dense_vram_index {
             u32_t const epoch_base = static_cast<u32_t>(context.epoch_floor_);
             context.epoch_floor_ += rows; // Monotone; an un-claim below only forfeits epoch space.
             if (claimed == status_t::success_k &&
-                (cudaMemsetAsync(context.assigned_rows_.get(), 0, sizeof(u32_t), stream) != cudaSuccess ||
-                 cudaMemsetAsync(context.telemetry_.get(), 0, sizeof(dense_cuda_telemetry_block_t), stream) !=
-                     cudaSuccess))
+                cudaMemsetAsync(context.assigned_rows_.get(), 0, sizeof(u32_t), stream) != cudaSuccess)
                 claimed = status_t::device_error_k;
             if (claimed == status_t::success_k) {
                 dense_cuda_build_view<kit_t> view {planes(), //
@@ -3663,13 +3657,14 @@ struct dense_vram_index {
 
     /** Validates and uploads @p queries, then any indexer or attend @p heads and the indexer's weights, sizes the
      *  arena for @p expansion, and reserves @p outputs_bytes of staging past them: everything a walking verb stages
-     *  before its sink. Until the context drains, the queries, the heads and the context stay live. */
+     *  before its sink, the walks bound below the @p visible rows. Until the context drains, the queries, the heads
+     *  and the context stay live. */
     template <typename heads_type_>
     expected<walk_launch<walk_rescoring<heads_type_>>> stage_walk_(vectors_view_t queries,
                                                                    [[maybe_unused]] heads_type_ const& heads,
                                                                    dense_traversal_context_t& context, u32_t expansion,
-                                                                   u32_t minimum_slots,
-                                                                   std::size_t outputs_bytes) noexcept {
+                                                                   u32_t minimum_slots, std::size_t outputs_bytes,
+                                                                   std::size_t visible) noexcept {
         constexpr bool indexer_k = std::is_same_v<heads_type_, dense_indexer_heads<scalar_t>>;
         constexpr bool attend_k = std::is_same_v<heads_type_, attend_heads_t>;
         std::size_t const queries_count = queries.extent(0);
@@ -3760,7 +3755,7 @@ struct dense_vram_index {
         dense_cuda_search_view<kit_t> const view {planes(),
                                                   reinterpret_cast<fragment_t const*>(staging),
                                                   static_cast<u32_t>(queries_count),
-                                                  static_cast<u32_t>(size()),
+                                                  static_cast<u32_t>(visible),
                                                   static_cast<u32_t>(row_bytes()),
                                                   expansion,
                                                   arena,
@@ -3785,14 +3780,40 @@ struct dense_vram_index {
         return submitted;
     }
 
-    /** The submission half of @c search: stages the queries and @p heads, launches, and queues the pitched
-     *  writeback. Until the context drains, the queries, the heads, both outputs and the context stay live;
-     *  across contexts they must not share a buffer at all. */
-    template <typename heads_type_>
-    expected<search_result_t> submit_search_(vectors_view_t queries, heads_type_ const& heads,
-                                             nk::matrix_span<dense_node_id_t> result_ids,
+    /** The single-query @c search over the @p visible rows, which a sharded caller snapshots across its shards. */
+    expected<search_result_t> search_(vector_view_t query_vector, dense_traversal_context_t& context,
+                                      search_config_t config, std::size_t visible) noexcept {
+        context.results.count_ = 0;
+        if (!visible) return {{}, status_t::success_k}; // An empty index matches nothing, touches nothing.
+        // Up to the expansion factor, defaulting to twice the connectivity, clipped to the landing and the graph.
+        u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
+        u32_t const count = min_of<u32_t>(min_of<u32_t>(dense_traversal_context_t::results_capacity_k, expansion),
+                                          static_cast<u32_t>(visible));
+        dense_node_id_t staged_ids[dense_traversal_context_t::results_capacity_k];
+        dense_distance_t staged_distances[dense_traversal_context_t::results_capacity_k];
+        vectors_view_t const one_query {query_vector.data(), {1, query_vector.size()}};
+        config.count = count;
+        expected<search_result_t> result = settle_(
+            submit_search_(one_query, nk::matrix_span<dense_node_id_t> {staged_ids, {1, count}},
+                           nk::matrix_span<dense_distance_t> {staged_distances, {1, count}}, context, config, visible),
+            1, context, completion_t::blocking_k);
+        if (!result) return result;
+        std::size_t live = 0;
+        for (; live != count && staged_ids[live] != dense_node_id_unknown_k; ++live)
+            context.results.entries_[live] = dense_scored_node_t {staged_ids[live], staged_distances[live]};
+        context.results.count_ = live;
+        result.value.count = live;
+        return result;
+    }
+
+    /** The submission half of @c search: stages the queries and @p heads, launches walks over the @p visible rows,
+     *  and queues the pitched writeback. Until the context drains, the queries, the heads, both outputs and the
+     *  context stay live; across contexts they must not share a buffer at all. */
+    template <typename heads_type_ = dummy_heads_t>
+    expected<search_result_t> submit_search_(vectors_view_t queries, nk::matrix_span<dense_node_id_t> result_ids,
                                              nk::matrix_span<dense_distance_t> result_distances,
-                                             dense_traversal_context_t& context, search_config_t config) noexcept {
+                                             dense_traversal_context_t& context, search_config_t config,
+                                             std::size_t visible, heads_type_ const& heads = {}) noexcept {
         std::size_t const queries_count = queries.extent(0);
         if (!queries_count) return {{}, status_t::success_k};
         bool const wants_distances = result_distances.extent(0) != 0;
@@ -3815,7 +3836,7 @@ struct dense_vram_index {
         std::size_t const ids_bytes = results_count * sizeof(dense_node_id_t);
         std::size_t const distances_bytes = wants_distances ? results_count * sizeof(dense_distance_t) : 0;
         auto const staged = stage_walk_(queries, heads, context, expansion, count_slots > 2 ? count_slots : 2,
-                                        ids_bytes + distances_bytes);
+                                        ids_bytes + distances_bytes, visible);
         if (!staged) return {{}, staged.status};
         dense_node_id_t* const device_ids = reinterpret_cast<dense_node_id_t*>(staged.value.outputs);
         dense_distance_t* const device_distances =
@@ -3839,11 +3860,12 @@ struct dense_vram_index {
         return {{config.count}, status_t::success_k};
     }
 
-    /** The submission half of @c multiply: stages the rows, launches, and queues the writeback of the
-     *  kept pairs and the scored counts. */
+    /** The submission half of @c multiply: stages the rows, launches walks over the @p visible rows, and queues the
+     *  writeback of the kept pairs and the scored counts. */
     expected<search_result_t> submit_multiply_(vectors_view_t left, nk::matrix_span<dense_node_id_t> node_ids,
                                                nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
-                                               dense_traversal_context_t& context, search_config_t config) noexcept {
+                                               dense_traversal_context_t& context, search_config_t config,
+                                               std::size_t visible) noexcept {
         std::size_t const rows_count = left.extent(0);
         std::size_t const wanted = node_ids.extent(1);
         if (node_ids.extent(0) != rows_count || products.extent(0) != rows_count || products.extent(1) != wanted ||
@@ -3857,7 +3879,7 @@ struct dense_vram_index {
         std::size_t const products_bytes = rows_count * wanted * sizeof(dot_t);
         auto const staged = stage_walk_(left, dummy_heads_t {}, context,
                                         static_cast<u32_t>(non_zero_expansion_factor(config)), 2,
-                                        ids_bytes + products_bytes + rows_count * sizeof(u32_t));
+                                        ids_bytes + products_bytes + rows_count * sizeof(u32_t), visible);
         if (!staged) return {{}, staged.status};
         dense_node_id_t* const device_ids = reinterpret_cast<dense_node_id_t*>(staged.value.outputs);
         dot_t* const device_products = reinterpret_cast<dot_t*>(staged.value.outputs + ids_bytes);
@@ -3880,13 +3902,14 @@ struct dense_vram_index {
     }
 
     /** The submission half of @c attend: stages each token's first head to navigate by, then every head, and launches
-     *  one walk per token, which lands the normalized rows, then the carries, in the first of @p blocks such blocks
-     *  of staging, returned device-resident; the sharded index gathers its other shards' into the rest. */
+     *  one walk per token over the @p visible rows, which lands the normalized rows, then the carries, in the first of
+     *  @p blocks such blocks of staging, returned device-resident; the sharded index gathers its other shards' into
+     *  the rest. */
     template <typename value_lookup_type_>
     expected<f32_t*> submit_attend_(vectors_view_t queries, std::size_t head_count,
                                     value_lookup_type_ const& value_lookup, f32_t score_scale,
-                                    dense_traversal_context_t& context, search_config_t config,
-                                    std::size_t blocks) noexcept {
+                                    dense_traversal_context_t& context, search_config_t config, std::size_t blocks,
+                                    std::size_t visible) noexcept {
         std::size_t const rows_count = queries.extent(0);
         if (!head_count || rows_count % head_count) return {nullptr, status_t::shape_mismatch_k};
         if (!rows_count) return {nullptr, status_t::success_k};
@@ -3896,7 +3919,7 @@ struct dense_vram_index {
         auto staged = stage_walk_(queries(nk::range(std::size_t {0}, rows_count, head_count), nk::slice),
                                   attend_heads_t {queries, head_count}, context,
                                   static_cast<u32_t>(non_zero_expansion_factor(config)), 2,
-                                  blocks * (outputs_bytes + rows_count * sizeof(dense_softmax_state_t)));
+                                  blocks * (outputs_bytes + rows_count * sizeof(dense_softmax_state_t)), visible);
         if (!staged) return {nullptr, staged.status};
         staged.value.view.scratch_bytes_per_warp += static_cast<u32_t>(scratch_bytes);
         cudaStream_t const stream = context.stream();
@@ -4151,6 +4174,23 @@ struct dense_vram_index {
         return failure;
     }
 
+    /** Rows claimed by batches and loads, visible or not: where the next claim starts. */
+    std::size_t claimed_() const noexcept {
+        return standard_atomic_ref<std::size_t const>(claimed_rows_).load(std::memory_order_acquire);
+    }
+
+    /** Turns the watermark from @p first over @p rows drained rows once every batch claimed before has turned it,
+     *  so the visible rows are always whole batches; a failure kept meanwhile answers instead, the rows invisible. */
+    status_t publish_(std::size_t first, std::size_t rows) noexcept {
+        for (std::size_t watermark = size(); watermark != first; watermark = size()) {
+            // A batch that failed before this one never turns the watermark, so its kept status ends the wait.
+            if (status_t const kept = status(); failed(kept)) return kept;
+            fu::standard_yield_t {}(&last_visible_id_, watermark, 0u, fu::wait_capped_t {});
+        }
+        standard_atomic_ref<std::size_t>(last_visible_id_).store(first + rows, std::memory_order_release);
+        return status_t::success_k;
+    }
+
     /** Maps every plane up to @p rows and sentinel-fills the fresh neighbor rows - always ahead of
      *  any launch that could assign new_node_ids into them. Callers hold @c claiming_, or run
      *  exclusively like @c reserve and @c load. */
@@ -4253,6 +4293,9 @@ struct dense_vram_index {
 
     /** Each batch's dense ID range, release-published once its launch is accepted. */
     std::size_t claimed_rows_ = 0;
+
+    /** Rows strictly below it are published and visible: turned once per batch, in claim order, after its drain. */
+    std::size_t last_visible_id_ = 0;
 
     /** The first post-claim device failure: IDs past it may be unpublished or unfilled. */
     status_t status_ = status_t::success_k;

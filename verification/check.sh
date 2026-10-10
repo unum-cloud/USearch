@@ -7,7 +7,10 @@
 
 set -u
 cd "$(dirname "$0")"
-source ../forkunion/verification/check.sh
+forkunion=../forkunion
+[ -e "$forkunion/verification/check.sh" ] || forkunion=${FORKUNION:?the forkunion submodule is not checked out; set FORKUNION to a ForkUnion checkout}
+export CPATH=$(cd "$forkunion/verification" && pwd) # where `weak_memory.pml` finds the model without the submodule
+source "$forkunion/verification/check.sh"
 
 section "basic_shared_mutex.pml: the gate, its certified probes, the wrap and the missing release"
 verify basic_shared_mutex.pml pass -Dmemory=sequential
@@ -16,7 +19,7 @@ verify basic_shared_mutex.pml pass
 verify basic_shared_mutex.pml fail -Dwithout_release_fence
 verify basic_shared_mutex.pml fail -Dmemory=sequential -Dwithout_backoff_cap
 
-section "dense_ram_index_watermark.pml: dispensing, publication, the settlement probe, the appender, the keys, the cursor, the load fan-out and two savers"
+section "dense_ram_index_watermark.pml: dispensing, publication, the settlement probe, the appender, the keys, the cursor, the load fan-out, two savers and batched commits"
 verify dense_ram_index_watermark.pml pass -Dmemory=sequential
 verify dense_ram_index_watermark.pml pass
 verify dense_ram_index_watermark.pml fail -Dwithout_watermark_release
@@ -40,24 +43,33 @@ verify dense_ram_index_watermark.pml fail -Dscenario=steps -Dwithout_covered_rel
 verify dense_ram_index_watermark.pml pass -Dmemory=sequential -Dscenario=savers
 verify dense_ram_index_watermark.pml pass -Dscenario=savers
 verify dense_ram_index_watermark.pml fail -Dscenario=savers -Dwithout_release_fence
+verify dense_ram_index_watermark.pml pass -Dmemory=sequential -Dscenario=batched
+verify dense_ram_index_watermark.pml pass -Dscenario=batched
+verify dense_ram_index_watermark.pml fail -Dmemory=sequential -Dscenario=batched -Dwithout_range_turn
+verify dense_ram_index_watermark.pml fail -Dscenario=batched -Dwithout_range_turn
+verify dense_ram_index_watermark.pml fail -Dmemory=sequential -Dscenario=batched -Dwithout_own_range_check
+verify dense_ram_index_watermark.pml fail -Dscenario=batched -Dwithout_own_range_check
 
-section "dense_vram_index_claims.pml: the host's claim under its mutex, the planes' growth, size() as a search bound, and the device's admission ramp"
+section "dense_vram_index_claims.pml: the host's claim under its mutex, the planes' growth, the watermark turned after the drain as a search bound, the neighbor filter, and the device's admission ramp"
 verify dense_vram_index_claims.pml pass -Dmemory=sequential
 verify dense_vram_index_claims.pml pass
-verify dense_vram_index_claims.pml fail -Dwithout_claim_release
+verify dense_vram_index_claims.pml fail -Dwithout_watermark_release
 verify dense_vram_index_claims.pml fail -Dwithout_size_acquire
 verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_claiming_mutex
 verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_unclaim_on_rejection
 verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_base_under_claim
 verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_abandon_unlock
+verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_drain_before_turn
+verify dense_vram_index_claims.pml fail -Dmemory=sequential -Dwithout_neighbor_filter
 
-section "dense_vram_indexes.pml: the mutation gate, keys before the claim, and a load beside a batch"
+section "dense_vram_indexes.pml: the mutation gate, keys before the turn, a commit across the shards, and a load beside a batch"
 verify dense_vram_indexes.pml pass -Dmemory=sequential
 verify dense_vram_indexes.pml pass
 verify dense_vram_indexes.pml fail -Dmemory=sequential -Dwithout_gate
-verify dense_vram_indexes.pml fail -Dmemory=sequential -Dwithout_key_before_claim
-verify dense_vram_indexes.pml fail -Dwithout_key_before_claim
-verify dense_vram_indexes.pml fail -Dwithout_claim_release
+verify dense_vram_indexes.pml fail -Dmemory=sequential -Dwithout_key_before_turn
+verify dense_vram_indexes.pml fail -Dwithout_key_before_turn
+verify dense_vram_indexes.pml fail -Dwithout_watermark_release
+verify dense_vram_indexes.pml fail -Dmemory=sequential -Dwithout_commit_sequence
 verify dense_vram_indexes.pml pass -Dmemory=sequential -Dscenario=loading
 verify dense_vram_indexes.pml pass -Dscenario=loading
 verify dense_vram_indexes.pml fail -Dmemory=sequential -Dscenario=loading -Dwithout_load_gate
@@ -107,7 +119,7 @@ verify dense_ram_index_capacity.pml pass -Dscenario=loaders
 verify dense_ram_index_capacity.pml pass -Dmemory=far -Dscenario=loaders
 verify dense_ram_index_capacity.pml fail -Dmemory=sequential -Dscenario=loaders -Dwithout_abandon_release
 
-section "dense_ram_indexes.pml: the shards' claims, the key columns' cover, keys before the turn, the monolith save's watermark per shard, and the load path's keys"
+section "dense_ram_indexes.pml: the shards' claims, the key columns' cover, keys before the turn, the monolith save's watermark per shard, the load path's keys, and a commit across the shards"
 verify dense_ram_indexes.pml pass -Dmemory=sequential
 verify dense_ram_indexes.pml pass
 verify dense_ram_indexes.pml fail -Dmemory=sequential -Dwithout_key_before_watermark
@@ -129,6 +141,16 @@ verify dense_ram_indexes.pml pass -Dscenario=loading
 verify dense_ram_indexes.pml pass -Dmemory=far -Dscenario=loading
 verify dense_ram_indexes.pml fail -Dmemory=sequential -Dscenario=loading -Dwithout_keys_before_finish
 verify dense_ram_indexes.pml fail -Dscenario=loading -Dwithout_keys_before_finish
+verify dense_ram_indexes.pml pass -Dmemory=sequential -Dscenario=committed
+verify dense_ram_indexes.pml pass -Dscenario=committed
+verify dense_ram_indexes.pml fail -Dmemory=sequential -Dscenario=committed -Dwithout_commit_sequence
+verify dense_ram_indexes.pml fail -Dscenario=committed -Dwithout_commit_sequence
+verify dense_ram_indexes.pml fail -Dmemory=sequential -Dscenario=committed -Dconcurrent_commits
+verify dense_ram_indexes.pml fail -Dscenario=committed -Dconcurrent_commits
+verify dense_ram_indexes.pml pass -Dmemory=sequential -Dscenario=committed -Dconcurrent_commits -Dcounted_sequence
+verify dense_ram_indexes.pml pass -Dscenario=committed -Dconcurrent_commits -Dcounted_sequence
+verify dense_ram_indexes.pml fail -Dmemory=sequential -Dscenario=committed -Dconcurrent_commits -Dcounted_sequence -Dwithout_ordered_dispense
+verify dense_ram_indexes.pml fail -Dscenario=committed -Dconcurrent_commits -Dcounted_sequence -Dwithout_ordered_dispense
 
 section "basic_ram_index_rows.pml: the rows under their mutex, what the gate carries, the traversal's frontier, and the load path's steps"
 verify basic_ram_index_rows.pml pass -Dmemory=sequential
@@ -167,11 +189,14 @@ verify ram_tables.pml fail -Dscenario=growth -Dwithout_walk_acquire
 
 section "GenMC clients over the real headers"
 if genmc_ready; then
-    verify_client basic_shared_mutex.cpp pass -I../include -I../forkunion/include
-    verify_client dense_ram_index_watermark.cpp pass -I../include -I../forkunion/include
-    verify_client dense_ram_index_watermark.cpp fail -I../include -I../forkunion/include -Dwithout_release_fence
-    verify_client dense_ram_index_capacity.cpp pass -I../include -I../forkunion/include
-    verify_client dense_ram_index_capacity.cpp fail -I../include -I../forkunion/include -Dwithout_ordered_release
+    verify_client basic_shared_mutex.cpp pass -I../include -I"$forkunion/include"
+    verify_client dense_ram_index_watermark.cpp pass -I../include -I"$forkunion/include"
+    verify_client dense_ram_index_watermark.cpp fail -I../include -I"$forkunion/include" -Dwithout_release_fence
+    verify_client dense_ram_index_watermark.cpp pass -I../include -I"$forkunion/include" -Dscenario=batched
+    verify_client dense_ram_index_watermark.cpp fail -I../include -I"$forkunion/include" -Dscenario=batched -Dwithout_range_turn
+    verify_client dense_ram_index_watermark.cpp fail -I../include -I"$forkunion/include" -Dscenario=batched -Dwithout_own_range_check
+    verify_client dense_ram_index_capacity.cpp pass -I../include -I"$forkunion/include"
+    verify_client dense_ram_index_capacity.cpp fail -I../include -I"$forkunion/include" -Dwithout_ordered_release
 fi
 
 finish

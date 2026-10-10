@@ -63,10 +63,12 @@
  *
  *  @section dense_index_concurrency Concurrency & Thread Safety
  *
- *  An insertion is all-or-nothing per call: every fallible step precedes the claim of the first
- *  entry identity, so a failed or cancelled call publishes nothing and leaves the reported size
- *  untouched. On a RAM handle the rows of one call also become visible at once, so a concurrent
- *  search sees all of them or none.
+ *  An insertion is all-or-nothing per call, and the rows of one call become visible at once on RAM
+ *  and VRAM handles alike, so a concurrent search sees all of them or none. On a RAM handle every
+ *  fallible step precedes the claim of the first entry identity, so a failed call publishes nothing
+ *  and leaves the reported size untouched. A VRAM call that fails after its first launch publishes
+ *  none of its rows either, and leaves the handle refusing every later mutation, while searches
+ *  continue.
  *
  *  A handle may be shared across threads. On a RAM handle, insertions and searches overlap freely:
  *  searches read only entries published behind the visibility watermark and never write to the
@@ -582,7 +584,7 @@ typedef struct usearch_dense_add_t {
     /** The @b optional candidate-pool breadth the build walk explores; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional handler, called with rows admitted; @c NULL skips it. */
+    /** The @b optional handler, called with rows admitted, which reports and cannot cancel; @c NULL skips it. */
     usearch_progress_callback_t progress;
 
     /** Opaque pointer forwarded into every @c progress call. */
@@ -598,15 +600,16 @@ typedef struct usearch_dense_add_t {
  *  @ref dense_index_concurrency
  *  @retval usearch_status_read_only_k The handle is a view.
  *
- *  An insertion is all-or-nothing per call, with or without a handler. Every fallible step runs
- *  before the first entry identity is claimed, so a rejected call leaves the index untouched, and a
- *  cancelled one reports @c usearch_status_cancelled_k
- *  and publishes no row. On a RAM handle the rows become visible at once, so a concurrent search
- *  sees every row of the call or none of them.
+ *  An insertion is all-or-nothing per call, with or without a handler, and its rows become visible
+ *  at once on RAM and VRAM handles alike, so a concurrent search sees every row of the call or none
+ *  of them. Every row is claimed before the handler's first report, and a claimed row cannot be
+ *  withdrawn, so the handler reports progress but cannot cancel: a returned @c usearch_cancel_k is
+ *  ignored.
  *
- *  One exception survives that rule: an accelerator fault severe enough to poison the device
- *  context reports @c usearch_status_device_k and latches the index unusable rather than partially
- *  applied.
+ *  On a RAM handle every fallible step runs before the first entry identity is claimed, so a failed
+ *  call leaves the index untouched. A VRAM call that fails after its first launch publishes none of
+ *  its rows and leaves the handle refusing every later mutation with that failure, while searches
+ *  continue.
  *
  *  @code{.c}
  *  usearch_outcome_t outcome = {0};

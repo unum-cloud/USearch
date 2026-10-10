@@ -1,9 +1,11 @@
 /**
- *  The CUDA index's row protocol from `include/usearch/dense/vram_index.cuh`: no watermark, one
- *  warp per node, slot zero of every row the combined lock and first-neighbor word. A warp is
- *  two lanes here, the leader and one follower, each a thread of the memory model with its own
- *  view; `__syncwarp` is the only step that merges views, `__shfl_sync` copies a value and
- *  merges nothing, which is what the PTX ISA promises of each.
+ *  The CUDA index's row protocol from `include/usearch/dense/vram_index.cuh`: no device watermark,
+ *  one warp per node, slot zero of every row the combined lock and first-neighbor word; a search
+ *  walk also skips every ID at or past the host watermark it launched under, which
+ *  `dense_vram_index_claims.pml` models, and the reader here is a walk that admits node 1. A
+ *  warp is two lanes here, the leader and one follower, each a thread of the memory model with
+ *  its own view; `__syncwarp` is the only step that merges views, `__shfl_sync` copies a value
+ *  and merges nothing, which is what the PTX ISA promises of each.
  *
  *  Row 0 is published by an earlier batch, made visible to every lane by the launch edge. The
  *  inserter warp lands node 1: the follower writes the payload word (it stands for the vector

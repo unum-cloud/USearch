@@ -13,8 +13,9 @@
  *  one consolidated monolith, or one per shard beside a manifest - written positionally with
  *  every header last, so a failed save reads as absent.
  *
- *  Beyond the executor's claim, two mechanisms guard the devices: the insertion gate admits one
- *  mutating batch at a time, and a shard's kept failure refuses every later mutation.
+ *  Beyond the executor's claim, the insertion gate admits one mutating batch at a time, a shard's
+ *  kept failure refuses every later mutation, and the commit sequence word lets a reader spanning
+ *  the shards see each batch whole or not at all.
  */
 #pragma once
 
@@ -156,8 +157,8 @@ struct dense_vram_indexes {
     using refine_result_t = typename index_t::refine_result_t;
     using health_result_t = typename index_t::health_result_t;
 
-    /** One shard: the graph on its device, the keys of its rows on the host and on the device, and the batch in
-     *  flight on it. Placement is not repeated - the index reports it through @c device_specs. */
+    /** One shard: the graph on its device, and the keys of its rows on the host and on the device. Placement is not
+     *  repeated: the index reports it through @c device_specs. */
     struct shard_t {
 
         /** The graph; an index holds atomics and never moves. */
@@ -169,10 +170,6 @@ struct dense_vram_indexes {
         /** The same keys on the shard's device, so a walk resolves its nodes to keys; reserved for every ID a shard
          *  can hold, since address space is free and the base never moves under a walk, and mapped as it grows. */
         cuda_virtual_memory_allocator<key_t> device_keys;
-
-        /** The batch submitted on this shard, live until the fan-out drains - a fan-out submits on
-         *  every device before awaiting any. */
-        expected<insert_result_t> inserted {};
     };
 
     /** The stored scalar vocabulary, re-exported for dispatchers gating crossing rows. */
@@ -229,7 +226,7 @@ struct dense_vram_indexes {
             return status_t::config_mismatch_k;
         for (shard_t const& one : shards_)
             if (one.index->device_specs().ordinal == shard->device_specs().ordinal) return status_t::config_mismatch_k;
-        return shards_.push_back(shard_t {std::move(shard), keys_column_t {allocator_}, {}, {}});
+        return shards_.push_back(shard_t {std::move(shard), keys_column_t {allocator_}, {}});
     }
 
     /** Empties every shard in place, keeping its device, geometry and capacity; a kept failure
@@ -248,7 +245,7 @@ struct dense_vram_indexes {
 
 #pragma endregion Placement
 
-#pragma region Measures
+#pragma region Measures and Reservation
 
     /** Shards in the index, one per engaged device. */
     std::size_t shards_count() const noexcept { return shards_.size(); }
@@ -265,12 +262,8 @@ struct dense_vram_indexes {
     /** Connections per node, frozen with the geometry. */
     std::size_t connectivity() const noexcept { return shards_.empty() ? 0 : shards_[0].index->connectivity(); }
 
-    /** Entries across every shard - each shard's own @c size, summed. */
-    std::size_t size() const noexcept {
-        std::size_t total = 0;
-        for (shard_t const& one : shards_) total += one.index->size();
-        return total;
-    }
+    /** Entries across every shard: each shard's own @c size, summed over one snapshot no batch straddles. */
+    std::size_t size() const noexcept { return snapshot_({}); }
 
     /** Rows the shards host without growing again; they grow past it on demand. */
     std::size_t capacity() const noexcept {
@@ -295,10 +288,6 @@ struct dense_vram_indexes {
         return bytes;
     }
 
-#pragma endregion Measures
-
-#pragma region Reservation
-
     /** Grows every shard ahead of @p config.capacity rows, split evenly over them - a hint, since the shards, their
      *  key columns and the locator map all grow on demand; the first call freezes the geometry. */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
@@ -316,13 +305,254 @@ struct dense_vram_indexes {
         return {capacity(), status_t::success_k};
     }
 
-#pragma endregion Reservation
+#pragma endregion Measures and Reservation
 
 #pragma region Insertion
 
     /**
+     *  @brief One batch in flight across the shards: the executor and the insertion gate held for the plan's whole
+     *      life, one context per shard carved for the whole batch, every shard's planes and key columns grown to the
+     *      rows it takes, and the locator seats claimed, so a step fails only on its devices.
+     *
+     *  Row @c t of the batch lands on shard @c (rotation+t) mod S. Steps run one after another on one host thread,
+     *  each writing its rows' keys and launching the rows as deferred inserts; @ref finish drains them and turns
+     *  every shard's watermark inside one commit, so a reader spanning the shards sees the batch whole or not at all.
+     *  A failed launch or drain publishes nothing, and neither does a plan dying unfinished: every shard holding
+     *  launched rows keeps the failure, so its rows stay invisible and later mutations are refused.
+     */
+    struct [[nodiscard]] insert_plan_t {
+
+        insert_plan_t() noexcept : insert_plan_t(forkunion_allocator_t {}) {}
+
+        /** An empty plan over @p allocator; only @ref plan_insert ever fills it. */
+        explicit insert_plan_t(forkunion_allocator_t allocator) noexcept : traversals_(allocator), shares_(allocator) {}
+        insert_plan_t(insert_plan_t&& other) noexcept
+            : traversals_(std::move(other.traversals_)), shares_(std::move(other.shares_)), seats_(other.seats_),
+              config_(other.config_), rows_(other.rows_), rotation_(other.rotation_), status_(other.status_),
+              streams_(std::move(other.streams_)), mutating_(std::move(other.mutating_)),
+              owner_(std::exchange(other.owner_, nullptr)) {}
+        insert_plan_t& operator=(insert_plan_t&&) = delete;
+        insert_plan_t(insert_plan_t const&) = delete;
+        insert_plan_t& operator=(insert_plan_t const&) = delete;
+
+        /** An unfinished plan drains what it launched and keeps @c cancelled_k on every shard holding it. */
+        ~insert_plan_t() noexcept {
+            if (owner_) [[maybe_unused]]
+                status_t const abandoned = abandon_(status_t::cancelled_k);
+        }
+
+        /** Launches rows @b [first_row,first_row+rows) of the plan under @p keys on their shards; the rows and the
+         *  keys stay live until @ref finish. Mismatched arguments launch nothing, any later refusal fails the plan. */
+        status_t insert(std::size_t first_row, std::span<key_t const> keys, vectors_view_t rows) noexcept {
+            if (!owner_) return status_t::uninitialized_k;
+            if (failed(status_)) return status_;
+            std::size_t const count = rows.extent(0);
+            if (keys.size() != count || first_row > rows_ || count > rows_ - first_row ||
+                (count && rows.extent(1) != owner_->dimensions()))
+                return status_t::config_mismatch_k;
+            if (!count) return status_t::success_k;
+            std::size_t const shards = shares_.size();
+            std::size_t const rotation = (rotation_ + first_row) % shards;
+            for (std::size_t shard = 0; shard != shards && succeeded(status_); ++shard)
+                status_ = launch_(shard, first_row_of_shard_(shard, shards, rotation), keys, rows);
+            return status_;
+        }
+
+        /** Drains every launch, publishes every row at once, and reports the batch's telemetry. A plan short of rows
+         *  refuses and stays whole, so the missing steps can still land; any other call spends it, and a failed
+         *  launch or drain publishes nothing and keeps its failure on every shard holding launched rows. */
+        expected<insert_result_t> finish() noexcept {
+            if (!owner_) return {{}, status_t::uninitialized_k};
+            std::size_t launched = 0;
+            for (share_t const& share : shares_) launched += share.launched;
+            if (succeeded(status_) && launched != rows_) return {{owner_->size()}, status_t::config_mismatch_k};
+            status_t status = status_;
+            for (traversal_t& traversal : traversals_)
+                if (status_t const drained = traversal.drain(); failed(drained) && succeeded(status)) status = drained;
+            // Every context was born zeroed for this plan alone, so its sink holds every launch on its shard.
+            insert_result_t result;
+            for (traversal_t const& traversal : traversals_) {
+                dense_cuda_telemetry_block_t const spent = traversal.spent();
+                result.visited_members += spent.hops;
+                result.computed_distances += spent.scored;
+                result.restarts += spent.restarts;
+                result.unlinked_neighbors += spent.lock_skips;
+                result.tail_drops += spent.tail_drops;
+                result.visited_saturations += spent.visited_saturations;
+            }
+            dense_vram_indexes& owner = *owner_;
+            if (failed(status)) {
+                result.new_size = owner.size();
+                return {result, abandon_(status)};
+            }
+
+            // Batches run one at a time under the gate, so no turn waits inside the commit.
+            standard_atomic_ref<u64_t>(owner.commit_sequence_).fetch_add(1, std::memory_order_release);
+            for (std::size_t shard = 0; shard != shares_.size(); ++shard)
+                if (share_t const& share = shares_[shard]; share.launched)
+                    if (status_t const published = owner.shards_[shard].index->publish_(share.first_id, share.launched);
+                        failed(published) && succeeded(status))
+                        status = published;
+            standard_atomic_ref<u64_t>(owner.commit_sequence_)
+                .fetch_add((u64_t {1} << 32) - 1, std::memory_order_release);
+
+            for (std::size_t shard = 0; shard != shares_.size(); ++shard)
+                for (std::size_t row = 0; row != shares_[shard].launched; ++row) {
+                    dense_node_id_t const node = static_cast<dense_node_id_t>(shares_[shard].first_id + row);
+                    owner.locators_of_key_.insert(seats_, owner.shards_[shard].keys[node], key_locator_t {shard, node});
+                }
+            owner_ = nullptr;
+            result.new_size = owner.size();
+            return {result, status};
+        }
+
+      private:
+
+        /** One shard's part of the batch. */
+        struct share_t {
+
+            /** The ID the part starts at: the shard's claim at planning. */
+            dense_node_id_t first_id = 0;
+
+            /** Rows of the batch the shard takes. */
+            std::size_t rows = 0;
+
+            /** Rows launched on the shard so far, contiguous from @c first_id. */
+            std::size_t launched = 0;
+        };
+
+        /** Writes the keys of the step's rows shard @p shard takes, from @p first on in strides of the shard count,
+         *  then launches those rows there. */
+        status_t launch_(std::size_t shard, std::size_t first, std::span<key_t const> keys,
+                         vectors_view_t rows) noexcept {
+            std::size_t const shards = shares_.size(), count = rows.extent(0);
+            std::size_t const taking = rows_from_(count, first, shards);
+            share_t& share = shares_[shard];
+            if (!taking) return status_t::success_k;
+            // Overlapping steps would write keys past the cover the plan grew.
+            if (share.launched + taking > share.rows) return status_t::config_mismatch_k;
+            shard_t& one = owner_->shards_[shard];
+            traversal_t& traversal = traversals_[shard];
+            if (cudaSetDevice(traversal.device()) != cudaSuccess) return status_t::device_error_k;
+            dense_node_id_t const first_node = static_cast<dense_node_id_t>(share.first_id + share.launched);
+            for (std::size_t taken = 0; taken != taking; ++taken)
+                one.keys[first_node + static_cast<dense_node_id_t>(taken)] = keys[first + taken * shards];
+            // On the launch's own stream, so the device keys land before the rows they name publish.
+            if (status_t const uploaded = upload_keys_(one, {first_node, first_node + taking}, traversal.stream());
+                failed(uploaded))
+                return uploaded;
+            expected<insert_result_t> const inserted = one.index->submit_insert_(
+                rows(nk::range(first, count, shards), nk::slice), {}, traversal, config_);
+            if (!inserted) return inserted.status;
+            share.launched += taking;
+            // A first ID other than the part's next one names a claimer outside the gate.
+            return inserted.value.first_id == first_node ? status_t::success_k : status_t::contended_k;
+        }
+
+        /** Drains every context and keeps @p failure on every shard holding launched rows, spending the plan. */
+        status_t abandon_(status_t failure) noexcept {
+            for (traversal_t& traversal : traversals_) [[maybe_unused]]
+                status_t const drained = traversal.drain();
+            for (std::size_t shard = 0; shard != shares_.size(); ++shard)
+                if (shares_[shard].launched) [[maybe_unused]]
+                    status_t const kept = owner_->shards_[shard].index->fail_(failure);
+            owner_ = nullptr;
+            return failure;
+        }
+
+        /** One context per shard, carved for the whole batch. */
+        growing_buffer<traversal_t, forkunion_allocator_t> traversals_;
+
+        /** One part per shard, in placement order. */
+        growing_buffer<share_t, forkunion_allocator_t> shares_;
+
+        /** The locator seats every row's key takes in @c finish. */
+        typename locators_map_t::seats_t seats_ {};
+
+        /** The per-shard insertion configuration, applied uniformly. */
+        insert_config_t config_ {};
+
+        /** Rows in the batch. */
+        std::size_t rows_ = 0;
+
+        /** The shard row zero of the batch lands on. */
+        std::size_t rotation_ = 0;
+
+        /** The first refusal past a step's arguments, which leaves the whole batch unpublished. */
+        status_t status_ = status_t::success_k;
+
+        /** The executor's hold, kept for the plan's whole life, one caller at a time. */
+        typename executor_t::claim_t streams_;
+
+        /** The insertion gate, held so batches never interleave their claims. */
+        std::unique_lock<fu::spin_mutex_t> mutating_;
+
+        /** The index inserted into; null in the empty plan a refused @ref plan_insert returns, and once spent. */
+        dense_vram_indexes* owner_ = nullptr;
+
+        friend dense_vram_indexes;
+    };
+
+    /**
+     *  @brief Opens a batch of @p rows: takes the executor and the insertion gate, carves one context per shard,
+     *      grows every shard's planes and key columns to the rows it takes, and claims the locator seats.
+     *
+     *  @param[in] rows Rows in the batch; the plan's steps launch each exactly once, in any order.
+     *  @param[inout] executor The streams and their scratch, paired positionally with the shards.
+     *  @param[in] config The per-shard insertion configuration, applied uniformly.
+     */
+    expected<insert_plan_t> plan_insert(std::size_t rows, executor_t& executor, insert_config_t config = {}) noexcept {
+        if (status_t const kept = status(); failed(kept)) return {{}, kept};
+        if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
+        insert_plan_t plan {allocator_};
+        plan.rows_ = rows;
+        plan.config_ = config;
+        if (!rows) {
+            plan.owner_ = this;
+            return {std::move(plan), status_t::success_k};
+        }
+        // Two holds: the executor's guards the scratch, the index's keeps batches from interleaving claims.
+        auto [claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
+        plan.streams_ = std::move(claim);
+        if (!mutating_.lock_if_free()) return {{}, status_t::contended_k};
+        plan.mutating_ = std::unique_lock<fu::spin_mutex_t> {mutating_, std::adopt_lock};
+
+        std::size_t const shards = shards_.size();
+        if (status_t const readied = reserve_traversals_(plan.traversals_, executor, divide_round_up(rows, shards),
+                                                         config);
+            failed(readied))
+            return {{}, readied};
+        // Every shard must seat its build launch before any row is admitted, or a mixed fleet inserts partially.
+        for (shard_t const& one : shards_)
+            if (!one.index->build_scratch_fits()) return {{}, status_t::config_mismatch_k};
+        auto [seats, seat_status] = locators_of_key_.claim(rows);
+        if (failed(seat_status)) return {{}, seat_status};
+        plan.seats_ = seats;
+        // Rotating by rows routed keeps a stream of small batches from drifting onto shard zero.
+        plan.rotation_ = standard_atomic_ref<std::size_t>(routed_rows_).fetch_add(rows, std::memory_order_relaxed) %
+                         shards;
+        if (failed(plan.shares_.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
+        for (std::size_t shard = 0; shard != shards; ++shard) {
+            shard_t& one = shards_[shard];
+            std::size_t const first_id = one.index->claimed_();
+            std::size_t const taking = rows_from_(rows, first_row_of_shard_(shard, shards, plan.rotation_), shards);
+            plan.shares_.push_back_reserved({static_cast<dense_node_id_t>(first_id), taking, 0});
+            if (!taking) continue;
+            if (cudaSetDevice(one.index->device_specs().ordinal) != cudaSuccess) return {{}, status_t::device_error_k};
+            reserve_capacity_t const grown {first_id + taking, static_cast<connectivity_t>(connectivity()),
+                                            dimensions()};
+            if (status_t const reserved = one.index->reserve(grown).status; failed(reserved)) return {{}, reserved};
+            if (status_t const covered = cover_keys_(one, first_id + taking); failed(covered)) return {{}, covered};
+        }
+        plan.owner_ = this;
+        return {std::move(plan), status_t::success_k};
+    }
+
+    /**
      *  @brief Inserts a batch under @p keys, dealing rows round-robin across the shards from a
-     *      rotating start, so they fill evenly and each sees the whole distribution.
+     *      rotating start, so they fill evenly and each sees the whole distribution: @ref plan_insert,
+     *      one step over every row, and its @c finish.
      *
      *  Node IDs never cross this boundary: they are shard-local, and which shard a row landed in
      *  is the index's business. The keys are what the caller gets its rows back by.
@@ -337,18 +567,12 @@ struct dense_vram_indexes {
      */
     expected<insert_result_t> insert(std::span<key_t const> keys, vectors_view_t new_vectors, executor_t& executor,
                                      insert_config_t config = {}) noexcept {
-        insert_result_t result;
-        result.new_size = size();
-        if (status_t const kept = status(); failed(kept)) return {result, kept};
-        if (keys.size() != new_vectors.extent(0)) return {result, status_t::config_mismatch_k};
-        if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {result, paired};
-        if (!new_vectors.extent(0)) return {result, status_t::success_k};
-        // Two holds: the executor's guards the scratch, the index's keeps batches from interleaving claims.
-        auto [claim, claim_status] = executor.claim();
-        if (failed(claim_status)) return {result, claim_status};
-        if (!mutating_.lock_if_free()) return {result, status_t::contended_k};
-        std::lock_guard const mutating {mutating_, std::adopt_lock};
-        return insert_gated_(keys, new_vectors, executor, config);
+        if (keys.size() != new_vectors.extent(0)) return {{size()}, status_t::config_mismatch_k};
+        auto [plan, status] = plan_insert(new_vectors.extent(0), executor, config);
+        if (failed(status)) return {{size()}, status};
+        // A refused step leaves rows short, and `finish` reports the refusal it kept or the shortfall.
+        [[maybe_unused]] status_t const launched = plan.insert(0, keys, new_vectors);
+        return plan.finish();
     }
 
     /** Inserts one row under @p key into whichever shard the rotation names next - the one-row
@@ -467,11 +691,15 @@ struct dense_vram_indexes {
         growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
         if (status_t const readied = reserve_traversals_(traversals, executor, 1, config); failed(readied))
             return {merged, readied};
+        growing_buffer<std::size_t, forkunion_allocator_t> visible {allocator_};
+        if (failed(visible.resize(shards_.size()))) return {merged, status_t::bad_alloc_k};
+        snapshot_(to_writable_span(visible));
         status_t status = status_t::success_k;
         for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
             traversal_t& traversal = traversals[shard];
             if (cudaSetDevice(traversal.device()) != cudaSuccess) return {merged, status_t::device_error_k};
-            auto const [search_result, search_status] = shards_[shard].index->search(query_vector, traversal, config);
+            auto const [search_result, search_status] = shards_[shard].index->search_(query_vector, traversal, config,
+                                                                                      visible[shard]);
             if (failed(search_status)) {
                 status = search_status;
                 break;
@@ -567,14 +795,14 @@ struct dense_vram_indexes {
         nk::matrix_span<dense_node_id_t> const ids_wide {ids_landing.data(), rows_count, shards * wanted};
         nk::matrix_span<dot_result_t> const products_wide {products_landing.data(), rows_count, shards * wanted};
 
-        auto multiply_shard = [&](std::size_t shard, traversal_t& traversal) noexcept {
+        auto multiply_shard = [&](std::size_t shard, traversal_t& traversal, std::size_t visible) noexcept {
             nk::matrix_span<dense_node_id_t> const shard_ids = ids_wide(
                 nk::all, nk::range(shard * wanted, (shard + 1) * wanted), nk::slice);
             nk::matrix_span<dot_result_t> const shard_products = products_wide(
                 nk::all, nk::range(shard * wanted, (shard + 1) * wanted), nk::slice);
             std::span<u32_t> const shard_counts {counts_landing.data() + shard * rows_count, rows_count};
-            expected<search_result_t> const multiplied = shards_[shard].index->multiply(
-                left, shard_ids, shard_products, shard_counts, traversal, config, completion_t::deferred_k);
+            expected<search_result_t> const multiplied = shards_[shard].index->submit_multiply_(
+                left, shard_ids, shard_products, shard_counts, traversal, config, visible);
             return multiplied.status;
         };
         // Shards append in placement order until a row fills, so rows truncate exactly as on the host.
@@ -682,10 +910,10 @@ struct dense_vram_indexes {
         // Shard 0 stages one block of rows and carries per shard, its own first and the others copied in.
         std::size_t const block_bytes = outputs.size_bytes() + carry.size_bytes();
         byte_t* blocks = nullptr;
-        auto attend_shard = [&](std::size_t shard, traversal_t& traversal) noexcept {
+        auto attend_shard = [&](std::size_t shard, traversal_t& traversal, std::size_t visible) noexcept {
             shard_lookup_t const lookup {shards_[shard].device_keys.base(), value_lookup};
             expected<f32_t*> const landed = shards_[shard].index->submit_attend_(
-                queries, head_count, lookup, score_scale, traversal, config, shard ? 1 : shards);
+                queries, head_count, lookup, score_scale, traversal, config, shard ? 1 : shards, visible);
             if (!landed) return landed.status;
             if (!shard) {
                 blocks = reinterpret_cast<byte_t*>(landed.value);
@@ -1264,8 +1492,6 @@ struct dense_vram_indexes {
 
 #pragma endregion Checkpoints
 
-#pragma region Key Columns
-
     /** Entries stored under @p key; a concurrent insertion can only make it under-report. */
     std::size_t count(key_t const& key) const noexcept { return locators_of_key_.count(key); }
 
@@ -1291,10 +1517,7 @@ struct dense_vram_indexes {
         return total;
     }
 
-#pragma endregion Key Columns
-
   private:
-#pragma region Placement
 
     /** One unreserved shard placed on @p device; null when the allocation fails. */
     static std::unique_ptr<index_t> build_(int device) noexcept {
@@ -1312,8 +1535,6 @@ struct dense_vram_indexes {
                 return status_t::config_mismatch_k;
         return status_t::success_k;
     }
-
-#pragma endregion Placement
 
 #pragma region Insertion
 
@@ -1374,93 +1595,7 @@ struct dense_vram_indexes {
         return uploaded;
     }
 
-    /** The body of @c insert, run with the insertion gate held. */
-    expected<insert_result_t> insert_gated_(std::span<key_t const> keys, vectors_view_t new_vectors,
-                                            executor_t& executor, insert_config_t config) noexcept {
-        insert_result_t result;
-        result.new_size = size();
-        std::size_t const rows = new_vectors.extent(0);
-        std::size_t const shards = shards_.size();
-        growing_buffer<traversal_t, forkunion_allocator_t> traversals {allocator_};
-        if (status_t const readied = reserve_traversals_(traversals, executor, divide_round_up(rows, shards), config);
-            failed(readied))
-            return {result, readied};
-
-        // Every shard must seat its build launch before any row is admitted, or a mixed fleet inserts partially.
-        for (shard_t const& one : shards_)
-            if (!one.index->build_scratch_fits()) return {result, status_t::config_mismatch_k};
-
-        // Seats before any row is taken, so recording a locator never fails once keys land.
-        auto [seats, seat_status] = locators_of_key_.claim(rows);
-        if (failed(seat_status)) return {result, seat_status};
-        // Rotating by rows routed keeps a stream of small batches from drifting onto shard zero.
-        std::size_t const rotation =
-            standard_atomic_ref<std::size_t>(routed_rows_).fetch_add(rows, std::memory_order_relaxed) % shards;
-
-        // Claim and launch on every device before awaiting any. Keys are written before the
-        // claim publishes, so a search that can rank a row reads its key fully written.
-        status_t status = status_t::success_k;
-        std::size_t launched = 0;
-        for (; launched != shards; ++launched) {
-            std::size_t const first = first_row_of_shard_(launched, shards, rotation);
-            std::size_t const taking = rows_from_(rows, first, shards);
-            shard_t& one = shards_[launched];
-            one.inserted = {};
-            if (!taking) continue;
-            if (cudaSetDevice(traversals[launched].device()) != cudaSuccess) {
-                status = status_t::device_error_k;
-                break;
-            }
-            dense_node_id_t const first_node = static_cast<dense_node_id_t>(one.index->size());
-            // Batches run one at a time under the gate, so covering the rows this one takes is all a key needs.
-            if (status_t const covered = cover_keys_(one, first_node + taking); failed(covered)) {
-                status = covered;
-                break;
-            }
-            for (std::size_t taken = 0; taken != taking; ++taken)
-                one.keys[first_node + static_cast<dense_node_id_t>(taken)] = keys[first + taken * shards];
-            // On the launch's own stream, so the device keys land before the rows they name publish.
-            if (status_t const uploaded = upload_keys_(one, {first_node, first_node + taking},
-                                                       traversals[launched].stream());
-                failed(uploaded)) {
-                status = uploaded;
-                break;
-            }
-            one.inserted = one.index->insert(new_vectors(nk::range(first, rows, shards), nk::slice), {},
-                                             traversals[launched], config, completion_t::deferred_k);
-            // A mismatched first ID means a claimer outside the gate, which no key written here can name.
-            status_t const launched_status = !one.inserted                               ? one.inserted.status
-                                             : one.inserted.value.first_id != first_node ? status_t::contended_k
-                                                                                         : status_t::success_k;
-            if (failed(launched_status)) {
-                status = launched_status;
-                break;
-            }
-            // Only rows the shard took get locators: a refused launch - its row limit, its growth - names none.
-            for (std::size_t taken = 0; taken != taking; ++taken)
-                locators_of_key_.insert(seats, keys[first + taken * shards],
-                                        key_locator_t {launched, first_node + static_cast<dense_node_id_t>(taken)});
-        }
-
-        // Drain every stream, the refused launch's included - its upload may still be reading the caller's rows.
-        if (status_t const drained = executor.drain(); failed(drained) && succeeded(status)) status = drained;
-        // Every context's sink holds this call's spend on its shard; an unlaunched one holds zeros.
-        for (traversal_t& traversal : traversals) {
-            dense_cuda_telemetry_block_t const spent = traversal.spent();
-            result.visited_members += spent.hops;
-            result.computed_distances += spent.scored;
-            result.restarts += spent.restarts;
-            result.unlinked_neighbors += spent.lock_skips;
-            result.tail_drops += spent.tail_drops;
-            result.visited_saturations += spent.visited_saturations;
-        }
-        result.new_size = size();
-        return {result, status};
-    }
-
 #pragma endregion Insertion
-
-#pragma region Refinement
 
     /** Folds one shard's sweep into the group's; every counter is a population or a spend, so all
      *  of them add. */
@@ -1487,9 +1622,28 @@ struct dense_vram_indexes {
         into.sweeps = max_of(into.sweeps, one.sweeps);
     }
 
-#pragma endregion Refinement
-
 #pragma region Search
+
+    /** Takes every shard's visible rows into @p visible, unless it is empty, at one instant no commit straddles;
+     *  answers their sum. */
+    std::size_t snapshot_(std::span<std::size_t> visible) const noexcept {
+        while (true) {
+            u64_t const before = standard_atomic_ref<u64_t const>(commit_sequence_).load(std::memory_order_acquire);
+            if (static_cast<u32_t>(before)) {
+                fu::standard_yield_t {}(&commit_sequence_, before, 0u, fu::wait_uncapped_t {});
+                continue;
+            }
+            std::size_t total = 0;
+            for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
+                std::size_t const rows = shards_[shard].index->size();
+                if (!visible.empty()) visible[shard] = rows;
+                total += rows;
+            }
+            // The watermarks' acquires keep this re-read after them.
+            if (standard_atomic_ref<u64_t const>(commit_sequence_).load(std::memory_order_relaxed) == before)
+                return total;
+        }
+    }
 
     /** Zips one (query, shard) pair of parallel landing rows into the scored shape
      *  @c merge_search_results consumes, stopping at the first sentinel ID - an absent
@@ -1532,13 +1686,13 @@ struct dense_vram_indexes {
         nk::matrix_span<dense_distance_t> const distances_wide {distances_landing.data(), queries_count,
                                                                 shards * config.count};
 
-        auto search_shard = [&](std::size_t shard, traversal_t& traversal) noexcept {
+        auto search_shard = [&](std::size_t shard, traversal_t& traversal, std::size_t visible) noexcept {
             nk::matrix_span<dense_node_id_t> const shard_ids = ids_wide(
                 nk::all, nk::range(shard * config.count, (shard + 1) * config.count), nk::slice);
             nk::matrix_span<dense_distance_t> const shard_distances = distances_wide(
                 nk::all, nk::range(shard * config.count, (shard + 1) * config.count), nk::slice);
-            expected<search_result_t> const found = shards_[shard].index->search(
-                queries, heads..., shard_ids, shard_distances, traversal, config, completion_t::deferred_k);
+            expected<search_result_t> const found = shards_[shard].index->submit_search_(
+                queries, shard_ids, shard_distances, traversal, config, visible, heads...);
             return found.status;
         };
         auto merge_shard = [&](std::size_t shard, traversal_t const&) noexcept {
@@ -1558,9 +1712,9 @@ struct dense_vram_indexes {
     }
 
     /** Claims @p executor, sizes one context per shard for @p rows_count rows under @p config and any indexer
-     *  @p heads, queues @p submit on every shard before awaiting any, drains every queued stream, hands each drained
-     *  shard and its context to @p merge, and sums the telemetry & the rows' @p counts; the first refusal is the one
-     *  kept. */
+     *  @p heads, snapshots the shards' visible rows, queues @p submit under its snapshot on every shard before
+     *  awaiting any, drains every queued stream, hands each drained shard and its context to @p merge, and sums the
+     *  telemetry & the rows' @p counts; the first refusal is the one kept. */
     template <typename submit_type_, typename merge_type_, typename... heads_types_>
     expected<search_result_t> for_each_shard_(executor_t& executor, std::size_t rows_count, search_config_t config,
                                               submit_type_&& submit, merge_type_&& merge,
@@ -1573,17 +1727,20 @@ struct dense_vram_indexes {
         if (status_t const readied = reserve_traversals_(traversals, executor, rows_count, config, heads...);
             failed(readied))
             return {{}, readied};
+        std::size_t const shards = shards_.size();
+        growing_buffer<std::size_t, forkunion_allocator_t> visible {allocator_};
+        if (failed(visible.resize(shards))) return {{}, status_t::bad_alloc_k};
+        snapshot_(to_writable_span(visible));
 
         // Queue every shard before awaiting any, so the batch costs the slowest device rather than
         // the sum. From here to the drain there must be no return: the caller's rows and the landing
         // are DMA targets on every queued stream.
-        std::size_t const shards = shards_.size();
         status_t first_refusal = status_t::success_k;
         std::size_t queued = 0;
         // A launch fails on a stream of any device but the current one.
         for (; queued != shards; ++queued)
             if (status_t const submitted = cudaSetDevice(traversals[queued].device()) == cudaSuccess
-                                               ? submit(queued, traversals[queued])
+                                               ? submit(queued, traversals[queued], visible[queued])
                                                : status_t::device_error_k;
                 failed(submitted)) {
                 first_refusal = submitted;
@@ -1990,6 +2147,10 @@ struct dense_vram_indexes {
 
     /** Held by the one batch of mutating work at a time; a refused hold is @c contended_k. */
     fu::spin_mutex_t mutating_;
+
+    /** Commits in flight in the low half, commits landed in the high half: a reader spanning the shards retries its
+     *  snapshot while one is in flight or one landed under it. */
+    u64_t commit_sequence_ = 0;
 };
 
 #endif // defined(__CUDACC__)

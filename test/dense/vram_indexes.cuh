@@ -79,6 +79,70 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
     return failures;
 }
 
+/** The planned insertion: launched rows stay out of the size, the locators and a search until @c finish publishes
+ *  every one, a plan short of rows refuses to finish and stays whole, its gate turns a second batch away, and a plan
+ *  dying unfinished publishes nothing and leaves its shard refusing every later batch. */
+template <typename indexes_type_>
+    requires vram_indexes<indexes_type_>
+std::size_t test_dense_indexes_planned_insert(u64_t seed) {
+    using scalar_t = typename indexes_type_::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    constexpr std::size_t rows_count = dense_thread_nodes_k, half = rows_count / 2;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+
+    dense_indexes_executor<indexes_type_> writer, reader;
+    if (failed(writer.status) || failed(reader.status)) return failures + expect(false);
+    indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(writer.place_shards(indexes)));
+    failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
+    auto const vectors = make_vectors<scalar_t>(2 * rows_count, dimensions, stream_key(seed, "indexes_planned"));
+    std::vector<key_t> keys(2 * rows_count);
+    for (std::size_t row = 0; row != keys.size(); ++row) keys[row] = static_cast<key_t>(1 + row);
+    auto rows_of = [&](std::size_t first, std::size_t count) noexcept {
+        return vectors(nk::range(first, first + count), nk::slice);
+    };
+    auto keys_of = [&](std::size_t first, std::size_t count) noexcept {
+        return std::span<key_t const> {keys.data() + first, count};
+    };
+    std::array<key_t, 8> found_keys {};
+    std::array<typename indexes_type_::distance_t, 8> found_distances {};
+
+    {
+        auto [plan, plan_status] = indexes.plan_insert(rows_count, writer.executor);
+        failures += expect_eq(plan_status, status_t::success_k);
+        failures += expect_eq(plan.insert(half, keys_of(half, half), rows_of(half, half)), status_t::success_k);
+        failures += expect_eq(indexes.size(), 0u);
+        failures += expect(!indexes.contains(keys[half]));
+        auto const [search_result, search_status] = indexes.search(vectors.view().row(half).as_vector(),
+                                                                   reader.executor, {}, std::span<key_t> {found_keys},
+                                                                   std::span {found_distances});
+        failures += expect(succeeded(search_status) && search_result.count == 0);
+        failures += expect_eq(indexes.insert(keys_of(0, 1), rows_of(0, 1), reader.executor).status,
+                              status_t::contended_k);
+        failures += expect_eq(plan.finish().status, status_t::config_mismatch_k);
+        failures += expect_eq(plan.insert(0, keys_of(0, half), rows_of(0, half)), status_t::success_k);
+        auto const [insert_result, finish_status] = plan.finish();
+        failures += expect_eq(finish_status, status_t::success_k);
+        failures += expect_eq(insert_result.new_size, rows_count);
+    }
+    failures += expect_eq(indexes.size(), rows_count);
+    failures += expect(indexes.contains(keys[0]) && indexes.contains(keys[rows_count - 1]));
+
+    {
+        auto [plan, plan_status] = indexes.plan_insert(rows_count, writer.executor);
+        failures += expect_eq(plan_status, status_t::success_k);
+        failures += expect_eq(plan.insert(0, keys_of(rows_count, half), rows_of(rows_count, half)),
+                              status_t::success_k);
+    }
+    failures += expect_eq(indexes.size(), rows_count);
+    failures += expect_eq(indexes.status(), status_t::cancelled_k);
+    failures += expect(!indexes.contains(keys[rows_count]));
+    failures += expect_eq(indexes.insert(keys_of(rows_count, 1), rows_of(rows_count, 1), writer.executor).status,
+                          status_t::cancelled_k);
+    return failures;
+}
+
 /** The VRAM reading of the sharded indexer search, keys equal to their rows: every shard walks the same queries
  *  under the same heads with a pool as wide as the index, so the merged top of every query is the oracle's. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
@@ -218,6 +282,7 @@ std::size_t test_cuda_indexes_configuration(char const* name, u64_t seed) {
     failures_count += test_dense_indexes_cancelled_load<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_concurrent_add<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_search_race<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_planned_insert<indexes_t>(seed);
     failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed);
@@ -226,13 +291,9 @@ std::size_t test_cuda_indexes_configuration(char const* name, u64_t seed) {
     return report(name, failures_count);
 }
 
-#pragma region Suite Entry Points
-
 /** The sharded CUDA suite entry its translation unit defines and the suite's @c main
  *  composes explicitly; returns the suite's failure count. */
 std::size_t check_vram_indexes(settings_t const& settings);
-
-#pragma endregion Suite Entry Points
 
 } // namespace unum::usearch::test::dense
 

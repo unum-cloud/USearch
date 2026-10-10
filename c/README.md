@@ -107,7 +107,8 @@ usearch_continuation_t stop_when_asked(size_t completed, size_t total, void* sta
 }
 ```
 
-A stopped call reports `usearch_status_cancelled_k`, and an insertion stopped midway publishes none of its rows.
+A stopped call reports `usearch_status_cancelled_k`.
+An insertion claims every row before its first report, so its handler only reports, and all its rows publish at once.
 
 ## Retrieving Vectors and Arenas
 

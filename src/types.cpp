@@ -106,10 +106,9 @@ USEARCH_EXPORT char const* usearch_status_name(usearch_status_t status) {
     case usearch_status_contended_k: return "contended";
     case usearch_status_cancelled_k: return "cancelled";
     case usearch_status_unsupported_k: return "unsupported";
-    case usearch_status_pending_k: return "pending";
+    case usearch_status_deferred_k: return "deferred";
     case usearch_status_invalid_argument_k: return "invalid-argument";
-    // An unrecognized value spells like the status an unrecognized name reads back as.
-    default: return "invalid-argument";
+    default: return "unrecognized";
     }
 }
 
@@ -167,6 +166,18 @@ USEARCH_EXPORT usearch_residency_t usearch_residency_from_name(usearch_bytes_vie
     if (named(name, "vram")) return usearch_residency_vram_k;
     if (named(name, "nvme")) return usearch_residency_nvme_k;
     return usearch_residency_ram_k;
+}
+
+USEARCH_EXPORT char const* usearch_mood_name(usearch_mood_t mood) {
+    switch (mood) {
+    case usearch_mood_parked_k: return "parked";
+    case usearch_mood_spinning_k: return "spinning";
+    default: return "unknown";
+    }
+}
+
+USEARCH_EXPORT usearch_mood_t usearch_mood_from_name(usearch_bytes_view_t name) {
+    return named(name, "spinning") ? usearch_mood_spinning_k : usearch_mood_parked_k;
 }
 
 USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class) {

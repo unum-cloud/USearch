@@ -18,6 +18,15 @@
  *  `finish`, then the plain key copy of `keys[0..visible)`, and a searcher; the dispenser is a
  *  word, since the watermark compares it. `-Dscenario=loading`: a loader running `plan_load` per
  *  shard, the keys at the base, then `finish`, against a searcher on the still-empty index.
+ *  `-Dscenario=committed`: one batch's commit landing a row on each shard, its ranges dispensed
+ *  in one step as the dispensing mutex does, every shard's turn awaited, then its watermark
+ *  stores bracketed by the index's commit sequence word, a release add making it odd before them
+ *  and another making it even after; and a searcher that acquires the word, snapshots both
+ *  shards' watermarks, re-reads the word, and retries while it is odd or changed.
+ *  `-Dconcurrent_commits` runs a second such commit beside the first, and `-Dcounted_sequence`
+ *  counts the commits in flight in the word's low part rather than in its parity, as the header
+ *  does: a commit adds one before its stores and `sequence_unit - 1` after, and the searcher
+ *  retries while the low part is not zero.
  *
  *  The shard's claim is `claim_capacity` seen from outside: it grows the shard on demand and
  *  refuses only past the rows one shard's ids reach, the model's row limit.
@@ -43,7 +52,16 @@
  *    watermark to capture whole batches, shard zero and shard one together, and fails under
  *    every model: the watermark is per shard;
  *  - the load path: keys land before `finish` publishes the rows. `-Dwithout_keys_before_finish`
- *    moves them after, and the searcher reads an unset key under the sequential and view models.
+ *    moves them after, and the searcher reads an unset key under the sequential and view models;
+ *  - the commit: a snapshot the searcher accepts holds each commit on both shards or on neither.
+ *    `-Dwithout_commit_sequence` leaves the word out, and the searcher takes a snapshot between
+ *    the commit's two watermark stores. `-Dconcurrent_commits` fails with the parity: one
+ *    commit's add makes the word odd and the other's makes it even again while both are inside
+ *    their brackets, so a searcher accepts a snapshot holding one shard's part.
+ *    `-Dcounted_sequence` passes there, since the word returns to a multiple of the unit only
+ *    once both are done. `-Dwithout_ordered_dispense` lets each shard dispense on its own, so two
+ *    commits' ranges cross between the shards, each waits for a turn only the other's store
+ *    gives, and Spin reports the deadlock.
  *
  *  `-Dwithout_claim_consume` drops the `claim.consume()` the shard's `insert` makes once the
  *  row is dispensed against: the landed row is released and the claim word falls below the
@@ -53,11 +71,12 @@
 #include "weak_memory.pml"
 
 // The scenarios: the adders against the shards, the key column's cover, the monolith save's
-// watermark, or the load path.
+// watermark, the load path, or a commit across the shards.
 #define adding 1
 #define covering 2
 #define saving 3
 #define loading 4
+#define committed 5
 #ifndef scenario
 #define scenario adding
 #endif
@@ -71,6 +90,8 @@
 #elif scenario == saving
 #define batch_adder_thread 0
 #define saver_thread 1
+#define searcher_thread 2
+#elif scenario == committed
 #define searcher_thread 2
 #else
 #define loader_thread 0
@@ -98,6 +119,10 @@
 #define key(shard, id) (2 + (id))
 #define claimed_rows 5
 #define key_chunk(id) (6 + (id))
+#elif scenario == committed
+#define commit_sequence 0
+#define last_visible_id(shard) (1 + (shard))
+#define key(shard, id) (3 + (shard) * 2 + (id))
 #else
 #define last_visible_id(shard) (0 + (shard))
 #define next_dispensed_id(shard) (2 + (shard))
@@ -126,7 +151,7 @@ byte in_flight[shards]; // rows dispensed and not yet published, per shard
 bool locators_of_key[shards * row_limit]; // which rows the locator map recorded
 #define locator(shard, id) ((shard) * row_limit + (id))
 
-#if scenario == adding
+#if scenario == adding || scenario == committed
 inline dispense(t, shard, id) {
     atomic {
         id = dispensed[shard];
@@ -397,6 +422,104 @@ active proctype loader() {
 }
 #endif
 
+#if scenario == committed
+#ifdef concurrent_commits
+#define commits 2
+#else
+#define commits 1
+#endif
+// the word's step after the turns: the parity's, or the counted word's carry into its high part
+#ifdef counted_sequence
+#define sequence_unit 4
+#else
+#define sequence_unit 2
+#endif
+byte commits_started;
+bool commit_dispensed[commits];
+byte commit_part[commits * shards]; // the ID each commit landed on each shard
+#define part(commit, shard) commit_part[(commit) * shards + (shard)]
+
+// a batch's commit: a row on each shard, both keys before the turns, every turn awaited outside
+// the bracket of the commit sequence word, and the watermark stores inside it
+active [commits] proctype committer() {
+    byte me, shard;
+    int id, watermark, sequence;
+    atomic { me = commits_started; commits_started++ };
+#ifdef without_ordered_dispense
+    // each shard dispenses on its own, so two commits' IDs may cross between the shards
+    for (shard : 0 .. shards - 1) {
+        atomic { dispense(me, shard, id); part(me, shard) = id }
+    };
+#else
+    // the dispensing mutex: every shard's range in one step, so no two commits cross between the shards
+    atomic {
+        for (shard : 0 .. shards - 1) {
+            dispense(me, shard, id);
+            part(me, shard) = id
+        }
+    };
+#endif
+    commit_dispensed[me] = true;
+    for (shard : 0 .. shards - 1) {
+        store(me, key(shard, part(me, shard)), order_relaxed, key_of(me))
+    };
+    // the waits hold no bracket open: no later range on a shard can take its turn first
+    for (shard : 0 .. shards - 1) {
+        (newest_value(last_visible_id(shard)) == part(me, shard));
+        do
+        :: load(me, last_visible_id(shard), order_acquire, watermark);
+           if
+           :: watermark == part(me, shard) -> break
+           :: else
+           fi
+        od
+    };
+#ifndef without_commit_sequence
+    read_modify_write(me, commit_sequence, order_release, sequence, sequence + 1);
+#endif
+    for (shard : 0 .. shards - 1) {
+        atomic {
+            store(me, last_visible_id(shard), watermark_order, part(me, shard) + 1);
+            in_flight[shard]--
+        }
+    };
+#ifndef without_commit_sequence
+    read_modify_write(me, commit_sequence, order_release, sequence, sequence + sequence_unit - 1)
+#endif
+}
+
+// a search over both shards: the word acquired, the shards' watermarks snapshotted, the word
+// re-read, and a retry while it is odd or moved; an accepted snapshot holds each commit whole
+active proctype searcher() {
+    byte shard, id, commit;
+    int before, after, watermarks[shards], seen;
+retry:
+    load(searcher_thread, commit_sequence, order_acquire, before);
+    for (shard : 0 .. shards - 1) {
+        load(searcher_thread, last_visible_id(shard), order_acquire, watermarks[shard])
+    };
+    load(searcher_thread, commit_sequence, order_relaxed, after);
+#ifndef without_commit_sequence
+    if
+    :: before % sequence_unit != 0 || after != before ->
+        (newest_value(commit_sequence) % sequence_unit == 0);
+        goto retry
+    :: else
+    fi;
+#endif
+    for (commit : 0 .. commits - 1) {
+        assert(!commit_dispensed[commit] ||
+               (watermarks[0] > part(commit, 0)) == (watermarks[1] > part(commit, 1)))
+    };
+    for (shard : 0 .. shards - 1) {
+        id = 0;
+        do
+        :: id == watermarks[shard] -> break
+        :: else -> load(searcher_thread, key(shard, id), order_relaxed, seen); assert(seen != unset); id++
+        od
+    }
+}
+#else
 // the search merge: every id below the watermark it acquired resolves through the key column
 active proctype searcher() {
     byte shard, id;
@@ -417,3 +540,4 @@ active proctype searcher() {
         od
     }
 }
+#endif
