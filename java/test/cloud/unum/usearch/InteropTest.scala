@@ -1,16 +1,18 @@
 package cloud.unum.usearch
 
+import scala.util.Using
+
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
-// Aliased, since the `class Test` below would otherwise shadow the annotation.
+// Aliased, since JUnit names its annotation `Test` and the Scala suite reads better with it renamed.
 import org.junit.jupiter.api.{Test => JUnitTest}
 
 import cloud.unum.usearch.DenseIndex.DenseMetric
 import cloud.unum.usearch.DenseIndex.DenseOptions
 import cloud.unum.usearch.Types.Executor
 import cloud.unum.usearch.Types.Key
-import cloud.unum.usearch.Types.Matrix
-import cloud.unum.usearch.Types.ScalarKind
+import cloud.unum.usearch.Types.RowsView
+import cloud.unum.usearch.Types.Scalar
 
 /**
  * The Java surface as a Scala caller meets it.
@@ -18,26 +20,20 @@ import cloud.unum.usearch.Types.ScalarKind
  * Scala reads no nullness annotations, so what it covers is the other half: that the fluent builder, the array
  * arguments and the `AutoCloseable` handles all compose under a language whose collections are its own.
  */
-class Test {
+class InteropTest {
 
   /** Scala's `Array[Key]` is a JVM array, so the batch verbs take it with no conversion. */
   @JUnitTest
   def batchesTakeScalaArrays(): Unit = {
-    val pool = Executor.forRam(2)
-    try {
-      val index = new DenseOptions()
-        .dimensions(2)
-        .metric(DenseMetric.EUCLIDEAN)
-        .quantization(ScalarKind.F32)
-        .open()
-      try {
-        index.reserve(2)
+    val options = new DenseOptions().dimensions(2).metric(DenseMetric.EUCLIDEAN).quantization(Scalar.F32)
+    Using.resources(Executor.forRam(Array.emptyIntArray, 2, 0), DenseIndex.initRam(options, Array.emptyIntArray)) {
+      (pool, index) =>
+        val receiver = index.on(pool)
+        receiver.reserve(2)
         val keys: Array[Key] = Array(Key.of(1), Key.of(2))
-        val vectors = Matrix.of(Array(1.0f, 0.0f, 0.0f, 1.0f), 2)
-        index.add(keys, vectors, pool)
-        assertEquals(2L, index.size())
-      } finally index.close()
-    } finally pool.close()
+        receiver.insert(keys, RowsView.of(Array(1.0f, 0.0f, 0.0f, 1.0f), 2))
+        assertEquals(2L, receiver.describe().size())
+    }
   }
 
   /** The identity vocabulary is the same string on every SDK. */

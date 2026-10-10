@@ -5,8 +5,9 @@ It instantiates no index template: every verb is a downcall onto the pre-instant
 Java 25 or newer is required, and the runtime needs `--enable-native-access` for the module or class path the SDK loads from.
 
 One source file mirrors one header.
-`Types.java` carries the shared vocabulary — `Key`, `Status`, `ScalarKind`, `Residency`, `Executor`, `USearchException`, `Matrix`, `Matches`.
-`DenseIndex.java` carries the dense modality — the index itself, `DenseOptions`, `DenseMetric`, `InsertionOptions`, `SearchOptions`, `DenseStats`, `Refinement`.
+`Types.java` carries the shared vocabulary — `Key`, `Status`, `Scalar`, `Executor`, `Arena`, `Mood`, `Deferred`, `USearchException`, `RowsView`, `Matches`, `Monolith`.
+`DenseIndex.java` carries the dense modality — the index itself, its `On` and `DeferredOn` receivers, `DenseOptions`, `DenseMetric`, `DenseMetadata`, `DenseIndexDescription`, `DenseReachability`, `DenseTraversalStats`, the `Dense*Config` knobs, `ValueLookup`, the arena-backed `Vectors` and `Products`, and the `DenseCursor` and `DenseSearchStream` scans.
+`DenseVerbs.java` writes the blocking verbs once for the index and its `On` receiver.
 `Library.java` loads the shared object and links every verb against it.
 Both vocabularies are nested types, and a nested type imports directly, so every call site below spells the bare name:
 
@@ -14,12 +15,13 @@ Both vocabularies are nested types, and a nested type imports directly, so every
 import cloud.unum.usearch.DenseIndex;
 import cloud.unum.usearch.DenseIndex.DenseMetric;
 import cloud.unum.usearch.DenseIndex.DenseOptions;
-import cloud.unum.usearch.DenseIndex.SearchOptions;
+import cloud.unum.usearch.DenseIndex.DenseSearchConfig;
+import cloud.unum.usearch.Types.Deferred;
 import cloud.unum.usearch.Types.Executor;
 import cloud.unum.usearch.Types.Key;
 import cloud.unum.usearch.Types.Matches;
-import cloud.unum.usearch.Types.Matrix;
-import cloud.unum.usearch.Types.ScalarKind;
+import cloud.unum.usearch.Types.RowsView;
+import cloud.unum.usearch.Types.Scalar;
 ```
 
 ## Installation
@@ -56,26 +58,24 @@ dependencies {
 ## Quickstart
 
 Every verb is a batch over strided matrices, so a memory-mapped dataset reaches the index with no reshape and no copy, and a single vector is a one-row matrix.
-Every fanned-out verb takes an executor, which owns the threads the work runs on.
+Every failure is a `USearchException` whose `Status` mirrors the C interface's `usearch_status_*_k`.
+The index runs every verb on the calling thread, and `index.on(executor)` runs the same verb on the threads an executor owns.
 
 ```java
 public class Main {
     public static void main(String[] arguments) {
-        try (Executor pool = Executor.forRam(0);
-                DenseIndex index = new DenseOptions()
-                        .dimensions(3)
-                        .metric(DenseMetric.ANGULAR)
-                        .quantization(ScalarKind.F32)
-                        .open()) {
+        DenseOptions options = new DenseOptions().dimensions(3).metric(DenseMetric.ANGULAR).quantization(Scalar.F32);
+        try (Executor pool = Executor.forRam(new int[0], 0, 0);
+                DenseIndex index = DenseIndex.initRam(options, new int[0])) {
 
             index.reserve(100);
-            index.add(
+            index.insert(
                 new Key[] {Key.of(42), Key.of(43)},
-                Matrix.of(new float[] {0.1f, 0.2f, 0.3f, 0.3f, 0.2f, 0.1f}, 3),
-                pool);
+                RowsView.of(new float[] {0.1f, 0.2f, 0.3f, 0.3f, 0.2f, 0.1f}, 3));
 
-            Matches matches = Matches.packed(1, 10);
-            index.search(Matrix.of(new float[] {0.1f, 0.2f, 0.3f}, 3), matches, pool, SearchOptions.DERIVED);
+            RowsView query = RowsView.of(new float[] {0.1f, 0.2f, 0.3f}, 3);
+            Matches matches = index.search(query, 10);            // the calling thread
+            matches = index.on(pool).search(query, 10);           // the same verb, on an executor
             for (int rank = 0; rank < matches.count(0); ++rank) {
                 System.out.println(matches.key(0, rank) + " at " + matches.score(0, rank));
             }
@@ -83,6 +83,32 @@ public class Main {
     }
 }
 ```
+
+## Receivers and Deferred Calls
+
+The receiver chooses how a call completes, and the verb stays the same.
+`DenseIndex` runs a verb on the caller's thread, `index.on(executor)` answers an `On` whose verbs block on that executor, and `index.deferred(executor)` answers a `DeferredOn` whose verbs submit there and answer a `Deferred`.
+A `Deferred` owns its outcome, its argument structure, its inputs, its outputs and its arena until the call is final; `status` polls without blocking, and `join` blocks, then answers or raises.
+
+```kotlin
+val matches = withContext(Dispatchers.IO) { call.join() }    // in a Kotlin coroutine
+```
+
+```java
+try (Deferred<Matches> call = index.deferred(pool).search(queries, 10)) {
+    if (call.status() == Status.DEFERRED) {
+        // other work
+    }
+    Matches matches = call.join();
+}
+```
+
+The first `join` frees the outcome and keeps what it answered or raised, so a later `status` or `join` repeats it; only a closed `Deferred` raises `IllegalStateException`.
+Closing an unfinished `Deferred`, or dropping it, waits for the call before freeing what it lent, so a native slab lent to one must stay open until then.
+An executor without threads of its own may hold a deferred call until its next `drain`, blocking call or close, so `drain` it before a `join` there.
+A submission finding the executor's deferred table full, sized by `deferredLimit`, finishes with `Status.CONTENDED`.
+Calls depending on each other are ordered by joining the first before submitting the second, since no call carries an ordering field.
+`cursor` and `searchStream` pull one batch at a time, blocking, so a `DeferredOn` lacks them, and constructors address no index yet, so no receiver offers them.
 
 ## Keys
 
@@ -103,100 +129,115 @@ long identity = key.toLong();
 
 ## Matrices and Quantization
 
-`Matrix` borrows a caller-owned slab: a primitive array, or a direct `ByteBuffer` for a memory-mapped dataset.
+`RowsView` borrows a `MemorySegment`: a heap one, which the array factories wrap, or a native one for a memory-mapped dataset.
 The scalar type of the input is independent of the stored quantization, and the library converts on ingest.
 
 ```java
-Matrix packed = Matrix.of(new float[] {0, 1, 1, 0}, 2);
-Matrix padded = Matrix.strided(slab, rows, 768, 4096, ScalarKind.I8);
-Matrix mapped = Matrix.strided(mappedBuffer, rows, 768, 768, ScalarKind.U8);
+RowsView packed = RowsView.of(new float[] {0, 1, 1, 0}, 2);
+RowsView padded = RowsView.strided(MemorySegment.ofArray(slab), rows, 768, 4096, Scalar.I8);
+RowsView mapped = RowsView.of(channel.map(MapMode.READ_ONLY, 0, size, arena), 768, Scalar.U8);
+RowsView direct = RowsView.of(MemorySegment.ofBuffer(buffer), 768, Scalar.F32);
 ```
 
-A primitive array is copied across the boundary for the duration of one call, since holding the JVM's own storage in place would stall every collector thread for as long as the batch runs.
-A direct `ByteBuffer` is addressed in place with no copy at all, which is the argument to reach for when a batch is large.
+A heap segment is copied across the boundary for the duration of one call, since holding the JVM's own storage in place would stall every collector thread for as long as the batch runs.
+A native segment is addressed in place with no copy at all, which is the argument to reach for when a batch is large.
+A segment over a direct `ByteBuffer` captures the buffer's position and limit once, so moving the buffer later cannot widen what a call reads.
 
 Quantization kinds run from the widest dynamic range down: `F64`, `F32`, `BF16`, `F16`, `E5M2`, `E4M3`, `E3M2`, `E2M3`, `I8`, `I4X2`, `U8`, `U4X2`, `U1X8`.
 Sub-byte kinds count logical dimensions, so sixteen `U1X8` dimensions occupy two bytes per row.
 
 ## Ranked Outputs
 
-Every ranked verb writes into caller-owned outputs and returns only the telemetry its walk reported, so a recall sweep sizes `Matches` once and reuses it across every point.
-`Matches` holds three slabs — a queries-by-wanted matrix of keys, the scores positionally paired with them, and one match count per query.
+Every ranked verb answers its `Matches`: three slabs — a queries-by-wanted matrix of keys, the scores positionally paired with them, and one match count per query.
+Given a wanted count, a call allocates them; given a `DenseSearchConfig` over `Matches` the caller already holds, it lands in those, so a recall sweep sizes them once and reuses them across every point.
 
 ```java
-Matches sized = Matches.packed(queries, 10);
+Matches fresh = index.on(pool).search(queries, 10);
+Matches sized = Matches.allocate(queries.rows(), 10);
 Matches adopted = Matches.of(keySlab, scoreSlab, countSlab);
+index.on(pool).search(queries, new DenseSearchConfig(sized));
 ```
 
 The wanted count is the "k" in kANN and the row width of both matrices, and `Matches.of` reads it off the slab lengths rather than taking it as an argument, so the room reserved and the count asked for cannot disagree.
 Slabs that are not the same shape, or that do not divide into one row per query, are refused with `Status.SHAPE_MISMATCH`.
+Native slabs are written in place, and heap ones are staged and copied back once the call is final.
 
 `count`, `key` and `score` all address one query's row by its position, so no call site multiplies out an offset of its own, and slots past a query's count hold memory the engine never wrote and are refused.
 
 ## Residency
 
-Where the payload lives and which engine traverses it is one tagged choice, and it also decides what loading a checkpoint means.
-Placement within a kind — the memory domains, the device ordinals, the device paths — derives from the machine.
+Where the payload lives is the constructor's name, as in the C lifecycle verbs, so a residency an index lacks has no constructor to call.
+Each takes only the placement its own hardware has - memory domains, devices, or paths, one shard per entry - and an empty list derives the placement: every NUMA node, one free device, or wherever the manifest points.
 
 ```java
-new DenseOptions().residency(Residency.RAM);
-new DenseOptions().residency(Residency.VRAM);
-new DenseOptions().residency(Residency.NVME);
+DenseIndex inRam = DenseIndex.initRam(options, new int[] {0, 1});             // one graph per socket
+DenseIndex inVram = DenseIndex.initVram(options, new int[] {0, 1, 2, 3});     // sharded, never replicated
+DenseIndex copied = DenseIndex.loadRam("index.safegraphs", pool, new int[0], 0);
+DenseIndex uploaded = DenseIndex.loadVram("index.safegraphs", gpu, new int[] {0}, 0);
+DenseIndex mapped = DenseIndex.viewRam("index.safegraphs");
+DenseIndex served = DenseIndex.viewNvme("index.safegraphs.json", disks, new String[] {"/mnt/nvme0"});
 ```
 
-An NVMe handle opens its checkpoint in place, so every mutating verb on it fails with `Status.READ_ONLY`.
+`initRam` and `initVram` create an empty, mutable index, and the `load` family copies a checkpoint in, each taking the executor its read fans out over, or `null` for the calling thread.
+`viewRam` serves a checkpoint in place through a memory mapping, and `viewNvme` from NVMe drives.
+A served handle is read-only, so every mutating verb on it fails with `Status.READ_ONLY`.
+Until NVMe checkpoints carry keys, `viewNvme` answers `Status.UNSUPPORTED`.
 
 ## Executors
 
 An executor owns the host threads or device streams a fanned-out verb runs on; an index owns rows.
 Keeping them apart is what lets one pool serve several indexes, and what makes the cost of spawning visible at the line that spawns.
-Its residency must match the residency of every handle it drives, and no verb derives one for itself.
+Its residency must match the residency of every handle it drives.
+The index itself runs a call on the calling thread instead: single-threaded on RAM, on the handle's device and default stream on VRAM.
 
-There is one factory per residency, and each takes only the hardware its own kind places shards on.
+There is one factory per C constructor, and each takes every argument its C twin takes, the last of them the `deferredLimit` sizing its table of deferred calls, where zero takes the default.
 
 ```java
-Executor.forRam(new int[] {0, 1}, 16);                  // two NUMA nodes, sixteen workers
-Executor.forVram(new int[] {0, 1, 2, 3});               // four devices, one stream apiece
-Executor.forNvme(new String[] {"/mnt/a", "/mnt/b"}, 8); // two drives, eight submission rings
+Executor.forRam(new int[] {0, 1}, 16, 0);                        // two NUMA nodes, sixteen workers
+Executor.onPool(forkUnionPool, new int[0], 0);                   // a thread pool the caller already runs
+Executor.forVram(new int[] {0, 1, 2, 3}, new MemorySegment[0], 0, 0); // four devices, own streams
+Executor.forNvme(new String[] {"/mnt/a", "/mnt/b"}, 8, 0);       // two drives, eight submission rings
 ```
 
 `forVram` takes no thread count: one host thread keeps every device fed, so the width of that pool is the device list itself.
-Naming no hardware derives it — `Executor.forRam(0)` spreads over every memory domain the process may allocate on, `Executor.forVram()` opens one free device, and `Executor.forNvme(0)` leaves every shard where its manifest already points.
+It borrows one CUDA stream per device when given them, and caps scratch bytes per device at a non-zero `scratchLimit`.
+Naming no hardware derives it — an empty domain list spreads over every memory domain the process may allocate on, an empty device list opens one free device, and an empty path list leaves every shard where its manifest already points.
 
 ```java
-try (Executor pool = Executor.forRam(16)) {
-    index.add(keys, vectors, pool);
-    index.search(queries, matches, pool, SearchOptions.DERIVED);
-    index.save("index.safegraphs", pool);
-    pool.drain();
+try (Executor pool = Executor.forRam(new int[0], 16, 0)) {
+    DenseIndex.On receiver = index.on(pool);
+    receiver.insert(keys, vectors);
+    Matches matches = receiver.search(queries, 10);
+    receiver.save("index.safegraphs");
+    pool.drain(Mood.PARKED);
 }
 ```
 
-`add`, `refine`, `search`, `maxsim`, `save`, `load`, `saveBuffer` and `loadBuffer` each take one.
-An executor admits one driver at a time, reporting `Status.CONTENDED` rather than corrupting a dispatch already in flight; handles themselves stay freely concurrent.
+Calls on one executor run in submission order, and handles themselves stay freely concurrent.
+`drain` also sets what the executor does once it goes idle: `Mood.PARKED` lets its threads sleep, `Mood.SPINNING` keeps them hot for the next call's latency.
 
 ## Per-Call Settings and Telemetry
 
 The candidate-pool breadth rides each call rather than the handle, which lets a recall sweep run against one immutable index with no mutation between points.
-Every verb that walks the graph returns the telemetry the walk reported, and `DenseStats.plus` sums a sweep of them.
+Every verb with knobs beyond its inputs has a bare form and one taking its `Dense*Config`, named after the C structure it fills.
+A `DenseTraversalStats` lent to a config is overwritten with what the walk reported, so one reading always belongs to one call.
 
 ```java
-DenseStats inserted = index.add(keys, vectors, pool, new InsertionOptions(256));
-DenseStats searched = index.search(queries, matches, pool, new SearchOptions(64));
-DenseStats total = inserted.plus(searched);
+DenseTraversalStats stats = new DenseTraversalStats();
+index.on(pool).insert(keys, vectors, new DenseInsertConfig().expansionFactor(256));
+index.on(pool).search(queries, new DenseSearchConfig(10).expansionFactor(64).stats(stats));
+System.out.println(stats.computedDistances() + " distances computed");
 ```
 
 ## Refinement
 
 Refinement re-selects the neighbors of every stored entry against the finished graph, improving edges that were chosen when the graph around them was still incomplete.
-It is a build step rather than a repair: a cheap insertion pass followed by one refinement reaches a better graph, in less total time, than a single expensive insertion pass, so a wide expansion factor belongs here rather than in `add`.
-The sweep resumes where a previous one stopped, so a caller loops until the changed-node count falls below whatever rate it considers settled.
+It is a build step rather than a repair: a cheap insertion pass followed by one refinement reaches a better graph, in less total time, than a single expensive insertion pass, so a wide expansion factor belongs here rather than in `insert`.
+Re-selecting a settled node changes nothing, so a caller loops until the changed-node count falls below whatever rate it considers settled.
 
 ```java
-Refinement pass = index.refine(pool, new InsertionOptions(256));
-while (pass.changedNodes() > index.size() / 100) {
-    pass = index.refine(pool, new InsertionOptions(256));
-}
+DenseRefineConfig wide = new DenseRefineConfig().expansionFactor(256);
+while (index.on(pool).refine(wide) > index.describe().size() / 100) {}
 ```
 
 ## Late Interaction
@@ -206,36 +247,71 @@ A document is one key holding its token rows, so `valuesPerKey` bounds how many 
 Every query carries the same number of rows, so a padded token batch applies as is.
 
 ```java
-try (DenseIndex index = new DenseOptions()
-        .dimensions(128)
-        .metric(DenseMetric.INNER)
-        .valuesPerKey(512)
-        .open()) {
-    Matches documents = Matches.packed(tokens.rows() / 32, 10);
-    index.maxsim(tokens, 32, documents, pool, SearchOptions.DERIVED);
+DenseOptions tokens = new DenseOptions().dimensions(128).metric(DenseMetric.INNER).valuesPerKey(512);
+try (DenseIndex index = DenseIndex.initRam(tokens, new int[0])) {
+    Matches documents = index.on(pool).maxsim(queryTokens, 32, 10);
 }
 ```
 
 It runs on the inner-product kinds alone, since a maximum over logits is what late interaction sums; a graph frozen under a distance kind reports `Status.CONFIG_MISMATCH`.
 
+## Attention
+
+`attend` is Flash Attention folded into the walk: every key it scores folds into each head's running maximum, partition and weighted value sum, with no top-k cut, and the outputs come back already divided by the partition.
+The index stores no values, so a `ValueLookup` names the row of a values matrix each scored key resolves to.
+The library states the scalar and width it reads each row as, and a values matrix of another kind, a row outside it, or a lookup that throws leaves the key without a row, which refuses the call with `Status.SHAPE_MISMATCH`; an exception the lookup raised outranks that status.
+The lookup runs on the executor's threads together, so it must tolerate concurrent calls.
+
+```java
+ValueLookup cache = new ValueLookup(RowsView.of(valueRows, 128, Scalar.BF16), rowOf::get);
+DenseSoftmaxState[] carry = new DenseSoftmaxState[queries.rows()];
+index.on(pool).attend(queries, cache, new DenseAttendConfig(outputs).headCount(8).carry(carry));
+```
+
+With `headCount(8)`, row `t * 8 + h` of the queries is head `h` of token `t`, and the heads of one token share its walk.
+The `carry` holds one `DenseSoftmaxState` per query row, which folds this branch into another over the same queries, such as a recent window kept out of the index.
+
 ## Serialization
 
 Checkpoints ride the SafeGraphs interchange format, and the path extension picks the layout: a `.safegraphs` path is one monolith, a `.safegraphs.json` path is a manifest cataloging many.
-A handle built with zero dimensions freezes its geometry at the first load, from the checkpoint's own headers.
+A loaded index takes its geometry and metric from the checkpoint's own headers, and only the placement and `valuesPerKey` from its constructor.
 
 ```java
-index.save("index.safegraphs", pool);
-index.load("index.safegraphs", pool);
+index.on(pool).save("index.safegraphs");
+DenseIndex loaded = DenseIndex.loadRam("index.safegraphs");
 
-DenseMetadata described = DenseIndex.metadata("index.safegraphs");
+DenseMetadata described = DenseIndex.metadataRead("index.safegraphs", pool);
 
-byte[] slab = new byte[(int) index.storageRequirements()];
-index.saveBuffer(slab, pool);
-index.loadBuffer(slab, pool);
+try (Monolith monolith = index.saveBuffer()) {
+    DenseIndex copied = DenseIndex.loadRamBuffer(monolith.segment());
+}
 ```
 
+Only the call can size a monolith, so `saveBuffer` lands it in an arena, as the next section describes, and `segment` reads it in place.
+
 `DenseMetadata` carries the four fields a checkpoint froze - dimensions, metric, quantization and connectivity.
-Residency is absent because a checkpoint records where it was written rather than where a reader must keep it, and `valuesPerKey` is absent because it bounds a live handle's mutable state rather than the serialized form.
+The placement is absent because a checkpoint records where it was written rather than where a reader must keep it, and `valuesPerKey` is absent because it bounds a live handle's mutable state rather than the serialized form.
+
+## Arenas
+
+Outputs only the call can size — the rows of `get`, the products of `multiply`, the monolith of `saveBuffer` — land in an `Arena` the library allocates where the executor computes, and the result reads them in place with no copy.
+Each of these verbs takes an optional arena:
+
+- Passing none gives the result a fresh arena of its own, freed when the result is closed, so the result outlives every later call.
+- Passing an arena reuses its memory, so a steady loop allocates once, and the result is valid until that arena is handed to another call or closed.
+
+Reading a result after its arena moved on raises `IllegalStateException` rather than touching freed memory, and so does joining a deferred call whose arena a later call already rewound.
+An arena serves one call at a time and takes no lock, so a second call submitted while the first runs fails with `Status.CONTENDED`.
+One the program drops without closing is freed once neither it nor any result read out of it is reachable.
+
+```java
+try (Arena arena = new Arena()) {
+    for (Key key : keys) {
+        Vectors rows = index.on(pool).get(key, Scalar.F32, arena);
+        consume(rows.segment(), rows.rows(), rows.strideBytes()); // valid until the next call takes `arena`
+    }
+}
+```
 
 ## Reading Back
 
@@ -243,18 +319,68 @@ Residency is absent because a checkpoint records where it was written rather tha
 long entries = index.count(Key.of(42));
 boolean present = index.contains(Key.of(42));
 
-Matrix retrieved = Matrix.allocate(entries, 3, ScalarKind.F32);
-index.get(Key.of(42), retrieved);
+try (Vectors every = index.get(Key.of(42), Scalar.F32)) {
+    float[] values = every.segment().toArray(ValueLayout.JAVA_FLOAT);
+}
+
+DenseIndexDescription description = index.describe();
+DenseReachability reachability = index.health();
+System.out.println(reachability.reachable() + " of " + reachability.audited() + " entries reachable");
 ```
 
-`get` and `search` report the __true__ extent, never the number written, so a count above the room reserved for it means the copy was truncated.
-`Matches.truncated` asks that question directly, and no accessor will hand back a slot the engine never wrote.
+`get` returns every row the key holds, however many there turn out to be, at the natural width of the kind asked for, with the `columns` and `strideBytes` the library reported.
+`describe` reports the frozen `DenseMetadata` with the size, capacity, memory usage and dispatched capabilities in one call.
+`health` audits how much of the graph a search reaches from its landmarks; entries it misses stay unfound until a `refine` re-links them.
+
+## Sparse Products
+
+`multiply` is the linear-algebra sibling of `search`: it reports every pair the traversal scored rather than only the nearest, as a ragged product with one run of pairs per left row, in traversal order.
+It runs on the inner-product kinds alone, and a non-zero wanted count keeps the first pairs each row's walk scored.
+
+```java
+try (Products products = index.on(pool).multiply(left)) {
+    for (int row = 0; row < products.queries(); ++row) {
+        for (long rank = 0; rank < products.count(row); ++rank) {
+            System.out.println(products.key(row, rank) + " x " + products.score(row, rank));
+        }
+    }
+}
+```
+
+## Scans and Merges
+
+A cursor walks the index contents as a sequential row scan, reading each shard's publication watermark as it enters that shard, so a row once passed is never revisited.
+The caller states the batch and the row width and scalar it wants the rows in, through the arrays and the matrix it lends.
+
+```java
+try (DenseCursor cursor = index.on(pool).cursor()) {
+    Key[] keys = new Key[1024];
+    RowsView rows = RowsView.allocate(1024, 768, Scalar.F32);
+    for (long written = cursor.next(keys, rows); written != 0; written = cursor.next(keys, rows)) {
+        export(keys, rows, written);
+    }
+}
+```
+
+A search stream is a resumable best-first traversal of one query row, so a caller that post-filters aggressively pulls until satisfied instead of guessing "k" upfront; no engine residency implements it yet, so the engine answers `Status.UNSUPPORTED`.
+`merge` absorbs donor indexes, consuming them whether or not it succeeds, and no engine residency absorbs donors yet either.
+
+```java
+try (DenseSearchStream stream = index.on(pool).searchStream(query)) {
+    Matches next = stream.next(16);
+}
+index.on(pool).merge(shard0, shard1);   // both donors are closed from here on
+```
 
 ## Concurrency
 
 A handle may be shared across threads.
 On a RAM handle, insertions and searches overlap freely: searches read only entries published behind the visibility watermark and never write to the graph, while insertions synchronize through per-node locks and publish in order.
 Serialization is the one exception, demanding a mutation-free window, though concurrent readers keep searching throughout.
+
+Every call leases the index it names through the FFM scope its handle lives in, so closing an index while another thread's blocking call still runs on it raises `IllegalStateException` rather than freeing the handle under that call; deferred calls are waited for by the close itself.
+A call leases one scope only, so an executor, a cursor or a stream is closed once no other thread still calls through it.
+An index, executor, arena or deferred call the program drops without closing is released once it is unreachable.
 
 The filtered search of the C interface stays unbound.
 Its predicate runs on the engine's own worker threads, which are not attached to the JVM, so every candidate would pay an attach, an upcall, and an exception check — and a predicate that threw would unwind through native frames that cannot handle it.
@@ -269,14 +395,37 @@ Nullness is part of the contract.
 The package is `@NullMarked`, so a Kotlin caller gets real non-null types across the whole boundary rather than platform types, and the compiler refuses a null where the API does not accept one:
 
 ```kotlin
-val index: DenseIndex = DenseOptions().dimensions(2).quantization(ScalarKind.F32).open()
+val index: DenseIndex = DenseIndex.initRam(DenseOptions().dimensions(2).quantization(Scalar.F32), intArrayOf())
 index.use { ... }                       // AutoCloseable is Kotlin's `use`
+val matches = withContext(Dispatchers.IO) { index.deferred(pool).search(queries, 10).use { it.join() } }
 ```
 
 Scala reads no nullness annotations, so what it gets instead is that the array-based batch verbs take `Array[Key]` and `Array[Float]` with no conversion, since both are JVM arrays already:
 
 ```scala
 val keys: Array[Key] = Array(Key.of(1), Key.of(2))
-index.add(keys, Matrix.of(Array(1.0f, 0.0f, 0.0f, 1.0f), 2), pool)
+index.on(pool).insert(keys, RowsView.of(Array(1.0f, 0.0f, 0.0f, 1.0f), 2))
 ```
 
+## Design
+
+The SDK is a thin layer over the C ABI in `include/usearch/`, and every rule below follows from that.
+
+- __Names follow the header.__
+  Every type is its C name without `usearch_` and `_t`, every constructor is a C lifecycle verb taking only what its C structure takes, and every wrapper's documentation names the C symbol it calls, or says it is binding-only.
+- __Blocking calls stay as simple as the language allows.__
+  `index.search(queries, 10)` takes no executor, completion or callback and returns its result; nothing about asynchrony reaches a caller who never asks for it.
+- __The receiver chooses, the verb stays.__
+  `DenseVerbs` writes every blocking verb once, for the index on the calling thread and for the `On` that `index.on(executor)` makes, and the `DeferredOn` that `index.deferred(executor)` makes offers the same verbs answering a `Deferred`.
+  The receiver's type alone chooses the completion, never a flag or a string.
+- __Deferred calls are symmetric through the language's own idioms.__
+  A `Deferred` is `AutoCloseable` and joins as a `CompletableFuture` would, so Java waits in a try-with-resources block or a virtual thread, and Kotlin in `withContext(Dispatchers.IO)`.
+- __Nothing costs anything until it is used.__
+  A blocking call allocates its argument structure in a confined arena freed on return and takes no lock; a deferred one keeps that memory in a shared arena until the call is final.
+- __A `Deferred` has no life of its own.__
+  `status` is an acquire load of the outcome word, `join` blocks in `usearch_outcome_wait`, and closing or dropping an unfinished one waits the same way before freeing what it lent.
+  The SDK starts no thread, counts no calls and keeps no queue: the C executor owns every thread, and every wait belongs to the C library.
+- __Statuses and modes are enums.__
+  `Status`, `Mood`, `DenseMetric` and `Scalar` carry the C enumerators' values, and their `toString` spells the names the C tables own, so nothing is compared as a string.
+- __Arenas are reused, never shared.__
+  A result owns a fresh arena by default, a passed one is reused, and no index holds an arena of its own.

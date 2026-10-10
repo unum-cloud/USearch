@@ -40,10 +40,11 @@ sourceSets {
     }
 }
 
-// The Kotlin plugin adds every Java source directory to `main`'s own Kotlin set, so `main` is
-// cleared - otherwise `compileKotlin` sweeps up the interop suites below and compiles them against
-// a classpath carrying no test framework.
+// The Kotlin plugin adds every Java source directory to `main`'s and `test`'s own Kotlin sets, so both
+// are cleared - otherwise they sweep up the interop suites below and compile them against a classpath
+// carrying no Kotlin test framework.
 sourceSets.main.kotlin.srcDirs = []
+sourceSets.test.kotlin.srcDirs = []
 
 task sourcesJar(type: Jar, dependsOn: classes) {
     archiveClassifier.set('sources')
@@ -101,7 +102,7 @@ spotless {
     // The interop suites are formatted by their own languages' tools, at the same 120 columns the
     // rest of the tree wraps at.
     kotlin {
-        target 'kotlin/**/*.kt'
+        target 'java/test/**/*.kt'
         // ktlint rather than ktfmt: it is the only Kotlin formatter that reads the import layout
         // from `.editorconfig`, which is how the house grouping survives here as it does in Java.
         ktlint('1.5.0')
@@ -110,7 +111,7 @@ spotless {
     }
 
     scala {
-        target 'scala/**/*.scala'
+        target 'java/test/**/*.scala'
         // Spotless has no `importOrder` for Scala, and scalafmt does not reorder, so the house
         // grouping in the sources stands as written.
         scalafmt('3.8.3').configFile('.scalafmt.conf')
@@ -210,6 +211,7 @@ test {
 // `main`'s output rather than its sources - exercising what a downstream caller actually sees - and
 // a test task of its own. `check` runs all three, so CI covers the boundary from every side.
 // Each language brings its own test framework; everything else it needs comes from `test`.
+def interopExtensions = [kotlin: "kt", scala: "scala"]
 def interopFrameworks = [
     kotlin: "org.jetbrains.kotlin:kotlin-test-junit5:2.4.20",
     scala: "org.scala-lang:scala3-library_3:3.9.0",
@@ -221,7 +223,9 @@ interopFrameworks.each { language, framework ->
         compileClasspath += sourceSets.main.output
         runtimeClasspath += sourceSets.main.output
         java.srcDirs = []
-        it."$language".srcDirs = [language]
+        // The suites sit beside the Java ones in their package's directory, picked out by extension.
+        it."$language".srcDirs = ["java/test"]
+        it."$language".include("**/*.${interopExtensions[language]}")
     }
     configurations."${interop}Implementation".extendsFrom configurations.testImplementation
     configurations."${interop}RuntimeOnly".extendsFrom configurations.testRuntimeOnly

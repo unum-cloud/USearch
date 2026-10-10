@@ -4,7 +4,7 @@ import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.lang.foreign.Arena;
+import java.lang.foreign.AddressLayout;
 import java.lang.foreign.FunctionDescriptor;
 import java.lang.foreign.Linker;
 import java.lang.foreign.MemoryLayout;
@@ -48,12 +48,6 @@ final class Library {
     private static final Linker LINKER = Linker.nativeLinker();
 
     /**
-     * Ensures the shared object is loaded before a caller reaches the C interface. The body is empty
-     * on purpose: invoking it initializes this class, and that initialization runs the loader above.
-     */
-    static void require() {}
-
-    /**
      * The handle for one C verb.
      *
      * <p>
@@ -87,113 +81,170 @@ final class Library {
     /** An enumerator, which C sizes as an @c int. */
     static final ValueLayout.OfInt ENUM = ValueLayout.JAVA_INT;
     /** Any pointer the ABI hands over or takes back. */
-    static final java.lang.foreign.AddressLayout POINTER = ValueLayout.ADDRESS;
+    static final AddressLayout POINTER = ValueLayout.ADDRESS;
 
-    /** @c usearch_error_t - the status every verb reports through, and its borrowed message. */
-    static final StructLayout ERROR = MemoryLayout.structLayout(
-                    ENUM.withName("status"), MemoryLayout.paddingLayout(4), POINTER.withName("message"))
-            .withName("usearch_error_t");
+    /** The four bytes C inserts after an enumerator that a pointer or a @c size_t follows. */
+    static MemoryLayout padding() {
+        return MemoryLayout.paddingLayout(4);
+    }
 
-    /** @c usearch_keys_view_t - one key per row the batch it accompanies carries. */
-    static final StructLayout KEYS_VIEW = MemoryLayout.structLayout(POINTER.withName("data"), SIZE.withName("count"))
+    /** @c usearch_outcome_t - the status every verb reports through, and its static message. */
+    static final StructLayout OUTCOME = MemoryLayout.structLayout(
+                    ENUM.withName("status"), padding(), POINTER.withName("message"))
+            .withName("usearch_outcome_t");
+
+    /** @c usearch_key_t - sixteen opaque bytes, embedded by value. */
+    static final StructLayout KEY = MemoryLayout.structLayout(
+                    MemoryLayout.sequenceLayout(16, ValueLayout.JAVA_BYTE).withName("bytes"))
+            .withName("usearch_key_t");
+
+    /** @c usearch_bytes_view_t - a borrowed byte run, which a path is. */
+    static final StructLayout BYTES_VIEW = MemoryLayout.structLayout(POINTER.withName("data"), SIZE.withName("length"))
+            .withName("usearch_bytes_view_t");
+
+    /** @c usearch_keys_view_t - one key per row of the call's count. */
+    static final StructLayout KEYS_VIEW = MemoryLayout.structLayout(POINTER.withName("data"), SIZE.withName("stride"))
             .withName("usearch_keys_view_t");
 
-    /** @c usearch_matrix_view_t - a strided run of rows the engine reads. */
-    static final StructLayout MATRIX_VIEW = MemoryLayout.structLayout(
+    /** @c usearch_rows_view_t - a strided run of rows the engine reads, checked against the frozen width. */
+    static final StructLayout ROWS_VIEW = MemoryLayout.structLayout(
                     POINTER.withName("data"),
-                    SIZE.withName("rows"),
+                    SIZE.withName("stride"),
                     SIZE.withName("columns"),
-                    SIZE.withName("stride_bytes"),
-                    ENUM.withName("scalar_kind"),
-                    MemoryLayout.paddingLayout(4))
-            .withName("usearch_matrix_view_t");
+                    ENUM.withName("scalar"),
+                    padding())
+            .withName("usearch_rows_view_t");
 
-    /** @c usearch_matrix_span_t - its writable twin, whose capacity bounds what a verb fills. */
-    static final StructLayout MATRIX_SPAN = MemoryLayout.structLayout(
-                    POINTER.withName("data"),
-                    SIZE.withName("capacity"),
-                    SIZE.withName("columns"),
-                    SIZE.withName("stride_bytes"),
-                    ENUM.withName("scalar_kind"),
-                    MemoryLayout.paddingLayout(4))
-            .withName("usearch_matrix_span_t");
-
-    /** @c usearch_matches_span_t - the three caller-owned buffers a ranked verb fills. */
+    /** @c usearch_matches_span_t - the three caller-owned outputs a ranked verb fills. */
     static final StructLayout MATCHES_SPAN = MemoryLayout.structLayout(
                     POINTER.withName("keys"),
-                    SIZE.withName("keys_stride_bytes"),
+                    SIZE.withName("keys_stride"),
                     POINTER.withName("scores"),
-                    SIZE.withName("scores_stride_bytes"),
+                    SIZE.withName("scores_stride"),
                     POINTER.withName("counts"),
+                    SIZE.withName("capacity"),
                     SIZE.withName("wanted"))
             .withName("usearch_matches_span_t");
 
-    /** @c usearch_dense_traversal_stats_t - a pure output, fully overwritten by its call. */
-    static final StructLayout TRAVERSAL_STATS = MemoryLayout.structLayout(
-                    SIZE.withName("visited_members"), SIZE.withName("computed_distances"), SIZE.withName("restarts"))
-            .withName("usearch_dense_traversal_stats_t");
+    /** @c usearch_rows_span_t - the writable twin of a rows view, whose capacity bounds what a verb fills. */
+    static final StructLayout ROWS_SPAN = MemoryLayout.structLayout(
+                    POINTER.withName("data"),
+                    SIZE.withName("stride"),
+                    SIZE.withName("columns"),
+                    SIZE.withName("capacity"),
+                    ENUM.withName("scalar"),
+                    padding())
+            .withName("usearch_rows_span_t");
+
+    /** @c usearch_keys_span_t - the writable twin of a keys view, whose capacity bounds what a verb fills. */
+    static final StructLayout KEYS_SPAN = MemoryLayout.structLayout(
+                    POINTER.withName("data"), SIZE.withName("stride"), SIZE.withName("capacity"))
+            .withName("usearch_keys_span_t");
 
     /** @c usearch_ram_options_t, @c usearch_vram_options_t and @c usearch_nvme_options_t all pair
      *      a borrowed run with its count, so one layout serves the three. */
     static final StructLayout PLACEMENT = MemoryLayout.structLayout(POINTER.withName("data"), SIZE.withName("count"))
             .withName("usearch_placement_options_t");
 
-    /** @c usearch_bytes_view_t - a borrowed byte run, which a path is. */
-    static final StructLayout BYTES_VIEW = MemoryLayout.structLayout(POINTER.withName("data"), SIZE.withName("length"))
-            .withName("usearch_bytes_view_t");
-
-    /** @c usearch_key_t - sixteen opaque bytes, passed and returned by value. */
-    static final StructLayout KEY = MemoryLayout.structLayout(
-                    MemoryLayout.sequenceLayout(16, ValueLayout.JAVA_BYTE).withName("bytes"))
-            .withName("usearch_key_t");
-
-    /** @c usearch_dense_options_t - the geometry, the metric, and the residency arm one of three. */
-    static final StructLayout DENSE_OPTIONS = MemoryLayout.structLayout(
-                    ENUM.withName("metric"),
-                    MemoryLayout.paddingLayout(4),
-                    POINTER.withName("metric_callback"),
-                    POINTER.withName("metric_callback_state"),
-                    ENUM.withName("quantization"),
-                    MemoryLayout.paddingLayout(4),
-                    SIZE.withName("dimensions"),
-                    SIZE.withName("connectivity"),
-                    SIZE.withName("values_per_key"),
-                    ENUM.withName("residency"),
-                    MemoryLayout.paddingLayout(4),
-                    POINTER.withName("placement_data"),
-                    SIZE.withName("placement_count"))
-            .withName("usearch_dense_options_t");
-
-    /** @c usearch_dense_metadata_t - the four fields a checkpoint froze. */
-    static final StructLayout DENSE_METADATA = MemoryLayout.structLayout(
-                    ENUM.withName("metric"),
-                    ENUM.withName("quantization"),
-                    SIZE.withName("dimensions"),
-                    SIZE.withName("connectivity"))
-            .withName("usearch_dense_metadata_t");
+    /** @c usearch_dense_traversal_stats_t - a pure output, fully overwritten by its call. */
+    static final StructLayout TRAVERSAL_STATS = MemoryLayout.structLayout(
+                    SIZE.withName("visited_members"), SIZE.withName("computed_distances"), SIZE.withName("restarts"))
+            .withName("usearch_dense_traversal_stats_t");
 
     /**
-     * Raises whatever @p error carries, and answers nothing when it carries success.
+     * The fields that open every verb on a handle - the handle, the executor, the outcome, the
+     * completion - then @p rest.
+     */
+    static StructLayout opening(MemoryLayout... rest) {
+        MemoryLayout[] fields = new MemoryLayout[4 + rest.length];
+        fields[0] = POINTER.withName("index");
+        fields[1] = POINTER.withName("executor");
+        fields[2] = POINTER.withName("outcome");
+        fields[3] = ENUM.withName("completion");
+        System.arraycopy(rest, 0, fields, 4, rest.length);
+        return MemoryLayout.structLayout(fields);
+    }
+
+    /** The offset of one possibly nested field, named by the path of member names leading to it. */
+    static long offset(StructLayout layout, String... path) {
+        MemoryLayout.PathElement[] elements = new MemoryLayout.PathElement[path.length];
+        for (int depth = 0; depth != path.length; ++depth) {
+            elements[depth] = MemoryLayout.PathElement.groupElement(path[depth]);
+        }
+        return layout.byteOffset(elements);
+    }
+
+    /** A verb taking one argument structure, which is every verb but the name lookups and frees. */
+    static MethodHandle verb(String name) {
+        return downcall(name, FunctionDescriptor.ofVoid(POINTER));
+    }
+
+    /** One of the C name tables, which spell an enumerator as a static string. */
+    static MethodHandle namer(String name) {
+        return downcall(name, FunctionDescriptor.of(POINTER, ENUM));
+    }
+
+    /** Calls a verb or a free, either of which takes one pointer and answers nothing. */
+    static void invoke(MethodHandle verb, MemorySegment argument) {
+        try {
+            verb.invokeExact(argument);
+        } catch (Throwable failure) {
+            throw rethrow(failure);
+        }
+    }
+
+    /** Reads the static string a name query answers. */
+    static String text(MethodHandle query) {
+        try {
+            return string((MemorySegment) query.invokeExact());
+        } catch (Throwable failure) {
+            throw rethrow(failure);
+        }
+    }
+
+    /** Reads the static string a name table spells for @p code. */
+    static String text(MethodHandle namer, int code) {
+        try {
+            return string((MemorySegment) namer.invokeExact(code));
+        } catch (Throwable failure) {
+            throw rethrow(failure);
+        }
+    }
+
+    /** Reads a static, null-terminated C string, answering an empty one for null. */
+    @SuppressWarnings("restricted")
+    static String string(MemorySegment text) {
+        return text.equals(MemorySegment.NULL)
+                ? ""
+                : text.reinterpret(Long.MAX_VALUE).getString(0);
+    }
+
+    /**
+     * Raises whatever a final @p outcome carries, and answers nothing on success.
      *
      * @throws Types.USearchException when the verb reported a failure.
      */
-    @SuppressWarnings("restricted")
-    static void raise(MemorySegment error) {
-        int status = error.get(ENUM, ERROR.byteOffset(MemoryLayout.PathElement.groupElement("status")));
+    static void check(MemorySegment outcome) {
+        int status = outcome.get(ENUM, offset(OUTCOME, "status"));
         if (status == 0) {
             return;
         }
-        MemorySegment message = error.get(POINTER, ERROR.byteOffset(MemoryLayout.PathElement.groupElement("message")));
-        throw Types.USearchException.of(
-                status,
-                message.equals(MemorySegment.NULL)
-                        ? "no detail"
-                        : message.reinterpret(Long.MAX_VALUE).getString(0));
+        throw new Types.USearchException(
+                Types.Status.of(status), string(outcome.get(POINTER, offset(OUTCOME, "message"))));
     }
 
-    /** A zeroed @c usearch_error_t in @p arena, which every verb writes its verdict into. */
-    static MemorySegment error(Arena arena) {
-        return arena.allocate(ERROR);
+    /**
+     * Carries a downcall's failure out unchanged when it is already one of ours, and wraps anything
+     * else - a linkage fault, a layout mismatch - as the internal error it is.
+     */
+    static RuntimeException rethrow(Throwable failure) {
+        if (failure instanceof RuntimeException raised) {
+            return raised;
+        }
+        if (failure instanceof Error raised) {
+            throw raised;
+        }
+        return new IllegalStateException("usearch: the C interface could not be reached", failure);
     }
 
     /**

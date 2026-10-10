@@ -529,7 +529,7 @@ cmake --build build_release --target usearch_static usearch_shared
 gradle -PusearchPrebuilt=$PWD/build_release test
 ```
 
-Kotlin and Scala consume the same published Java surface rather than a binding of their own, and each has a suite under `kotlin/` and `scala/` covering what only another JVM language can observe — that `@NullMarked` reaches a Kotlin caller as real non-null types, and that the array-based batch verbs take Scala arrays unconverted.
+Kotlin and Scala consume the same published Java surface rather than a binding of their own, and each has a suite beside the Java one in `java/test/cloud/unum/usearch/`, `InteropTest.kt` and `InteropTest.scala`, covering what only another JVM language can observe — that `@NullMarked` reaches a Kotlin caller as real non-null types, and that the array-based batch verbs take Scala arrays unconverted.
 `check` runs all three.
 
 ```sh
