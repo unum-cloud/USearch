@@ -508,8 +508,8 @@ typedef struct usearch_geospatial_traversal_stats_t {
     size_t restarts;
 } usearch_geospatial_traversal_stats_t;
 
-/** The arguments of @c usearch_geospatial_add. */
-typedef struct usearch_geospatial_add_t {
+/** The arguments of @c usearch_geospatial_insert. */
+typedef struct usearch_geospatial_insert_t {
 
     /** The handle to be populated. */
     usearch_geospatial_index_t index;
@@ -548,7 +548,7 @@ typedef struct usearch_geospatial_add_t {
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_geospatial_traversal_stats_t* stats;
-} usearch_geospatial_add_t;
+} usearch_geospatial_insert_t;
 
 /**
  *  @brief Adds a tape of point sets under their keys - the native batch operation; a
@@ -567,7 +567,7 @@ typedef struct usearch_geospatial_add_t {
  *  A key already holding @c values_per_key entries rejects the whole call, since a smaller retry
  *  cannot help.
  */
-USEARCH_EXPORT void usearch_geospatial_add(usearch_geospatial_add_t* arguments);
+USEARCH_EXPORT void usearch_geospatial_insert(usearch_geospatial_insert_t* arguments);
 
 /** The arguments of @c usearch_geospatial_refine. */
 typedef struct usearch_geospatial_refine_t {
@@ -606,7 +606,7 @@ typedef struct usearch_geospatial_refine_t {
  *
  *  This is a build step rather than a repair. A cheap insertion pass followed by one refinement
  *  reaches a better graph, in less total time, than a single expensive insertion pass - so a wide
- *  @c expansion_factor belongs here rather than in @c usearch_geospatial_add.
+ *  @c expansion_factor belongs here rather than in @c usearch_geospatial_insert.
  *
  *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-selecting an entry's
  *  edges is idempotent and claims no identity, so a stopped pass leaves the graph correct and

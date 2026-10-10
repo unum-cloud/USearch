@@ -575,8 +575,8 @@ void usearch_sequence_describe(usearch_sequence_describe_t* arguments) {
     };
 }
 
-void usearch_sequence_add(usearch_sequence_add_t* arguments) {
-    if (deferred<usearch_sequence_add>(arguments)) return;
+void usearch_sequence_insert(usearch_sequence_insert_t* arguments) {
+    if (deferred<usearch_sequence_insert>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_sequence_traversal_stats_t* const stats = arguments->stats;
     reset(stats);

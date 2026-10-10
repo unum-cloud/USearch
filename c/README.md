@@ -34,7 +34,7 @@ int main(void) {
     if (outcome.status != usearch_status_success_k) goto cleanup;
 
     // Populate:
-    usearch_dense_add(&(usearch_dense_add_t){
+    usearch_dense_insert(&(usearch_dense_insert_t){
         .index = index, .executor = executor, .outcome = &outcome,
         .count = 2, .keys = {keys, sizeof(usearch_key_t)},
         .vectors = {vectors, sizeof(vectors[0]), 128, usearch_scalar_f32_k}});
@@ -163,7 +163,7 @@ Pin the rows you upload often, and the bounce disappears:
 float* rows = NULL;
 cudaHostAlloc((void**)&rows, 4096 * 1024 * sizeof(float), cudaHostAllocDefault);
 // ... fill 4096 rows ...
-usearch_dense_add(&(usearch_dense_add_t){
+usearch_dense_insert(&(usearch_dense_insert_t){
     .index = index, .executor = gpu, .outcome = &outcome,
     .count = 4096, .keys = {row_keys, sizeof(usearch_key_t)},
     .vectors = {rows, 1024 * sizeof(float), 1024, usearch_scalar_f32_k}});
@@ -264,7 +264,7 @@ usearch_sequence_init_ram(&(usearch_sequence_init_ram_t){
 char const tape[] = "kittensittingmitten";
 size_t const offsets[4] = {0, 6, 13, 19};
 usearch_key_t words[3] = {{{1}}, {{2}}, {{3}}};
-usearch_sequence_add(&(usearch_sequence_add_t){
+usearch_sequence_insert(&(usearch_sequence_insert_t){
     .index = sequences, .executor = executor, .outcome = &outcome,
     .count = 3, .keys = {words, sizeof(usearch_key_t)}, .sequences = {tape, offsets}});
 

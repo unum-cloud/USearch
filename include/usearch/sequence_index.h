@@ -47,7 +47,7 @@ extern "C" {
  *  @brief Similarity Search Index over variable-length sequences.
  *
  *  @see usearch_sequence_init_ram
- *  @see usearch_sequence_add
+ *  @see usearch_sequence_insert
  *  @see usearch_sequence_search
  */
 typedef struct usearch_sequence_index_handle_t* usearch_sequence_index_t;
@@ -361,8 +361,8 @@ typedef struct usearch_sequence_traversal_stats_t {
     size_t restarts;
 } usearch_sequence_traversal_stats_t;
 
-/** The arguments of @c usearch_sequence_add. */
-typedef struct usearch_sequence_add_t {
+/** The arguments of @c usearch_sequence_insert. */
+typedef struct usearch_sequence_insert_t {
 
     /** The handle to be populated. */
     usearch_sequence_index_t index;
@@ -397,7 +397,7 @@ typedef struct usearch_sequence_add_t {
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_sequence_traversal_stats_t* stats;
-} usearch_sequence_add_t;
+} usearch_sequence_insert_t;
 
 /**
  *  @brief Adds a tape of sequences under their keys - the native batch operation; a single
@@ -413,7 +413,7 @@ typedef struct usearch_sequence_add_t {
  *  A key already holding @c values_per_key entries rejects the whole call, since a smaller retry
  *  cannot help.
  */
-USEARCH_EXPORT void usearch_sequence_add(usearch_sequence_add_t* arguments);
+USEARCH_EXPORT void usearch_sequence_insert(usearch_sequence_insert_t* arguments);
 
 /** The arguments of @c usearch_sequence_refine. */
 typedef struct usearch_sequence_refine_t {
@@ -452,7 +452,7 @@ typedef struct usearch_sequence_refine_t {
  *
  *  This is a build step rather than a repair. A cheap insertion pass followed by one refinement
  *  reaches a better graph, in less total time, than a single expensive insertion pass - so a wide
- *  @c expansion_factor belongs here rather than in @c usearch_sequence_add. It pays most in this
+ *  @c expansion_factor belongs here rather than in @c usearch_sequence_insert. It pays most in this
  *  modality, where a single alignment is quadratic and a stingy insertion pass is tempting.
  *
  *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-selecting an entry's

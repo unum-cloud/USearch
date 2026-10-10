@@ -98,7 +98,7 @@ extern "C" {
  *  @brief Similarity Search Index over rank-2 objects of varying height.
  *
  *  @see usearch_matrix_init_ram
- *  @see usearch_matrix_add
+ *  @see usearch_matrix_insert
  *  @see usearch_matrix_search
  */
 typedef struct usearch_matrix_index_handle_t* usearch_matrix_index_t;
@@ -449,8 +449,8 @@ typedef struct usearch_matrix_traversal_stats_t {
     size_t restarts;
 } usearch_matrix_traversal_stats_t;
 
-/** The arguments of @c usearch_matrix_add. */
-typedef struct usearch_matrix_add_t {
+/** The arguments of @c usearch_matrix_insert. */
+typedef struct usearch_matrix_insert_t {
 
     /** The handle to be populated. */
     usearch_matrix_index_t index;
@@ -487,7 +487,7 @@ typedef struct usearch_matrix_add_t {
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_matrix_traversal_stats_t* stats;
-} usearch_matrix_add_t;
+} usearch_matrix_insert_t;
 
 /**
  *  @brief Adds a tape of matrices under their keys - the native batch operation; a single
@@ -504,7 +504,7 @@ typedef struct usearch_matrix_add_t {
  *  A key already holding @c values_per_key entries rejects the whole call, since a smaller retry
  *  cannot help.
  */
-USEARCH_EXPORT void usearch_matrix_add(usearch_matrix_add_t* arguments);
+USEARCH_EXPORT void usearch_matrix_insert(usearch_matrix_insert_t* arguments);
 
 /** The arguments of @c usearch_matrix_refine. */
 typedef struct usearch_matrix_refine_t {
@@ -543,7 +543,7 @@ typedef struct usearch_matrix_refine_t {
  *
  *  This is a build step rather than a repair. A cheap insertion pass followed by one refinement
  *  reaches a better graph, in less total time, than a single expensive insertion pass - so a wide
- *  @c expansion_factor belongs here rather than in @c usearch_matrix_add. It pays most in this
+ *  @c expansion_factor belongs here rather than in @c usearch_matrix_insert. It pays most in this
  *  modality, where one comparison scores a whole matrix against another.
  *
  *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-selecting an entry's

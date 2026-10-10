@@ -2041,7 +2041,7 @@ static bool rejects_columns(usearch_dense_index_handle_t& index, std::size_t cou
                             "The rows' width differs from the frozen geometry");
 }
 
-USEARCH_EXPORT void usearch_dense_add(usearch_dense_add_t* arguments) {
+USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
     usearch_outcome_t* const outcome = arguments->outcome;
     usearch_dense_traversal_stats_t* const stats = arguments->stats;
     usearch_keys_view_t const keys = arguments->keys;

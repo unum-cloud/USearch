@@ -548,8 +548,8 @@ void usearch_geospatial_describe(usearch_geospatial_describe_t* arguments) {
     };
 }
 
-void usearch_geospatial_add(usearch_geospatial_add_t* arguments) {
-    if (deferred<usearch_geospatial_add>(arguments)) return;
+void usearch_geospatial_insert(usearch_geospatial_insert_t* arguments) {
+    if (deferred<usearch_geospatial_insert>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_geospatial_traversal_stats_t* const stats = arguments->stats;
     reset(stats);

@@ -525,8 +525,8 @@ void usearch_dense_describe(usearch_dense_describe_t* arguments) {
     };
 }
 
-void usearch_dense_add(usearch_dense_add_t* arguments) {
-    if (deferred<usearch_dense_add>(arguments)) return;
+void usearch_dense_insert(usearch_dense_insert_t* arguments) {
+    if (deferred<usearch_dense_insert>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     usearch_dense_index_handle_t& index = *arguments->index;

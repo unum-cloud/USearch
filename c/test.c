@@ -198,12 +198,12 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     for (size_t row = 0; row != collection_size; ++row) keys[row] = key_of(row);
 
     size_t const row_bytes = dimensions * sizeof(float);
-    usearch_dense_add(&(usearch_dense_add_t) {.index = index,
-                                              .executor = executor,
-                                              .outcome = &outcome,
-                                              .count = collection_size,
-                                              .keys = {keys, sizeof(usearch_key_t)},
-                                              .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
+    usearch_dense_insert(&(usearch_dense_insert_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = collection_size,
+                                                    .keys = {keys, sizeof(usearch_key_t)},
+                                                    .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
     expect(!outcome.message, outcome.message);
     usearch_dense_index_description_t description = {0};
     usearch_dense_describe(&(usearch_dense_describe_t) {.index = index,
@@ -299,15 +299,15 @@ void test_add_progress(void) {
     for (size_t row = 0; row != rows_count; ++row) keys[row] = key_of(row);
 
     progress_reports_t reports = {0, 0, 0, true};
-    usearch_dense_add(
-        &(usearch_dense_add_t) {.index = index,
-                                .executor = executor,
-                                .outcome = &outcome,
-                                .count = rows_count,
-                                .keys = {keys, sizeof(usearch_key_t)},
-                                .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
-                                .progress = record_progress,
-                                .progress_state = &reports});
+    usearch_dense_insert(
+        &(usearch_dense_insert_t) {.index = index,
+                                   .executor = executor,
+                                   .outcome = &outcome,
+                                   .count = rows_count,
+                                   .keys = {keys, sizeof(usearch_key_t)},
+                                   .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
+                                   .progress = record_progress,
+                                   .progress_state = &reports});
     expect(!outcome.message, outcome.message);
     expect(reports.ascending && reports.calls > 1, "Every step must be reported, in order");
     expect(reports.completed == rows_count && reports.total == rows_count, "The last report must cover the batch");
@@ -342,12 +342,12 @@ void test_count_and_get(size_t const dimensions) {
     float* const data = create_vectors(2, dimensions);
     usearch_key_t const keys[2] = {key_of(7), key_of(8)};
     size_t const row_bytes = dimensions * sizeof(float);
-    usearch_dense_add(&(usearch_dense_add_t) {.index = index,
-                                              .executor = executor,
-                                              .outcome = &outcome,
-                                              .count = 2,
-                                              .keys = {keys, sizeof(usearch_key_t)},
-                                              .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
+    usearch_dense_insert(&(usearch_dense_insert_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = 2,
+                                                    .keys = {keys, sizeof(usearch_key_t)},
+                                                    .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
     expect(!outcome.message, outcome.message);
 
     size_t entries = 0;
@@ -386,12 +386,13 @@ void test_count_and_get(size_t const dimensions) {
         expect(fabsf(retrieved[position] - data[position]) <= fabsf(data[position]) / 128,
                "A bf16 index must return rows within its 7-bit mantissa");
 
-    usearch_dense_add(&(usearch_dense_add_t) {.index = index,
-                                              .executor = executor,
-                                              .outcome = &outcome,
-                                              .count = 1,
-                                              .keys = {keys, sizeof(usearch_key_t)},
-                                              .vectors = {data, row_bytes, dimensions - 1, usearch_scalar_f32_k}});
+    usearch_dense_insert(
+        &(usearch_dense_insert_t) {.index = index,
+                                   .executor = executor,
+                                   .outcome = &outcome,
+                                   .count = 1,
+                                   .keys = {keys, sizeof(usearch_key_t)},
+                                   .vectors = {data, row_bytes, dimensions - 1, usearch_scalar_f32_k}});
     expect_eq(outcome.status, usearch_status_shape_mismatch_k, "Rows of another width than the frozen one are refused");
 
     char const path[] = "usearch-test-c-view.safegraphs";
@@ -404,12 +405,13 @@ void test_count_and_get(size_t const dimensions) {
     // An implementation that cannot serve a mapping yet says so, and has no view to hold to the contract.
     if (outcome.status != usearch_status_unsupported_k) {
         expect(!outcome.message, outcome.message);
-        usearch_dense_add(&(usearch_dense_add_t) {.index = view,
-                                                  .executor = executor,
-                                                  .outcome = &outcome,
-                                                  .count = 1,
-                                                  .keys = {keys, sizeof(usearch_key_t)},
-                                                  .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
+        usearch_dense_insert(
+            &(usearch_dense_insert_t) {.index = view,
+                                       .executor = executor,
+                                       .outcome = &outcome,
+                                       .count = 1,
+                                       .keys = {keys, sizeof(usearch_key_t)},
+                                       .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
         expect_eq(outcome.status, usearch_status_read_only_k, "A view must refuse every mutation");
         usearch_dense_free(view);
     }
@@ -438,12 +440,12 @@ void test_walks_name_their_index(size_t const dimensions) {
     usearch_dense_reserve(
         &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = 2});
     expect(!outcome.message, outcome.message);
-    usearch_dense_add(&(usearch_dense_add_t) {.index = index,
-                                              .executor = executor,
-                                              .outcome = &outcome,
-                                              .count = 2,
-                                              .keys = {keys, sizeof(usearch_key_t)},
-                                              .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
+    usearch_dense_insert(&(usearch_dense_insert_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = 2,
+                                                    .keys = {keys, sizeof(usearch_key_t)},
+                                                    .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
     expect(!outcome.message, outcome.message);
 
     usearch_dense_cursor_t cursor = NULL;
@@ -535,13 +537,13 @@ void test_multiply_packed(void) {
         for (size_t column = 0; column != dimensions; ++column)
             data[row * dimensions + column] = (float)((row + column) % 5) - 2;
     }
-    usearch_dense_add(
-        &(usearch_dense_add_t) {.index = index,
-                                .executor = executor,
-                                .outcome = &outcome,
-                                .count = rows_count,
-                                .keys = {keys, sizeof(usearch_key_t)},
-                                .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
+    usearch_dense_insert(
+        &(usearch_dense_insert_t) {.index = index,
+                                   .executor = executor,
+                                   .outcome = &outcome,
+                                   .count = rows_count,
+                                   .keys = {keys, sizeof(usearch_key_t)},
+                                   .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
     expect(!outcome.message, outcome.message);
 
     size_t offsets[rows_count + 1];
@@ -651,13 +653,13 @@ void test_attend(void) {
         rows[token * dimensions + token] = (float)token;
         table[token * dimensions] = (int8_t)token, table[token * dimensions + 1] = 1;
     }
-    usearch_dense_add(
-        &(usearch_dense_add_t) {.index = index,
-                                .executor = executor,
-                                .outcome = &outcome,
-                                .count = tokens,
-                                .keys = {keys, sizeof(usearch_key_t)},
-                                .vectors = {rows, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
+    usearch_dense_insert(
+        &(usearch_dense_insert_t) {.index = index,
+                                   .executor = executor,
+                                   .outcome = &outcome,
+                                   .count = tokens,
+                                   .keys = {keys, sizeof(usearch_key_t)},
+                                   .vectors = {rows, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
     expect(!outcome.message, outcome.message);
 
     // A logit scale of ln 2 turns the ones' dots into weights 1/8, 1/4, 1/2 and 1, and the negated
@@ -806,7 +808,7 @@ usearch_dense_index_t create_filled_index(float const* rows, usearch_executor_t 
     usearch_dense_index_t const index = create_index(deferred_dimensions);
     usearch_key_t keys[deferred_rows];
     for (size_t row = 0; row != deferred_rows; ++row) keys[row] = key_of(row);
-    usearch_dense_add(&(usearch_dense_add_t) {
+    usearch_dense_insert(&(usearch_dense_insert_t) {
         .index = index,
         .executor = executor,
         .outcome = &outcome,

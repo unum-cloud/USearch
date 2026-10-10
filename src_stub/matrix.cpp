@@ -462,8 +462,8 @@ void usearch_matrix_describe(usearch_matrix_describe_t* arguments) {
     };
 }
 
-void usearch_matrix_add(usearch_matrix_add_t* arguments) {
-    if (deferred<usearch_matrix_add>(arguments)) return;
+void usearch_matrix_insert(usearch_matrix_insert_t* arguments) {
+    if (deferred<usearch_matrix_insert>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_matrix_traversal_stats_t* const stats = arguments->stats;
     reset(stats);

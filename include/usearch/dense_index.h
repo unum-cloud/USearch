@@ -89,7 +89,7 @@
  *  Every verb this header declares is exported by the engine and by the stand-in alike, so a
  *  residency that lacks one answers @c usearch_status_unsupported_k rather than a missing symbol.
  *
- *  @c usearch_dense_add, @c usearch_dense_search, @c usearch_dense_count, @c usearch_dense_refine
+ *  @c usearch_dense_insert, @c usearch_dense_search, @c usearch_dense_count, @c usearch_dense_refine
  *  and the serialization family, except @c usearch_dense_save_buffer, answer on a RAM handle and on
  *  a VRAM one alike. A search with a @c predicate answers on RAM and is refused on VRAM with
  *  @c usearch_status_device_k, since a host predicate cannot narrow a device walk.
@@ -146,7 +146,7 @@ extern "C" {
  *  @brief Vector Search Index over equidimensional dense representations.
  *
  *  @see usearch_dense_init_ram
- *  @see usearch_dense_add
+ *  @see usearch_dense_insert
  *  @see usearch_dense_search
  */
 typedef struct usearch_dense_index_handle_t* usearch_dense_index_t;
@@ -557,8 +557,8 @@ typedef struct usearch_dense_traversal_stats_t {
     size_t restarts;
 } usearch_dense_traversal_stats_t;
 
-/** The arguments of @c usearch_dense_add. */
-typedef struct usearch_dense_add_t {
+/** The arguments of @c usearch_dense_insert. */
+typedef struct usearch_dense_insert_t {
 
     /** The handle to be populated. */
     usearch_dense_index_t index;
@@ -592,7 +592,7 @@ typedef struct usearch_dense_add_t {
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_dense_traversal_stats_t* stats;
-} usearch_dense_add_t;
+} usearch_dense_insert_t;
 
 /**
  *  @brief Adds a run of vectors under their keys - the native batch operation; a single vector is
@@ -613,14 +613,14 @@ typedef struct usearch_dense_add_t {
  *
  *  @code{.c}
  *  usearch_outcome_t outcome = {0};
- *  usearch_dense_add(&(usearch_dense_add_t){
+ *  usearch_dense_insert(&(usearch_dense_insert_t){
  *      .index = index, .executor = executor, .outcome = &outcome,
  *      .count = 256, .keys = {keys, sizeof(usearch_key_t)},
  *      .vectors = {rows_base, 128 * sizeof(float), 128, usearch_scalar_f32_k}});
  *  if (outcome.status != usearch_status_success_k) report(outcome.message);
  *  @endcode
  */
-USEARCH_EXPORT void usearch_dense_add(usearch_dense_add_t* arguments);
+USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments);
 
 /** The arguments of @c usearch_dense_refine. */
 typedef struct usearch_dense_refine_t {
@@ -659,7 +659,7 @@ typedef struct usearch_dense_refine_t {
  *
  *  This is a build step rather than a repair. A cheap insertion pass followed by one refinement
  *  reaches a better graph, in less total time, than a single expensive insertion pass - so a wide
- *  @c expansion_factor belongs here rather than in @c usearch_dense_add.
+ *  @c expansion_factor belongs here rather than in @c usearch_dense_insert.
  *
  *  Cancelling is safe, which is what makes a whole-graph sweep affordable. Re-selecting a node's
  *  neighbors is idempotent and claims no identity, so a stopped pass leaves the graph correct and
