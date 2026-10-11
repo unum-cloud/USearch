@@ -212,8 +212,11 @@ struct safegraphs_column_t {
     }
 };
 
-/** A parsed monolith header: the metadata, the three columns, and where the data
- *  segment begins. */
+/** The norms column's row: a node's sum, then its sum of squares, both in the dot product's dtype. */
+inline constexpr column_shape_t safegraphs_norms_shape_k = vector_shape_t {2};
+
+/** A parsed monolith header: the metadata, the three graph columns and the optional norms, and
+ *  where the data segment begins. */
 struct safegraphs_header_t {
 
     /** Buffer alignment in bytes the producer declared; 4096 by default. */
@@ -230,6 +233,10 @@ struct safegraphs_header_t {
 
     /** Adjacency column of node indices; out-of-range IDs are positional sentinels. */
     safegraphs_column_t neighbors;
+
+    /** The producer column of pre-computed norms, its dtype @c unknown_k when the part carries none; graph
+     *  readers ignore it. */
+    safegraphs_column_t norms;
 
     /** The @p length bytes of @p monolith at @p offset, empty when they do not fit -
      *  @c subspan asserts its precondition, so every range is checked before it is taken. */
@@ -248,7 +255,7 @@ struct safegraphs_header_t {
         auto const end_of = [](safegraphs_column_t const& column) noexcept {
             return max_of(column.data.bound, column.offsets ? column.offsets->bytes.bound : 0);
         };
-        return data_offset + max_of(end_of(key), max_of(end_of(value), end_of(neighbors)));
+        return data_offset + max_of(max_of(end_of(key), end_of(value)), max_of(end_of(neighbors), end_of(norms)));
     }
 
     /** The bytes of @p rows rows of a regular @p column, starting at row @p first_row -
@@ -439,9 +446,13 @@ expected<safegraphs_header_t> safegraphs_read_header(bytes_view_t monolith, allo
     auto const [key, key_status] = safegraphs_parse_column_(yyjson_obj_get(root, "key"));
     auto const [value, value_status] = safegraphs_parse_column_(yyjson_obj_get(root, "value"));
     auto const [neighbors, neighbors_status] = safegraphs_parse_column_(yyjson_obj_get(root, "neighbors"));
+    yyjson_val* const norms_object = yyjson_obj_get(root, "norms");
+    auto const [norms, norms_status] = norms_object ? safegraphs_parse_column_(norms_object)
+                                                    : expected<safegraphs_column_t> {{}, status_t::success_k};
     yyjson_doc_free(document);
-    if (failed(key_status) || failed(value_status) || failed(neighbors_status)) return {header, status_t::malformed_k};
-    header.key = key, header.value = value, header.neighbors = neighbors;
+    if (failed(key_status) || failed(value_status) || failed(neighbors_status) || failed(norms_status))
+        return {header, status_t::malformed_k};
+    header.key = key, header.value = value, header.neighbors = neighbors, header.norms = norms;
 
     // The data segment starts on the declared alignment boundary at or past the JSON's end.
     if (!std::has_single_bit(header.alignment)) return {header, status_t::malformed_k};
@@ -501,6 +512,7 @@ inline yyjson_mut_doc* safegraphs_header_document_(safegraphs_header_t const& he
     };
     complete = complete && add_column("key", header.key) && add_column("value", header.value) &&
                add_column("neighbors", header.neighbors);
+    if (header.norms.dtype != dtype_t::unknown_k) complete = complete && add_column("norms", header.norms);
     if (complete) return document;
     yyjson_mut_doc_free(document);
     return nullptr;
@@ -600,7 +612,7 @@ constexpr dtype_t safegraphs_value_dtype() noexcept {
     return dtype_named(scalar_type_::dtype_name());
 }
 
-/** What three regular columns need to be laid out: the node count, each column's element
+/** What the regular columns need to be laid out: the node count, each column's element
  *  type, and the two row widths. */
 struct safegraphs_regular_shape_t {
 
@@ -621,10 +633,14 @@ struct safegraphs_regular_shape_t {
 
     /** Neighbor IDs per node's list. */
     std::size_t connectivity = 0;
+
+    /** Element type of the norms column; @c unknown_k lays out none. */
+    dtype_t norms_dtype = dtype_t::unknown_k;
 };
 
 /** A header of three regular columns at aligned starts - keys, fixed-width values, and
- *  fixed-degree neighbors - with the data offset they follow. */
+ *  fixed-degree neighbors - then the norms where @p shape names their dtype, with the data
+ *  offset they follow. */
 template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_header_t> safegraphs_regular_header(safegraphs_regular_shape_t const& shape, std::size_t alignment,
                                                         std::span<safegraphs_custom_field_t const> custom_fields = {},
@@ -641,6 +657,12 @@ expected<safegraphs_header_t> safegraphs_regular_header(safegraphs_regular_shape
     header.neighbors.shape = vector_shape_t {shape.connectivity};
     header.neighbors.data.first = round_up_to_multiple(header.value.data.bound, alignment);
     header.neighbors.data.bound = header.neighbors.data.first + shape.nodes * header.neighbors.row_bytes();
+    if (shape.norms_dtype != dtype_t::unknown_k) {
+        header.norms.dtype = shape.norms_dtype;
+        header.norms.shape = safegraphs_norms_shape_k;
+        header.norms.data.first = round_up_to_multiple(header.neighbors.data.bound, alignment);
+        header.norms.data.bound = header.norms.data.first + shape.nodes * header.norms.row_bytes();
+    }
     auto const [data_offset, status] = safegraphs_data_offset(header, custom_fields, allocator);
     header.data_offset = data_offset;
     return {header, status};
