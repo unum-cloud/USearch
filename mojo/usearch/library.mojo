@@ -11,47 +11,60 @@ return type, leaving arguments unchecked; a search on the hot path cannot afford
 """
 
 from std.ffi import OwnedDLHandle, __fn_type_is_cabi, c_int
-from std.memory import ArcPointer
+from std.memory import ArcPointer, stack_allocation
 from std.sys.info import CompilationTarget
 
 from usearch.dense import (
-    DenseAdd,
     DenseAttend,
-    DenseCapabilities,
     DenseClear,
     DenseCount,
-    DenseCursorFree,
+    DenseCursorInit,
     DenseCursorNext,
-    DenseFind,
-    DenseFindFree,
-    DenseFindNext,
-    DenseFree,
+    DenseDescribe,
     DenseGet,
-    DenseInit,
-    DenseLoad,
-    DenseLoadBuffer,
+    DenseHealth,
+    DenseInitRam,
+    DenseInitVram,
+    DenseInsert,
+    DenseLoadRam,
+    DenseLoadRamBuffer,
+    DenseLoadVram,
+    DenseLoadVramBuffer,
     DenseMaxsim,
-    DenseMeasure,
     DenseMerge,
-    DenseReadMetadata,
-    DenseReadMetadataBuffer,
+    DenseMetadataRead,
+    DenseMetadataReadBuffer,
+    DenseMetric,
     DenseMultiply,
-    DenseOpenCursor,
     DenseRefine,
     DenseReserve,
     DenseSave,
     DenseSaveBuffer,
     DenseSearch,
-    DenseSearchIf,
+    DenseSearchStreamInit,
+    DenseSearchStreamNext,
+    DenseViewNvme,
+    DenseViewRam,
 )
 from usearch.types import (
     Address,
+    ArenaInit,
+    BytesView,
     Error,
     ExecutorDrain,
     ExecutorForNvme,
     ExecutorForRam,
     ExecutorForVram,
-    ExecutorFree,
+    ExecutorOnPool,
+    FromName,
+    Mood,
+    NameOf,
+    NULL_ADDRESS,
+    Outcome,
+    OutcomeStatus,
+    Release,
+    Residency,
+    ScalarKind,
     Status,
     text_at,
 )
@@ -68,7 +81,15 @@ comptime BINDING_MAJOR = 3
 # region Signatures
 
 comptime StaticText = def() thin abi("C") -> Address
-"""`usearch_version` and both capability getters: a static C string returned by value."""
+"""`usearch_version_name` and both capability getters: a static C string returned by value."""
+
+comptime VersionOf = def(
+    Pointer[c_int, MutAnyOrigin], Pointer[c_int, MutAnyOrigin], Pointer[c_int, MutAnyOrigin]
+) thin abi("C") -> None
+"""`usearch_version`: the linked library's major, minor and patch, written through three `int` pointers.
+
+Typed pointers rather than `Address`: an `alloca` whose address crosses only as an integer argument
+was measured reading back the value stored before the call."""
 
 # endregion Signatures
 
@@ -85,97 +106,127 @@ def _resolve[
     comptime assert __fn_type_is_cabi[Signature](), 'the signature must carry abi("C")'
     var address = handle.get_symbol[NoneType](name)
     if not address:
-        raise Error(Status.SYMBOL_MISSING, name, 0)
+        raise Error(Status.SYMBOL_MISSING, name)
     return Pointer(to=address.value()).unsafe_bitcast[Signature]()[]
 
 
 struct Symbols:
     """Every entry point the C ABI exports, resolved once when the library loads.
 
-    Answers are never cached here, only addresses. An index re-asks the engine for its size and its
-    capabilities on every call, because a concurrent insertion changes the first and a reload can
-    change the second.
+    Answers are never cached here, only addresses. An index re-asks the engine for its description
+    on every call, because a concurrent insertion changes its size.
     """
 
-    var version: StaticText
-    """`usearch_version`."""
+    var version_name: StaticText
+    """`usearch_version_name`."""
     var capabilities_compiled: StaticText
     """`usearch_capabilities_compiled`."""
     var capabilities_available: StaticText
     """`usearch_capabilities_available`."""
 
+    var outcome_wait: OutcomeStatus
+    """`usearch_outcome_wait`."""
+    var outcome_status: OutcomeStatus
+    """`usearch_outcome_status`."""
+    var status_name: NameOf
+    """`usearch_status_name`."""
+    var status_from_name: FromName
+    """`usearch_status_from_name`."""
+    var scalar_name: NameOf
+    """`usearch_scalar_name`."""
+    var scalar_from_name: FromName
+    """`usearch_scalar_from_name`."""
+    var residency_name: NameOf
+    """`usearch_residency_name`."""
+    var residency_from_name: FromName
+    """`usearch_residency_from_name`."""
+    var mood_name: NameOf
+    """`usearch_mood_name`."""
+    var mood_from_name: FromName
+    """`usearch_mood_from_name`."""
+    var dense_metric_name: NameOf
+    """`usearch_dense_metric_name`."""
+    var dense_metric_from_name: FromName
+    """`usearch_dense_metric_from_name`."""
+
+    var arena_init: ArenaInit
+    """`usearch_arena_init`."""
+    var arena_free: Release
+    """`usearch_arena_free`."""
     var executor_for_ram: ExecutorForRam
     """`usearch_executor_for_ram`."""
+    var executor_on_pool: ExecutorOnPool
+    """`usearch_executor_on_pool`."""
     var executor_for_nvme: ExecutorForNvme
     """`usearch_executor_for_nvme`."""
     var executor_for_vram: ExecutorForVram
     """`usearch_executor_for_vram`."""
     var executor_drain: ExecutorDrain
     """`usearch_executor_drain`."""
-    var executor_free: ExecutorFree
+    var executor_free: Release
     """`usearch_executor_free`."""
 
-    var dense_init: DenseInit
-    """`usearch_dense_init`."""
-    var dense_free: DenseFree
+    var dense_init_ram: DenseInitRam
+    """`usearch_dense_init_ram`."""
+    var dense_init_vram: DenseInitVram
+    """`usearch_dense_init_vram`."""
+    var dense_load_ram: DenseLoadRam
+    """`usearch_dense_load_ram`."""
+    var dense_load_vram: DenseLoadVram
+    """`usearch_dense_load_vram`."""
+    var dense_load_ram_buffer: DenseLoadRamBuffer
+    """`usearch_dense_load_ram_buffer`."""
+    var dense_load_vram_buffer: DenseLoadVramBuffer
+    """`usearch_dense_load_vram_buffer`."""
+    var dense_view_ram: DenseViewRam
+    """`usearch_dense_view_ram`."""
+    var dense_view_nvme: DenseViewNvme
+    """`usearch_dense_view_nvme`."""
+    var dense_free: Release
     """`usearch_dense_free`."""
+
     var dense_reserve: DenseReserve
     """`usearch_dense_reserve`."""
     var dense_clear: DenseClear
     """`usearch_dense_clear`."""
-    var dense_size: DenseMeasure
-    """`usearch_dense_size`."""
-    var dense_capacity: DenseMeasure
-    """`usearch_dense_capacity`."""
-    var dense_dimensions: DenseMeasure
-    """`usearch_dense_dimensions`."""
-    var dense_connectivity: DenseMeasure
-    """`usearch_dense_connectivity`."""
-    var dense_memory_usage: DenseMeasure
-    """`usearch_dense_memory_usage`."""
-    var dense_capabilities: DenseCapabilities
-    """`usearch_dense_capabilities`."""
-    var dense_storage_requirements: DenseMeasure
-    """`usearch_dense_storage_requirements`."""
-
-    var dense_add: DenseAdd
-    """`usearch_dense_add`."""
+    var dense_describe: DenseDescribe
+    """`usearch_dense_describe`."""
+    var dense_insert: DenseInsert
+    """`usearch_dense_insert`."""
     var dense_refine: DenseRefine
     """`usearch_dense_refine`."""
+    var dense_health: DenseHealth
+    """`usearch_dense_health`."""
+    var dense_merge: DenseMerge
+    """`usearch_dense_merge`."""
     var dense_search: DenseSearch
     """`usearch_dense_search`."""
-    var dense_search_if: DenseSearchIf
-    """`usearch_dense_search_if`."""
     var dense_count: DenseCount
     """`usearch_dense_count`."""
     var dense_get: DenseGet
     """`usearch_dense_get`."""
 
-    var dense_cursor: DenseOpenCursor
-    """`usearch_dense_cursor`."""
+    var dense_cursor_init: DenseCursorInit
+    """`usearch_dense_cursor_init`."""
     var dense_cursor_next: DenseCursorNext
     """`usearch_dense_cursor_next`."""
-    var dense_cursor_free: DenseCursorFree
+    var dense_cursor_free: Release
     """`usearch_dense_cursor_free`."""
-    var dense_find: DenseFind
-    """`usearch_dense_find`."""
-    var dense_find_next: DenseFindNext
-    """`usearch_dense_find_next`."""
-    var dense_find_free: DenseFindFree
-    """`usearch_dense_find_free`."""
+    var dense_search_stream_init: DenseSearchStreamInit
+    """`usearch_dense_search_stream_init`."""
+    var dense_search_stream_next: DenseSearchStreamNext
+    """`usearch_dense_search_stream_next`."""
+    var dense_search_stream_free: Release
+    """`usearch_dense_search_stream_free`."""
 
     var dense_save: DenseSave
     """`usearch_dense_save`."""
-    var dense_load: DenseLoad
-    """`usearch_dense_load`."""
-    var dense_metadata: DenseReadMetadata
-    """`usearch_dense_metadata`."""
     var dense_save_buffer: DenseSaveBuffer
     """`usearch_dense_save_buffer`."""
-    var dense_load_buffer: DenseLoadBuffer
-    """`usearch_dense_load_buffer`."""
-    var dense_metadata_buffer: DenseReadMetadataBuffer
-    """`usearch_dense_metadata_buffer`."""
+    var dense_metadata_read: DenseMetadataRead
+    """`usearch_dense_metadata_read`."""
+    var dense_metadata_read_buffer: DenseMetadataReadBuffer
+    """`usearch_dense_metadata_read_buffer`."""
 
     var dense_multiply: DenseMultiply
     """`usearch_dense_multiply`."""
@@ -193,48 +244,66 @@ struct Symbols:
         Raises:
             With `SYMBOL_MISSING`, on the first symbol the loaded library does not export.
         """
-        self.version = _resolve[StaticText](handle, "usearch_version")
+        self.version_name = _resolve[StaticText](handle, "usearch_version_name")
         self.capabilities_compiled = _resolve[StaticText](handle, "usearch_capabilities_compiled")
         self.capabilities_available = _resolve[StaticText](handle, "usearch_capabilities_available")
 
+        self.outcome_wait = _resolve[OutcomeStatus](handle, "usearch_outcome_wait")
+        self.outcome_status = _resolve[OutcomeStatus](handle, "usearch_outcome_status")
+        self.status_name = _resolve[NameOf](handle, "usearch_status_name")
+        self.status_from_name = _resolve[FromName](handle, "usearch_status_from_name")
+        self.scalar_name = _resolve[NameOf](handle, "usearch_scalar_name")
+        self.scalar_from_name = _resolve[FromName](handle, "usearch_scalar_from_name")
+        self.residency_name = _resolve[NameOf](handle, "usearch_residency_name")
+        self.residency_from_name = _resolve[FromName](handle, "usearch_residency_from_name")
+        self.mood_name = _resolve[NameOf](handle, "usearch_mood_name")
+        self.mood_from_name = _resolve[FromName](handle, "usearch_mood_from_name")
+        self.dense_metric_name = _resolve[NameOf](handle, "usearch_dense_metric_name")
+        self.dense_metric_from_name = _resolve[FromName](handle, "usearch_dense_metric_from_name")
+
+        self.arena_init = _resolve[ArenaInit](handle, "usearch_arena_init")
+        self.arena_free = _resolve[Release](handle, "usearch_arena_free")
         self.executor_for_ram = _resolve[ExecutorForRam](handle, "usearch_executor_for_ram")
+        self.executor_on_pool = _resolve[ExecutorOnPool](handle, "usearch_executor_on_pool")
         self.executor_for_nvme = _resolve[ExecutorForNvme](handle, "usearch_executor_for_nvme")
         self.executor_for_vram = _resolve[ExecutorForVram](handle, "usearch_executor_for_vram")
         self.executor_drain = _resolve[ExecutorDrain](handle, "usearch_executor_drain")
-        self.executor_free = _resolve[ExecutorFree](handle, "usearch_executor_free")
+        self.executor_free = _resolve[Release](handle, "usearch_executor_free")
 
-        self.dense_init = _resolve[DenseInit](handle, "usearch_dense_init")
-        self.dense_free = _resolve[DenseFree](handle, "usearch_dense_free")
+        self.dense_init_ram = _resolve[DenseInitRam](handle, "usearch_dense_init_ram")
+        self.dense_init_vram = _resolve[DenseInitVram](handle, "usearch_dense_init_vram")
+        self.dense_load_ram = _resolve[DenseLoadRam](handle, "usearch_dense_load_ram")
+        self.dense_load_vram = _resolve[DenseLoadVram](handle, "usearch_dense_load_vram")
+        self.dense_load_ram_buffer = _resolve[DenseLoadRamBuffer](handle, "usearch_dense_load_ram_buffer")
+        self.dense_load_vram_buffer = _resolve[DenseLoadVramBuffer](handle, "usearch_dense_load_vram_buffer")
+        self.dense_view_ram = _resolve[DenseViewRam](handle, "usearch_dense_view_ram")
+        self.dense_view_nvme = _resolve[DenseViewNvme](handle, "usearch_dense_view_nvme")
+        self.dense_free = _resolve[Release](handle, "usearch_dense_free")
+
         self.dense_reserve = _resolve[DenseReserve](handle, "usearch_dense_reserve")
         self.dense_clear = _resolve[DenseClear](handle, "usearch_dense_clear")
-        self.dense_size = _resolve[DenseMeasure](handle, "usearch_dense_size")
-        self.dense_capacity = _resolve[DenseMeasure](handle, "usearch_dense_capacity")
-        self.dense_dimensions = _resolve[DenseMeasure](handle, "usearch_dense_dimensions")
-        self.dense_connectivity = _resolve[DenseMeasure](handle, "usearch_dense_connectivity")
-        self.dense_memory_usage = _resolve[DenseMeasure](handle, "usearch_dense_memory_usage")
-        self.dense_capabilities = _resolve[DenseCapabilities](handle, "usearch_dense_capabilities")
-        self.dense_storage_requirements = _resolve[DenseMeasure](handle, "usearch_dense_storage_requirements")
-
-        self.dense_add = _resolve[DenseAdd](handle, "usearch_dense_add")
+        self.dense_describe = _resolve[DenseDescribe](handle, "usearch_dense_describe")
+        self.dense_insert = _resolve[DenseInsert](handle, "usearch_dense_insert")
         self.dense_refine = _resolve[DenseRefine](handle, "usearch_dense_refine")
+        self.dense_health = _resolve[DenseHealth](handle, "usearch_dense_health")
+        self.dense_merge = _resolve[DenseMerge](handle, "usearch_dense_merge")
         self.dense_search = _resolve[DenseSearch](handle, "usearch_dense_search")
-        self.dense_search_if = _resolve[DenseSearchIf](handle, "usearch_dense_search_if")
         self.dense_count = _resolve[DenseCount](handle, "usearch_dense_count")
         self.dense_get = _resolve[DenseGet](handle, "usearch_dense_get")
 
-        self.dense_cursor = _resolve[DenseOpenCursor](handle, "usearch_dense_cursor")
+        self.dense_cursor_init = _resolve[DenseCursorInit](handle, "usearch_dense_cursor_init")
         self.dense_cursor_next = _resolve[DenseCursorNext](handle, "usearch_dense_cursor_next")
-        self.dense_cursor_free = _resolve[DenseCursorFree](handle, "usearch_dense_cursor_free")
-        self.dense_find = _resolve[DenseFind](handle, "usearch_dense_find")
-        self.dense_find_next = _resolve[DenseFindNext](handle, "usearch_dense_find_next")
-        self.dense_find_free = _resolve[DenseFindFree](handle, "usearch_dense_find_free")
+        self.dense_cursor_free = _resolve[Release](handle, "usearch_dense_cursor_free")
+        self.dense_search_stream_init = _resolve[DenseSearchStreamInit](handle, "usearch_dense_search_stream_init")
+        self.dense_search_stream_next = _resolve[DenseSearchStreamNext](handle, "usearch_dense_search_stream_next")
+        self.dense_search_stream_free = _resolve[Release](handle, "usearch_dense_search_stream_free")
 
         self.dense_save = _resolve[DenseSave](handle, "usearch_dense_save")
-        self.dense_load = _resolve[DenseLoad](handle, "usearch_dense_load")
-        self.dense_metadata = _resolve[DenseReadMetadata](handle, "usearch_dense_metadata")
         self.dense_save_buffer = _resolve[DenseSaveBuffer](handle, "usearch_dense_save_buffer")
-        self.dense_load_buffer = _resolve[DenseLoadBuffer](handle, "usearch_dense_load_buffer")
-        self.dense_metadata_buffer = _resolve[DenseReadMetadataBuffer](handle, "usearch_dense_metadata_buffer")
+        self.dense_metadata_read = _resolve[DenseMetadataRead](handle, "usearch_dense_metadata_read")
+        self.dense_metadata_read_buffer = _resolve[DenseMetadataReadBuffer](
+            handle, "usearch_dense_metadata_read_buffer"
+        )
 
         self.dense_multiply = _resolve[DenseMultiply](handle, "usearch_dense_multiply")
         self.dense_attend = _resolve[DenseAttend](handle, "usearch_dense_attend")
@@ -251,7 +320,14 @@ struct _Loaded:
         try:
             self.handle = OwnedDLHandle(String(LIBRARY_FILE))
         except:
-            raise Error(Status.LIBRARY_MISSING, LIBRARY_FILE, 0)
+            raise Error(Status.LIBRARY_MISSING, LIBRARY_FILE)
+        var version = _resolve[VersionOf](self.handle, "usearch_version")
+        var parts = stack_allocation[3, c_int]().unsafe_origin_cast[MutAnyOrigin]()
+        for part in range(3):
+            parts[unsafe_offset=part] = c_int(0)
+        version(parts, parts.unsafe_offset(1), parts.unsafe_offset(2))
+        if Int(parts[unsafe_offset=0]) != BINDING_MAJOR:
+            raise Error(Status.VERSION_MISMATCH, "usearch_version")
         self.symbols = Symbols(self.handle)
 
 
@@ -270,8 +346,9 @@ struct Library(ImplicitlyCopyable):
         """Opens the shared object and resolves it, which every handle then shares.
 
         Raises:
-            With `LIBRARY_MISSING`, when nothing is on the loader path, or with `SYMBOL_MISSING`
-            when what loaded does not export an entry point the binding needs.
+            With `LIBRARY_MISSING`, when nothing is on the loader path, with `VERSION_MISMATCH`
+            when what loaded is another major version, or with `SYMBOL_MISSING` when it does not
+            export an entry point the binding needs.
         """
         self.shared = ArcPointer(_Loaded())
 
@@ -284,16 +361,18 @@ struct Library(ImplicitlyCopyable):
         """
         return self.shared[].symbols
 
-    def version(self) -> String:
+    def version_name(self) -> String:
         """The loaded engine's own version, which is also the cheapest check that loading worked.
+        Calls `usearch_version_name`.
 
         Returns:
             The version string the shared object reports for itself.
         """
-        return text_at(self.symbols().version())
+        return text_at(self.symbols().version_name())
 
     def capabilities_compiled(self) -> String:
         """The hardware capabilities this build of the engine was compiled with.
+        Calls `usearch_capabilities_compiled`.
 
         Returns:
             A comma-separated list of capability names.
@@ -302,8 +381,60 @@ struct Library(ImplicitlyCopyable):
 
     def capabilities_available(self) -> String:
         """The hardware capabilities this machine offers now, which the build does not imply.
+        Calls `usearch_capabilities_available`.
 
         Returns:
             A comma-separated list of capability names.
         """
         return text_at(self.symbols().capabilities_available())
+
+    def status_name(self, status: Status) -> String:
+        """The engine's spelling of a status, "unrecognized" for a code it does not name. Calls `usearch_status_name`.
+        """
+        return text_at(self.symbols().status_name(c_int(status.code)))
+
+    def status_from_name(self, name: StringSlice) -> Status:
+        """Reads a spelling back; `INVALID_ARGUMENT` when unrecognized. Calls `usearch_status_from_name`."""
+        return Status.of(self.symbols().status_from_name(BytesView.of(name).untracked()))
+
+    def scalar_name(self, scalar: ScalarKind) -> String:
+        """The engine's spelling of a scalar kind, as `F32` spells "f32". Calls `usearch_scalar_name`."""
+        return text_at(self.symbols().scalar_name(scalar.code))
+
+    def scalar_from_name(self, name: StringSlice) -> ScalarKind:
+        """Reads a spelling back; `UNKNOWN` when unrecognized. Calls `usearch_scalar_from_name`."""
+        return ScalarKind(self.symbols().scalar_from_name(BytesView.of(name).untracked()))
+
+    def residency_name(self, residency: Residency) -> String:
+        """The engine's spelling of a residency, as `RAM` spells "ram". Calls `usearch_residency_name`."""
+        return text_at(self.symbols().residency_name(residency.code))
+
+    def residency_from_name(self, name: StringSlice) -> Residency:
+        """Reads a spelling back; `RAM` when unrecognized. Calls `usearch_residency_from_name`."""
+        return Residency(self.symbols().residency_from_name(BytesView.of(name).untracked()))
+
+    def mood_name(self, mood: Mood) -> String:
+        """The engine's spelling of a mood, as `PARKED` spells "parked". Calls `usearch_mood_name`."""
+        return text_at(self.symbols().mood_name(mood.code))
+
+    def mood_from_name(self, name: StringSlice) -> Mood:
+        """Reads a spelling back; `PARKED` when unrecognized. Calls `usearch_mood_from_name`."""
+        return Mood(self.symbols().mood_from_name(BytesView.of(name).untracked()))
+
+    def dense_metric_name(self, metric: DenseMetric) -> String:
+        """The engine's spelling of a metric kind, as `INNER` spells "inner". Calls `usearch_dense_metric_name`."""
+        return text_at(self.symbols().dense_metric_name(metric.code))
+
+    def dense_metric_from_name(self, name: StringSlice) -> DenseMetric:
+        """Reads a spelling back; `UNKNOWN` when unrecognized. Calls `usearch_dense_metric_from_name`."""
+        return DenseMetric(self.symbols().dense_metric_from_name(BytesView.of(name).untracked()))
+
+    def _error(self, outcome: Outcome, symbol: StaticString) -> Error:
+        """The failure a final outcome reports, its status spelled by the engine's own table."""
+        var status = Status.of(outcome.status)
+        return Error(status, symbol, outcome.message, self.symbols().status_name(c_int(status.code)), self)
+
+    def _check(self, outcome: Outcome, symbol: StaticString) raises Error:
+        """Raises the failure a final outcome reports, and returns on success."""
+        if outcome.status != c_int(0):
+            raise self._error(outcome, symbol)

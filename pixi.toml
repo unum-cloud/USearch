@@ -15,7 +15,7 @@ version = "3.0.0-rc.1"
 
 # A dependency of the environment too, so `pixi run` puts the library in the prefix `mojo build` bakes as runpath.
 [dependencies]
-mojo = ">=1.0.0,<2"
+mojo = ">=1.1.0,<2"
 usearch = { path = "." }
 
 # `mojo build` links against a MAX runtime that needs a newer glibc than conda-forge's default

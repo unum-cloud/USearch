@@ -1,28 +1,37 @@
-"""Vector search over equidimensional embeddings: the index, its cursor, and its resumable finder.
+"""Vector search over equidimensional embeddings: the index, its receivers, its cursor, and its search stream.
 
 Mirrors @c include/usearch/dense_index.h. The type is `DenseIndex` rather than `Index` because the
 engine has sibling modalities that will bind beside it, and a bare name would have to be renamed
 the day one of them lands.
 
-Every batch is a matrix. `MatrixView` and `MatrixSpan` carry the base pointer, the row count, the
-column count, the byte stride, and the scalar kind as one value, so a single vector is a one-row
-matrix and a caller never packs a special case. Both structs are laid out exactly as
-`usearch_matrix_view_t` and `usearch_matrix_span_t` declare them, and cross by address
-as the verbs take them - transposing two adjacent counts is a compile error rather than a silent
-corruption. `MatchesSpan` is the same idea for the three outputs a ranked run writes.
+Every verb takes one argument structure named after it, and every one of them is mirrored below as
+a `...Arguments` struct laid out exactly as the header declares it, materialized in a
+`stack_allocation` slot and crossed by address. The receiver picks the completion: verbs on the
+index and on `index.on(executor)` pass blocking completion and return with their outcome final and
+their outputs readable, while `index.deferred(executor)` passes deferred completion and answers a
+`Deferred` at once. Each verb is one `Call` all three route, so the receivers stay symmetric.
 
-No callback of this binding is written in Mojo, and the two slots that take one - the admission
-predicate of `search_if` and the custom metric of `DenseOptions` - cross as raw `Address` values so
-that a kernel built in C can still be installed. Two Mojo 1.0 facts force that. A closure capturing
-anything cannot be handed to C at all, which is the familiar one; and a `def ... abi("C")` that
-returns a value does not in fact lower to the C calling convention, so the engine calling one
-jumps into a corrupted frame. Both of these entry points return a value - an admission and a
-distance - so neither can be authored here. Progress handlers are not exposed for the same reason,
-and every `progress` and `progress_state` slot crosses as `NULL_ADDRESS`.
+Batches are rows. `RowsView` carries the base pointer, the row count, the column count, the byte
+stride, and the scalar kind as one value, so a single vector is a one-row view. The row count
+becomes the verb's `count`, and the column count crosses with the rows, so the engine checks it
+against the geometry the index froze.
 
-Telemetry is an argument rather than an option. Every verb that reports traversal statistics takes
-`mut stats`, so the engine always writes through a real slot and the binding never has to represent
-a null one.
+Every output whose length scales with the call - the matches of `search` and `maxsim`, the rows of
+`get` and `attend`, the pairs of `multiply`, the monolith of `save_buffer`, and every cursor and
+stream pull - lands in an `Arena` the verb requires, and is read in place. Every receiver takes the arena
+as the verb's last required argument, deferred ones too, and the result borrows it in turn, named by
+the arena's origin.
+
+Two Mojo 1.1 facts shape the callback slots. A closure capturing anything cannot be handed to C at
+all, so a callback's state crosses beside it as an `Address`; and a `def ... abi("C")` that returns
+a value does not in fact lower to the C calling convention, so the engine calling one jumps into a
+corrupted frame. The value lookup of `attend` returns nothing, so it is a Mojo function - a
+`ValueLookup`. The admission predicate of `search` returns a verdict, so it crosses as a raw
+`Address` that a kernel built in C can fill; progress handlers return one too, so every `progress`
+and `progress_state` slot crosses as `NULL_ADDRESS`.
+
+Telemetry is a lent output. Every config of a verb that reports traversal statistics takes an
+optional `stats` pointer, which the engine overwrites whole on every call it is passed to.
 """
 
 from std.ffi import c_int, c_size_t
@@ -32,509 +41,58 @@ from std.sys.info import size_of
 from usearch.library import Library
 from usearch.types import (
     Address,
-    BytesSpan,
+    Arena,
     BytesView,
+    Call,
+    Completion,
+    Deferred,
     Distance,
     Error,
-    ErrorSlot,
     Executor,
-    Handle,
     Key,
-    KeysSpan,
+    KeyBytes,
     KeysView,
+    Matches,
+    MatchesTapeViewArguments,
+    MatchesViewArguments,
+    Monolith,
     NULL_ADDRESS,
-    Residency,
+    NvmeOptions,
+    Outcome,
+    RamOptions,
+    RowsView,
+    RowsViewArguments,
     ScalarKind,
     Status,
+    Unwritten,
+    Verb,
+    VramOptions,
+    _anchor,
+    _block,
+    _in_arena,
+    _readable,
+    _refuse,
+    _served,
     text_at,
 )
-
-# region Signatures
-
-comptime ErrorReport = Pointer[ErrorSlot, MutAnyOrigin]
-"""The `usearch_error_t *` every entry point takes last."""
-
-comptime ReadData = Pointer[NoneType, ImmUntrackedOrigin]
-"""A `void const *` run of rows the engine reads."""
-
-comptime WriteData = Pointer[NoneType, MutAnyOrigin]
-"""A `void *` run of rows the engine fills."""
-
-comptime StoredWriteData = Pointer[NoneType, MutUntrackedOrigin]
-"""The same, as a struct may hold it: Mojo 1.0 refuses `AnyOrigin` in a field, so a stored pointer
-carries an untracked origin and is widened at the call boundary."""
-
-comptime StoredKeys = Pointer[Key, MutUntrackedOrigin]
-"""A stored `usearch_key_t *` output run, widened at the call boundary."""
-
-comptime StoredScores = Pointer[Distance, MutUntrackedOrigin]
-"""A stored `usearch_distance_t *` output run, widened at the call boundary."""
-
-comptime StoredCounts = Pointer[c_size_t, MutUntrackedOrigin]
-"""A stored `size_t *` output run, widened at the call boundary."""
-
-comptime ScoresOut = Pointer[Distance, MutAnyOrigin]
-"""A `usearch_distance_t *` output run."""
-
-comptime MatrixViewIn = Pointer[MatrixView[ImmUntrackedOrigin], MutAnyOrigin]
-"""A `usearch_matrix_view_t const *` run of rows the engine reads.
-
-Every descriptor pointer below carries `MutAnyOrigin` even though C only reads through it: the
-binding fills a stack slot and hands its address over, and a narrower origin lets the compiler
-fold that store away, which leaves the engine reading whatever the frame held before. Every
-descriptor here is the borrow-erased instantiation, since one C function pointer type cannot be
-parametric; what keeps the caller's rows alive is the origin its own descriptor carries, which
-lives for the duration of the binding method that erases it."""
-
-comptime MatrixSpanIn = Pointer[MatrixSpan[MutUntrackedOrigin], MutAnyOrigin]
-"""A `usearch_matrix_span_t const *` run of rows the engine fills."""
-
-comptime MatchesIn = Pointer[
-    MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin],
-    MutAnyOrigin,
-]
-"""A `usearch_matches_span_t const *` triple of ranked outputs the engine fills."""
-
-comptime OptionsIn = Pointer[DenseOptions[ImmUntrackedOrigin], MutAnyOrigin]
-"""A `usearch_dense_options_t const *` the engine reads."""
-
-comptime MetadataOut = Pointer[DenseMetadata, MutAnyOrigin]
-"""A `usearch_dense_metadata_t *` a metadata probe fills."""
-
-comptime InsertionIn = Pointer[InsertionOptions, MutAnyOrigin]
-"""A `usearch_dense_insertion_options_t const *` the engine reads."""
-
-comptime SearchIn = Pointer[SearchOptions, MutAnyOrigin]
-"""A `usearch_dense_search_options_t const *` the engine reads."""
-
-comptime AttentionIn = Pointer[AttentionOptions, MutAnyOrigin]
-"""A `usearch_dense_attention_options_t const *` the engine reads."""
-
-comptime StatsOut = Pointer[TraversalStats, MutAnyOrigin]
-"""A `usearch_dense_traversal_stats_t *` the engine overwrites."""
-
-
-comptime DenseInit = def(OptionsIn, ErrorReport) thin abi("C") -> Address
-"""`usearch_dense_init`: answers the handle's address, or zero on failure."""
-comptime DenseFree = def(Handle) thin abi("C") -> None
-"""`usearch_dense_free`: releases a handle; cannot fail."""
-comptime DenseReserve = def(Handle, c_size_t, ErrorReport) thin abi("C") -> None
-"""`usearch_dense_reserve`: reserves total capacity ahead of insertion."""
-comptime DenseClear = def(Handle, ErrorReport) thin abi("C") -> None
-"""`usearch_dense_clear`: erases every entry, keeping the capacity and the frozen geometry."""
-comptime DenseMeasure = def(Handle, ErrorReport) thin abi("C") -> c_size_t
-"""`usearch_dense_size` and every other whole-index count: one `size_t` returned by value."""
-comptime DenseCapabilities = def(Handle, ErrorReport) thin abi("C") -> Address
-"""`usearch_dense_capabilities`: the dispatched codename, as a static C string."""
-
-comptime DenseAdd = def(
-    Handle,
-    Handle,
-    KeysView[ImmUntrackedOrigin],
-    MatrixViewIn,
-    InsertionIn,
-    Address,
-    Address,
-    StatsOut,
-    ErrorReport,
-) thin abi("C") -> c_size_t
-"""`usearch_dense_add`: the rows and their keys, answering how many were published."""
-
-comptime DenseRefine = def(Handle, Handle, InsertionIn, Address, Address, StatsOut, ErrorReport) thin abi(
-    "C"
-) -> c_size_t
-"""`usearch_dense_refine`: re-selects every entry's neighbors, answering how many changed."""
-
-comptime DenseSearch = def(
-    Handle,
-    Handle,
-    MatrixViewIn,
-    MatchesIn,
-    SearchIn,
-    Address,
-    Address,
-    StatsOut,
-    ErrorReport,
-) thin abi("C") -> None
-"""`usearch_dense_search`: k-approximate nearest neighbors for a batch of queries."""
-
-comptime DenseSearchIf = def(
-    Handle,
-    Handle,
-    MatrixViewIn,
-    MatchesIn,
-    SearchIn,
-    Address,
-    Address,
-    Address,
-    Address,
-    StatsOut,
-    ErrorReport,
-) thin abi("C") -> None
-"""`usearch_dense_search_if`: the same walk, admitting only what the predicate approves."""
-
-comptime DenseCount = def(Handle, Key, ErrorReport) thin abi("C") -> c_size_t
-"""`usearch_dense_count`: how many entries share one key."""
-
-comptime DenseGet = def(Handle, Key, MatrixSpanIn, ErrorReport) thin abi("C") -> c_size_t
-"""`usearch_dense_get`: exports the rows under one key, answering the true count."""
-
-comptime DenseOpenCursor = def(Handle, ErrorReport) thin abi("C") -> Address
-"""`usearch_dense_cursor`: opens a snapshot cursor, answering its address or zero."""
-comptime DenseCursorNext = def(Handle, KeysSpan[MutUntrackedOrigin], MatrixSpanIn, ErrorReport) thin abi(
-    "C"
-) -> c_size_t
-"""`usearch_dense_cursor_next`: copies the next rows out of the snapshot."""
-comptime DenseCursorFree = def(Handle) thin abi("C") -> None
-"""`usearch_dense_cursor_free`: releases the cursor."""
-
-comptime DenseFind = def(Handle, Handle, MatrixViewIn, ErrorReport) thin abi("C") -> Address
-"""`usearch_dense_find`: opens a resumable stream for one query, pinning one executor thread."""
-comptime DenseFindNext = def(Handle, KeysSpan[MutUntrackedOrigin], ScoresOut, ErrorReport) thin abi("C") -> c_size_t
-"""`usearch_dense_find_next`: pulls the next matches off the live frontier."""
-comptime DenseFindFree = def(Handle) thin abi("C") -> None
-"""`usearch_dense_find_free`: releases the finder and unpins its thread."""
-
-comptime DenseSave = def(Handle, Handle, BytesView[ImmUntrackedOrigin], Address, Address, ErrorReport) thin abi(
-    "C"
-) -> None
-"""`usearch_dense_save`: writes a checkpoint, the path extension picking the layout."""
-comptime DenseLoad = def(Handle, Handle, BytesView[ImmUntrackedOrigin], Address, Address, ErrorReport) thin abi(
-    "C"
-) -> None
-"""`usearch_dense_load`: reads a checkpoint into an initialized handle, shard by shard."""
-comptime DenseReadMetadata = def(BytesView[ImmUntrackedOrigin], MetadataOut, ErrorReport) thin abi("C") -> None
-"""`usearch_dense_metadata`: reads a checkpoint's geometry without loading it."""
-comptime DenseSaveBuffer = def(Handle, Handle, BytesSpan[MutUntrackedOrigin], Address, Address, ErrorReport) thin abi(
-    "C"
-) -> None
-"""`usearch_dense_save_buffer`: writes one monolith into a caller-owned buffer."""
-comptime DenseLoadBuffer = def(Handle, Handle, BytesView[ImmUntrackedOrigin], Address, Address, ErrorReport) thin abi(
-    "C"
-) -> None
-"""`usearch_dense_load_buffer`: reads one monolith out of a caller-owned buffer."""
-comptime DenseReadMetadataBuffer = def(BytesView[ImmUntrackedOrigin], MetadataOut, ErrorReport) thin abi("C") -> None
-"""`usearch_dense_metadata_buffer`: reads a monolith buffer's geometry without loading it."""
-
-comptime DenseMultiply = def(
-    Handle,
-    Handle,
-    MatrixViewIn,
-    MatchesIn,
-    SearchIn,
-    Address,
-    Address,
-    StatsOut,
-    ErrorReport,
-) thin abi("C") -> None
-"""`usearch_dense_multiply`: every pair the walk scored, not only the nearest."""
-
-comptime DenseAttend = def(
-    Handle,
-    Handle,
-    MatrixViewIn,
-    MatrixViewIn,
-    MatrixSpanIn,
-    Address,
-    AttentionIn,
-    Address,
-    Address,
-    StatsOut,
-    ErrorReport,
-) thin abi("C") -> None
-"""`usearch_dense_attend`: softmax-weighted attention folded into the walk, in one pass."""
-
-comptime DenseMaxsim = def(
-    Handle,
-    Handle,
-    MatrixViewIn,
-    c_size_t,
-    MatchesIn,
-    SearchIn,
-    Address,
-    Address,
-    StatsOut,
-    ErrorReport,
-) thin abi("C") -> None
-"""`usearch_dense_maxsim`: late-interaction scoring, every query row taking its best match per key."""
-
-# endregion Signatures
-
-# region Matrices
-
-
-@fieldwise_init
-struct MatrixView[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable, TrivialRegisterPassable):
-    """A borrowed strided matrix - `usearch_matrix_view_t`, the batch currency every verb reads.
-
-    One vector is a one-row matrix. The row and column counts are scalars; `stride_bytes` alone is
-    a byte count, which is why it says so in its name, and zero means rows sit contiguously at
-    their natural width. `columns` is what the engine checks the frozen geometry against.
-
-    Parameters:
-        origin: The borrowed rows, named so they outlive every call this view crosses.
-    """
-
-    var data: ReadData
-    """Base pointer of the first row; non-null, since a Mojo pointer cannot be otherwise."""
-    var rows: c_size_t
-    """Rows the matrix carries."""
-    var columns: c_size_t
-    """Logical scalars per row, as the caller counts them."""
-    var stride_bytes: c_size_t
-    """Bytes between the starts of consecutive rows; zero means contiguous."""
-    var scalar_kind: ScalarKind
-    """The scalar type the rows hold, converted on the way in where it differs."""
-
-    @staticmethod
-    def of[
-        dtype: DType, rows_origin: ImmOrigin, //
-    ](
-        rows: Span[Scalar[dtype], rows_origin],
-        columns: Int,
-        scalar_kind: ScalarKind,
-    ) raises Error -> MatrixView[
-        rows_origin
-    ]:
-        """Reads a flat run of scalars as a contiguous matrix of the given width.
-
-        The row count comes from the bytes the run spans divided by the bytes one row of
-        `scalar_kind` occupies, so a kind that disagrees with `dtype` is refused here rather than
-        read past the end by the engine. A sub-byte kind counts logical dimensions, so eight
-        `U1X8` columns are one `UInt8`.
-
-        Parameters:
-            dtype: The scalar type of the run, inferred from the argument.
-            rows_origin: The run's origin, inferred with it.
-
-        Args:
-            rows: The scalars, laid out row after row with no padding between them.
-            columns: Logical scalars per row, which must divide the run into whole rows.
-            scalar_kind: How the engine should read those scalars.
-
-        Returns:
-            A view of the whole run, with a derived contiguous stride.
-
-        Raises:
-            `Error` when the run does not divide into whole rows of that width and kind.
-        """
-        var row_bytes = scalar_kind.bytes_for_columns(columns)
-        var spanned = len(rows) * size_of[Scalar[dtype]]()
-        if columns <= 0 or row_bytes == 0 or spanned % row_bytes != 0:
-            raise Error(Status.SHAPE_MISMATCH, "MatrixView.of", NULL_ADDRESS)
-        return MatrixView[rows_origin](
-            Pointer[NoneType, ImmUntrackedOrigin](unsafe_from_address=Int(rows.unsafe_ptr())),
-            c_size_t(spanned // row_bytes),
-            c_size_t(columns),
-            c_size_t(0),
-            scalar_kind,
-        )
-
-    def untracked(self) -> MatrixView[ImmUntrackedOrigin]:
-        """The same matrix with its borrow erased - the one instantiation the ABI signatures name.
-
-        Returns:
-            A view of the same rows, whose type no longer keeps their storage alive.
-        """
-        return MatrixView[ImmUntrackedOrigin](
-            self.data,
-            self.rows,
-            self.columns,
-            self.stride_bytes,
-            self.scalar_kind,
-        )
-
-
-@fieldwise_init
-struct MatrixSpan[origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopyable, TrivialRegisterPassable):
-    """The writable twin - `usearch_matrix_span_t`, carried by every verb that lands rows.
-
-    The row count is the capacity the engine may fill rather than a promise about what it will.
-
-    Parameters:
-        origin: The lent rows, named so they outlive every call this span crosses.
-    """
-
-    var data: StoredWriteData
-    """Base pointer of the first row the engine may write."""
-    var capacity: c_size_t
-    """Rows the matrix can hold, which a verb writes up to and reports back."""
-    var columns: c_size_t
-    """Logical scalars per row, as the caller counts them."""
-    var stride_bytes: c_size_t
-    """Bytes between the starts of consecutive rows; zero means contiguous."""
-    var scalar_kind: ScalarKind
-    """The scalar type to write, converted on the way out where it differs."""
-
-    @staticmethod
-    def of[
-        dtype: DType, rows_origin: MutOrigin, //
-    ](
-        rows: Span[Scalar[dtype], rows_origin],
-        columns: Int,
-        scalar_kind: ScalarKind,
-    ) raises Error -> MatrixSpan[
-        rows_origin
-    ]:
-        """Writes into a flat run of scalars as a contiguous matrix of the given width.
-
-        The capacity comes from the bytes the run spans divided by the bytes one row of
-        `scalar_kind` occupies, so a kind that disagrees with `dtype` is refused here rather than
-        written past the end by the engine.
-
-        Parameters:
-            dtype: The scalar type of the run, inferred from the argument.
-            rows_origin: The run's origin, inferred with it.
-
-        Args:
-            rows: The storage, laid out row after row with no padding between them.
-            columns: Logical scalars per row, which must divide the run into whole rows.
-            scalar_kind: How the engine should write those scalars.
-
-        Returns:
-            A span over the whole run, with a derived contiguous stride.
-
-        Raises:
-            `Error` when the run does not divide into whole rows of that width and kind.
-        """
-        var row_bytes = scalar_kind.bytes_for_columns(columns)
-        var spanned = len(rows) * size_of[Scalar[dtype]]()
-        if columns <= 0 or row_bytes == 0 or spanned % row_bytes != 0:
-            raise Error(Status.SHAPE_MISMATCH, "MatrixSpan.of", NULL_ADDRESS)
-        return MatrixSpan[rows_origin](
-            StoredWriteData(unsafe_from_address=Int(rows.unsafe_ptr())),
-            c_size_t(spanned // row_bytes),
-            c_size_t(columns),
-            c_size_t(0),
-            scalar_kind,
-        )
-
-    def untracked(self) -> MatrixSpan[MutUntrackedOrigin]:
-        """The same matrix with its borrow erased - the one instantiation the ABI signatures name.
-
-        Returns:
-            A span over the same storage, whose type no longer keeps it alive.
-        """
-        return MatrixSpan[MutUntrackedOrigin](
-            self.data,
-            self.capacity,
-            self.columns,
-            self.stride_bytes,
-            self.scalar_kind,
-        )
-
-
-@fieldwise_init
-struct MatchesSpan[
-    keys_origin: MutOrigin = MutUntrackedOrigin,
-    scores_origin: MutOrigin = MutUntrackedOrigin,
-    counts_origin: MutOrigin = MutUntrackedOrigin,
-](ImplicitlyCopyable, TrivialRegisterPassable):
-    """Where a batch of matches lands: `rows x wanted` keys, their scores, and one count per row.
-
-    Every ranking verb - both searches, the sparse product, and late interaction - fills exactly
-    this triple, so it travels as one value rather than as six loose arguments. Each count reports
-    the true number the walk found, never the number written, so a count above `wanted` means that
-    row was truncated and the call should be repeated with more room.
-
-    Parameters:
-        keys_origin: The lent key storage, named so it outlives every call this span crosses.
-        scores_origin: The lent score storage, named for the same reason.
-        counts_origin: The lent per-row count storage, named for the same reason.
-    """
-
-    var keys: StoredKeys
-    """First key of the first row."""
-    var keys_stride_bytes: c_size_t
-    """Bytes between the starts of consecutive key rows; zero means contiguous."""
-    var scores: StoredScores
-    """First score of the first row, paired positionally with the keys."""
-    var scores_stride_bytes: c_size_t
-    """Bytes between the starts of consecutive score rows; zero means contiguous."""
-    var counts: StoredCounts
-    """One true count per row, of at least as many entries as the batch has rows."""
-    var wanted: c_size_t
-    """Column capacity of both matrices - the "k" the verb is asked for."""
-
-    @staticmethod
-    def of[
-        found_keys_origin: MutOrigin,
-        found_scores_origin: MutOrigin,
-        found_counts_origin: MutOrigin,
-        //,
-    ](
-        keys: Span[Key, found_keys_origin],
-        scores: Span[Distance, found_scores_origin],
-        counts: Span[c_size_t, found_counts_origin],
-    ) raises Error -> MatchesSpan[found_keys_origin, found_scores_origin, found_counts_origin]:
-        """Lands the batch in three runs the caller already sized to `rows x wanted`.
-
-        The strides and `wanted` follow from the lengths, so they are derived here rather than
-        asked for - three numbers a caller could contradict become one shape the lengths fix.
-
-        Parameters:
-            found_keys_origin: The key run's origin, inferred from the argument.
-            found_scores_origin: The score run's origin, inferred with it.
-            found_counts_origin: The count run's origin, inferred with it.
-
-        Args:
-            keys: Storage for the keys, row after row.
-            scores: Storage for the scores, row after row and the same shape.
-            counts: Storage for the per-row counts, one per row.
-
-        Returns:
-            A span over all three, with derived contiguous strides.
-
-        Raises:
-            `Error` when the three runs do not describe one `rows x wanted` rectangle.
-        """
-        if len(counts) == 0 or len(keys) != len(scores) or len(keys) % len(counts) != 0:
-            raise Error(Status.SHAPE_MISMATCH, "MatchesSpan.of", NULL_ADDRESS)
-        return MatchesSpan[found_keys_origin, found_scores_origin, found_counts_origin](
-            StoredKeys(unsafe_from_address=Int(keys.unsafe_ptr())),
-            c_size_t(0),
-            StoredScores(unsafe_from_address=Int(scores.unsafe_ptr())),
-            c_size_t(0),
-            StoredCounts(unsafe_from_address=Int(counts.unsafe_ptr())),
-            c_size_t(len(keys) // len(counts)),
-        )
-
-    def untracked(
-        self,
-    ) -> MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin]:
-        """The same triple with its borrows erased - the one instantiation the ABI signatures name.
-
-        Returns:
-            A span over the same storage, whose type no longer keeps any of it alive.
-        """
-        return MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin](
-            self.keys,
-            self.keys_stride_bytes,
-            self.scores,
-            self.scores_stride_bytes,
-            self.counts,
-            self.wanted,
-        )
-
-
-# endregion Matrices
 
 # region Configuration
 
 
 @fieldwise_init
-struct Metric(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writable):
+struct DenseMetric(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """The built-in dense metrics - `usearch_dense_metric_t`, each with its own SIMD kernel chain.
 
     The last two read their rows as `ScalarKind.U1X8` bit sets and refuse any other quantization; the
     first four refuse that one. The three linear-algebra verbs run on `INNER` alone, since a
-    product and a softmax both need logits rather than distances.
+    product and a softmax both need logits rather than distances. `Library.dense_metric_name` spells
+    each one as the engine does.
     """
 
     var code: c_int
     """The raw `usearch_dense_metric_t` value the ABI exchanges."""
     comptime UNKNOWN = Self(0)
-    """No built-in kind - a custom callback supplies the scoring and forfeits the kernel chains."""
+    """No kind named - an unset field, refused by every constructor."""
     comptime INNER = Self(1)
     """Sum of elementwise products, unnormalized and scale-sensitive."""
     comptime ANGULAR = Self(2)
@@ -546,109 +104,9 @@ struct Metric(Equatable, ImplicitlyCopyable, TrivialRegisterPassable, Writable):
     comptime JACCARD = Self(5)
     """Differing bits over union bits in [0, 1], ignoring the zeros both rows share."""
 
-    def write_to(self, mut writer: Some[Writer]):
-        """Names which of the six this is.
-
-        Args:
-            writer: The sink the name is appended to.
-        """
-        if self == Self.INNER:
-            writer.write("inner")
-        elif self == Self.ANGULAR:
-            writer.write("angular")
-        elif self == Self.EUCLIDEAN:
-            writer.write("euclidean")
-        elif self == Self.HAMMING:
-            writer.write("hamming")
-        elif self == Self.JACCARD:
-            writer.write("jaccard")
-        else:
-            writer.write("unknown")
-
 
 @fieldwise_init
-struct Admission(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
-    """Whether a filtered search reports one candidate key or passes over it - `usearch_admission_t`."""
-
-    var code: c_int
-    """The raw `usearch_admission_t` value the ABI exchanges."""
-    comptime REJECT = Self(0)
-    """Skip the key; the walk still routes through it."""
-    comptime ADMIT = Self(1)
-    """Report the key among the matches."""
-
-
-@fieldwise_init
-struct InsertionOptions(ImplicitlyCopyable, TrivialRegisterPassable):
-    """Per-call settings of insertion and refinement - `usearch_dense_insertion_options_t`.
-
-    A pure input, never written. Every field zeroed derives every setting, which is what the
-    default constructor leaves behind.
-    """
-
-    var expansion_factor: c_size_t
-    """The candidate-pool breadth the build walk explores; zero derives."""
-
-    def __init__(out self):
-        """Derives every setting."""
-        self.expansion_factor = c_size_t(0)
-
-    def __init__(out self, *, expansion_factor: Int):
-        """Pins the candidate-pool breadth for this call.
-
-        Args:
-            expansion_factor: How wide the pool is kept; zero derives.
-        """
-        self.expansion_factor = c_size_t(expansion_factor)
-
-
-@fieldwise_init
-struct SearchOptions(ImplicitlyCopyable, TrivialRegisterPassable):
-    """Per-call settings of the read-only walks - `usearch_dense_search_options_t`.
-
-    A pure input, never written, taken by both searches as well as the sparse product and late
-    interaction, where the same breadth reads as emitted-pair density rather than as recall.
-    """
-
-    var expansion_factor: c_size_t
-    """The candidate-pool breadth the walk explores; zero derives."""
-
-    def __init__(out self):
-        """Derives every setting."""
-        self.expansion_factor = c_size_t(0)
-
-    def __init__(out self, *, expansion_factor: Int):
-        """Pins the candidate-pool breadth for this call.
-
-        Args:
-            expansion_factor: How wide the pool is kept; zero derives.
-        """
-        self.expansion_factor = c_size_t(expansion_factor)
-
-
-@fieldwise_init
-struct AttentionOptions(ImplicitlyCopyable, TrivialRegisterPassable):
-    """Per-call settings of the attention verb - `usearch_dense_attention_options_t`.
-
-    A pure input, never written, and every field zeroed derives every setting.
-    """
-
-    var expansion_factor: c_size_t
-    """The candidate-pool breadth; zero derives."""
-    var score_scale: Float32
-    """The logit scale, conventionally the inverse square root of the head dimensionality; zero derives."""
-    var mass_tolerance: Float32
-    """The residual-mass threshold the walk stops at; zero derives."""
-
-    def __init__(out self):
-        """Derives every setting."""
-        self.expansion_factor = c_size_t(0)
-        self.score_scale = Float32(0)
-        self.mass_tolerance = Float32(0)
-
-
-@fieldwise_init
-struct SoftmaxState(ImplicitlyCopyable, TrivialRegisterPassable):
+struct DenseSoftmaxState(ImplicitlyCopyable, TrivialRegisterPassable):
     """The online-softmax carry of one query row - `usearch_dense_softmax_state_t`.
 
     Flash Attention's running maximum and partition. The two are one concept: a maximum without
@@ -668,8 +126,20 @@ struct SoftmaxState(ImplicitlyCopyable, TrivialRegisterPassable):
         self.partition = Float32(0)
 
 
+comptime ValueLookup = def(
+    Address, Pointer[Key, ImmUntrackedOrigin], c_size_t, ScalarKind, c_size_t, Pointer[Address, MutAnyOrigin]
+) thin abi("C") -> None
+"""`usearch_value_lookup_t`: resolves `count` keys to one value-row address each, `columns` values of
+`scalar` apiece - the index's own width and kind - alive until the call returns; a `NULL_ADDRESS` row
+refuses the call.
+
+Called with the `value_lookup_state` the verb was handed, once per scored batch and concurrently from
+the executor's threads. A lookup whose rows hold another kind or width answers `NULL_ADDRESS` for
+every key rather than handing the engine rows it would misread."""
+
+
 @fieldwise_init
-struct TraversalStats(ImplicitlyCopyable):
+struct DenseTraversalStats(ImplicitlyCopyable):
     """Traversal telemetry - `usearch_dense_traversal_stats_t`, a pure output.
 
     Fully overwritten by the call it is passed to, so a caller reusing one slot across calls reads
@@ -691,196 +161,81 @@ struct TraversalStats(ImplicitlyCopyable):
 
 
 @fieldwise_init
-struct DenseOptions[origin: ImmOrigin = ImmUntrackedOrigin](ImplicitlyCopyable):
-    """Construction and loading options - `usearch_dense_options_t`, laid out as the ABI declares.
+struct DenseReachability(Defaultable, ImplicitlyCopyable):
+    """One reachability audit - `usearch_dense_reachability_t`: the population it judged, and how much
+    of it a search reaches."""
 
-    The `residency` field tags which arm of the C union the last two fields are; every arm is a
-    borrowed array and its count, so the two fields serve all three and the placement factories
-    below name which. Zeroed optional fields derive from the geometry.
+    var audited: c_size_t
+    """Entries published when the audit started; compare `reachable` against this, never a later size."""
+    var reachable: c_size_t
+    """Of those, the entries a search reaches; the rest no search finds until a `refine` re-links them."""
+    var sweeps: c_size_t
+    """Levels the sweep took to converge - a diameter proxy."""
 
-    Never marked register-passable: its address crosses to C, and Mojo 1.0 mislays a struct this
-    wide once it is, so the handle would be built from nothing.
+    def __init__(out self):
+        """Zeroes the audit, which is what a failed call leaves."""
+        self.audited = c_size_t(0)
+        self.reachable = c_size_t(0)
+        self.sweeps = c_size_t(0)
 
-    Parameters:
-        origin: The borrowed placement array, named so it outlives the call that reads it.
+
+@fieldwise_init
+struct DenseOptions(ImplicitlyCopyable):
+    """The geometry an empty index freezes - what `usearch_dense_init_ram_t` and
+    `usearch_dense_init_vram_t` share, without the placement each names its own way.
+
+    Zeroed optional fields derive from the geometry.
     """
 
-    var metric: Metric
+    var metric: DenseMetric
     """The metric kind used for distance calculations between vectors."""
-    var metric_callback: Address
-    """A `usearch_dense_metric_callback_t`; `NULL_ADDRESS` unless `metric` is `Metric.UNKNOWN`.
-
-    An address rather than a Mojo function, for the reason this module's docstring records: a
-    `def ... abi("C")` returning a value does not lower to the C calling convention in Mojo 1.0,
-    and a scoring kernel returns a distance. A kernel compiled in C installs here unchanged, and
-    must outlive the index.
-    """
-    var metric_callback_state: Address
-    """The opaque state forwarded into every custom metric call."""
     var quantization: ScalarKind
     """The scalar type vectors are stored and quantized into."""
     var dimensions: c_size_t
-    """Dimensions in the indexed vectors; zero defers the geometry to a later load."""
+    """Dimensions in the indexed vectors."""
     var connectivity: c_size_t
     """The connections-per-node bound; zero derives."""
     var values_per_key: c_size_t
     """Upper bound on entries sharing one key; zero derives to one - unique keys."""
-    var residency: Residency
-    """Selects the active arm of the two placement fields, and the meaning of "load"."""
-    var placement: Address
-    """The arm's borrowed array - NUMA node ids, device ordinals, or paths; `NULL_ADDRESS` derives."""
-    var placement_count: c_size_t
-    """How many entries that array holds; zero derives."""
 
     def __init__(
         out self,
-        metric: Metric,
+        metric: DenseMetric,
         quantization: ScalarKind,
         dimensions: Int,
         connectivity: Int = 0,
         values_per_key: Int = 0,
-        residency: Residency = Residency.RAM,
     ):
-        """Describes an index by its geometry, leaving placement to be derived.
+        """Describes an index by its geometry.
 
         Args:
             metric: The metric kind the graph is frozen under.
             quantization: The scalar type vectors are stored as.
-            dimensions: Dimensions per vector; zero defers the geometry to a later load.
+            dimensions: Dimensions per vector.
             connectivity: The connections-per-node bound; zero derives.
             values_per_key: Upper bound on entries sharing one key; zero derives to one.
-            residency: Where the payload lives and which engine traverses it.
         """
         self.metric = metric
-        self.metric_callback = NULL_ADDRESS
-        self.metric_callback_state = NULL_ADDRESS
         self.quantization = quantization
         self.dimensions = c_size_t(dimensions)
         self.connectivity = c_size_t(connectivity)
         self.values_per_key = c_size_t(values_per_key)
-        self.residency = residency
-        self.placement = NULL_ADDRESS
-        self.placement_count = c_size_t(0)
-
-    def on_memory_domains[
-        domains_origin: ImmOrigin, //
-    ](self, memory_domains: Span[Int32, domains_origin]) -> DenseOptions[domains_origin]:
-        """Names the NUMA nodes a RAM-resident index places its shards in.
-
-        Answers re-typed options rather than mutating in place, because naming the array is what
-        binds its origin, and a value cannot gain a parameter after it is built.
-
-        Parameters:
-            domains_origin: The run's origin, inferred from the argument.
-
-        Args:
-            memory_domains: The node ids to place one shard on apiece.
-
-        Returns:
-            The same geometry, placed on those nodes and holding their storage alive.
-        """
-        return DenseOptions[domains_origin](
-            self.metric,
-            self.metric_callback,
-            self.metric_callback_state,
-            self.quantization,
-            self.dimensions,
-            self.connectivity,
-            self.values_per_key,
-            Residency.RAM,
-            Int(memory_domains.unsafe_ptr()),
-            c_size_t(len(memory_domains)),
-        )
-
-    def on_devices[
-        devices_origin: ImmOrigin, //
-    ](self, devices: Span[Int32, devices_origin]) -> DenseOptions[devices_origin]:
-        """Names the CUDA ordinals a VRAM-resident index shards across.
-
-        Parameters:
-            devices_origin: The run's origin, inferred from the argument.
-
-        Args:
-            devices: The device ordinals to place one shard on apiece.
-
-        Returns:
-            The same geometry, placed on those devices and holding their storage alive.
-        """
-        return DenseOptions[devices_origin](
-            self.metric,
-            self.metric_callback,
-            self.metric_callback_state,
-            self.quantization,
-            self.dimensions,
-            self.connectivity,
-            self.values_per_key,
-            Residency.VRAM,
-            Int(devices.unsafe_ptr()),
-            c_size_t(len(devices)),
-        )
-
-    def on_paths[
-        paths_origin: ImmOrigin, //
-    ](self, paths: Span[BytesView[ImmUntrackedOrigin], paths_origin]) -> DenseOptions[paths_origin]:
-        """Names the devices or directories an NVMe-resident index places its shards on.
-
-        Parameters:
-            paths_origin: The run's origin, inferred from the argument.
-
-        Args:
-            paths: The device or directory names, one shard apiece.
-
-        Returns:
-            The same geometry, placed on those paths and holding their storage alive.
-        """
-        return DenseOptions[paths_origin](
-            self.metric,
-            self.metric_callback,
-            self.metric_callback_state,
-            self.quantization,
-            self.dimensions,
-            self.connectivity,
-            self.values_per_key,
-            Residency.NVME,
-            Int(paths.unsafe_ptr()),
-            c_size_t(len(paths)),
-        )
-
-    def untracked(self) -> DenseOptions[ImmUntrackedOrigin]:
-        """The same options with the borrow erased - the one instantiation the ABI signatures name.
-
-        Returns:
-            Options naming the same placement array, whose type no longer keeps it alive.
-        """
-        return DenseOptions[ImmUntrackedOrigin](
-            self.metric,
-            self.metric_callback,
-            self.metric_callback_state,
-            self.quantization,
-            self.dimensions,
-            self.connectivity,
-            self.values_per_key,
-            self.residency,
-            self.placement,
-            self.placement_count,
-        )
 
 
 @fieldwise_init
-struct DenseMetadata(ImplicitlyCopyable):
+struct DenseMetadata(Defaultable, ImplicitlyCopyable):
     """The geometry and metric a checkpoint froze - `usearch_dense_metadata_t`, a pure output.
 
     Everything a reader learns without opening the checkpoint, and nothing a reader must choose for
     itself. Placement is absent because a checkpoint records where it was written rather than where
     a reader must keep it, and `values_per_key` is absent because it bounds a live handle's mutable
-    state rather than anything the serialized form carries; both stay the caller's to name in the
-    `DenseOptions` a handle is built from.
+    state rather than anything the serialized form carries.
 
-    Never marked register-passable: its address crosses to C, and Mojo 1.0 mislays a struct once it
+    Never marked register-passable: its address crosses to C, and Mojo 1.1 mislays a struct once it
     is, so the probes would read back nothing.
     """
 
-    var metric: Metric
+    var metric: DenseMetric
     """The metric kind the checkpoint scores with."""
     var quantization: ScalarKind
     """The scalar type its rows are stored and quantized into."""
@@ -891,24 +246,1660 @@ struct DenseMetadata(ImplicitlyCopyable):
 
     def __init__(out self):
         """Names no kind and no geometry, so an unwritten slot reads as an unanswered probe."""
-        self.metric = Metric.UNKNOWN
+        self.metric = DenseMetric.UNKNOWN
         self.quantization = ScalarKind.UNKNOWN
         self.dimensions = c_size_t(0)
         self.connectivity = c_size_t(0)
 
 
+@fieldwise_init
+struct DenseIndexDescription(Copyable, Movable):
+    """`usearch_dense_index_description_t`: a live index's frozen metadata and current counters.
+
+    Each counter is read once, so under concurrent insertions they may come from slightly
+    different moments.
+    """
+
+    var metadata: DenseMetadata
+    """The frozen metric, quantization, dimensions and connectivity, as a checkpoint reports them."""
+    var size: c_size_t
+    """Stored entries."""
+    var capacity: c_size_t
+    """Entries hosted without growing again."""
+    var memory_usage: c_size_t
+    """Bytes the handle holds; traversal scratch is the executor's."""
+    var capabilities: String
+    """Codename of the kernels the index dispatched to on this machine."""
+
+
+@fieldwise_init
+struct DenseIndexDescriptionOutputs(Defaultable, ImplicitlyCopyable):
+    """`usearch_dense_index_description_t`, laid out as the ABI declares it."""
+
+    var metadata: DenseMetadata
+    var size: c_size_t
+    var capacity: c_size_t
+    var memory_usage: c_size_t
+    var capabilities: Address
+
+    def __init__(out self):
+        """Zeroes every field, so an unwritten slot reads as an empty index."""
+        self.metadata = DenseMetadata()
+        self.size = c_size_t(0)
+        self.capacity = c_size_t(0)
+        self.memory_usage = c_size_t(0)
+        self.capabilities = NULL_ADDRESS
+
+
+@fieldwise_init
+struct DenseVectors[dtype: DType, origin: MutOrigin](Movable, Sized):
+    """Rows a call wrote into its arena - `usearch_rows_view_t` - read in place: the entries `get`
+    exports, or the rows `attend` attends.
+
+    Rows are `stride` bytes apart and `columns` values wide, both as the engine reported them, so a
+    padded row never reads as extra values.
+
+    Parameters:
+        dtype: The element type each row is read as.
+        origin: The arena the rows live in, which this result borrows.
+    """
+
+    var arena: Pointer[Arena, Self.origin]
+    """The arena holding the rows."""
+    var generation: Int
+    """The arena's call these rows came from, so a read after a later call is refused."""
+    var view: RowsViewArguments
+    """The first row, the stride, the width and the kind, as the engine wrote them."""
+    var rows: Int
+    """Rows written; zero when the key is absent."""
+
+    def __len__(self) -> Int:
+        """The rows written.
+
+        Returns:
+            Zero when the key is absent.
+        """
+        return self.rows
+
+    def __getitem__(ref self, row: Int) raises Error -> Span[Scalar[Self.dtype], origin_of(self)]:
+        """One row, borrowed from the arena this result reads. Binding-only.
+
+        Args:
+            row: Which row, below `len(self)`.
+
+        Returns:
+            The row's elements - `columns` of them, or its packed bytes for a sub-byte kind.
+
+        Raises:
+            `Error` with `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
+        """
+        _readable(self.arena, self.generation, "DenseVectors.__getitem__")
+        return _in_arena[Scalar[Self.dtype], origin_of(self)](
+            self.view.data + row * Int(self.view.stride),
+            self.view.scalar.bytes_for_columns(Int(self.view.columns)) // size_of[Scalar[Self.dtype]](),
+        )
+
+    def columns(self) -> Int:
+        """Values in each row, as the engine reported them.
+
+        Returns:
+            The width the rows were written at.
+        """
+        return Int(self.view.columns)
+
+
+@fieldwise_init
+struct DenseBatch[origin: MutOrigin](Movable, Sized):
+    """One cursor pull, read in place from its arena: the keys, and the rows beside them when asked for.
+
+    Parameters:
+        origin: The arena the batch lives in, which this result borrows.
+    """
+
+    var arena: Pointer[Arena, Self.origin]
+    """The arena holding the batch."""
+    var generation: Int
+    """The arena's call this batch came from, so a read after a later call is refused."""
+    var keys_address: Address
+    """The first key, inside the arena."""
+    var view: RowsViewArguments
+    """The rows beside the keys, null for a pull of keys alone."""
+    var written: Int
+    """Entries the pull wrote; zero when the walk is exhausted."""
+
+    def __len__(self) -> Int:
+        """The entries the pull wrote.
+
+        Returns:
+            Zero when the walk is exhausted.
+        """
+        return self.written
+
+    def keys(ref self) raises Error -> Span[Key, origin_of(self)]:
+        """Every entry's key, in walk order.
+
+        Returns:
+            The keys, borrowed from the arena this result reads.
+
+        Raises:
+            `Error` with `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
+        """
+        _readable(self.arena, self.generation, "DenseBatch.keys")
+        return _in_arena[Key, origin_of(self)](self.keys_address, self.written)
+
+    def row[dtype: DType](ref self, row: Int) raises Error -> Span[Scalar[dtype], origin_of(self)]:
+        """One entry's row, beside its key. Binding-only.
+
+        Parameters:
+            dtype: The element type the row is read as, which the exported kind must store whole.
+
+        Args:
+            row: Which entry, below `len(self)`.
+
+        Returns:
+            The row's elements - `columns` of them, or its packed bytes for a sub-byte kind.
+
+        Raises:
+            `Error` with `SHAPE_MISMATCH` for a pull of keys alone or a kind `dtype` cannot hold, with
+            `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
+        """
+        _readable(self.arena, self.generation, "DenseBatch.row")
+        if not self.view.scalar.stores[dtype]():
+            raise Error(Status.SHAPE_MISMATCH, "DenseBatch.row")
+        return _in_arena[Scalar[dtype], origin_of(self)](
+            self.view.data + row * Int(self.view.stride),
+            self.view.scalar.bytes_for_columns(Int(self.view.columns)) // size_of[Scalar[dtype]](),
+        )
+
+
+@fieldwise_init
+struct DenseProducts[origin: MutOrigin](Movable):
+    """The ragged output of `multiply` - `usearch_matches_tape_view_t` - read in place from its arena:
+    row `i` spans pairs `offsets()[i]` up to `offsets()[i + 1]` of `keys()` and `scores()`.
+
+    Parameters:
+        origin: The arena the pairs live in, which this result borrows.
+    """
+
+    var arena: Pointer[Arena, Self.origin]
+    """The arena holding the pairs."""
+    var generation: Int
+    """The arena's call these pairs came from, so a read after a later call is refused."""
+    var view: MatchesTapeViewArguments
+    """The keys, products and offsets, as the engine wrote them."""
+    var rows: Int
+    """Left-hand rows the call multiplied."""
+    var pairs: Int
+    """Pairs written across every row."""
+    var required: Int
+    """Pairs the walks scored before `wanted` cut any; above `pairs` means rows were truncated."""
+
+    def offsets(ref self) raises Error -> Span[c_size_t, origin_of(self)]:
+        """One more offset than left-hand rows, as Apache Arrow lays a ragged batch out.
+
+        Returns:
+            The offsets into `keys()` and `scores()`, borrowed from the arena this result reads.
+
+        Raises:
+            `Error` with `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
+        """
+        _readable(self.arena, self.generation, "DenseProducts.offsets")
+        return _in_arena[c_size_t, origin_of(self)](self.view.offsets, self.rows + 1)
+
+    def keys(ref self) raises Error -> Span[Key, origin_of(self)]:
+        """Each pair's indexed row, borrowed from the arena this result reads.
+
+        Returns:
+            One key per pair.
+
+        Raises:
+            `Error` with `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
+        """
+        _readable(self.arena, self.generation, "DenseProducts.keys")
+        return _in_arena[Key, origin_of(self)](self.view.keys, self.pairs)
+
+    def scores(ref self) raises Error -> Span[Distance, origin_of(self)]:
+        """Each pair's product, positionally paired with `keys()`.
+
+        Returns:
+            One score per pair.
+
+        Raises:
+            `Error` with `UNINITIALIZED` once a later call rewound the arena, or `DEVICE` over VRAM.
+        """
+        _readable(self.arena, self.generation, "DenseProducts.scores")
+        return _in_arena[Distance, origin_of(self)](self.view.scores, self.pairs)
+
+
 # endregion Configuration
+
+# region Configs
+
+
+def _stats_address[origin: MutOrigin](stats: Optional[Pointer[DenseTraversalStats, origin]]) -> Address:
+    """The telemetry slot a config lends, or `NULL_ADDRESS` to skip reporting."""
+    return Int(stats.value()) if stats else NULL_ADDRESS
+
+
+struct DenseInsertConfig[stats_origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopyable):
+    """The knobs of `usearch_dense_insert_t`; zeroed or absent ones derive what the C interface derives.
+
+    Parameters:
+        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
+    """
+
+    var expansion_factor: Int
+    """The candidate-pool breadth the build walk explores; zero derives."""
+    var stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]]
+    """Receives this call's traversal telemetry, fully overwritten; absent skips reporting."""
+
+    def __init__(
+        out self,
+        *,
+        expansion_factor: Int = 0,
+        stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]] = Optional[
+            Pointer[DenseTraversalStats, Self.stats_origin]
+        ](),
+    ):
+        """Names only the knobs that differ from the derived ones.
+
+        Args:
+            expansion_factor: The candidate-pool breadth the build walk explores; zero derives.
+            stats: Receives this call's traversal telemetry; absent skips reporting.
+        """
+        self.expansion_factor = expansion_factor
+        self.stats = stats
+
+
+struct DenseRefineConfig[stats_origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopyable):
+    """The knobs of `usearch_dense_refine_t`; zeroed or absent ones derive what the C interface derives.
+
+    Parameters:
+        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
+    """
+
+    var expansion_factor: Int
+    """The candidate-pool breadth the re-selection walk explores; zero derives."""
+    var stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]]
+    """Receives this call's traversal telemetry, fully overwritten; absent skips reporting."""
+
+    def __init__(
+        out self,
+        *,
+        expansion_factor: Int = 0,
+        stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]] = Optional[
+            Pointer[DenseTraversalStats, Self.stats_origin]
+        ](),
+    ):
+        """Names only the knobs that differ from the derived ones.
+
+        Args:
+            expansion_factor: The candidate-pool breadth the re-selection walk explores; zero derives.
+            stats: Receives this call's traversal telemetry; absent skips reporting.
+        """
+        self.expansion_factor = expansion_factor
+        self.stats = stats
+
+
+struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopyable):
+    """The knobs of `usearch_dense_search_t`; zeroed or absent ones derive what the C interface derives.
+
+    A `predicate` narrows the matches to the entries it admits, and is an address rather than a Mojo
+    function, because a `def ... abi("C")` that returns a value does not lower to the C calling
+    convention in Mojo 1.1. Any `usearch_predicate_t` compiled in C installs unchanged. Non-matching
+    entries still route the traversal, so the predicate is called once per scored candidate,
+    concurrently from the executor's threads.
+
+    Parameters:
+        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
+    """
+
+    var expansion_factor: Int
+    """The candidate-pool breadth the walk explores; zero derives."""
+    var predicate: Address
+    """A `usearch_predicate_t` that must outlive the call; `NULL_ADDRESS` admits all."""
+    var predicate_state: Address
+    """The opaque state forwarded into every predicate call."""
+    var stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]]
+    """Receives this call's traversal telemetry, fully overwritten; absent skips reporting."""
+
+    def __init__(
+        out self,
+        *,
+        expansion_factor: Int = 0,
+        predicate: Address = NULL_ADDRESS,
+        predicate_state: Address = NULL_ADDRESS,
+        stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]] = Optional[
+            Pointer[DenseTraversalStats, Self.stats_origin]
+        ](),
+    ):
+        """Names only the knobs that differ from the derived ones.
+
+        Args:
+            expansion_factor: The candidate-pool breadth the walk explores; zero derives.
+            predicate: A `usearch_predicate_t` that must outlive the call; `NULL_ADDRESS` admits all.
+            predicate_state: The opaque state forwarded into every predicate call.
+            stats: Receives this call's traversal telemetry; absent skips reporting.
+        """
+        self.expansion_factor = expansion_factor
+        self.predicate = predicate
+        self.predicate_state = predicate_state
+        self.stats = stats
+
+
+struct DenseMaxsimConfig[stats_origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopyable):
+    """The knobs of `usearch_dense_maxsim_t`; zeroed or absent ones derive what the C interface derives.
+
+    Parameters:
+        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
+    """
+
+    var expansion_factor: Int
+    """The candidate-pool breadth; zero derives."""
+    var stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]]
+    """Receives this call's traversal telemetry, fully overwritten; absent skips reporting."""
+
+    def __init__(
+        out self,
+        *,
+        expansion_factor: Int = 0,
+        stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]] = Optional[
+            Pointer[DenseTraversalStats, Self.stats_origin]
+        ](),
+    ):
+        """Names only the knobs that differ from the derived ones.
+
+        Args:
+            expansion_factor: The candidate-pool breadth; zero derives.
+            stats: Receives this call's traversal telemetry; absent skips reporting.
+        """
+        self.expansion_factor = expansion_factor
+        self.stats = stats
+
+
+struct DenseMultiplyConfig[stats_origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopyable):
+    """The knobs of `usearch_dense_multiply_t`; zeroed or absent ones derive what the C interface derives.
+
+    Parameters:
+        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
+    """
+
+    var wanted: Int
+    """Pairs kept per row, the first ones its walk scored; zero keeps every pair."""
+    var expansion_factor: Int
+    """The candidate-pool breadth, which widens the emitted pattern; zero derives."""
+    var stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]]
+    """Receives this call's traversal telemetry, fully overwritten; absent skips reporting."""
+
+    def __init__(
+        out self,
+        *,
+        wanted: Int = 0,
+        expansion_factor: Int = 0,
+        stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]] = Optional[
+            Pointer[DenseTraversalStats, Self.stats_origin]
+        ](),
+    ):
+        """Names only the knobs that differ from the derived ones.
+
+        Args:
+            wanted: Pairs kept per row, the first ones its walk scored; zero keeps every pair.
+            expansion_factor: The candidate-pool breadth, which widens the emitted pattern; zero derives.
+            stats: Receives this call's traversal telemetry; absent skips reporting.
+        """
+        self.wanted = wanted
+        self.expansion_factor = expansion_factor
+        self.stats = stats
+
+
+struct DenseAttendConfig[carry_origin: MutOrigin = MutUntrackedOrigin, stats_origin: MutOrigin = MutUntrackedOrigin](
+    ImplicitlyCopyable
+):
+    """The knobs of `usearch_dense_attend_t`; zeroed or absent ones derive what the C interface derives.
+
+    Parameters:
+        carry_origin: The lent softmax states' origin, inferred where any are lent.
+        stats_origin: The lent telemetry slot's origin, inferred where one is lent.
+    """
+
+    var head_count: Int
+    """The query heads sharing the index's key-value head; it must divide the rows, and zero means one."""
+    var carry: Span[DenseSoftmaxState, Self.carry_origin]
+    """The softmax states, one per query row; empty skips them."""
+    var expansion_factor: Int
+    """The candidate-pool breadth; zero derives. A wider pool walks further, folding more of the tail."""
+    var score_scale: Float32
+    """The logit scale, conventionally the inverse square root of the head width; zero derives it."""
+    var stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]]
+    """Receives this call's traversal telemetry, fully overwritten; absent skips reporting."""
+
+    def __init__(
+        out self,
+        *,
+        head_count: Int = 0,
+        carry: Span[DenseSoftmaxState, Self.carry_origin] = Span[DenseSoftmaxState, Self.carry_origin](),
+        expansion_factor: Int = 0,
+        score_scale: Float32 = 0,
+        stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]] = Optional[
+            Pointer[DenseTraversalStats, Self.stats_origin]
+        ](),
+    ):
+        """Names only the knobs that differ from the derived ones.
+
+        Args:
+            head_count: The query heads sharing the index's key-value head; zero means one.
+            carry: The softmax states, one per query row; empty skips them.
+            expansion_factor: The candidate-pool breadth; zero derives.
+            score_scale: The logit scale; zero derives it from the index's frozen geometry.
+            stats: Receives this call's traversal telemetry; absent skips reporting.
+        """
+        self.head_count = head_count
+        self.carry = carry
+        self.expansion_factor = expansion_factor
+        self.score_scale = score_scale
+        self.stats = stats
+
+
+struct DenseSearchStreamInitConfig(ImplicitlyCopyable):
+    """The knobs of `usearch_dense_search_stream_init_t`; zeroed ones derive what the C interface derives."""
+
+    var expansion_factor: Int
+    """The candidate-pool breadth the walk explores; zero derives."""
+
+    def __init__(out self, *, expansion_factor: Int = 0):
+        """Names only the knobs that differ from the derived ones.
+
+        Args:
+            expansion_factor: The candidate-pool breadth the walk explores; zero derives.
+        """
+        self.expansion_factor = expansion_factor
+
+
+# endregion Configs
+
+# region Arguments
+
+
+@fieldwise_init
+struct DenseInitRamArguments(ImplicitlyCopyable):
+    """`usearch_dense_init_ram_t`."""
+
+    var index: Address
+    var outcome: Address
+    var metric: DenseMetric
+    var quantization: ScalarKind
+    var dimensions: c_size_t
+    var connectivity: c_size_t
+    var values_per_key: c_size_t
+    var ram: RamOptions[ImmUntrackedOrigin]
+
+
+@fieldwise_init
+struct DenseInitVramArguments(ImplicitlyCopyable):
+    """`usearch_dense_init_vram_t`."""
+
+    var index: Address
+    var outcome: Address
+    var metric: DenseMetric
+    var quantization: ScalarKind
+    var dimensions: c_size_t
+    var connectivity: c_size_t
+    var values_per_key: c_size_t
+    var vram: VramOptions[ImmUntrackedOrigin]
+
+
+@fieldwise_init
+struct DenseLoadRamArguments(ImplicitlyCopyable):
+    """`usearch_dense_load_ram_t`, and `usearch_dense_load_ram_buffer_t` with `source` a buffer."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var source: BytesView[ImmUntrackedOrigin]
+    var ram: RamOptions[ImmUntrackedOrigin]
+    var values_per_key: c_size_t
+    var progress: Address
+    var progress_state: Address
+
+
+@fieldwise_init
+struct DenseLoadVramArguments(ImplicitlyCopyable):
+    """`usearch_dense_load_vram_t`, and `usearch_dense_load_vram_buffer_t` with `source` a buffer."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var source: BytesView[ImmUntrackedOrigin]
+    var vram: VramOptions[ImmUntrackedOrigin]
+    var values_per_key: c_size_t
+    var progress: Address
+    var progress_state: Address
+
+
+@fieldwise_init
+struct DenseViewRamArguments(ImplicitlyCopyable):
+    """`usearch_dense_view_ram_t`."""
+
+    var index: Address
+    var outcome: Address
+    var path: BytesView[ImmUntrackedOrigin]
+
+
+@fieldwise_init
+struct DenseViewNvmeArguments(ImplicitlyCopyable):
+    """`usearch_dense_view_nvme_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var path: BytesView[ImmUntrackedOrigin]
+    var nvme: NvmeOptions[ImmUntrackedOrigin]
+
+
+@fieldwise_init
+struct DenseReserveArguments(ImplicitlyCopyable):
+    """`usearch_dense_reserve_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var capacity: c_size_t
+
+
+@fieldwise_init
+struct DenseClearArguments(ImplicitlyCopyable):
+    """`usearch_dense_clear_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+
+
+@fieldwise_init
+struct DenseDescribeArguments(ImplicitlyCopyable):
+    """`usearch_dense_describe_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var description: Address
+
+
+@fieldwise_init
+struct DenseInsertArguments(ImplicitlyCopyable):
+    """`usearch_dense_insert_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var count: c_size_t
+    var keys: KeysView[ImmUntrackedOrigin]
+    var vectors: RowsViewArguments
+    var expansion_factor: c_size_t
+    var progress: Address
+    var progress_state: Address
+    var stats: Address
+
+
+@fieldwise_init
+struct DenseRefineArguments(ImplicitlyCopyable):
+    """`usearch_dense_refine_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var changed: Address
+    var expansion_factor: c_size_t
+    var progress: Address
+    var progress_state: Address
+    var stats: Address
+
+
+@fieldwise_init
+struct DenseHealthArguments(ImplicitlyCopyable):
+    """`usearch_dense_health_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var reachability: Address
+
+
+@fieldwise_init
+struct DenseMergeArguments(ImplicitlyCopyable):
+    """`usearch_dense_merge_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var count: c_size_t
+    var donors: Address
+    var progress: Address
+    var progress_state: Address
+
+
+@fieldwise_init
+struct DenseSearchArguments(ImplicitlyCopyable):
+    """`usearch_dense_search_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var count: c_size_t
+    var queries: RowsViewArguments
+    var matches: Address
+    var arena: Address
+    var wanted: c_size_t
+    var expansion_factor: c_size_t
+    var predicate: Address
+    var predicate_state: Address
+    var progress: Address
+    var progress_state: Address
+    var stats: Address
+
+
+@fieldwise_init
+struct DenseCountArguments(ImplicitlyCopyable):
+    """`usearch_dense_count_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var key: KeyBytes
+    var entries: Address
+
+
+@fieldwise_init
+struct DenseGetArguments(ImplicitlyCopyable):
+    """`usearch_dense_get_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var key: KeyBytes
+    var vectors: Address
+    var written: Address
+    var arena: Address
+    var outputs_scalar: ScalarKind
+
+
+@fieldwise_init
+struct DenseCursorInitArguments(ImplicitlyCopyable):
+    """`usearch_dense_cursor_init_t`."""
+
+    var cursor: Address
+    var index: Address
+    var outcome: Address
+
+
+@fieldwise_init
+struct DenseCursorNextArguments(ImplicitlyCopyable):
+    """`usearch_dense_cursor_next_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var cursor: Address
+    var keys: Address
+    var vectors: Address
+    var written: Address
+    var arena: Address
+    var wanted: c_size_t
+    var outputs_scalar: ScalarKind
+
+
+@fieldwise_init
+struct DenseSearchStreamInitArguments(ImplicitlyCopyable):
+    """`usearch_dense_search_stream_init_t`."""
+
+    var stream: Address
+    var index: Address
+    var outcome: Address
+    var query: RowsViewArguments
+    var expansion_factor: c_size_t
+
+
+@fieldwise_init
+struct DenseSearchStreamNextArguments(ImplicitlyCopyable):
+    """`usearch_dense_search_stream_next_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var stream: Address
+    var matches: Address
+    var arena: Address
+    var wanted: c_size_t
+
+
+@fieldwise_init
+struct DenseSaveArguments(ImplicitlyCopyable):
+    """`usearch_dense_save_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var path: BytesView[ImmUntrackedOrigin]
+    var progress: Address
+    var progress_state: Address
+
+
+@fieldwise_init
+struct DenseSaveBufferArguments(ImplicitlyCopyable):
+    """`usearch_dense_save_buffer_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var monolith: Address
+    var arena: Address
+    var progress: Address
+    var progress_state: Address
+
+
+@fieldwise_init
+struct DenseMetadataReadArguments(ImplicitlyCopyable):
+    """`usearch_dense_metadata_read_t`, and `usearch_dense_metadata_read_buffer_t` with `source` a
+    buffer."""
+
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var source: BytesView[ImmUntrackedOrigin]
+    var metadata: Address
+
+
+@fieldwise_init
+struct DenseMultiplyArguments(ImplicitlyCopyable):
+    """`usearch_dense_multiply_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var count: c_size_t
+    var left: RowsViewArguments
+    var products: Address
+    var written: Address
+    var required: Address
+    var arena: Address
+    var wanted: c_size_t
+    var expansion_factor: c_size_t
+    var progress: Address
+    var progress_state: Address
+    var stats: Address
+
+
+@fieldwise_init
+struct DenseAttendArguments(ImplicitlyCopyable):
+    """`usearch_dense_attend_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var count: c_size_t
+    var queries: RowsViewArguments
+    var head_count: c_size_t
+    var value_lookup: ValueLookup
+    var value_lookup_state: Address
+    var carry: Address
+    var outputs: Address
+    var arena: Address
+    var outputs_scalar: ScalarKind
+    var expansion_factor: c_size_t
+    var score_scale: Float32
+    var progress: Address
+    var progress_state: Address
+    var stats: Address
+
+
+@fieldwise_init
+struct DenseMaxsimArguments(ImplicitlyCopyable):
+    """`usearch_dense_maxsim_t`."""
+
+    var index: Address
+    var executor: Address
+    var outcome: Address
+    var completion: Completion
+    var count: c_size_t
+    var queries: RowsViewArguments
+    var rows_per_query: c_size_t
+    var matches: Address
+    var arena: Address
+    var wanted: c_size_t
+    var expansion_factor: c_size_t
+    var progress: Address
+    var progress_state: Address
+    var stats: Address
+
+
+comptime DenseInitRam = Verb[DenseInitRamArguments]
+comptime DenseInitVram = Verb[DenseInitVramArguments]
+comptime DenseLoadRam = Verb[DenseLoadRamArguments]
+comptime DenseLoadRamBuffer = Verb[DenseLoadRamArguments]
+comptime DenseLoadVram = Verb[DenseLoadVramArguments]
+comptime DenseLoadVramBuffer = Verb[DenseLoadVramArguments]
+comptime DenseViewRam = Verb[DenseViewRamArguments]
+comptime DenseViewNvme = Verb[DenseViewNvmeArguments]
+comptime DenseReserve = Verb[DenseReserveArguments]
+comptime DenseClear = Verb[DenseClearArguments]
+comptime DenseDescribe = Verb[DenseDescribeArguments]
+comptime DenseInsert = Verb[DenseInsertArguments]
+comptime DenseRefine = Verb[DenseRefineArguments]
+comptime DenseHealth = Verb[DenseHealthArguments]
+comptime DenseMerge = Verb[DenseMergeArguments]
+comptime DenseSearch = Verb[DenseSearchArguments]
+comptime DenseCount = Verb[DenseCountArguments]
+comptime DenseGet = Verb[DenseGetArguments]
+comptime DenseCursorInit = Verb[DenseCursorInitArguments]
+comptime DenseCursorNext = Verb[DenseCursorNextArguments]
+comptime DenseSearchStreamInit = Verb[DenseSearchStreamInitArguments]
+comptime DenseSearchStreamNext = Verb[DenseSearchStreamNextArguments]
+comptime DenseSave = Verb[DenseSaveArguments]
+comptime DenseSaveBuffer = Verb[DenseSaveBufferArguments]
+comptime DenseMetadataRead = Verb[DenseMetadataReadArguments]
+comptime DenseMetadataReadBuffer = Verb[DenseMetadataReadArguments]
+comptime DenseMultiply = Verb[DenseMultiplyArguments]
+comptime DenseAttend = Verb[DenseAttendArguments]
+comptime DenseMaxsim = Verb[DenseMaxsimArguments]
+
+
+# endregion Arguments
+
+# region Calls
+
+
+def _cross[Arguments: ImplicitlyCopyable & Deinitable, //](arguments: Arguments, verb: Verb[Arguments]):
+    """Materializes one argument structure in a stack slot and hands its address to `verb`."""
+    var slot = stack_allocation[1, Arguments]()
+    slot[unsafe_offset=0] = arguments
+    verb(slot.unsafe_origin_cast[MutAnyOrigin]())
+
+
+@fieldwise_init
+struct DenseCountOutputs(Defaultable, ImplicitlyCopyable):
+    """The one `size_t` `usearch_dense_count` and `usearch_dense_refine` write."""
+
+    var value: c_size_t
+
+    def __init__(out self):
+        """Zero, which is what a failed call leaves."""
+        self.value = c_size_t(0)
+
+
+def _no_rows() -> RowsViewArguments:
+    """A rows view nothing was written to, which is what a failed call leaves."""
+    return RowsViewArguments(NULL_ADDRESS, c_size_t(0), c_size_t(0), ScalarKind.UNKNOWN)
+
+
+@fieldwise_init
+struct DenseGetOutputs(Defaultable, ImplicitlyCopyable):
+    """What `usearch_dense_get` writes through its pointers."""
+
+    var vectors: RowsViewArguments
+    var written: c_size_t
+
+    def __init__(out self):
+        """Nothing exported."""
+        self.vectors = _no_rows()
+        self.written = c_size_t(0)
+
+
+@fieldwise_init
+struct DenseCursorNextOutputs(Defaultable, ImplicitlyCopyable):
+    """What `usearch_dense_cursor_next` writes through its pointers; the keys are a `usearch_keys_view_t`."""
+
+    var keys: Address
+    var keys_stride: c_size_t
+    var vectors: RowsViewArguments
+    var written: c_size_t
+
+    def __init__(out self):
+        """Nothing pulled."""
+        self.keys = NULL_ADDRESS
+        self.keys_stride = c_size_t(0)
+        self.vectors = _no_rows()
+        self.written = c_size_t(0)
+
+
+@fieldwise_init
+struct DenseMultiplyOutputs(Defaultable, ImplicitlyCopyable):
+    """What `usearch_dense_multiply` writes through its pointers."""
+
+    var products: MatchesTapeViewArguments
+    var written: c_size_t
+    var required: c_size_t
+
+    def __init__(out self):
+        """No pairs."""
+        self.products = MatchesTapeViewArguments()
+        self.written = c_size_t(0)
+        self.required = c_size_t(0)
+
+
+@fieldwise_init
+struct DenseAttendOutputs(Defaultable, ImplicitlyCopyable):
+    """What `usearch_dense_attend` writes through its pointer."""
+
+    var outputs: RowsViewArguments
+
+    def __init__(out self):
+        """No rows attended."""
+        self.outputs = _no_rows()
+
+
+@fieldwise_init
+struct DenseSaveBufferOutputs(Defaultable, ImplicitlyCopyable):
+    """What `usearch_dense_save_buffer` writes through its pointer: a `usearch_bytes_view_t`."""
+
+    var data: Address
+    var length: c_size_t
+
+    def __init__(out self):
+        """No bytes."""
+        self.data = NULL_ADDRESS
+        self.length = c_size_t(0)
+
+
+@fieldwise_init
+struct _DenseReserveCall(Call):
+    """The crossing of `usearch_dense_reserve`."""
+
+    comptime Outputs = Unwritten
+    comptime Result = NoneType
+    comptime symbol: StaticString = "usearch_dense_reserve"
+    var capacity: Int
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        _cross(
+            DenseReserveArguments(index, executor, outcome, completion, c_size_t(self.capacity)),
+            library.symbols().dense_reserve,
+        )
+
+    def conclude(deinit self, outputs: Unwritten, generation: Int) -> NoneType:
+        return None
+
+
+@fieldwise_init
+struct _DenseClearCall(Call):
+    """The crossing of `usearch_dense_clear`."""
+
+    comptime Outputs = Unwritten
+    comptime Result = NoneType
+    comptime symbol: StaticString = "usearch_dense_clear"
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        _cross(DenseClearArguments(index, executor, outcome, completion), library.symbols().dense_clear)
+
+    def conclude(deinit self, outputs: Unwritten, generation: Int) -> NoneType:
+        return None
+
+
+@fieldwise_init
+struct _DenseDescribeCall(Call):
+    """The crossing of `usearch_dense_describe`."""
+
+    comptime Outputs = DenseIndexDescriptionOutputs
+    comptime Result = DenseIndexDescription
+    comptime symbol: StaticString = "usearch_dense_describe"
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        _cross(DenseDescribeArguments(index, executor, outcome, completion, outputs), library.symbols().dense_describe)
+
+    def conclude(deinit self, outputs: DenseIndexDescriptionOutputs, generation: Int) -> DenseIndexDescription:
+        return DenseIndexDescription(
+            outputs.metadata, outputs.size, outputs.capacity, outputs.memory_usage, text_at(outputs.capabilities)
+        )
+
+
+@fieldwise_init
+struct _DenseCountCall(Call):
+    """The crossing of `usearch_dense_count`."""
+
+    comptime Outputs = DenseCountOutputs
+    comptime Result = Int
+    comptime symbol: StaticString = "usearch_dense_count"
+    var key: Key
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        _cross(
+            DenseCountArguments(index, executor, outcome, completion, KeyBytes.of(self.key), outputs),
+            library.symbols().dense_count,
+        )
+
+    def conclude(deinit self, outputs: DenseCountOutputs, generation: Int) -> Int:
+        return Int(outputs.value)
+
+
+@fieldwise_init
+struct _DenseGetCall[dtype: DType, origin: MutOrigin](Call):
+    """The crossing of `usearch_dense_get`, which borrows the arena its rows land in."""
+
+    comptime Outputs = DenseGetOutputs
+    comptime Result = DenseVectors[Self.dtype, Self.origin]
+    comptime symbol: StaticString = "usearch_dense_get"
+    var key: Key
+    var scalar: ScalarKind
+    var arena: Pointer[Arena, Self.origin]
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        if not self.scalar.stores[Self.dtype]():
+            return _refuse(outcome, Status.SHAPE_MISMATCH)
+        var landing = Pointer[DenseGetOutputs, MutAnyOrigin](unsafe_from_address=outputs)
+        _cross(
+            DenseGetArguments(
+                index,
+                executor,
+                outcome,
+                completion,
+                KeyBytes.of(self.key),
+                Int(Pointer(to=landing[].vectors)),
+                Int(Pointer(to=landing[].written)),
+                self.arena[]._address,
+                self.scalar,
+            ),
+            library.symbols().dense_get,
+        )
+
+    def served(self, status: Status) -> Int:
+        return _served(self.arena, status)
+
+    def conclude(deinit self, outputs: DenseGetOutputs, generation: Int) -> Self.Result:
+        return Self.Result(self.arena, generation, outputs.vectors, Int(outputs.written))
+
+
+@fieldwise_init
+struct _DenseInsertCall(Call):
+    """The crossing of `usearch_dense_insert`."""
+
+    comptime Outputs = Unwritten
+    comptime Result = NoneType
+    comptime symbol: StaticString = "usearch_dense_insert"
+    var keys: KeysView[ImmUntrackedOrigin]
+    var keys_count: Int
+    var vectors: RowsViewArguments
+    var count: Int
+    var expansion_factor: Int
+    var stats: Address
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        if self.keys_count != self.count:
+            return _refuse(outcome, Status.SHAPE_MISMATCH)
+        _cross(
+            DenseInsertArguments(
+                index,
+                executor,
+                outcome,
+                completion,
+                c_size_t(self.count),
+                self.keys,
+                self.vectors,
+                c_size_t(self.expansion_factor),
+                NULL_ADDRESS,
+                NULL_ADDRESS,
+                self.stats,
+            ),
+            library.symbols().dense_insert,
+        )
+
+    def conclude(deinit self, outputs: Unwritten, generation: Int) -> NoneType:
+        return None
+
+
+@fieldwise_init
+struct _DenseRefineCall(Call):
+    """The crossing of `usearch_dense_refine`."""
+
+    comptime Outputs = DenseCountOutputs
+    comptime Result = Int
+    comptime symbol: StaticString = "usearch_dense_refine"
+    var expansion_factor: Int
+    var stats: Address
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        _cross(
+            DenseRefineArguments(
+                index,
+                executor,
+                outcome,
+                completion,
+                outputs,
+                c_size_t(self.expansion_factor),
+                NULL_ADDRESS,
+                NULL_ADDRESS,
+                self.stats,
+            ),
+            library.symbols().dense_refine,
+        )
+
+    def conclude(deinit self, outputs: DenseCountOutputs, generation: Int) -> Int:
+        return Int(outputs.value)
+
+
+@fieldwise_init
+struct _DenseHealthCall(Call):
+    """The crossing of `usearch_dense_health`."""
+
+    comptime Outputs = DenseReachability
+    comptime Result = DenseReachability
+    comptime symbol: StaticString = "usearch_dense_health"
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        _cross(DenseHealthArguments(index, executor, outcome, completion, outputs), library.symbols().dense_health)
+
+    def conclude(deinit self, outputs: DenseReachability, generation: Int) -> DenseReachability:
+        return outputs
+
+
+struct _DenseMergeCall(Call):
+    """The crossing of `usearch_dense_merge`, which owns the donors until the call is final."""
+
+    comptime Outputs = Unwritten
+    comptime Result = NoneType
+    comptime symbol: StaticString = "usearch_dense_merge"
+    var donors: List[DenseIndex]
+    var addresses: List[Address]
+
+    def __init__(out self, var donors: List[DenseIndex]):
+        self.addresses = List[Address](capacity=len(donors))
+        for position in range(len(donors)):
+            self.addresses.append(donors[position].address)
+        self.donors = donors^
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        _cross(
+            DenseMergeArguments(
+                index,
+                executor,
+                outcome,
+                completion,
+                c_size_t(len(self.addresses)),
+                Int(self.addresses.unsafe_ptr()),
+                NULL_ADDRESS,
+                NULL_ADDRESS,
+            ),
+            library.symbols().dense_merge,
+        )
+
+    def conclude(deinit self, outputs: Unwritten, generation: Int) -> NoneType:
+        # The engine nulled every donor it consumed, so only the survivors are freed with the list.
+        var surviving = Pointer[Address, MutAnyOrigin](unsafe_from_address=Int(self.addresses.unsafe_ptr()))
+        for position in range(len(self.donors)):
+            self.donors[position].address = surviving[unsafe_offset=position]
+        return None
+
+
+@fieldwise_init
+struct _DenseSearchCall[origin: MutOrigin](Call):
+    """The crossing of `usearch_dense_search`, which borrows the arena its matches land in."""
+
+    comptime Outputs = MatchesViewArguments
+    comptime Result = Matches[Self.origin]
+    comptime symbol: StaticString = "usearch_dense_search"
+    var queries: RowsViewArguments
+    var count: Int
+    var wanted: Int
+    var arena: Pointer[Arena, Self.origin]
+    var expansion_factor: Int
+    var predicate: Address
+    var predicate_state: Address
+    var stats: Address
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        _cross(
+            DenseSearchArguments(
+                index,
+                executor,
+                outcome,
+                completion,
+                c_size_t(self.count),
+                self.queries,
+                outputs,
+                self.arena[]._address,
+                c_size_t(self.wanted),
+                c_size_t(self.expansion_factor),
+                self.predicate,
+                self.predicate_state,
+                NULL_ADDRESS,
+                NULL_ADDRESS,
+                self.stats,
+            ),
+            library.symbols().dense_search,
+        )
+
+    def served(self, status: Status) -> Int:
+        return _served(self.arena, status)
+
+    def conclude(deinit self, outputs: MatchesViewArguments, generation: Int) -> Self.Result:
+        return Self.Result(self.arena, generation, outputs, self.count)
+
+
+@fieldwise_init
+struct _DenseMaxsimCall[origin: MutOrigin](Call):
+    """The crossing of `usearch_dense_maxsim`, which borrows the arena its matches land in."""
+
+    comptime Outputs = MatchesViewArguments
+    comptime Result = Matches[Self.origin]
+    comptime symbol: StaticString = "usearch_dense_maxsim"
+    var queries: RowsViewArguments
+    var rows: Int
+    var rows_per_query: Int
+    var wanted: Int
+    var arena: Pointer[Arena, Self.origin]
+    var expansion_factor: Int
+    var stats: Address
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        if self.rows_per_query <= 0 or self.rows % self.rows_per_query != 0:
+            return _refuse(outcome, Status.SHAPE_MISMATCH)
+        _cross(
+            DenseMaxsimArguments(
+                index,
+                executor,
+                outcome,
+                completion,
+                c_size_t(self.rows // self.rows_per_query),
+                self.queries,
+                c_size_t(self.rows_per_query),
+                outputs,
+                self.arena[]._address,
+                c_size_t(self.wanted),
+                c_size_t(self.expansion_factor),
+                NULL_ADDRESS,
+                NULL_ADDRESS,
+                self.stats,
+            ),
+            library.symbols().dense_maxsim,
+        )
+
+    def served(self, status: Status) -> Int:
+        return _served(self.arena, status)
+
+    def conclude(deinit self, outputs: MatchesViewArguments, generation: Int) -> Self.Result:
+        var queries = self.rows // self.rows_per_query if self.rows_per_query > 0 else 0
+        return Self.Result(self.arena, generation, outputs, queries)
+
+
+@fieldwise_init
+struct _DenseMultiplyCall[origin: MutOrigin](Call):
+    """The crossing of `usearch_dense_multiply`, which borrows the arena its pairs land in."""
+
+    comptime Outputs = DenseMultiplyOutputs
+    comptime Result = DenseProducts[Self.origin]
+    comptime symbol: StaticString = "usearch_dense_multiply"
+    var left: RowsViewArguments
+    var count: Int
+    var arena: Pointer[Arena, Self.origin]
+    var wanted: Int
+    var expansion_factor: Int
+    var stats: Address
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        var landing = Pointer[DenseMultiplyOutputs, MutAnyOrigin](unsafe_from_address=outputs)
+        _cross(
+            DenseMultiplyArguments(
+                index,
+                executor,
+                outcome,
+                completion,
+                c_size_t(self.count),
+                self.left,
+                Int(Pointer(to=landing[].products)),
+                Int(Pointer(to=landing[].written)),
+                Int(Pointer(to=landing[].required)),
+                self.arena[]._address,
+                c_size_t(self.wanted),
+                c_size_t(self.expansion_factor),
+                NULL_ADDRESS,
+                NULL_ADDRESS,
+                self.stats,
+            ),
+            library.symbols().dense_multiply,
+        )
+
+    def served(self, status: Status) -> Int:
+        return _served(self.arena, status)
+
+    def conclude(deinit self, outputs: DenseMultiplyOutputs, generation: Int) -> Self.Result:
+        return Self.Result(
+            self.arena, generation, outputs.products, self.count, Int(outputs.written), Int(outputs.required)
+        )
+
+
+@fieldwise_init
+struct _DenseAttendCall[dtype: DType, origin: MutOrigin](Call):
+    """The crossing of `usearch_dense_attend`, which borrows the arena its attended rows land in."""
+
+    comptime Outputs = DenseAttendOutputs
+    comptime Result = DenseVectors[Self.dtype, Self.origin]
+    comptime symbol: StaticString = "usearch_dense_attend"
+    var queries: RowsViewArguments
+    var count: Int
+    var head_count: Int
+    var value_lookup: ValueLookup
+    var value_lookup_state: Address
+    var carry: Address
+    var carry_count: Int
+    var arena: Pointer[Arena, Self.origin]
+    var expansion_factor: Int
+    var score_scale: Float32
+    var stats: Address
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        # The engine reads a zero kind as the queries' own, which `dtype` might not hold.
+        if ScalarKind.of[Self.dtype]() == ScalarKind.UNKNOWN:
+            return _refuse(outcome, Status.SHAPE_MISMATCH)
+        # The carry crosses as a bare pointer, so only this side can see it fall short of the rows.
+        if self.carry != NULL_ADDRESS and self.carry_count < self.count:
+            return _refuse(outcome, Status.SHAPE_MISMATCH)
+        _cross(
+            DenseAttendArguments(
+                index,
+                executor,
+                outcome,
+                completion,
+                c_size_t(self.count),
+                self.queries,
+                c_size_t(self.head_count),
+                self.value_lookup,
+                self.value_lookup_state,
+                self.carry,
+                outputs,
+                self.arena[]._address,
+                ScalarKind.of[Self.dtype](),
+                c_size_t(self.expansion_factor),
+                self.score_scale,
+                NULL_ADDRESS,
+                NULL_ADDRESS,
+                self.stats,
+            ),
+            library.symbols().dense_attend,
+        )
+
+    def served(self, status: Status) -> Int:
+        return _served(self.arena, status)
+
+    def conclude(deinit self, outputs: DenseAttendOutputs, generation: Int) -> Self.Result:
+        return Self.Result(self.arena, generation, outputs.outputs, self.count)
+
+
+@fieldwise_init
+struct _DenseSaveCall(Call):
+    """The crossing of `usearch_dense_save`."""
+
+    comptime Outputs = Unwritten
+    comptime Result = NoneType
+    comptime symbol: StaticString = "usearch_dense_save"
+    var path: BytesView[ImmUntrackedOrigin]
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        _cross(
+            DenseSaveArguments(index, executor, outcome, completion, self.path, NULL_ADDRESS, NULL_ADDRESS),
+            library.symbols().dense_save,
+        )
+
+    def conclude(deinit self, outputs: Unwritten, generation: Int) -> NoneType:
+        return None
+
+
+@fieldwise_init
+struct _DenseSaveBufferCall[origin: MutOrigin](Call):
+    """The crossing of `usearch_dense_save_buffer`, which borrows the arena the monolith lands in."""
+
+    comptime Outputs = DenseSaveBufferOutputs
+    comptime Result = Monolith[Self.origin]
+    comptime symbol: StaticString = "usearch_dense_save_buffer"
+    var arena: Pointer[Arena, Self.origin]
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        _cross(
+            DenseSaveBufferArguments(
+                index, executor, outcome, completion, outputs, self.arena[]._address, NULL_ADDRESS, NULL_ADDRESS
+            ),
+            library.symbols().dense_save_buffer,
+        )
+
+    def served(self, status: Status) -> Int:
+        return _served(self.arena, status)
+
+    def conclude(deinit self, outputs: DenseSaveBufferOutputs, generation: Int) -> Self.Result:
+        return Self.Result(self.arena, generation, outputs.data, Int(outputs.length))
+
+
+@fieldwise_init
+struct _DenseCursorNextCall[origin: MutOrigin](Call):
+    """The crossing of `usearch_dense_cursor_next`, which borrows the arena its batch lands in."""
+
+    comptime Outputs = DenseCursorNextOutputs
+    comptime Result = DenseBatch[Self.origin]
+    comptime symbol: StaticString = "usearch_dense_cursor_next"
+    var cursor: Address
+    var scalar: ScalarKind
+    var wanted: Int
+    var arena: Pointer[Arena, Self.origin]
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        var landing = Pointer[DenseCursorNextOutputs, MutAnyOrigin](unsafe_from_address=outputs)
+        var scalar = self.scalar
+        _cross(
+            DenseCursorNextArguments(
+                index,
+                executor,
+                outcome,
+                completion,
+                self.cursor,
+                Int(Pointer(to=landing[].keys)),
+                Int(Pointer(to=landing[].vectors)) if scalar != ScalarKind.UNKNOWN else NULL_ADDRESS,
+                Int(Pointer(to=landing[].written)),
+                self.arena[]._address,
+                c_size_t(self.wanted),
+                scalar,
+            ),
+            library.symbols().dense_cursor_next,
+        )
+
+    def served(self, status: Status) -> Int:
+        return _served(self.arena, status)
+
+    def conclude(deinit self, outputs: DenseCursorNextOutputs, generation: Int) -> Self.Result:
+        return Self.Result(self.arena, generation, outputs.keys, outputs.vectors, Int(outputs.written))
+
+
+@fieldwise_init
+struct _DenseSearchStreamNextCall[origin: MutOrigin](Call):
+    """The crossing of `usearch_dense_search_stream_next`, which borrows the arena its pull lands in."""
+
+    comptime Outputs = MatchesViewArguments
+    comptime Result = Matches[Self.origin]
+    comptime symbol: StaticString = "usearch_dense_search_stream_next"
+    var stream: Address
+    var wanted: Int
+    var arena: Pointer[Arena, Self.origin]
+
+    def submit(
+        mut self,
+        library: Library,
+        index: Address,
+        executor: Address,
+        completion: Completion,
+        outcome: Address,
+        outputs: Address,
+    ):
+        _cross(
+            DenseSearchStreamNextArguments(
+                index, executor, outcome, completion, self.stream, outputs, self.arena[]._address, c_size_t(self.wanted)
+            ),
+            library.symbols().dense_search_stream_next,
+        )
+
+    def served(self, status: Status) -> Int:
+        return _served(self.arena, status)
+
+    def conclude(deinit self, outputs: MatchesViewArguments, generation: Int) -> Self.Result:
+        return Self.Result(self.arena, generation, outputs, 1)
+
+
+# endregion Calls
 
 # region Index
 
 
-struct DenseIndex:
-    """A dense vector index. Released when the last reference to it goes out of use.
+struct DenseIndex(DenseVerbs, Movable):
+    """A dense vector index, released when it goes out of scope.
 
     Insertions and searches overlap freely on one handle: a search never writes to the graph, and
     an insertion publishes a row only once it is reachable, so a concurrent walk sees a consistent
-    graph at every instant. What does not overlap is two calls driving one executor - the second
-    reports `CONTENDED` before any work begins.
+    graph at every instant. Calls on one executor run in submission order.
+
+    Verbs called on the index run on the calling thread; `index.on(executor)` runs the same verbs
+    blocking on an executor, and `index.deferred(executor)` submits them there. The cursor and the
+    stream's opening name no executor, and their pulls run on the receiver's.
     """
 
     var library: Library
@@ -918,64 +1909,489 @@ struct DenseIndex:
 
     # region Lifetime
 
-    def __init__[
-        options_origin: ImmOrigin, //
-    ](out self, library: Library, options: DenseOptions[options_origin]) raises Error:
-        """Initializes a handle for the residency the options select.
+    def __init__(out self, *, library: Library, address: Address):
+        """Adopts a handle the engine just created.
+
+        Args:
+            library: The loaded engine the handle was created through, and is freed through.
+            address: A `usearch_dense_index_t` whose lifetime this index takes over.
+        """
+        self.library = library
+        self.address = address
+
+    @staticmethod
+    def init_ram[
+        ram_origin: ImmOrigin, //
+    ](library: Library, options: DenseOptions, ram: RamOptions[ram_origin] = RamOptions()) raises Error -> Self:
+        """Initializes an empty, mutable index in host memory. Calls `usearch_dense_init_ram`.
 
         Parameters:
-            options_origin: The options' borrowed placement array, inferred from the argument.
+            ram_origin: The options' borrowed node-id array, inferred from the argument.
 
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
-            options: The geometry, metric, and placement; read only during this call.
+            options: The geometry and metric; read only during this call.
+            ram: The memory domains to place one shard on apiece.
+
+        Returns:
+            The new index.
 
         Raises:
             `Error` if the geometry is refused, the placement cannot be resolved, or the
             allocation fails.
         """
-        self.library = library
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var settings = stack_allocation[1, DenseOptions[ImmUntrackedOrigin]]()
-        settings[unsafe_offset=0] = options.untracked()
-        var address = library.symbols().dense_init(settings.unsafe_origin_cast[MutAnyOrigin](), slot)
-        Error.raise_if_failed(slot, "usearch_dense_init")
-        if address == 0:
-            raise Error(Status.INTERNAL, "usearch_dense_init", 0)
-        self.address = address
+        var created = stack_allocation[1, Address]()
+        created[unsafe_offset=0] = NULL_ADDRESS
+        var outcome = stack_allocation[1, Outcome]()
+        outcome[unsafe_offset=0] = Outcome()
+        _cross(
+            DenseInitRamArguments(
+                Int(created),
+                Int(outcome),
+                options.metric,
+                options.quantization,
+                options.dimensions,
+                options.connectivity,
+                options.values_per_key,
+                ram.untracked(),
+            ),
+            library.symbols().dense_init_ram,
+        )
+        library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_dense_init_ram")
+        return Self(library=library, address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0])
+
+    @staticmethod
+    def init_vram[
+        vram_origin: ImmOrigin, //
+    ](library: Library, options: DenseOptions, vram: VramOptions[vram_origin] = VramOptions()) raises Error -> Self:
+        """Initializes an empty, mutable index in device memory. Calls `usearch_dense_init_vram`.
+
+        Parameters:
+            vram_origin: The options' borrowed ordinal array, inferred from the argument.
+
+        Args:
+            library: The loaded engine, kept so the shared object stays mapped.
+            options: The geometry and metric; read only during this call.
+            vram: The devices to place one shard on apiece.
+
+        Returns:
+            The new index.
+
+        Raises:
+            `Error` if the geometry is refused, or a device cannot be selected or claimed.
+        """
+        var created = stack_allocation[1, Address]()
+        created[unsafe_offset=0] = NULL_ADDRESS
+        var outcome = stack_allocation[1, Outcome]()
+        outcome[unsafe_offset=0] = Outcome()
+        _cross(
+            DenseInitVramArguments(
+                Int(created),
+                Int(outcome),
+                options.metric,
+                options.quantization,
+                options.dimensions,
+                options.connectivity,
+                options.values_per_key,
+                vram.untracked(),
+            ),
+            library.symbols().dense_init_vram,
+        )
+        library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_dense_init_vram")
+        return Self(library=library, address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0])
+
+    @staticmethod
+    def load_ram[
+        path_origin: ImmOrigin, ram_origin: ImmOrigin, //
+    ](
+        executor: Executor,
+        path: StringSlice[path_origin],
+        ram: RamOptions[ram_origin] = RamOptions(),
+        values_per_key: Int = 0,
+    ) raises Error -> Self:
+        """Copies a checkpoint into a new, mutable index in host memory, shard by shard.
+        Calls `usearch_dense_load_ram`.
+
+        Point the path at the manifest, never at one of the parts it enumerates - naming a part
+        loads exactly that part, which is a fragment of the index rather than the index. Part `p`
+        lands whole on shard `p` modulo the shard count, wherever it was written from.
+
+        Parameters:
+            path_origin: The path bytes' origin, inferred from the argument.
+            ram_origin: The options' borrowed node-id array, inferred from the argument.
+
+        Args:
+            executor: The executor the read fans out over, one shard per thread; it also lends its engine.
+            path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
+            ram: The memory domains to place the parts on.
+            values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
+
+        Returns:
+            The new index; a failed load creates none.
+
+        Raises:
+            `Error` if the checkpoint cannot be read or decoded.
+        """
+        return Self._load_ram(
+            executor,
+            executor.library.symbols().dense_load_ram,
+            BytesView.of(path).untracked(),
+            ram.untracked(),
+            values_per_key,
+            "usearch_dense_load_ram",
+        )
+
+    @staticmethod
+    def load_ram_buffer[
+        buffer_origin: ImmOrigin, ram_origin: ImmOrigin, //
+    ](
+        executor: Executor,
+        buffer: Span[UInt8, buffer_origin],
+        ram: RamOptions[ram_origin] = RamOptions(),
+        values_per_key: Int = 0,
+    ) raises Error -> Self:
+        """Copies a monolith from a memory buffer into a new, mutable index in host memory.
+        Calls `usearch_dense_load_ram_buffer`.
+
+        Parameters:
+            buffer_origin: The source bytes' origin, inferred from the argument.
+            ram_origin: The options' borrowed node-id array, inferred from the argument.
+
+        Args:
+            executor: The executor the copy fans out over; it also lends its engine.
+            buffer: Source holding one serialized monolith.
+            ram: The memory domains to place shards on; the monolith lands whole on the first.
+            values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
+
+        Returns:
+            The new index; a failed load creates none.
+
+        Raises:
+            `Error` if the bytes cannot be decoded.
+        """
+        return Self._load_ram(
+            executor,
+            executor.library.symbols().dense_load_ram_buffer,
+            BytesView.of(buffer).untracked(),
+            ram.untracked(),
+            values_per_key,
+            "usearch_dense_load_ram_buffer",
+        )
+
+    @staticmethod
+    def _load_ram(
+        executor: Executor,
+        verb: DenseLoadRam,
+        source: BytesView[ImmUntrackedOrigin],
+        ram: RamOptions[ImmUntrackedOrigin],
+        values_per_key: Int,
+        detail: StaticString,
+    ) raises Error -> Self:
+        """The path and buffer forms share one argument layout, differing only in the verb."""
+        var created = stack_allocation[1, Address]()
+        created[unsafe_offset=0] = NULL_ADDRESS
+        var outcome = stack_allocation[1, Outcome]()
+        outcome[unsafe_offset=0] = Outcome()
+        _cross(
+            DenseLoadRamArguments(
+                Int(created),
+                executor.address,
+                Int(outcome),
+                Completion.BLOCKING,
+                source,
+                ram,
+                c_size_t(values_per_key),
+                NULL_ADDRESS,
+                NULL_ADDRESS,
+            ),
+            verb,
+        )
+        executor.library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], detail)
+        return Self(library=executor.library, address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0])
+
+    @staticmethod
+    def load_vram[
+        path_origin: ImmOrigin, vram_origin: ImmOrigin, //
+    ](
+        executor: Executor,
+        path: StringSlice[path_origin],
+        vram: VramOptions[vram_origin] = VramOptions(),
+        values_per_key: Int = 0,
+    ) raises Error -> Self:
+        """Copies a checkpoint into a new, mutable index in device memory, with the placement rules
+        of `load_ram`. Calls `usearch_dense_load_vram`.
+
+        Parameters:
+            path_origin: The path bytes' origin, inferred from the argument.
+            vram_origin: The options' borrowed ordinal array, inferred from the argument.
+
+        Args:
+            executor: The executor the upload runs on, one stream per device; it also lends its engine.
+            path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
+            vram: The devices to place the parts on.
+            values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
+
+        Returns:
+            The new index; a failed load creates none.
+
+        Raises:
+            `Error` if the checkpoint cannot be read, or a device cannot hold it.
+        """
+        return Self._load_vram(
+            executor,
+            executor.library.symbols().dense_load_vram,
+            BytesView.of(path).untracked(),
+            vram.untracked(),
+            values_per_key,
+            "usearch_dense_load_vram",
+        )
+
+    @staticmethod
+    def load_vram_buffer[
+        buffer_origin: ImmOrigin, vram_origin: ImmOrigin, //
+    ](
+        executor: Executor,
+        buffer: Span[UInt8, buffer_origin],
+        vram: VramOptions[vram_origin] = VramOptions(),
+        values_per_key: Int = 0,
+    ) raises Error -> Self:
+        """Copies a monolith from a host or device buffer into a new, mutable index in device memory.
+        Calls `usearch_dense_load_vram_buffer`.
+
+        Parameters:
+            buffer_origin: The source bytes' origin, inferred from the argument.
+            vram_origin: The options' borrowed ordinal array, inferred from the argument.
+
+        Args:
+            executor: The executor the upload runs on, one stream per device; it also lends its engine.
+            buffer: Source holding one serialized monolith.
+            vram: The devices to place shards on; the monolith lands whole on the first.
+            values_per_key: Upper bound on entries sharing one key, which no checkpoint records.
+
+        Returns:
+            The new index; a failed load creates none.
+
+        Raises:
+            `Error` if the bytes cannot be decoded, or a device cannot hold them.
+        """
+        return Self._load_vram(
+            executor,
+            executor.library.symbols().dense_load_vram_buffer,
+            BytesView.of(buffer).untracked(),
+            vram.untracked(),
+            values_per_key,
+            "usearch_dense_load_vram_buffer",
+        )
+
+    @staticmethod
+    def _load_vram(
+        executor: Executor,
+        verb: DenseLoadVram,
+        source: BytesView[ImmUntrackedOrigin],
+        vram: VramOptions[ImmUntrackedOrigin],
+        values_per_key: Int,
+        detail: StaticString,
+    ) raises Error -> Self:
+        """The path and buffer forms share one argument layout, differing only in the verb."""
+        var created = stack_allocation[1, Address]()
+        created[unsafe_offset=0] = NULL_ADDRESS
+        var outcome = stack_allocation[1, Outcome]()
+        outcome[unsafe_offset=0] = Outcome()
+        _cross(
+            DenseLoadVramArguments(
+                Int(created),
+                executor.address,
+                Int(outcome),
+                Completion.BLOCKING,
+                source,
+                vram,
+                c_size_t(values_per_key),
+                NULL_ADDRESS,
+                NULL_ADDRESS,
+            ),
+            verb,
+        )
+        executor.library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], detail)
+        return Self(library=executor.library, address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0])
+
+    @staticmethod
+    def view_ram[path_origin: ImmOrigin, //](library: Library, path: StringSlice[path_origin]) raises Error -> Self:
+        """Serves a checkpoint in place through a memory mapping, as a read-only index.
+        Calls `usearch_dense_view_ram`.
+
+        Nothing is copied, so opening costs the headers alone. Every mutating verb on the handle
+        raises with `READ_ONLY`, and the files must stay unmodified until the handle is released.
+
+        Parameters:
+            path_origin: The path bytes' origin, inferred from the argument.
+
+        Args:
+            library: The loaded engine, kept so the shared object stays mapped.
+            path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
+
+        Returns:
+            The read-only index.
+
+        Raises:
+            `Error` if the checkpoint cannot be mapped or decoded.
+        """
+        var created = stack_allocation[1, Address]()
+        created[unsafe_offset=0] = NULL_ADDRESS
+        var outcome = stack_allocation[1, Outcome]()
+        outcome[unsafe_offset=0] = Outcome()
+        _cross(
+            DenseViewRamArguments(Int(created), Int(outcome), BytesView.of(path).untracked()),
+            library.symbols().dense_view_ram,
+        )
+        library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_dense_view_ram")
+        return Self(library=library, address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0])
+
+    @staticmethod
+    def view_nvme[
+        path_origin: ImmOrigin, nvme_origin: ImmOrigin, //
+    ](
+        executor: Executor,
+        path: StringSlice[path_origin],
+        nvme: NvmeOptions[nvme_origin] = NvmeOptions(),
+    ) raises Error -> Self:
+        """Serves a checkpoint in place from NVMe drives, read through the executor's rings.
+        Calls `usearch_dense_view_nvme`.
+
+        Parameters:
+            path_origin: The path bytes' origin, inferred from the argument.
+            nvme_origin: The options' borrowed path array, inferred from the argument.
+
+        Args:
+            executor: The NVMe executor whose rings read the checkpoint's headers; it also lends its engine.
+            path: The manifest of a sharded checkpoint, or a single `.safegraphs` monolith.
+            nvme: The devices the parts are served from; naming none serves each where it points.
+
+        Returns:
+            The read-only index.
+
+        Raises:
+            `Error` with `UNSUPPORTED` until NVMe checkpoints carry keys and a shard wrapper.
+        """
+        var created = stack_allocation[1, Address]()
+        created[unsafe_offset=0] = NULL_ADDRESS
+        var outcome = stack_allocation[1, Outcome]()
+        outcome[unsafe_offset=0] = Outcome()
+        _cross(
+            DenseViewNvmeArguments(
+                Int(created),
+                executor.address,
+                Int(outcome),
+                Completion.BLOCKING,
+                BytesView.of(path).untracked(),
+                nvme.untracked(),
+            ),
+            executor.library.symbols().dense_view_nvme,
+        )
+        executor.library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_dense_view_nvme")
+        return Self(library=executor.library, address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0])
 
     def __deinit__(deinit self):
         """Releases the index and everything it owns, unless a merge already took the handle.
+        Calls `usearch_dense_free`.
 
         The loader reference is surrendered only after the call: reading the entry point is the
         last use of `library`, so without the trailing move Mojo drops the last reference - and
         `dlclose`s the engine - between the load and the branch to it.
         """
-        if self.address != 0:
-            self.library.symbols().dense_free(Handle(unsafe_from_address=self.address))
+        self.library.symbols().dense_free(self.address)
         _ = self.library^
 
-    def live(self) raises Error -> Handle:
-        """The handle a verb crosses, refusing one a merge has already consumed.
+    # endregion Lifetime
+
+    # region Receivers
+
+    def on(ref self, ref executor: Executor) -> DenseIndexOn[ImmOrigin(origin_of(self, executor))]:
+        """The same verbs, blocking on `executor` after every call submitted there before them. Binding-only.
+
+        Args:
+            executor: The executor every verb runs on; its kind must match the handle's residency.
 
         Returns:
-            The engine's `usearch_dense_index_t`.
+            A receiver borrowing both, which neither may outlive.
+        """
+        return DenseIndexOn[ImmOrigin(origin_of(self, executor))](
+            Pointer[DenseIndex, ImmOrigin(origin_of(self, executor))](unsafe_from_address=Int(Pointer(to=self))),
+            executor.address,
+        )
+
+    def deferred(ref self, ref executor: Executor) -> DenseIndexDeferredOn[ImmOrigin(origin_of(self, executor))]:
+        """The same verbs, each submitted to `executor` and answering a `Deferred` at once. Binding-only.
+
+        Args:
+            executor: The executor every verb is submitted to; its kind must match the handle's residency.
+
+        Returns:
+            A receiver borrowing both, which neither it nor any `Deferred` it answers may outlive.
+        """
+        return DenseIndexDeferredOn[ImmOrigin(origin_of(self, executor))](
+            Pointer[DenseIndex, ImmOrigin(origin_of(self, executor))](unsafe_from_address=Int(Pointer(to=self))),
+            executor.address,
+        )
+
+    def _route[C: Call](self, var call: C) raises Error -> C.Result:
+        """Runs `call` on the calling thread."""
+        return _block(self.library, call^, self.address, NULL_ADDRESS)
+
+    def cursor(ref self) raises Error -> DenseCursor[ImmOrigin(origin_of(self))]:
+        """Opens a row scan over the current contents, its pulls on the calling thread.
+        Calls `usearch_dense_cursor_init`.
+
+        Each shard's publication watermark is read as the walk enters that shard, so a row once
+        passed is never revisited.
+
+        Returns:
+            The cursor, which borrows the index and cannot outlive it.
 
         Raises:
-            `Error` if this handle was donated to a merge, which the engine has since freed.
+            `Error` if the residency has no cursor, as VRAM does not.
         """
-        if self.address == 0:
-            raise Error(
-                Status.UNINITIALIZED,
-                "the index handle was consumed by a merge",
-                0,
-            )
-        return Handle(unsafe_from_address=self.address)
+        return DenseCursor[ImmOrigin(origin_of(self))](self.library, self.address, NULL_ADDRESS)
+
+    def search_stream[
+        query_origin: ImmOrigin, //
+    ](
+        ref self, query: RowsView[query_origin], config: DenseSearchStreamInitConfig = DenseSearchStreamInitConfig()
+    ) raises Error -> DenseSearchStream[ImmOrigin(origin_of(self, _anchor[query_origin]()))]:
+        """Opens a resumable nearest-neighbor stream for one query, its pulls on the calling thread.
+        Calls `usearch_dense_search_stream_init`.
+
+        The stream keeps walk state rather than a thread, so any number may stay open at once.
+
+        Parameters:
+            query_origin: The query row's origin, inferred from the argument.
+
+        Args:
+            query: The single query row; a view of more rows has its first row read.
+            config: The candidate-pool breadth the walk explores.
+
+        Returns:
+            A stream yielding matches lazily, which borrows the index and the query.
+
+        Raises:
+            `Error` with `UNSUPPORTED` while no residency implements the stream.
+        """
+        return DenseSearchStream[ImmOrigin(origin_of(self, _anchor[query_origin]()))](
+            self.library, self.address, NULL_ADDRESS, query.arguments(), config.expansion_factor
+        )
+
+    # endregion Receivers
+
+
+trait DenseVerbs:
+    """The verbs every blocking receiver offers - the index on the calling thread, and
+    `index.on(executor)` on an executor - each written once over the receiver's `_route`."""
+
+    def _route[C: Call](self, var call: C) raises Error -> C.Result:
+        """Runs `call` to its final status on this receiver's executor and answers its result."""
+        ...
 
     def reserve(self, capacity: Int) raises Error:
-        """Reserves capacity for a number of incoming vectors ahead of insertion.
+        """Reserves capacity for a number of incoming vectors ahead of insertion. Calls `usearch_dense_reserve`.
 
         Args:
             capacity: The desired total capacity, including the current size.
@@ -983,158 +2399,38 @@ struct DenseIndex:
         Raises:
             `Error` if the reservation cannot be satisfied, or contradicts a frozen geometry.
         """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        self.library.symbols().dense_reserve(self.live(), c_size_t(capacity), slot)
-        Error.raise_if_failed(slot, "usearch_dense_reserve")
+        _ = self._route(_DenseReserveCall(capacity))
 
     def clear(self) raises Error:
-        """Erases every entry, keeping the reserved capacity and the frozen geometry.
+        """Erases every entry, keeping the reserved capacity and the frozen geometry. Calls `usearch_dense_clear`.
 
         Never invoked concurrently with any other verb on the same handle.
 
         Raises:
-            `Error` if the handle opens its checkpoint in place, or the engine refuses.
+            `Error` with `READ_ONLY` if the handle serves its checkpoint in place.
         """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        self.library.symbols().dense_clear(self.live(), slot)
-        Error.raise_if_failed(slot, "usearch_dense_clear")
+        _ = self._route(_DenseClearCall())
 
-    # endregion Lifetime
-
-    # region Introspection
-
-    @always_inline
-    def _read_integer_property(self, symbol: DenseMeasure, detail: StaticString) raises Error -> Int:
-        """Reads one of the handle's integer properties, which every geometry and footprint getter
-        below shares the shape of; `capabilities` is the one property that answers text instead.
-
-        Args:
-            symbol: The `(handle, error) -> size_t` entry point to call.
-            detail: The entry point's name, carried into any raised error.
+    def describe(self) raises Error -> DenseIndexDescription:
+        """Reports the frozen metadata and the current counters in one call. Calls `usearch_dense_describe`.
 
         Returns:
-            The reading, which is meaningful only when nothing raised.
+            The description.
 
         Raises:
             `Error` if the engine refuses the query.
         """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var answer = symbol(self.live(), slot)
-        Error.raise_if_failed(slot, detail)
-        return Int(answer)
+        return self._route(_DenseDescribeCall())
 
-    def size(self) raises Error -> Int:
-        """How many entries the index stores.
-
-        Returns:
-            The count of published rows, which a concurrent insertion may already have grown.
-
-        Raises:
-            `Error` if the engine refuses the query.
-        """
-        return self._read_integer_property(self.library.symbols().dense_size, "usearch_dense_size")
-
-    def capacity(self) raises Error -> Int:
-        """How many entries the reservation left room for.
-
-        Returns:
-            The reserved capacity in entries, never below `size`.
-
-        Raises:
-            `Error` if the engine refuses the query.
-        """
-        return self._read_integer_property(self.library.symbols().dense_capacity, "usearch_dense_capacity")
-
-    def dimensions(self) raises Error -> Int:
-        """The frozen dimensionality of the stored vectors.
-
-        Returns:
-            Logical scalars per row, which every batch's `columns` must match.
-
-        Raises:
-            `Error` if the engine refuses the query.
-        """
-        return self._read_integer_property(self.library.symbols().dense_dimensions, "usearch_dense_dimensions")
-
-    def connectivity(self) raises Error -> Int:
-        """The frozen connections-per-node bound of the graph.
-
-        Returns:
-            The bound every node's neighbor list is sized by.
-
-        Raises:
-            `Error` if the engine refuses the query.
-        """
-        return self._read_integer_property(
-            self.library.symbols().dense_connectivity,
-            "usearch_dense_connectivity",
-        )
-
-    def memory_usage(self) raises Error -> Int:
-        """How many bytes the index occupies.
-
-        Returns:
-            The byte count, arenas and neighbor lists included.
-
-        Raises:
-            `Error` if the engine refuses the query.
-        """
-        return self._read_integer_property(
-            self.library.symbols().dense_memory_usage,
-            "usearch_dense_memory_usage",
-        )
-
-    def capabilities(self) raises Error -> String:
-        """The capability codename the index dispatched to on this machine.
-
-        Returns:
-            The codename the engine picked, copied out of its own static storage.
-
-        Raises:
-            `Error` if the engine refuses the query.
-        """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var address = self.library.symbols().dense_capabilities(self.live(), slot)
-        Error.raise_if_failed(slot, "usearch_dense_capabilities")
-        return text_at(address)
-
-    def storage_requirements(self) raises Error -> Int:
-        """Bytes one monolith of this index takes under the default layout.
-
-        Returns:
-            What `save_buffer` needs; a manifest checkpoint's parts sum to about the same.
-
-        Raises:
-            `Error` if the engine refuses the query.
-        """
-        return self._read_integer_property(
-            self.library.symbols().dense_storage_requirements,
-            "usearch_dense_storage_requirements",
-        )
-
-    # endregion Introspection
-
-    # region Population
-
-    def add[
-        keys_origin: ImmOrigin, vectors_origin: ImmOrigin, //
+    def insert[
+        keys_origin: ImmOrigin, vectors_origin: ImmOrigin, stats_origin: MutOrigin, //
     ](
         self,
-        executor: Executor,
         keys: Span[Key, keys_origin],
-        vectors: MatrixView[vectors_origin],
-        mut stats: TraversalStats,
-        options: InsertionOptions = InsertionOptions(),
-    ) raises Error -> Int:
-        """Adds a strided matrix of vectors under their keys - the native batch operation.
+        vectors: RowsView[vectors_origin],
+        config: DenseInsertConfig[stats_origin] = DenseInsertConfig(),
+    ) raises Error:
+        """Adds a run of vectors under their keys - the native batch operation. Calls `usearch_dense_insert`.
 
         A batch is all-or-nothing, because this binding installs no progress handler: every
         fallible step runs before the first entry identity is claimed, so a rejected batch leaves
@@ -1143,227 +2439,104 @@ struct DenseIndex:
         Parameters:
             keys_origin: The key run's origin, inferred from the argument.
             vectors_origin: The row storage's origin, inferred with it.
+            stats_origin: The lent telemetry slot's origin, inferred with it.
 
         Args:
-            executor: The executor driving the batch; its kind must match the handle's residency.
             keys: One key per row of `vectors`; keys need not be unique.
             vectors: The rows to insert, converted on ingest to the stored type.
-            stats: Receives this call's traversal telemetry, fully overwritten.
-            options: Per-call breadth; the default derives every setting.
-
-        Returns:
-            How many rows were published, which is every row unless the call failed.
+            config: The candidate-pool breadth and the telemetry slot.
 
         Raises:
-            `Error` if the shapes disagree, the handle is read-only, or a second thread is already
-            driving `executor`.
+            `Error` if the shapes disagree or the handle is read-only.
         """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var settings = stack_allocation[1, InsertionOptions]()
-        settings[unsafe_offset=0] = options
-        var view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
-        view[unsafe_offset=0] = vectors.untracked()
-        var published = self.library.symbols().dense_add(
-            self.live(),
-            executor.handle,
-            KeysView.of(keys).untracked(),
-            view.unsafe_origin_cast[MutAnyOrigin](),
-            settings.unsafe_origin_cast[MutAnyOrigin](),
-            NULL_ADDRESS,
-            NULL_ADDRESS,
-            Pointer(to=stats).unsafe_origin_cast[MutAnyOrigin](),
-            slot,
-        )
-        Error.raise_if_failed(slot, "usearch_dense_add")
-        return Int(published)
+        _ = self._route(_insert_call(keys, vectors, config))
 
-    def refine(
-        self,
-        executor: Executor,
-        mut stats: TraversalStats,
-        options: InsertionOptions = InsertionOptions(),
-    ) raises Error -> Int:
-        """Re-selects every entry's neighbors against the finished graph.
+    def refine[
+        stats_origin: MutOrigin, //
+    ](self, config: DenseRefineConfig[stats_origin] = DenseRefineConfig()) raises Error -> Int:
+        """Re-selects every entry's neighbors against the finished graph. Calls `usearch_dense_refine`.
 
         A build step rather than a repair: a cheap insertion pass followed by one refinement
         reaches a better graph, in less total time, than a single expensive insertion pass - so a
-        wide expansion factor belongs here rather than in `add`. Searches may run throughout;
+        wide expansion factor belongs here rather than in `insert`. Searches may run throughout;
         insertions may not.
 
+        Parameters:
+            stats_origin: The lent telemetry slot's origin, inferred from the argument.
+
         Args:
-            executor: The executor to fan out over; its kind must match the residency.
-            stats: Receives this call's traversal telemetry, fully overwritten.
-            options: Per-call breadth; the default derives every setting.
+            config: The candidate-pool breadth the re-selection walk explores, and the telemetry slot.
 
         Returns:
-            How many nodes' edges changed; zero means the graph has settled.
+            How many nodes' neighbors changed; zero means the graph has settled.
 
         Raises:
-            `Error` if the handle is read-only, or a second thread is already driving `executor`.
+            `Error` with `READ_ONLY` if the handle serves its checkpoint in place.
         """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var settings = stack_allocation[1, InsertionOptions]()
-        settings[unsafe_offset=0] = options
-        var changed = self.library.symbols().dense_refine(
-            self.live(),
-            executor.handle,
-            settings.unsafe_origin_cast[MutAnyOrigin](),
-            NULL_ADDRESS,
-            NULL_ADDRESS,
-            Pointer(to=stats).unsafe_origin_cast[MutAnyOrigin](),
-            slot,
-        )
-        Error.raise_if_failed(slot, "usearch_dense_refine")
-        return Int(changed)
+        return self._route(_DenseRefineCall(config.expansion_factor, _stats_address(config.stats)))
 
-    # endregion Population
+    def health(self) raises Error -> DenseReachability:
+        """Audits how much of the graph a search reaches from its landmarks. Calls `usearch_dense_health`.
 
-    # region Retrieval
+        Read-only, so concurrent insertions merely leave fresh entries unaudited.
+
+        Returns:
+            The audit; entries it misses stay unfound until a `refine` re-links them.
+
+        Raises:
+            `Error` if the engine refuses the audit.
+        """
+        return self._route(_DenseHealthCall())
+
+    def merge(self, var donors: List[DenseIndex]) raises Error:
+        """Absorbs every donor into this index - cheaper than re-inserting their vectors one by one.
+        Calls `usearch_dense_merge`.
+
+        Each donor the engine consumes is emptied here, so dropping the list releases only the
+        donors a stopped merge left standing.
+
+        Args:
+            donors: The handles to absorb, consumed by the call.
+
+        Raises:
+            `Error` with `UNSUPPORTED` while no residency absorbs donor handles.
+        """
+        _ = self._route(_DenseMergeCall(donors^))
 
     def search[
-        queries_origin: ImmOrigin,
-        found_keys_origin: MutOrigin,
-        found_scores_origin: MutOrigin,
-        found_counts_origin: MutOrigin,
-        //,
+        queries_origin: ImmOrigin, stats_origin: MutOrigin, //
     ](
         self,
-        executor: Executor,
-        queries: MatrixView[queries_origin],
-        matches: MatchesSpan[found_keys_origin, found_scores_origin, found_counts_origin],
-        mut stats: TraversalStats,
-        options: SearchOptions = SearchOptions(),
-    ) raises Error:
-        """Performs k-approximate nearest-neighbor search for a batch of queries.
+        queries: RowsView[queries_origin],
+        wanted: Int,
+        mut arena: Arena,
+        config: DenseSearchConfig[stats_origin] = DenseSearchConfig(),
+    ) raises Error -> Matches[origin_of(arena)]:
+        """Performs k-approximate nearest-neighbor search for a batch of queries, landing the matches
+        in a lent arena. Calls `usearch_dense_search`.
 
         Never writes to the graph, so any number of these may overlap with concurrent insertions.
-        A failure leaves every output row indeterminate, since a query resolved before the stop is
-        indistinguishable from one that never ran.
 
         Parameters:
             queries_origin: The query rows' origin, inferred from the argument.
-            found_keys_origin: The landing keys' origin, inferred with it.
-            found_scores_origin: The landing scores' origin, inferred with it.
-            found_counts_origin: The landing counts' origin, inferred with it.
+            stats_origin: The lent telemetry slot's origin, inferred with it.
 
         Args:
-            executor: The executor driving the batch; its kind must match the handle's residency.
             queries: The query rows, one per search.
-            matches: Where the keys, distances, and per-query counts land.
-            stats: Receives this call's traversal telemetry, fully overwritten.
-            options: Per-call breadth; the default derives every setting.
+            wanted: Matches per query - the "k"; zero lands only the counts.
+            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            config: The candidate-pool breadth, the predicate, and the telemetry slot.
+
+        Returns:
+            Every query's matches, read in place from the arena.
 
         Raises:
-            `Error` if the shapes disagree, or a second thread is already driving `executor`.
+            `Error` if the shapes disagree, or a predicate is passed to a VRAM handle.
         """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var settings = stack_allocation[1, SearchOptions]()
-        settings[unsafe_offset=0] = options
-        var view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
-        view[unsafe_offset=0] = queries.untracked()
-        var landing = stack_allocation[
-            1,
-            MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin],
-        ]()
-        landing[unsafe_offset=0] = matches.untracked()
-        self.library.symbols().dense_search(
-            self.live(),
-            executor.handle,
-            view.unsafe_origin_cast[MutAnyOrigin](),
-            landing.unsafe_origin_cast[MutAnyOrigin](),
-            settings.unsafe_origin_cast[MutAnyOrigin](),
-            NULL_ADDRESS,
-            NULL_ADDRESS,
-            Pointer(to=stats).unsafe_origin_cast[MutAnyOrigin](),
-            slot,
-        )
-        Error.raise_if_failed(slot, "usearch_dense_search")
-
-    def search_if[
-        queries_origin: ImmOrigin,
-        found_keys_origin: MutOrigin,
-        found_scores_origin: MutOrigin,
-        found_counts_origin: MutOrigin,
-        //,
-    ](
-        self,
-        executor: Executor,
-        queries: MatrixView[queries_origin],
-        matches: MatchesSpan[found_keys_origin, found_scores_origin, found_counts_origin],
-        mut stats: TraversalStats,
-        predicate: Address,
-        predicate_state: Address = NULL_ADDRESS,
-        options: SearchOptions = SearchOptions(),
-    ) raises Error:
-        """The filtered sibling of `search`, admitting only entries the predicate approves.
-
-        The predicate is an address rather than a Mojo function, because a `def ... abi("C")` that
-        returns a value does not lower to the C calling convention in Mojo 1.0 and the engine
-        calling one jumps into a corrupted frame. A predicate compiled in C and reached through the
-        same `dlopen` - or any other `usearch_predicate_t` the caller already holds - installs
-        here unchanged.
-
-        Non-matching entries still route the traversal rather than terminating it, so recall does
-        not collapse at low selectivity. The cost is that the predicate is called once per scored
-        candidate, far more often than `wanted`, and concurrently from the executor's threads - so
-        it belongs on the caller's fast path and must tolerate that.
-
-        Parameters:
-            queries_origin: The query rows' origin, inferred from the argument.
-            found_keys_origin: The landing keys' origin, inferred with it.
-            found_scores_origin: The landing scores' origin, inferred with it.
-            found_counts_origin: The landing counts' origin, inferred with it.
-
-        Args:
-            executor: The executor driving the batch; its kind must match the handle's residency.
-            queries: The query rows, one per search.
-            matches: Where the keys, distances, and per-query counts land.
-            stats: Receives this call's traversal telemetry, fully overwritten.
-            predicate: A `usearch_predicate_t`, which must outlive the call.
-            predicate_state: The opaque state forwarded into every predicate call.
-            options: Per-call breadth; the default derives every setting.
-
-        Raises:
-            `Error` if the shapes disagree, or a second thread is already driving `executor`.
-        """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var settings = stack_allocation[1, SearchOptions]()
-        settings[unsafe_offset=0] = options
-        var view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
-        view[unsafe_offset=0] = queries.untracked()
-        var landing = stack_allocation[
-            1,
-            MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin],
-        ]()
-        landing[unsafe_offset=0] = matches.untracked()
-        self.library.symbols().dense_search_if(
-            self.live(),
-            executor.handle,
-            view.unsafe_origin_cast[MutAnyOrigin](),
-            landing.unsafe_origin_cast[MutAnyOrigin](),
-            settings.unsafe_origin_cast[MutAnyOrigin](),
-            predicate,
-            predicate_state,
-            NULL_ADDRESS,
-            NULL_ADDRESS,
-            Pointer(to=stats).unsafe_origin_cast[MutAnyOrigin](),
-            slot,
-        )
-        Error.raise_if_failed(slot, "usearch_dense_search_if")
+        return self._route(_search_call(queries, wanted, Pointer(to=arena), config))
 
     def count(self, key: Key) raises Error -> Int:
-        """How many entries the index stores under one key.
-
-        Pairing this with `get` is not atomic, but harmlessly so: entries are only ever added, so a
-        stale count under-reports and `get` returns the true total.
+        """How many entries the index stores under one key. Calls `usearch_dense_count`.
 
         Args:
             key: The key whose entries are counted.
@@ -1374,50 +2547,36 @@ struct DenseIndex:
         Raises:
             `Error` if the engine refuses the query.
         """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var found = self.library.symbols().dense_count(self.live(), key, slot)
-        Error.raise_if_failed(slot, "usearch_dense_count")
-        return Int(found)
+        return self._route(_DenseCountCall(key))
 
-    def get[vectors_origin: MutOrigin, //](self, key: Key, vectors: MatrixSpan[vectors_origin]) raises Error -> Int:
-        """Exports the vectors stored under one key, one row per entry, in insertion order.
+    def get[
+        dtype: DType
+    ](self, key: Key, mut arena: Arena, scalar: ScalarKind = ScalarKind.of[dtype]()) raises Error -> DenseVectors[
+        dtype, origin_of(arena)
+    ]:
+        """Exports every vector stored under one key into a lent arena, one row per entry, in
+        insertion order. Calls `usearch_dense_get`.
 
         Parameters:
-            vectors_origin: The landing rows' origin, inferred from the argument.
+            dtype: The element type the rows are read as, which `scalar` must store whole.
 
         Args:
             key: The key whose entries are exported.
-            vectors: Where the rows land; its capacity bounds the copy, never promising it.
+            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            scalar: The scalar type to export as, converted from storage where it differs; the kind
+                `dtype` stores by default.
 
         Returns:
-            The true number of entries under the key, never the number written - a return above
-            the span's capacity means the copy was truncated.
+            The rows, read in place from the arena; none when the key is absent.
 
         Raises:
-            `Error` if the shapes disagree, or the engine refuses the export.
+            `Error` with `SHAPE_MISMATCH` if `dtype` cannot hold `scalar`, or if the engine refuses
+            the export.
         """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var span = stack_allocation[1, MatrixSpan[MutUntrackedOrigin]]()
-        span[unsafe_offset=0] = vectors.untracked()
-        var found = self.library.symbols().dense_get(
-            self.live(),
-            key,
-            span.unsafe_origin_cast[MutAnyOrigin](),
-            slot,
-        )
-        Error.raise_if_failed(slot, "usearch_dense_get")
-        return Int(found)
+        return self._route(_DenseGetCall[dtype](key, scalar, Pointer(to=arena)))
 
-    # endregion Retrieval
-
-    # region Serialization
-
-    def save[path_origin: ImmOrigin, //](self, executor: Executor, path: BytesView[path_origin]) raises Error:
-        """Writes a checkpoint, the path extension picking the layout.
+    def save[path_origin: ImmOrigin, //](self, path: StringSlice[path_origin]) raises Error:
+        """Writes a checkpoint, the path extension picking the layout. Calls `usearch_dense_save`.
 
         A `.safegraphs` path is one monolith; a `.safegraphs.json` path is a manifest naming one
         monolith per shard. Demands a mutation-free window; concurrent readers keep searching
@@ -1428,522 +2587,691 @@ struct DenseIndex:
             path_origin: The path bytes' origin, inferred from the argument.
 
         Args:
-            executor: The executor the write fans out over, one shard per thread or stream.
             path: Destination path, whose extension picks the layout.
 
         Raises:
-            `Error` if the destination cannot be written, or a second thread is driving `executor`.
+            `Error` if the destination cannot be written.
         """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        self.library.symbols().dense_save(
-            self.live(),
-            executor.handle,
-            path.untracked(),
-            NULL_ADDRESS,
-            NULL_ADDRESS,
-            slot,
-        )
-        Error.raise_if_failed(slot, "usearch_dense_save")
+        _ = self._route(_DenseSaveCall(BytesView.of(path).untracked()))
 
-    def load[path_origin: ImmOrigin, //](self, executor: Executor, path: BytesView[path_origin]) raises Error:
-        """Reads a checkpoint into this handle, shard by shard.
-
-        The handle's residency decides what loading means: materialize into RAM, upload to the
-        devices, or open in place on disk. A handle whose geometry was left zeroed freezes it here,
-        from the checkpoint's own headers. Point the path at the manifest, never at one of the
-        parts it enumerates - naming a part loads exactly that part, which is a fragment of the
-        index rather than the index. A failed load publishes nothing and loads cleanly again.
-
-        Parameters:
-            path_origin: The path bytes' origin, inferred from the argument.
+    def save_buffer(self, mut arena: Arena) raises Error -> Monolith[origin_of(arena)]:
+        """Serializes the index as one monolith into a lent arena - the same bytes the path-taking
+        sibling writes. Calls `usearch_dense_save_buffer`.
 
         Args:
-            executor: The executor the read fans out over, one shard per thread or stream.
-            path: The manifest of a sharded checkpoint, or a single monolith.
+            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+
+        Returns:
+            The monolith, read in place from the arena.
 
         Raises:
-            `Error` if the checkpoint cannot be read, or its geometry does not fit this handle.
+            `Error` if the engine refuses, as it does for a VRAM handle.
         """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        self.library.symbols().dense_load(
-            self.live(),
-            executor.handle,
-            path.untracked(),
-            NULL_ADDRESS,
-            NULL_ADDRESS,
-            slot,
-        )
-        Error.raise_if_failed(slot, "usearch_dense_load")
-
-    def save_buffer[
-        buffer_origin: MutOrigin, //
-    ](self, executor: Executor, buffer: BytesSpan[buffer_origin]) raises Error:
-        """Writes one monolith into a caller-owned buffer of at least `storage_requirements` bytes.
-
-        The bytes are the same the path-taking sibling writes, so the two are interchangeable.
-
-        Parameters:
-            buffer_origin: The destination bytes' origin, inferred from the argument.
-
-        Args:
-            executor: The executor to fan out over; its kind must match the residency.
-            buffer: Destination, whose length the engine never exceeds.
-
-        Raises:
-            `Error` if the buffer is too small, or a second thread is driving `executor`.
-        """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        self.library.symbols().dense_save_buffer(
-            self.live(),
-            executor.handle,
-            buffer.untracked(),
-            NULL_ADDRESS,
-            NULL_ADDRESS,
-            slot,
-        )
-        Error.raise_if_failed(slot, "usearch_dense_save_buffer")
-
-    def load_buffer[
-        buffer_origin: ImmOrigin, //
-    ](self, executor: Executor, buffer: BytesView[buffer_origin]) raises Error:
-        """Reads one monolith out of a caller-owned buffer into this handle.
-
-        The monolith lands whole on the first shard, and a failed load publishes nothing. The
-        path-taking sibling reaches the same bytes through a mapping, so a mapped file needs no
-        copy into a buffer first.
-
-        Parameters:
-            buffer_origin: The source bytes' origin, inferred from the argument.
-
-        Args:
-            executor: The executor to fan out over; its kind must match the residency.
-            buffer: Source holding one serialized monolith.
-
-        Raises:
-            `Error` if the bytes cannot be decoded, or do not fit this handle's geometry.
-        """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        self.library.symbols().dense_load_buffer(
-            self.live(),
-            executor.handle,
-            buffer.untracked(),
-            NULL_ADDRESS,
-            NULL_ADDRESS,
-            slot,
-        )
-        Error.raise_if_failed(slot, "usearch_dense_load_buffer")
-
-    # endregion Serialization
-
-    # region Linear Algebra
+        return self._route(_DenseSaveBufferCall(Pointer(to=arena)))
 
     def multiply[
-        rows_origin: ImmOrigin,
-        pair_keys_origin: MutOrigin,
-        pair_scores_origin: MutOrigin,
-        pair_counts_origin: MutOrigin,
-        //,
+        left_origin: ImmOrigin, stats_origin: MutOrigin, //
     ](
         self,
-        executor: Executor,
-        rows: MatrixView[rows_origin],
-        pairs: MatchesSpan[pair_keys_origin, pair_scores_origin, pair_counts_origin],
-        mut stats: TraversalStats,
-        options: SearchOptions = SearchOptions(),
-    ) raises Error:
-        """Approximate sparse product of a matrix against the indexed rows.
+        left: RowsView[left_origin],
+        mut arena: Arena,
+        config: DenseMultiplyConfig[stats_origin] = DenseMultiplyConfig(),
+    ) raises Error -> DenseProducts[origin_of(arena)]:
+        """Approximate sparse product of a run of rows against the indexed rows, into a lent arena.
+        Calls `usearch_dense_multiply`.
 
         Reports every pair the traversal scored instead of only the nearest, in traversal order
         rather than sorted, and with no duplicates. Cost is roughly
         `rows x expansion x connectivity x dimensions`, sublinear in the indexed rows, which is the
-        whole point of reading a product off a graph. Runs on `Metric.INNER` alone.
-
-        `pairs.keys` names each pair's indexed row and `pairs.scores` carries the products.
+        whole point of reading a product off a graph. Runs on `DenseMetric.INNER` alone.
 
         Parameters:
-            rows_origin: The left-hand rows' origin, inferred from the argument.
-            pair_keys_origin: The landing keys' origin, inferred with it.
-            pair_scores_origin: The landing products' origin, inferred with it.
-            pair_counts_origin: The landing counts' origin, inferred with it.
+            left_origin: The left-hand rows' origin, inferred from the argument.
+            stats_origin: The lent telemetry slot's origin, inferred with it.
 
         Args:
-            executor: The executor driving the batch; its kind must match the handle's residency.
-            rows: The left-hand rows.
-            pairs: Where the column keys, products, and per-row pair counts land.
-            stats: Receives this call's traversal telemetry, fully overwritten.
-            options: Per-call breadth, which is what widens the emitted pattern.
-
-        Raises:
-            `Error` with `CONFIG_MISMATCH` if the graph was frozen under a distance kind.
-        """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var settings = stack_allocation[1, SearchOptions]()
-        settings[unsafe_offset=0] = options
-        var view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
-        view[unsafe_offset=0] = rows.untracked()
-        var landing = stack_allocation[
-            1,
-            MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin],
-        ]()
-        landing[unsafe_offset=0] = pairs.untracked()
-        self.library.symbols().dense_multiply(
-            self.live(),
-            executor.handle,
-            view.unsafe_origin_cast[MutAnyOrigin](),
-            landing.unsafe_origin_cast[MutAnyOrigin](),
-            settings.unsafe_origin_cast[MutAnyOrigin](),
-            NULL_ADDRESS,
-            NULL_ADDRESS,
-            Pointer(to=stats).unsafe_origin_cast[MutAnyOrigin](),
-            slot,
-        )
-        Error.raise_if_failed(slot, "usearch_dense_multiply")
-
-    def attend[
-        queries_origin: ImmOrigin,
-        values_origin: ImmOrigin,
-        outputs_origin: MutOrigin,
-        //,
-        carry_origin: MutOrigin = MutUntrackedOrigin,
-    ](
-        self,
-        executor: Executor,
-        queries: MatrixView[queries_origin],
-        values: MatrixView[values_origin],
-        outputs: MatrixSpan[outputs_origin],
-        mut stats: TraversalStats,
-        carry: Optional[Pointer[SoftmaxState, carry_origin]] = None,
-        options: AttentionOptions = AttentionOptions(),
-    ) raises Error:
-        """Softmax-weighted attention over the indexed keys, folded into the walk in one pass.
-
-        The index holds the keys and `values` holds the value rows, addressed by key: an entry's
-        key is its row offset into `values`. Token positions already are such keys, so a context
-        inserted in position order needs no mapping, and the publication watermark becomes the
-        causal mask. The recurrence is Flash Attention's online softmax, so `outputs` comes back
-        already divided by its partition; what differs is the sweep, which walks the graph and
-        scores a magnitude-chosen subset rather than every key tile.
-
-        `carry` is that recurrence's `m` and `l`, one `SoftmaxState` per query row: supplying it
-        folds this branch into another over the same queries - a dense recent window, or a second
-        shard of one context - by partial-softmax rescaling.
-
-        The value table crosses whole, so `values.rows` bounds which keys may contribute and a key
-        past it is refused rather than silently skipped.
-
-        Parameters:
-            queries_origin: The query rows' origin, inferred from the argument.
-            values_origin: The value rows' origin, inferred with it.
-            outputs_origin: The landing rows' origin, inferred with it.
-            carry_origin: The softmax states' origin, inferred with it where any are supplied.
-
-        Args:
-            executor: The executor driving the batch; its kind must match the handle's residency.
-            queries: The query rows; every query head is one more row.
-            values: The value rows, whose column count is independent of the key dimensionality.
-            outputs: Where the attended rows land, one per query.
-            stats: Receives this call's traversal telemetry, fully overwritten.
-            carry: The online-softmax states, one per query row; omitted skips them.
-            options: Per-call breadth, logit scale, and stopping mass; the default derives all three.
-
-        Raises:
-            `Error` if the outputs cannot hold one row per query or are not as wide as the value
-            rows, and with `CONFIG_MISMATCH` if the graph was frozen under a distance kind.
-        """
-        if outputs.capacity < queries.rows or outputs.columns != values.columns:
-            raise Error(Status.SHAPE_MISMATCH, "usearch_dense_attend", NULL_ADDRESS)
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var settings = stack_allocation[1, AttentionOptions]()
-        settings[unsafe_offset=0] = options
-        var queries_view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
-        queries_view[unsafe_offset=0] = queries.untracked()
-        var values_view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
-        values_view[unsafe_offset=0] = values.untracked()
-        var outputs_span = stack_allocation[1, MatrixSpan[MutUntrackedOrigin]]()
-        outputs_span[unsafe_offset=0] = outputs.untracked()
-        var states = Int(carry.value()) if carry else NULL_ADDRESS
-        self.library.symbols().dense_attend(
-            self.live(),
-            executor.handle,
-            queries_view.unsafe_origin_cast[MutAnyOrigin](),
-            values_view.unsafe_origin_cast[MutAnyOrigin](),
-            outputs_span.unsafe_origin_cast[MutAnyOrigin](),
-            states,
-            settings.unsafe_origin_cast[MutAnyOrigin](),
-            NULL_ADDRESS,
-            NULL_ADDRESS,
-            Pointer(to=stats).unsafe_origin_cast[MutAnyOrigin](),
-            slot,
-        )
-        Error.raise_if_failed(slot, "usearch_dense_attend")
-
-    def maxsim[
-        queries_origin: ImmOrigin,
-        found_keys_origin: MutOrigin,
-        found_scores_origin: MutOrigin,
-        found_counts_origin: MutOrigin,
-        //,
-    ](
-        self,
-        executor: Executor,
-        queries: MatrixView[queries_origin],
-        rows_per_query: Int,
-        matches: MatchesSpan[found_keys_origin, found_scores_origin, found_counts_origin],
-        mut stats: TraversalStats,
-        options: SearchOptions = SearchOptions(),
-    ) raises Error:
-        """Late-interaction scoring: every query row takes its best match within a key, and those
-        maxima sum to that key's score.
-
-        This is what `values_per_key` above one exists for. A document is one key holding its token
-        rows, and the walk stays over individual tokens under a plain inner product - no
-        set-to-set metric is ever evaluated, which is why an entry's rows need no ordering and two
-        documents need not share a row count. Approximate in the usual direction: a key can score
-        below its exact value but never above it.
-
-        `queries.rows` carries the total row count, from which the engine derives the query count
-        by dividing out `rows_per_query`.
-
-        Parameters:
-            queries_origin: The query rows' origin, inferred from the argument.
-            found_keys_origin: The landing keys' origin, inferred with it.
-            found_scores_origin: The landing scores' origin, inferred with it.
-            found_counts_origin: The landing counts' origin, inferred with it.
-
-        Args:
-            executor: The executor to fan out over; its kind must match the residency.
-            queries: The query rows, queries laid end to end.
-            rows_per_query: Rows in every query; uniform, so ColBERT's padding applies as is.
-            matches: Where the keys, summed maxima, and per-query key counts land.
-            stats: Receives this call's traversal telemetry, fully overwritten.
-            options: Per-call breadth; the default derives every setting.
-
-        Raises:
-            `Error` with `CONFIG_MISMATCH` if the graph was frozen under a distance kind.
-        """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        if rows_per_query <= 0 or Int(queries.rows) % rows_per_query != 0:
-            raise Error(Status.SHAPE_MISMATCH, "usearch_dense_maxsim", NULL_ADDRESS)
-        var settings = stack_allocation[1, SearchOptions]()
-        settings[unsafe_offset=0] = options
-        var view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
-        view[unsafe_offset=0] = queries.untracked()
-        var landing = stack_allocation[
-            1,
-            MatchesSpan[MutUntrackedOrigin, MutUntrackedOrigin, MutUntrackedOrigin],
-        ]()
-        landing[unsafe_offset=0] = matches.untracked()
-        self.library.symbols().dense_maxsim(
-            self.live(),
-            executor.handle,
-            view.unsafe_origin_cast[MutAnyOrigin](),
-            c_size_t(rows_per_query),
-            landing.unsafe_origin_cast[MutAnyOrigin](),
-            settings.unsafe_origin_cast[MutAnyOrigin](),
-            NULL_ADDRESS,
-            NULL_ADDRESS,
-            Pointer(to=stats).unsafe_origin_cast[MutAnyOrigin](),
-            slot,
-        )
-        Error.raise_if_failed(slot, "usearch_dense_maxsim")
-
-    # endregion Linear Algebra
-
-    # region Streams
-
-    def cursor(self) raises Error -> DenseCursor:
-        """Opens a snapshot cursor over the current contents.
+            left: The left-hand rows.
+            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            config: The pairs kept per row, the candidate-pool breadth, and the telemetry slot.
 
         Returns:
-            A cursor pinned to the publication watermark this call captured, so concurrent inserts
-            never appear mid-iteration.
+            The ragged pairs and their offsets, read in place from the arena.
 
         Raises:
-            `Error` if the snapshot cannot be taken.
+            `Error` with `CONFIG_MISMATCH` if the graph was frozen under a distance kind.
         """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var address = self.library.symbols().dense_cursor(self.live(), slot)
-        Error.raise_if_failed(slot, "usearch_dense_cursor")
-        if address == 0:
-            raise Error(Status.INTERNAL, "usearch_dense_cursor", 0)
-        return DenseCursor(library=self.library, handle=Handle(unsafe_from_address=address))
+        return self._route(_multiply_call(left, Pointer(to=arena), config))
 
-    def find[
+    def attend[
+        queries_origin: ImmOrigin, carry_origin: MutOrigin, stats_origin: MutOrigin, //, dtype: DType
+    ](
+        self,
+        queries: RowsView[queries_origin],
+        value_lookup: ValueLookup,
+        value_lookup_state: Address,
+        mut arena: Arena,
+        config: DenseAttendConfig[carry_origin, stats_origin] = DenseAttendConfig(),
+    ) raises Error -> DenseVectors[dtype, origin_of(arena)]:
+        """Softmax attention of a run of query heads over every indexed key their graph walks score,
+        landing in a lent arena. Calls `usearch_dense_attend`.
+
+        Every key a walk scores folds into each head's running maximum, partition, and weighted
+        value sum, as Flash Attention folds key tiles, with no top-k cut: the long tail the walk
+        scores is what brings the result toward exact dense attention. The outputs come back
+        already divided by the partition.
+
+        Row `t · head_count + h` of `queries`, the outputs, and `carry` is head `h` of token `t`. One
+        index holds one layer's one key-value head, so the `head_count` query heads of grouped-query
+        attention share its keys and one walk per token.
+
+        The index stores no values: `value_lookup` resolves the keys of every scored batch to their
+        value rows, so only keys a walk scores are ever resolved. `carry` is the softmax's `m` and
+        `l`, one `DenseSoftmaxState` per query row, lent by the caller: supplying it folds this branch
+        into another over the same queries, such as the recent window kept out of the index, by
+        partial-softmax rescaling.
+
+        Parameters:
+            queries_origin: The query rows' origin, inferred from the argument.
+            carry_origin: The softmax states' origin, inferred with it where any are supplied.
+            stats_origin: The lent telemetry slot's origin, inferred with it.
+            dtype: The element type the attended rows land as, which must name a scalar kind.
+
+        Args:
+            queries: The query rows, `head_count` per token.
+            value_lookup: Resolves every scored batch of keys to their value rows.
+            value_lookup_state: The opaque state forwarded into every `value_lookup` call.
+            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            config: The heads per token, the carry, the candidate-pool breadth, the logit scale,
+                and the telemetry slot.
+
+        Returns:
+            One attended row per query row, as wide as the keys, read in place from the arena.
+
+        Raises:
+            `Error` with `SHAPE_MISMATCH` if `dtype` names no scalar kind, `head_count` does not
+            divide the rows, the carry holds fewer states than there are rows, or a lookup yields a
+            null row; with `CONFIG_MISMATCH` if the graph was frozen under a distance kind.
+        """
+        return self._route(_attend_call[dtype](queries, value_lookup, value_lookup_state, Pointer(to=arena), config))
+
+    def maxsim[
+        queries_origin: ImmOrigin, stats_origin: MutOrigin, //
+    ](
+        self,
+        queries: RowsView[queries_origin],
+        rows_per_query: Int,
+        wanted: Int,
+        mut arena: Arena,
+        config: DenseMaxsimConfig[stats_origin] = DenseMaxsimConfig(),
+    ) raises Error -> Matches[origin_of(arena)]:
+        """Late-interaction scoring: every query row takes its best match within a key, and those
+        maxima sum to that key's score, landing in a lent arena. Calls `usearch_dense_maxsim`.
+
+        This is what `values_per_key` above one exists for. A document is one key holding its token
+        rows, and the walk stays over individual tokens under a plain inner product. Approximate in
+        the usual direction: a key can score below its exact value but never above it.
+
+        Parameters:
+            queries_origin: The query rows' origin, inferred from the argument.
+            stats_origin: The lent telemetry slot's origin, inferred with it.
+
+        Args:
+            queries: The token rows of every query, laid end to end.
+            rows_per_query: Rows in every query; uniform, so ColBERT's padding applies as is.
+            wanted: Keys per query - the "k" over documents rather than rows; zero lands only the counts.
+            arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
+            config: The candidate-pool breadth and the telemetry slot.
+
+        Returns:
+            Every query's keys, summed maxima largest first, read in place from the arena.
+
+        Raises:
+            `Error` with `SHAPE_MISMATCH` if `rows_per_query` does not divide the rows; with
+            `CONFIG_MISMATCH` if the graph was frozen under a distance kind.
+        """
+        return self._route(_maxsim_call(queries, rows_per_query, wanted, Pointer(to=arena), config))
+
+
+struct DenseIndexOn[origin: ImmOrigin](DenseVerbs, ImplicitlyCopyable):
+    """An index bound to the executor its verbs block on, as `index.on(executor)` answers it. Binding-only.
+
+    Parameters:
+        origin: The index and the executor, which this receiver borrows.
+    """
+
+    var index: Pointer[DenseIndex, Self.origin]
+    """The index every verb addresses."""
+    var executor: Address
+    """The `usearch_executor_t` every verb runs on."""
+
+    def __init__(out self, index: Pointer[DenseIndex, Self.origin], executor: Address):
+        """Binds an index to an executor.
+
+        Args:
+            index: The index every verb addresses.
+            executor: The `usearch_executor_t` every verb runs on.
+        """
+        self.index = index
+        self.executor = executor
+
+    def _route[C: Call](self, var call: C) raises Error -> C.Result:
+        """Runs `call` on the bound executor, after every call submitted there before it."""
+        return _block(self.index[].library, call^, self.index[].address, self.executor)
+
+    def cursor(self) raises Error -> DenseCursor[Self.origin]:
+        """Opens a row scan over the current contents, its pulls on the bound executor.
+        Calls `usearch_dense_cursor_init`.
+
+        Returns:
+            The cursor, which borrows the index and the executor and cannot outlive them.
+
+        Raises:
+            `Error` if the residency has no cursor, as VRAM does not.
+        """
+        return DenseCursor[Self.origin](self.index[].library, self.index[].address, self.executor)
+
+    def search_stream[
         query_origin: ImmOrigin, //
-    ](self, executor: Executor, query: MatrixView[query_origin]) raises Error -> DenseFinder:
-        """Opens a resumable nearest-neighbor stream for one query.
-
-        A live finder holds one of the executor's threads for as long as it exists, so an executor
-        with few threads and many open finders starves. Release each one the moment its caller
-        stops pulling, rather than at the end of the enclosing scope.
+    ](
+        self, query: RowsView[query_origin], config: DenseSearchStreamInitConfig = DenseSearchStreamInitConfig()
+    ) raises Error -> DenseSearchStream[ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[query_origin]()))]:
+        """Opens a resumable nearest-neighbor stream for one query, its pulls on the bound executor.
+        Calls `usearch_dense_search_stream_init`.
 
         Parameters:
             query_origin: The query row's origin, inferred from the argument.
 
         Args:
-            executor: The executor the stream draws from; one of its threads stays pinned.
-            query: The single query row; a matrix of more rows has its first row read.
+            query: The single query row; a view of more rows has its first row read.
+            config: The candidate-pool breadth the walk explores.
 
         Returns:
-            A finder yielding matches lazily off a live frontier.
+            A stream yielding matches lazily, which borrows the index, the executor and the query.
 
         Raises:
-            `Error` if the executor cannot spare a thread, or the shapes disagree.
+            `Error` with `UNSUPPORTED` while no residency implements the stream.
         """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var view = stack_allocation[1, MatrixView[ImmUntrackedOrigin]]()
-        view[unsafe_offset=0] = query.untracked()
-        var address = self.library.symbols().dense_find(
-            self.live(),
-            executor.handle,
-            view.unsafe_origin_cast[MutAnyOrigin](),
-            slot,
+        return DenseSearchStream[ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[query_origin]()))](
+            self.index[].library, self.index[].address, self.executor, query.arguments(), config.expansion_factor
         )
-        Error.raise_if_failed(slot, "usearch_dense_find")
-        if address == 0:
-            raise Error(Status.INTERNAL, "usearch_dense_find", 0)
-        return DenseFinder(library=self.library, handle=Handle(unsafe_from_address=address))
-
-    # endregion Streams
 
 
-@fieldwise_init
-struct DenseCursor:
-    """A consistent snapshot of the index contents - `usearch_dense_cursor_t`.
+def _insert_call[
+    keys_origin: ImmOrigin, vectors_origin: ImmOrigin, stats_origin: MutOrigin
+](
+    keys: Span[Key, keys_origin], vectors: RowsView[vectors_origin], config: DenseInsertConfig[stats_origin]
+) -> _DenseInsertCall:
+    """Lowers an insertion's borrowed inputs into its crossing."""
+    return _DenseInsertCall(
+        KeysView.of(keys).untracked(),
+        len(keys),
+        vectors.arguments(),
+        Int(vectors.rows),
+        config.expansion_factor,
+        _stats_address(config.stats),
+    )
 
-    Captures the publication watermark at creation, so concurrent inserts never appear
-    mid-iteration, and the walk is a sequential row scan. Export, migration, and visualization feed
-    off it.
+
+def _search_call[
+    origin: MutOrigin, queries_origin: ImmOrigin, stats_origin: MutOrigin
+](
+    queries: RowsView[queries_origin],
+    wanted: Int,
+    arena: Pointer[Arena, origin],
+    config: DenseSearchConfig[stats_origin],
+) -> _DenseSearchCall[origin]:
+    """Lowers a search's borrowed inputs into its crossing."""
+    return _DenseSearchCall[origin](
+        queries.arguments(),
+        Int(queries.rows),
+        wanted,
+        arena,
+        config.expansion_factor,
+        config.predicate,
+        config.predicate_state,
+        _stats_address(config.stats),
+    )
+
+
+def _maxsim_call[
+    origin: MutOrigin, queries_origin: ImmOrigin, stats_origin: MutOrigin
+](
+    queries: RowsView[queries_origin],
+    rows_per_query: Int,
+    wanted: Int,
+    arena: Pointer[Arena, origin],
+    config: DenseMaxsimConfig[stats_origin],
+) -> _DenseMaxsimCall[origin]:
+    """Lowers a late-interaction call's borrowed inputs into its crossing."""
+    return _DenseMaxsimCall[origin](
+        queries.arguments(),
+        Int(queries.rows),
+        rows_per_query,
+        wanted,
+        arena,
+        config.expansion_factor,
+        _stats_address(config.stats),
+    )
+
+
+def _multiply_call[
+    origin: MutOrigin, left_origin: ImmOrigin, stats_origin: MutOrigin
+](
+    left: RowsView[left_origin], arena: Pointer[Arena, origin], config: DenseMultiplyConfig[stats_origin]
+) -> _DenseMultiplyCall[origin]:
+    """Lowers a product's borrowed inputs into its crossing."""
+    return _DenseMultiplyCall[origin](
+        left.arguments(),
+        Int(left.rows),
+        arena,
+        config.wanted,
+        config.expansion_factor,
+        _stats_address(config.stats),
+    )
+
+
+def _attend_call[
+    dtype: DType, origin: MutOrigin, queries_origin: ImmOrigin, carry_origin: MutOrigin, stats_origin: MutOrigin
+](
+    queries: RowsView[queries_origin],
+    value_lookup: ValueLookup,
+    value_lookup_state: Address,
+    arena: Pointer[Arena, origin],
+    config: DenseAttendConfig[carry_origin, stats_origin],
+) -> _DenseAttendCall[dtype, origin]:
+    """Lowers an attention call's borrowed inputs into its crossing."""
+    return _DenseAttendCall[dtype, origin](
+        queries.arguments(),
+        Int(queries.rows),
+        config.head_count,
+        value_lookup,
+        value_lookup_state,
+        Int(config.carry.unsafe_ptr()) if len(config.carry) else NULL_ADDRESS,
+        len(config.carry),
+        arena,
+        config.expansion_factor,
+        config.score_scale,
+        _stats_address(config.stats),
+    )
+
+
+struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
+    """An index bound to the executor its verbs are submitted to, as `index.deferred(executor)` answers
+    it: every verb answers a `Deferred` at once. Binding-only.
+
+    The verbs and their arguments are those of `DenseVerbs`, the arena borrowed as theirs is; only the
+    blocking receivers add the cursor and the search stream, whose every pull blocks.
+
+    Parameters:
+        origin: The index and the executor, which this receiver borrows.
+    """
+
+    var index: Pointer[DenseIndex, Self.origin]
+    """The index every verb addresses."""
+    var executor: Address
+    """The `usearch_executor_t` every verb is submitted to."""
+
+    def __init__(out self, index: Pointer[DenseIndex, Self.origin], executor: Address):
+        """Binds an index to an executor.
+
+        Args:
+            index: The index every verb addresses.
+            executor: The `usearch_executor_t` every verb is submitted to.
+        """
+        self.index = index
+        self.executor = executor
+
+    def reserve(self, capacity: Int) -> Deferred[_DenseReserveCall, Self.origin]:
+        """Submits `DenseVerbs.reserve`. Calls `usearch_dense_reserve`."""
+        return {self.index[].library, _DenseReserveCall(capacity), self.index[].address, self.executor}
+
+    def clear(self) -> Deferred[_DenseClearCall, Self.origin]:
+        """Submits `DenseVerbs.clear`. Calls `usearch_dense_clear`."""
+        return {self.index[].library, _DenseClearCall(), self.index[].address, self.executor}
+
+    def describe(self) -> Deferred[_DenseDescribeCall, Self.origin]:
+        """Submits `DenseVerbs.describe`. Calls `usearch_dense_describe`."""
+        return {self.index[].library, _DenseDescribeCall(), self.index[].address, self.executor}
+
+    def insert[
+        keys_origin: ImmOrigin, vectors_origin: ImmOrigin, stats_origin: MutOrigin, //
+    ](
+        self,
+        keys: Span[Key, keys_origin],
+        vectors: RowsView[vectors_origin],
+        config: DenseInsertConfig[stats_origin] = DenseInsertConfig(),
+    ) -> Deferred[
+        _DenseInsertCall,
+        ImmOrigin(
+            origin_of(
+                _anchor[Self.origin](), _anchor[keys_origin](), _anchor[vectors_origin](), _anchor[stats_origin]()
+            )
+        ),
+    ]:
+        """Submits `DenseVerbs.insert`; the keys, rows and telemetry slot stay borrowed until final.
+        Calls `usearch_dense_insert`."""
+        return {self.index[].library, _insert_call(keys, vectors, config), self.index[].address, self.executor}
+
+    def refine[
+        stats_origin: MutOrigin, //
+    ](self, config: DenseRefineConfig[stats_origin] = DenseRefineConfig()) -> Deferred[
+        _DenseRefineCall, ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[stats_origin]()))
+    ]:
+        """Submits `DenseVerbs.refine`. Calls `usearch_dense_refine`."""
+        return {
+            self.index[].library,
+            _DenseRefineCall(config.expansion_factor, _stats_address(config.stats)),
+            self.index[].address,
+            self.executor,
+        }
+
+    def health(self) -> Deferred[_DenseHealthCall, Self.origin]:
+        """Submits `DenseVerbs.health`. Calls `usearch_dense_health`."""
+        return {self.index[].library, _DenseHealthCall(), self.index[].address, self.executor}
+
+    def merge(self, var donors: List[DenseIndex]) -> Deferred[_DenseMergeCall, Self.origin]:
+        """Submits `DenseVerbs.merge`; the donors are owned by the call. Calls `usearch_dense_merge`."""
+        return {self.index[].library, _DenseMergeCall(donors^), self.index[].address, self.executor}
+
+    def search[
+        queries_origin: ImmOrigin, stats_origin: MutOrigin, //
+    ](
+        self,
+        queries: RowsView[queries_origin],
+        wanted: Int,
+        mut arena: Arena,
+        config: DenseSearchConfig[stats_origin] = DenseSearchConfig(),
+    ) -> Deferred[
+        _DenseSearchCall[origin_of(arena)],
+        ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[queries_origin](), _anchor[stats_origin]())),
+    ]:
+        """Submits `DenseVerbs.search`; the queries, telemetry slot and arena stay borrowed until final.
+        Calls `usearch_dense_search`."""
+        return {
+            self.index[].library,
+            _search_call(queries, wanted, Pointer(to=arena), config),
+            self.index[].address,
+            self.executor,
+        }
+
+    def count(self, key: Key) -> Deferred[_DenseCountCall, Self.origin]:
+        """Submits `DenseVerbs.count`. Calls `usearch_dense_count`."""
+        return {self.index[].library, _DenseCountCall(key), self.index[].address, self.executor}
+
+    def get[
+        dtype: DType
+    ](self, key: Key, mut arena: Arena, scalar: ScalarKind = ScalarKind.of[dtype]()) -> Deferred[
+        _DenseGetCall[dtype, origin_of(arena)], Self.origin
+    ]:
+        """Submits `DenseVerbs.get`; the arena stays borrowed until final. Calls `usearch_dense_get`."""
+        return {
+            self.index[].library,
+            _DenseGetCall[dtype](key, scalar, Pointer(to=arena)),
+            self.index[].address,
+            self.executor,
+        }
+
+    def save[
+        path_origin: ImmOrigin, //
+    ](self, path: StringSlice[path_origin]) -> Deferred[
+        _DenseSaveCall, ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[path_origin]()))
+    ]:
+        """Submits `DenseVerbs.save`; the path stays borrowed until final. Calls `usearch_dense_save`."""
+        return {
+            self.index[].library,
+            _DenseSaveCall(BytesView.of(path).untracked()),
+            self.index[].address,
+            self.executor,
+        }
+
+    def save_buffer(self, mut arena: Arena) -> Deferred[_DenseSaveBufferCall[origin_of(arena)], Self.origin]:
+        """Submits `DenseVerbs.save_buffer`; the arena stays borrowed until final. Calls `usearch_dense_save_buffer`."""
+        return {
+            self.index[].library,
+            _DenseSaveBufferCall(Pointer(to=arena)),
+            self.index[].address,
+            self.executor,
+        }
+
+    def multiply[
+        left_origin: ImmOrigin, stats_origin: MutOrigin, //
+    ](
+        self,
+        left: RowsView[left_origin],
+        mut arena: Arena,
+        config: DenseMultiplyConfig[stats_origin] = DenseMultiplyConfig(),
+    ) -> Deferred[
+        _DenseMultiplyCall[origin_of(arena)],
+        ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[left_origin](), _anchor[stats_origin]())),
+    ]:
+        """Submits `DenseVerbs.multiply`; the rows, telemetry slot and arena stay borrowed until final.
+        Calls `usearch_dense_multiply`."""
+        return {
+            self.index[].library,
+            _multiply_call(left, Pointer(to=arena), config),
+            self.index[].address,
+            self.executor,
+        }
+
+    def attend[
+        queries_origin: ImmOrigin, carry_origin: MutOrigin, stats_origin: MutOrigin, //, dtype: DType
+    ](
+        self,
+        queries: RowsView[queries_origin],
+        value_lookup: ValueLookup,
+        value_lookup_state: Address,
+        mut arena: Arena,
+        config: DenseAttendConfig[carry_origin, stats_origin] = DenseAttendConfig(),
+    ) -> Deferred[
+        _DenseAttendCall[dtype, origin_of(arena)],
+        ImmOrigin(
+            origin_of(
+                _anchor[Self.origin](), _anchor[queries_origin](), _anchor[carry_origin](), _anchor[stats_origin]()
+            )
+        ),
+    ]:
+        """Submits `DenseVerbs.attend`; the queries, carry, telemetry slot and arena stay borrowed until
+        final, and the lookup state must outlive the call too. Calls `usearch_dense_attend`."""
+        return {
+            self.index[].library,
+            _attend_call[dtype](queries, value_lookup, value_lookup_state, Pointer(to=arena), config),
+            self.index[].address,
+            self.executor,
+        }
+
+    def maxsim[
+        queries_origin: ImmOrigin, stats_origin: MutOrigin, //
+    ](
+        self,
+        queries: RowsView[queries_origin],
+        rows_per_query: Int,
+        wanted: Int,
+        mut arena: Arena,
+        config: DenseMaxsimConfig[stats_origin] = DenseMaxsimConfig(),
+    ) -> Deferred[
+        _DenseMaxsimCall[origin_of(arena)],
+        ImmOrigin(origin_of(_anchor[Self.origin](), _anchor[queries_origin](), _anchor[stats_origin]())),
+    ]:
+        """Submits `DenseVerbs.maxsim`; the queries, telemetry slot and arena stay borrowed until final.
+        Calls `usearch_dense_maxsim`."""
+        return {
+            self.index[].library,
+            _maxsim_call(queries, rows_per_query, wanted, Pointer(to=arena), config),
+            self.index[].address,
+            self.executor,
+        }
+
+
+struct DenseCursor[origin: ImmOrigin]:
+    """A sequential row scan over the index contents - `usearch_dense_cursor_t`.
+
+    Export, migration, and visualization feed off it. It borrows the index and the executor its
+    pulls run on, so neither can be released while it lives.
+
+    Parameters:
+        origin: The index and the executor, which the cursor borrows.
     """
 
     var library: Library
     """The loaded engine, held so the release can still reach `usearch_dense_cursor_free`."""
-    var handle: Handle
-    """The `usearch_dense_cursor_t` this struct owns, non-null for as long as it lives."""
+    var index: Address
+    """The `usearch_dense_index_t` the cursor was opened on, which every pull names again."""
+    var executor: Address
+    """The `usearch_executor_t` every pull runs on."""
+    var address: Address
+    """The `usearch_dense_cursor_t` this struct owns."""
+
+    def __init__(out self, library: Library, index: Address, executor: Address) raises Error:
+        """Opens a cursor over `index`. Calls `usearch_dense_cursor_init`.
+
+        Args:
+            library: The loaded engine the cursor is opened through.
+            index: The handle to scan.
+            executor: The executor every pull runs on.
+
+        Raises:
+            `Error` if the residency has no cursor, as VRAM does not.
+        """
+        var created = stack_allocation[1, Address]()
+        created[unsafe_offset=0] = NULL_ADDRESS
+        var outcome = stack_allocation[1, Outcome]()
+        outcome[unsafe_offset=0] = Outcome()
+        _cross(DenseCursorInitArguments(Int(created), index, Int(outcome)), library.symbols().dense_cursor_init)
+        library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_dense_cursor_init")
+        self.library = library
+        self.index = index
+        self.executor = executor
+        self.address = created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
 
     def __deinit__(deinit self):
-        """Releases the cursor and the snapshot it pinned.
+        """Releases the cursor. Calls `usearch_dense_cursor_free`.
 
         The loader reference is surrendered only after the call: reading the entry point is the
         last use of `library`, so without the trailing move Mojo drops the last reference - and
         `dlclose`s the engine - between the load and the branch to it.
         """
-        self.library.symbols().dense_cursor_free(self.handle)
+        self.library.symbols().dense_cursor_free(self.address)
         _ = self.library^
 
-    def next[
-        keys_origin: MutOrigin, vectors_origin: MutOrigin, //
-    ](self, keys: Span[Key, keys_origin], vectors: MatrixSpan[vectors_origin]) raises Error -> Int:
-        """Copies the next batch of entries out of the snapshot.
-
-        The key run bounds the batch, so a vector export must have room for as many rows.
-
-        Parameters:
-            keys_origin: The key run's origin, inferred from the argument.
-            vectors_origin: The landing rows' origin, inferred with it.
+    def next_keys(self, wanted: Int, mut arena: Arena) raises Error -> DenseBatch[origin_of(arena)]:
+        """Copies up to `wanted` next keys into a lent arena, skipping the rows. Calls `usearch_dense_cursor_next`.
 
         Args:
-            keys: Where the keys land, whose length is the batch size this call may write.
-            vectors: Where the rows land, of at least as many rows as `keys` holds.
+            wanted: The upper bound on keys this pull writes.
+            arena: The arena to rewind and refill, which the batch borrows; a failed call leaves it valid.
 
         Returns:
-            How many rows were written; zero when the snapshot is exhausted.
+            The keys, read in place from the arena; an empty batch once the walk is exhausted.
 
         Raises:
             `Error` if the engine refuses the copy.
         """
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var span = stack_allocation[1, MatrixSpan[MutUntrackedOrigin]]()
-        span[unsafe_offset=0] = vectors.untracked()
-        var written = self.library.symbols().dense_cursor_next(
-            self.handle,
-            KeysSpan.of(keys).untracked(),
-            span.unsafe_origin_cast[MutAnyOrigin](),
-            slot,
-        )
-        Error.raise_if_failed(slot, "usearch_dense_cursor_next")
-        return Int(written)
+        return self._next(_DenseCursorNextCall(self.address, ScalarKind.UNKNOWN, wanted, Pointer(to=arena)))
+
+    def next_batch(
+        self, wanted: Int, scalar: ScalarKind, mut arena: Arena
+    ) raises Error -> DenseBatch[origin_of(arena)]:
+        """Copies up to `wanted` next entries into a lent arena, keys and rows alike.
+        Calls `usearch_dense_cursor_next`.
+
+        Args:
+            wanted: The upper bound on entries this pull writes.
+            scalar: The scalar type to export the rows as, converted from storage where it differs.
+            arena: The arena to rewind and refill, which the batch borrows; a failed call leaves it valid.
+
+        Returns:
+            The keys and their rows, read in place from the arena; an empty batch once the walk is exhausted.
+
+        Raises:
+            `Error` if the engine refuses the copy.
+        """
+        return self._next(_DenseCursorNextCall(self.address, scalar, wanted, Pointer(to=arena)))
+
+    def _next[C: Call](self, var call: C) raises Error -> C.Result:
+        """One blocking pull on the cursor's executor."""
+        return _block(self.library, call^, self.index, self.executor)
 
 
-@fieldwise_init
-struct DenseFinder:
-    """A resumable nearest-neighbor stream - `usearch_dense_finder_t`.
+struct DenseSearchStream[origin: ImmOrigin]:
+    """A resumable nearest-neighbor stream - `usearch_dense_search_stream_t`.
 
-    Best-first traversal is naturally pausable, so the finder owns a live frontier and visited set
-    and yields matches lazily. Callers that post-filter aggressively pull until satisfied instead
-    of guessing "k" upfront, at the price of pinning one of the executor's threads until released.
+    Best-first traversal is naturally pausable, so the stream keeps the walk's frontier and visited
+    set between pulls. Callers that post-filter aggressively pull until satisfied instead of
+    guessing "k" upfront. Ordering beyond the expansion horizon is best-effort nearest rather than
+    globally exact.
 
-    Ordering beyond the expansion horizon is best-effort nearest rather than globally exact, so
-    pulling far past the configured breadth sees the ranking degrade rather than the stream end.
+    Parameters:
+        origin: The index, the executor, and the query row, which the stream borrows.
     """
 
     var library: Library
-    """The loaded engine, held so the release can still reach `usearch_dense_find_free`."""
-    var handle: Handle
-    """The `usearch_dense_finder_t` this struct owns, non-null for as long as it lives."""
+    """The loaded engine, held so the release can still reach `usearch_dense_search_stream_free`."""
+    var index: Address
+    """The `usearch_dense_index_t` the stream was opened on, which every pull names again."""
+    var executor: Address
+    """The `usearch_executor_t` every pull runs on."""
+    var address: Address
+    """The `usearch_dense_search_stream_t` this struct owns."""
+
+    def __init__(
+        out self, library: Library, index: Address, executor: Address, query: RowsViewArguments, expansion_factor: Int
+    ) raises Error:
+        """Opens a stream over `index` for one query row. Calls `usearch_dense_search_stream_init`.
+
+        Args:
+            library: The loaded engine the stream is opened through.
+            index: The handle to query.
+            executor: The executor every pull runs on.
+            query: The single query row.
+            expansion_factor: The candidate-pool breadth the walk explores; zero derives.
+
+        Raises:
+            `Error` with `UNSUPPORTED` while no residency implements the stream.
+        """
+        var created = stack_allocation[1, Address]()
+        created[unsafe_offset=0] = NULL_ADDRESS
+        var outcome = stack_allocation[1, Outcome]()
+        outcome[unsafe_offset=0] = Outcome()
+        _cross(
+            DenseSearchStreamInitArguments(Int(created), index, Int(outcome), query, c_size_t(expansion_factor)),
+            library.symbols().dense_search_stream_init,
+        )
+        library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_dense_search_stream_init")
+        self.library = library
+        self.index = index
+        self.executor = executor
+        self.address = created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
 
     def __deinit__(deinit self):
-        """Releases the finder and the traversal context it pinned.
+        """Releases the stream and the walk state it keeps. Calls `usearch_dense_search_stream_free`.
 
         The loader reference is surrendered only after the call: reading the entry point is the
         last use of `library`, so without the trailing move Mojo drops the last reference - and
         `dlclose`s the engine - between the load and the branch to it.
         """
-        self.library.symbols().dense_find_free(self.handle)
+        self.library.symbols().dense_search_stream_free(self.address)
         _ = self.library^
 
-    def next[
-        keys_origin: MutOrigin, distances_origin: MutOrigin, //
-    ](self, keys: Span[Key, keys_origin], distances: Span[Distance, distances_origin],) raises Error -> Int:
-        """Pulls the next matches off the live frontier.
-
-        Parameters:
-            keys_origin: The key run's origin, inferred from the argument.
-            distances_origin: The distance run's origin, inferred with it.
+    def next(self, wanted: Int, mut arena: Arena) raises Error -> Matches[origin_of(arena)]:
+        """Pulls up to `wanted` next-nearest matches into a lent arena, as the one row of a search.
+        Calls `usearch_dense_search_stream_next`.
 
         Args:
-            keys: Where the keys land, which bounds how many this call may write.
-            distances: Where the distances land, paired positionally with the keys.
+            wanted: The upper bound on matches this pull writes.
+            arena: The arena to rewind and refill, which the pull borrows; a failed call leaves it valid.
 
         Returns:
-            How many matches were written; zero when the traversal is drained.
+            One row of matches, read in place from the arena; an empty row once the walk is drained.
 
         Raises:
-            `Error` if the engine refuses to advance the stream.
+            `Error` if the engine refuses to advance.
         """
-        if len(keys) != len(distances):
-            raise Error(Status.SHAPE_MISMATCH, "usearch_dense_find_next", NULL_ADDRESS)
-        var report = stack_allocation[1, ErrorSlot]()
-        report[unsafe_offset=0] = ErrorSlot()
-        var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-        var written = self.library.symbols().dense_find_next(
-            self.handle,
-            KeysSpan.of(keys).untracked(),
-            ScoresOut(unsafe_from_address=Int(distances.unsafe_ptr())),
-            slot,
+        return _block(
+            self.library,
+            _DenseSearchStreamNextCall(self.address, wanted, Pointer(to=arena)),
+            self.index,
+            self.executor,
         )
-        Error.raise_if_failed(slot, "usearch_dense_find_next")
-        return Int(written)
 
 
 # endregion Index
@@ -1951,8 +3279,26 @@ struct DenseFinder:
 # region Metadata
 
 
-def metadata[path_origin: ImmOrigin, //](library: Library, path: BytesView[path_origin]) raises Error -> DenseMetadata:
-    """Reads a checkpoint's geometry and metric without loading it.
+def _read_metadata(
+    executor: Executor, verb: DenseMetadataRead, source: BytesView[ImmUntrackedOrigin], detail: StaticString
+) raises Error -> DenseMetadata:
+    """The path and buffer forms share one argument layout, differing only in the verb."""
+    var described = stack_allocation[1, DenseMetadata]()
+    described[unsafe_offset=0] = DenseMetadata()
+    var outcome = stack_allocation[1, Outcome]()
+    outcome[unsafe_offset=0] = Outcome()
+    _cross(
+        DenseMetadataReadArguments(executor.address, Int(outcome), Completion.BLOCKING, source, Int(described)),
+        verb,
+    )
+    executor.library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], detail)
+    return described.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
+
+
+def dense_metadata_read[
+    path_origin: ImmOrigin, //
+](executor: Executor, path: StringSlice[path_origin]) raises Error -> DenseMetadata:
+    """Reads a checkpoint's geometry and metric without loading it. Calls `usearch_dense_metadata_read`.
 
     A manifest answers from its summary and its first part's header, so the cost does not grow with
     the index.
@@ -1961,7 +3307,7 @@ def metadata[path_origin: ImmOrigin, //](library: Library, path: BytesView[path_
         path_origin: The path bytes' origin, inferred from the argument.
 
     Args:
-        library: The loaded engine that reads the header.
+        executor: The executor the read runs on; it also lends its engine.
         path: The manifest of a sharded checkpoint, or a single monolith.
 
     Returns:
@@ -1970,26 +3316,25 @@ def metadata[path_origin: ImmOrigin, //](library: Library, path: BytesView[path_
     Raises:
         `Error` if the checkpoint cannot be opened or its header cannot be decoded.
     """
-    var report = stack_allocation[1, ErrorSlot]()
-    report[unsafe_offset=0] = ErrorSlot()
-    var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-    var described = stack_allocation[1, DenseMetadata]()
-    described[unsafe_offset=0] = DenseMetadata()
-    library.symbols().dense_metadata(path.untracked(), described.unsafe_origin_cast[MutAnyOrigin](), slot)
-    Error.raise_if_failed(slot, "usearch_dense_metadata")
-    return described[unsafe_offset=0]
+    return _read_metadata(
+        executor,
+        executor.library.symbols().dense_metadata_read,
+        BytesView.of(path).untracked(),
+        "usearch_dense_metadata_read",
+    )
 
 
-def metadata_buffer[
+def dense_metadata_read_buffer[
     buffer_origin: ImmOrigin, //
-](library: Library, buffer: BytesView[buffer_origin]) raises Error -> DenseMetadata:
+](executor: Executor, buffer: Span[UInt8, buffer_origin]) raises Error -> DenseMetadata:
     """Reads a serialized monolith's geometry and metric without loading it.
+    Calls `usearch_dense_metadata_read_buffer`.
 
     Parameters:
         buffer_origin: The source bytes' origin, inferred from the argument.
 
     Args:
-        library: The loaded engine that reads the header.
+        executor: The executor the read runs on; it also lends its engine.
         buffer: Source holding one serialized monolith.
 
     Returns:
@@ -1998,14 +3343,12 @@ def metadata_buffer[
     Raises:
         `Error` if the bytes cannot be decoded.
     """
-    var report = stack_allocation[1, ErrorSlot]()
-    report[unsafe_offset=0] = ErrorSlot()
-    var slot = report.unsafe_origin_cast[MutAnyOrigin]()
-    var described = stack_allocation[1, DenseMetadata]()
-    described[unsafe_offset=0] = DenseMetadata()
-    library.symbols().dense_metadata_buffer(buffer.untracked(), described.unsafe_origin_cast[MutAnyOrigin](), slot)
-    Error.raise_if_failed(slot, "usearch_dense_metadata_buffer")
-    return described[unsafe_offset=0]
+    return _read_metadata(
+        executor,
+        executor.library.symbols().dense_metadata_read_buffer,
+        BytesView.of(buffer).untracked(),
+        "usearch_dense_metadata_read_buffer",
+    )
 
 
 # endregion Metadata
