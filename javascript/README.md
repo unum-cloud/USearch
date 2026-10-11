@@ -252,8 +252,8 @@ const index = usearch.DenseIndex.initRam(
   {
     dimensions: 128,
     metric: usearch.DenseMetric.Inner, // or Angular, the default, Euclidean, Hamming, Jaccard
-    quantization: usearch.Scalar.F32, // the default, or F64, BF16, F16, E5M2, E4M3, E3M2, E2M3, I8, I4x2, U8, U4x2, U1x8
-    connectivity: 10, // absent derives it from the geometry
+    quantization: usearch.Scalar.BF16, // the default, or F16, E5M2, E4M3, E3M2, E2M3, I8, I4x2, U8, U4x2, U1x8
+    connectivity: 32, // a power of two; absent derives it from the geometry
     valuesPerKey: 2, // absent derives it to unique keys
   },
   [0, 1], // absent spreads the shards over every NUMA node
@@ -265,6 +265,7 @@ The candidate-pool breadth rides every call rather than the construction, so a r
 ```js
 index.on(executor).insert(keys, vectors, { expansionFactor: 128 });
 index.on(executor).search(queries, 10, arena, { expansionFactor: 64 });
+index.on(executor).search(queries, 10, arena, { traversal: usearch.Traversal.Scan }); // exact, on RAM and NVMe handles
 ```
 
 ## Refinement and Merging
@@ -451,3 +452,5 @@ npm run prebuild
 npm run build-js
 npm test
 ```
+
+The addon carries the dense storage types its CMake configure compiled: `npm run build-native` and the prebuilt addons pass `USEARCH_DENSE_DTYPES=11`, while a plain configure compiles `bf16`, `u1x8`, `i8` and `e4m3` alone, and the suite skips the kinds such a build refuses.

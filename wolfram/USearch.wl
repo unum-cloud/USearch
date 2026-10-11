@@ -21,8 +21,8 @@ ExecutorForNvme::usage = "ExecutorForNvme[] calls usearch_executor_for_nvme."
 ExecutorDrain::usage = "ExecutorDrain[executor, mood] calls usearch_executor_drain, \"parked\" or \"spinning\"."
 ArenaInit::usage = "ArenaInit[] calls usearch_arena_init, placing the arena where its \"Executor\" computes."
 
-DenseInitRam::usage = "DenseInitRam[metric, quantization, dimensions] calls usearch_dense_init_ram."
-DenseInitVram::usage = "DenseInitVram[metric, quantization, dimensions] calls usearch_dense_init_vram."
+DenseInitRam::usage = "DenseInitRam[metric : \"angular\", quantization : \"bf16\", dimensions] calls usearch_dense_init_ram."
+DenseInitVram::usage = "DenseInitVram[metric : \"angular\", quantization : \"bf16\", dimensions] calls usearch_dense_init_vram."
 DenseLoadRam::usage = "DenseLoadRam[path] calls usearch_dense_load_ram."
 DenseLoadVram::usage = "DenseLoadVram[path] calls usearch_dense_load_vram."
 DenseLoadRamBuffer::usage = "DenseLoadRamBuffer[monolith] calls usearch_dense_load_ram_buffer."
@@ -37,7 +37,7 @@ DenseClear::usage = "DenseClear[receiver] calls usearch_dense_clear."
 DenseInsert::usage = "DenseInsert[receiver, keys, vectors] calls usearch_dense_insert."
 DenseRefine::usage = "DenseRefine[receiver] calls usearch_dense_refine."
 DenseHealth::usage = "DenseHealth[receiver] calls usearch_dense_health."
-DenseSearch::usage = "DenseSearch[receiver, queries, wanted, arena] calls usearch_dense_search."
+DenseSearch::usage = "DenseSearch[receiver, queries, wanted, arena] calls usearch_dense_search; \"Traversal\" is \"walk\" or \"scan\"."
 DenseMaxsim::usage = "DenseMaxsim[receiver, queries, rowsPerQuery, wanted, arena] calls usearch_dense_maxsim."
 DenseCount::usage = "DenseCount[receiver, key] calls usearch_dense_count."
 DenseGet::usage = "DenseGet[receiver, key, arena] calls usearch_dense_get."
@@ -82,7 +82,7 @@ denseClear = receiving["DenseClear", {}];
 denseInsert = receiving["DenseInsert", {LibraryDataType[NumericArray], {Real, _}, Integer}];
 denseRefine = receiving["DenseRefine", {Integer}];
 denseHealth = receiving["DenseHealth", {}];
-denseSearch = receiving["DenseSearch", {{Real, _}, Integer, Integer, Integer}];
+denseSearch = receiving["DenseSearch", {{Real, _}, Integer, Integer, Integer, "UTF8String"}];
 denseMaxsim = receiving["DenseMaxsim", {{Real, _}, Integer, Integer, Integer, Integer}];
 denseCount = receiving["DenseCount", {LibraryDataType[NumericArray]}];
 denseGet = receiving["DenseGet", {LibraryDataType[NumericArray], Integer}];
@@ -151,11 +151,11 @@ Options[ArenaInit] = {"Executor" -> None};
 ArenaInit[OptionsPattern[]] := construct[Arena, arenaInit, {OptionValue["Executor"]}]
 
 Options[DenseInitRam] = {"Connectivity" -> 0, "ValuesPerKey" -> 0, "MemoryDomains" -> {}};
-DenseInitRam[metric_String, quantization_String, dimensions_Integer, OptionsPattern[]] :=
+DenseInitRam[metric_String : "angular", quantization_String : "bf16", dimensions_Integer, OptionsPattern[]] :=
     construct[DenseIndex, denseInitRam, {metric, quantization, dimensions, OptionValue["Connectivity"],
         OptionValue["ValuesPerKey"], store[OptionValue["MemoryDomains"]]}]
 Options[DenseInitVram] = {"Connectivity" -> 0, "ValuesPerKey" -> 0, "Devices" -> {}};
-DenseInitVram[metric_String, quantization_String, dimensions_Integer, OptionsPattern[]] :=
+DenseInitVram[metric_String : "angular", quantization_String : "bf16", dimensions_Integer, OptionsPattern[]] :=
     construct[DenseIndex, denseInitVram, {metric, quantization, dimensions, OptionValue["Connectivity"],
         OptionValue["ValuesPerKey"], store[OptionValue["Devices"]]}]
 Options[DenseLoadRam] = {"Executor" -> None, "MemoryDomains" -> {}, "ValuesPerKey" -> 0};
@@ -192,11 +192,11 @@ DenseInsert[receiver_, keys : {__?keyQ}, vectors_List, OptionsPattern[]] :=
 Options[DenseRefine] = {"ExpansionFactor" -> 0};
 DenseRefine[receiver_, OptionsPattern[]] := submit[receiver, denseRefine, {OptionValue["ExpansionFactor"]}]
 DenseHealth[receiver_] := submit[receiver, denseHealth, {}]
-Options[DenseSearch] = {"ExpansionFactor" -> 0};
+Options[DenseSearch] = {"ExpansionFactor" -> 0, "Traversal" -> "walk"};
 (* No tensor holds zero rows, so a call with no queries answers here, as C would, with nothing found. *)
 DenseSearch[receiver_, {}, wanted_Integer, arena_Arena, OptionsPattern[]] := <|"Keys" -> {}, "Scores" -> {}|>
-DenseSearch[receiver_, queries : {__List}, wanted_Integer, arena_Arena, OptionsPattern[]] :=
-    submit[receiver, denseSearch, {rows[queries], wanted, arena, OptionValue["ExpansionFactor"]}]
+DenseSearch[receiver_, queries : {__List}, wanted_Integer, arena_Arena, OptionsPattern[]] := submit[receiver,
+    denseSearch, {rows[queries], wanted, arena, OptionValue["ExpansionFactor"], OptionValue["Traversal"]}]
 Options[DenseMaxsim] = {"ExpansionFactor" -> 0};
 DenseMaxsim[receiver_, {}, rowsPerQuery_Integer, wanted_Integer, arena_Arena, OptionsPattern[]] :=
     <|"Keys" -> {}, "Scores" -> {}|>

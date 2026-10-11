@@ -96,6 +96,12 @@ class Residency(IntEnum):
     VRAM = 1
     NVME = 2
 
+class Traversal(IntEnum):
+    """How a search reaches the rows it scores, valued as `usearch_traversal_t`."""
+
+    WALK = 0
+    SCAN = 1
+
 class Error(RuntimeError):
     """The base of every failure the library reports, one subclass per status shared with the C API."""
 
@@ -395,6 +401,7 @@ class On[IndexT]:
         /,
         *,
         expansion_factor: int = 0,
+        traversal: Traversal = ...,
         dtype: Scalar | None = None,
         predicate: Callable[[Key], bool] | None = None,
         progress: _Progress | None = None,
@@ -496,6 +503,7 @@ class DeferredOn[IndexT]:
         /,
         *,
         expansion_factor: int = 0,
+        traversal: Traversal = ...,
         dtype: Scalar | None = None,
         predicate: Callable[[Key], bool] | None = None,
         progress: _Progress | None = None,
@@ -883,6 +891,7 @@ class DenseIndex:
         /,
         *,
         expansion_factor: int = 0,
+        traversal: Traversal = ...,
         dtype: Scalar | None = None,
         predicate: Callable[[Key], bool] | None = None,
         progress: _Progress | None = None,

@@ -13,7 +13,7 @@
 #include <atomic>      // `std::atomic`
 #include <bit>         // `std::bit_cast` - hashing `uuid_t` as two words
 #include <concepts>    // `std::convertible_to` - the string-view conversion's constraint
-#include <functional>  // `std::hash` - specialized for `uuid_t` below
+#include <functional>  // `std::hash` - specialized for `uuid_t` below, `std::less`
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
 #include <type_traits> // `std::type_identity_t`, `std::conditional_t` - the kit cascades
@@ -355,7 +355,7 @@ constexpr char const* status_to_string(status_t status) noexcept {
     case status_t::config_mismatch_k: return "the request contradicts the frozen configuration";
     case status_t::contended_k: return "a synchronization contract was violated concurrently";
     case status_t::cancelled_k: return "a progress callback asked the operation to stop";
-    case status_t::unsupported_k: return "this residency does not implement the verb";
+    case status_t::unsupported_k: return "this residency does not implement the verb or its traversal";
     case status_t::deferred_k: return "the call was submitted deferred and is not final yet";
     case status_t::invalid_argument_k: return "an argument breaks the verb's contract";
     }
@@ -486,6 +486,16 @@ enum class synchronization_t : u32_t {
 
     /** Sole ownership - nothing else touches the index, readers included. */
     exclusive_k,
+};
+
+/** How a search reaches the rows it scores, mirroring @c usearch_traversal_t. */
+enum class traversal_t : u32_t {
+
+    /** Walk the graph, scoring the rows the expansion reaches - approximate, the default. */
+    walk_k = usearch_traversal_walk_k,
+
+    /** Score every published row - exact, ignoring the expansion factor. */
+    scan_k = usearch_traversal_scan_k,
 };
 
 enum connectivity_t : u32_t {
@@ -723,20 +733,20 @@ constexpr value_type_ max_of(value_type_ first, value_type_ second) noexcept {
 inline constexpr std::size_t tile_span_k = 16;
 
 /**
- *  @brief The first position in the ascending @p values not ordered before @p value -
- *      @c std::lower_bound re-spelled in ten lines, so headers don't drag in
+ *  @brief The first position in the @p values, ascending under @p comparator, not ordered before
+ *      @p value - @c std::lower_bound re-spelled in ten lines, so headers don't drag in
  *      @c <algorithm>, one of the heaviest includes on the compile-health charts.
  *  @see https://artificial-mind.net/projects/compile-health/
  */
-template <typename value_type_>
-constexpr value_type_* lower_bound(std::span<value_type_> values,
-                                   std::type_identity_t<value_type_> const& value) noexcept {
+template <typename value_type_, typename comparator_type_ = std::less<void>>
+constexpr value_type_* lower_bound(std::span<value_type_> values, std::type_identity_t<value_type_> const& value,
+                                   comparator_type_ comparator = {}) noexcept {
     value_type_* first = values.data();
     std::size_t count = values.size();
     while (count) {
         std::size_t const half = count / 2;
         value_type_* const middle = first + half;
-        bool const is_before = *middle < value;
+        bool const is_before = comparator(*middle, value);
         first = is_before ? middle + 1 : first;
         count = is_before ? count - half - 1 : half;
     }
@@ -983,7 +993,14 @@ enum class cpu_class_t : u32_t {
     /** Genoa-class x86 - Zen 4 and newer: native @c bf16 dot products over AVX-512. */
     amd_genoa_k,
 
-    /** Diamond Rapids-class x86: the AVX-512 lineage plus AVX10.2's FP8 conversions and
+    /** Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16 &
+     *  AMX-INT8 tiles. */
+    intel_sapphire_k,
+
+    /** Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles. */
+    intel_granite_k,
+
+    /** Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions and
      *  the Sierra vector bundle, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
     intel_diamond_k,
 
@@ -995,8 +1012,12 @@ enum class cpu_class_t : u32_t {
      *  Apple M2; Cortex-A710 & X2 - Snapdragon 8 Gen 1, AmpereOne - carry the same. */
     apple_m2_k,
 
+    /** Apple M4-class Arm: the @c apple_m2_k bundle plus the SME outer-product tiles,
+     *  @c BMOPA among them, without plain SVE. */
+    apple_m4_k,
+
     /** Graviton5-class Arm - Neoverse V3, Armv9.2: the @c apple_m2_k bundle with
-     *  @c FEAT_WFxT guaranteed, so waits monitor instead of spinning; M4-class too. */
+     *  @c FEAT_WFxT guaranteed, so waits monitor instead of spinning. */
     aws_g5_k,
 
     /** Vera-class Arm - NVIDIA's Armv9.2+ cores with @c FEAT_FP8 dot products. */

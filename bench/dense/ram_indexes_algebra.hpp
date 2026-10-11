@@ -53,8 +53,8 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
     // A pair dump keeps every scored pair, not just the breadth's worth, so its rows go a thread's worth per call.
     std::size_t const wanted = algebra.pairs_path.empty() ? settings.expansion_search.value : std::size_t {1} << 18;
     std::size_t const batch_rows = algebra.pairs_path.empty() ? query_count : bench.executor.size();
-    std::vector<key_t> keys(batch_rows * wanted);
-    std::vector<dot_result_t> products(batch_rows * wanted);
+    auto keys = nk::matrix<key_t>::zeros({batch_rows, wanted}).value;
+    auto products = nk::matrix<dot_result_t>::zeros({batch_rows, wanted}).value;
     std::vector<std::size_t> counts(batch_rows);
     std::vector<std::vector<scored_pair_t>> pairs(algebra.pairs_path.empty() ? 0 : judged);
     std::size_t scored_pairs = 0;
@@ -62,10 +62,10 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
     auto started = steady_clock_t::now();
     for (std::size_t base = 0; base != query_count;) {
         std::size_t const count = min_of(batch_rows, query_count - base);
+        nk::range_t const batch = nk::range(std::size_t {0}, count);
         auto const [result, status] = bench.indexes.multiply(
-            inputs.rows(nk::range(base, base + count), nk::slice), bench.executor, config, wanted,
-            std::span {keys.data(), count * wanted}, std::span {products.data(), count * wanted},
-            std::span {counts.data(), count});
+            inputs.rows(nk::range(base, base + count), nk::slice), bench.executor, config, keys(batch, nk::slice),
+            products(batch, nk::slice), std::span {counts.data(), count});
         if (failed(status))
             return fmt::println("Multiply refused a batch of {} rows at row {}: {}", count, base,
                                 status_to_string(status)),
@@ -73,7 +73,7 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
         for (std::size_t row = 0; row != count && base + row < pairs.size(); ++row)
             for (std::size_t pair = 0; pair != min_of(counts[row], wanted); ++pair)
                 pairs[base + row].push_back(
-                    {keys[row * wanted + pair], static_cast<f32_t>(static_cast<f64_t>(products[row * wanted + pair]))});
+                    {keys(row, pair), static_cast<f32_t>(static_cast<f64_t>(products(row, pair)))});
         scored_pairs += result.computed_distances;
         base += count;
     }
@@ -87,18 +87,18 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
         for (std::size_t lane = 0; lane != value_keys.size(); ++lane)
             value_rows[lane] = values.row(value_keys[lane]).as_vector();
     };
-    std::vector<f32_t> outputs(query_count * columns);
+    auto outputs = nk::matrix<f32_t>::zeros({query_count, columns}).value;
     std::vector<dense_softmax_state_t> carry(query_count);
     started = steady_clock_t::now();
     auto const [attended, attend_status] = bench.indexes.attend(inputs.rows, head_count, value_of, inputs.score_scale,
-                                                                std::span {outputs}, std::span {carry}, bench.executor,
+                                                                outputs.span(), std::span {carry}, bench.executor,
                                                                 config);
     double const attend_seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
     if (failed(attend_status))
         return fmt::println("Attend refused {} queries: {}", query_count / head_count, status_to_string(attend_status)),
                false;
     report_attend_metrics(query_count, head_count, nodes_count, attend_seconds, attended.computed_distances);
-    return judge_attention(streamed, algebra, inputs, std::span<f32_t> {outputs});
+    return judge_attention(streamed, algebra, inputs, outputs.span());
 }
 
 /** The algebra workload the cascade ends in: graph products and graph attention over the built shards, judged

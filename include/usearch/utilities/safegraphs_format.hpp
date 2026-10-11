@@ -24,7 +24,6 @@
 #include <cstdio>  // `std::snprintf`
 #include <cstring> // `std::memcpy`, `std::memset`
 
-#include <algorithm>   // `std::copy_n`
 #include <limits>      // `std::numeric_limits` - the addressable ceiling a 32-bit host refuses past
 #include <array>       // `std::array` - the prefix magic
 #include <atomic>      // `std::atomic` - the first failure across regions
@@ -341,7 +340,7 @@ struct safegraphs_yyjson_allocator_ {
     static void* reallocate_(void* context, void* pointer, std::size_t old_size, std::size_t size) noexcept {
         void* grown = allocate_(context, size);
         if (!grown || !pointer) return grown;
-        std::copy_n(static_cast<std::byte const*>(pointer), min_of(old_size, size), static_cast<std::byte*>(grown));
+        std::memcpy(grown, pointer, min_of(old_size, size));
         deallocate_(context, pointer);
         return grown;
     }
@@ -776,8 +775,8 @@ expected<std::string_view> safegraphs_sibling_path(growing_buffer<char, allocato
     std::string_view const directory = manifest_path.substr(
         0, manifest_path.size() - safegraphs_basename(manifest_path).size());
     if (failed(buffer.resize_uninitialized(directory.size() + relative.size()))) return {{}, status_t::bad_alloc_k};
-    std::copy_n(directory.data(), directory.size(), buffer.data());
-    std::copy_n(relative.data(), relative.size(), buffer.data() + directory.size());
+    std::memcpy(buffer.data(), directory.data(), directory.size());
+    std::memcpy(buffer.data() + directory.size(), relative.data(), relative.size());
     return {to_string_view(buffer), status_t::success_k};
 }
 

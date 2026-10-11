@@ -440,6 +440,18 @@ struct Residency(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
 
 
 @fieldwise_init
+struct Traversal(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
+    """How a search reaches the indexed rows it scores - `usearch_traversal_t`."""
+
+    var code: c_int
+    """The raw `usearch_traversal_t` value the ABI exchanges."""
+    comptime WALK = Self(0)
+    """Walk the graph, scoring the rows the expansion reaches - approximate, the default."""
+    comptime SCAN = Self(1)
+    """Score every row published when the query's scan starts - exact, on RAM and NVMe handles."""
+
+
+@fieldwise_init
 struct Mood(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """What an executor does with its threads or streams once it goes idle - `usearch_mood_t`."""
 

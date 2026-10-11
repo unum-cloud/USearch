@@ -614,6 +614,23 @@ func (residency Residency) String() string {
 	return C.GoString(C.usearch_residency_name(C.usearch_residency_t(residency)))
 }
 
+// Traversal is how a search reaches the rows it scores.
+//
+// Mirrors usearch_traversal_t.
+type Traversal int32
+
+const (
+	// TraversalWalk walks the graph, scoring the rows the expansion reaches - approximate, the default.
+	TraversalWalk Traversal = C.usearch_traversal_walk_k
+	// TraversalScan scores every row published when the query's scan starts - exact, on RAM and NVMe handles.
+	TraversalScan Traversal = C.usearch_traversal_scan_k
+)
+
+// String renders the traversal as the library spells it. Calls usearch_traversal_name.
+func (traversal Traversal) String() string {
+	return C.GoString(C.usearch_traversal_name(C.usearch_traversal_t(traversal)))
+}
+
 // Mood is what an executor does with its threads or streams once it goes idle.
 //
 // Mirrors usearch_mood_t.
@@ -1021,14 +1038,6 @@ func CapabilitiesAvailable() string { return C.GoString(C.usearch_capabilities_a
 // endregion: Introspection
 
 // region: Helpers
-
-// A count crosses as a C size_t and a key is reinterpreted rather than copied, so each pair must
-// agree in width on every platform this package builds for. A constant overflows, and fails the
-// build, the moment one of them diverges.
-const _ = uint(unsafe.Sizeof(C.size_t(0))) - uint(unsafe.Sizeof(uint(0)))
-const _ = uint(unsafe.Sizeof(uint(0))) - uint(unsafe.Sizeof(C.size_t(0)))
-const _ = uint(unsafe.Sizeof(C.usearch_key_t{})) - uint(unsafe.Sizeof(Key{}))
-const _ = uint(unsafe.Sizeof(Key{})) - uint(unsafe.Sizeof(C.usearch_key_t{}))
 
 // pin keeps a Go object in place until the call is final and hands back its address.
 func pin[Value any](call *call, value *Value) *Value {

@@ -250,8 +250,12 @@ public struct DenseRefineConfig {
 
 /// The knobs of `search`. Every zeroed field derives.
 public struct DenseSearchConfig {
-    /// The candidate-pool breadth the walk explores; zero derives it from the geometry.
+    /// The candidate-pool breadth the walk explores; zero derives it from the geometry, and a
+    /// scan ignores it.
     public var expansionFactor: Int
+    /// Walks the graph by default; `.scan` scores every row exactly, on RAM and NVMe handles, and
+    /// a VRAM handle refuses it with `unsupported`.
+    public var traversal: Traversal
     /// Narrows the matches to the keys it approves. Non-matching entries still route the
     /// traversal, so recall does not collapse at low selectivity. It runs on the executor's
     /// threads together, so it must be safe for concurrent use; an error it throws never unwinds
@@ -264,11 +268,13 @@ public struct DenseSearchConfig {
 
     public init(
         expansionFactor: Int = 0,
+        traversal: Traversal = .walk,
         predicate: (@Sendable (Key) throws -> Bool)? = nil,
         progress: Progress? = nil,
         stats: DenseTraversalStats? = nil
     ) {
         self.expansionFactor = expansionFactor
+        self.traversal = traversal
         self.predicate = predicate
         self.progress = progress
         self.stats = stats
@@ -1568,6 +1574,7 @@ struct DenseCall {
             arena: arena.raw,
             wanted: wanted,
             expansion_factor: config.expansionFactor,
+            traversal: config.traversal.raw,
             predicate: predicate,
             predicate_state: predicateState,
             progress: progress,

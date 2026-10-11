@@ -141,6 +141,7 @@ export interface CompiledIndex {
       arena: CompiledArena,
       wanted: number,
       expansion: number | undefined,
+      traversal: string | undefined,
       stats: CompiledStats | undefined,
     ]
   ): CompiledMatches | CompiledDeferred;

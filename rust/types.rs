@@ -245,6 +245,7 @@ pub const usearch_completion_blocking_k: usearch_completion_t = 0;
 pub const usearch_completion_deferred_k: usearch_completion_t = 1;
 
 pub type usearch_residency_t = c_int;
+pub type usearch_traversal_t = c_int;
 
 pub type usearch_arena_t = *mut c_void;
 pub type usearch_executor_t = *mut c_void;
@@ -322,6 +323,8 @@ extern "C" {
     pub fn usearch_scalar_from_name(name: usearch_bytes_view_t) -> usearch_scalar_t;
     pub fn usearch_residency_name(residency: usearch_residency_t) -> *const c_char;
     pub fn usearch_residency_from_name(name: usearch_bytes_view_t) -> usearch_residency_t;
+    pub fn usearch_traversal_name(traversal: usearch_traversal_t) -> *const c_char;
+    pub fn usearch_traversal_from_name(name: usearch_bytes_view_t) -> usearch_traversal_t;
     pub fn usearch_mood_name(mood: usearch_mood_t) -> *const c_char;
     pub fn usearch_mood_from_name(name: usearch_bytes_view_t) -> usearch_mood_t;
 
@@ -1214,6 +1217,51 @@ impl FromStr for Residency {
     }
 }
 
+/// How a search reaches the indexed rows it scores.
+///
+/// Mirrors `usearch_traversal_t`.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Hash)]
+#[non_exhaustive]
+pub enum Traversal {
+    /// Walks the graph, scoring the rows the expansion reaches - approximate.
+    #[default]
+    Walk = 0,
+    /// Scores every row published when the query's scan starts - exact, on RAM and NVMe handles.
+    Scan = 1,
+}
+
+impl Traversal {
+    fn from_raw(value: usearch_traversal_t) -> Option<Self> {
+        match value {
+            0 => Some(Traversal::Walk),
+            1 => Some(Traversal::Scan),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for Traversal {
+    /// Calls `usearch_traversal_name`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(spelling(usearch_traversal_name, *self as c_int))
+    }
+}
+
+impl FromStr for Traversal {
+    type Err = Error;
+
+    /// Calls `usearch_traversal_from_name`.
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(
+            text,
+            usearch_traversal_from_name,
+            usearch_traversal_name,
+            Traversal::from_raw,
+        )
+    }
+}
+
 /// The host threads or device streams an [`On`] runs its calls on, and the traversal scratch each
 /// of them walks with.
 ///
@@ -1756,12 +1804,15 @@ mod tests {
         assert_eq!("parked".parse(), Ok(Mood::Parked));
         assert_eq!(Residency::Vram.to_string(), "vram");
         assert_eq!("nvme".parse(), Ok(Residency::Nvme));
+        assert_eq!(Traversal::Scan.to_string(), "scan");
+        assert_eq!("walk".parse(), Ok(Traversal::Walk));
 
         assert!("success".parse::<Status>().is_err(), "success names no failure");
         assert!("shape mismatch".parse::<Status>().is_err());
         assert!("unknown".parse::<Scalar>().is_err());
         assert!("parking".parse::<Mood>().is_err());
         assert!("gpu".parse::<Residency>().is_err());
+        assert!("exact".parse::<Traversal>().is_err());
     }
 
     #[test]

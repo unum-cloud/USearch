@@ -16,7 +16,7 @@ using Cloud.Unum.USearch;
 DenseOptions options = DenseOptions.Default with  // Angular metric, BF16 quantization
 {
     Metric = DenseMetric.Angular,                 // Or Inner, Euclidean, Hamming, Jaccard
-    Quantization = Scalar.F32,                    // Or F64, BF16, F16, E5M2, E4M3, E3M2, E2M3, I8, U8, U1x8
+    Quantization = Scalar.BF16,                   // Or F16, E5M2, E4M3, E3M2, E2M3, I8, U8, U1x8
     Dimensions = 3,                               // Zero leaves the geometry unfrozen
     Connectivity = 16,                            // Connections per node in the graph, optional
     ValuesPerKey = 1,                             // Upper bound on entries sharing one key, optional
@@ -169,6 +169,7 @@ for (int query = 0; query < found.Queries; query++)
 ```
 
 The candidate-pool breadth rides each call rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
+`traversal: Traversal.Scan` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth.
 `DenseTraversalStats` is a pure output, overwritten by every call it is passed to.
 
 A sweep reuses one arena across every point, which keeps its high-water mark, so nothing is allocated between them:
@@ -212,7 +213,7 @@ DenseOptions colbert = DenseOptions.Default with
 {
     Dimensions = 128,
     Metric = DenseMetric.Inner,      // Only the inner-product kinds score logits
-    Quantization = Scalar.F32,
+    Quantization = Scalar.BF16,
     ValuesPerKey = 32,               // A document is one key holding its token rows
 };
 
@@ -241,7 +242,7 @@ The index stores no values, so every scored key resolves to a row of a values `R
 ```csharp
 DenseSoftmaxState[] carry = new DenseSoftmaxState[queryRows];
 DenseVectors attended = index.On(pool).Attend(
-    RowsView.RowsOf<float>(queryHeads, 128), RowsView.RowsOf<float>(valueCache, 128),
+    RowsView.RowsOf<float>(queryHeads, 128), RowsView.RowsOf<ushort>(valueCache, 128, Scalar.BF16),
     rowOf: key => positionOf[key],                       // Runs on the executor's threads together
     arena, headCount: 8, carry: carry);                  // One row per query row, as the queries' kind
 ReadOnlySpan<float> first = attended.Row<float>(0);

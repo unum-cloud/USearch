@@ -18,7 +18,7 @@
 //! ```zig
 //! const usearch = @import("usearch");
 //!
-//! var index = try usearch.DenseIndex.initRam(.{ .dimensions = 256, .quantization = .f32 }, &.{});
+//! var index = try usearch.DenseIndex.initRam(.{ .dimensions = 256 }, &.{});
 //! defer index.deinit();
 //! try index.reserve(1_000);
 //!
@@ -51,6 +51,7 @@ pub const Key = types.Key;
 pub const Distance = types.Distance;
 pub const Scalar = types.Scalar;
 pub const Residency = types.Residency;
+pub const Traversal = types.Traversal;
 pub const BytesView = types.BytesView;
 pub const RowsView = types.RowsView;
 pub const Matches = types.Matches;

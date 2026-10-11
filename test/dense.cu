@@ -51,16 +51,36 @@ int main() {
     if (!log_cuda_device()) return 0;
     std::size_t failures_count = 0;
     if (settings.selects("vram_index_bf16")) failures_count += dense::check_vram_index_bf16(settings);
-    if (settings.selects("vram_index_f16")) failures_count += dense::check_vram_index_f16(settings);
-    if (settings.selects("vram_index_e5m2")) failures_count += dense::check_vram_index_e5m2(settings);
-    if (settings.selects("vram_index_e4m3")) failures_count += dense::check_vram_index_e4m3(settings);
-    if (settings.selects("vram_index_e3m2")) failures_count += dense::check_vram_index_e3m2(settings);
-    if (settings.selects("vram_index_e2m3")) failures_count += dense::check_vram_index_e2m3(settings);
-    if (settings.selects("vram_index_i8")) failures_count += dense::check_vram_index_i8(settings);
-    if (settings.selects("vram_index_i4")) failures_count += dense::check_vram_index_i4(settings);
-    if (settings.selects("vram_index_u8")) failures_count += dense::check_vram_index_u8(settings);
-    if (settings.selects("vram_index_u4")) failures_count += dense::check_vram_index_u4(settings);
+#if USEARCH_DENSE_DTYPES >= 2
     if (settings.selects("vram_index_u1")) failures_count += dense::check_vram_index_u1(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+    if (settings.selects("vram_index_i8")) failures_count += dense::check_vram_index_i8(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+    if (settings.selects("vram_index_e4m3")) failures_count += dense::check_vram_index_e4m3(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+    if (settings.selects("vram_index_f16")) failures_count += dense::check_vram_index_f16(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+    if (settings.selects("vram_index_u8")) failures_count += dense::check_vram_index_u8(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+    if (settings.selects("vram_index_e5m2")) failures_count += dense::check_vram_index_e5m2(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+    if (settings.selects("vram_index_i4")) failures_count += dense::check_vram_index_i4(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+    if (settings.selects("vram_index_u4")) failures_count += dense::check_vram_index_u4(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+    if (settings.selects("vram_index_e3m2")) failures_count += dense::check_vram_index_e3m2(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+    if (settings.selects("vram_index_e2m3")) failures_count += dense::check_vram_index_e2m3(settings);
+#endif
     if (settings.selects("vram_indexes")) failures_count += dense::check_vram_indexes(settings);
     return report("total", failures_count) ? 1 : 0;
 }

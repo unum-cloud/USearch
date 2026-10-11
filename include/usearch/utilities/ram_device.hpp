@@ -14,7 +14,7 @@
 #include <cstdlib> // `std::aligned_alloc`, `std::free` - the heap fallback of a domainless allocator
 
 #include <mutex>       // `std::unique_lock`, `std::adopt_lock` - the executor's one-caller hold
-#include <type_traits> // `std::remove_reference_t` - the trampolines' callback recovery
+#include <type_traits> // `std::remove_reference_t`, `std::true_type` - callback recovery & move propagation
 #include <utility>     // `std::swap`, `std::move`, `std::exchange`
 
 #include <forkunion.h>         // `fu_allocate_on_domain_id`, `fu_pool_spawn`, `fu_local_memory_of`

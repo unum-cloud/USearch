@@ -15,7 +15,9 @@ std::size_t test::dense::check_vram_indexes(settings_t const& settings) {
                                                                                   settings.seed);
     failures_count += test_cuda_indexes_configuration<nk_bf16_k, nk_kernel_angular_k>("cuda-sharded bf16+angular",
                                                                                       settings.seed);
+#if USEARCH_DENSE_DTYPES >= 3
     failures_count += test_cuda_indexes_configuration<nk_i8_k, nk_kernel_euclidean_k>("cuda-sharded i8+euclidean",
                                                                                       settings.seed);
+#endif
     return failures_count;
 }

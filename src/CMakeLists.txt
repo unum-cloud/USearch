@@ -102,10 +102,12 @@ usearch_dense_ram_variant(
 usearch_dense_ram_variant(intel_skylake OVER intel_haswell skylake)
 usearch_dense_ram_variant(intel_icelake OVER intel_skylake icelake)
 usearch_dense_ram_variant(amd_genoa OVER intel_icelake genoa)
+usearch_dense_ram_variant(intel_sapphire OVER amd_genoa sapphire sapphireamx)
+usearch_dense_ram_variant(intel_granite OVER intel_sapphire graniteamx)
 usearch_dense_ram_variant(
     intel_diamond
     OVER
-    amd_genoa
+    intel_granite
     alder
     sierra
     diamond
@@ -123,6 +125,7 @@ usearch_dense_ram_variant(
     arm64_lse
     arm64_rcpc
 )
+usearch_dense_ram_variant(apple_m4 OVER apple_m2 sme smebi32)
 usearch_dense_ram_variant(aws_g5 OVER apple_m2 arm64_wfet)
 usearch_dense_ram_variant(nvidia_vera OVER aws_g5 neonfp8)
 usearch_dense_ram_variant(
@@ -148,9 +151,9 @@ endif ()
 usearch_dense_ram_variant(wasm32_v128 OVER serial v128)
 usearch_dense_ram_variant(wasm64_extended OVER wasm32_v128 v128relaxed)
 
-# The NVMe arms compile per CPU class with the RAM unit's flags, for the classes whose kits a storage walk tells apart:
-# it carries no waiter or atomic reference, so aws_g5 and alibaba_c930, which advance only by those, take none, and a
-# WebAssembly module reads no storage directly.
+# The NVMe arms compile per CPU class with the RAM unit's flags, for the classes whose 4-way or tiles kits a storage
+# walk or scan tells apart: it carries no waiter or atomic reference, so aws_g5 and alibaba_c930, which advance only by
+# those, take none, and a WebAssembly module reads no storage directly.
 add_library(usearch_dense_nvme_variants OBJECT dense/nvme_variants_serial.cpp)
 usearch_setup_target(usearch_dense_nvme_variants)
 target_include_directories(usearch_dense_nvme_variants PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
@@ -163,9 +166,12 @@ foreach (
     intel_skylake
     intel_icelake
     amd_genoa
+    intel_sapphire
+    intel_granite
     intel_diamond
     aws_g2
     apple_m2
+    apple_m4
     nvidia_vera
 )
     if (usearch_variant_${class_}_exists_)

@@ -169,6 +169,7 @@ std.debug.print("{d} distances computed\n", .{stats.computed_distances});
 `Matches.row` answers one query's keys and distances, nearest first, as many as the walk found up to the "k" asked for.
 
 The candidate-pool breadth rides the call rather than the handle, so a recall sweep is a loop over expansion factors against one immutable index, with no mutation and no synchronization between points.
+`.traversal = .scan` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth.
 
 ## Filtering With Predicates
 
@@ -311,13 +312,13 @@ The attended rows land in the arena as the queries' own scalar type, or as the c
 
 ```zig
 const Cache = struct {
-    rows: []const f32,
-    fn resolve(self: *const @This(), key: usearch.Key) ?[]const f32 {
+    rows: []const usearch.Scalar.BF16,
+    fn resolve(self: *const @This(), key: usearch.Key) ?[]const usearch.Scalar.BF16 {
         const entry: usize = @intCast(key.asInteger() orelse return null);
         return self.rows[entry * 128 ..][0..128];
     }
 };
-const attended = try index.on(executor).attend(try .of(f32, queries, 128), .of(f32, &cache, Cache.resolve), &arena, .{
+const attended = try index.on(executor).attend(try .of(f32, queries, 128), .of(usearch.Scalar.BF16, &cache, Cache.resolve), &arena, .{
     .head_count = 8,
     .carry = carry,
 });

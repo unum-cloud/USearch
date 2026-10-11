@@ -182,6 +182,23 @@ void test_init(size_t const collection_size, size_t const dimensions) {
     expect_eq(description.metadata.dimensions, dimensions, "Dimensions must read back as configured");
     expect_eq(description.metadata.connectivity, 16, "Connectivity must read back as configured");
 
+#if USEARCH_DENSE_DTYPES < 11
+    // The ladder's next rung is the first storage dtype this build leaves out, so it answers
+    // unsupported, never an unknown kind.
+    usearch_scalar_t const ladder[] = {usearch_scalar_bf16_k, usearch_scalar_u1x8_k, usearch_scalar_i8_k,
+                                       usearch_scalar_e4m3_k, usearch_scalar_f16_k,  usearch_scalar_u8_k,
+                                       usearch_scalar_e5m2_k, usearch_scalar_i4x2_k, usearch_scalar_u4x2_k,
+                                       usearch_scalar_e3m2_k, usearch_scalar_e2m3_k};
+    usearch_dense_index_t refused = NULL;
+    usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &refused,
+                                                        .outcome = &outcome,
+                                                        .metric = usearch_dense_metric_inner_k,
+                                                        .quantization = ladder[USEARCH_DENSE_DTYPES],
+                                                        .dimensions = dimensions});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A storage dtype the build left out is unsupported");
+    expect(refused == NULL, "A refused initialization returns no handle");
+#endif
+
     usearch_executor_free(executor);
     usearch_dense_free(index);
     printf("Test: Index Initialization - PASSED\n");
@@ -258,6 +275,23 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     expect(!outcome.message, outcome.message);
     for (size_t row = 0; row != collection_size; ++row)
         expect(matches.counts[row] == 0 || matches.keys[row].bytes[15] % 2 == 0, "A predicate must narrow the matches");
+
+    // Where the walk may miss a few self-queries, an exact scan finds every one.
+    usearch_dense_search(&(usearch_dense_search_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = collection_size,
+                                                    .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
+                                                    .matches = &matches,
+                                                    .arena = arena,
+                                                    .wanted = 1,
+                                                    .traversal = usearch_traversal_scan_k});
+    expect(!outcome.message, outcome.message);
+    for (size_t row = 0; row != collection_size; ++row) {
+        usearch_key_t const expected = key_of(row);
+        expect(matches.counts[row] == 1 && memcmp(matches.keys[row].bytes, expected.bytes, sizeof(expected.bytes)) == 0,
+               "An exact scan must find every self-query itself");
+    }
 
     // A zero `wanted` lands only the counts.
     usearch_dense_search(&(usearch_dense_search_t) {.index = index,
@@ -625,7 +659,7 @@ void test_multiply_packed(void) {
     usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
                                                         .outcome = &outcome,
                                                         .metric = usearch_dense_metric_inner_k,
-                                                        .quantization = usearch_scalar_i4x2_k,
+                                                        .quantization = usearch_scalar_u1x8_k,
                                                         .dimensions = dimensions,
                                                         .connectivity = 16});
     expect(!outcome.message, outcome.message);
@@ -634,13 +668,13 @@ void test_multiply_packed(void) {
         &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = rows_count});
     expect(!outcome.message, outcome.message);
 
-    // Small integers survive the cast into `i4` exactly, so every product is known up front.
+    // Zeros and ones survive the cast into `u1x8` exactly, so every product is known up front.
     float data[rows_count * dimensions];
     usearch_key_t keys[rows_count];
     for (size_t row = 0; row != rows_count; ++row) {
         keys[row] = key_of(row);
         for (size_t column = 0; column != dimensions; ++column)
-            data[row * dimensions + column] = (float)((row + column) % 5) - 2;
+            data[row * dimensions + column] = (float)((row + column) % 3 == 0);
     }
     usearch_dense_insert(
         &(usearch_dense_insert_t) {.index = index,
@@ -904,6 +938,20 @@ void test_nvme_view(size_t const dimensions) {
         recalled += matches.counts[row] && memcmp(matches.keys[row].bytes, keys[row].bytes, sizeof(usearch_key_t)) == 0;
     expect(recalled * 10 >= rows_count * 9, "A viewed graph must find its own rows as the RAM one does");
 
+    usearch_dense_search(&(usearch_dense_search_t) {.index = view,
+                                                    .executor = storage,
+                                                    .outcome = &outcome,
+                                                    .count = rows_count,
+                                                    .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
+                                                    .matches = &matches,
+                                                    .arena = arena,
+                                                    .wanted = 1,
+                                                    .traversal = usearch_traversal_scan_k});
+    expect(!outcome.message, outcome.message);
+    for (size_t row = 0; row != rows_count; ++row)
+        expect(matches.counts[row] == 1 && memcmp(matches.keys[row].bytes, keys[row].bytes, sizeof(usearch_key_t)) == 0,
+               "An exact scan of a view must find every self-query itself");
+
     size_t entries = 0;
     usearch_dense_count(&(usearch_dense_count_t) {.index = view,
                                                   .executor = storage,
@@ -1035,6 +1083,9 @@ void test_library_probes(void) {
     usearch_mood_t const spinning = usearch_mood_from_name((usearch_bytes_view_t) {(uint8_t const*)"spinning", 8});
     expect_eq(spinning, usearch_mood_spinning_k, "A mood reads back from its name");
     expect(strcmp(usearch_mood_name(usearch_mood_parked_k), "parked") == 0, "A mood spells its name");
+    usearch_traversal_t const scan = usearch_traversal_from_name((usearch_bytes_view_t) {(uint8_t const*)"scan", 4});
+    expect_eq(scan, usearch_traversal_scan_k, "A traversal reads back from its name");
+    expect(strcmp(usearch_traversal_name(usearch_traversal_walk_k), "walk") == 0, "A traversal spells its name");
     printf("Test: Library Probes - PASSED\n");
 }
 
@@ -1262,8 +1313,12 @@ int main(int argc, char* argv[]) {
     test_count_and_get(dimension_counts[0]);
     test_arenas(dimension_counts[0]);
     test_walks_name_their_index(dimension_counts[0]);
+#if USEARCH_DENSE_DTYPES >= 2
     test_multiply_packed();
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
     test_attend();
+#endif
     test_nvme_view(dimension_counts[0]);
     test_deferred_search();
     test_deferred_limit();

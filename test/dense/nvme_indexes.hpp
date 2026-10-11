@@ -136,9 +136,11 @@ struct nvme_rankings {
                                                              executor_type_& executor, std::size_t expansion_factor) {
         typename indexes_type_::search_config_t config {};
         config.expansion_factor = static_cast<decltype(config.expansion_factor)>(expansion_factor);
-        return indexes.search(queries, executor, config, wanted, std::span {keys}, std::span {distances},
-                              std::span {counts});
+        return indexes.search(queries, executor, config, keys_span(), distances_span(), std::span {counts});
     }
+
+    nk::matrix_span<key_t> keys_span() noexcept { return {keys.data(), counts.size(), wanted}; }
+    nk::matrix_span<distance_t> distances_span() noexcept { return {distances.data(), counts.size(), wanted}; }
 
     std::span<key_t const> keys_of(std::size_t query) const noexcept {
         return {keys.data() + query * wanted, counts[query]};
@@ -149,25 +151,27 @@ struct nvme_rankings {
 };
 
 /** The RAM group an NVMe view is judged against: @p rows rows keyed @c 1+row unless @p key_of says
- *  otherwise, saved under @c TMPDIR as the @p scenario checkpoint by @ref view. */
+ *  otherwise, built under @p kernel and saved under @c TMPDIR as the @p scenario checkpoint by
+ *  @ref view. */
 template <typename nvme_type_>
 struct nvme_reference {
     using nvme_t = nvme_type_;
     using key_t = typename nvme_t::key_t;
     using scalar_t = typename nvme_t::scalar_t;
-    using ram_t = dense_ram_indexes<key_t, nvme_t::vector_dtype_k, nvme_t::kernel_kind_k, nvme_t::capability_k>;
+    using ram_t = dense_ram_indexes<key_t, nvme_t::vector_dtype_k, nvme_t::capability_k>;
 
     dense_indexes_executor<ram_t> builder;
-    ram_t built {forkunion_allocator_t {no_memory_domain_k}};
+    ram_t built;
     nk::matrix<scalar_t> vectors;
     std::vector<key_t> keys;
     nvme_checkpoint_t checkpoint;
     std::size_t failures = 0;
 
     template <typename key_of_type_ = key_t (*)(std::size_t) noexcept>
-    nvme_reference(std::string_view scenario, std::size_t rows, std::size_t dimensions, u64_t seed,
-                   key_of_type_&& key_of = &default_key_) noexcept
-        : vectors(make_vectors<scalar_t>(rows, dimensions, stream_key(seed, scenario))), keys(rows),
+    nvme_reference(std::string_view scenario, nk_kernel_kind_t kernel, std::size_t rows, std::size_t dimensions,
+                   u64_t seed, key_of_type_&& key_of = &default_key_) noexcept
+        : built(kernel, forkunion_allocator_t {no_memory_domain_k}),
+          vectors(make_vectors<scalar_t>(rows, dimensions, stream_key(seed, scenario))), keys(rows),
           checkpoint(scenario) {
         for (std::size_t row = 0; row != rows; ++row) keys[row] = key_of(row);
         if (failed(builder.status)) {
@@ -226,16 +230,16 @@ std::size_t nvme_expect_rankings(reference_type_ const& reference,
         failures += expect_eq(found_keys.size(), wanted_distances.size());
         std::vector<bool> seen(reference.keys.size());
         auto const query_vector = queries.row(query).as_vector();
-        auto const query_norms = usearch::dense_norms<nvme_t::kernel_kind_k, nk_cap_serial_k, scalar_t>(query_vector);
+        auto const query_norms = usearch::dense_norms<nk_cap_serial_k, scalar_t>(query_vector);
         for (std::size_t rank = 0; rank != min_of(found_keys.size(), wanted_distances.size()); ++rank) {
             std::size_t const row = reference_type_::row_of(found_keys[rank]);
             failures += expect(row < seen.size() && !seen[row]);
             if (row >= seen.size() || seen[row]) continue;
             seen[row] = true;
             auto const stored = reference.vectors.view().row(row).as_vector();
-            auto const stored_norms = usearch::dense_norms<nvme_t::kernel_kind_k, nk_cap_serial_k, scalar_t>(stored);
-            f32_t const exact = usearch::distance<nvme_t::kernel_kind_k, nk_cap_serial_k, scalar_t>(
-                query_vector, query_norms, stored, stored_norms);
+            auto const stored_norms = usearch::dense_norms<nk_cap_serial_k, scalar_t>(stored);
+            f32_t const exact = usearch::distance<nk_cap_serial_k, scalar_t>(reference.built.kernel(), query_vector,
+                                                                             query_norms, stored, stored_norms);
             failures += expect_near(found_distances[rank], exact);
             failures += expect_near(found_distances[rank], wanted_distances[rank]);
         }
@@ -246,12 +250,12 @@ std::size_t nvme_expect_rankings(reference_type_ const& reference,
 /** Search on NVMe against the RAM group its parts came from: under a walk as wide as the index both
  *  rank every row, so every query's ranking matches rank for rank, each key at its exact distance;
  *  a default walk keeps its pool ascending over distinct rows at their exact distances. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_search(u64_t seed) {
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 8, wanted = 16;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
 
-    nvme_reference<nvme_type_> reference {"nvme_search", rows_count, dimensions, seed};
+    nvme_reference<nvme_type_> reference {"nvme_search", kernel_, rows_count, dimensions, seed};
     nvme_type_ viewed {forkunion_allocator_t {no_memory_domain_k}};
     reference.view(viewed, checkpoint_layout_t::distributed_k);
     dense_indexes_executor<nvme_type_> driver;
@@ -284,14 +288,14 @@ std::size_t test_nvme_indexes_search(u64_t seed) {
 
 /** Filtered search on NVMe against the RAM group: a per-key predicate reads every scored row's key,
  *  and under a walk as wide as the index both rank every admitted row alike. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_filtered(u64_t seed) {
     using key_t = typename nvme_type_::key_t;
     using small_size_t = typename nvme_type_::index_t::small_size_t;
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 4, wanted = 16;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
 
-    nvme_reference<nvme_type_> reference {"nvme_filtered", rows_count, dimensions, seed};
+    nvme_reference<nvme_type_> reference {"nvme_filtered", kernel_, rows_count, dimensions, seed};
     nvme_type_ viewed {forkunion_allocator_t {no_memory_domain_k}};
     reference.view(viewed, checkpoint_layout_t::distributed_k);
     dense_indexes_executor<nvme_type_> driver;
@@ -305,14 +309,13 @@ std::size_t test_nvme_indexes_filtered(u64_t seed) {
     nvme_rankings<nvme_type_> ram {queries_count, wanted}, nvme {queries_count, wanted};
     failures += expect(
         succeeded(reference.built
-                      .search_if(queries, reference.builder.executor, {static_cast<small_size_t>(rows_count)}, wanted,
-                                 std::span {ram.keys}, std::span {ram.distances}, std::span {ram.counts}, odd)
+                      .search_if(queries, reference.builder.executor, {static_cast<small_size_t>(rows_count)},
+                                 ram.keys_span(), ram.distances_span(), std::span {ram.counts}, odd)
                       .status));
-    failures += expect(
-        succeeded(viewed
-                      .search_if(queries, driver.executor, {static_cast<small_size_t>(rows_count)}, wanted,
-                                 std::span {nvme.keys}, std::span {nvme.distances}, std::span {nvme.counts}, odd)
-                      .status));
+    failures += expect(succeeded(viewed
+                                     .search_if(queries, driver.executor, {static_cast<small_size_t>(rows_count)},
+                                                nvme.keys_span(), nvme.distances_span(), std::span {nvme.counts}, odd)
+                                     .status));
     failures += expect(nvme.counts == ram.counts);
     failures += nvme_expect_rankings(reference, queries, nvme, ram);
     for (std::size_t query = 0; query != queries_count; ++query) {
@@ -326,7 +329,7 @@ std::size_t test_nvme_indexes_filtered(u64_t seed) {
  *  included: every count, verdict and true total agrees, and every key's exported rows are its
  *  earliest in placement order, as the cursor reads them; an output narrower than a stored row is
  *  refused. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_key_scans(u64_t seed) {
     using key_t = typename nvme_type_::key_t;
     using scalar_t = typename nvme_type_::scalar_t;
@@ -334,9 +337,8 @@ std::size_t test_nvme_indexes_key_scans(u64_t seed) {
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     key_t const shared = nvme_key<key_t>(100000);
 
-    nvme_reference<nvme_type_> reference {"nvme_scans", rows_count, dimensions, seed, [&](std::size_t row) noexcept {
-                                              return row % 3 ? nvme_key<key_t>(1 + row) : shared;
-                                          }};
+    auto const key_of = [&](std::size_t row) noexcept { return row % 3 ? nvme_key<key_t>(1 + row) : shared; };
+    nvme_reference<nvme_type_> reference {"nvme_scans", kernel_, rows_count, dimensions, seed, key_of};
     nvme_type_ viewed {forkunion_allocator_t {no_memory_domain_k}};
     reference.view(viewed, checkpoint_layout_t::distributed_k);
     dense_indexes_executor<nvme_type_> driver;
@@ -475,11 +477,11 @@ struct nvme_composed_engine {
 template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_, u32_t block_bytes_>
 std::size_t test_nvme_indexes_straddling(u64_t seed) {
     using engine_t = nvme_composed_engine<engine_type_, nvme_reblocked_medium<block_bytes_>>;
-    using nvme_t = dense_nvme_indexes<u32_t, dtype_, kernel_, nk_cap_serial_k, engine_t>;
+    using nvme_t = dense_nvme_indexes<u32_t, dtype_, nk_cap_serial_k, engine_t>;
     constexpr std::size_t rows_count = dense_thread_nodes_k, queries_count = 4, wanted = 8;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_t::scalar_t>(100);
 
-    nvme_reference<nvme_t> reference {"nvme_straddling", rows_count, dimensions, seed};
+    nvme_reference<nvme_t> reference {"nvme_straddling", kernel_, rows_count, dimensions, seed};
     nvme_t viewed {forkunion_allocator_t {no_memory_domain_k}};
     reference.view(viewed, checkpoint_layout_t::distributed_k, 64);
     dense_indexes_executor<nvme_t> driver;
@@ -503,14 +505,14 @@ std::size_t test_nvme_indexes_straddling(u64_t seed) {
 
 /** The cursor exports the rows the RAM group's cursor does, keys and vectors alike and in placement
  *  order, through reads that cross the parts' ends; then it answers no more rows. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_cursor(u64_t seed) {
     using key_t = typename nvme_type_::key_t;
     using scalar_t = typename nvme_type_::scalar_t;
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, chunk = 37;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
 
-    nvme_reference<nvme_type_> reference {"nvme_cursor", rows_count, dimensions, seed};
+    nvme_reference<nvme_type_> reference {"nvme_cursor", kernel_, rows_count, dimensions, seed};
     nvme_type_ viewed {forkunion_allocator_t {no_memory_domain_k}};
     reference.view(viewed, checkpoint_layout_t::distributed_k);
     dense_indexes_executor<nvme_type_> driver;
@@ -545,12 +547,12 @@ std::size_t test_nvme_indexes_cursor(u64_t seed) {
 
 /** The reachability audit agrees with the RAM group's on the same parts: the same rows audited, the
  *  same reached. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_health(u64_t seed) {
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
 
-    nvme_reference<nvme_type_> reference {"nvme_health", rows_count, dimensions, seed};
+    nvme_reference<nvme_type_> reference {"nvme_health", kernel_, rows_count, dimensions, seed};
     nvme_type_ viewed {forkunion_allocator_t {no_memory_domain_k}};
     reference.view(viewed, checkpoint_layout_t::distributed_k);
     dense_indexes_executor<nvme_type_> driver;
@@ -571,8 +573,9 @@ std::size_t test_nvme_indexes_health(u64_t seed) {
 /** Per-row latencies and reads by purpose: every row's latency lands, positive; a search reads one
  *  value row per distance, one neighbors row per expansion and one key per written result; a
  *  filtered search reads a key beside every value row and none again for its results; attention
- *  reads a key beside every value row and resolves none. */
-template <typename nvme_type_>
+ *  reads a key beside every value row and resolves none, and over parts of another kernel it,
+ *  multiply and maxsim refuse with @c config_mismatch_k. */
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_telemetry(u64_t seed) {
     using key_t = typename nvme_type_::key_t;
     using scalar_t = typename nvme_type_::scalar_t;
@@ -580,7 +583,7 @@ std::size_t test_nvme_indexes_telemetry(u64_t seed) {
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 8, wanted = 16;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
 
-    nvme_reference<nvme_type_> reference {"nvme_telemetry", rows_count, dimensions, seed};
+    nvme_reference<nvme_type_> reference {"nvme_telemetry", kernel_, rows_count, dimensions, seed};
     nvme_type_ viewed {forkunion_allocator_t {no_memory_domain_k}};
     reference.view(viewed, checkpoint_layout_t::distributed_k);
     dense_indexes_executor<nvme_type_> driver;
@@ -598,8 +601,8 @@ std::size_t test_nvme_indexes_telemetry(u64_t seed) {
     std::size_t const value_bytes = dense_rows_bytes(reference.vectors.view(), 1);
     std::size_t const neighbor_bytes = viewed.connectivity() * sizeof(dense_node_id_t);
 
-    auto const [searched, search_status] = viewed.search(queries, driver.executor, {}, wanted, std::span {nvme.keys},
-                                                         std::span {nvme.distances}, std::span {nvme.counts},
+    auto const [searched, search_status] = viewed.search(queries, driver.executor, {}, nvme.keys_span(),
+                                                         nvme.distances_span(), std::span {nvme.counts},
                                                          std::span {latencies});
     failures += expect_eq(search_status, status_t::success_k);
     failures += expect_latencies();
@@ -614,29 +617,43 @@ std::size_t test_nvme_indexes_telemetry(u64_t seed) {
     auto const odd = [](key_t key) noexcept {
         return nvme_key_number(key) % 2 ? admission_t::admit_k : admission_t::reject_k;
     };
-    auto const [filtered, filtered_status] = viewed.search_if(queries, driver.executor, {}, wanted,
-                                                              std::span {nvme.keys}, std::span {nvme.distances},
-                                                              std::span {nvme.counts}, odd, std::span {latencies});
+    auto const [filtered, filtered_status] = viewed.search_if(queries, driver.executor, {}, nvme.keys_span(),
+                                                              nvme.distances_span(), std::span {nvme.counts}, odd,
+                                                              std::span {latencies});
     failures += expect_eq(filtered_status, status_t::success_k);
     failures += expect_latencies();
     failures += expect(filtered.count > 0);
     failures += expect_eq(filtered.key_reads.count, filtered.value_reads.count);
 
-    if constexpr (nvme_type_::kernel_kind_k == nk_kernel_dot_k) {
-        auto lookup = [&](std::span<key_t const> batch, std::span<vector_view_t> rows) noexcept {
-            for (std::size_t lane = 0; lane != batch.size(); ++lane)
-                rows[lane] = reference.vectors.view().row(reference.row_of(batch[lane])).as_vector();
-        };
-        std::vector<f32_t> outputs(queries_count * dimensions);
-        std::vector<dense_softmax_state_t> carry(queries_count);
-        auto const [attended, attend_status] = viewed.attend(queries, 1, lookup, 1.0f / f32_t(dimensions),
-                                                             std::span {outputs}, std::span {carry}, driver.executor,
-                                                             {}, std::span {latencies});
+    auto lookup = [&](std::span<key_t const> batch, std::span<vector_view_t> rows) noexcept {
+        for (std::size_t lane = 0; lane != batch.size(); ++lane)
+            rows[lane] = reference.vectors.view().row(reference.row_of(batch[lane])).as_vector();
+    };
+    auto outputs = nk::matrix<f32_t>::zeros({queries_count, dimensions}).value;
+    std::vector<dense_softmax_state_t> carry(queries_count);
+    auto const [attended, attend_status] = viewed.attend(queries, 1, lookup, 1.0f / f32_t(dimensions), outputs.span(),
+                                                         std::span {carry}, driver.executor, {}, std::span {latencies});
+    if constexpr (kernel_ == nk_kernel_dot_k) {
         failures += expect_eq(attend_status, status_t::success_k);
         failures += expect_latencies();
         failures += expect(attended.value_reads.count > 0);
         failures += expect_eq(attended.key_reads.count, attended.value_reads.count);
         failures += expect_eq(attended.value_reads.count, attended.computed_distances);
+    }
+    else {
+        // Products are dots, so parts of another kernel refuse every algebra verb before any read.
+        auto keys = nk::matrix<key_t>::zeros({queries_count, wanted}).value;
+        auto products = nk::matrix<typename nvme_type_::dot_result_t>::zeros({queries_count, wanted}).value;
+        auto scores = nk::matrix<f64_t>::zeros({queries_count, wanted}).value;
+        std::vector<std::size_t> counts(queries_count);
+        failures += expect_eq(attend_status, status_t::config_mismatch_k);
+        failures += expect_eq(
+            viewed.multiply(queries, driver.executor, {}, keys.span(), products.span(), std::span {counts}).status,
+            status_t::config_mismatch_k);
+        failures += expect_eq(
+            viewed.maxsim(queries, 1, driver.executor, {}, keys.span(), scores.span(), std::span {counts}).status,
+            status_t::config_mismatch_k);
+        failures += expect_eq(attended.value_reads.count, 0u);
     }
     return failures;
 }
@@ -644,13 +661,13 @@ std::size_t test_nvme_indexes_telemetry(u64_t seed) {
 /** Views keep no executor: one executor serves a manifest view and a monolith view of the same rows
  *  in turn, and a second executor serves the first view alike; a claimed executor refuses a second
  *  caller, and one asked for a transport its engine does not drive refuses to spawn. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_executors(u64_t seed) {
     using executor_t = typename nvme_type_::executor_t;
     constexpr std::size_t rows_count = dense_thread_nodes_k, queries_count = 4, wanted = 8;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
 
-    nvme_reference<nvme_type_> reference {"nvme_executors", rows_count, dimensions, seed};
+    nvme_reference<nvme_type_> reference {"nvme_executors", kernel_, rows_count, dimensions, seed};
     nvme_type_ parts {forkunion_allocator_t {no_memory_domain_k}}, whole {forkunion_allocator_t {no_memory_domain_k}};
     reference.view(parts, checkpoint_layout_t::distributed_k);
     reference.view(whole, checkpoint_layout_t::monolith_k);
@@ -688,13 +705,13 @@ std::size_t test_nvme_indexes_executors(u64_t seed) {
  *  search, filtered search and the key scans with @c io_k, again on every retry, and the very
  *  executor then serves an intact view exactly, so every engine drained and every buffer
  *  returned. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_failed_read(u64_t seed) {
     using key_t = typename nvme_type_::key_t;
     constexpr std::size_t rows_count = dense_thread_nodes_k, queries_count = 8, wanted = 8;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
 
-    nvme_reference<nvme_type_> reference {"nvme_failed_read", rows_count, dimensions, seed};
+    nvme_reference<nvme_type_> reference {"nvme_failed_read", kernel_, rows_count, dimensions, seed};
     nvme_type_ broken {forkunion_allocator_t {no_memory_domain_k}}, intact {forkunion_allocator_t {no_memory_domain_k}};
     reference.view(broken, checkpoint_layout_t::distributed_k);
     reference.view(intact, checkpoint_layout_t::monolith_k);
@@ -713,8 +730,8 @@ std::size_t test_nvme_indexes_failed_read(u64_t seed) {
     for (std::size_t attempt = 0; attempt != 2; ++attempt) {
         failures += expect_eq(nvme.search(broken, queries, driver.executor, 0).status, status_t::io_k);
         failures += expect_eq(broken
-                                  .search_if(queries, driver.executor, {}, wanted, std::span {nvme.keys},
-                                             std::span {nvme.distances}, std::span {nvme.counts}, any)
+                                  .search_if(queries, driver.executor, {}, nvme.keys_span(), nvme.distances_span(),
+                                             std::span {nvme.counts}, any)
                                   .status,
                               status_t::io_k);
         std::array<std::size_t, 1> entries {};
@@ -734,12 +751,12 @@ std::size_t test_nvme_indexes_failed_read(u64_t seed) {
 template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_failed_submit(u64_t seed) {
     using engine_t = nvme_composed_engine<engine_type_>;
-    using nvme_t = dense_nvme_indexes<u32_t, dtype_, kernel_, nk_cap_serial_k, engine_t>;
+    using nvme_t = dense_nvme_indexes<u32_t, dtype_, nk_cap_serial_k, engine_t>;
     using key_t = typename nvme_t::key_t;
     constexpr std::size_t rows_count = dense_thread_nodes_k, queries_count = 8, wanted = 8;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_t::scalar_t>(dense_values_k);
 
-    nvme_reference<nvme_t> reference {"nvme_failed_submit", rows_count, dimensions, seed};
+    nvme_reference<nvme_t> reference {"nvme_failed_submit", kernel_, rows_count, dimensions, seed};
     nvme_t viewed {forkunion_allocator_t {no_memory_domain_k}};
     reference.view(viewed, checkpoint_layout_t::distributed_k);
     dense_indexes_executor<nvme_t> driver;
@@ -784,7 +801,7 @@ std::size_t test_nvme_indexes_failed_submit(u64_t seed) {
  *  many true neighbors as on a queue a hop fills, their pools only as wide as their results. Over
  *  blocking reads they also take fewer round trips, and a full batch on the deep queue, which
  *  leaves no depth idle, ranks exactly as the shallow queue does. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_pipelined(u64_t seed) {
     using key_t = typename nvme_type_::key_t;
     using scalar_t = typename nvme_type_::scalar_t;
@@ -793,7 +810,7 @@ std::size_t test_nvme_indexes_pipelined(u64_t seed) {
     constexpr std::size_t rows_count = 16 * dense_thread_nodes_k, queries_count = 32, wanted = 10;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
 
-    nvme_reference<nvme_type_> reference {"nvme_pipelined", rows_count, dimensions, seed};
+    nvme_reference<nvme_type_> reference {"nvme_pipelined", kernel_, rows_count, dimensions, seed};
     nvme_type_ viewed {forkunion_allocator_t {no_memory_domain_k}};
     reference.view(viewed, checkpoint_layout_t::distributed_k);
     dense_indexes_executor<nvme_type_> shallow, deep {nvme_deep_queue_depth_k};
@@ -844,12 +861,12 @@ std::size_t test_nvme_indexes_pipelined(u64_t seed) {
 /** Parts served from elsewhere than the manifest points: one through the directory holding it, one
  *  moved under another name and named itself. The view ranks exactly like the RAM group, while one
  *  naming too few parts is refused and one following the manifest no longer opens. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_indexes_relocated(u64_t seed) {
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 4, wanted = 8;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
 
-    nvme_reference<nvme_type_> reference {"nvme_relocated", rows_count, dimensions, seed};
+    nvme_reference<nvme_type_> reference {"nvme_relocated", kernel_, rows_count, dimensions, seed};
     nvme_type_ original {forkunion_allocator_t {no_memory_domain_k}};
     reference.view(original, checkpoint_layout_t::distributed_k);
     dense_indexes_executor<nvme_type_> driver;
@@ -881,7 +898,7 @@ std::size_t test_nvme_indexes_relocated(u64_t seed) {
 /** The single-part index over a monolith: under a walk as wide as the part it ranks every row like
  *  the RAM group, each node ID a distinct row at its exact distance, the rows named through the
  *  cursor's placement order. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_index_search(u64_t seed) {
     using index_t = typename nvme_type_::index_t;
     using key_t = typename nvme_type_::key_t;
@@ -890,12 +907,12 @@ std::size_t test_nvme_index_search(u64_t seed) {
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 4, wanted = 8;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
 
-    nvme_reference<nvme_type_> reference {"nvme_part", rows_count, dimensions, seed};
+    nvme_reference<nvme_type_> reference {"nvme_part", kernel_, rows_count, dimensions, seed};
     nvme_type_ whole {forkunion_allocator_t {no_memory_domain_k}};
     reference.view(whole, checkpoint_layout_t::monolith_k);
     dense_indexes_executor<nvme_type_> driver;
     std::size_t failures = reference.failures;
-    index_t part;
+    index_t part {kernel_};
     failures += expect_eq(part.view(reference.checkpoint.monolith.data()), status_t::success_k);
     failures += expect_eq(part.size(), rows_count);
     if (failed(driver.status) || failures) return failures + expect(false);
@@ -910,26 +927,25 @@ std::size_t test_nvme_index_search(u64_t seed) {
     std::vector<distance_t> distances(queries_count * wanted);
     std::vector<std::size_t> counts(queries_count);
     typename index_t::search_config_t const config {static_cast<typename index_t::small_size_t>(rows_count)};
-    auto const [searched, status] = part.search(queries, driver.executor, config, wanted, std::span {ids},
-                                                std::span {distances}, std::span {counts});
+    auto const [searched, status] = part.search(
+        queries, driver.executor, config, nk::matrix_span<dense_node_id_t> {ids.data(), queries_count, wanted},
+        nk::matrix_span<distance_t> {distances.data(), queries_count, wanted}, std::span {counts});
     failures += expect_eq(status, status_t::success_k);
     failures += expect_eq(searched.computed_distances, queries_count * rows_count);
     failures += expect(counts == ram.counts);
     for (std::size_t query = 0; query != queries_count; ++query) {
         std::vector<bool> seen(rows_count);
         auto const query_vector = queries.row(query).as_vector();
-        auto const query_norms = usearch::dense_norms<nvme_type_::kernel_kind_k, nk_cap_serial_k, scalar_t>(
-            query_vector);
+        auto const query_norms = usearch::dense_norms<nk_cap_serial_k, scalar_t>(query_vector);
         for (std::size_t rank = 0; rank != min_of(counts[query], wanted); ++rank) {
             dense_node_id_t const node = ids[query * wanted + rank];
             failures += expect(node < rows_count && !seen[node]);
             if (node >= rows_count || seen[node]) continue;
             seen[node] = true;
             auto const stored = reference.vectors.view().row(reference.row_of(placed_keys[node])).as_vector();
-            auto const stored_norms = usearch::dense_norms<nvme_type_::kernel_kind_k, nk_cap_serial_k, scalar_t>(
-                stored);
-            f32_t const exact = usearch::distance<nvme_type_::kernel_kind_k, nk_cap_serial_k, scalar_t>(
-                query_vector, query_norms, stored, stored_norms);
+            auto const stored_norms = usearch::dense_norms<nk_cap_serial_k, scalar_t>(stored);
+            f32_t const exact = usearch::distance<nk_cap_serial_k, scalar_t>(kernel_, query_vector, query_norms, stored,
+                                                                             stored_norms);
             failures += expect_near(distances[query * wanted + rank], exact);
             failures += expect_near(distances[query * wanted + rank], ram.distances[query * wanted + rank]);
         }
@@ -957,6 +973,7 @@ struct rewrite_fixture {
     using ram_t = typename nvme_reference<nvme_t>::ram_t;
 
     std::string_view scenario;
+    nk_kernel_kind_t kernel;
     nk::matrix<scalar_t> vectors;
     nk::matrix<scalar_t> queries;
     std::vector<key_t> keys;
@@ -966,8 +983,10 @@ struct rewrite_fixture {
     std::vector<std::unique_ptr<nvme_checkpoint_t>> checkpoints;
     std::size_t failures = 0;
 
-    rewrite_fixture(std::string_view scenario, std::size_t rows, std::size_t dimensions, u64_t seed)
-        : scenario(scenario), vectors(make_vectors<scalar_t>(rows, dimensions, stream_key(seed, scenario))),
+    rewrite_fixture(std::string_view scenario, nk_kernel_kind_t kernel, std::size_t rows, std::size_t dimensions,
+                    u64_t seed)
+        : scenario(scenario), kernel(kernel),
+          vectors(make_vectors<scalar_t>(rows, dimensions, stream_key(seed, scenario))),
           queries(make_vectors<scalar_t>(rewrite_queries_k, dimensions, stream_key(seed, scenario, 1))), keys(rows),
           thresholds(rewrite_queries_k) {
         for (std::size_t row = 0; row != rows; ++row) keys[row] = static_cast<key_t>(1 + row);
@@ -1001,7 +1020,7 @@ struct rewrite_fixture {
     /** Saves rows [first, first + count) as a two-shard RAM group in @p layout and answers the
      *  path. */
     char const* save(std::size_t first, std::size_t count, checkpoint_layout_t layout) {
-        ram_t group {forkunion_allocator_t {no_memory_domain_k}};
+        ram_t group {kernel, forkunion_allocator_t {no_memory_domain_k}};
         return save(group, first, count, layout);
     }
 
@@ -1038,7 +1057,7 @@ struct rewrite_fixture {
     /** The recall of a fresh RAM build of every row into @p shards shards, so its searches walk as
      *  many graphs as a target of as many parts. */
     f64_t fresh_recall(std::size_t shards) {
-        ram_t fresh {forkunion_allocator_t {no_memory_domain_k}};
+        ram_t fresh {kernel, forkunion_allocator_t {no_memory_domain_k}};
         build(fresh, 0, keys.size(), shards);
         return recall(fresh, builder.executor);
     }
@@ -1088,9 +1107,9 @@ struct rewrite_fixture {
     f32_t exact_(std::size_t query, std::size_t row) const noexcept {
         auto const query_vector = queries.view().row(query).as_vector();
         auto const stored = vectors.view().row(row).as_vector();
-        return usearch::distance<nvme_t::kernel_kind_k, nk_cap_serial_k, scalar_t>(
-            query_vector, usearch::dense_norms<nvme_t::kernel_kind_k, nk_cap_serial_k, scalar_t>(query_vector), stored,
-            usearch::dense_norms<nvme_t::kernel_kind_k, nk_cap_serial_k, scalar_t>(stored));
+        return usearch::distance<nk_cap_serial_k, scalar_t>(
+            kernel, query_vector, usearch::dense_norms<nk_cap_serial_k, scalar_t>(query_vector), stored,
+            usearch::dense_norms<nk_cap_serial_k, scalar_t>(stored));
     }
 };
 
@@ -1099,11 +1118,11 @@ inline std::vector<byte_t> rewrite_workspace(std::size_t bytes) { return std::ve
 
 /** Merging the two parts one RAM group saved yields one part over every row, every key once, that a
  *  RAM group loads back whole, and that recalls within the margin of a fresh RAM build. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_rewrites_merge(u64_t seed) {
     using ram_t = typename rewrite_fixture<nvme_type_>::ram_t;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
-    rewrite_fixture<nvme_type_> fixture {"rewrite_merge", rewrite_rows_k, dimensions, seed};
+    rewrite_fixture<nvme_type_> fixture {"rewrite_merge", kernel_, rewrite_rows_k, dimensions, seed};
     nvme_type_ source = fixture.view(fixture.save(0, rewrite_rows_k, checkpoint_layout_t::distributed_k));
     if (fixture.failures) return fixture.failures;
     std::vector<byte_t> workspace = rewrite_workspace(4u << 20);
@@ -1126,7 +1145,7 @@ std::size_t test_nvme_rewrites_merge(u64_t seed) {
     fixture.expect_keys(viewed);
     fixture.expect_recall(viewed, "of two parts");
 
-    ram_t loaded {forkunion_allocator_t {no_memory_domain_k}};
+    ram_t loaded {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     fixture.failures += expect(succeeded(place_shards(loaded)));
     fixture.failures += expect_eq(loaded.load(target.manifest.data(), load_config_t {}, fixture.builder.executor),
                                   status_t::success_k);
@@ -1137,11 +1156,11 @@ std::size_t test_nvme_rewrites_merge(u64_t seed) {
 /** Three parts from two sources, a manifest of two and a monolith, merge step by step, a search of
  *  a source running between every two steps on the same executor, and the merge recalls within the
  *  margin. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_rewrites_merge_steps(u64_t seed) {
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
     std::size_t const first_rows = rewrite_rows_k * 2 / 3;
-    rewrite_fixture<nvme_type_> fixture {"rewrite_merge_steps", rewrite_rows_k, dimensions, seed};
+    rewrite_fixture<nvme_type_> fixture {"rewrite_merge_steps", kernel_, rewrite_rows_k, dimensions, seed};
     nvme_type_ first = fixture.view(fixture.save(0, first_rows, checkpoint_layout_t::distributed_k));
     nvme_type_ second = fixture.view(
         fixture.save(first_rows, rewrite_rows_k - first_rows, checkpoint_layout_t::monolith_k));
@@ -1183,10 +1202,10 @@ std::size_t test_nvme_rewrites_merge_steps(u64_t seed) {
 
 /** A split by rows of one part into thirds: the parts and rows add up, the cut edges are counted,
  *  and each third, repaired by the RAM refine the workspace holds, recalls within the margin. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_rewrites_split_rows(u64_t seed) {
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
-    rewrite_fixture<nvme_type_> fixture {"rewrite_split_rows", rewrite_rows_k, dimensions, seed};
+    rewrite_fixture<nvme_type_> fixture {"rewrite_split_rows", kernel_, rewrite_rows_k, dimensions, seed};
     nvme_type_ source = fixture.view(fixture.save(0, rewrite_rows_k, checkpoint_layout_t::monolith_k));
     if (fixture.failures) return fixture.failures;
     std::vector<byte_t> workspace = rewrite_workspace(8u << 20);
@@ -1213,11 +1232,11 @@ std::size_t test_nvme_rewrites_split_rows(u64_t seed) {
 /** A split by keys of two parts into three key ranges, in a workspace too small for any RAM index,
  *  so every part is repaired by walks: the parts and rows add up, each part holds only its range,
  *  the cut edges are counted, and the parts recall within the margin. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_rewrites_split_keys(u64_t seed) {
     using key_t = typename nvme_type_::key_t;
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
-    rewrite_fixture<nvme_type_> fixture {"rewrite_split_keys", rewrite_rows_k, dimensions, seed};
+    rewrite_fixture<nvme_type_> fixture {"rewrite_split_keys", kernel_, rewrite_rows_k, dimensions, seed};
     nvme_type_ source = fixture.view(fixture.save(0, rewrite_rows_k, checkpoint_layout_t::distributed_k));
     if (fixture.failures) return fixture.failures;
     std::vector<byte_t> workspace = rewrite_workspace(512u << 10);
@@ -1254,10 +1273,10 @@ std::size_t test_nvme_rewrites_split_keys(u64_t seed) {
 
 /** A part thinned to one neighbor per row recalls poorly; refining all its rows by walks, in a
  *  workspace too small for a RAM index, recalls better and reaches every row. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_rewrites_refine(u64_t seed) {
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
-    rewrite_fixture<nvme_type_> fixture {"rewrite_refine", rewrite_rows_k, dimensions, seed};
+    rewrite_fixture<nvme_type_> fixture {"rewrite_refine", kernel_, rewrite_rows_k, dimensions, seed};
     char const* const saved = fixture.save(0, rewrite_rows_k, checkpoint_layout_t::monolith_k);
     if (fixture.failures) return fixture.failures;
 
@@ -1313,28 +1332,27 @@ std::size_t test_nvme_rewrites_refine(u64_t seed) {
  *  128-byte cache lines, so the workspace is measured on this host: that fixed cost, plus a quarter
  *  of the rows' staging and RAM rows. A literal four times the rows' bytes would take tens of
  *  thousands of rows to outgrow the fixed cost. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_rewrites_build(u64_t seed) {
     using scalar_t = typename nvme_type_::scalar_t;
     using ram_t = typename rewrite_fixture<nvme_type_>::ram_t;
     using block_index_t =
-        dense_ram_index<nvme_type_::vector_dtype_k, nvme_type_::kernel_kind_k, nvme_type_::capability_k,
-                        fu::standard_yield_t, fu::standard_atomic_ref, fu::standard_cache_hints_t,
-                        dense_nvme_workspace_allocator<byte_t>, dense_nvme_workspace_allocator<byte_t>,
-                        arena_allocator<byte_t, forkunion_allocator_t>>;
+        dense_ram_index<nvme_type_::vector_dtype_k, nvme_type_::capability_k, fu::standard_yield_t,
+                        fu::standard_atomic_ref, fu::standard_cache_hints_t, dense_nvme_workspace_allocator<byte_t>,
+                        dense_nvme_workspace_allocator<byte_t>, arena_allocator<byte_t, forkunion_allocator_t>>;
     constexpr std::size_t rows_count = 4 * rewrite_rows_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
-    rewrite_fixture<nvme_type_> fixture {"rewrite_build", rows_count, dimensions, seed};
+    rewrite_fixture<nvme_type_> fixture {"rewrite_build", kernel_, rows_count, dimensions, seed};
     // One RAM shard over every row is both the rows the build reads and the graph it is judged
     // against.
-    ram_t group {forkunion_allocator_t {no_memory_domain_k}};
+    ram_t group {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     char const* const saved = fixture.save(group, 0, rows_count, checkpoint_layout_t::distributed_k, 1);
     if (fixture.failures) return fixture.failures;
 
     std::vector<byte_t> probed(16u << 20);
     bytes_span_t left {probed};
     {
-        block_index_t probe {dense_nvme_workspace_allocator<byte_t>(left),
+        block_index_t probe {kernel_, dense_nvme_workspace_allocator<byte_t>(left),
                              dense_nvme_workspace_allocator<byte_t>(left)};
         fixture.failures += expect(succeeded(probe.reserve({1, connectivity_16_k, dimensions}).status));
     }
@@ -1371,10 +1389,10 @@ std::size_t test_nvme_rewrites_build(u64_t seed) {
 
 /** A merge dropped after its first select step leaves no manifest, no part and no spill behind, so
  *  nothing views. */
-template <typename nvme_type_>
+template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_rewrites_dropped(u64_t seed) {
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
-    rewrite_fixture<nvme_type_> fixture {"rewrite_dropped", rewrite_rows_k, dimensions, seed};
+    rewrite_fixture<nvme_type_> fixture {"rewrite_dropped", kernel_, rewrite_rows_k, dimensions, seed};
     nvme_type_ source = fixture.view(fixture.save(0, rewrite_rows_k, checkpoint_layout_t::distributed_k));
     if (fixture.failures) return fixture.failures;
     std::vector<byte_t> workspace = rewrite_workspace(512u << 10);
@@ -1433,7 +1451,9 @@ struct nvme_staged_indexes {
     viewed_t viewed;
     nvme_checkpoint_t checkpoint {"nvme_staged"};
 
-    explicit nvme_staged_indexes(forkunion_allocator_t allocator) noexcept : built(allocator), viewed(allocator) {}
+    /** The RAM group walks by @p kernel; the view reads it back from the parts' headers. */
+    nvme_staged_indexes(nk_kernel_kind_t kernel, forkunion_allocator_t allocator) noexcept
+        : built(kernel, allocator), viewed(allocator) {}
 
     status_t emplace(fu_memory_domain_id_t memory_domain) noexcept { return built.emplace(memory_domain); }
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept { return built.reserve(config); }
@@ -1463,8 +1483,9 @@ struct nvme_staged_indexes {
     bool contains(key_t const& key) noexcept { return count(key) != 0; }
     std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted) noexcept {
         std::size_t entries = 0;
-        status_t const gotten = viewed.get({&key, 1}, vectors, min_of(wanted, vectors.extent(0)), {&entries, 1},
-                                           reader.executor);
+        std::size_t const rows = min_of(wanted, vectors.extent(0));
+        status_t const gotten = viewed.get({&key, 1}, vectors(nk::range(std::size_t {0}, rows), nk::slice), rows,
+                                           {&entries, 1}, reader.executor);
         return succeeded(gotten) ? entries : 0;
     }
     status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) noexcept {
@@ -1478,28 +1499,40 @@ struct nvme_staged_indexes {
         return viewed.get(keys, vectors, wanted, entries, executor);
     }
 
-    expected<search_result_t> search(vectors_view_t queries, dense_indexer_heads<scalar_t> const& heads,
-                                     executor_t& executor, search_config_t config, std::size_t wanted,
-                                     std::span<key_t> keys, std::span<distance_t> distances,
+    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
+                                     nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
                                      std::span<std::size_t> counts) noexcept {
-        return viewed.search(queries, heads, executor, config, wanted, keys, distances, counts);
+        return viewed.search(queries, executor, config, keys, distances, counts);
+    }
+
+    template <typename predicate_type_>
+    expected<search_result_t> search_if(vectors_view_t queries, executor_t& executor, search_config_t config,
+                                        nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
+                                        std::span<std::size_t> counts, predicate_type_&& predicate) noexcept {
+        return viewed.search_if(queries, executor, config, keys, distances, counts, predicate);
+    }
+
+    expected<search_result_t> search(vectors_view_t queries, dense_indexer_heads<scalar_t> const& heads,
+                                     executor_t& executor, search_config_t config, nk::matrix_span<key_t> keys,
+                                     nk::matrix_span<distance_t> distances, std::span<std::size_t> counts) noexcept {
+        return viewed.search(queries, heads, executor, config, keys, distances, counts);
     }
 
     expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
-                                       std::size_t wanted, std::span<key_t> keys, std::span<dot_result_t> products,
+                                       nk::matrix_span<key_t> keys, nk::matrix_span<dot_result_t> products,
                                        std::span<std::size_t> counts) noexcept {
-        return viewed.multiply(left, executor, config, wanted, keys, products, counts);
+        return viewed.multiply(left, executor, config, keys, products, counts);
     }
 
     expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
-                                     search_config_t config, std::size_t wanted, std::span<key_t> keys,
-                                     std::span<f64_t> scores, std::span<std::size_t> counts) noexcept {
-        return viewed.maxsim(queries, rows_per_query, executor, config, wanted, keys, scores, counts);
+                                     search_config_t config, nk::matrix_span<key_t> keys, nk::matrix_span<f64_t> scores,
+                                     std::span<std::size_t> counts) noexcept {
+        return viewed.maxsim(queries, rows_per_query, executor, config, keys, scores, counts);
     }
 
     template <typename value_lookup_type_>
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
-                                     f32_t score_scale, std::span<f32_t> outputs,
+                                     f32_t score_scale, nk::matrix_span<f32_t> outputs,
                                      std::span<dense_softmax_state_t> carry, executor_t& executor,
                                      search_config_t config = {}) noexcept {
         return viewed.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
@@ -1524,50 +1557,68 @@ concept nvme_staged = nvme_indexes<indexes_type_> && requires { typename indexes
  *  refuses the engine. */
 template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_configuration(char const* name, u64_t seed) {
-    using indexes_t = dense_nvme_indexes<u32_t, dtype_, kernel_, nk_cap_serial_k, engine_type_>;
+    using indexes_t = dense_nvme_indexes<u32_t, dtype_, nk_cap_serial_k, engine_type_>;
     using staged_t = nvme_staged_indexes<indexes_t>;
     {
         dense_indexes_executor<indexes_t> probe;
         if (failed(probe.status)) return report(name, "engine refused by this host");
     }
     std::size_t failures_count = 0;
-    failures_count += test_nvme_indexes_search<indexes_t>(seed);
-    failures_count += test_nvme_indexes_filtered<indexes_t>(seed);
-    failures_count += test_nvme_indexes_key_scans<indexes_t>(seed);
-    failures_count += test_nvme_indexes_cursor<indexes_t>(seed);
-    failures_count += test_nvme_indexes_health<indexes_t>(seed);
-    failures_count += test_nvme_indexes_telemetry<indexes_t>(seed);
-    failures_count += test_nvme_indexes_executors<indexes_t>(seed);
-    failures_count += test_nvme_indexes_failed_read<indexes_t>(seed);
+    failures_count += test_nvme_indexes_search<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_indexes_filtered<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_indexes_key_scans<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_indexes_cursor<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_indexes_health<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_indexes_telemetry<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_indexes_executors<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_indexes_failed_read<indexes_t, kernel_>(seed);
     failures_count += test_nvme_indexes_failed_submit<engine_type_, dtype_, kernel_>(seed);
-    failures_count += test_nvme_indexes_pipelined<indexes_t>(seed);
-    failures_count += test_nvme_indexes_relocated<indexes_t>(seed);
-    failures_count += test_nvme_index_search<indexes_t>(seed);
+    failures_count += test_nvme_indexes_pipelined<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_indexes_relocated<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_index_search<indexes_t, kernel_>(seed);
     failures_count += test_nvme_indexes_straddling<engine_type_, dtype_, kernel_, 512>(seed);
     failures_count += test_nvme_indexes_straddling<engine_type_, dtype_, kernel_, 4096>(seed);
+    failures_count += test_dense_indexes_scan<staged_t, kernel_>(seed);
     failures_count += test_dense_indexes_products<staged_t, kernel_>(seed);
     failures_count += test_dense_indexes_indexer_search<staged_t, kernel_>(seed);
     failures_count += test_dense_indexes_maxsim<staged_t, kernel_>(seed);
     failures_count += test_dense_indexes_attend<staged_t, kernel_>(seed);
-    failures_count += test_dense_indexes_duplicate_keys<staged_t>(seed);
+    failures_count += test_dense_indexes_duplicate_keys<staged_t, kernel_>(seed);
     return report(name, failures_count);
+}
+
+/** The exact scan alone over parts a matrix engine streams under @p caps_, skipped where the build
+ *  lacks the kit, the host its capabilities, or the engine. */
+template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_, nk_capability_t caps_>
+std::size_t test_nvme_scan_configuration(char const* name, u64_t seed) {
+    if constexpr (!dense_cell_testable<dtype_, kernel_, caps_>) return report(name, "kit not compiled for this target");
+    else {
+        using indexes_t = dense_nvme_indexes<u32_t, dtype_, caps_, engine_type_>;
+        if (!dense_cell_admitted<caps_, fu::standard_atomic_ref>())
+            return report(name, "capabilities missing at runtime");
+        {
+            dense_indexes_executor<indexes_t> probe;
+            if (failed(probe.status)) return report(name, "engine refused by this host");
+        }
+        return report(name, test_dense_indexes_scan<nvme_staged_indexes<indexes_t>, kernel_>(seed));
+    }
 }
 
 /** The cases that read keys, once more over the C layer's 16-byte @c uuid_t keys, skipped where the
  *  host refuses the engine. */
 template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_uuid_configuration(char const* name, u64_t seed) {
-    using indexes_t = dense_nvme_indexes<usearch::uuid_t, dtype_, kernel_, nk_cap_serial_k, engine_type_>;
+    using indexes_t = dense_nvme_indexes<usearch::uuid_t, dtype_, nk_cap_serial_k, engine_type_>;
     {
         dense_indexes_executor<indexes_t> probe;
         if (failed(probe.status)) return report(name, "engine refused by this host");
     }
     std::size_t failures_count = 0;
-    failures_count += test_nvme_indexes_search<indexes_t>(seed);
-    failures_count += test_nvme_indexes_filtered<indexes_t>(seed);
-    failures_count += test_nvme_indexes_key_scans<indexes_t>(seed);
-    failures_count += test_nvme_indexes_cursor<indexes_t>(seed);
-    failures_count += test_nvme_indexes_telemetry<indexes_t>(seed);
+    failures_count += test_nvme_indexes_search<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_indexes_filtered<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_indexes_key_scans<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_indexes_cursor<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_indexes_telemetry<indexes_t, kernel_>(seed);
     return report(name, failures_count);
 }
 
@@ -1575,19 +1626,19 @@ std::size_t test_nvme_uuid_configuration(char const* name, u64_t seed) {
  *  refuses the engine. */
 template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_rewrites_configuration(char const* name, u64_t seed) {
-    using indexes_t = dense_nvme_indexes<u32_t, dtype_, kernel_, nk_cap_serial_k, engine_type_>;
+    using indexes_t = dense_nvme_indexes<u32_t, dtype_, nk_cap_serial_k, engine_type_>;
     {
         dense_indexes_executor<indexes_t> probe;
         if (failed(probe.status)) return report(name, "engine refused by this host");
     }
     std::size_t failures_count = 0;
-    failures_count += test_nvme_rewrites_merge<indexes_t>(seed);
-    failures_count += test_nvme_rewrites_merge_steps<indexes_t>(seed);
-    failures_count += test_nvme_rewrites_split_rows<indexes_t>(seed);
-    failures_count += test_nvme_rewrites_split_keys<indexes_t>(seed);
-    failures_count += test_nvme_rewrites_refine<indexes_t>(seed);
-    failures_count += test_nvme_rewrites_build<indexes_t>(seed);
-    failures_count += test_nvme_rewrites_dropped<indexes_t>(seed);
+    failures_count += test_nvme_rewrites_merge<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_rewrites_merge_steps<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_rewrites_split_rows<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_rewrites_split_keys<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_rewrites_refine<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_rewrites_build<indexes_t, kernel_>(seed);
+    failures_count += test_nvme_rewrites_dropped<indexes_t, kernel_>(seed);
     return report(name, failures_count);
 }
 
@@ -1604,8 +1655,8 @@ std::size_t test_nvme_rewrites_configuration(char const* name, u64_t seed) {
  */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_spdk_configuration(char const* name, u64_t seed) {
-    using files_t = dense_nvme_indexes<u32_t, dtype_, kernel_, nk_cap_serial_k, blocking_files_engine<>>;
-    using spdk_t = dense_nvme_indexes<u32_t, dtype_, kernel_, nk_cap_serial_k, linux_spdk_engine<>>;
+    using files_t = dense_nvme_indexes<u32_t, dtype_, nk_cap_serial_k, blocking_files_engine<>>;
+    using spdk_t = dense_nvme_indexes<u32_t, dtype_, nk_cap_serial_k, linux_spdk_engine<>>;
     using key_t = typename files_t::key_t;
     using scalar_t = typename files_t::scalar_t;
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 8, wanted = 16;
@@ -1614,7 +1665,7 @@ std::size_t test_nvme_spdk_configuration(char const* name, u64_t seed) {
     char const* const path = std::getenv("USEARCH_TEST_SPDK_PATH");
     if (!part || !*part) return report(name, "no part named in USEARCH_TEST_SPDK_PART");
     if (!path || !*path) {
-        nvme_reference<files_t> reference {"nvme_spdk", rows_count, dimensions, seed};
+        nvme_reference<files_t> reference {"nvme_spdk", kernel_, rows_count, dimensions, seed};
         save_config_t config;
         config.layout = checkpoint_layout_t::monolith_k;
         std::size_t const failures = reference.failures +
@@ -1755,5 +1806,5 @@ struct us::test::dense_indexes_row_driver<indexes_type_> {
 
     dense_indexes_row_driver(indexes_type_& indexes, us::test::dense_indexes_executor<indexes_type_>&) noexcept
         : arena(indexes.built), status(arena.status) {}
-    typename indexes_type_::ram_t::traversal_t& handle() noexcept { return arena.context; }
+    typename indexes_type_::ram_t::dense_traversal_context_t& handle() noexcept { return arena.context; }
 };

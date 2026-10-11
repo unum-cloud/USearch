@@ -38,6 +38,7 @@ backend = { name = "pixi-build-cmake", version = "0.*" }
 compilers = ["c", "cxx"]
 extra-args = [
   "-DUSEARCH_BUILD_LIB_C=1",
+  "-DUSEARCH_DENSE_DTYPES=11",
   "-DUSEARCH_BUILD_TEST=0",
   "-DUSEARCH_BUILD_BENCH=0",
 ]

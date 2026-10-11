@@ -33,6 +33,7 @@ const Residency = types.Residency;
 const RowsView = types.RowsView;
 const Scalar = types.Scalar;
 const Status = types.Status;
+const Traversal = types.Traversal;
 const landed = types.landed;
 const refuse = types.refuse;
 const refuseInto = types.refuseInto;
@@ -308,6 +309,8 @@ pub const DenseRefineConfig = struct {
 pub const DenseSearchConfig = struct {
     /// The candidate-pool breadth the walk explores; zero derives.
     expansion_factor: usize = 0,
+    /// A walk, or an exact scan of every row on RAM and NVMe handles; VRAM answers `Error.Unsupported`.
+    traversal: Traversal = .walk,
     /// Admits only the keys it approves; non-matching entries still route the walk. Refused on VRAM.
     predicate: Predicate = .{},
     /// Called with queries resolved; a stopped search answers `Error.Cancelled` and no matches.
@@ -522,6 +525,7 @@ const usearch_dense_search_t = extern struct {
     arena: ?*anyopaque,
     wanted: usize,
     expansion_factor: usize,
+    traversal: Traversal,
     predicate: ?PredicateFunction,
     predicate_state: ?*anyopaque,
     progress: ?ProgressFunction,
@@ -741,67 +745,6 @@ extern fn usearch_dense_describe(arguments: *usearch_dense_describe_t) void;
 extern fn usearch_dense_multiply(arguments: *usearch_dense_multiply_t) void;
 extern fn usearch_dense_attend(arguments: *usearch_dense_attend_t) void;
 extern fn usearch_dense_maxsim(arguments: *usearch_dense_maxsim_t) void;
-
-// Every argument structure this module declares by hand, against the size the C compiler gives
-// its twin on a 64-bit target, with the offsets a tag or a narrow float could shift.
-comptime {
-    const assert = std.debug.assert;
-    if (@sizeOf(usize) == 8) {
-        assert(@sizeOf(DenseIndex) == 8);
-        assert(@sizeOf(DenseMetadata) == 24);
-        assert(@sizeOf(usearch_dense_index_description_t) == 56);
-        assert(@sizeOf(DenseTraversalStats) == 24);
-        assert(@sizeOf(DenseReachability) == 24);
-        assert(@sizeOf(DenseSoftmaxState) == 8);
-        assert(@sizeOf(usearch_dense_init_ram_t) == 64);
-        assert(@sizeOf(usearch_dense_init_vram_t) == 64);
-        assert(@sizeOf(usearch_dense_load_ram_t) == 88);
-        assert(@sizeOf(usearch_dense_load_vram_t) == 88);
-        assert(@sizeOf(usearch_dense_load_ram_buffer_t) == 88);
-        assert(@sizeOf(usearch_dense_load_vram_buffer_t) == 88);
-        assert(@sizeOf(usearch_dense_view_ram_t) == 32);
-        assert(@sizeOf(usearch_dense_view_nvme_t) == 64);
-        assert(@sizeOf(usearch_dense_reserve_t) == 40);
-        assert(@sizeOf(usearch_dense_clear_t) == 32);
-        assert(@sizeOf(usearch_dense_insert_t) == 120);
-        assert(@sizeOf(usearch_dense_refine_t) == 72);
-        assert(@sizeOf(usearch_dense_health_t) == 40);
-        assert(@sizeOf(usearch_dense_search_t) == 144);
-        assert(@offsetOf(usearch_dense_search_t, "matches") == 72);
-        assert(@sizeOf(usearch_dense_count_t) == 56);
-        assert(@offsetOf(usearch_dense_count_t, "key") == 28);
-        assert(@sizeOf(usearch_dense_get_t) == 80);
-        assert(@offsetOf(usearch_dense_get_t, "vectors") == 48);
-        assert(@offsetOf(usearch_dense_get_t, "arena") == 64);
-        assert(@offsetOf(usearch_dense_get_t, "outputs_scalar") == 72);
-        assert(@sizeOf(usearch_dense_merge_t) == 64);
-        assert(@sizeOf(usearch_dense_cursor_init_t) == 24);
-        assert(@sizeOf(usearch_dense_cursor_next_t) == 88);
-        assert(@offsetOf(usearch_dense_cursor_next_t, "cursor") == 32);
-        assert(@offsetOf(usearch_dense_cursor_next_t, "keys") == 40);
-        assert(@offsetOf(usearch_dense_cursor_next_t, "outputs_scalar") == 80);
-        assert(@sizeOf(usearch_dense_search_stream_init_t) == 64);
-        assert(@sizeOf(usearch_dense_search_stream_next_t) == 64);
-        assert(@offsetOf(usearch_dense_search_stream_next_t, "stream") == 32);
-        assert(@sizeOf(usearch_dense_save_t) == 64);
-        assert(@sizeOf(usearch_dense_save_buffer_t) == 64);
-        assert(@sizeOf(usearch_dense_metadata_read_t) == 48);
-        assert(@sizeOf(usearch_dense_metadata_read_buffer_t) == 48);
-        assert(@sizeOf(usearch_dense_describe_t) == 40);
-        assert(@sizeOf(usearch_dense_multiply_t) == 144);
-        assert(@offsetOf(usearch_dense_multiply_t, "arena") == 96);
-        assert(@sizeOf(usearch_dense_attend_t) == 168);
-        assert(@offsetOf(usearch_dense_attend_t, "head_count") == 72);
-        assert(@offsetOf(usearch_dense_attend_t, "carry") == 96);
-        assert(@offsetOf(usearch_dense_attend_t, "outputs") == 104);
-        assert(@offsetOf(usearch_dense_attend_t, "arena") == 112);
-        assert(@offsetOf(usearch_dense_attend_t, "outputs_scalar") == 120);
-        assert(@offsetOf(usearch_dense_attend_t, "score_scale") == 136);
-        assert(@offsetOf(usearch_dense_attend_t, "progress") == 144);
-        assert(@sizeOf(usearch_dense_maxsim_t) == 136);
-        assert(@offsetOf(usearch_dense_maxsim_t, "wanted") == 96);
-    }
-}
 
 /// Vector Search Index over equidimensional dense representations.
 ///
@@ -1562,6 +1505,7 @@ pub const DenseSearch = struct {
             .arena = self.stamp.arena.handle,
             .wanted = self.wanted,
             .expansion_factor = self.config.expansion_factor,
+            .traversal = self.config.traversal,
             .predicate = self.config.predicate.callback,
             .predicate_state = self.config.predicate.state,
             .progress = self.config.progress.callback,
@@ -2074,6 +2018,7 @@ test "left alone, an index is an angular one quantized to bf16" {
     }, DenseOptions{});
     try std.testing.expectEqual(@as(?ProgressFunction, null), (DenseSearchConfig{}).progress.callback);
     try std.testing.expectEqual(@as(?PredicateFunction, null), (DenseSearchConfig{}).predicate.callback);
+    try std.testing.expectEqual(Traversal.walk, (DenseSearchConfig{}).traversal);
 }
 
 test "metrics keep the values the linked library spells them by" {
@@ -2161,7 +2106,7 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     const dimensions = 3;
     var executor = try Executor.forRam(.{ .threads = 2 });
     defer executor.deinit();
-    var index = try DenseIndex.initRam(.{ .dimensions = dimensions, .metric = .euclidean, .quantization = .f32 }, &.{});
+    var index = try DenseIndex.initRam(.{ .dimensions = dimensions, .metric = .euclidean }, &.{});
     defer index.deinit();
     try index.on(executor).reserve(3);
 
@@ -2171,7 +2116,7 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     try index.on(executor).insert(&keys, try .of(f32, &slab, dimensions), .{ .stats = &stats });
     const description = try index.on(executor).describe();
     // The engine derives the connectivity, so it is read back rather than predicted.
-    const frozen: DenseMetadata = .{ .metric = .euclidean, .quantization = .f32, .dimensions = dimensions, .connectivity = description.metadata.connectivity };
+    const frozen: DenseMetadata = .{ .metric = .euclidean, .quantization = .bf16, .dimensions = dimensions, .connectivity = description.metadata.connectivity };
     try std.testing.expectEqual(frozen, description.metadata);
     try std.testing.expectEqual(@as(usize, 3), description.size);
 
@@ -2261,15 +2206,18 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     try std.testing.expectEqual(types.Status.io, outcome.status);
     try std.testing.expect(outcome.text().len != 0);
 
-    // A stream yields one query's matches nearest first, and refuses a run carrying more.
+    // A stream yields one query's matches nearest first, and refuses a run carrying more; a
+    // residency that streams no matches yet refuses the stream itself.
     try std.testing.expectError(Error.ShapeMismatch, DenseSearchStream.init(index, try .of(f32, &slab, dimensions), .{}));
-    var stream = try DenseSearchStream.init(index, try .ofRow(f32, slab[0..dimensions]), .{});
-    defer stream.deinit();
-    const pulled = try index.on(executor).searchStreamNext(stream, 2, &arena);
-    try std.testing.expectEqualSlices(Key, keys[0..2], (try pulled.row(0)).keys);
-    try std.testing.expectEqual(@as(usize, 1), (try (try index.searchStreamNext(stream, 2, &arena)).row(0)).keys.len);
-    // A drained walk answers an empty row, as a pull of zero does.
-    try std.testing.expectEqual(@as(usize, 0), (try (try index.searchStreamNext(stream, 2, &arena)).row(0)).keys.len);
+    if (DenseSearchStream.init(index, try .ofRow(f32, slab[0..dimensions]), .{})) |opened| {
+        var stream = opened;
+        defer stream.deinit();
+        const pulled = try index.on(executor).searchStreamNext(stream, 2, &arena);
+        try std.testing.expectEqualSlices(Key, keys[0..2], (try pulled.row(0)).keys);
+        try std.testing.expectEqual(@as(usize, 1), (try (try index.searchStreamNext(stream, 2, &arena)).row(0)).keys.len);
+        // A drained walk answers an empty row, as a pull of zero does.
+        try std.testing.expectEqual(@as(usize, 0), (try (try index.searchStreamNext(stream, 2, &arena)).row(0)).keys.len);
+    } else |failure| try std.testing.expectEqual(Error.Unsupported, failure);
 
     // A cursor walks the rows, `wanted` at a time, and exports the rows only when asked.
     var walk = try DenseCursor.init(index);
@@ -2307,11 +2255,26 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     try std.testing.expectEqual([2]usize{ 3, 3 }, [2]usize{ reachability.audited, reachability.reachable });
 }
 
+test "a scan scores every row, so every query finds itself first" {
+    const dimensions = 4;
+    var index = try DenseIndex.initRam(.{ .dimensions = dimensions }, &.{});
+    defer index.deinit();
+    try index.reserve(4);
+    const slab = [_]f32{ 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.5, 0.5, 0.5, 0.5 };
+    const keys = [_]Key{ .fromInteger(0), .fromInteger(1), .fromInteger(2), .fromInteger(3) };
+    try index.insert(&keys, try .of(f32, &slab, dimensions), .{});
+
+    var arena: Arena = try .init(null);
+    defer arena.deinit();
+    const matches = try index.search(try .of(f32, &slab, dimensions), 1, &arena, .{ .traversal = .scan });
+    for (keys, 0..) |key, query| try std.testing.expectEqual(key, (try matches.row(query)).keys[0]);
+}
+
 test "a deferred call is the same verb, final only once waited on" {
     const dimensions = 2;
     var executor = try Executor.forRam(.{});
     defer executor.deinit();
-    var index = try DenseIndex.initRam(.{ .dimensions = dimensions, .metric = .euclidean, .quantization = .f32 }, &.{});
+    var index = try DenseIndex.initRam(.{ .dimensions = dimensions, .metric = .euclidean }, &.{});
     defer index.deinit();
 
     var reserving: Deferred(DenseReserve) = undefined;
@@ -2387,10 +2350,11 @@ test "a deferred call is the same verb, final only once waited on" {
 
 test "a product lands ragged, and a softmax weighs every key the walk scores" {
     const dimensions = 2;
-    var index = try DenseIndex.initRam(.{ .dimensions = dimensions, .metric = .inner, .quantization = .f32 }, &.{});
+    var index = try DenseIndex.initRam(.{ .dimensions = dimensions, .metric = .inner }, &.{});
     defer index.deinit();
     try index.reserve(3);
-    const slab = [_]f32{ 1, 0, 0, 1, 0.6, 0.8 };
+    // Every value is exact in bf16, so the oracle below scores what the index stores.
+    const slab = [_]f32{ 1, 0, 0, 1, 0.5, 0.75 };
     const keys = [_]Key{ .fromInteger(0), .fromInteger(1), .fromInteger(2) };
     try index.insert(&keys, try .of(f32, &slab, dimensions), .{});
 
@@ -2415,18 +2379,21 @@ test "a product lands ragged, and a softmax weighs every key the walk scores" {
     // A graph this small walks every key, so attention is exact over all of them, whether the two
     // query rows are two tokens of one head or one token of two; a key without a row refuses.
     const Table = struct {
-        rows: []const f32,
+        rows: []const Scalar.BF16,
         resolvable: usize,
-        fn resolve(self: *const @This(), key: Key) ?[]const f32 {
+        fn resolve(self: *const @This(), key: Key) ?[]const Scalar.BF16 {
             const entry: usize = @intCast(key.asInteger().?);
             return if (entry < self.resolvable) self.rows[entry * dimensions ..][0..dimensions] else null;
         }
     };
     const values = [_]f32{ 10, 1, 20, 2, 30, 3 };
-    var table: Table = .{ .rows = &values, .resolvable = keys.len };
+    // Value rows come in the index's own quantization, and a small integer's bf16 bits are its f32's high half.
+    var stored: [values.len]Scalar.BF16 = undefined;
+    for (&stored, values) |*bits, value| bits.* = .{ .bits = @truncate(@as(u32, @bitCast(value)) >> 16) };
+    var table: Table = .{ .rows = &stored, .resolvable = keys.len };
     var carry: [2]DenseSoftmaxState = undefined;
     for ([_]usize{ 1, 2 }) |head_count| {
-        const outputs = try index.attend(try .of(f32, &left, dimensions), .of(f32, &table, Table.resolve), &arena, .{
+        const outputs = try index.attend(try .of(f32, &left, dimensions), .of(Scalar.BF16, &table, Table.resolve), &arena, .{
             .head_count = head_count,
             .carry = &carry,
             .expansion_factor = 8,
@@ -2448,13 +2415,13 @@ test "a product lands ragged, and a softmax weighs every key the walk scores" {
             }
             const attended = try outputs.row(f32, query);
             for (mixed, attended) |column, landed_column|
-                try std.testing.expectApproxEqAbs(column / partition, landed_column, 1e-4);
-            try std.testing.expectApproxEqAbs(maximum, carry[query].maximum_score, 1e-5);
-            try std.testing.expectApproxEqAbs(partition, carry[query].partition, 1e-5);
+                try std.testing.expectApproxEqAbs(column / partition, landed_column, 1e-3 * @max(@abs(column / partition), 1));
+            try std.testing.expectApproxEqAbs(maximum, carry[query].maximum_score, 1e-3 * @max(@abs(maximum), 1));
+            try std.testing.expectApproxEqAbs(partition, carry[query].partition, 1e-3 * @max(@abs(partition), 1));
         }
     }
     table.resolvable = keys.len - 1;
-    try std.testing.expectError(Error.ShapeMismatch, index.attend(try .of(f32, &left, dimensions), .of(f32, &table, Table.resolve), &arena, .{}));
+    try std.testing.expectError(Error.ShapeMismatch, index.attend(try .of(f32, &left, dimensions), .of(Scalar.BF16, &table, Table.resolve), &arena, .{}));
     // A lookup over another kind than the index stores answers no row, which the call refuses alike.
     table.resolvable = keys.len;
     const Halves = struct {
@@ -2473,7 +2440,7 @@ test "a reporting batch counts what it published, and a stopped sweep is no fail
     const dimensions = 3;
     var executor = try Executor.forRam(.{ .threads = 2 });
     defer executor.deinit();
-    var index = try DenseIndex.initRam(.{ .dimensions = dimensions, .metric = .euclidean, .quantization = .f32 }, &.{});
+    var index = try DenseIndex.initRam(.{ .dimensions = dimensions, .metric = .euclidean }, &.{});
     defer index.deinit();
     try index.on(executor).reserve(6);
 

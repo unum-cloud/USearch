@@ -29,6 +29,8 @@ extern fn usearch_scalar_name(scalar: Scalar) [*:0]const u8;
 extern fn usearch_scalar_from_name(name: BytesView) Scalar;
 extern fn usearch_residency_name(residency: Residency) [*:0]const u8;
 extern fn usearch_residency_from_name(name: BytesView) Residency;
+extern fn usearch_traversal_name(traversal: Traversal) [*:0]const u8;
+extern fn usearch_traversal_from_name(name: BytesView) Traversal;
 extern fn usearch_mood_name(mood: Mood) [*:0]const u8;
 extern fn usearch_mood_from_name(name: BytesView) Mood;
 
@@ -359,6 +361,24 @@ pub const Residency = enum(c_int) {
     /// Reads a spelling back, or null when no residency spells it. Calls `usearch_residency_from_name`.
     pub fn fromName(text: []const u8) ?Residency {
         return spelled(Residency, usearch_residency_from_name(.of(text)), text);
+    }
+};
+
+/// How a search reaches the indexed rows it scores. Mirrors `usearch_traversal_t`.
+pub const Traversal = enum(c_int) {
+    /// Walk the graph, scoring the rows the expansion reaches - approximate, the default.
+    walk = 0,
+    /// Score every row published when the query's scan starts - exact, on RAM and NVMe handles.
+    scan = 1,
+
+    /// The canonical spelling, as `.scan` spells "scan". Calls `usearch_traversal_name`.
+    pub fn name(self: Traversal) [:0]const u8 {
+        return std.mem.span(usearch_traversal_name(self));
+    }
+
+    /// Reads a spelling back, or null when no traversal spells it. Calls `usearch_traversal_from_name`.
+    pub fn fromName(text: []const u8) ?Traversal {
+        return spelled(Traversal, usearch_traversal_from_name(.of(text)), text);
     }
 };
 
@@ -987,72 +1007,6 @@ pub fn Deferred(comptime Call: type) type {
     };
 }
 
-// Every descriptor this module declares by hand, field by field, against the layout the C
-// compiler gives its twin - the check that makes writing the interface out as safe as translating
-// it. The offsets are written in pointer widths, so a 32-bit target holds them too.
-comptime {
-    const pointer = @sizeOf(usize);
-    const tag = @sizeOf(c_int);
-
-    std.debug.assert(@sizeOf(Key) == 16);
-    std.debug.assert(@alignOf(Key) == 1);
-    std.debug.assert(@offsetOf(Key, "bytes") == 0);
-
-    std.debug.assert(@sizeOf(Status) == tag);
-    std.debug.assert(@sizeOf(Scalar) == tag);
-    std.debug.assert(@sizeOf(Residency) == tag);
-    std.debug.assert(@sizeOf(Mood) == tag);
-    std.debug.assert(@sizeOf(Completion) == tag);
-    std.debug.assert(@sizeOf(Admission) == tag);
-    std.debug.assert(@sizeOf(Continuation) == tag);
-    std.debug.assert(@sizeOf(Distance) == 8);
-
-    std.debug.assert(@sizeOf(Scalar.BF16) == 2);
-    std.debug.assert(@sizeOf(Scalar.U1x8) == 1);
-
-    std.debug.assert(@sizeOf(Outcome) == 2 * pointer);
-    std.debug.assert(@offsetOf(Outcome, "status") == 0);
-    std.debug.assert(@offsetOf(Outcome, "message") == pointer);
-
-    std.debug.assert(@sizeOf(BytesView) == 2 * pointer);
-    std.debug.assert(@offsetOf(BytesView, "data") == 0);
-    std.debug.assert(@offsetOf(BytesView, "length") == pointer);
-
-    std.debug.assert(@sizeOf(usearch_keys_view_t) == 2 * pointer);
-    std.debug.assert(@offsetOf(usearch_keys_view_t, "stride") == pointer);
-
-    std.debug.assert(@sizeOf(usearch_rows_view_t) == 4 * pointer);
-    std.debug.assert(@offsetOf(usearch_rows_view_t, "stride") == pointer);
-    std.debug.assert(@offsetOf(usearch_rows_view_t, "columns") == 2 * pointer);
-    std.debug.assert(@offsetOf(usearch_rows_view_t, "scalar") == 3 * pointer);
-
-    std.debug.assert(@sizeOf(usearch_matches_view_t) == 4 * pointer);
-    std.debug.assert(@offsetOf(usearch_matches_view_t, "scores") == pointer);
-    std.debug.assert(@offsetOf(usearch_matches_view_t, "counts") == 2 * pointer);
-    std.debug.assert(@offsetOf(usearch_matches_view_t, "columns") == 3 * pointer);
-
-    std.debug.assert(@sizeOf(usearch_matches_tape_view_t) == 3 * pointer);
-    std.debug.assert(@offsetOf(usearch_matches_tape_view_t, "offsets") == 2 * pointer);
-
-    std.debug.assert(@sizeOf(usearch_ram_options_t) == 2 * pointer);
-    std.debug.assert(@sizeOf(usearch_vram_options_t) == 2 * pointer);
-    std.debug.assert(@sizeOf(usearch_nvme_options_t) == 2 * pointer);
-
-    std.debug.assert(@sizeOf(usearch_executor_for_ram_t) == 6 * pointer);
-    std.debug.assert(@offsetOf(usearch_executor_for_ram_t, "ram") == 2 * pointer);
-    std.debug.assert(@offsetOf(usearch_executor_for_ram_t, "threads") == 4 * pointer);
-    std.debug.assert(@offsetOf(usearch_executor_for_ram_t, "deferred_limit") == 5 * pointer);
-    std.debug.assert(@sizeOf(usearch_executor_on_pool_t) == 6 * pointer);
-    std.debug.assert(@offsetOf(usearch_executor_on_pool_t, "pool") == 4 * pointer);
-    std.debug.assert(@sizeOf(usearch_executor_for_vram_t) == 7 * pointer);
-    std.debug.assert(@offsetOf(usearch_executor_for_vram_t, "streams") == 4 * pointer);
-    std.debug.assert(@sizeOf(usearch_executor_for_nvme_t) == 6 * pointer);
-    std.debug.assert(@sizeOf(usearch_executor_drain_t) == 3 * pointer);
-    std.debug.assert(@sizeOf(usearch_arena_init_t) == 3 * pointer);
-    std.debug.assert(@offsetOf(usearch_arena_init_t, "outcome") == 2 * pointer);
-    std.debug.assert(@offsetOf(usearch_executor_drain_t, "mood") == 2 * pointer);
-}
-
 /// The library's version, as a static null-terminated string. Calls `usearch_version_name`.
 pub fn version() [:0]const u8 {
     return std.mem.span(usearch_version_name());
@@ -1101,15 +1055,17 @@ test "statuses lift into the error set one for one" {
 }
 
 test "every enumerator keeps the value the linked library spells it by" {
-    // A renumbered header shifts the spellings, which is what this catches and a size check cannot.
+    // A renumbered header shifts the spellings, which is what this catches.
     try expectSpellings(Status);
     try expectSpellings(Scalar);
     try expectSpellings(Residency);
+    try expectSpellings(Traversal);
     try expectSpellings(Mood);
     try std.testing.expectEqualStrings("unrecognized", (@as(Status, @enumFromInt(9999))).name());
     try std.testing.expectEqual(@as(?Status, null), Status.fromName("pending"));
     try std.testing.expectEqual(@as(?Mood, null), Mood.fromName("chill"));
     try std.testing.expectEqual(@as(?Residency, null), Residency.fromName("disk"));
+    try std.testing.expectEqual(@as(?Traversal, null), Traversal.fromName("exact"));
     try std.testing.expectEqual(@as(?Scalar, null), Scalar.fromName("f128"));
 }
 

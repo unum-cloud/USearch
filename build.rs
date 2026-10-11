@@ -118,7 +118,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     let mut engine = cmake::Config::new(&manifest);
     // The crate reconfigures on every invocation by default, which on this tree is a fresh ISA
     // probe and submodule walk before a build that has nothing to do.
+    // CMake's Debug configuration instruments for sanitizers whose runtimes rustc never links.
     engine
+        .profile("RelWithDebInfo")
         .define("USEARCH_INSTALL", "OFF")
         .build_target(chosen.target)
         .always_configure(false);

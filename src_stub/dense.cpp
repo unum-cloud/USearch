@@ -20,15 +20,19 @@
  *  @section dense_stub_blind_spots What It Cannot Tell You
  *
  *  A test double this lossy invites false confidence, so its limits are worth stating plainly.
- *  Entries are stored as @c double and @c quantization is ignored, so quantization loss is
- *  invisible and an @c i8 index round-trips exactly. Every scalar kind the engine stores is
+ *  Entries are stored as @c double whatever the @c quantization, so quantization loss is invisible
+ *  and an @c i8 index round-trips exactly, though the quantization itself is refused as the engine
+ *  refuses it: @c f32, @c f64 and @c i32 are never stored, and a dtype the build's
+ *  @c USEARCH_DENSE_DTYPES leaves out is unsupported. Every scalar kind the engine stores is
  *  decoded, the mini-floats and the packed nibble and bit kinds among them, so a row's byte extent
  *  is computed here exactly as the engine computes it and a binding sizing rows wrongly for a
  *  narrow float or a sub-byte kind fails on the shape instead of passing quietly, while @c i32, the
  *  geospatial coordinate, is refused as the engine refuses it. The metric and the quantization are
  *  never checked against each other, so the bit-set kinds read whatever rows they are handed where
  *  the engine admits @c u1x8 alone. @c values_per_key bounds nothing - a key holds as many entries
- *  as it is handed, the header naming no failure for exceeding it.
+ *  as it is handed, the header naming no failure for exceeding it. A walk and a scan rank alike,
+ *  both being exact here, and both ask the predicate about every row, where the engine's scan asks
+ *  only about rows closer than the worst match a query already holds.
  *  Refinement keeps no edges to re-select, so its @c changed is a constant zero rather than a
  *  settling signal, and a caller must not read it as one. Residency and huge pages are inert, a
  *  view copies its checkpoint rather than mapping it, and only the RAM verbs answer - every VRAM
@@ -50,6 +54,12 @@
 #include "usearch/dense_index.h"
 
 #include "lib.hpp"
+
+/** How many storage dtypes the engine's build keeps, from the front of its ladder; CMake passes the
+ *  engine's own count, so only builds that bypass CMake take this default. */
+#if !defined(USEARCH_DENSE_DTYPES)
+#define USEARCH_DENSE_DTYPES 4
+#endif
 
 using namespace unum::usearch;
 using namespace unum::usearch::stub;
@@ -141,6 +151,20 @@ static bool reject_view(usearch_rows_view_t const& rows, std::size_t count, dens
                      "The stride is shorter than one row", outcome);
 }
 
+/** Refuses a quantization the engine never stores - f32, f64, i32 or no scalar at all - and one
+ *  its build's @c USEARCH_DENSE_DTYPES leaves off the front of the ladder, as the engine does. */
+static bool reject_unstored(usearch_scalar_t quantization, usearch_outcome_t* outcome) {
+    static constexpr usearch_scalar_t ladder_k[] = {usearch_scalar_bf16_k, usearch_scalar_u1x8_k, usearch_scalar_i8_k,
+                                                    usearch_scalar_e4m3_k, usearch_scalar_f16_k,  usearch_scalar_u8_k,
+                                                    usearch_scalar_e5m2_k, usearch_scalar_i4x2_k, usearch_scalar_u4x2_k,
+                                                    usearch_scalar_e3m2_k, usearch_scalar_e2m3_k};
+    for (std::size_t rung = 0; rung != std::size(ladder_k); ++rung)
+        if (ladder_k[rung] == quantization)
+            return reject_if(rung >= USEARCH_DENSE_DTYPES, usearch_status_unsupported_k,
+                             "This build's USEARCH_DENSE_DTYPES leaves the quantization out", outcome);
+    return reject_if(true, usearch_status_unknown_kind_k, "Unsupported quantization", outcome);
+}
+
 /** Whether the geometry is frozen; a zeroed width makes every derived extent zero. */
 static bool reject_unfrozen(dense_index_t const& index, usearch_outcome_t* outcome) {
     return reject_if(!index.options.dimensions, usearch_status_uninitialized_k, "The geometry was never frozen",
@@ -199,13 +223,15 @@ static double dot_product(std::span<double const> first, std::span<double const>
  */
 static std::size_t search_rows(dense_index_t& index, usearch_rows_view_t const& queries, std::size_t count,
                                ranked_landing_t const& landing, std::size_t expansion_factor,
-                               usearch_dense_traversal_stats_t* stats, usearch_predicate_t predicate,
-                               void* predicate_state, usearch_progress_callback_t progress, void* progress_state) {
+                               usearch_traversal_t traversal, usearch_dense_traversal_stats_t* stats,
+                               usearch_predicate_t predicate, void* predicate_state,
+                               usearch_progress_callback_t progress, void* progress_state) {
     std::size_t const rows = index.entries.size();
     std::size_t const dimensions = index.options.dimensions;
     std::size_t const query_bytes = row_extent(queries.scalar, dimensions);
-    // Let the expansion factor move the reported work, so a sweep can see it change.
-    if (stats && expansion_factor) stats->computed_distances += expansion_factor * count;
+    // A scan scores every row, as the engine's does; the expansion factor moves a walk's work.
+    bool const scanning = traversal == usearch_traversal_scan_k;
+    if (stats) stats->computed_distances += scanning ? rows * count : expansion_factor * count;
 
     std::vector<double> query_row(dimensions);
     std::vector<match_t> ranked;
@@ -217,7 +243,7 @@ static std::size_t search_rows(dense_index_t& index, usearch_rows_view_t const& 
         landing.write(query, ranked);
         if (stats) {
             stats->visited_members += rows;
-            stats->computed_distances += ranked.size();
+            if (!scanning) stats->computed_distances += ranked.size();
             stats->restarts += 1;
         }
         if (!keep_going(progress, progress_state, query + 1, count)) return query + 1;
@@ -317,7 +343,7 @@ static bool adopt(dense_index_options_t& options, dense_checkpoint_prefix_t cons
 /** Fills a fresh @p index from a checkpoint, which no other thread can see yet. */
 static bool read_from(dense_index_t& index, bytes_view_t blob, usearch_outcome_t* outcome) {
     dense_checkpoint_prefix_t prefix {};
-    if (!parse_prefix(prefix, blob, outcome)) return false;
+    if (!parse_prefix(prefix, blob, outcome) || reject_unstored(prefix.quantization, outcome)) return false;
     std::size_t const rows = prefix.entries;
     std::size_t const dimensions = prefix.dimensions;
     index.reset();
@@ -388,7 +414,8 @@ void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_if(!known_metric(arguments->metric), usearch_status_unknown_kind_k,
-                  "The stand-in does not implement that metric", outcome))
+                  "The stand-in does not implement that metric", outcome) ||
+        reject_unstored(arguments->quantization, outcome))
         return;
     usearch_dense_index_handle_t* const index = new (std::nothrow) usearch_dense_index_handle_t();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return;
@@ -430,6 +457,9 @@ void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments) {
     if (through_executor<usearch_dense_load_ram_buffer>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
+    if (reject_if(!arguments->buffer.length, usearch_status_invalid_argument_k, "The checkpoint must not be empty",
+                  outcome))
+        return;
     if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     usearch_dense_index_handle_t* const index = open_checkpoint<usearch_dense_index_handle_t>(
@@ -580,15 +610,19 @@ void usearch_dense_search(usearch_dense_search_t* arguments) {
     if (reject_unfrozen(index, outcome)) return;
     std::size_t const count = arguments->count;
     if (reject_view(arguments->queries, count, index, outcome)) return;
+    usearch_traversal_t const traversal = arguments->traversal;
+    if (reject_if(traversal != usearch_traversal_walk_k && traversal != usearch_traversal_scan_k,
+                  usearch_status_unknown_kind_k, "Unknown traversal", outcome))
+        return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {arguments->queries.data},
                                                       outcome);
     ranked_landing_t landing {};
     if (!arena || !carve_ranked(*arena, count, arguments->wanted, landing, outcome)) return;
 
     std::shared_lock readers(index.mutex);
-    std::size_t const answered = search_rows(index, arguments->queries, count, landing, arguments->expansion_factor,
-                                             arguments->stats, arguments->predicate, arguments->predicate_state,
-                                             arguments->progress, arguments->progress_state);
+    std::size_t const answered = search_rows(
+        index, arguments->queries, count, landing, arguments->expansion_factor, traversal, arguments->stats,
+        arguments->predicate, arguments->predicate_state, arguments->progress, arguments->progress_state);
     if (reject_cancelled(answered, count, outcome)) return;
     *arguments->matches = landing.view();
 }
@@ -818,6 +852,9 @@ void usearch_dense_metadata_read_buffer(usearch_dense_metadata_read_buffer_t* ar
     if (through_executor<usearch_dense_metadata_read_buffer>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->metadata = {};
+    if (reject_if(!arguments->buffer.length, usearch_status_invalid_argument_k, "The buffer must not be empty",
+                  outcome))
+        return;
     dense_checkpoint_prefix_t prefix {};
     if (!parse_prefix(prefix, as_readable_bytes(arguments->buffer), outcome)) return;
     reject_if(!describe(*arguments->metadata, prefix), usearch_status_unknown_kind_k,
@@ -834,7 +871,7 @@ void usearch_dense_multiply(usearch_dense_multiply_t* arguments) {
     usearch_dense_index_handle_t& index = *arguments->index;
     if (reject_unfrozen(index, outcome)) return;
     if (reject_if(index.options.metric != usearch_dense_metric_inner_k, usearch_status_config_mismatch_k,
-                  "A product is a logit, so the kind must be inner product", outcome))
+                  "A product is a dot, so the kind must be inner product", outcome))
         return;
     std::size_t const rows_count = arguments->count;
     usearch_rows_view_t const& left = arguments->left;

@@ -5,7 +5,7 @@
       "name": "Unit Test C++",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build_debug/usearch_test",
+      "program": "${workspaceFolder}/build_host_debug/usearch_test",
       "cwd": "${workspaceFolder}",
       "environment": [
         {
@@ -18,24 +18,24 @@
         }
       ],
       "stopAtEntry": false,
-      "preLaunchTask": "Build Debug",
+      "preLaunchTask": "Build Host Debug",
       "MIMode": "gdb",
       "osx": {
         "MIMode": "lldb"
       },
       "windows": {
         "type": "cppvsdbg",
-        "program": "${workspaceFolder}/build_debug/usearch_test.exe"
+        "program": "${workspaceFolder}/build_host_debug/usearch_test.exe"
       }
     },
     {
       "name": "Unit Test C++ Core",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build_debug/test/usearch_test_header_only",
+      "program": "${workspaceFolder}/build_host_debug/test/usearch_test_header_only",
       "cwd": "${workspaceFolder}",
       "stopAtEntry": false,
-      "preLaunchTask": "Build Debug",
+      "preLaunchTask": "Build Host Debug",
       "MIMode": "gdb",
       "osx": {
         "MIMode": "lldb"
@@ -45,7 +45,7 @@
       "name": "Unit Test C",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build_debug/test_c",
+      "program": "${workspaceFolder}/build_host_debug/test_c",
       "cwd": "${workspaceFolder}",
       "environment": [
         {
@@ -58,31 +58,31 @@
         }
       ],
       "stopAtEntry": false,
-      "preLaunchTask": "Build Debug",
+      "preLaunchTask": "Build Host Debug",
       "MIMode": "gdb",
       "osx": {
         "MIMode": "lldb"
       },
       "windows": {
         "type": "cppvsdbg",
-        "program": "${workspaceFolder}/build_debug/test_c.exe"
+        "program": "${workspaceFolder}/build_host_debug/test_c.exe"
       }
     },
     {
       "name": "Unit Test CUDA",
       "type": "cuda-gdb",
       "request": "launch",
-      "program": "${workspaceFolder}/build_dev/test/usearch_test_cuda",
+      "program": "${workspaceFolder}/build_cuda_relwithdebinfo/test/usearch_test_cuda",
       "cwd": "${workspaceFolder}",
       "stopAtEntry": false,
       "breakOnLaunch": false,
-      "preLaunchTask": "Build Dev"
+      "preLaunchTask": "Build CUDA RelWithDebInfo"
     },
     {
       "name": "Benchmark C++ on Wiki 1M",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build_profile/usearch_bench",
+      "program": "${workspaceFolder}/build_host_profile/usearch_bench",
       "cwd": "${workspaceFolder}",
       "args": [
         "--vectors",
@@ -93,7 +93,7 @@
         "data/wiki-1m/groundtruth.public.100K.ibin"
       ],
       "stopAtEntry": false,
-      "preLaunchTask": "Build Profile",
+      "preLaunchTask": "Build Host Profile",
       "MIMode": "gdb",
       "osx": {
         "MIMode": "lldb"
@@ -103,7 +103,7 @@
       "name": "Benchmark C++ on Deep 10M",
       "type": "cppdbg",
       "request": "launch",
-      "program": "${workspaceFolder}/build_profile/usearch_bench",
+      "program": "${workspaceFolder}/build_host_profile/usearch_bench",
       "cwd": "${workspaceFolder}",
       "args": [
         "--vectors",
@@ -114,7 +114,7 @@
         "data/deep-1b/groundtruth.public.10K.ibin"
       ],
       "stopAtEntry": false,
-      "preLaunchTask": "Build Profile",
+      "preLaunchTask": "Build Host Profile",
       "MIMode": "gdb",
       "osx": {
         "MIMode": "lldb"
@@ -124,7 +124,7 @@
       "name": "Benchmark CUDA on Deep 10M",
       "type": "cuda-gdb",
       "request": "launch",
-      "program": "${workspaceFolder}/build_dev/bench/usearch_bench_dense_vram_index_search",
+      "program": "${workspaceFolder}/build_cuda_relwithdebinfo/bench/usearch_bench_dense_vram_index_search",
       "cwd": "${workspaceFolder}",
       "args": [
         "--vectors",
@@ -137,7 +137,7 @@
       ],
       "stopAtEntry": false,
       "breakOnLaunch": false,
-      "preLaunchTask": "Build Dev"
+      "preLaunchTask": "Build CUDA RelWithDebInfo"
     },
     {
       "name": "Debug PyTest",

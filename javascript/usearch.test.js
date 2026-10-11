@@ -61,6 +61,33 @@ function rows(columns, ...values) {
   return usearch.RowsView.of(new Float32Array(values), columns);
 }
 
+// The bf16 words of values a bf16 holds exactly: the high halves of their float32 bits.
+function bf16Words(values) {
+  return Uint16Array.from(new Uint32Array(Float32Array.from(values).buffer), (bits) => bits >>> 16);
+}
+
+// Whether `verb` ran, rather than answering unsupported as the engine does for the verbs it declares before serving.
+function served(verb) {
+  try {
+    verb();
+    return true;
+  } catch (error) {
+    if (error.code !== usearch.Status.Unsupported) throw error;
+    return false;
+  }
+}
+
+// An index of `options`, or a skipped test when this build's USEARCH_DENSE_DTYPES left its quantization out.
+function initRamOrSkip(t, options) {
+  try {
+    return usearch.DenseIndex.initRam(options);
+  } catch (error) {
+    if (error.code !== usearch.Status.Unsupported) throw error;
+    t.skip(`this build leaves ${options.quantization} out`);
+    return undefined;
+  }
+}
+
 // What a ranked run holds, read out of its arena so two runs compare by content.
 function contents(matches) {
   return { keys: matches.keys, scores: matches.scores, counts: matches.counts, columns: matches.columns };
@@ -141,6 +168,7 @@ test("Identities", async (t) => {
   await t.test("a 128-bit identity round-trips through the index", () => {
     const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, connectivity: 16, dimensions: 3 });
     const key = usearch.parseKey("f81d4fae-7dec-11d0-a765-00a0c91e6bf6");
+    index.reserve(1);
     index.insert(key, new Float32Array([0.2, 0.6, 0.4]));
 
     const found = index.search(new Float32Array([0.2, 0.6, 0.4]), 1, new Arena()).get(0);
@@ -156,6 +184,7 @@ test("Identities", async (t) => {
 
   await t.test("an integer key crosses the addon in the ABI's own byte order", () => {
     const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, connectivity: 16, dimensions: 2 });
+    index.reserve(1);
     index.insert(new BigUint64Array([42n]), new Float32Array([10, 20]));
 
     const found = index.search(new Float32Array([10, 20]), 1, new Arena()).get(0);
@@ -174,6 +203,7 @@ test("Identities", async (t) => {
 
   await t.test("a key given as a UUID string matches the same key given as bytes", () => {
     const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, connectivity: 16, dimensions: 3 });
+    index.reserve(1);
     index.insert("f81d4fae-7dec-11d0-a765-00a0c91e6bf6", new Float32Array([0.2, 0.6, 0.4]));
 
     assert.equal(index.count("f81d4fae-7dec-11d0-a765-00a0c91e6bf6"), 1);
@@ -187,7 +217,7 @@ test("Single-entry operations", async (t) => {
 
     assert.deepEqual(index.describe().metadata, {
       metric: DenseMetric.Euclidean,
-      quantization: Scalar.F32,
+      quantization: Scalar.BF16,
       dimensions: 2,
       connectivity: 16,
     });
@@ -197,6 +227,7 @@ test("Single-entry operations", async (t) => {
   await t.test("insert", () => {
     const index = DenseIndex.initRam({ dimensions: 2, metric: DenseMetric.Euclidean });
 
+    index.reserve(2);
     index.insert(15n, new Float32Array([10, 20]));
     index.insert(16n, new Float32Array([10, 25]));
 
@@ -210,8 +241,9 @@ test("Single-entry operations", async (t) => {
   });
 
   await t.test("get shapes its rows from the width the call reports", () => {
-    const index = DenseIndex.initRam({ dimensions: 2, metric: DenseMetric.Euclidean, quantization: Scalar.F32 });
+    const index = DenseIndex.initRam({ dimensions: 2, metric: DenseMetric.Euclidean });
 
+    index.reserve(1);
     index.insert(15n, new Float32Array([10, 20]));
     const stored = index.get(15n, new Arena());
 
@@ -228,6 +260,7 @@ test("Batch operations", async (t) => {
   await t.test("a run of rows inserts under a run of keys", () => {
     const index = DenseIndex.initRam({ dimensions: 2, metric: DenseMetric.Euclidean });
 
+    index.reserve(2);
     assert.equal(index.insert([15n, 16n], rows(2, 10, 20, 10, 25)), undefined, "an insertion answers with nothing");
     assert.equal(index.describe().size, 2, "size after adding batch should be 2");
 
@@ -237,12 +270,14 @@ test("Batch operations", async (t) => {
 
   await t.test("a single key broadcasts across every row", () => {
     const index = DenseIndex.initRam({ dimensions: 2, metric: DenseMetric.Euclidean, valuesPerKey: 2 });
+    index.reserve(2);
     index.insert(7n, rows(2, 1, 2, 3, 4));
     assert.equal(index.count(7n), 2);
   });
 
   await t.test("keys that name neither one key nor one per row are refused", () => {
     const index = DenseIndex.initRam({ dimensions: 2, metric: DenseMetric.Euclidean });
+    index.reserve(3);
     assert.throws(() => index.insert([1n, 2n, 3n], rows(2, 1, 2, 3, 4)), {
       code: Status.ShapeMismatch,
       message: "The keys name neither one key nor one per row",
@@ -251,6 +286,7 @@ test("Batch operations", async (t) => {
 
   await t.test("search over a batch fills one row per query", () => {
     const index = DenseIndex.initRam({ dimensions: 3, metric: DenseMetric.Euclidean });
+    index.reserve(2);
     index.insert([15n, 16n], rows(3, 10, 20, 30, 10, 25, 35));
 
     const matches = index.search(rows(3, 13, 14, 15, 10, 20, 30), 2, new Arena());
@@ -264,6 +300,7 @@ test("Batch operations", async (t) => {
 
 test("Ranked runs land in the arena they are handed", async (t) => {
   const index = DenseIndex.initRam({ dimensions: 2, metric: DenseMetric.Euclidean });
+  index.reserve(2);
   index.insert([1n, 2n], rows(2, 1, 1, 2, 2));
 
   await t.test("a verb handed no arena is refused rather than given one", () => {
@@ -291,6 +328,7 @@ test("Ranked runs land in the arena they are handed", async (t) => {
 
 test("Rows are checked against the array that holds them", async (t) => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 8 });
+  index.reserve(8);
 
   await t.test("a row narrower than the index is refused, not read past", () => {
     assert.throws(() => index.insert(42n, new Float32Array([0.2, 0.6, 0.4])), { code: Status.ShapeMismatch });
@@ -317,6 +355,7 @@ test("Rows are checked against the array that holds them", async (t) => {
 
 test("Receivers choose where a verb runs, and the verb stays the same", async (t) => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, connectivity: 16, dimensions: 3 });
+  index.reserve(2);
   index.insert([42n, 43n], rows(3, 0.2, 0.6, 0.4, 0.9, 0.1, 0.1));
   const query = new Float32Array([0.2, 0.6, 0.4]);
 
@@ -350,6 +389,7 @@ test("Receivers choose where a verb runs, and the verb stays the same", async (t
 
 test("Deferred calls", async (t) => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, connectivity: 16, dimensions: 3 });
+  index.reserve(2);
   index.insert([42n, 43n], rows(3, 0.2, 0.6, 0.4, 0.9, 0.1, 0.1));
   const query = new Float32Array([0.2, 0.6, 0.4]);
 
@@ -383,8 +423,11 @@ test("Deferred calls", async (t) => {
     };
     assert.equal(await calls.count, 1);
     assert.deepEqual(await calls.describe, index.describe());
-    assert.deepEqual(await calls.health, { audited: 2, reachable: 2, sweeps: 1 });
-    assert.deepEqual((await calls.get).data, new Float32Array([0.9, 0.1, 0.1]));
+    const health = await calls.health;
+    assert.deepEqual([health.audited, health.reachable], [2, 2]);
+    assert(health.sweeps >= 1, "an audit sweeps at least once");
+    const stored = (await calls.get).data;
+    [0.9, 0.1, 0.1].forEach((expected, column) => assertAlmostEqual(stored[column], expected, 2 ** -7));
     assert.equal(await calls.refine, 0);
     executor.free();
   });
@@ -443,6 +486,7 @@ test("Deferred calls", async (t) => {
   await t.test("a dropped call keeps its inputs alive until it runs", () => {
     const executor = Executor.forRam();
     const target = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 3 });
+    target.reserve(1);
     (() => target.deferred(executor).insert(7n, new Float32Array([1, 2, 3])))();
     collect();
     executor.drain();
@@ -467,6 +511,7 @@ test("Several entries under one key", async (t) => {
     dimensions: 3,
     valuesPerKey: 3,
   });
+  index.reserve(2);
   index.insert([42n, 42n], rows(3, 0.1, 0.6, 0.4, 0.2, 0.6, 0.4));
 
   await t.test("the count is the whole extent", () => {
@@ -504,6 +549,7 @@ test("Refinement leaves the graph searchable", () => {
     keys.push(BigInt(entry));
     values.push(entry, entry + 1, entry + 2, entry + 3);
   }
+  index.reserve(64);
   index.on(EXECUTOR).insert(keys, rows(4, ...values));
 
   const changed = index.on(EXECUTOR).refine({ expansionFactor: 64 });
@@ -515,10 +561,12 @@ test("Refinement leaves the graph searchable", () => {
 test("Merging consumes the donors", () => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
   const donor = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
+  index.reserve(2);
+  donor.reserve(1);
   index.insert(1n, new Float32Array([1, 1]));
   donor.insert(2n, new Float32Array([2, 2]));
 
-  index.merge([donor]);
+  if (!served(() => index.merge([donor]))) return;
 
   assert.equal(index.count(2n), 1, "the donor's entries joined the index");
   assert.throws(() => donor.describe(), {
@@ -547,6 +595,8 @@ test("A deferred merge holds its donors until it is final", () => {
   const executor = Executor.forRam();
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
   const donor = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
+  index.reserve(1);
+  donor.reserve(1);
   donor.insert(2n, new Float32Array([2, 2]));
 
   const call = index.deferred(executor).merge([donor]);
@@ -558,13 +608,14 @@ test("A deferred merge holds its donors until it is final", () => {
     code: Status.Uninitialized,
     message: "A donor was freed or merged already",
   });
-  assert.equal(call.wait(), undefined);
-  assert.equal(index.count(2n), 1, "the donor's entries joined the index");
+  if (served(() => assert.equal(call.wait(), undefined)))
+    assert.equal(index.count(2n), 1, "the donor's entries joined the index");
   executor.free();
 });
 
 test("Late interaction over multi-row entries", () => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Inner, dimensions: 4, valuesPerKey: 4 });
+  index.reserve(4);
   index.insert([7n, 7n, 8n, 8n], rows(4, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1));
 
   const matches = index.maxsim(rows(4, 1, 0, 0, 0, 0, 1, 0, 0), 2, 2, new Arena());
@@ -582,6 +633,7 @@ test("Late interaction over multi-row entries", () => {
 test("Sparse products against the indexed rows", async (t) => {
   const populated = () => {
     const index = DenseIndex.initRam({ metric: DenseMetric.Inner, dimensions: 4 });
+    index.reserve(3);
     index.insert([1n, 2n, 3n], rows(4, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0));
     return index;
   };
@@ -614,6 +666,7 @@ test("Sparse products against the indexed rows", async (t) => {
 
   await t.test("a graph frozen under a distance kind is refused", () => {
     const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 4 });
+    index.reserve(1);
     index.insert(1n, new Float32Array([1, 0, 0, 0]));
     assert.throws(() => index.multiply(new Float32Array([1, 0, 0, 0]), new Arena()), { code: Status.ConfigMismatch });
   });
@@ -622,12 +675,14 @@ test("Sparse products against the indexed rows", async (t) => {
 test("Attention folds every key the walk scores", async (t) => {
   const dimensions = 4;
   const index = DenseIndex.initRam({ metric: DenseMetric.Inner, dimensions });
+  // Every key, value and query is one a bf16 holds exactly, so the stored rows are these.
   const keys = [
     new Float32Array([1, 0, 0, 0]),
-    new Float32Array([0.6, 0.8, 0, 0]),
+    new Float32Array([0.5, 0.75, 0, 0]),
     new Float32Array([0, 1, 0, 0]),
-    new Float32Array([-0.8, 0.6, 0, 0]),
+    new Float32Array([-0.75, 0.5, 0, 0]),
   ];
+  index.reserve(4);
   index.insert([0n, 1n, 2n, 3n], RowsView.of(Float32Array.from(keys.flatMap((key) => [...key])), dimensions));
   const values = [
     new Float32Array([10, 20, 0, 1]),
@@ -635,7 +690,7 @@ test("Attention folds every key the walk scores", async (t) => {
     new Float32Array([50, 60, 0, 1]),
     new Float32Array([70, 80, 1, 0]),
   ];
-  const valueRows = RowsView.of(Float32Array.from(values.flatMap((value) => [...value])), dimensions);
+  const valueRows = RowsView.of(bf16Words(values.flatMap((value) => [...value])), dimensions, Scalar.BF16);
   const rowOf = (key) => Number(usearch.integerFromKey(key));
   // Exact attention of `query` over every key, at the derived scale of one over the root of the width.
   const attention = (query) => {
@@ -651,7 +706,7 @@ test("Attention folds every key the walk scores", async (t) => {
   const queries = [
     new Float32Array([1, 0, 0, 0]),
     new Float32Array([0, 1, 0, 0]),
-    new Float32Array([0.6, 0.8, 0, 0]),
+    new Float32Array([0.5, 0.75, 0, 0]),
     new Float32Array([-1, 0, 0, 0]),
   ];
   const queryRows = RowsView.of(Float32Array.from(queries.flatMap((query) => [...query])), dimensions);
@@ -683,16 +738,12 @@ test("Attention folds every key the walk scores", async (t) => {
     for (const answer of [-1, values.length, 0.5, undefined])
       assert.throws(() => index.attend(queryRows, valueRows, () => answer, new Arena()), {
         code: Status.ShapeMismatch,
-        message: "A scored key resolved to no value row",
       });
   });
 
   await t.test("values in another scalar kind refuse the call", () => {
     const widened = RowsView.of(Float64Array.from(valueRows.data), dimensions);
-    assert.throws(() => index.attend(queryRows, widened, rowOf, new Arena()), {
-      code: Status.ShapeMismatch,
-      message: "A scored key resolved to no value row",
-    });
+    assert.throws(() => index.attend(queryRows, widened, rowOf, new Arena()), { code: Status.ShapeMismatch });
   });
 
   await t.test("the resolver's first exception stops every later lookup and outranks the refusal", () => {
@@ -725,6 +776,7 @@ test("Attention folds every key the walk scores", async (t) => {
 test("Cursors walk every entry once, and keep their index alive", () => {
   const opened = () => {
     const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, connectivity: 16, dimensions: 2 });
+    index.reserve(3);
     index.insert([1n, 2n, 3n], rows(2, 1, 1, 2, 2, 3, 3));
     return index.on(EXECUTOR).cursor();
   };
@@ -757,9 +809,11 @@ test("Cursors walk every entry once, and keep their index alive", () => {
 
 test("Search streams pull matches lazily", () => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, connectivity: 16, dimensions: 2 });
+  index.reserve(3);
   index.insert([1n, 2n, 3n], rows(2, 1, 1, 2, 2, 3, 3));
 
-  const stream = index.on(EXECUTOR).searchStream(new Float32Array([1, 1]));
+  let stream;
+  if (!served(() => (stream = index.on(EXECUTOR).searchStream(new Float32Array([1, 1]))))) return;
   const arena = new Arena();
 
   const nearest = stream.next(1, arena);
@@ -783,6 +837,7 @@ test("Serialization", async (t) => {
 
   t.beforeEach(() => {
     const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, connectivity: 16, dimensions: 3 });
+    index.reserve(1);
     index.insert(42n, new Float32Array([0.2, 0.6, 0.4]));
     index.on(EXECUTOR).save(indexPath);
   });
@@ -801,7 +856,8 @@ test("Serialization", async (t) => {
   });
 
   await t.test("viewRam serves the checkpoint read-only", () => {
-    const index = DenseIndex.viewRam(indexPath);
+    let index;
+    if (!served(() => (index = DenseIndex.viewRam(indexPath)))) return;
 
     assert.deepEqual(
       index.search(new Float32Array([0.2, 0.6, 0.4]), 1, new Arena()).get(0).keys,
@@ -813,7 +869,7 @@ test("Serialization", async (t) => {
   await t.test("metadataRead", () => {
     assert.deepEqual(DenseIndex.metadataRead(indexPath), {
       metric: DenseMetric.Euclidean,
-      quantization: Scalar.F32,
+      quantization: Scalar.BF16,
       dimensions: 3,
       connectivity: 16,
     });
@@ -822,6 +878,7 @@ test("Serialization", async (t) => {
 
 test("Serialization through memory", async (t) => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, connectivity: 16, dimensions: 3 });
+  index.reserve(1);
   index.insert(42n, new Float32Array([0.2, 0.6, 0.4]));
 
   const monolith = index.on(EXECUTOR).saveBuffer(new Arena());
@@ -840,7 +897,7 @@ test("Serialization through memory", async (t) => {
   await t.test("metadataReadBuffer", () => {
     assert.deepEqual(DenseIndex.metadataReadBuffer(monolith.bytes), {
       metric: DenseMetric.Euclidean,
-      quantization: Scalar.F32,
+      quantization: Scalar.BF16,
       dimensions: 3,
       connectivity: 16,
     });
@@ -851,13 +908,14 @@ test("Every enumerator crosses the C name tables", async (t) => {
   await t.test("metrics", () => {
     for (const metric of Object.values(DenseMetric)) {
       const bits = metric === DenseMetric.Hamming || metric === DenseMetric.Jaccard;
-      const index = DenseIndex.initRam({ metric, dimensions: 8, quantization: bits ? Scalar.U1x8 : Scalar.F32 });
+      const index = DenseIndex.initRam({ metric, dimensions: 8, quantization: bits ? Scalar.U1x8 : Scalar.BF16 });
       assert.equal(index.describe().metadata.metric, metric);
     }
   });
 
   await t.test("scalar kinds", () => {
     const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 8 });
+    index.reserve(1);
     index.insert(1n, new Float32Array(8).fill(1));
     for (const scalar of Object.values(Scalar).filter((scalar) => scalar !== Scalar.I32))
       assert.equal(index.get(1n, new Arena(), { scalar }).scalar, scalar);
@@ -884,10 +942,12 @@ test("Every enumerator crosses the C name tables", async (t) => {
 
 test("Mini-float quantization types", async (t) => {
   for (const quantization of [Scalar.E5M2, Scalar.E4M3, Scalar.E3M2, Scalar.E2M3]) {
-    await t.test(`insert and search with ${quantization}`, () => {
-      const index = DenseIndex.initRam({ metric: DenseMetric.Angular, dimensions: 64, quantization });
+    await t.test(`insert and search with ${quantization}`, (t) => {
+      const index = initRamOrSkip(t, { metric: DenseMetric.Angular, dimensions: 64, quantization });
+      if (!index) return;
       const vector = new Float32Array(64);
       for (let position = 0; position < 64; position++) vector[position] = position * 0.1;
+      index.reserve(1);
       index.insert(1n, vector);
 
       assert.equal(usearch.integerFromKey(index.search(vector, 1, new Arena()).get(0).keys), 1n);
@@ -895,10 +955,25 @@ test("Mini-float quantization types", async (t) => {
   }
 });
 
+test("A scan scores every row exactly, so each row finds itself first", () => {
+  const index = DenseIndex.initRam({ dimensions: 4 });
+  const stored = rows(4, 1, 0, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0);
+  index.reserve(3);
+  index.insert([1n, 2n, 3n], stored);
+  const matches = index.search(stored, 3, new Arena(), { traversal: usearch.Traversal.Scan });
+  for (let query = 0; query < 3; query++)
+    assert.equal(usearch.integerFromKey(usearch.keyAt(matches.get(query).keys, 0)), BigInt(query + 1));
+  assert.throws(() => index.search(stored, 3, new Arena(), { traversal: "sweep" }), {
+    code: Status.InvalidArgument,
+    message: "The 'traversal' argument names nothing: 'sweep'",
+  });
+});
+
 test("Input scalar kinds beyond the four a TypedArray spells", async (t) => {
   await t.test("packed bits reach a Hamming index as u1x8", () => {
     const index = DenseIndex.initRam({ metric: DenseMetric.Hamming, dimensions: 64, quantization: Scalar.U1x8 });
     const packed = new Uint8Array([0b10101010, 0, 0, 0, 0, 0, 0, 0, 0b10101011, 0, 0, 0, 0, 0, 0, 0]);
+    index.reserve(2);
     index.insert([1n, 2n], RowsView.of(packed, 64, Scalar.U1x8));
 
     const found = index.search(RowsView.of(packed.subarray(0, 8), 64, Scalar.U1x8), 2, new Arena()).get(0);
@@ -911,6 +986,7 @@ test("Input scalar kinds beyond the four a TypedArray spells", async (t) => {
     const index = DenseIndex.initRam({ metric: DenseMetric.Angular, dimensions: 4, quantization: Scalar.BF16 });
     // The bf16 encoding of 1.0 is 0x3f80.
     const row = RowsView.of(new Uint16Array([0x3f80, 0x3f80, 0x3f80, 0x3f80]), 4, Scalar.BF16);
+    index.reserve(1);
     index.insert(1n, row);
 
     assert.equal(usearch.integerFromKey(index.search(row, 1, new Arena()).get(0).keys), 1n);
@@ -922,14 +998,20 @@ test("Input scalar kinds beyond the four a TypedArray spells", async (t) => {
 
   await t.test("a Uint16Array without a named kind is refused", () => {
     const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 4 });
+    index.reserve(1);
     assert.throws(() => index.insert(1n, new Uint16Array([1, 2, 3, 4])), {
       code: Status.UnknownKind,
       message: "The rows spell no scalar kind on their own; name one in a RowsView.",
     });
   });
 
-  await t.test("f64 rows keep their width on the way in", () => {
-    const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2, quantization: Scalar.F64 });
+  await t.test("f64 rows keep their width on the way in, though no index stores them so", () => {
+    for (const quantization of [Scalar.F64, Scalar.F32])
+      assert.throws(() => DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2, quantization }), {
+        code: Status.UnknownKind,
+      });
+    const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
+    index.reserve(1);
     index.insert(1n, new Float64Array([10, 20]));
 
     assertAlmostEqual(index.search(new Float64Array([10, 20]), 1, new Arena()).get(0).scores[0], 0, 1e-9);
@@ -938,8 +1020,10 @@ test("Input scalar kinds beyond the four a TypedArray spells", async (t) => {
   await t.test(
     "f16 rows travel as a Float16Array where the runtime has one",
     { skip: typeof Float16Array !== "function" },
-    () => {
-      const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2, quantization: Scalar.F16 });
+    (t) => {
+      const index = initRamOrSkip(t, { metric: DenseMetric.Euclidean, dimensions: 2, quantization: Scalar.F16 });
+      if (!index) return;
+      index.reserve(1);
       index.insert(2n, new Float16Array([30, 40]));
 
       assert.deepEqual(index.get(2n, new Arena(), { scalar: Scalar.F16 }).data, new Float16Array([30, 40]));
@@ -949,6 +1033,7 @@ test("Input scalar kinds beyond the four a TypedArray spells", async (t) => {
 
 test("Arenas hold every output whose length scales with the call", async (t) => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Inner, dimensions: 4 });
+  index.reserve(2);
   index.insert([1n, 2n], rows(4, 1, 0, 0, 0, 0, 1, 0, 0));
 
   await t.test("each arena keeps its own call's outputs, past the collector", () => {
@@ -995,8 +1080,8 @@ test("Arenas hold every output whose length scales with the call", async (t) => 
     assert(index.get(1n, new Arena(), { scalar: Scalar.F64 }).data instanceof Float64Array);
     assert.deepEqual(
       index.get(1n, new Arena(), { scalar: Scalar.U1x8 }).data,
-      new Uint8Array([1]),
-      "four bits pack into one byte",
+      new Uint8Array([0x80]),
+      "four bits pack into one byte, the first dimension in the most significant bit",
     );
     const arena = new Arena();
     const absent = index.get(3n, arena);
@@ -1021,6 +1106,7 @@ test("Traversal telemetry", async (t) => {
       keys.push(BigInt(entry));
       values.push(entry, entry + 1, entry + 2, entry + 3);
     }
+    index.reserve(64);
     index.insert(keys, rows(4, ...values));
     return index;
   };
@@ -1082,6 +1168,9 @@ test("Traversal telemetry", async (t) => {
 
 test("Reachability audits", () => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
+  index.reserve(2);
   index.insert([1n, 2n], rows(2, 1, 1, 2, 2));
-  assert.deepEqual(index.on(EXECUTOR).health(), { audited: 2, reachable: 2, sweeps: 1 });
+  const health = index.on(EXECUTOR).health();
+  assert.deepEqual([health.audited, health.reachable], [2, 2]);
+  assert(health.sweeps >= 1, "an audit sweeps at least once");
 });

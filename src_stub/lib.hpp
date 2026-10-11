@@ -518,11 +518,11 @@ inline u8_t write_minifloat(double value, minifloat_t format) {
     return static_cast<u8_t>(sign | std::min(code, largest));
 }
 
-/** Widens a bit-set row, whose eight dimensions per byte ascend from the low bit. */
+/** Widens a bit-set row, eight dimensions a byte from the high bit down, as NumKong packs them. */
 inline void widen_bits(bytes_view_t row, std::span<double> values) {
     u8_t const* packed = static_cast<u8_t const*>(static_cast<void const*>(row.data()));
     for (std::size_t position = 0; position != values.size(); ++position)
-        values[position] = (packed[position / 8] >> (position % 8)) & 1 ? 1.0 : 0.0;
+        values[position] = (packed[position / 8] >> (7 - position % 8)) & 1 ? 1.0 : 0.0;
 }
 
 /** Narrows to a bit-set row, where every value that is not a zero sets its bit. */
@@ -532,15 +532,15 @@ inline void narrow_bits(bytes_span_t row, std::span<double const> values) {
     // the partial byte a ragged width leaves is cleared without rounding the count up again here.
     std::fill_n(packed, row.size(), u8_t {0});
     for (std::size_t position = 0; position != values.size(); ++position)
-        if (values[position] != 0) packed[position / 8] |= static_cast<u8_t>(1u << (position % 8));
+        if (values[position] != 0) packed[position / 8] |= static_cast<u8_t>(1u << (7 - position % 8));
 }
 
-/** Widens a nibble row, whose even dimensions sit in the low half of each byte. */
+/** Widens a nibble row, even dimensions in the high half of each byte, as NumKong packs them. */
 template <typename nibble_>
 void widen_nibbles(bytes_view_t row, std::span<double> values) {
     u8_t const* packed = static_cast<u8_t const*>(static_cast<void const*>(row.data()));
     for (std::size_t position = 0; position != values.size(); ++position) {
-        int const nibble = (packed[position / 2] >> (position % 2 * 4)) & 0xF;
+        int const nibble = (packed[position / 2] >> ((1 - position % 2) * 4)) & 0xF;
         // A signed nibble carries its sign in the high bit, so the upper half of the range wraps.
         values[position] = std::is_signed_v<nibble_> && nibble >= 8 ? nibble - 16 : nibble;
     }
@@ -555,7 +555,7 @@ void narrow_nibbles(bytes_span_t row, std::span<double const> values) {
     std::fill_n(packed, row.size(), u8_t {0});
     for (std::size_t position = 0; position != values.size(); ++position) {
         int const clamped = static_cast<int>(std::clamp(values[position], floor_value, ceiling_value));
-        packed[position / 2] |= static_cast<u8_t>((clamped & 0xF) << (position % 2 * 4));
+        packed[position / 2] |= static_cast<u8_t>((clamped & 0xF) << ((1 - position % 2) * 4));
     }
 }
 

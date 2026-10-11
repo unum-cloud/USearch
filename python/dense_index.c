@@ -1003,8 +1003,8 @@ static PyObject* DenseIndex_refine(PyObject* self, PyObject* const* args, Py_ssi
 #pragma region Search
 
 static char const doc_DenseIndex_search[] =                                                    //
-    "search(queries, wanted, arena, /, *, expansion_factor=0, dtype=None, predicate=None,\n"   //
-    "    progress=None, stats=None) -> Matches\n"                                              //
+    "search(queries, wanted, arena, /, *, expansion_factor=0, traversal=Traversal.WALK,\n"     //
+    "    dtype=None, predicate=None, progress=None, stats=None) -> Matches\n"                  //
     "\n"                                                                                       //
     "Finds the `wanted` nearest entries for every query row; one query is a one-row matrix.\n" //
     "Never writes to the graph, so any number of searches may overlap with insertions.\n"      //
@@ -1015,6 +1015,8 @@ static char const doc_DenseIndex_search[] =                                     
     "  wanted (int): Upper bound on matches per query - the 'k' in 'kANN'.\n"                  //
     "  arena (Arena): Where the matches land, rewound by the call.\n"                          //
     "  expansion_factor (int, optional): Candidate-pool breadth; 0 derives it.\n"              //
+    "  traversal (Traversal, optional): `Traversal.WALK`, the default, walks the graph;\n"     //
+    "    `Traversal.SCAN` scores every row exactly, on RAM and NVMe handles.\n"                //
     "  dtype (Scalar, optional): Names the query scalar type when the buffer cannot.\n"        //
     "  predicate (callable, optional): Admits a Key when it returns truthy. Non-matching\n"    //
     "    entries still route the traversal, so recall survives low selectivity. The\n"         //
@@ -1075,23 +1077,27 @@ static usearch_py_verb_t const search_verb = {sizeof(search_call_t), search_subm
 
 static PyObject* DenseIndex_search(PyObject* self, PyObject* const* args, Py_ssize_t positional_args_count,
                                    PyObject* args_names_tuple) {
-    PyObject *queries_object, *wanted_object, *arena_object, *expansion_object, *dtype_object, *predicate_object,
-        *progress_object, *stats_object;
+    PyObject *queries_object, *wanted_object, *arena_object, *expansion_object, *traversal_object, *dtype_object,
+        *predicate_object, *progress_object, *stats_object;
     usearch_py_argument_t const arguments[] = {
-        {"queries", &queries_object},   {"wanted", &wanted_object},
-        {"arena", &arena_object},       {"expansion_factor", &expansion_object},
-        {"dtype", &dtype_object},       {"predicate", &predicate_object},
-        {"progress", &progress_object}, {"stats", &stats_object},
+        {"queries", &queries_object},     {"wanted", &wanted_object},
+        {"arena", &arena_object},         {"expansion_factor", &expansion_object},
+        {"traversal", &traversal_object}, {"dtype", &dtype_object},
+        {"predicate", &predicate_object}, {"progress", &progress_object},
+        {"stats", &stats_object},
     };
     usearch_py_receiver_t receiver;
     usearch_dense_index_t handle = NULL;
     size_t wanted = 0, expansion_factor = 0;
+    int traversal = usearch_traversal_walk_k;
     usearch_scalar_t dtype = usearch_scalar_unknown_k;
     if (usearch_py_arguments_parse("search", args, positional_args_count, args_names_tuple, 3, 3, arguments,
                                    usearch_py_table_size_(arguments)) != 0 ||
         !(handle = receiver_from_object(self, &receiver)) ||
         usearch_py_size_from_object(wanted_object, "wanted", &wanted) != 0 ||
         usearch_py_size_from_object(expansion_object, "expansion_factor", &expansion_factor) != 0 ||
+        (traversal_object &&
+         usearch_py_enum_from_object(traversal_object, "traversal", &usearch_py_traversal, &traversal) != 0) ||
         usearch_py_scalar_from_object(dtype_object, "dtype", &dtype) != 0)
         return NULL;
 
@@ -1118,6 +1124,7 @@ static PyObject* DenseIndex_search(PyObject* self, PyObject* const* args, Py_ssi
         .arena = ((Arena*)call->call.arena)->handle,
         .wanted = wanted,
         .expansion_factor = expansion_factor,
+        .traversal = (usearch_traversal_t)traversal,
         .predicate = usearch_py_predicate_registered(&call->predicate),
         .predicate_state = &call->predicate,
         .progress = usearch_py_progress_registered(&call->reports.progress),
@@ -2424,6 +2431,7 @@ static char const doc_DenseIndex_save_buffer[] =                                
     "\n"                                                                                     //
     "Example:\n"                                                                             //
     "  >>> index = usearch.DenseIndex.init_ram(dimensions=4)\n"                              //
+    "  >>> index.reserve(1)\n"                                                               //
     "  >>> checkpoint = index.save_buffer(usearch.Arena())\n"                                //
     "  >>> usearch.DenseIndex.metadata_read_buffer(checkpoint).dimensions\n"                 //
     "  4";

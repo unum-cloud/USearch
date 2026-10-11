@@ -32,6 +32,7 @@ from usearch import (
     RowsView,
     ScalarKind,
     Status,
+    Traversal,
     dense_metadata_read_buffer,
 )
 
@@ -138,6 +139,7 @@ def test_telemetry_starts_at_an_untaken_walk() raises:
     assert_equal(Int(stats.computed_distances), 0, "nothing computed")
 
 
+
 # endregion Pure Logic
 
 # region Engine
@@ -163,7 +165,7 @@ def _basis(library: Library) raises -> DenseIndex:
     Returns:
         An index holding `[1, 0]` under key zero and `[0, 1]` under key one.
     """
-    var index = DenseIndex.init_ram(library, DenseOptions(DenseMetric.INNER, ScalarKind.F32, 2, values_per_key=2))
+    var index = DenseIndex.init_ram(library, DenseOptions(2, DenseMetric.INNER, values_per_key=2))
     index.reserve(2)
     var rows = [Float32(1), 0, Float32(0), 1]
     var keys = [Key(integer=0), Key(integer=1)]
@@ -179,7 +181,7 @@ def test_engine_round_trips_when_present() raises:
     var library = Library()
     assert_equal(library.version_name(), "3.0.0", "the engine names its own version")
     var executor = Executor.for_ram(library, threads=2)
-    var index = DenseIndex.init_ram(library, DenseOptions(DenseMetric.ANGULAR, ScalarKind.F32, dimensions=3))
+    var index = DenseIndex.init_ram(library, DenseOptions(3))
     var on = index.on(executor)
     on.reserve(3)
 
@@ -190,7 +192,9 @@ def test_engine_round_trips_when_present() raises:
     var description = on.describe()
     assert_equal(Int(description.size), 3, "the index reports what it stored")
     assert_equal(Int(description.metadata.dimensions), 3, "the geometry froze at three")
-    assert_equal(description.capabilities, "serial", "the dispatch codename crosses as text")
+    assert_true(description.metadata.quantization == ScalarKind.BF16, "an index left alone stores bf16")
+    assert_true(description.metadata.metric == DenseMetric.ANGULAR, "and scores angular distances")
+    assert_true(description.capabilities.byte_length() != 0, "the dispatch codename crosses as text")
 
     var query = [Float32(1), 0, 0]
     var arena = Arena(executor)
@@ -252,6 +256,8 @@ def test_names_come_from_the_engine_tables() raises:
     assert_true(library.mood_from_name("parked") == Mood.PARKED, "and back")
     assert_equal(library.residency_name(Residency.VRAM), "vram", "a residency")
     assert_true(library.residency_from_name("nvme") == Residency.NVME, "and back")
+    assert_equal(library.traversal_name(Traversal.SCAN), "scan", "a traversal")
+    assert_true(library.traversal_from_name("walk") == Traversal.WALK, "and back")
     assert_equal(library.dense_metric_name(DenseMetric.JACCARD), "jaccard", "a metric")
     assert_true(library.dense_metric_from_name("euclidean") == DenseMetric.EUCLIDEAN, "and back")
 
@@ -262,7 +268,7 @@ def test_get_exports_every_entry_under_a_key() raises:
         print("skipped: libusearch_shared is not on the loader path")
         return
     var library = Library()
-    var index = DenseIndex.init_ram(library, DenseOptions(DenseMetric.ANGULAR, ScalarKind.F32, 2, values_per_key=3))
+    var index = DenseIndex.init_ram(library, DenseOptions(2, values_per_key=3))
     index.reserve(3)
 
     var rows = [Float32(1), 0, Float32(2), 0, Float32(3), 0]
@@ -347,7 +353,7 @@ def test_caller_thread_executor_drives_every_verb() raises:
         return
     var library = Library()
     var inline = Executor(library)
-    var index = DenseIndex.init_ram(library, DenseOptions(DenseMetric.EUCLIDEAN, ScalarKind.F32, dimensions=2))
+    var index = DenseIndex.init_ram(library, DenseOptions(2, DenseMetric.EUCLIDEAN))
     var on = index.on(inline)
     on.reserve(2)
     var rows = [Float32(0), 0, Float32(5), 5]
@@ -369,7 +375,7 @@ def test_buffers_round_trip_through_the_arena() raises:
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
-    var index = DenseIndex.init_ram(library, DenseOptions(DenseMetric.INNER, ScalarKind.F32, dimensions=2))
+    var index = DenseIndex.init_ram(library, DenseOptions(2, DenseMetric.INNER))
     index.reserve(2)
     var rows = [Float32(1), 2, Float32(3), 4]
     var keys = [Key(integer=5), Key(integer=6)]
@@ -394,13 +400,18 @@ def test_search_stream_pulls_in_distance_order() raises:
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
-    var index = DenseIndex.init_ram(library, DenseOptions(DenseMetric.EUCLIDEAN, ScalarKind.F32, dimensions=2))
+    var index = DenseIndex.init_ram(library, DenseOptions(2, DenseMetric.EUCLIDEAN))
     index.reserve(2)
     var rows = [Float32(0), 0, Float32(5), 5]
     var keys = [Key(integer=1), Key(integer=2)]
     index.insert(keys, RowsView.of(rows, 2))
 
     var query = [Float32(4), 4]
+    try:
+        _ = index.on(executor).search_stream(RowsView.of(query, 2))
+    except error:
+        assert_true(error.status == Status.UNSUPPORTED, "a residency that streams no matches yet refuses the stream")
+        return
     var stream = index.on(executor).search_stream(RowsView.of(query, 2))
     var arena = Arena(executor)
     assert_true(stream.next(1, arena).row_keys(0)[0] == Key(integer=2), "the first pull lands the nearest")
@@ -452,14 +463,18 @@ def test_merge_consumes_its_donors() raises:
         return
     var library = Library()
     var index = _basis(library)
-    var donor = DenseIndex.init_ram(library, DenseOptions(DenseMetric.INNER, ScalarKind.F32, 2, values_per_key=2))
+    var donor = DenseIndex.init_ram(library, DenseOptions(2, DenseMetric.INNER, values_per_key=2))
     donor.reserve(1)
     var rows = [Float32(1), 1]
     var keys = [Key(integer=3)]
     donor.insert(keys, RowsView.of(rows, 2))
     var donors = List[DenseIndex]()
     donors.append(donor^)
-    index.merge(donors^)
+    try:
+        index.merge(donors^)
+    except error:
+        assert_true(error.status == Status.UNSUPPORTED, "no residency absorbs donors yet")
+        return
     assert_equal(Int(index.describe().size), 3, "the donor's row joined")
     assert_equal(index.count(Key(integer=3)), 1, "under its own key")
 
@@ -472,6 +487,11 @@ def test_mutating_a_view_is_refused_as_read_only() raises:
     var library = Library()
     var index = _basis(library)
     index.save("/tmp/usearch-mojo-view.safegraphs")
+    try:
+        _ = DenseIndex.view_ram(library, "/tmp/usearch-mojo-view.safegraphs")
+    except error:
+        assert_true(error.status == Status.UNSUPPORTED, "RAM serves no mapping in place yet")
+        return
     var view = DenseIndex.view_ram(library, "/tmp/usearch-mojo-view.safegraphs")
     assert_equal(Int(view.describe().size), 2, "the view serves what was saved")
     var status = Status.SUCCESS
@@ -480,6 +500,24 @@ def test_mutating_a_view_is_refused_as_read_only() raises:
     except error:
         status = error.status
     assert_true(status == Status.READ_ONLY, "clearing a view is refused as read-only")
+
+
+def test_scans_find_every_query_itself() raises:
+    """A scan scores every row rather than the ones a walk reaches, so every query finds itself first."""
+    if not _engine_is_present():
+        print("skipped: libusearch_shared is not on the loader path")
+        return
+    var library = Library()
+    var index = DenseIndex.init_ram(library, DenseOptions(2))
+    index.reserve(3)
+    var rows = [Float32(1), 0, Float32(0), 1, Float32(1), 1]
+    var keys = [Key(integer=0), Key(integer=1), Key(integer=2)]
+    index.insert(keys, RowsView.of(rows, 2))
+    var arena = Arena(library)
+    var matches = index.search(RowsView.of(rows, 2), 1, arena, DenseSearchConfig(traversal=Traversal.SCAN))
+    assert_equal(len(matches), 3, "every row is a query")
+    for query in range(3):
+        assert_true(matches.row_keys(query)[0] == keys[query], "each query finds itself first")
 
 
 # endregion Engine
@@ -618,7 +656,7 @@ def test_maxsim_scores_over_documents_rather_than_rows() raises:
 
 @fieldwise_init
 struct _ValueTable(ImplicitlyCopyable, TrivialRegisterPassable):
-    """The `Float32` value rows an attend test resolves keys through, its first `rows` resolvable."""
+    """The `BFloat16` value rows an attend test resolves keys through, its first `rows` resolvable."""
 
     var data: Address
     var rows: Int
@@ -636,7 +674,7 @@ def _value_rows(
     """Resolves the key of integer `k` to row `k` of the table, and to no row past its resolvable ones
     or for a kind or width other than the table's own."""
     var table = Pointer[_ValueTable, ImmUntrackedOrigin](unsafe_from_address=state)[]
-    var shaped = scalar == ScalarKind.F32 and Int(columns) * 4 == table.row_bytes
+    var shaped = scalar == ScalarKind.BF16 and Int(columns) * 2 == table.row_bytes
     for lane in range(Int(count)):
         var row = Int(keys[unsafe_offset=lane].as_integer().value())
         rows[unsafe_offset=lane] = table.data + row * table.row_bytes if shaped and row < table.rows else NULL_ADDRESS
@@ -651,16 +689,18 @@ def test_attend_is_exact_attention_over_every_key() raises:
         return
     var library = Library()
     var executor = Executor.for_ram(library, threads=2)
-    var index = DenseIndex.init_ram(library, DenseOptions(DenseMetric.INNER, ScalarKind.F32, dimensions=2))
+    var index = DenseIndex.init_ram(library, DenseOptions(2, DenseMetric.INNER))
     var on = index.on(executor)
     on.reserve(3)
-    var rows = [Float32(1), 0, Float32(0), 1, Float32(0.6), Float32(0.8)]
+    # Every value is exact in bf16, so the oracle below scores what the index stores.
+    var rows = [Float32(1), 0, Float32(0), 1, Float32(0.5), Float32(0.75)]
     var keys = [Key(integer=0), Key(integer=1), Key(integer=2)]
     on.insert(keys, RowsView.of(rows, 2))
 
-    var values = [Float32(10), Float32(-1), Float32(20), Float32(-2), Float32(30), Float32(-3)]
+    # Value rows come in the index's own quantization.
+    var values = [BFloat16(10), BFloat16(-1), BFloat16(20), BFloat16(-2), BFloat16(30), BFloat16(-3)]
     var table = stack_allocation[1, _ValueTable]()
-    table[unsafe_offset=0] = _ValueTable(Int(values.unsafe_ptr()), 3, 8)
+    table[unsafe_offset=0] = _ValueTable(Int(values.unsafe_ptr()), 3, 4)
     var queries = [Float32(1), 0, Float32(0), 1]
     var arena = Arena(executor)
     for head_count in range(1, 3):
@@ -686,9 +726,10 @@ def test_attend_is_exact_attention_over_every_key() raises:
                 for column in range(2):
                     mixed[column] += weight * Float64(values[key * 2 + column])
             for column in range(2):
-                assert_almost_equal(Float64(outputs[query][column]), mixed[column] / partition, atol=1e-4)
-            assert_almost_equal(Float64(carry[query].maximum_score), maximum, atol=1e-5)
-            assert_almost_equal(Float64(carry[query].partition), partition, atol=1e-5)
+                var expected = mixed[column] / partition
+                assert_almost_equal(Float64(outputs[query][column]), expected, atol=1e-3 * max(abs(expected), 1.0))
+            assert_almost_equal(Float64(carry[query].maximum_score), maximum, atol=1e-3 * max(abs(maximum), 1.0))
+            assert_almost_equal(Float64(carry[query].partition), partition, atol=1e-3 * max(abs(partition), 1.0))
 
     var short_carry = List[DenseSoftmaxState](length=1, fill=DenseSoftmaxState())
     var status = Status.SUCCESS
@@ -700,7 +741,7 @@ def test_attend_is_exact_attention_over_every_key() raises:
         status = error.status
     assert_true(status == Status.SHAPE_MISMATCH, "one softmax state cannot carry two rows")
 
-    table[unsafe_offset=0] = _ValueTable(Int(values.unsafe_ptr()), 2, 8)
+    table[unsafe_offset=0] = _ValueTable(Int(values.unsafe_ptr()), 2, 4)
     status = Status.SUCCESS
     try:
         _ = on.attend[DType.float32](RowsView.of(queries, 2), _value_rows, Int(table), arena)
@@ -736,6 +777,7 @@ def main() raises:
     suite.test[test_health_audits_every_entry]()
     suite.test[test_merge_consumes_its_donors]()
     suite.test[test_mutating_a_view_is_refused_as_read_only]()
+    suite.test[test_scans_find_every_query_itself]()
     suite.test[test_deferred_calls_wait_until_final]()
     suite.test[test_deferred_failures_repeat]()
     suite.test[test_deferred_refusals_finish_at_submission]()

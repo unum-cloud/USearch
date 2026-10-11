@@ -10,12 +10,12 @@ import os
 
 import numpy as np
 import pytest
-from base import SETTINGS, batch_sizes
+from base import BATCH_SIZES, SETTINGS
 
 from usearch.io import load_matrix, save_matrix
 
 
-@pytest.mark.parametrize("rows", batch_sizes)
+@pytest.mark.parametrize("rows", BATCH_SIZES)
 @pytest.mark.parametrize("columns", SETTINGS.dims)
 @pytest.mark.parametrize(("extension", "dtype"), [("fbin", np.float32), ("ibin", np.int32)])
 def test_matrix_roundtrip(tmp_path, rows: int, columns: int, extension: str, dtype):

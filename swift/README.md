@@ -23,7 +23,7 @@ A single vector is a one-row matrix, so nothing is reshaped and nothing is copie
 import NumKong
 import USearch
 
-let index = try DenseIndex.initRam(DenseOptions(dimensions: 3, metric: .angular, quantization: .f32))
+let index = try DenseIndex.initRam(DenseOptions(dimensions: 3, metric: .angular, quantization: .bf16))
 try index.reserve(2)
 
 let vectors = try Tensor.fromArray([Float](arrayLiteral: 0.3, 0.5, 1.2, 0.4, 0.2, 1.2), rows: 2, columns: 3)
@@ -248,6 +248,7 @@ let restored = try monolith.withUnsafeBytes { bytes in
 
 The predicate runs on the executor's threads, so it must be `@Sendable` and safe for concurrent use; an error it throws rejects that key.
 Non-matching entries still route the traversal, so recall does not collapse at low selectivity.
+`DenseSearchConfig(traversal: .scan)` skips the walk and scores every row exactly, on RAM and NVMe handles, the fallback for a filter too selective for a walk to cross.
 
 ```swift
 let even = try index.on(executor).search(queries, wanted: 10, arena: arena, config: DenseSearchConfig(

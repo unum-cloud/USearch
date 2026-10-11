@@ -9,6 +9,13 @@ Every verb is a batch, and one vector is a one-row matrix, so a memory-mapped da
 pip install usearch
 ```
 
+The wheels carry every dense storage type.
+A build from source takes its count from `USEARCH_DENSE_DTYPES` in `pyproject.toml`, eleven, and a leaner one can override it:
+
+```sh
+pip install . -C cmake.define.USEARCH_DENSE_DTYPES=4  # `bf16`, `u1x8`, `i8` & `e4m3` alone
+```
+
 ## Quickstart
 
 ```python
@@ -19,7 +26,7 @@ from usearch import DenseIndex, DenseMetric, Scalar
 index = DenseIndex.init_ram(
     dimensions=256,                 # Scalars per vector
     metric=DenseMetric.ANGULAR,     # INNER, ANGULAR, EUCLIDEAN, HAMMING or JACCARD
-    quantization=Scalar.BF16,       # The stored scalar type: F64...E2M3, I8, U8, U1X8
+    quantization=Scalar.BF16,       # The stored scalar type: BF16...E2M3, I8, U8, U1X8
     connectivity=16,                # Connections per node; 0 derives it from the geometry
 )
 
@@ -212,6 +219,8 @@ for expansion_factor in (16, 32, 64, 128, 256):
     index.on(pool).search(queries, 10, arena, expansion_factor=expansion_factor, stats=stats)
     print(expansion_factor, stats.computed_distances)
 ```
+
+`traversal=usearch.Traversal.SCAN` skips the walk and scores every row exactly, on RAM and NVMe handles, which gives such a sweep its ground truth.
 
 ## Callbacks
 

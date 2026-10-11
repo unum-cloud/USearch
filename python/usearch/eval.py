@@ -14,14 +14,13 @@ from time import perf_counter_ns
 from typing import Any, Literal
 
 import numpy as np
+import numpy.typing as npt
 
 import numkong as nk
 from usearch import Arena, DenseIndex, DenseMetric, DenseTraversalStats, On
 from usearch.keys import integers_to_keys, keys_to_integers
 
-# `integers_to_keys` and `keys_to_integers` are re-exported so a caller reaching for the recall
-# harness finds the identity bridge beside it.
-__all__ = [
+__all__: list[str] = [
     "SearchStats",
     "exact_matches",
     "index_keys",
@@ -31,8 +30,9 @@ __all__ = [
     "random_vectors",
     "self_recall",
 ]
+"""`integers_to_keys` and `keys_to_integers` are re-exported so a caller reaching for the recall
+harness finds the identity bridge beside it."""
 
-# The NumKong spelling of every metric the index scores, which the two libraries share.
 _NUMKONG_METRICS: dict[DenseMetric, Literal["inner", "angular", "euclidean", "hamming", "jaccard"]] = {
     DenseMetric.INNER: "inner",
     DenseMetric.ANGULAR: "angular",
@@ -40,14 +40,15 @@ _NUMKONG_METRICS: dict[DenseMetric, Literal["inner", "angular", "euclidean", "ha
     DenseMetric.HAMMING: "hamming",
     DenseMetric.JACCARD: "jaccard",
 }
+"""The NumKong spelling of every metric the index scores, which the two libraries share."""
 
-# Metrics over packed bits, where generation produces bit vectors rather than gaussians.
-_BITWISE_METRICS = (DenseMetric.HAMMING, DenseMetric.JACCARD)
+_BITWISE_METRICS: tuple[DenseMetric, ...] = (DenseMetric.HAMMING, DenseMetric.JACCARD)
+"""Metrics over packed bits, where generation produces bit vectors rather than gaussians."""
 
-# NumKong scores `inner` as the raw dot product while the index scores it as `1 - dot`, so the
-# two rank a candidate list in opposite directions. Every other metric agrees on direction, and
-# ranking is all an oracle needs - a monotone difference in magnitude changes no ordering.
-_DESCENDING_METRICS = (DenseMetric.INNER,)
+_DESCENDING_METRICS: tuple[DenseMetric, ...] = (DenseMetric.INNER,)
+"""NumKong scores `inner` as the raw dot product while the index scores it as `1 - dot`, so the
+two rank a candidate list in opposite directions. Every other metric agrees on direction, and
+ranking is all an oracle needs - a monotone difference in magnitude changes no ordering."""
 
 
 def random_vectors(
@@ -56,8 +57,9 @@ def random_vectors(
     *,
     metric: DenseMetric = DenseMetric.ANGULAR,
     seed: int = 0,
-) -> np.ndarray:
-    """Reproducible `float32` rows for the given metric.
+) -> npt.NDArray[np.generic]:
+    """Reproducible rows for the given metric: `float32`, or packed `uint8` bits for a bitwise one, hence the
+    generic dtype.
 
     Bitwise metrics get packed bits, where *dimensions* counts bits rather than scalars;
     everything else gets unit-norm gaussians, which sit in the representable range of every
@@ -73,7 +75,7 @@ def random_vectors(
     return (rows / norms).astype(np.float32)
 
 
-def exact_matches(vectors, queries, wanted: int, *, metric: DenseMetric = DenseMetric.ANGULAR) -> np.ndarray:
+def exact_matches(vectors, queries, wanted: int, *, metric: DenseMetric = DenseMetric.ANGULAR) -> npt.NDArray[np.intp]:
     """Brute-force ground truth, scored by the kernels the index itself dispatches to.
 
     Scores the ``(Q, dimensions)`` queries against the ``(N, dimensions)`` matrix the index was
@@ -113,7 +115,7 @@ class SearchStats:
         return self.count_matches / self.count_queries
 
 
-def index_keys(index: DenseIndex | On[DenseIndex], arena: Arena) -> np.ndarray:
+def index_keys(index: DenseIndex | On[DenseIndex], arena: Arena) -> npt.NDArray[np.uint8]:
     """Every identity the index holds, as a (size, 16) matrix, walked through one cursor landing in *arena*."""
     cursor, batches = index.cursor(), [np.zeros((0, 16), dtype=np.uint8)]
     while batch := cursor.next(1024, arena):

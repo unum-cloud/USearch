@@ -2,8 +2,9 @@
  *  @file include/usearch/utilities/ram_sorts.hpp
  *  @author Ash Vardanian
  *  @date September 27, 2026
- *  @brief Orderings that never allocate: sorting networks for the smallest batches and an in-place radix
- *      grouping for the rest, so no hot path calls a library sort.
+ *  @brief Orderings that never allocate: sorting networks for the smallest batches, an in-place
+ *      radix grouping for the rest, and a heap selection of the first few, so no hot path calls a
+ *      library sort.
  */
 #pragma once
 
@@ -11,7 +12,6 @@
 
 #include <array>       // `std::array` - the bucket tables
 #include <functional>  // `std::less`
-#include <numeric>     // `std::exclusive_scan` - the bucket starts
 #include <span>        // `std::span`, `std::as_bytes`
 #include <type_traits> // `std::is_trivially_copyable_v`
 #include <utility>     // `std::swap`
@@ -58,8 +58,11 @@ void radix_group(std::span<value_type_> values, key_type_ value_type_::* key, st
     };
     std::array<u32_t, 256> next {}, ends {};
     for (value_type_ const& value : values) ++ends[digit(value)];
-    std::exclusive_scan(ends.begin(), ends.end(), next.begin(), u32_t {0});
-    for (std::size_t bucket = 0; bucket != 256; ++bucket) ends[bucket] += next[bucket];
+    for (u32_t bucket = 0, start = 0; bucket != 256; ++bucket) {
+        next[bucket] = start;
+        start += ends[bucket];
+        ends[bucket] = start;
+    }
     // Each swap drops one value into its bucket for good, so the cycles finish in one sweep.
     for (std::size_t bucket = 0; bucket != 256; ++bucket)
         while (next[bucket] != ends[bucket]) {
@@ -69,6 +72,31 @@ void radix_group(std::span<value_type_> values, key_type_ value_type_::* key, st
         }
     for (std::size_t bucket = 0, begin = 0; bucket != 256; begin = ends[bucket++])
         radix_group(values.subspan(begin, ends[bucket] - begin), key, position + 1);
+}
+
+/** Moves the first @p count of @p values under @p comparator to the front, ascending, in place -
+ *  @c std::partial_sort re-spelled: a heap of the front keeps the worst kept on top, so a later
+ *  value costs one compare unless it displaces that worst. */
+template <typename value_type_, typename comparator_type_ = std::less<void>>
+void partial_sort(std::span<value_type_> values, std::size_t count, comparator_type_ comparator = {}) noexcept {
+    if (!count) return;
+    auto sift_down = [&](std::size_t root, std::size_t size) noexcept {
+        for (std::size_t child = 2 * root + 1; child < size; root = child, child = 2 * root + 1) {
+            if (child + 1 < size && comparator(values[child], values[child + 1])) ++child;
+            if (!comparator(values[root], values[child])) return;
+            std::swap(values[root], values[child]);
+        }
+    };
+    for (std::size_t parent = count / 2; parent-- != 0;) sift_down(parent, count);
+    for (std::size_t candidate = count; candidate < values.size(); ++candidate)
+        if (comparator(values[candidate], values[0])) {
+            std::swap(values[0], values[candidate]);
+            sift_down(0, count);
+        }
+    for (std::size_t size = count; size > 1;) {
+        std::swap(values[0], values[--size]);
+        sift_down(0, size);
+    }
 }
 
 } // namespace usearch

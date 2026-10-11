@@ -7,36 +7,34 @@
  */
 #include "dense_specializations.cuh"
 
-template struct specialized_index<vram_index<nk_bf16_k, nk_kernel_dot_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_bf16_k, nk_kernel_angular_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_bf16_k, nk_kernel_euclidean_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_f16_k, nk_kernel_dot_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_f16_k, nk_kernel_angular_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_f16_k, nk_kernel_euclidean_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_e5m2_k, nk_kernel_dot_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_e5m2_k, nk_kernel_angular_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_e5m2_k, nk_kernel_euclidean_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_e4m3_k, nk_kernel_dot_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_e4m3_k, nk_kernel_angular_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_e4m3_k, nk_kernel_euclidean_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_e3m2_k, nk_kernel_dot_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_e3m2_k, nk_kernel_angular_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_e3m2_k, nk_kernel_euclidean_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_e2m3_k, nk_kernel_dot_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_e2m3_k, nk_kernel_angular_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_e2m3_k, nk_kernel_euclidean_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_i8_k, nk_kernel_dot_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_i8_k, nk_kernel_angular_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_i8_k, nk_kernel_euclidean_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_i4_k, nk_kernel_dot_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_i4_k, nk_kernel_angular_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_i4_k, nk_kernel_euclidean_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_u8_k, nk_kernel_dot_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_u8_k, nk_kernel_angular_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_u8_k, nk_kernel_euclidean_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_u4_k, nk_kernel_dot_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_u4_k, nk_kernel_angular_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_u4_k, nk_kernel_euclidean_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_u1_k, nk_kernel_dot_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_u1_k, nk_kernel_hamming_k, gpu_class_t::nvidia_hopper_k>>;
-template struct specialized_index<vram_index<nk_u1_k, nk_kernel_jaccard_k, gpu_class_t::nvidia_hopper_k>>;
+template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::nvidia_hopper_k>>;
+#if USEARCH_DENSE_DTYPES >= 2
+template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::nvidia_hopper_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::nvidia_hopper_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::nvidia_hopper_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::nvidia_hopper_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::nvidia_hopper_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::nvidia_hopper_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::nvidia_hopper_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::nvidia_hopper_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::nvidia_hopper_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::nvidia_hopper_k>>;
+#endif

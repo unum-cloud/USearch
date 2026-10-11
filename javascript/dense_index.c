@@ -645,9 +645,6 @@ static napi_value usearch_js_index_refine(napi_env env, napi_callback_info info)
     return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
 }
 
-/** The engine lands counts and offsets as @c size_t, which a @c BigUint64Array views in place. */
-_Static_assert(sizeof(size_t) == sizeof(uint64_t), "Counts land in a BigUint64Array, eight bytes apiece");
-
 /** Builds an object of @p count named values, or answers @c NULL with an exception pending. */
 static napi_value usearch_js_object(napi_env env, size_t count, char const* const* names, napi_value const* values) {
     napi_value object = NULL;
@@ -716,10 +713,10 @@ static napi_value usearch_js_finish_matches(napi_env env, usearch_js_call_t* cal
 }
 
 /** @c search(executor, completion, data, rows, columns, stride, scalar, arena, wanted, expansion,
- *  stats) → @c {keys, scores, counts, columns}, viewed inside @p arena. */
+ *  traversal, stats) → @c {keys, scores, counts, columns}, viewed inside @p arena. */
 static napi_value usearch_js_index_search(napi_env env, napi_callback_info info) {
-    napi_value arguments[11], self = NULL, deferred = NULL;
-    usearch_js_index_t* const index = usearch_js_index_self(env, info, 11, arguments, &self);
+    napi_value arguments[12], self = NULL, deferred = NULL;
+    usearch_js_index_t* const index = usearch_js_index_self(env, info, 12, arguments, &self);
     usearch_js_dense_call_t local;
     usearch_dense_search_t search = {.index = index ? index->handle : NULL};
     usearch_js_dense_call_t* const call =
@@ -728,12 +725,13 @@ static napi_value usearch_js_index_search(napi_env env, napi_callback_info info)
     if (!usearch_js_rows_from_value(env, arguments + 2, "queries", &search.count, &search.queries) ||
         !usearch_js_size_from_value(env, arguments[8], "wanted", &search.wanted) ||
         !usearch_js_size_from_value(env, arguments[9], "expansionFactor", &search.expansion_factor) ||
-        !usearch_js_stats_from_value(env, arguments[10], call, &search.stats) ||
+        !usearch_js_traversal_from_value(env, arguments[10], "traversal", &search.traversal) ||
+        !usearch_js_stats_from_value(env, arguments[11], call, &search.stats) ||
         !usearch_js_arena_from_value(env, arguments[7], &call->call, &search.arena)) {
         usearch_js_call_abandon(&call->call, &local.call);
         return NULL;
     }
-    napi_value const slots[usearch_js_slots_k] = {self, arguments[0], arguments[7], arguments[2], NULL, arguments[10]};
+    napi_value const slots[usearch_js_slots_k] = {self, arguments[0], arguments[7], arguments[2], NULL, arguments[11]};
     call->call.finish = usearch_js_finish_matches;
     call->count = search.count;
     search.outcome = &call->call.outcome;

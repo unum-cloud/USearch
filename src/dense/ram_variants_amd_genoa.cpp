@@ -6,12 +6,10 @@
  */
 #include "dense_specializations.cuh"
 
-template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::amd_genoa_k>>;
-template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::amd_genoa_k>>;
-template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::amd_genoa_k>>;
-template struct specialized_index<ram_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::amd_genoa_k>>;
-template struct specialized_index<ram_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::amd_genoa_k>>;
-template struct specialized_index<ram_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::amd_genoa_k>>;
-template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::amd_genoa_k>>;
-template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::amd_genoa_k>>;
-template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::amd_genoa_k>>;
+template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::amd_genoa_k>>;
+#if USEARCH_DENSE_DTYPES >= 4
+template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::amd_genoa_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::amd_genoa_k>>;
+#endif

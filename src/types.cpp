@@ -171,6 +171,18 @@ USEARCH_EXPORT usearch_residency_t usearch_residency_from_name(usearch_bytes_vie
     return usearch_residency_ram_k;
 }
 
+USEARCH_EXPORT char const* usearch_traversal_name(usearch_traversal_t traversal) {
+    switch (traversal) {
+    case usearch_traversal_walk_k: return "walk";
+    case usearch_traversal_scan_k: return "scan";
+    default: return "unknown";
+    }
+}
+
+USEARCH_EXPORT usearch_traversal_t usearch_traversal_from_name(usearch_bytes_view_t name) {
+    return named(name, "scan") ? usearch_traversal_scan_k : usearch_traversal_walk_k;
+}
+
 USEARCH_EXPORT char const* usearch_mood_name(usearch_mood_t mood) {
     switch (mood) {
     case usearch_mood_parked_k: return "parked";
@@ -191,9 +203,12 @@ USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class)
     case usearch_cpu_class_intel_skylake_k: return "intel-skylake";
     case usearch_cpu_class_intel_icelake_k: return "intel-icelake";
     case usearch_cpu_class_amd_genoa_k: return "amd-genoa";
+    case usearch_cpu_class_intel_sapphire_k: return "intel-sapphire";
+    case usearch_cpu_class_intel_granite_k: return "intel-granite";
     case usearch_cpu_class_intel_diamond_k: return "intel-diamond";
     case usearch_cpu_class_aws_g2_k: return "aws-g2";
     case usearch_cpu_class_apple_m2_k: return "apple-m2";
+    case usearch_cpu_class_apple_m4_k: return "apple-m4";
     case usearch_cpu_class_aws_g5_k: return "aws-g5";
     case usearch_cpu_class_nvidia_vera_k: return "nvidia-vera";
     case usearch_cpu_class_alibaba_c930_k: return "alibaba-c930";

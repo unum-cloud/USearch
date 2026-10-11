@@ -18,161 +18,161 @@ namespace unum::usearch::bench {
 
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f32_t, nk_bf16_k>( //
     utilities::persisted_dataset<nk::f32_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::bf16_t, nk_bf16_k>( //
     utilities::persisted_dataset<nk::bf16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f16_t, nk_bf16_k>( //
     utilities::persisted_dataset<nk::f16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::i8_t, nk_bf16_k>( //
     utilities::persisted_dataset<nk::i8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::u8_t, nk_bf16_k>( //
     utilities::persisted_dataset<nk::u8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f32_t, nk_f16_k>( //
     utilities::persisted_dataset<nk::f32_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::bf16_t, nk_f16_k>( //
     utilities::persisted_dataset<nk::bf16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f16_t, nk_f16_k>( //
     utilities::persisted_dataset<nk::f16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::i8_t, nk_f16_k>( //
     utilities::persisted_dataset<nk::i8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::u8_t, nk_f16_k>( //
     utilities::persisted_dataset<nk::u8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f32_t, nk_e5m2_k>( //
     utilities::persisted_dataset<nk::f32_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::bf16_t, nk_e5m2_k>( //
     utilities::persisted_dataset<nk::bf16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f16_t, nk_e5m2_k>( //
     utilities::persisted_dataset<nk::f16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::i8_t, nk_e5m2_k>( //
     utilities::persisted_dataset<nk::i8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::u8_t, nk_e5m2_k>( //
     utilities::persisted_dataset<nk::u8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f32_t, nk_e4m3_k>( //
     utilities::persisted_dataset<nk::f32_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::bf16_t, nk_e4m3_k>( //
     utilities::persisted_dataset<nk::bf16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f16_t, nk_e4m3_k>( //
     utilities::persisted_dataset<nk::f16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::i8_t, nk_e4m3_k>( //
     utilities::persisted_dataset<nk::i8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::u8_t, nk_e4m3_k>( //
     utilities::persisted_dataset<nk::u8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f32_t, nk_e3m2_k>( //
     utilities::persisted_dataset<nk::f32_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::bf16_t, nk_e3m2_k>( //
     utilities::persisted_dataset<nk::bf16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f16_t, nk_e3m2_k>( //
     utilities::persisted_dataset<nk::f16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::i8_t, nk_e3m2_k>( //
     utilities::persisted_dataset<nk::i8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::u8_t, nk_e3m2_k>( //
     utilities::persisted_dataset<nk::u8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f32_t, nk_e2m3_k>( //
     utilities::persisted_dataset<nk::f32_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::bf16_t, nk_e2m3_k>( //
     utilities::persisted_dataset<nk::bf16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f16_t, nk_e2m3_k>( //
     utilities::persisted_dataset<nk::f16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::i8_t, nk_e2m3_k>( //
     utilities::persisted_dataset<nk::i8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::u8_t, nk_e2m3_k>( //
     utilities::persisted_dataset<nk::u8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f32_t, nk_i8_k>( //
     utilities::persisted_dataset<nk::f32_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::bf16_t, nk_i8_k>( //
     utilities::persisted_dataset<nk::bf16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f16_t, nk_i8_k>( //
     utilities::persisted_dataset<nk::f16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::i8_t, nk_i8_k>( //
     utilities::persisted_dataset<nk::i8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::u8_t, nk_i8_k>( //
     utilities::persisted_dataset<nk::u8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f32_t, nk_i4_k>( //
     utilities::persisted_dataset<nk::f32_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::bf16_t, nk_i4_k>( //
     utilities::persisted_dataset<nk::bf16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f16_t, nk_i4_k>( //
     utilities::persisted_dataset<nk::f16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::i8_t, nk_i4_k>( //
     utilities::persisted_dataset<nk::i8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::u8_t, nk_i4_k>( //
     utilities::persisted_dataset<nk::u8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f32_t, nk_u8_k>( //
     utilities::persisted_dataset<nk::f32_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::bf16_t, nk_u8_k>( //
     utilities::persisted_dataset<nk::bf16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f16_t, nk_u8_k>( //
     utilities::persisted_dataset<nk::f16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::i8_t, nk_u8_k>( //
     utilities::persisted_dataset<nk::i8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::u8_t, nk_u8_k>( //
     utilities::persisted_dataset<nk::u8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f32_t, nk_u4_k>( //
     utilities::persisted_dataset<nk::f32_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::bf16_t, nk_u4_k>( //
     utilities::persisted_dataset<nk::bf16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::f16_t, nk_u4_k>( //
     utilities::persisted_dataset<nk::f16_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::i8_t, nk_u4_k>( //
     utilities::persisted_dataset<nk::i8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 extern template int dense::run_indexes_algebra_with_stored_dtype<nk::u8_t, nk_u4_k>( //
     utilities::persisted_dataset<nk::u8_t> const&, settings_t const&, algebra_settings_t const&, std::span<int const>,
-    cuda_arch_t);
+    nk_capability_t);
 
 /** Runs the multi-device CUDA algebra benchmark over the flags in @p argv. */
 int bench_dense_vram_indexes_algebra(int argc, char const* const* argv) {
     algebra_settings_t algebra;
     auto const on_dataset = [&]<typename dataset_scalar_type_>(
                                 utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
-                                settings_t const& settings, std::span<int const> devices, cuda_arch_t max_compute,
+                                settings_t const& settings, std::span<int const> devices, nk_capability_t max_compute,
                                 cuda_address_space_t plane_space) {
         if (plane_space == cuda_address_space_t::managed_k)
             return fmt::println(stderr, "--managed-memory pages one index's planes; every shard here stays in VRAM"), 1;

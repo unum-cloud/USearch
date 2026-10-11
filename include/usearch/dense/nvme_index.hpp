@@ -47,7 +47,6 @@
 #include <cassert> // `assert`
 #include <cstring> // `std::memcpy`
 
-#include <algorithm>   // `std::find`, `std::any_of`, for a walk's hop slots
 #include <array>       // `std::array`
 #include <atomic>      // `std::atomic_ref`
 #include <chrono>      // `std::chrono::steady_clock`, for per-row latencies
@@ -220,20 +219,18 @@ enum class dense_nvme_key_reads_t : u8_t {
  *  several hops in flight, expanding the next closest frontier nodes inside its pool's radius
  *  before earlier hops land, so a full batch walks hop by hop and a lone query takes the queue.
  */
-template <                                               //
-    nk_dtype_t vector_dtype_ = nk_bf16_k,                //
-    nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k, //
-    nk_capability_t capability_ = nk_cap_icelake_k,      //
-    typename engine_type_ = default_io_engine_t          //
+template <                                          //
+    nk_dtype_t vector_dtype_ = nk_bf16_k,           //
+    nk_capability_t capability_ = nk_cap_icelake_k, //
+    typename engine_type_ = default_io_engine_t     //
     >
 struct dense_nvme_index {
 
     // The sharded index walks every part of a row on one thread, through the walk machinery below.
-    template <typename, nk_dtype_t, nk_kernel_kind_t, nk_capability_t, typename>
+    template <typename, nk_dtype_t, nk_capability_t, typename>
     friend struct dense_nvme_indexes;
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
-    inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
     inline static constexpr nk_capability_t capability_k = capability_;
 
     using engine_t = engine_type_;
@@ -253,12 +250,15 @@ struct dense_nvme_index {
 
     using vector_view_t = nk::vector_view<scalar_t>;
     using vectors_view_t = nk::matrix_view<scalar_t>;
-    using vector_norms_t = stored_norms<kernel_kind_, scalar_t>;
+    using vector_norms_t = vector_norms<dot_result_t>;
 
     /** The capability bit of the distance kit the chain actually picked, lower than @c capability_
-     *  when no SIMD kit is adapted for this dtype & metric pair yet. */
+     *  when no SIMD kit is adapted for this dtype yet. */
     inline static constexpr nk_capability_t picked_quads_capability_k =
-        dense_quads_chain<kernel_kind_, scalar_t, capability_>::picked_k;
+        dense_quads_chain<scalar_t, capability_>::picked_k;
+
+    /** The distance kit the chain picked. */
+    using quads_kit_t = typename dense_quads_chain<scalar_t, capability_>::kit_t;
 
     /** The strongest @c synchronization_t contract this design honors: the payload is immutable, so
      *  arbitrary readers share one instance with no fences at all. */
@@ -269,6 +269,10 @@ struct dense_nvme_index {
 
         /** Breadth of each walk's candidate pool; defaults to twice the connectivity. */
         small_size_t expansion_factor = 0;
+
+        /** How rows are reached; @c scan_k streams every part's value column, ignoring the
+         *  breadth. */
+        traversal_t traversal = traversal_t::walk_k;
     };
 
     /** Telemetry of one batched call; matches land in the caller's spans. */
@@ -306,19 +310,34 @@ struct dense_nvme_index {
         std::size_t round_trips = 0;
     };
 
-    dense_nvme_index() noexcept = default;
+    /** An empty index ranking by @p kernel once it views a part; a kernel the dtype's kits cannot
+     *  finalize is refused at @ref view. */
+    explicit dense_nvme_index(nk_kernel_kind_t kernel = nk_kernel_angular_k) noexcept : kernel_(kernel) {}
     dense_nvme_index(dense_nvme_index&&) noexcept = default;
     dense_nvme_index& operator=(dense_nvme_index&&) noexcept = default;
     dense_nvme_index(dense_nvme_index const&) = delete;
     dense_nvme_index& operator=(dense_nvme_index const&) = delete;
 
+    /** The distance kind every search ranks by, fixed at construction. */
+    nk_kernel_kind_t kernel() const noexcept { return kernel_; }
+
+    /** Whether the kernel reads rows' norms: every metric but a dot, and a dot whose kit
+     *  compensates. */
+    bool stores_norms() const noexcept { return stores_norms_(kernel_); }
+
+    /** The norms of @p row the kernel reads, or none when it reads none. */
+    vector_norms_t dense_norms(vector_view_t row) const noexcept { return dense_norms_(kernel_, row); }
+
     /** Opens the SafeGraphs monolith at @p path, a file, a device or, in SPDK builds, a transport
      *  ID with optional @c ns:<ID> and @c base:<bytes> keys: its header, vetted against this
-     *  instantiation, and its medium for the engines. A failed view leaves the index empty. */
+     *  instantiation and its kernel, and its medium for the engines. Refuses with
+     *  @c unknown_kind_k a kernel the dtype's kits cannot finalize. A failed view leaves the index
+     *  empty. */
     status_t view(std::string_view path) noexcept {
         medium_ = medium_t {};
         part_ = {};
-        return open_part_(path, dtype_t::unknown_k, std::allocator<byte_t> {}, medium_, part_);
+        if (!dense_kernel_supported<quads_kit_t>(kernel_)) return status_t::unknown_kind_k;
+        return open_part_(path, dtype_t::unknown_k, kernel_, std::allocator<byte_t> {}, medium_, part_);
     }
 
     /** Rows the part holds. */
@@ -345,9 +364,9 @@ struct dense_nvme_index {
      *
      *  @param[in] queries The batch, one query per row, in the part's stored scalar type.
      *  @param[inout] executor The threads, their engines and their scratch; held for the call.
-     *  @param[in] config The walk breadth.
-     *  @param[in] wanted Matches kept per query, the row width of @p node_ids and @p distances.
-     *  @param[out] node_ids Rankings by node ID, @b [queries,wanted] row-major.
+     *  @param[in] config The walk breadth; @c scan_k is refused with @c unsupported_k, as exact
+     *      scans run over @c dense_nvme_indexes, which a monolith views as one shard.
+     *  @param[out] node_ids Rankings by node ID, one query per row, as many matches as its width.
      *  @param[out] distances Distances of the same rankings, ascending per row.
      *  @param[out] counts Matches written per query.
      *
@@ -355,9 +374,9 @@ struct dense_nvme_index {
      *  @c io_k.
      */
     expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     std::size_t wanted, std::span<node_id_t> node_ids, std::span<distance_t> distances,
+                                     nk::matrix_span<node_id_t> node_ids, nk::matrix_span<distance_t> distances,
                                      std::span<std::size_t> counts) noexcept {
-        return search_(queries, dummy_heads_t {}, executor, config, wanted, node_ids, distances, counts);
+        return search_(queries, dummy_heads_t {}, executor, config, node_ids, distances, counts);
     }
 
     /**
@@ -365,14 +384,15 @@ struct dense_nvme_index {
      *      distance is 1 − its node's indexer score against the heads of its query row.
      *
      *  @param[in] heads The indexer heads of every query row.
+     *  @return @c config_mismatch_k unless the part ranks by dot.
      */
     expected<search_result_t> search(vectors_view_t queries, dense_indexer_heads<scalar_t> const& heads,
-                                     executor_t& executor, search_config_t config, std::size_t wanted,
-                                     std::span<node_id_t> node_ids, std::span<distance_t> distances,
-                                     std::span<std::size_t> counts) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k && !nk::is_integral_dtype<scalar_t>())
+                                     executor_t& executor, search_config_t config, nk::matrix_span<node_id_t> node_ids,
+                                     nk::matrix_span<distance_t> distances, std::span<std::size_t> counts) noexcept
+        requires dense_floating_scalar<scalar_t>
     {
-        return search_(queries, heads, executor, config, wanted, node_ids, distances, counts);
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+        return search_(queries, heads, executor, config, node_ids, distances, counts);
     }
 
   private:
@@ -385,6 +405,17 @@ struct dense_nvme_index {
     using visited_set_t = growing_hash_set<dense_node_id_t, std::hash<dense_node_id_t>, scratch_allocator_t,
                                            typename dense_visits_hash_set_chain<capability_>::kit_t>;
 
+    /** Whether @p kernel reads rows' norms, as @ref stores_norms answers for this index's own. */
+    static bool stores_norms_(nk_kernel_kind_t kernel) noexcept {
+        return kernel != nk_kernel_dot_k || dense_quads_compensated<quads_kit_t>;
+    }
+
+    /** The norms of @p row that @p kernel reads, or none, so a plain dot never sums a landed
+     *  row. */
+    static vector_norms_t dense_norms_(nk_kernel_kind_t kernel, vector_view_t row) noexcept {
+        return stores_norms_(kernel) ? usearch::dense_norms<capability_, scalar_t>(row) : vector_norms_t {};
+    }
+
 #pragma region Opening
 
     /** Whether a part's metadata token @p name is absent, or parses to @p parsed equal to the
@@ -394,18 +425,20 @@ struct dense_nvme_index {
     }
 
     /** Opens the part at @p path, a file or device or, in SPDK builds, a transport ID: its medium
-     *  for the engines, and its header vetted against this instantiation and, unless @p key_dtype
-     *  is @c unknown_k, the key column's dtype. A file's header comes through one buffered read, a
-     *  namespace's through blocking sector reads. */
+     *  for the engines, and its header vetted against this instantiation, against @p kernel unless
+     *  it is @c nk_kernel_unknown_k, which then takes the metric the header names, and, unless
+     *  @p key_dtype is @c unknown_k, against the key column's dtype. A file's header comes through
+     *  one buffered read, a namespace's through blocking sector reads. */
     template <typename allocator_type_>
-    static status_t open_part_(std::string_view path, dtype_t key_dtype, allocator_type_ allocator, medium_t& medium,
-                               dense_nvme_part_t& part) noexcept {
+    static status_t open_part_(std::string_view path, dtype_t key_dtype, nk_kernel_kind_t& kernel,
+                               allocator_type_ allocator, medium_t& medium, dense_nvme_part_t& part) noexcept {
 #if USEARCH_WITH_LINUX_SPDK
         if constexpr (std::is_constructible_v<medium_t, spdk_medium_t&&>)
             if (names_transport_id(path)) {
                 auto [name_space, open_status] = spdk_medium_t::open(path);
                 if (failed(open_status)) return open_status;
-                if (status_t const read = read_part_(name_space, key_dtype, allocator, part); failed(read)) return read;
+                if (status_t const read = read_part_(name_space, key_dtype, kernel, allocator, part); failed(read))
+                    return read;
                 medium = medium_t {std::move(name_space)};
                 return status_t::success_k;
             }
@@ -415,7 +448,7 @@ struct dense_nvme_index {
         else {
             auto [file, open_status] = seekable_file_t::open(path, file_mode_t::read_k, allocator);
             if (failed(open_status)) return open_status;
-            if (status_t const read = read_part_(file, key_dtype, allocator, part); failed(read)) return read;
+            if (status_t const read = read_part_(file, key_dtype, kernel, allocator, part); failed(read)) return read;
             auto [file_medium, medium_status] = file_medium_t::open(path);
             if (failed(medium_status)) return part = {}, medium_status;
             medium = medium_t {std::move(file_medium)};
@@ -426,8 +459,8 @@ struct dense_nvme_index {
     /** Reads a part's header through @p source, any reader with `read_at(offset, bytes)`, into
      *  @p part, vetted as @ref open_part_ promises. */
     template <typename source_type_, typename allocator_type_>
-    static status_t read_part_(source_type_ const& source, dtype_t key_dtype, allocator_type_ allocator,
-                               dense_nvme_part_t& part) noexcept {
+    static status_t read_part_(source_type_ const& source, dtype_t key_dtype, nk_kernel_kind_t& kernel,
+                               allocator_type_ allocator, dense_nvme_part_t& part) noexcept {
         growing_buffer<byte_t, allocator_type_> header_bytes {allocator};
         if (status_t const read = dense_nvme_read_header(source, header_bytes); failed(read)) return read;
 
@@ -443,7 +476,9 @@ struct dense_nvme_index {
             header.key.shape != column_shape_t {scalar_shape_t {}})
             return status_t::config_mismatch_k;
         if (key_dtype != dtype_t::unknown_k && header.key.dtype != key_dtype) return status_t::config_mismatch_k;
-        if (!agrees_(metric, kernel_kind_, nk_kernel_named(metric.characters, metric.view().size())) ||
+        nk_kernel_kind_t const named = metric.empty() ? kernel
+                                                      : nk_kernel_named(metric.characters, metric.view().size());
+        if ((kernel != nk_kernel_unknown_k && named != kernel) ||
             !agrees_(quantization, vector_dtype_, nk_dtype_named(quantization.characters, quantization.view().size())))
             return status_t::config_mismatch_k;
         std::size_t const nodes = header.nodes();
@@ -453,6 +488,7 @@ struct dense_nvme_index {
             !header.key.row_bytes() || nodes >= dense_node_id_unknown_k)
             return status_t::malformed_k;
 
+        kernel = named;
         part.nodes = static_cast<u32_t>(nodes);
         part.dimensions = static_cast<u32_t>(dimensions);
         part.connectivity = static_cast<u32_t>(connectivity);
@@ -596,6 +632,9 @@ struct dense_nvme_index {
     /** The sizes and shared words every thread of one call reads. */
     struct walk_shape_t {
 
+        /** The distance kind every walk ranks by. */
+        nk_kernel_kind_t kernel = nk_kernel_unknown_k;
+
         /** Rows of the batch. */
         std::size_t rows_count = 0;
 
@@ -652,14 +691,16 @@ struct dense_nvme_index {
     }
 
     /** The shape of a walk of @p rows_count rows of @p row_type_ over every part in @p parts, each
-     *  walk @p expansion_factor wide, on @p threads engines @p queue_depth reads deep. */
+     *  walk @p expansion_factor wide and ranking by @p kernel, on @p threads engines @p queue_depth
+     *  reads deep. */
     template <typename row_type_>
     static walk_shape_t walk_shape_(std::span<medium_t const> media, std::span<dense_nvme_part_t const> parts,
-                                    std::size_t queue_depth, std::size_t threads, std::size_t rows_count,
-                                    std::size_t expansion_factor) noexcept {
+                                    nk_kernel_kind_t kernel, std::size_t queue_depth, std::size_t threads,
+                                    std::size_t rows_count, std::size_t expansion_factor) noexcept {
         using slice_t = arena_allocator<byte_t>;
         std::size_t const connectivity = parts[0].connectivity;
         walk_shape_t shape;
+        shape.kernel = kernel;
         shape.rows_count = rows_count;
         shape.expansion_factor = expansion_factor;
         shape.buffers_per_flight = row_type_::key_reads_k == dense_nvme_key_reads_t::scored_k ? 2 : 1;
@@ -865,9 +906,9 @@ struct dense_nvme_index {
 
         /** Whether a hop slot of @p walk_index still waits on a flight. */
         bool in_flight_(u32_t walk_index) noexcept {
-            std::span<u32_t> const hop_flights = hop_flights_of_(walk_index);
-            return std::any_of(hop_flights.begin(), hop_flights.end(),
-                               [](u32_t flights) noexcept { return flights != 0; });
+            for (u32_t const flights : hop_flights_of_(walk_index))
+                if (flights) return true;
+            return false;
         }
 
         /** Stops @p walk after a scratch refusal, counted as saturated: its outstanding reads land
@@ -960,7 +1001,9 @@ struct dense_nvme_index {
                 slot = row_slot_t {static_cast<u32_t>(parts), 0, 0, 0, row_stage_t::walking_k, row, {}};
                 if (!shape_.latencies.empty()) slot.armed = std::chrono::steady_clock::now();
                 ++rows_in_flight_;
-                rows_[slot_index].arm(row);
+                row_t& armed = rows_[slot_index];
+                armed.arm(row);
+                armed.query_norms = dense_norms_(shape_.kernel, armed.query);
                 for (u32_t shard = 0; shard != parts; ++shard) {
                     u32_t const walk_index = slot_index * static_cast<u32_t>(parts) + shard;
                     walk_t& walk = walks_[walk_index];
@@ -1069,14 +1112,14 @@ struct dense_nvme_index {
                 vectors[lane] = vector_view_t {
                     reinterpret_cast<scalar_t const*>(landed_row_(source, purpose_t::score_k, source)),
                     part.dimensions};
-                norms[lane] = usearch::dense_norms<kernel_kind_, capability_, scalar_t>(vectors[lane]);
+                norms[lane] = dense_norms_(shape_.kernel, vectors[lane]);
                 if constexpr (keyed)
                     std::memcpy(&keys[lane], landed_row_(source, purpose_t::key_k, key_buffer_(source)), sizeof(key_t));
             }
             std::span<key_t const> const lane_keys = std::span<key_t const>(keys).first(keyed ? fill : 0);
-            dense_scores<dot_result_t, 4> scores = usearch::scores<kernel_kind_, capability_, scalar_t>(
-                row.query, row.query_norms, vectors, norms);
-            row.rescore(ids, vectors, scores, fill, lane_keys);
+            dense_scores<dot_result_t, 4> scores = usearch::scores<capability_, scalar_t>(
+                shape_.kernel, row.query, row.query_norms, vectors, norms);
+            row.rescore(ids, vectors, norms, scores, fill, lane_keys);
             telemetry_.computed_distances += fill;
             std::array<dense_scored_node_t, 4> scored_batch;
             for (std::size_t lane = 0; lane != fill; ++lane)
@@ -1118,8 +1161,8 @@ struct dense_nvme_index {
             results_array_t const& pool = bound.size() == expansion_factor ? bound : walk.results;
             bool const pool_full = pool.size() == expansion_factor;
             std::span<u32_t> const hop_flights = hop_flights_of_(walk_index);
-            for (auto hop = std::find(hop_flights.begin(), hop_flights.end(), 0u);
-                 hop != hop_flights.end() && !walk.frontier.empty(); hop = std::find(hop, hop_flights.end(), 0u)) {
+            for (u32_t slot = 0; slot != hop_flights.size() && !walk.frontier.empty(); ++slot) {
+                if (hop_flights[slot]) continue;
                 dense_scored_node_t const candidate = walk.frontier.top();
                 if (pool_full && candidate.distance > pool.top().distance) break;
                 if (pool_full && walk.frontier.capacity() - walk.frontier.size() < parts_[walk.shard].connectivity)
@@ -1127,10 +1170,9 @@ struct dense_nvme_index {
                 walk.frontier.pop();
                 ++telemetry_.visited_members;
                 u32_t const flight = take_flight_();
-                u32_t const slot = static_cast<u32_t>(hop - hop_flights.begin());
                 flights_[flight] = flight_t {walk_index, candidate.node_id, slot, 1, purpose_t::expand_k};
                 issue_(flight, purpose_t::expand_k, flight);
-                *hop = 1;
+                hop_flights[slot] = 1;
             }
             if (in_flight_(walk_index)) return;
             // A walk only reaches nodes connected to its seeds, so a frontier drained before the
@@ -1287,17 +1329,18 @@ struct dense_nvme_index {
     }
 
     /** The batch @ref run_walks_ walks, inside a call of its own: @p rows_count rows over every
-     *  part in @p parts, each walk @p expansion_factor wide. */
+     *  part in @p parts, each walk @p expansion_factor wide and ranking by @p kernel. */
     template <typename row_type_>
     static expected<search_result_t> walk_rows_(std::span<medium_t const> media,
-                                                std::span<dense_nvme_part_t const> parts, executor_t& executor,
-                                                std::size_t rows_count, std::size_t expansion_factor,
+                                                std::span<dense_nvme_part_t const> parts, nk_kernel_kind_t kernel,
+                                                executor_t& executor, std::size_t rows_count,
+                                                std::size_t expansion_factor,
                                                 typename row_type_::inputs_t const& inputs,
                                                 std::span<std::size_t const> counts,
                                                 std::span<u64_t> latencies) noexcept {
         if (parts.empty()) return {{}, status_t::uninitialized_k};
         if (!rows_count) return {{}, status_t::success_k};
-        walk_shape_t const shape = walk_shape_<row_type_>(media, parts, executor.queue_depth(), executor.size(),
+        walk_shape_t const shape = walk_shape_<row_type_>(media, parts, kernel, executor.queue_depth(), executor.size(),
                                                           rows_count, expansion_factor);
         auto [call, call_status] = begin_call_(executor, media, shape.scratch_bytes, shape.buffers, shape.buffer_bytes);
         if (failed(call_status)) return {{}, call_status};
@@ -1319,9 +1362,8 @@ struct dense_nvme_index {
         struct inputs_t {
             vectors_view_t queries;
             heads_type_ const* heads = nullptr;
-            std::size_t wanted = 0;
-            std::span<node_id_t> node_ids;
-            std::span<distance_t> distances;
+            nk::matrix_span<node_id_t> node_ids;
+            nk::matrix_span<distance_t> distances;
             std::span<std::size_t> counts;
         };
 
@@ -1336,21 +1378,22 @@ struct dense_nvme_index {
         void arm(std::size_t new_row) noexcept {
             row = new_row;
             query = inputs.queries.row(row).as_vector();
-            query_norms = usearch::dense_norms<kernel_kind_, capability_, scalar_t>(query);
             inputs.counts[row] = 0;
         }
         void rescore(std::array<node_id_t, 4> const& ids, std::array<vector_view_t, 4> const& vectors,
-                     dense_scores<dot_result_t, 4>& scores, std::size_t count, std::span<key_t const>) const noexcept {
+                     std::array<vector_norms_t, 4> const& norms, dense_scores<dot_result_t, 4>& scores,
+                     std::size_t count, std::span<key_t const>) const noexcept {
             if constexpr (!std::is_same_v<heads_type_, dummy_heads_t>)
-                dense_indexer_rescoring<capability_, scalar_t> {inputs.heads->row(row)}(ids, vectors, scores, count);
+                dense_indexer_rescoring<capability_, scalar_t> {inputs.heads->row(row)}(ids, vectors, norms, scores,
+                                                                                        count);
         }
         fold_t fold(walk_t const&) const noexcept { return {}; }
         results_array_t const& bound(walk_t const& walk) const noexcept { return walk.results; }
         void finish_walk(walk_t const& walk) noexcept {
-            std::size_t const kept = min_of(walk.results.size(), inputs.wanted);
+            std::size_t const kept = min_of(walk.results.size(), inputs.node_ids.extent(1));
             for (std::size_t rank = 0; rank != kept; ++rank) {
-                inputs.node_ids[row * inputs.wanted + rank] = walk.results[rank].node_id;
-                inputs.distances[row * inputs.wanted + rank] = walk.results[rank].distance;
+                inputs.node_ids(row, rank) = walk.results[rank].node_id;
+                inputs.distances(row, rank) = walk.results[rank].distance;
             }
             inputs.counts[row] = kept;
         }
@@ -1363,18 +1406,20 @@ struct dense_nvme_index {
     /** The batched @ref search under @p heads, or as the kit scores under @c dummy_heads_t. */
     template <typename heads_type_>
     expected<search_result_t> search_(vectors_view_t queries, heads_type_ const& heads, executor_t& executor,
-                                      search_config_t config, std::size_t wanted, std::span<node_id_t> node_ids,
-                                      std::span<distance_t> distances, std::span<std::size_t> counts) noexcept {
+                                      search_config_t config, nk::matrix_span<node_id_t> node_ids,
+                                      nk::matrix_span<distance_t> distances, std::span<std::size_t> counts) noexcept {
         std::size_t const queries_count = queries.extent(0);
         if (!part_.dimensions) return {{}, status_t::uninitialized_k};
-        if (counts.size() != queries_count || node_ids.size() < queries_count * wanted ||
-            distances.size() < queries_count * wanted)
-            return {{}, status_t::config_mismatch_k};
+        if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
+        if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
+        if (status_t const refusal = dense_rankings_refusal(queries_count, node_ids, distances); failed(refusal))
+            return {{}, refusal};
         if (queries_count && queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
         using row_t = node_search_row<heads_type_>;
-        typename row_t::inputs_t const inputs {queries, &heads, wanted, node_ids, distances, counts};
+        typename row_t::inputs_t const inputs {queries, &heads, node_ids, distances, counts};
         return walk_rows_<row_t>(std::span<medium_t const>(&medium_, 1), std::span<dense_nvme_part_t const>(&part_, 1),
-                                 executor, queries_count, non_zero_expansion_factor(config), inputs, counts, {});
+                                 kernel_, executor, queries_count, non_zero_expansion_factor(config), inputs, counts,
+                                 {});
     }
 
 #pragma endregion Rows
@@ -1384,6 +1429,9 @@ struct dense_nvme_index {
 
     /** Where the part keeps its columns. */
     dense_nvme_part_t part_;
+
+    /** The distance kind every search ranks by. */
+    nk_kernel_kind_t kernel_ = nk_kernel_angular_k;
 };
 
 #pragma endregion Index

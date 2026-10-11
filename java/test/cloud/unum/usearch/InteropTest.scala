@@ -25,7 +25,7 @@ class InteropTest {
   /** Scala's `Array[Key]` is a JVM array, so the batch verbs take it with no conversion. */
   @JUnitTest
   def batchesTakeScalaArrays(): Unit = {
-    val options = new DenseOptions().dimensions(2).metric(DenseMetric.EUCLIDEAN).quantization(Scalar.F32)
+    val options = new DenseOptions().dimensions(2).metric(DenseMetric.EUCLIDEAN).quantization(Scalar.BF16)
     Using.resources(Executor.forRam(Array.emptyIntArray, 2, 0), DenseIndex.initRam(options, Array.emptyIntArray)) {
       (pool, index) =>
         val receiver = index.on(pool)

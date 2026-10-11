@@ -329,7 +329,7 @@ bool run_nvme_search(streamed_dataset_type_& streamed) {
         return fmt::println("--neighbors names row {}, past the {} rows the parts hold", farthest, rows), false;
 
     bench_indexer_heads<scalar_t> heads;
-    if (!open_indexer_heads<nvme_t>(streamed, heads)) return false;
+    if (!open_indexer_heads(nvme.viewed, streamed, heads)) return false;
     std::size_t const search_count = searched_count(streamed, heads);
     if (!reserve_results(nvme.results, search_count, wanted)) return false;
     // Queries land in the stored scalar before the clock, so the call times storage, not casts.
@@ -338,18 +338,18 @@ bool run_nvme_search(streamed_dataset_type_& streamed) {
 
     typename nvme_t::search_config_t config;
     config.expansion_factor = static_cast<u32_t>(settings.expansion_search.value);
-    std::span<key_t> const keys {nvme.results.hit_rows.data(), search_count * wanted};
-    std::span<dense_distance_t> const distances {nvme.results.hit_distances.data(), search_count * wanted};
+    nk::matrix_span<key_t> const keys = nvme.results.hit_rows.span();
+    nk::matrix_span<dense_distance_t> const distances = nvme.results.hit_distances.span();
     std::vector<std::size_t> counts(search_count);
     std::vector<u64_t> latencies_ns(search_count);
     auto search = [&](auto const&... ranking) noexcept {
-        return nvme.viewed.search(queries, ranking..., nvme.executor, config, wanted, keys, distances,
-                                  std::span {counts}, std::span {latencies_ns});
+        return nvme.viewed.search(queries, ranking..., nvme.executor, config, keys, distances, std::span {counts},
+                                  std::span {latencies_ns});
     };
 
     auto const started = steady_clock_t::now();
     auto const [result, status] = [&]() noexcept {
-        if constexpr (scores_indexer<nvme_t>())
+        if constexpr (!nk::is_integral_dtype<scalar_t>())
             if (heads.engaged()) return search(heads.rows(0, search_count));
         return search();
     }();
@@ -375,11 +375,6 @@ bool run_nvme_search(streamed_dataset_type_& streamed) {
 
 /** The search workload the cascade ends in, under the kernel the parts were built for. */
 struct nvme_search_workload_t {
-
-    /** Whether the workload is defined over the dot kernel alone, so the cascade pins it instead of
-     *  dispatching the parts' metric. */
-    static constexpr bool dot_only_k = false;
-
     template <typename streamed_dataset_type_>
     bool run(streamed_dataset_type_& streamed) const {
         return run_nvme_search(streamed);
@@ -390,29 +385,22 @@ struct nvme_search_workload_t {
 
 #pragma region Dispatch Cascade
 
-/** Gate: a (stored dtype, kernel) cell is viewable once its kit chain is adapted in
- *  @c usearch/dense/ram_metric.hpp; unadapted combinations report as skipped. */
-template <nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, nk_capability_t capability_>
-concept ram_kit_adapted = requires {
-    sizeof(dense_quads_chain<kernel_, typename nk::type_for<stored_dtype_>::type, capability_>);
-};
-
-/** No-op sibling picked when the cell's CPU kit chain is not adapted yet. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
-          nk_capability_t capability_, typename workload_type_>
-int view_and_run(bench_launch<dataset_scalar_type_> const&, nvme_settings_t const&, workload_type_ const&) {
-    fmt::println("skipped: no CPU kit adapted for {} · {}", dtype_name(stored_dtype_), nk_kernel_name(kernel_));
+/** No-op sibling picked when the stored dtype's CPU kit chain is not adapted yet, the constrained
+ *  hop below winning wherever it is. */
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
+int view_and_run(bench_launch<dataset_scalar_type_> const& launch, nvme_settings_t const&, workload_type_ const&) {
+    fmt::println("skipped: no CPU kit adapted for {} · {}", dtype_name(stored_dtype_),
+                 nk_kernel_name(launch.settings.kernel));
     return 0;
 }
 
-/** The innermost hop: binds the concrete sharded NVMe instantiation, views the parts, and hands
- *  them, the queries and their truth to @p workload. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
-          nk_capability_t capability_, typename workload_type_>
-    requires ram_kit_adapted<stored_dtype_, kernel_, capability_>
+/** The innermost hop: binds the concrete sharded NVMe instantiation, views the parts under the
+ *  metric their headers name, and hands them, the queries and their truth to @p workload. */
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
+    requires dense_quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>
 int view_and_run(bench_launch<dataset_scalar_type_> const& launch, nvme_settings_t const& nvme,
                  workload_type_ const& workload) {
-    using nvme_t = dense_nvme_indexes<u32_t, stored_dtype_, kernel_, capability_>;
+    using nvme_t = dense_nvme_indexes<u32_t, stored_dtype_, capability_>;
     using context_t = nvme_context<nvme_t>;
     using vectors_t = nk::matrix_view<dataset_scalar_type_>;
     utilities::persisted_dataset<dataset_scalar_type_> const& dataset = launch.dataset;
@@ -430,29 +418,8 @@ int view_and_run(bench_launch<dataset_scalar_type_> const& launch, nvme_settings
     return workload.run(streamed) ? 0 : 1;
 }
 
-/** Kernel axis: lowers the metric the parts name to a compile-time kernel kind; a dot-only workload
- *  pins the dot kernel instead. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
-int view_with_metric(bench_launch<dataset_scalar_type_> const& launch, nvme_settings_t const& nvme,
-                     workload_type_ const& workload) {
-    if constexpr (workload_type_::dot_only_k)
-        return view_and_run<dataset_scalar_type_, stored_dtype_, nk_kernel_dot_k, capability_>(launch, nvme, workload);
-    else
-        return dispatch_kernel<stored_dtype_>(
-            launch.settings.kernel,
-            [&](auto kernel) {
-                return view_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, capability_>(launch, nvme,
-                                                                                                    workload);
-            },
-            [&](auto metric) {
-                fmt::println("The parts name metric {}, which {} rows do not take", nk_kernel_name(metric),
-                             dtype_name(stored_dtype_));
-                return 1;
-            });
-}
-
 /** Compute axis: the allow-mask intersected with the runtime detection picks the newest table
- *  row, whose @ref prefix_mask ceiling instantiates @ref view_with_metric; past the tail sit the
+ *  row, whose @ref prefix_mask ceiling instantiates @ref view_and_run; past the tail sit the
  *  serial kernels every machine owns. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename workload_type_>
 int view_with_compute(bench_launch<dataset_scalar_type_> const& launch, nvme_settings_t const& nvme,
@@ -463,10 +430,10 @@ int view_with_compute(bench_launch<dataset_scalar_type_> const& launch, nvme_set
     return dispatch_index<std::size(compute_choices_k)>(
         highest_index(compute_choices_k, effective),
         [&](auto row) {
-            return view_with_metric<dataset_scalar_type_, stored_dtype_, prefix_mask(compute_choices_k, row.value)>(
+            return view_and_run<dataset_scalar_type_, stored_dtype_, prefix_mask(compute_choices_k, row.value)>(
                 launch, nvme, workload);
         },
-        [&] { return view_with_metric<dataset_scalar_type_, stored_dtype_, nk_cap_serial_k>(launch, nvme, workload); });
+        [&] { return view_and_run<dataset_scalar_type_, stored_dtype_, nk_cap_serial_k>(launch, nvme, workload); });
 }
 
 /** The NVMe shard hop: everything below one stored dtype, so a per-dtype shard translation unit

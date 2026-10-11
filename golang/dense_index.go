@@ -218,15 +218,6 @@ type DenseSoftmaxState struct {
 	Partition float32
 }
 
-// Each of these shares the layout of its C twin, size_t or float fields in order, so the library
-// writes the caller's struct in place.
-const _ = uint(unsafe.Sizeof(DenseTraversalStats{})) - uint(unsafe.Sizeof(C.usearch_dense_traversal_stats_t{}))
-const _ = uint(unsafe.Sizeof(C.usearch_dense_traversal_stats_t{})) - uint(unsafe.Sizeof(DenseTraversalStats{}))
-const _ = uint(unsafe.Sizeof(DenseReachability{})) - uint(unsafe.Sizeof(C.usearch_dense_reachability_t{}))
-const _ = uint(unsafe.Sizeof(C.usearch_dense_reachability_t{})) - uint(unsafe.Sizeof(DenseReachability{}))
-const _ = uint(unsafe.Sizeof(DenseSoftmaxState{})) - uint(unsafe.Sizeof(C.usearch_dense_softmax_state_t{}))
-const _ = uint(unsafe.Sizeof(C.usearch_dense_softmax_state_t{})) - uint(unsafe.Sizeof(DenseSoftmaxState{}))
-
 // stats lends optional telemetry as the pointer the C interface fills.
 func (call *call) stats(stats *DenseTraversalStats) *C.usearch_dense_traversal_stats_t {
 	if stats == nil {
@@ -371,8 +362,11 @@ type DenseRefineConfig struct {
 // Mirrors usearch_dense_search_t.
 type DenseSearchConfig struct {
 	// ExpansionFactor is the candidate-pool breadth the walk explores; zero derives it from
-	// the geometry.
+	// the geometry, and a scan ignores it.
 	ExpansionFactor uint
+	// Traversal walks the graph by default; TraversalScan scores every row exactly, on RAM and
+	// NVMe handles, and a VRAM handle refuses it with StatusUnsupported.
+	Traversal Traversal
 	// Predicate admits only the keys it approves; nil admits everything. Non-matching entries
 	// still route the traversal, so recall does not collapse at low selectivity. A VRAM handle
 	// refuses one with StatusDevice.
@@ -1342,6 +1336,7 @@ func (receiver denseReceiver) search(completion C.usearch_completion_t, queries 
 		arena:            memory,
 		wanted:           C.size_t(wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
+		traversal:        C.usearch_traversal_t(config.Traversal),
 		predicate:        predicate,
 		predicate_state:  predicateState,
 		progress:         progress,

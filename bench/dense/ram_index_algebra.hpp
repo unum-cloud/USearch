@@ -64,11 +64,11 @@ bool run_algebra(streamed_dataset_type_& streamed, fu_pool_t pool, algebra_setti
     config.synchronization = synchronization_t::immutable_k;
     // A pair dump keeps every scored pair, not just the breadth's worth.
     std::size_t const wanted = algebra.pairs_path.empty() ? settings.expansion_search.value : std::size_t {1} << 18;
-    std::vector<dense_node_id_t> node_ids(threads * wanted);
-    std::vector<dot_result_t> products(threads * wanted);
+    auto node_ids = nk::matrix<dense_node_id_t>::zeros({threads, wanted}).value;
+    auto products = nk::matrix<dot_result_t>::zeros({threads, wanted}).value;
     std::vector<std::vector<scored_pair_t>> pairs(algebra.pairs_path.empty() ? 0 : judged);
-    std::vector<f32_t> outputs(query_count * columns);
-    std::vector<dense_softmax_state_t> carry(threads * head_count);
+    auto outputs = nk::matrix<f32_t>::zeros({query_count, columns}).value;
+    auto carry = nk::matrix<dense_softmax_state_t>::zeros({threads, head_count}).value;
     auto const values = inputs.node_values_view();
     auto const value_of = [&](std::span<dense_node_id_t const> nodes,
                               std::span<typename index_t::vector_view_t> rows) noexcept {
@@ -79,8 +79,8 @@ bool run_algebra(streamed_dataset_type_& streamed, fu_pool_t pool, algebra_setti
     };
 
     auto multiply_row = [&](std::size_t query, std::size_t thread) noexcept {
-        std::span const kept_ids {node_ids.data() + thread * wanted, wanted};
-        std::span const kept_products {products.data() + thread * wanted, wanted};
+        std::span const kept_ids = to_span(node_ids.row(thread).as_vector());
+        std::span const kept_products = to_span(products.row(thread).as_vector());
         auto const [result, status] = bench.index->multiply(inputs.rows.row(query).as_vector(), kept_ids, kept_products,
                                                             *bench.traversals[thread], config);
         if (failed(status)) return refuse();
@@ -95,8 +95,8 @@ bool run_algebra(streamed_dataset_type_& streamed, fu_pool_t pool, algebra_setti
         std::size_t const first = token * head_count;
         auto const [result, status] = bench.index->attend(
             inputs.rows(nk::range(first, first + head_count), nk::slice), head_count, value_of, inputs.score_scale,
-            std::span {outputs.data() + first * columns, head_count * columns},
-            std::span {carry.data() + thread * head_count, head_count}, *bench.traversals[thread], config);
+            outputs(nk::range(first, first + head_count), nk::slice), to_span(carry.row(thread).as_vector()),
+            *bench.traversals[thread], config);
         if (failed(status)) return refuse();
         bench.lanes[thread].computed_distances += result.computed_distances;
         bench.lanes[thread].visited_members += result.visited_members;
@@ -118,7 +118,7 @@ bool run_algebra(streamed_dataset_type_& streamed, fu_pool_t pool, algebra_setti
         return fmt::println("Multiply or attend failed on {} queries", failures), false;
     report_attend_metrics(query_count, head_count, nodes_count, attend_seconds,
                           summed_lanes(bench.lanes).computed_distances);
-    return judge_attention(streamed, algebra, inputs, std::span<f32_t> {outputs});
+    return judge_attention(streamed, algebra, inputs, outputs.span());
 }
 
 /** The algebra workload the cascade ends in: graph products and graph attention over the built index, judged

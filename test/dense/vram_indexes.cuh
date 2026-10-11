@@ -34,7 +34,7 @@ std::size_t test_dense_vram_indexes_search_race(u64_t seed) {
     std::size_t const nodes_count = 4 * dense_thread_nodes_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
 
-    indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+    indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(indexes)));
     failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions}).status));
 
@@ -81,7 +81,7 @@ std::size_t test_dense_vram_indexes_search_race(u64_t seed) {
 /** The planned insertion: launched rows stay out of the size, the locators and a search until @c finish publishes
  *  every one, a plan short of rows refuses to finish and stays whole, its gate turns a second batch away, and a plan
  *  dying unfinished publishes nothing and leaves its shard refusing every later batch. */
-template <typename indexes_type_>
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_indexes_planned_insert(u64_t seed) {
     using scalar_t = typename indexes_type_::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -91,7 +91,7 @@ std::size_t test_dense_indexes_planned_insert(u64_t seed) {
 
     dense_indexes_executor<indexes_type_> writer, reader;
     if (failed(writer.status) || failed(reader.status)) return failures + expect(false);
-    indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+    indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(writer.place_shards(indexes)));
     failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
     auto const vectors = make_vectors<scalar_t>(2 * rows_count, dimensions, stream_key(seed, "indexes_planned"));
@@ -155,7 +155,7 @@ std::size_t test_dense_vram_indexes_indexer_search(u64_t seed) {
 
         dense_indexes_executor<indexes_type_> driver;
         if (failed(driver.status)) return failures + expect(false);
-        indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+        indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
         failures += expect(succeeded(driver.place_shards(indexes)));
         failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
         auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_indexer"));
@@ -167,18 +167,20 @@ std::size_t test_dense_vram_indexes_indexer_search(u64_t seed) {
         auto const queries = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
         dense_indexer_inputs<scalar_t> const inputs = dense_make_indexer_inputs(vectors.view(), queries_count);
         typename indexes_type_::search_config_t const exhaustive {rows_count, wanted};
-        std::vector<key_t> found_keys(queries_count * wanted);
-        std::vector<dense_distance_t> found_distances(queries_count * wanted);
+        auto found_keys = nk::matrix<key_t>::zeros({queries_count, wanted}).value;
+        auto found_distances = nk::matrix<dense_distance_t>::zeros({queries_count, wanted}).value;
         std::array<std::size_t, queries_count> counts;
-        failures += expect(
-            succeeded(indexes
-                          .search(queries, inputs.heads(), driver.executor, exhaustive, wanted, std::span {found_keys},
-                                  std::span {found_distances}, std::span {counts})
-                          .status));
-        for (std::size_t query = 0; query != queries_count; ++query)
-            failures += dense_expect_indexer_matches(
-                inputs, query, std::span<key_t const> {found_keys.data() + query * wanted, counts[query]},
-                std::span<dense_distance_t const> {found_distances.data() + query * wanted, counts[query]});
+        failures += expect(succeeded(indexes
+                                         .search(queries, inputs.heads(), driver.executor, exhaustive,
+                                                 found_keys.span(), found_distances.span(), std::span {counts})
+                                         .status));
+        nk::matrix_view<key_t> const ranked_keys = found_keys.view();
+        nk::matrix_view<dense_distance_t> const ranked_distances = found_distances.view();
+        for (std::size_t query = 0; query != queries_count; ++query) {
+            nk::range_t const kept = nk::range(std::size_t {0}, counts[query]);
+            failures += dense_expect_indexer_matches(inputs, query, ranked_keys(query, kept, nk::slice).as_vector(),
+                                                     ranked_distances(query, kept, nk::slice).as_vector());
+        }
         return failures;
     }
 }
@@ -202,7 +204,7 @@ std::size_t test_dense_vram_indexes_attend(u64_t seed) {
 
         dense_indexes_executor<indexes_type_> driver;
         if (failed(driver.status)) return failures + expect(false);
-        indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+        indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
         failures += expect(succeeded(driver.place_shards(indexes)));
         failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions}).status));
         auto const vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexes_attend"));
@@ -217,12 +219,12 @@ std::size_t test_dense_vram_indexes_attend(u64_t seed) {
         typename indexes_type_::search_config_t const exhaustive {nodes_count};
         auto const queries = make_vectors<scalar_t>(tokens_count * 4, dimensions,
                                                     stream_key(seed, "indexes_attend", 2));
-        std::vector<f32_t> outputs(queries.extent(0) * dimensions);
+        auto outputs = nk::matrix<f32_t>::zeros({queries.extent(0), dimensions}).value;
         std::vector<dense_softmax_state_t> carry(queries.extent(0));
         auto attend = [&](nk::matrix_view<scalar_t> heads, std::size_t head_count, lookup_t lookup, f32_t score_scale,
                           typename indexes_type_::search_config_t config) noexcept {
             auto const [attended, status] = indexes.attend(
-                heads, head_count, lookup, score_scale, std::span {outputs}.first(heads.extent(0) * dimensions),
+                heads, head_count, lookup, score_scale, outputs(nk::range(std::size_t {0}, heads.extent(0)), nk::slice),
                 std::span {carry}.first(heads.extent(0)), driver.executor, config);
             failures += expect(failed(status) || attended.count == heads.extent(0));
             return status;
@@ -232,7 +234,7 @@ std::size_t test_dense_vram_indexes_attend(u64_t seed) {
             f32_t const score_scale = dense_attend_scale(
                 dense_oracle_dots(dense_widened_rows(heads, index_t::vector_dtype_k),
                                   dense_widened_rows(vectors.view(), index_t::vector_dtype_k), dimensions));
-            std::span<f32_t const> const attended {outputs.data(), heads.extent(0) * dimensions};
+            nk::matrix_view<f32_t> const attended = outputs(nk::range(std::size_t {0}, heads.extent(0)), nk::slice);
             std::span<dense_softmax_state_t const> const carried {carry.data(), heads.extent(0)};
             failures += expect(
                 succeeded(attend(heads, head_count, table.lookup(nodes_count), score_scale, exhaustive)));
@@ -251,7 +253,8 @@ std::size_t test_dense_vram_indexes_attend(u64_t seed) {
         failures += expect_eq(attend(queries.view(), 3, table.lookup(nodes_count), 1, exhaustive),
                               status_t::shape_mismatch_k);
         failures += expect_eq(indexes
-                                  .attend(queries.view(), 4, table.lookup(nodes_count), 1, std::span {outputs}.first(1),
+                                  .attend(queries.view(), 4, table.lookup(nodes_count), 1,
+                                          outputs(nk::range(std::size_t {0}, std::size_t {1}), nk::slice),
                                           std::span {carry}, driver.executor, exhaustive)
                                   .status,
                               status_t::config_mismatch_k);
@@ -265,20 +268,20 @@ template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_cuda_indexes_configuration(char const* name, u64_t seed) {
     if (failed(cuda_device_specs_t::query(0).status)) return report(name, "no CUDA device reachable");
 
-    using indexes_t = dense_vram_indexes<u32_t, dtype_, kernel_, cuda_arch_blackwellrtx_k>;
+    using indexes_t = dense_vram_indexes<u32_t, dtype_, dense_nvidia_capabilities_k>;
 
     // The suite is composed here, not reflected: every call below is a capability claim
     // this sharded, executor-driven category makes about itself.
     std::size_t failures_count = 0;
-    failures_count += test_dense_indexes_guards<indexes_t>(seed);
-    failures_count += test_dense_indexes_duplicate_keys<indexes_t>(seed);
+    failures_count += test_dense_indexes_guards<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_duplicate_keys<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_save_load<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_split_load<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_buffer_roundtrip<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_cancelled_load<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_concurrent_add<indexes_t, kernel_>(seed);
     failures_count += test_dense_vram_indexes_search_race<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_planned_insert<indexes_t>(seed);
+    failures_count += test_dense_indexes_planned_insert<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed);

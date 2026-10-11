@@ -45,10 +45,10 @@
 #include <cstdio>  // `std::remove`, `std::snprintf`
 #include <cstring> // `std::memcpy`, `std::memcmp`, `std::memset`
 
-#include <algorithm>   // `std::lower_bound`, `std::upper_bound`, `std::sort`, `std::is_sorted`
 #include <array>       // `std::array`
 #include <atomic>      // `std::atomic_ref`
 #include <bit>         // `std::popcount`, `std::countr_zero`
+#include <chrono>      // `std::chrono::steady_clock`, for a scan's latencies
 #include <limits>      // `std::numeric_limits`
 #include <memory>      // `std::uninitialized_value_construct_n`
 #include <mutex>       // `std::unique_lock`
@@ -61,6 +61,7 @@
 #include "usearch/utilities/blocking_files.hpp"    // `seekable_file_t`, `mapped_file_t`, `file_span_t`
 #include "usearch/utilities/ram_buffers.hpp"       // `growing_buffer`, `arena_allocator`, `ceil2`
 #include "usearch/utilities/ram_device.hpp"        // `forkunion_allocator_t`
+#include "usearch/utilities/ram_sorts.hpp"         // `partial_sort`
 #include "usearch/utilities/safegraphs_format.hpp" // `safegraphs_read_manifest`, `safegraphs_write_manifest`
 #include "usearch/dense/types.hpp"
 #include "usearch/dense/ram_index.hpp" // `dense_ram_index`, the RAM index a block build fills
@@ -96,14 +97,14 @@ struct dense_nvme_indexes_cursor;
  *
  *  A row's walks, one per part, share one row state on one executor thread, so the verbs reuse the
  *  in-memory index's folds and rescorings unchanged and need no lock. No mutating verb exists:
- *  growth is a new part from a RAM or VRAM save, opened by a fresh @ref view.
+ *  growth is a new part from a RAM or VRAM save, opened by a fresh @ref view. The metric is the
+ *  one the parts' headers name, so one instantiation views parts of any kernel its kits finalize.
  */
-template <                                               //
-    typename key_type_ = uuid_t,                         //
-    nk_dtype_t vector_dtype_ = nk_bf16_k,                //
-    nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k, //
-    nk_capability_t capability_ = nk_cap_icelake_k,      //
-    typename engine_type_ = default_io_engine_t          //
+template <                                          //
+    typename key_type_ = uuid_t,                    //
+    nk_dtype_t vector_dtype_ = nk_bf16_k,           //
+    nk_capability_t capability_ = nk_cap_icelake_k, //
+    typename engine_type_ = default_io_engine_t     //
     >
 struct dense_nvme_indexes {
     friend struct dense_nvme_indexes_cursor<dense_nvme_indexes>;
@@ -117,7 +118,7 @@ struct dense_nvme_indexes {
     using key_t = key_type_;
 
     /** The one-part index, whose walks every verb drives over all parts at once. */
-    using index_t = dense_nvme_index<vector_dtype_, kernel_kind_, capability_, engine_type_>;
+    using index_t = dense_nvme_index<vector_dtype_, capability_, engine_type_>;
 
     /** The threads, their engines and their scratch every verb runs on; it names no view, so one
      *  executor serves every view reaching the same devices. */
@@ -138,9 +139,6 @@ struct dense_nvme_indexes {
     /** The stored scalar vocabulary, re-exported for dispatchers gating crossing rows. */
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
 
-    /** The distance kernel this instantiation walks with. */
-    inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
-
     /** The compute-capability mask the kernels compiled under. */
     inline static constexpr nk_capability_t capability_k = capability_;
 
@@ -158,6 +156,9 @@ struct dense_nvme_indexes {
      *      and medium, refusing parts that disagree with this instantiation or with each other. A
      *      failed view leaves the index empty.
      *
+     *  The first part naming a metric fixes the kernel, a later part naming another is refused with
+     *  @c config_mismatch_k, and a kernel the dtype's kits cannot finalize with @c unknown_kind_k.
+     *
      *  @param[in] path A monolith, the manifest whose parts sit beside it or, in SPDK builds, a
      *      transport ID naming a monolith on a namespace, with the optional keys @c ns:<ID> and
      *      @c base:<bytes>.
@@ -168,10 +169,17 @@ struct dense_nvme_indexes {
     status_t view(std::string_view path, std::span<std::string_view const> paths = {}) noexcept {
         media_.clear();
         parts_.clear();
+        kernel_ = nk_kernel_unknown_k;
         status_t const viewed = view_(path, paths);
-        if (failed(viewed)) media_.clear(), parts_.clear();
+        if (failed(viewed)) media_.clear(), parts_.clear(), kernel_ = nk_kernel_unknown_k;
         return viewed;
     }
+
+    /** The distance kind the parts were built for, as @ref view read it; unknown before one. */
+    nk_kernel_kind_t kernel() const noexcept { return kernel_; }
+
+    /** Whether the kernel reads rows' norms, which a rewrite's targets then carry as a column. */
+    bool stores_norms() const noexcept { return index_t::stores_norms_(kernel_); }
 
     /** The checkpoint's metadata without viewing it, @ref dense_nvme_read_metadata. */
     static expected<safegraphs_metadata_t> metadata(std::string_view path) noexcept {
@@ -217,8 +225,7 @@ struct dense_nvme_indexes {
      *  @param[in] queries The batch, one query per row, in the parts' stored scalar type.
      *  @param[inout] executor The threads, their engines and their scratch; held for the call.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
-     *  @param[in] wanted Matches kept per query, the row width of @p keys and @p distances.
-     *  @param[out] keys Merged rankings, @b [queries,wanted] row-major.
+     *  @param[out] keys Merged rankings, one query per row, as many matches as its width.
      *  @param[out] distances Distances of the same rankings, parallel to @p keys.
      *  @param[out] counts Per-query merged hit counts, one per query row.
      *  @param[out] latencies Steady-clock nanoseconds per query row, from its first armed walk to
@@ -228,11 +235,9 @@ struct dense_nvme_indexes {
      *  @c io_k.
      */
     expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     std::size_t wanted, std::span<key_t> keys, std::span<distance_t> distances,
+                                     nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
                                      std::span<std::size_t> counts, std::span<u64_t> latencies = {}) noexcept {
-        dummy_predicate_t predicate;
-        return search_rows_(queries, dummy_heads_t {}, executor, config, wanted, keys, distances, counts, predicate,
-                            latencies);
+        return search_if(queries, executor, config, keys, distances, counts, dummy_predicate_t {}, latencies);
     }
 
     /**
@@ -240,30 +245,37 @@ struct dense_nvme_indexes {
      *      distance is 1 − its key's indexer score against the heads of its query row.
      *
      *  @param[in] heads The indexer heads of every query row.
+     *  @return @c config_mismatch_k unless the parts rank by dot.
      */
     expected<search_result_t> search(vectors_view_t queries, dense_indexer_heads<scalar_t> const& heads,
-                                     executor_t& executor, search_config_t config, std::size_t wanted,
-                                     std::span<key_t> keys, std::span<distance_t> distances,
-                                     std::span<std::size_t> counts, std::span<u64_t> latencies = {}) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k && !nk::is_integral_dtype<scalar_t>())
+                                     executor_t& executor, search_config_t config, nk::matrix_span<key_t> keys,
+                                     nk::matrix_span<distance_t> distances, std::span<std::size_t> counts,
+                                     std::span<u64_t> latencies = {}) noexcept
+        requires dense_floating_scalar<scalar_t>
     {
+        if (parts_.empty()) return {{}, status_t::uninitialized_k};
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         dummy_predicate_t predicate;
-        return search_rows_(queries, heads, executor, config, wanted, keys, distances, counts, predicate, latencies);
+        return search_rows_(queries, heads, executor, config, keys, distances, counts, predicate, latencies);
     }
 
     /**
-     *  @brief The filtered sibling of the batched @ref search, sharing its whole contract.
+     *  @brief The filtered sibling of the batched @ref search, sharing its whole contract; a
+     *      @c traversal_t::scan_k scan ranks every row exactly instead, as @ref scan_rows_ reads
+     *      them.
      *
      *  @param[in] predicate The per-key admission filter; every scored row's key is read beside its
-     *      value, so the predicate sees keys, never node IDs.
+     *      value, so the predicate sees keys, never node IDs. A scan asks it only about rows closer
+     *      than the worst match some query already holds.
      */
     template <typename predicate_type_>
     expected<search_result_t> search_if(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                        std::size_t wanted, std::span<key_t> keys, std::span<distance_t> distances,
+                                        nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
                                         std::span<std::size_t> counts, predicate_type_&& predicate,
                                         std::span<u64_t> latencies = {}) noexcept {
-        return search_rows_(queries, dummy_heads_t {}, executor, config, wanted, keys, distances, counts, predicate,
-                            latencies);
+        if (config.traversal == traversal_t::scan_k)
+            return scan_rows_(queries, executor, keys, distances, counts, predicate, latencies);
+        return search_rows_(queries, dummy_heads_t {}, executor, config, keys, distances, counts, predicate, latencies);
     }
 
     /**
@@ -274,24 +286,26 @@ struct dense_nvme_indexes {
      *      type.
      *  @param[inout] executor The threads, their engines and their scratch; held for the call.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
-     *  @param[in] wanted Pairs kept per row, the row width of @p keys and @p products.
-     *  @param[out] keys The key of each kept pair, @b [rows,wanted] row-major.
+     *  @param[out] keys The key of each kept pair, one left-hand row per row, as many pairs as its
+     *      width.
      *  @param[out] products The dot of each kept pair, parallel to @p keys.
-     *  @param[out] counts Pairs scored per row across every shard, above @p wanted when truncated.
+     *  @param[out] counts Pairs scored per row across every shard, above the row width when
+     *      truncated.
      *  @param[out] latencies Steady-clock nanoseconds per left-hand row, as @ref search collects
      *      them.
+     *  @return @c config_mismatch_k unless the parts rank by dot.
      */
     expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
-                                       std::size_t wanted, std::span<key_t> keys, std::span<dot_result_t> products,
-                                       std::span<std::size_t> counts, std::span<u64_t> latencies = {}) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k)
-    {
+                                       nk::matrix_span<key_t> keys, nk::matrix_span<dot_result_t> products,
+                                       std::span<std::size_t> counts, std::span<u64_t> latencies = {}) noexcept {
         std::size_t const rows_count = left.extent(0);
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
-        if (counts.size() != rows_count || keys.size() < rows_count * wanted || products.size() < rows_count * wanted)
-            return {{}, status_t::config_mismatch_k};
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+        if (counts.size() != rows_count) return {{}, status_t::config_mismatch_k};
+        if (status_t const refusal = dense_rankings_refusal(rows_count, keys, products); failed(refusal))
+            return {{}, refusal};
         if (rows_count && left.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
-        typename multiply_row_t::inputs_t const inputs {left, wanted, keys, products, counts};
+        typename multiply_row_t::inputs_t const inputs {left, keys, products, counts};
         return walk_rows_<multiply_row_t>(rows_count, config, inputs, counts, latencies, executor);
     }
 
@@ -305,26 +319,25 @@ struct dense_nvme_indexes {
      *  @param[inout] executor The threads, their engines and their scratch; held for the call.
      *  @param[in] config The per-shard walk configuration; each row ranks as many tokens as its
      *      expansion factor.
-     *  @param[in] wanted Keys kept per query, the row width of @p keys and @p scores.
-     *  @param[out] keys The best-scoring keys of each query, @b [queries,wanted] row-major.
+     *  @param[out] keys The best-scoring keys of each query, one query per row, as many keys as its
+     *      width.
      *  @param[out] scores Their summed maxima, largest first, parallel to @p keys.
-     *  @param[out] counts Keys written per query, at most @p wanted.
+     *  @param[out] counts Keys written per query, at most the width of @p keys.
      *  @param[out] latencies Steady-clock nanoseconds per token row, each walked on its own, as
      *      @ref search collects them; the reduction into queries follows the last token.
+     *  @return @c config_mismatch_k unless the parts rank by dot.
      */
     expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
-                                     search_config_t config, std::size_t wanted, std::span<key_t> keys,
-                                     std::span<f64_t> scores, std::span<std::size_t> counts,
-                                     std::span<u64_t> latencies = {}) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k)
-    {
+                                     search_config_t config, nk::matrix_span<key_t> keys, nk::matrix_span<f64_t> scores,
+                                     std::span<std::size_t> counts, std::span<u64_t> latencies = {}) noexcept {
         std::size_t const rows_count = queries.extent(0);
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
         std::size_t const groups_count = rows_count / rows_per_query;
-        if (counts.size() != groups_count || keys.size() < groups_count * wanted ||
-            scores.size() < groups_count * wanted)
-            return {{}, status_t::config_mismatch_k};
+        if (counts.size() != groups_count) return {{}, status_t::config_mismatch_k};
+        if (status_t const refusal = dense_rankings_refusal(groups_count, keys, scores); failed(refusal))
+            return {{}, refusal};
         if (!groups_count) return {{}, status_t::success_k};
         if (queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
 
@@ -332,7 +345,7 @@ struct dense_nvme_indexes {
         using row_t = search_row<dummy_heads_t, dummy_predicate_t>;
         std::size_t const width = non_zero_expansion_factor(config);
         walk_shape_t const shape = index_t::template walk_shape_<row_t>(
-            to_span(media_), to_span(parts_), executor.queue_depth(), executor.size(), rows_count, width);
+            to_span(media_), to_span(parts_), kernel_, executor.queue_depth(), executor.size(), rows_count, width);
         auto [call, call_status] = index_t::begin_call_(executor, to_span(media_), shape.scratch_bytes, shape.buffers,
                                                         shape.buffer_bytes);
         if (failed(call_status)) return {{}, call_status};
@@ -340,26 +353,20 @@ struct dense_nvme_indexes {
         growing_buffer<key_t, scratch_allocator_t> row_keys {scratch};
         growing_buffer<distance_t, scratch_allocator_t> row_distances {scratch};
         growing_buffer<std::size_t, scratch_allocator_t> row_counts {scratch};
-        dense_maxsim_reducer<key_t, scratch_allocator_t> reduce {scratch};
+        dense_maxsim_reducer<key_t, distance_t, scratch_allocator_t> reduce {scratch};
         if (failed(row_keys.resize_uninitialized(rows_count * width)) ||
             failed(row_distances.resize_uninitialized(rows_count * width)) ||
-            failed(row_counts.resize_uninitialized(rows_count)) ||
-            failed(reduce.reserve(rows_per_query, width, wanted)))
+            failed(row_counts.resize_uninitialized(rows_count)) || failed(reduce.reserve(rows_per_query, width)))
             return {{}, status_t::bad_alloc_k};
+        nk::matrix_span<key_t> const ranked_keys {row_keys.data(), rows_count, width};
+        nk::matrix_span<distance_t> const ranked_distances {row_distances.data(), rows_count, width};
         dummy_predicate_t predicate;
-        typename row_t::inputs_t const inputs {queries,
-                                               nullptr,
-                                               &predicate,
-                                               width,
-                                               width,
-                                               to_writable_span(row_keys),
-                                               to_writable_span(row_distances),
-                                               to_writable_span(row_counts)};
+        typename row_t::inputs_t const inputs {
+            queries, nullptr, &predicate, width, ranked_keys, ranked_distances, to_writable_span(row_counts)};
         expected<search_result_t> ranked = index_t::template run_walks_<row_t>(
             to_span(media_), to_span(parts_), executor, shape, inputs, to_span(row_counts), latencies);
         if (!ranked) return ranked;
-        ranked.value.count = reduce(to_span(row_keys), to_span(row_distances), to_span(row_counts), keys, scores,
-                                    counts);
+        ranked.value.count = reduce(ranked_keys, ranked_distances, to_span(row_counts), keys, scores, counts);
         return ranked;
     }
 
@@ -376,27 +383,28 @@ struct dense_nvme_indexes {
      *      row per key. Keys are read beside the scored rows; one without a value row refuses with
      *      @c shape_mismatch_k.
      *  @param[in] score_scale The factor turning a dot into a logit.
-     *  @param[out] outputs The attended rows, one per query row, as wide as the keys.
+     *  @param[out] outputs The attended rows, one per query row, as wide as the keys and packed.
      *  @param[out] carry Every query row's softmax state, which merges this call with other
      *      branches.
      *  @param[inout] executor The threads, their engines and their scratch; held for the call.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
      *  @param[out] latencies Steady-clock nanoseconds per token, its heads walked together, as
      *      @ref search collects them.
-     *  @return The query rows attended in @c count.
+     *  @return The query rows attended in @c count, or @c config_mismatch_k unless the parts rank
+     *      by dot.
      */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
-                                     f32_t score_scale, std::span<f32_t> outputs,
+                                     f32_t score_scale, nk::matrix_span<f32_t> outputs,
                                      std::span<dense_softmax_state_t> carry, executor_t& executor,
-                                     search_config_t config = {}, std::span<u64_t> latencies = {}) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k)
-    {
+                                     search_config_t config = {}, std::span<u64_t> latencies = {}) noexcept {
         std::size_t const rows_count = queries.extent(0), columns = queries.extent(1);
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
-        if (outputs.size() != rows_count * columns || carry.size() != rows_count)
+        if (outputs.extent(0) != rows_count || outputs.extent(1) != columns || carry.size() != rows_count)
             return {{}, status_t::config_mismatch_k};
+        if (!outputs.is_contiguous()) return {{}, status_t::unsupported_layout_k};
         if (!rows_count) return {{}, status_t::success_k};
         if (columns != dimensions()) return {{}, status_t::config_mismatch_k};
         using row_t = attend_row<value_lookup_type_>;
@@ -446,8 +454,8 @@ struct dense_nvme_indexes {
      *
      *  @param[in] keys The keys to export, repeats and absent ones included.
      *  @param[out] vectors @b [keys·wanted,dimensions]: row q · @p wanted + i is the i-th row of
-     *      key q in shard and row order, a key holding more keeping its earliest; when narrower
-     *      than a stored row, refused with @c config_mismatch_k.
+     *      key q in shard and row order, a key holding more keeping its earliest; refused as
+     *      @ref dense_rows_refusal says.
      *  @param[in] wanted Rows kept per key.
      *  @param[out] entries The true total under each key, parallel to @p keys; above @p wanted when
      *      its rows truncated, zero when absent.
@@ -456,9 +464,9 @@ struct dense_nvme_indexes {
     status_t get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
                  std::span<std::size_t> entries, executor_t& executor) const noexcept {
         std::size_t const row_values = divide_round_up<std::size_t>(dimensions(), nk::dimensions_per_value<scalar_t>());
-        if (entries.size() != keys.size() || vectors.extent(0) < keys.size() * wanted ||
-            (wanted && vectors.extent(1) < row_values))
-            return status_t::config_mismatch_k;
+        if (entries.size() != keys.size()) return status_t::config_mismatch_k;
+        if (status_t const refusal = dense_rows_refusal(keys.size() * wanted, vectors, row_values); failed(refusal))
+            return refusal;
         if (parts_.empty()) return status_t::uninitialized_k;
         std::memset(entries.data(), 0, entries.size_bytes());
         if (keys.empty()) return status_t::success_k;
@@ -489,16 +497,16 @@ struct dense_nvme_indexes {
                 rows[slot] = locator;
             });
         if (failed(scanned)) return scanned;
-        auto describe = [&](std::size_t read, u64_t& progress) noexcept {
+        auto describe = [&](std::size_t read, u64_t& progress) noexcept -> std::array<extent_t, 1> {
             std::size_t const position = read / wanted, rank = read % wanted;
-            if (progress++ || rank >= min_of(entries[position], wanted)) return extent_t {};
+            if (progress++ || rank >= min_of(entries[position], wanted)) return {};
             dense_nvme_locator_t const locator = kept[read];
             dense_nvme_part_t const& part = parts_[locator.shard];
-            return extent_t {locator.shard, part.values_begin + u64_t(locator.node) * part.value_row_bytes,
-                             part.value_row_bytes};
+            return {extent_t {locator.shard, part.values_begin + u64_t(locator.node) * part.value_row_bytes,
+                              part.value_row_bytes}};
         };
-        auto consume = [&](std::size_t read, extent_t const&, byte_t const* row) noexcept {
-            std::memcpy(vectors.row(read).as_vector().byte_data(), row, parts_[kept[read].shard].value_row_bytes);
+        auto consume = [&](std::size_t, std::size_t read, auto const&, auto const& rows) noexcept {
+            std::memcpy(vectors.row(read).as_vector().byte_data(), rows[0], parts_[kept[read].shard].value_row_bytes);
         };
         return scan_reads_(executor, keys.size() * wanted, describe, consume).status;
     }
@@ -581,8 +589,7 @@ struct dense_nvme_indexes {
                     std::size_t const kept = pool.size();
                     // The slot `sorted_buffer::insert` picks, so the keys open the same one.
                     std::size_t const slot = static_cast<std::size_t>(
-                        std::lower_bound(pool.begin(), pool.end(), scored[lane], dense_closer_scored_node_t {}) -
-                        pool.begin());
+                        lower_bound(to_span(pool), scored[lane], dense_closer_scored_node_t {}) - pool.data());
                     if (!pool.insert(dense_scored_node_t(scored[lane]), limit)) continue;
                     std::memmove(pool_keys + slot + 1, pool_keys + slot,
                                  (kept - (kept == limit) - slot) * sizeof(key_t));
@@ -603,10 +610,9 @@ struct dense_nvme_indexes {
             vectors_view_t queries;
             heads_type_ const* heads = nullptr;
             predicate_type_* predicate = nullptr;
-            std::size_t wanted = 0;
             std::size_t expansion_factor = 0;
-            std::span<key_t> keys;
-            std::span<distance_t> distances;
+            nk::matrix_span<key_t> keys;
+            nk::matrix_span<distance_t> distances;
             std::span<std::size_t> counts;
         };
 
@@ -625,7 +631,7 @@ struct dense_nvme_indexes {
         }
 
         status_t reserve(std::size_t shards, std::size_t connectivity) noexcept {
-            if (failed(locators.resize_uninitialized(inputs.wanted))) return status_t::bad_alloc_k;
+            if (failed(locators.resize_uninitialized(inputs.keys.extent(1)))) return status_t::bad_alloc_k;
             if constexpr (key_reads_k == dense_nvme_key_reads_t::scored_k) {
                 if (failed(admitted.reserve_exactly(shards)) ||
                     failed(admitted_keys.resize_uninitialized(shards * inputs.expansion_factor)))
@@ -643,14 +649,15 @@ struct dense_nvme_indexes {
             row = new_row;
             found = 0;
             query = inputs.queries.row(row).as_vector();
-            query_norms = usearch::dense_norms<kernel_kind_, capability_, scalar_t>(query);
             inputs.counts[row] = 0;
             for (results_array_t& pool : admitted) pool.clear();
         }
         void rescore(std::array<node_id_t, 4> const& ids, std::array<vector_view_t, 4> const& vectors,
-                     dense_scores<dot_result_t, 4>& scores, std::size_t count, std::span<key_t const>) const noexcept {
+                     std::array<vector_norms_t, 4> const& norms, dense_scores<dot_result_t, 4>& scores,
+                     std::size_t count, std::span<key_t const>) const noexcept {
             if constexpr (!std::is_same_v<heads_type_, dummy_heads_t>)
-                dense_indexer_rescoring<capability_, scalar_t> {inputs.heads->row(row)}(ids, vectors, scores, count);
+                dense_indexer_rescoring<capability_, scalar_t> {inputs.heads->row(row)}(ids, vectors, norms, scores,
+                                                                                        count);
         }
         fold_t fold(walk_t const& walk) noexcept {
             if constexpr (key_reads_k == dense_nvme_key_reads_t::scored_k)
@@ -663,7 +670,7 @@ struct dense_nvme_indexes {
             else return walk.results;
         }
         void finish_walk(walk_t const& walk) noexcept {
-            std::span<distance_t> const distances = inputs.distances.subspan(row * inputs.wanted, inputs.wanted);
+            std::span<distance_t> const distances = to_span(inputs.distances.row(row).as_vector());
             if constexpr (key_reads_k == dense_nvme_key_reads_t::scored_k) {
                 // The walk is over, so its pool's IDs become slots of the keys kept beside it,
                 // which merge directly.
@@ -673,7 +680,7 @@ struct dense_nvme_indexes {
                     slots[slot].node_id = static_cast<node_id_t>(slot);
                 found = merge_search_results(to_span(bound(walk)),
                                              admitted_keys.data() + walk.shard * inputs.expansion_factor,
-                                             inputs.keys.subspan(row * inputs.wanted, inputs.wanted), distances, found);
+                                             to_span(inputs.keys.row(row).as_vector()), distances, found);
             }
             else
                 found = merge_search_results(to_span(bound(walk)), dense_nvme_shard_locators_t {walk.shard},
@@ -685,7 +692,7 @@ struct dense_nvme_indexes {
         }
         dense_nvme_locator_t locator(std::size_t output) const noexcept { return locators[output]; }
         void resolve(std::size_t output, byte_t const* key) noexcept {
-            std::memcpy(&inputs.keys[row * inputs.wanted + output], key, sizeof(key_t));
+            std::memcpy(&inputs.keys(row, output), key, sizeof(key_t));
         }
         status_t finish() noexcept {
             inputs.counts[row] = found;
@@ -703,9 +710,8 @@ struct dense_nvme_indexes {
         /** The batch every row of the call reads and writes. */
         struct inputs_t {
             vectors_view_t left;
-            std::size_t wanted = 0;
-            std::span<key_t> keys;
-            std::span<dot_result_t> products;
+            nk::matrix_span<key_t> keys;
+            nk::matrix_span<dot_result_t> products;
             std::span<std::size_t> counts;
         };
 
@@ -720,17 +726,18 @@ struct dense_nvme_indexes {
             : inputs(inputs), locators(allocator) {}
 
         status_t reserve(std::size_t, std::size_t) noexcept {
-            return failed(locators.resize_uninitialized(inputs.wanted)) ? status_t::bad_alloc_k : status_t::success_k;
+            return failed(locators.resize_uninitialized(inputs.keys.extent(1))) ? status_t::bad_alloc_k
+                                                                                : status_t::success_k;
         }
         void arm(std::size_t new_row) noexcept {
             row = new_row;
             query = inputs.left.row(row).as_vector();
-            query_norms = usearch::dense_norms<kernel_kind_, capability_, scalar_t>(query);
             inputs.counts[row] = 0;
-            pairs = fold_t {to_writable_span(locators), inputs.products.subspan(row * inputs.wanted, inputs.wanted)};
+            pairs = fold_t {to_writable_span(locators), to_span(inputs.products.row(row).as_vector())};
         }
         void rescore(std::array<node_id_t, 4> const&, std::array<vector_view_t, 4> const&,
-                     dense_scores<dot_result_t, 4>&, std::size_t, std::span<key_t const>) const noexcept {}
+                     std::array<vector_norms_t, 4> const&, dense_scores<dot_result_t, 4>&, std::size_t,
+                     std::span<key_t const>) const noexcept {}
         fold_t& fold(walk_t const& walk) noexcept {
             pairs.resolve.shard = walk.shard;
             return pairs;
@@ -740,7 +747,7 @@ struct dense_nvme_indexes {
         std::size_t outputs() const noexcept { return pairs.written; }
         dense_nvme_locator_t locator(std::size_t output) const noexcept { return locators[output]; }
         void resolve(std::size_t output, byte_t const* key) noexcept {
-            std::memcpy(&inputs.keys[row * inputs.wanted + output], key, sizeof(key_t));
+            std::memcpy(&inputs.keys(row, output), key, sizeof(key_t));
         }
         status_t finish() noexcept {
             inputs.counts[row] = pairs.scored;
@@ -764,7 +771,7 @@ struct dense_nvme_indexes {
             std::size_t head_count = 0;
             std::remove_reference_t<value_lookup_type_>* value_lookup = nullptr;
             f32_t score_scale = 1;
-            std::span<f32_t> outputs;
+            nk::matrix_span<f32_t> outputs;
             std::span<dense_softmax_state_t> carry;
         };
 
@@ -779,11 +786,12 @@ struct dense_nvme_indexes {
         /** The token's heads over its rows of the outputs and the carry, refusing into the row's
          *  status. */
         rescoring_t rescoring() noexcept {
-            std::size_t const first = token * inputs.head_count, columns = inputs.queries.extent(1);
-            return {inputs.queries(nk::range(first, first + inputs.head_count), nk::slice),
+            std::size_t const first = token * inputs.head_count;
+            nk::range_t const heads = nk::range(first, first + inputs.head_count);
+            return {inputs.queries(heads, nk::slice),
                     *inputs.value_lookup,
                     inputs.score_scale,
-                    inputs.outputs.subspan(first * columns, inputs.head_count * columns),
+                    inputs.outputs(heads, nk::slice),
                     inputs.carry.subspan(first, inputs.head_count),
                     status};
         }
@@ -793,13 +801,13 @@ struct dense_nvme_indexes {
             token = new_token;
             status = status_t::success_k;
             query = inputs.queries.row(token * inputs.head_count).as_vector();
-            query_norms = usearch::dense_norms<kernel_kind_, capability_, scalar_t>(query);
             rescoring().clear();
         }
         void rescore(std::array<node_id_t, 4> const& ids, std::array<vector_view_t, 4> const& vectors,
-                     dense_scores<dot_result_t, 4>& scores, std::size_t count, std::span<key_t const> keys) noexcept {
+                     std::array<vector_norms_t, 4> const& norms, dense_scores<dot_result_t, 4>& scores,
+                     std::size_t count, std::span<key_t const> keys) noexcept {
             rescoring_t const attention = rescoring();
-            attention(ids, vectors, scores, count, keys);
+            attention(ids, vectors, norms, scores, count, keys);
         }
         fold_t fold(walk_t const&) const noexcept { return {}; }
         results_array_t const& bound(walk_t const& walk) const noexcept { return walk.results; }
@@ -821,25 +829,25 @@ struct dense_nvme_indexes {
                                          typename row_type_::inputs_t const& inputs,
                                          std::span<std::size_t const> counts, std::span<u64_t> latencies,
                                          executor_t& executor) noexcept {
-        return index_t::template walk_rows_<row_type_>(to_span(media_), to_span(parts_), executor, rows_count,
+        return index_t::template walk_rows_<row_type_>(to_span(media_), to_span(parts_), kernel_, executor, rows_count,
                                                        non_zero_expansion_factor(config), inputs, counts, latencies);
     }
 
     /** The batched @ref search_if under @p heads, which only a @c dummy_predicate_t accompanies. */
     template <typename heads_type_, typename predicate_type_>
     expected<search_result_t> search_rows_(vectors_view_t queries, heads_type_ const& heads, executor_t& executor,
-                                           search_config_t config, std::size_t wanted, std::span<key_t> keys,
-                                           std::span<distance_t> distances, std::span<std::size_t> counts,
+                                           search_config_t config, nk::matrix_span<key_t> keys,
+                                           nk::matrix_span<distance_t> distances, std::span<std::size_t> counts,
                                            predicate_type_& predicate, std::span<u64_t> latencies) noexcept {
         std::size_t const queries_count = queries.extent(0);
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
-        if (counts.size() != queries_count || keys.size() < queries_count * wanted ||
-            distances.size() < queries_count * wanted)
-            return {{}, status_t::config_mismatch_k};
+        if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
+        if (status_t const refusal = dense_rankings_refusal(queries_count, keys, distances); failed(refusal))
+            return {{}, refusal};
         if (queries_count && queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
         using row_t = search_row<heads_type_, predicate_type_>;
-        typename row_t::inputs_t const inputs {
-            queries, &heads, &predicate, wanted, non_zero_expansion_factor(config), keys, distances, counts};
+        typename row_t::inputs_t const inputs {queries, &heads,    &predicate, non_zero_expansion_factor(config),
+                                               keys,    distances, counts};
         return walk_rows_<row_t>(queries_count, config, inputs, counts, latencies, executor);
     }
 
@@ -861,18 +869,22 @@ struct dense_nvme_indexes {
         u64_t bytes = 0;
     };
 
-    /** Where one scan read landed: the task it serves, its extent, and where its bytes start in the
-     *  buffer. */
-    struct scanned_t {
+    /** One staging slot of a scan: the task whose reads it holds, what each read asked for, where
+     *  each one's bytes start in its covering read, and the reads still to land. */
+    template <std::size_t reads_per_task_>
+    struct scan_slot {
 
-        /** The task the read belongs to. */
+        /** The task the reads belong to. */
         std::size_t task = 0;
 
-        /** What the read asked for. */
-        extent_t extent;
+        /** What each read asked for. */
+        std::array<extent_t, reads_per_task_> extents {};
 
-        /** The offset of the extent's first byte in its covering read. */
-        u64_t offset = 0;
+        /** The offset of each extent's first byte in its covering read. */
+        std::array<u64_t, reads_per_task_> offsets {};
+
+        /** Reads issued and not landed yet. */
+        std::size_t reads_left = 0;
     };
 
     /** One run of whole rows of one column a scan reads: where it starts, its rows, and where its
@@ -889,32 +901,40 @@ struct dense_nvme_indexes {
         std::size_t position = 0;
     };
 
-    /** Begins a call of @p scans scans over every shard: every thread's arena sized for their read
-     *  records, and every engine for a queue depth of staging buffers, each as wide as a walk's. */
-    expected<call_t> begin_scans_(executor_t& executor, std::size_t scans) const noexcept {
+    /** Begins a call of @p scans scans over every shard, each landing @p reads_per_task_ reads per
+     *  task: every thread's arena sized for their slots and @p scratch_bytes more, and every engine
+     *  for a queue depth of slots, each as many staging buffers as reads, every buffer as wide as a
+     *  walk's. */
+    template <std::size_t reads_per_task_ = 1>
+    expected<call_t> begin_scans_(executor_t& executor, std::size_t scans,
+                                  std::size_t scratch_bytes = 0) const noexcept {
         using slice_t = arena_allocator<byte_t>;
         std::size_t const depth = max_of<std::size_t>(executor.queue_depth(), 1);
         // What `scan_reads_` carves per scan, and padding to the first boundary.
-        std::size_t const scan_bytes = slice_t::reserved_bytes(depth * sizeof(scanned_t)) +
+        std::size_t const scan_bytes = slice_t::reserved_bytes(depth * sizeof(scan_slot<reads_per_task_>)) +
                                        slice_t::reserved_bytes(depth * sizeof(u32_t)) +
-                                       slice_t::reserved_bytes(depth * sizeof(io_completion_t));
-        return index_t::begin_call_(executor, to_span(media_), scans * scan_bytes + default_alignment_k, depth,
-                                    staging_bytes_());
+                                       slice_t::reserved_bytes(depth * reads_per_task_ * sizeof(io_completion_t));
+        return index_t::begin_call_(executor, to_span(media_), scans * scan_bytes + scratch_bytes + default_alignment_k,
+                                    depth * reads_per_task_, staging_bytes_());
     }
 
     /**
      *  @brief Scans the reads of @p tasks_count tasks over every thread of @p executor, as many
-     *      in flight per thread as its engine takes, and answers the reads issued.
+     *      slots in flight per thread as its engine's depth, and answers the reads issued.
      *
      *  A thread claims a task whole and asks @p describe for its reads in turn, as
-     *  `describe(task, progress)` with @p progress zero at the claim and kept between the calls,
-     *  until an empty extent ends the task; @p consume takes every landed read as
-     *  `consume(task, extent, bytes)`. Runs inside a call @ref begin_scans_ began; a failed read
-     *  stops every thread, which drains its engine.
+     *  `describe(task, progress)` with @p progress zero at the claim and kept between the calls;
+     *  each call answers @p reads_per_task_ extents, every one non-empty, or an empty first one,
+     *  which ends the task. The reads of one call share a slot, read r of slot s landing in buffer
+     *  s + r · depth, and @p consume takes them once all landed, as `consume(thread, task, extents,
+     *  bytes)` on the thread that read them, both arrays in read order. Runs inside a call
+     *  @ref begin_scans_ began for as many reads per task; a failed read stops every thread, which
+     *  drains its engine.
      */
-    template <typename describe_type_, typename consume_type_>
+    template <std::size_t reads_per_task_ = 1, typename describe_type_, typename consume_type_>
     expected<dense_nvme_reads_t> scan_reads_(executor_t& executor, std::size_t tasks_count, describe_type_&& describe,
                                              consume_type_&& consume) const noexcept {
+        using slot_t = scan_slot<reads_per_task_>;
         constexpr std::size_t unclaimed_k = ~std::size_t {0};
         std::size_t const depth = max_of<std::size_t>(executor.queue_depth(), 1);
         alignas(default_alignment_k) std::size_t cursor = 0;
@@ -923,45 +943,49 @@ struct dense_nvme_indexes {
         auto scan_thread = [&](std::size_t thread, std::size_t) noexcept {
             engine_t& engine = executor.engine(thread);
             arena_t& arena = executor.arena(thread);
-            auto* const scanned = reinterpret_cast<scanned_t*>(
-                arena.allocate(depth * sizeof(scanned_t), default_alignment_k));
-            auto* const free_buffers = reinterpret_cast<u32_t*>(
+            auto* const slots = reinterpret_cast<slot_t*>(arena.allocate(depth * sizeof(slot_t), default_alignment_k));
+            auto* const free_slots = reinterpret_cast<u32_t*>(
                 arena.allocate(depth * sizeof(u32_t), default_alignment_k));
             auto* const completions = reinterpret_cast<io_completion_t*>(
-                arena.allocate(depth * sizeof(io_completion_t), default_alignment_k));
-            status_t local = scanned && free_buffers && completions ? status_t::success_k : status_t::bad_alloc_k;
+                arena.allocate(depth * reads_per_task_ * sizeof(io_completion_t), default_alignment_k));
+            status_t local = slots && free_slots && completions ? status_t::success_k : status_t::bad_alloc_k;
             std::size_t free_count = succeeded(local) ? depth : 0, outstanding = 0;
-            for (std::size_t buffer = 0; buffer != free_count; ++buffer)
-                free_buffers[buffer] = static_cast<u32_t>(buffer);
+            for (std::size_t slot = 0; slot != free_count; ++slot) free_slots[slot] = static_cast<u32_t>(slot);
             std::size_t task = unclaimed_k;
             u64_t progress = 0;
-            // A read a full engine refused, retried once a completion frees room in it.
-            extent_t held;
+            // The slot whose reads are being enqueued and its next read, which a full engine may
+            // refuse until a completion frees room in it; `depth` while none is.
+            std::size_t issuing = depth, next_read = 0;
             dense_nvme_reads_t reads;
             while (true) {
-                while (succeeded(local) && free_count &&
+                while (succeeded(local) &&
                        succeeded(std::atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) {
-                    if (!held.bytes) {
+                    if (issuing == depth) {
+                        if (!free_count) break;
                         if (task == unclaimed_k)
                             task = min_of(std::atomic_ref<std::size_t>(cursor).fetch_add(1, std::memory_order_relaxed),
                                           tasks_count),
                             progress = 0;
                         if (task == tasks_count) break;
-                        held = describe(task, progress);
-                        if (!held.bytes) {
+                        std::array<extent_t, reads_per_task_> const extents = describe(task, progress);
+                        if (!extents[0].bytes) {
                             task = unclaimed_k;
                             continue;
                         }
+                        issuing = free_slots[--free_count];
+                        next_read = 0;
+                        slots[issuing] = slot_t {task, extents, {}, reads_per_task_};
                     }
-                    medium_t const& medium = media_[held.shard];
-                    u64_t const begin = byte_base_of(medium) + held.begin;
-                    u32_t const buffer = free_buffers[--free_count];
+                    slot_t& slot = slots[issuing];
+                    extent_t const& extent = slot.extents[next_read];
+                    medium_t const& medium = media_[extent.shard];
+                    u64_t const begin = byte_base_of(medium) + extent.begin;
                     // The buffer alone names what landed, so the context stays unused.
-                    io_request_t const request = dense_nvme_covering_read(begin, held.bytes, block_bytes_of(medium),
-                                                                          held.shard, buffer, 0);
-                    scanned[buffer] = scanned_t {task, held, begin - request.offset};
+                    io_request_t const request = dense_nvme_covering_read(
+                        begin, extent.bytes, block_bytes_of(medium), extent.shard,
+                        static_cast<io_buffer_id_t>(issuing + next_read * depth), 0);
+                    slot.offsets[next_read] = begin - request.offset;
                     status_t const enqueued = engine.enqueue_read(request);
-                    if (failed(enqueued)) free_buffers[free_count++] = buffer;
                     if (enqueued == status_t::overflow_k && outstanding) break;
                     // A full engine holding none of this thread's reads would never drain, so the
                     // thread fails instead.
@@ -969,9 +993,9 @@ struct dense_nvme_indexes {
                         local = enqueued == status_t::overflow_k ? status_t::io_k : enqueued;
                         break;
                     }
-                    held = {};
                     reads += dense_nvme_reads_t {1, request.length};
                     ++outstanding;
+                    if (++next_read == reads_per_task_) issuing = depth;
                 }
                 if (!outstanding) break;
                 if (status_t const submitted = engine.submit(io_wait_t::blocking_k); failed(submitted)) {
@@ -979,20 +1003,26 @@ struct dense_nvme_indexes {
                     if (succeeded(local)) local = submitted;
                     break;
                 }
-                std::span<io_completion_t> const polling {completions, depth};
+                std::span<io_completion_t> const polling {completions, depth * reads_per_task_};
                 for (std::size_t polled = engine.poll_completions(polling); polled;
                      polled = engine.poll_completions(polling))
                     for (io_completion_t const& completion : polling.first(polled)) {
                         --outstanding;
-                        io_buffer_id_t const buffer = completion.buffer;
-                        scanned_t const& landed = scanned[buffer];
+                        std::size_t const landed = completion.buffer % depth, read = completion.buffer / depth;
+                        slot_t& slot = slots[landed];
+                        u64_t const needed = slot.offsets[read] + slot.extents[read].bytes;
+                        if (succeeded(local) &&
+                            (completion.result < 0 || static_cast<u64_t>(completion.result) < needed))
+                            local = status_t::io_k;
+                        if (--slot.reads_left) continue;
                         if (succeeded(local)) {
-                            if (completion.result < 0 ||
-                                static_cast<u64_t>(completion.result) < landed.offset + landed.extent.bytes)
-                                local = status_t::io_k;
-                            else consume(landed.task, landed.extent, engine.buffer(buffer) + landed.offset);
+                            std::array<byte_t const*, reads_per_task_> bytes;
+                            for (std::size_t each = 0; each != reads_per_task_; ++each)
+                                bytes[each] = engine.buffer(static_cast<io_buffer_id_t>(landed + each * depth)) +
+                                              slot.offsets[each];
+                            consume(thread, slot.task, slot.extents, bytes);
                         }
-                        free_buffers[free_count++] = buffer;
+                        free_slots[free_count++] = static_cast<u32_t>(landed);
                     }
             }
             std::atomic_ref<std::size_t>(issued.count).fetch_add(reads.count, std::memory_order_relaxed);
@@ -1079,13 +1109,14 @@ struct dense_nvme_indexes {
             return task < key_runs ? locate_run_(first, count, task, key_column_k)
                                    : locate_run_(first, count, task - key_runs, value_column_k);
         };
-        auto describe = [&](std::size_t task, u64_t& progress) noexcept {
-            if (progress++) return extent_t {};
-            return run_extent_(run_of(task), task < key_runs ? key_column_k : value_column_k);
+        auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<extent_t, 1> {
+            if (progress++) return {};
+            return {run_extent_(run_of(task), task < key_runs ? key_column_k : value_column_k)};
         };
-        auto consume = [&](std::size_t task, extent_t const& extent, byte_t const* bytes) noexcept {
+        auto consume = [&](std::size_t, std::size_t task, auto const& extents, auto const& landed) noexcept {
             run_t const run = run_of(task);
-            std::size_t const row_bytes = static_cast<std::size_t>(extent.bytes / run.rows);
+            byte_t const* const bytes = landed[0];
+            std::size_t const row_bytes = static_cast<std::size_t>(extents[0].bytes / run.rows);
             for (std::size_t row = 0; row != run.rows; ++row)
                 if (task < key_runs) std::memcpy(&keys[run.position + row], bytes + row * row_bytes, sizeof(key_t));
                 else
@@ -1134,11 +1165,13 @@ struct dense_nvme_indexes {
         }
 
         std::size_t const rows_count = size();
-        auto describe = [&](std::size_t run, u64_t& progress) noexcept {
-            if (progress++) return extent_t {};
-            return run_extent_(locate_run_(0, rows_count, run, key_column_k), key_column_k);
+        auto describe = [&](std::size_t run, u64_t& progress) noexcept -> std::array<extent_t, 1> {
+            if (progress++) return {};
+            return {run_extent_(locate_run_(0, rows_count, run, key_column_k), key_column_k)};
         };
-        auto consume = [&](std::size_t, extent_t const& extent, byte_t const* bytes) noexcept {
+        auto consume = [&](std::size_t, std::size_t, auto const& extents, auto const& landed) noexcept {
+            extent_t const& extent = extents[0];
+            byte_t const* const bytes = landed[0];
             dense_nvme_part_t const& part = parts_[extent.shard];
             std::size_t const first = static_cast<std::size_t>((extent.begin - part.keys_begin) / part.key_row_bytes);
             for (std::size_t row = 0; row != extent.bytes / part.key_row_bytes; ++row) {
@@ -1150,6 +1183,249 @@ struct dense_nvme_indexes {
             }
         };
         return scan_reads_(executor, runs_count_(0, rows_count, key_column_k), describe, consume).status;
+    }
+
+    /** One match a thread's scan keeps for a query: its distance and its row's key. */
+    struct scan_match_t {
+        distance_t distance = 0;
+        key_t key {};
+    };
+
+    /** One thread's share of a scan, from its own arena: as many matches per query as a ranking is
+     *  wide, unordered, each query's kept count and worst distance, and one step of engine dots. */
+    struct scan_share_t {
+        scan_match_t* matches = nullptr;
+        u32_t* kept = nullptr;
+        distance_t* thresholds = nullptr;
+        byte_t* dots = nullptr;
+    };
+
+    /**
+     *  @brief Exact rankings of every query over every row: each part's value column is read once,
+     *      in runs, every run paired with the key run of its rows and scored against the batch.
+     *
+     *  A batch as wide as a tile streams through the matrix engine, packed once per block of the
+     *  kit's pack width; a narrower one, or a scalar no engine multiplies, scores four rows at a
+     *  time per query. Both finalize through the walk's quads kit. Every thread keeps its own
+     *  matches of every query, and they merge once the column ends. @p predicate sees a row's key
+     *  only once the row beats some query's worst match. One pass answers the whole batch, so
+     *  every latency is that pass.
+     */
+    template <typename predicate_type_>
+    expected<search_result_t> scan_rows_(vectors_view_t queries, executor_t& executor, nk::matrix_span<key_t> keys,
+                                         nk::matrix_span<distance_t> distances, std::span<std::size_t> counts,
+                                         predicate_type_& predicate, std::span<u64_t> latencies) noexcept {
+        using slice_t = arena_allocator<byte_t>;
+        using tiles_chain_t = dense_tiles_chain<scalar_t, capability_>;
+        using quads_kit_t = typename index_t::quads_kit_t;
+        constexpr bool filtered_k = !std::is_same_v<std::remove_cv_t<predicate_type_>, dummy_predicate_t>;
+        std::size_t const queries_count = queries.extent(0), wanted = keys.extent(1), threads = executor.size();
+        if (parts_.empty()) return {{}, status_t::uninitialized_k};
+        if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
+        if (status_t const refusal = dense_rankings_refusal(queries_count, keys, distances); failed(refusal))
+            return {{}, refusal};
+        if (!latencies.empty() && latencies.size() != queries_count) return {{}, status_t::config_mismatch_k};
+        if (queries_count && queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
+        std::memset(counts.data(), 0, counts.size_bytes());
+        if (!queries_count || !wanted) return {{}, status_t::success_k};
+        auto const started = std::chrono::steady_clock::now();
+
+        // A batch narrower than a tile scores per query, as a lone query scans on RAM.
+        std::size_t pack_columns = 1, stream_rows = 0, pack_stride = 0;
+        bool tiled = false;
+        if constexpr (tiles_chain_t::has_tiles_k) {
+            using tiles_kit_t = typename tiles_chain_t::kit_t;
+            nk_size_t packed_bytes = 0;
+            tiled = queries_count >= tiles_kit_t::tile_columns_k &&
+                    tiles_kit_t::pack_size(tiles_kit_t::pack_columns_k, dimensions(), &packed_bytes) == nk_success_k;
+            pack_columns = tiles_kit_t::pack_columns_k, stream_rows = tiles_kit_t::stream_rows_k;
+            pack_stride = round_up_to_multiple<std::size_t>(packed_bytes, default_alignment_k);
+        }
+        std::size_t const packs = tiled ? divide_round_up(queries_count, pack_columns) : 0;
+        std::size_t const padded_queries = round_up_to_multiple<std::size_t>(queries_count, 4);
+        // Every arena takes a share, and thread zero's the packs, the queries' norms, the shares
+        // and the merge besides, so every arena is sized for both.
+        std::size_t const share_bytes = slice_t::reserved_bytes(queries_count * wanted * sizeof(scan_match_t)) +
+                                        slice_t::reserved_bytes(queries_count * sizeof(u32_t)) +
+                                        slice_t::reserved_bytes(queries_count * sizeof(distance_t)) +
+                                        slice_t::reserved_bytes(stream_rows * pack_columns * sizeof(dot_result_t));
+        std::size_t const home_bytes = slice_t::reserved_bytes(packs * pack_stride) +
+                                       slice_t::reserved_bytes(padded_queries * sizeof(vector_norms_t)) +
+                                       slice_t::reserved_bytes(padded_queries * sizeof(dot_result_t)) +
+                                       slice_t::reserved_bytes(threads * sizeof(scan_share_t)) +
+                                       slice_t::reserved_bytes(threads * wanted * sizeof(scan_match_t));
+        auto [call, call_status] = begin_scans_<2>(executor, 1, share_bytes + home_bytes);
+        if (failed(call_status)) return {{}, call_status};
+        auto carve = [](arena_t& arena, std::size_t bytes) noexcept {
+            return arena.allocate(max_of<std::size_t>(bytes, 1), default_alignment_k);
+        };
+        arena_t& home = executor.arena(0);
+        auto* const packed = carve(home, packs * pack_stride);
+        auto* const norms = reinterpret_cast<vector_norms_t*>(carve(home, padded_queries * sizeof(vector_norms_t)));
+        auto* const sumsqs = reinterpret_cast<dot_result_t*>(carve(home, padded_queries * sizeof(dot_result_t)));
+        auto* const shares = reinterpret_cast<scan_share_t*>(carve(home, threads * sizeof(scan_share_t)));
+        auto* const merged = reinterpret_cast<scan_match_t*>(carve(home, threads * wanted * sizeof(scan_match_t)));
+        if (!packed || !norms || !sumsqs || !shares || !merged) return {{}, status_t::bad_alloc_k};
+        for (std::size_t thread = 0; thread != threads; ++thread) {
+            arena_t& arena = executor.arena(thread);
+            scan_share_t& share = *new (shares + thread) scan_share_t {
+                reinterpret_cast<scan_match_t*>(carve(arena, queries_count * wanted * sizeof(scan_match_t))),
+                reinterpret_cast<u32_t*>(carve(arena, queries_count * sizeof(u32_t))),
+                reinterpret_cast<distance_t*>(carve(arena, queries_count * sizeof(distance_t))),
+                carve(arena, stream_rows * pack_columns * sizeof(dot_result_t))};
+            if (!share.matches || !share.kept || !share.thresholds || !share.dots) return {{}, status_t::bad_alloc_k};
+            std::memset(share.kept, 0, queries_count * sizeof(u32_t));
+            for (std::size_t query = 0; query != queries_count; ++query)
+                share.thresholds[query] = std::numeric_limits<distance_t>::max();
+        }
+        for (std::size_t query = 0; query != padded_queries; ++query) {
+            norms[query] = query < queries_count ? index_t::dense_norms_(kernel_, queries.row(query).as_vector())
+                                                 : vector_norms_t {};
+            sumsqs[query] = norms[query].sumsq;
+        }
+        if constexpr (tiles_chain_t::has_tiles_k) {
+            using tiles_kit_t = typename tiles_chain_t::kit_t;
+            for (std::size_t pack = 0; pack != packs; ++pack) {
+                std::size_t const first = pack * pack_columns, columns = min_of(pack_columns, queries_count - first);
+                vectors_view_t const block = queries(nk::range(first, first + columns), nk::slice);
+                [[maybe_unused]] nk_status_t const packed_status = tiles_kit_t::pack(
+                    block.raw_values_data(), columns, dimensions(), static_cast<std::size_t>(block.stride_bytes(0)),
+                    packed + pack * pack_stride, 0, columns, nullptr);
+                assert(packed_status == nk_success_k && "A matrix engine packs any block");
+            }
+        }
+
+        // Keeps a match in a thread's share of a query, and answers that query's new worst.
+        auto land_into = [wanted](scan_share_t const& share, std::size_t query, scan_match_t match) noexcept {
+            scan_match_t* const kept = share.matches + query * wanted;
+            u32_t& count = share.kept[query];
+            if (count < wanted) {
+                kept[count++] = match;
+                if (count < wanted) return std::numeric_limits<distance_t>::max();
+            }
+            else {
+                std::size_t worst = 0;
+                for (std::size_t slot = 1; slot != wanted; ++slot)
+                    if (kept[slot].distance > kept[worst].distance) worst = slot;
+                kept[worst] = match;
+            }
+            distance_t threshold = kept[0].distance;
+            for (std::size_t slot = 1; slot != wanted; ++slot) threshold = max_of(threshold, kept[slot].distance);
+            return threshold;
+        };
+
+        // Runs follow the wider of the key and value rows, so both runs of a task fit a buffer.
+        std::size_t const rows_count = size();
+        column_t const runs_column = parts_[0].value_row_bytes >= parts_[0].key_row_bytes ? value_column_k
+                                                                                          : key_column_k;
+        auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<extent_t, 2> {
+            if (progress++) return {};
+            run_t const run = locate_run_(0, rows_count, task, runs_column);
+            return {run_extent_(run, key_column_k), run_extent_(run, value_column_k)};
+        };
+        auto consume = [&](std::size_t thread, std::size_t, std::array<extent_t, 2> const& extents,
+                           std::array<byte_t const*, 2> const& landed) noexcept {
+            scan_share_t const& share = shares[thread];
+            dense_nvme_part_t const& part = parts_[extents[1].shard];
+            std::size_t const run_rows = static_cast<std::size_t>(extents[1].bytes / part.value_row_bytes);
+            auto key_of = [&](std::size_t row) noexcept {
+                key_t key;
+                std::memcpy(&key, landed[0] + row * part.key_row_bytes, sizeof(key_t));
+                return key;
+            };
+            auto row_of = [&](std::size_t row) noexcept {
+                return vector_view_t {reinterpret_cast<scalar_t const*>(landed[1] + row * part.value_row_bytes),
+                                      part.dimensions};
+            };
+            auto admits = [&]() noexcept {
+                if constexpr (filtered_k) return [&](dense_node_id_t row) noexcept { return predicate(key_of(row)); };
+                else return dummy_predicate_t {};
+            }();
+            if constexpr (tiles_chain_t::has_tiles_k)
+                if (tiled) {
+                    using tiles_kit_t = typename tiles_chain_t::kit_t;
+                    using raw_dot_t = typename dot_result_t::raw_t;
+                    // Rows may be padded past the logical width the queries were packed at.
+                    vectors_view_t const dense {reinterpret_cast<scalar_t const*>(landed[1]), run_rows,
+                                                std::size_t {part.dimensions}};
+                    nk::shape_storage_<2> const logical {
+                        {run_rows, std::size_t {part.dimensions}},
+                        {static_cast<decltype(dense.stride_bytes(0))>(part.value_row_bytes), dense.stride_bytes(1)},
+                        2};
+                    vectors_view_t const rows {dense.byte_data(), logical};
+                    nk::matrix_span<raw_dot_t> const dots {reinterpret_cast<raw_dot_t*>(share.dots), stream_rows,
+                                                           pack_columns};
+                    auto row_sumsq = [&](std::size_t row) noexcept {
+                        return index_t::dense_norms_(kernel_, row_of(row)).sumsq;
+                    };
+                    for (std::size_t pack = 0; pack != packs; ++pack) {
+                        std::size_t const first = pack * pack_columns;
+                        std::size_t const columns = min_of(pack_columns, queries_count - first);
+                        auto land = [&](std::size_t column, dense_scored_node_t scored) noexcept {
+                            return land_into(share, first + column, {scored.distance, key_of(scored.node_id)});
+                        };
+                        dense_scan_tiles<tiles_kit_t, quads_kit_t>(
+                            kernel_, rows, 0, packed + pack * pack_stride,
+                            std::span<dot_result_t const>(sumsqs + first, columns),
+                            std::span<distance_t>(share.thresholds + first, columns), dots, row_sumsq, admits, land);
+                    }
+                    return;
+                }
+            for (std::size_t row = 0; row < run_rows; row += 4) {
+                std::size_t const lanes = min_of<std::size_t>(4, run_rows - row);
+                std::array<vector_view_t, 4> lane_rows;
+                std::array<vector_norms_t, 4> lane_norms;
+                for (std::size_t lane = 0; lane != 4; ++lane) {
+                    lane_rows[lane] = row_of(row + min_of(lane, lanes - 1));
+                    lane_norms[lane] = index_t::dense_norms_(kernel_, lane_rows[lane]);
+                }
+                // A lane asks the predicate at most once, once it beats some query's worst.
+                std::array<u8_t, 4> verdicts {};
+                auto admitted = [&](std::size_t lane) noexcept {
+                    if (!verdicts[lane])
+                        verdicts[lane] = dense_admitted(admits, static_cast<dense_node_id_t>(row + lane)) ? 1 : 2;
+                    return verdicts[lane] == 1;
+                };
+                for (std::size_t query = 0; query != queries_count; ++query) {
+                    std::array<distance_t, 4> const lane_distances = usearch::distances<capability_, scalar_t>(
+                        kernel_, queries.row(query).as_vector(), norms[query], lane_rows, lane_norms);
+                    for (std::size_t lane = 0; lane != lanes; ++lane)
+                        if (lane_distances[lane] < share.thresholds[query] && admitted(lane))
+                            share.thresholds[query] = land_into(share, query,
+                                                                {lane_distances[lane], key_of(row + lane)});
+                }
+            }
+        };
+        auto const [reads, status] = scan_reads_<2>(executor, runs_count_(0, rows_count, runs_column), describe,
+                                                    consume);
+        search_result_t result;
+        result.scan_reads = reads;
+        result.computed_distances = rows_count * queries_count;
+        if (failed(status)) return {result, status};
+
+        // Every thread's matches of a query merge, the nearest landing ascending.
+        auto nearer = [](scan_match_t const& first, scan_match_t const& second) noexcept {
+            return first.distance < second.distance;
+        };
+        for (std::size_t query = 0; query != queries_count; ++query) {
+            std::size_t gathered = 0;
+            for (std::size_t thread = 0; thread != threads; ++thread) {
+                scan_share_t const& share = shares[thread];
+                std::memcpy(merged + gathered, share.matches + query * wanted,
+                            share.kept[query] * sizeof(scan_match_t));
+                gathered += share.kept[query];
+            }
+            std::size_t const kept = min_of(gathered, wanted);
+            partial_sort(std::span<scan_match_t>(merged, gathered), kept, nearer);
+            for (std::size_t rank = 0; rank != kept; ++rank)
+                keys(query, rank) = merged[rank].key, distances(query, rank) = merged[rank].distance;
+            counts[query] = kept;
+            result.count += kept;
+        }
+        u64_t const elapsed = static_cast<u64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count());
+        for (u64_t& latency : latencies) latency = elapsed;
+        return {result, status_t::success_k};
     }
 
 #pragma endregion Scans
@@ -1189,10 +1465,10 @@ struct dense_nvme_indexes {
             }
             return bound;
         };
-        auto describe = [&](std::size_t task, u64_t& progress) noexcept {
+        auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<extent_t, 1> {
             std::size_t const task_first = task * run_rows, bound = min_of(task_first + run_rows, nodes);
             std::size_t const first = first_in_level(task_first + progress, bound);
-            if (first == bound) return extent_t {};
+            if (first == bound) return {};
             // Rows join while their blocks touch the read's, so it covers no block that a read per
             // row would not.
             std::size_t last = first;
@@ -1202,9 +1478,11 @@ struct dense_nvme_indexes {
                 last = row;
             }
             progress = last + 1 - task_first;
-            return extent_t {part_index, part.neighbors_begin + first * row_bytes, (last + 1 - first) * row_bytes};
+            return {extent_t {part_index, part.neighbors_begin + first * row_bytes, (last + 1 - first) * row_bytes}};
         };
-        auto consume = [&](std::size_t, extent_t const& extent, byte_t const* bytes) noexcept {
+        auto consume = [&](std::size_t, std::size_t, auto const& extents, auto const& landed) noexcept {
+            extent_t const& extent = extents[0];
+            byte_t const* const bytes = landed[0];
             std::size_t const first = static_cast<std::size_t>((extent.begin - part.neighbors_begin) / row_bytes);
             for (std::size_t row = 0; row != extent.bytes / row_bytes; ++row) {
                 std::size_t const node = first + row;
@@ -1320,8 +1598,8 @@ struct dense_nvme_indexes {
             medium_t medium;
             dense_nvme_part_t opened;
             std::string_view const resolved_path {resolved.data(), resolved.size() - 1};
-            if (status_t const vetted = index_t::open_part_(resolved_path, safegraphs_key_dtype<key_t>(), allocator_,
-                                                            medium, opened);
+            if (status_t const vetted = index_t::open_part_(resolved_path, safegraphs_key_dtype<key_t>(), kernel_,
+                                                            allocator_, medium, opened);
                 failed(vetted))
                 return vetted;
             if (part && (opened.dimensions != parts_[0].dimensions || opened.connectivity != parts_[0].connectivity ||
@@ -1330,6 +1608,7 @@ struct dense_nvme_indexes {
             media_.push_back_reserved(std::move(medium));
             parts_.push_back_reserved(opened);
         }
+        if (!dense_kernel_supported<typename index_t::quads_kit_t>(kernel_)) return status_t::unknown_kind_k;
         return status_t::success_k;
     }
 
@@ -1343,6 +1622,9 @@ struct dense_nvme_indexes {
 
     /** The host allocator behind the catalog and the paths a view resolves. */
     forkunion_allocator_t allocator_;
+
+    /** The distance kind the parts name, every walk ranks by, and every rewrite carries on. */
+    nk_kernel_kind_t kernel_ = nk_kernel_unknown_k;
 };
 
 /**
@@ -1698,22 +1980,17 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     using paths_t = growing_buffer<char, forkunion_allocator_t>;
 
     /** The RAM index a block build or a whole-part refine places inside the workspace. */
-    using ram_index_t = dense_ram_index<indexes_t::vector_dtype_k, indexes_t::kernel_kind_k, indexes_t::capability_k,
-                                        fu::standard_yield_t, fu::standard_atomic_ref, fu::standard_cache_hints_t,
-                                        dense_nvme_workspace_allocator<byte_t>, dense_nvme_workspace_allocator<byte_t>,
-                                        arena_allocator<byte_t, forkunion_allocator_t>>;
-    using traversal_t = typename ram_index_t::dense_traversal_context_t;
-    using traversals_t = growing_buffer<traversal_t, forkunion_allocator_t>;
+    using ram_index_t =
+        dense_ram_index<indexes_t::vector_dtype_k, indexes_t::capability_k, fu::standard_yield_t,
+                        fu::standard_atomic_ref, fu::standard_cache_hints_t, dense_nvme_workspace_allocator<byte_t>,
+                        dense_nvme_workspace_allocator<byte_t>, arena_allocator<byte_t, forkunion_allocator_t>>;
+    using dense_traversal_context_t = typename ram_index_t::dense_traversal_context_t;
+    using traversals_t = growing_buffer<dense_traversal_context_t, forkunion_allocator_t>;
     using ram_cursor_t =
         dense_ram_cursor<ram_index_t, synchronization_t::immutable_k, arena_allocator<byte_t, forkunion_allocator_t>>;
 
     inline static constexpr node_id_t sentinel_k = dense_node_id_unknown_k;
-    inline static constexpr std::size_t norms_bytes_k = std::is_same_v<vector_norms_t, no_norms_t>
-                                                            ? 0
-                                                            : sizeof(vector_norms_t);
-    inline static constexpr dtype_t norms_dtype_k = norms_bytes_k ? safegraphs_value_dtype<dot_result_t>()
-                                                                  : dtype_t::unknown_k;
-    static_assert(!norms_bytes_k || norms_bytes_k == 2 * sizeof(dot_result_t), "A norms row is a sum and a square");
+    static_assert(sizeof(vector_norms_t) == 2 * sizeof(dot_result_t), "A norms row is a sum and a square");
 
     /** Key ranges a split by keys routes at most: every row's range is tagged with one byte. */
     inline static constexpr std::size_t max_key_ranges_k = std::size_t {std::numeric_limits<u8_t>::max()} + 1;
@@ -1872,11 +2149,11 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         void arm(std::size_t new_row) noexcept {
             row = new_row;
             query = inputs.queries.row(row).as_vector();
-            query_norms = usearch::dense_norms<indexes_t::kernel_kind_k, indexes_t::capability_k, scalar_t>(query);
             inputs.pools.counts[row] = 0;
         }
         void rescore(std::array<node_id_t, 4> const&, std::array<vector_view_t, 4> const& vectors,
-                     dense_scores<dot_result_t, 4>&, std::size_t, std::span<key_t const>) noexcept {
+                     std::array<vector_norms_t, 4> const&, dense_scores<dot_result_t, 4>&, std::size_t,
+                     std::span<key_t const>) noexcept {
             landed = vectors;
         }
         fold_t fold(walk_t const&) noexcept { return {this}; }
@@ -1916,9 +2193,9 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         return status_t::success_k;
     }
 
-    /** Opens the plan's common state: the workspace, the walk breadth, the header fields, the
-     *  target's paths and the geometry of the first source part, and removes a stale manifest so no
-     *  half-written part is ever named. */
+    /** Opens the plan's common state: the workspace, the walk breadth, the kernel and the header
+     *  fields, the target's paths and the geometry of the first source part, and removes a stale
+     *  manifest so no half-written part is ever named. */
     status_t open_(std::string_view target, bytes_span_t workspace, dense_nvme_rewrite_config_t const& config,
                    indexes_t const& view) noexcept {
         save_config_t const save {checkpoint_layout_t::distributed_k, config.alignment, synchronization_t::immutable_k,
@@ -1931,8 +2208,10 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         alignment_ = config.alignment;
         dimensions_ = first.dimensions, connectivity_ = first.connectivity, value_row_bytes_ = first.value_row_bytes;
         expansion_factor_ = config.expansion_factor ? config.expansion_factor : connectivity_ * 2;
+        kernel_ = view.kernel();
+        norms_bytes_ = view.stores_norms() ? sizeof(vector_norms_t) : 0;
         if (failed(fields_.reserve_exactly(2 + config.provenance.size()))) return status_t::bad_alloc_k;
-        fields_.push_back_reserved({"metric", nk_kernel_name(indexes_t::kernel_kind_k)});
+        fields_.push_back_reserved({"metric", nk_kernel_name(kernel_)});
         fields_.push_back_reserved({"quantization", nk_dtype_name(indexes_t::vector_dtype_k)});
         for (safegraphs_custom_field_t const& field : config.provenance) fields_.push_back_reserved(field);
         if (failed(keep_path_(manifest_, target)) || failed(keep_path_(stem_, safegraphs_stem(target))))
@@ -1941,9 +2220,10 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         return status_t::success_k;
     }
 
-    /** Appends every non-empty part of @p view to the sources, refusing a geometry other than the
-     *  first one's. */
+    /** Appends every non-empty part of @p view to the sources, refusing a geometry or a kernel
+     *  other than the first one's. */
     status_t add_sources_(indexes_t const& view) noexcept {
+        if (view.kernel() != kernel_) return status_t::config_mismatch_k;
         for (u32_t part = 0; part != view.parts_.size(); ++part) {
             dense_nvme_part_t const& opened = view.parts_[part];
             if (opened.dimensions != dimensions_ || opened.connectivity != connectivity_ ||
@@ -1968,18 +2248,20 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         std::size_t buckets = 0;
         for (std::size_t part = 0; part != rows.size(); ++part) {
             if (!rows[part] || rows[part] >= dense_node_id_unknown_k) return status_t::overflow_k;
-            safegraphs_regular_shape_t const shape {rows[part],
-                                                    safegraphs_key_dtype<key_t>(),
-                                                    safegraphs_value_dtype<scalar_t>(),
-                                                    dimensions_,
-                                                    dtype_t::u32_k,
-                                                    connectivity_,
-                                                    norms_dtype_k};
+            safegraphs_regular_shape_t const shape {
+                rows[part],
+                safegraphs_key_dtype<key_t>(),
+                safegraphs_value_dtype<scalar_t>(),
+                dimensions_,
+                dtype_t::u32_k,
+                connectivity_,
+                norms_bytes_ ? safegraphs_value_dtype<dot_result_t>() : dtype_t::unknown_k};
             auto const [header, frame_status] = safegraphs_regular_header(shape, alignment_, to_span(fields_));
             if (failed(frame_status)) return frame_status;
             targets_.push_back_reserved(
                 target_t {paths_t {allocator_}, seekable_file_t {}, header, indexes_t {allocator_}});
             target_t& target = targets_.back();
+            target.view.kernel_ = kernel_;
             paths_t name {allocator_};
             auto const [path, path_status] = safegraphs_part_path(name, path_of_(stem_), part, rows.size());
             if (failed(path_status)) return path_status;
@@ -2124,7 +2406,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     /** Bytes a copy step stages per row: every column, and a second copy of them when key ranges
      *  scatter the rows. */
     std::size_t copy_row_bytes_() const noexcept {
-        std::size_t const row = sizeof(key_t) + value_row_bytes_ + norms_bytes_k + neighbors_row_bytes_();
+        std::size_t const row = sizeof(key_t) + value_row_bytes_ + norms_bytes_ + neighbors_row_bytes_();
         return fences_.empty() ? row : row * 2;
     }
 
@@ -2164,14 +2446,14 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         using schedule_t = typename ram_index_t::chunk_schedule_t;
         std::size_t const chunks = schedule_t::chunks_for(rows);
         typename ram_index_t::geometry_t const geometry {dimensions_, static_cast<connectivity_t>(connectivity_)};
-        std::size_t const row_bytes = ram_index_t::padded_row_values(geometry) * sizeof(scalar_t) + norms_bytes_k +
+        std::size_t const row_bytes = ram_index_t::padded_row_values(geometry) * sizeof(scalar_t) + norms_bytes_ +
                                       neighbors_row_bytes_();
         std::size_t const directory = round_up_to_multiple(
             max_of(max_of(sizeof(typename ram_index_t::vectors_chunk_t), sizeof(typename ram_index_t::norms_chunk_t)),
                    sizeof(typename ram_index_t::neighbors_chunk_t)),
             default_alignment_k);
         // A chunk without norms allocates only its values and neighbors.
-        std::size_t const chunk_slices = norms_bytes_k ? 3 : 2;
+        std::size_t const chunk_slices = norms_bytes_ ? 3 : 2;
         return 3 * (ram_index_t::max_chunks_k * directory + default_alignment_k) +
                chunks * chunk_slices * default_alignment_k + schedule_t::rows_before(chunks) * row_bytes;
     }
@@ -2234,20 +2516,20 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
             }
             return run = 0, columns.back();
         };
-        auto describe = [&](std::size_t task, u64_t& progress) noexcept {
-            if (progress++) return extent_t {};
+        auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<extent_t, 1> {
+            if (progress++) return {};
             std::size_t run = 0;
             staged_column_t const& column = locate(task, run);
             std::size_t const run_rows = run_rows_of(column);
             std::size_t const row = run * run_rows, rows = min_of(run_rows, count - row);
-            return extent_t {part, column.begin + u64_t(first + row) * column.row_bytes,
-                             u64_t(rows) * column.row_bytes};
+            return {
+                extent_t {part, column.begin + u64_t(first + row) * column.row_bytes, u64_t(rows) * column.row_bytes}};
         };
-        auto consume = [&](std::size_t task, extent_t const& extent, byte_t const* bytes) noexcept {
+        auto consume = [&](std::size_t, std::size_t task, auto const& extents, auto const& landed) noexcept {
             std::size_t run = 0;
             staged_column_t const& column = locate(task, run);
-            std::memcpy(column.staging + run * run_rows_of(column) * column.row_bytes, bytes,
-                        static_cast<std::size_t>(extent.bytes));
+            std::memcpy(column.staging + run * run_rows_of(column) * column.row_bytes, landed[0],
+                        static_cast<std::size_t>(extents[0].bytes));
         };
         auto [call, call_status] = view.begin_scans_(executor, 1);
         if (failed(call_status)) return call_status;
@@ -2264,12 +2546,12 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
                           row_of_type_&& row_of, destination_of_type_&& destination_of, executor_t& executor,
                           dense_nvme_reads_t& reads) noexcept {
         if (!tasks) return status_t::success_k;
-        auto describe = [&](std::size_t task, u64_t& progress) noexcept {
-            if (progress++) return extent_t {};
-            return extent_t {0, begin + u64_t(row_of(task)) * row_bytes, row_bytes};
+        auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<extent_t, 1> {
+            if (progress++) return {};
+            return {extent_t {0, begin + u64_t(row_of(task)) * row_bytes, row_bytes}};
         };
-        auto consume = [&](std::size_t task, extent_t const&, byte_t const* bytes) noexcept {
-            std::memcpy(destination_of(task), bytes, row_bytes);
+        auto consume = [&](std::size_t, std::size_t task, auto const&, auto const& landed) noexcept {
+            std::memcpy(destination_of(task), landed[0], row_bytes);
         };
         auto [call, call_status] = view.begin_scans_(executor, 1);
         if (failed(call_status)) return call_status;
@@ -2285,15 +2567,15 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         indexes_t const& view = *source.view;
         dense_nvme_part_t const& part = view.parts_[source.part];
         std::size_t const run_rows = min_of(view.scan_run_rows_(source.part, sizeof(key_t)), source.rows);
-        auto describe = [&](std::size_t task, u64_t& progress) noexcept {
-            if (progress++) return extent_t {};
+        auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<extent_t, 1> {
+            if (progress++) return {};
             std::size_t const row = task * run_rows, rows = min_of(run_rows, source.rows - row);
-            return extent_t {source.part, part.keys_begin + u64_t(row) * sizeof(key_t), u64_t(rows) * sizeof(key_t)};
+            return {extent_t {source.part, part.keys_begin + u64_t(row) * sizeof(key_t), u64_t(rows) * sizeof(key_t)}};
         };
-        auto consume = [&](std::size_t task, extent_t const& extent, byte_t const* bytes) noexcept {
-            for (std::size_t row = 0; row != extent.bytes / sizeof(key_t); ++row) {
+        auto consume = [&](std::size_t, std::size_t task, auto const& extents, auto const& landed) noexcept {
+            for (std::size_t row = 0; row != extents[0].bytes / sizeof(key_t); ++row) {
                 key_t key;
-                std::memcpy(&key, bytes + row * sizeof(key_t), sizeof(key_t));
+                std::memcpy(&key, landed[0] + row * sizeof(key_t), sizeof(key_t));
                 on_key(task * run_rows + row, key);
             }
         };
@@ -2336,9 +2618,10 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
 
 #pragma region Selection
 
-    /** The query-side norms of the row whose bytes start at @p bytes. */
+    /** The norms the kernel reads of the row whose bytes start at @p bytes, or none. */
     vector_norms_t norms_of_(byte_t const* bytes) const noexcept {
-        return usearch::dense_norms<indexes_t::kernel_kind_k, indexes_t::capability_k, scalar_t>(view_of_(bytes));
+        return norms_bytes_ ? usearch::dense_norms<indexes_t::capability_k, scalar_t>(view_of_(bytes))
+                            : vector_norms_t {};
     }
     vector_view_t view_of_(byte_t const* bytes) const noexcept {
         return vector_view_t {reinterpret_cast<scalar_t const*>(bytes), dimensions_};
@@ -2347,8 +2630,8 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     /** The exact distance between two rows. */
     f32_t distance_(byte_t const* first, vector_norms_t first_norms, byte_t const* second,
                     vector_norms_t second_norms) const noexcept {
-        return usearch::distance<indexes_t::kernel_kind_k, indexes_t::capability_k, scalar_t>(
-            view_of_(first), first_norms, view_of_(second), second_norms);
+        return usearch::distance<indexes_t::capability_k, scalar_t>(kernel_, view_of_(first), first_norms,
+                                                                    view_of_(second), second_norms);
     }
 
     /**
@@ -2364,7 +2647,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         dense_scored_node_t const* const entries = pools.entries_of(row);
         std::size_t const count = pools.counts[row], limit = out.size();
         for (u32_t slot = 0; slot != count; ++slot) scratch.order[slot] = slot;
-        std::sort(scratch.order, scratch.order + count, [&](u32_t first, u32_t second) noexcept {
+        partial_sort(std::span<u32_t>(scratch.order, count), count, [&](u32_t first, u32_t second) noexcept {
             return entries[first].distance != entries[second].distance
                        ? entries[first].distance < entries[second].distance
                        : entries[first].node_id < entries[second].node_id;
@@ -2414,7 +2697,8 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     /** Appends the back-links in @p proposals to the buckets of target part @p part, one positional
      *  write per bucket; sentinel records are skipped. */
     status_t spill_(std::size_t part, std::span<proposal_t> proposals) noexcept {
-        std::sort(proposals.begin(), proposals.end(), [](proposal_t const& first, proposal_t const& second) noexcept {
+        // A full ascending order, so the sentinel records gather at the end, where the loop stops.
+        partial_sort(proposals, proposals.size(), [](proposal_t const& first, proposal_t const& second) noexcept {
             return first.target < second.target;
         });
         paths_t name {allocator_};
@@ -2482,7 +2766,9 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
 
     /** The key range @p key falls in. */
     std::size_t tag_of_(key_t const& key) const noexcept {
-        return static_cast<std::size_t>(std::upper_bound(fences_.begin(), fences_.end(), key) - fences_.begin());
+        // The first fence above the key, as an upper bound finds it.
+        auto const not_above = [](key_t const& fence, key_t const& probe) noexcept { return !(probe < fence); };
+        return static_cast<std::size_t>(lower_bound(fences_, key, not_above) - fences_.data());
     }
 
     /** Counts the rows of source part @p step.part every key range takes. */
@@ -2610,7 +2896,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
                 return routed;
         auto* const keys = carve_<byte_t>(space, count * sizeof(key_t));
         auto* const values = carve_<byte_t>(space, count * value_bytes);
-        auto* const norms = carve_<byte_t>(space, count * norms_bytes_k);
+        auto* const norms = carve_<byte_t>(space, count * norms_bytes_);
         auto* const neighbors = carve_<node_id_t>(space, count * connectivity_);
         if (!keys || !values || !norms || !neighbors) return status_t::bad_alloc_k;
 
@@ -2627,9 +2913,9 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
 
         std::size_t cut = 0;
         status_t const prepared = fan_out_(executor, count, [&](std::size_t row, std::size_t, std::size_t) noexcept {
-            if constexpr (norms_bytes_k != 0) {
+            if (norms_bytes_) {
                 vector_norms_t const derived = norms_of_(values + row * value_bytes);
-                std::memcpy(norms + row * norms_bytes_k, &derived, norms_bytes_k);
+                std::memcpy(norms + row * norms_bytes_, &derived, norms_bytes_);
             }
             node_id_t* const row_neighbors = neighbors + row * connectivity_;
             std::size_t row_cut = 0;
@@ -2647,8 +2933,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
             std::size_t const landed = source.base + first - range * source.stride;
             status_t wrote = write_rows_(target, written.keys_begin, sizeof(key_t), landed, count, keys);
             if (succeeded(wrote)) wrote = write_rows_(target, written.values_begin, value_bytes, landed, count, values);
-            if (succeeded(wrote))
-                wrote = write_rows_(target, norms_begin_(target), norms_bytes_k, landed, count, norms);
+            if (succeeded(wrote)) wrote = write_rows_(target, norms_begin_(target), norms_bytes_, landed, count, norms);
             // A block build writes every row's neighbors itself.
             if (succeeded(wrote) && !source.kept.empty())
                 wrote = write_rows_(target, written.neighbors_begin, neighbor_bytes, landed, count,
@@ -2667,7 +2952,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         std::size_t const value_bytes = value_row_bytes_, neighbor_bytes = neighbors_row_bytes_();
         auto* const gathered_keys = carve_<byte_t>(space, count * sizeof(key_t));
         auto* const gathered_values = carve_<byte_t>(space, count * value_bytes);
-        auto* const gathered_norms = carve_<byte_t>(space, count * norms_bytes_k);
+        auto* const gathered_norms = carve_<byte_t>(space, count * norms_bytes_);
         auto* const gathered_neighbors = carve_<node_id_t>(space, count * connectivity_);
         if (!gathered_keys || !gathered_values || !gathered_norms || !gathered_neighbors) return status_t::bad_alloc_k;
         std::array<std::size_t, max_key_ranges_k + 1> offsets {};
@@ -2679,7 +2964,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
             std::size_t const to = cursors[tags[first + row]]++;
             std::memcpy(gathered_keys + to * sizeof(key_t), keys + row * sizeof(key_t), sizeof(key_t));
             std::memcpy(gathered_values + to * value_bytes, values + row * value_bytes, value_bytes);
-            std::memcpy(gathered_norms + to * norms_bytes_k, norms + row * norms_bytes_k, norms_bytes_k);
+            std::memcpy(gathered_norms + to * norms_bytes_, norms + row * norms_bytes_, norms_bytes_);
             std::memcpy(gathered_neighbors + to * connectivity_, neighbors + row * connectivity_, neighbor_bytes);
         }
         for (std::size_t range = 0; range != ranges; ++range) {
@@ -2698,8 +2983,8 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
                 wrote = write_rows_(target, written.values_begin, value_bytes, landed, rows,
                                     gathered_values + from * value_bytes);
             if (succeeded(wrote))
-                wrote = write_rows_(target, norms_begin_(target), norms_bytes_k, landed, rows,
-                                    gathered_norms + from * norms_bytes_k);
+                wrote = write_rows_(target, norms_begin_(target), norms_bytes_, landed, rows,
+                                    gathered_norms + from * norms_bytes_);
             if (succeeded(wrote))
                 wrote = write_rows_(target, written.neighbors_begin, neighbor_bytes, landed, rows,
                                     reinterpret_cast<byte_t const*>(gathered_neighbors + from * connectivity_));
@@ -2720,7 +3005,8 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
             return sized;
         if (failed(traversals.reserve_exactly(executor.size()))) return status_t::bad_alloc_k;
         for (std::size_t thread = 0; thread != executor.size(); ++thread) {
-            traversals.push_back_reserved(traversal_t {typename traversal_t::allocator_t {executor.arena(thread)}});
+            traversals.push_back_reserved(
+                dense_traversal_context_t {typename dense_traversal_context_t::allocator_t {executor.arena(thread)}});
             traversals[thread].random_generator.state = mix_bits(thread + 1);
             if (status_t const sized = index.reserve_traversal(traversals[thread], config); failed(sized)) return sized;
         }
@@ -2729,7 +3015,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
 
     /** Folds the telemetry a RAM index's traversals ran up into the result. */
     void absorb_traversals_(traversals_t const& traversals) noexcept {
-        for (traversal_t const& traversal : traversals) {
+        for (dense_traversal_context_t const& traversal : traversals) {
             result_.graph.visited_members += traversal.visited_members;
             result_.graph.computed_distances += traversal.computed_distances;
             result_.graph.computed_distances_in_refines += traversal.computed_distances_in_refines;
@@ -2785,7 +3071,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
             return read;
 
-        ram_index_t index {dense_nvme_workspace_allocator<byte_t>(space),
+        ram_index_t index {kernel_, dense_nvme_workspace_allocator<byte_t>(space),
                            dense_nvme_workspace_allocator<byte_t>(space)};
         if (status_t const reserved =
                 index.reserve({count, static_cast<connectivity_t>(connectivity_), dimensions_}).status;
@@ -2834,7 +3120,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
                                                             header.data_of(bytes, header.neighbors),
                                                             {}};
         bytes_span_t space = workspace_;
-        ram_index_t index {dense_nvme_workspace_allocator<byte_t>(space),
+        ram_index_t index {kernel_, dense_nvme_workspace_allocator<byte_t>(space),
                            dense_nvme_workspace_allocator<byte_t>(space)};
         if (status_t const reserved =
                 index.reserve({nodes, static_cast<connectivity_t>(connectivity_), dimensions_}).status;
@@ -3222,6 +3508,13 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     std::size_t connectivity_ = 0;
     std::size_t value_row_bytes_ = 0;
 
+    /** The distance kind of every source, which the targets name and their selections rank by. */
+    nk_kernel_kind_t kernel_ = nk_kernel_unknown_k;
+
+    /** Bytes of one norms row, zero when the kernel reads no norms and the targets carry no
+     *  column. */
+    std::size_t norms_bytes_ = 0;
+
     /** The custom fields every target header carries. */
     growing_buffer<safegraphs_custom_field_t, forkunion_allocator_t> fields_ {allocator_};
 
@@ -3344,9 +3637,9 @@ expected<dense_nvme_rewrite_plan<indexes_type_>> plan_split(indexes_type_ const&
         if (status_t const marked = plan.selected_whole_(); failed(marked)) return {std::move(plan), marked};
     }
     else {
-        if (policy.fences.size() >= plan_t::max_key_ranges_k ||
-            !std::is_sorted(policy.fences.begin(), policy.fences.end()))
-            return {std::move(plan), status_t::invalid_argument_k};
+        if (policy.fences.size() >= plan_t::max_key_ranges_k) return {std::move(plan), status_t::invalid_argument_k};
+        for (std::size_t fence = 1; fence < policy.fences.size(); ++fence)
+            if (policy.fences[fence] < policy.fences[fence - 1]) return {std::move(plan), status_t::invalid_argument_k};
         plan.fences_ = policy.fences;
         std::size_t const ranges = policy.fences.size() + 1;
         std::size_t routing = 0;

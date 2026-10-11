@@ -30,11 +30,12 @@ Expect["an unknown mood", ExecutorDrain[$executor, "chill"],
 
 Expect["an unknown quantization", DenseInitRam["inner", "f24", 5],
     Failure["unknown-kind", <|"MessageTemplate" -> "the metric or quantization is not a known name"|>]]
-$index = DenseInitRam["inner", "f16", 5]
+Expect["a quantization the engine never stores", DenseInitRam["inner", "f32", 5][[1]], "unknown-kind"]
+$index = DenseInitRam["inner", "bf16", 5]
 Print["New Index: ", $index]
 Expect["a reservation", DenseReserve[$index, 10], Null]
 Expect["the frozen geometry", KeyTake[DenseDescribe[$index], {"Metric", "Quantization", "Dimensions", "Size"}],
-    <|"Metric" -> "inner", "Quantization" -> "f16", "Dimensions" -> 5, "Size" -> 0|>]
+    <|"Metric" -> "inner", "Quantization" -> "bf16", "Dimensions" -> 5, "Size" -> 0|>]
 
 (* One identity too wide for a machine integer and one plain integer, so the batch exercises both. *)
 $rows = {{1.0, 2.0, 3.0, 4.0, 5.0}, {5.0, 4.0, 3.0, 2.0, 1.0}};
@@ -60,6 +61,16 @@ Expect["arguments of the wrong type", Quiet[DenseSearch[$index, {{"one"}}, 1, $a
 Expect["an empty batch", DenseInsert[$index, {}, {}], Null]
 Expect["no queries", DenseSearch[$index, {}, 10, $arena], <|"Keys" -> {}, "Scores" -> {}|>]
 
+(* The defaults make an angular bf16 index, and a scan scores every row exactly, so each row finds itself first. *)
+$scanned = DenseInitRam[5]
+Expect["the default geometry", KeyTake[DenseDescribe[$scanned], {"Metric", "Quantization"}],
+    <|"Metric" -> "angular", "Quantization" -> "bf16"|>]
+Expect["a reservation to scan", DenseReserve[$scanned, 2], Null]
+Expect["an insertion to scan", DenseInsert[$scanned, {$uuid, 43}, $rows], Null]
+Expect["a scan", First /@ DenseSearch[$scanned, $rows, 2, $local, "Traversal" -> "scan"]["Keys"], {$uuid, 43}]
+Expect["an unknown traversal", DenseSearch[$scanned, $rows, 2, $local, "Traversal" -> "sweep"],
+    Failure["unknown-kind", <|"MessageTemplate" -> "the traversal is neither walk nor scan"|>]]
+
 Expect["a drain", ExecutorDrain[$executor, "parked"], Null]
 Expect["an arena no constructor made", DenseSearch[$index, $rows, 10, Arena[0]],
     Failure["uninitialized", <|"MessageTemplate" -> "the Arena was released"|>]]
@@ -84,17 +95,20 @@ Expect["a save", DenseSave[DenseIndexOn[$index, $executor], $checkpoint], Null]
 $loaded = DenseLoadRam[$checkpoint, "Executor" -> $executor]
 Expect["a checkpoint round trip", DenseDescribe[$loaded]["Size"], 2]
 Expect["the checkpoint metadata", DenseMetadataRead[$checkpoint],
-    <|"Metric" -> "inner", "Quantization" -> "f16", "Dimensions" -> 5,
+    <|"Metric" -> "inner", "Quantization" -> "bf16", "Dimensions" -> 5,
         "Connectivity" -> DenseDescribe[$index]["Connectivity"]|>]
 $monolith = DenseSaveBuffer[$index, $local]
 Expect["a buffer round trip", DenseDescribe[DenseLoadRamBuffer[$monolith]]["Size"], 2]
+(* The engine declares views before it serves them, so only the refusal is checked there. *)
 $viewed = DenseViewRam[$checkpoint]
-Expect["a viewed index refuses writes", DenseInsert[$viewed, {45}, {First[$rows]}][[1]], "read-only"]
+If[FailureQ[$viewed],
+    Expect["a view the build does not serve yet", $viewed[[1]], "unsupported"],
+    Expect["a viewed index refuses writes", DenseInsert[$viewed, {45}, {First[$rows]}][[1]], "read-only"]]
 Print["Saved and Loaded"]
 
 Expect["a clear", DenseClear[$loaded], Null]
 Expect["the size after clearing", DenseDescribe[$loaded]["Size"], 0]
 
-ClearAll[$loaded, $viewed, $arena, $local, $index, $executor]
+ClearAll[$loaded, $viewed, $arena, $local, $scanned, $index, $executor]
 DeleteFile[$checkpoint]
 Print["Handles Released"]

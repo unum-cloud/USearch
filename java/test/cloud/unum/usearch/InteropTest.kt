@@ -33,7 +33,7 @@ class InteropTest {
      */
     @Test
     fun nullnessReachesKotlin() {
-        val options: DenseOptions = DenseOptions().dimensions(2).quantization(Scalar.F32)
+        val options: DenseOptions = DenseOptions().dimensions(2).quantization(Scalar.BF16)
         val index: DenseIndex = DenseIndex.initRam(options, intArrayOf())
         index.use {
             val capabilities: String = it.describe().capabilities()
@@ -45,7 +45,7 @@ class InteropTest {
     @Test
     fun handlesCloseThroughUse() {
         Executor.forRam(intArrayOf(), 2, 0).use { pool ->
-            val options = DenseOptions().dimensions(2).metric(DenseMetric.EUCLIDEAN).quantization(Scalar.F32)
+            val options = DenseOptions().dimensions(2).metric(DenseMetric.EUCLIDEAN).quantization(Scalar.BF16)
             DenseIndex.initRam(options, intArrayOf()).use { index ->
                 val receiver = index.on(pool)
                 receiver.reserve(2)
@@ -63,8 +63,9 @@ class InteropTest {
     @Test
     fun deferredCallsJoinWhereKotlinWaits() {
         Executor.forRam(intArrayOf(), 0, 0).use { pool ->
-            val options = DenseOptions().dimensions(2).quantization(Scalar.F32)
+            val options = DenseOptions().dimensions(2).quantization(Scalar.BF16)
             DenseIndex.initRam(options, intArrayOf()).use { index ->
+                index.reserve(2)
                 index.insert(arrayOf(Key.of(1), Key.of(2)), RowsView.of(floatArrayOf(1f, 0f, 0f, 1f), 2))
                 val query = RowsView.of(floatArrayOf(1f, 0f), 2)
                 Arena(pool).use { arena ->

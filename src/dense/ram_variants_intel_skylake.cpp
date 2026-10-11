@@ -6,21 +6,19 @@
  */
 #include "dense_specializations.cuh"
 
-template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_f16_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_e3m2_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>>;
-template struct specialized_index<ram_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>>;
+template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::intel_skylake_k>>;
+#if USEARCH_DENSE_DTYPES >= 4
+template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::intel_skylake_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+template struct specialized_index<ram_index<nk_f16_k, cpu_class_t::intel_skylake_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::intel_skylake_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+template struct specialized_index<ram_index<nk_e3m2_k, cpu_class_t::intel_skylake_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::intel_skylake_k>>;
+#endif

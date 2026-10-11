@@ -9,6 +9,7 @@ cargo add usearch
 ```
 
 CMake builds the engine and the crate links it through its stable C headers, so no index template is instantiated in your build.
+That build compiles the four most common dense storage types, `bf16`, `u1x8`, `i8` and `e4m3`, and an index over any other is refused as `Unsupported`.
 [NumKong](https://github.com/ashvardanian/NumKong) is a hard dependency rather than a feature: its matrices, scalar types, and traits _are_ this crate's vocabulary, and it supplies the SIMD kernels.
 
 ## Quickstart
@@ -117,6 +118,7 @@ let rows = index.on(&executor).get::<f32>(key, &mut arena)?;       // rewinds it
 An arena made by a VRAM executor holds device memory, so its `residency()` is `Residency::Vram` and every host accessor of what it holds, such as `row`, `rows`, `view` and `keys`, answers `Status::Device` instead of a slice.
 
 The candidate-pool breadth rides the call rather than the handle, as `expansion_factor` on every config that walks the graph, so a recall sweep is a loop over `ef` values against one immutable index, with no mutation and no synchronization between points.
+`traversal: Traversal::Scan` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth.
 
 ## Residency
 
@@ -328,7 +330,7 @@ With a `head_count` of 8, row `t * 8 + h` of the queries is head `h` of token `t
 A `carry` of one `DenseSoftmaxState` per query row, lent by you, folds this branch into another over the same queries, such as a recent window kept out of the index.
 
 ```rust
-let value_lookup: &ValueLookup<f32> = &|key| cache.get(&key).map(Vec::as_slice);
+let value_lookup: &ValueLookup<bf16> = &|key| cache.get(&key).map(Vec::as_slice);
 let mut carry = vec![DenseSoftmaxState::default(); queries_count];
 let context = index.on(&executor).attend(&rows(&queries, 128)?, value_lookup, DenseAttendConfig {
     carry: Some(&mut carry),

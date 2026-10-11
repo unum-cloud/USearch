@@ -70,25 +70,23 @@ struct cuda_indexes_context {
     /** The backend-neutral judgment state both phases fill. */
     bench_results_t results;
 
-    cuda_indexes_context(settings_t const& settings, std::span<int const> devices) noexcept
-        : settings(settings), devices(devices), indexes(forkunion_allocator_t {no_memory_domain_k}) {}
+    cuda_indexes_context(settings_t const& settings, std::span<int const> devices, nk_kernel_kind_t kernel) noexcept
+        : settings(settings), devices(devices), indexes(kernel, forkunion_allocator_t {no_memory_domain_k}) {}
 };
 
 /** The checkpoint manifest path: dtype, kernel and connectivity stamped into the name, so a
  *  geometry-mismatched run finds nothing rather than restoring the wrong graph. */
 template <typename indexes_type_>
-std::string checkpoint_path_of(settings_t const& settings, std::string_view name) {
-    using index_t = typename indexes_type_::index_t;
-    return fmt::format("{}/{}-{}-{}-c{}.safegraphs.json", settings.checkpoints_dir, name,
-                       index_t::scalar_t::dtype_name(), nk_kernel_name(index_t::kernel_kind_k),
-                       settings.connectivity.value);
+std::string checkpoint_path_of(settings_t const& settings, indexes_type_ const& indexes, std::string_view name) {
+    return fmt::format( //
+        "{}/{}-{}-{}-c{}.safegraphs.json", settings.checkpoints_dir, name, indexes_type_::scalar_t::dtype_name(),
+        nk_kernel_name(indexes.kernel()), settings.connectivity.value);
 }
 
 /** Places one shard per engaged device, opens a stream on each, restores a checkpoint, and reserves for the
  *  viewed rows it lacks - everything fallible, before any clock. */
 template <typename streamed_dataset_type_>
 bool prepare_indexes(streamed_dataset_type_& streamed) {
-    using indexes_t = typename streamed_dataset_type_::bench_t::indexes_t;
     auto& bench = streamed.bench;
     std::size_t const rows = streamed.vectors.extent(0);
     std::size_t const dimensions = streamed.vectors.extent(1);
@@ -118,7 +116,7 @@ bool prepare_indexes(streamed_dataset_type_& streamed) {
 
     // The checkpoint's own summary sizes the reservation inside `load`, so shards reach it bare.
     if (!bench.settings.load_name.empty()) {
-        std::string const path = checkpoint_path_of<indexes_t>(bench.settings, bench.settings.load_name);
+        std::string const path = checkpoint_path_of(bench.settings, bench.indexes, bench.settings.load_name);
         if (status_t const restored = bench.indexes.load(path, load_config_t {}, bench.executor); failed(restored)) {
             fmt::println("Failed to load {}: {}", path, status_to_string(restored));
             return false;
@@ -192,8 +190,8 @@ bool run_indexes_insertion(streamed_dataset_type_& streamed) {
     fmt::println("\nInsertions");
     fmt::println("  shape: {} × {}d", inserted_rows, streamed.vectors.extent(1));
     if (bench.settings.skip_vectors.value) fmt::println("  topping: {} loaded rows", bench.settings.skip_vectors.value);
-    fmt::println("  kit: {} · {} · {} kit · devices {}", scalar_t::dtype_name(), nk_kernel_name(index_t::kernel_kind_k),
-                 bit_name(cuda_compute_choices_k, index_t::picked_capability_k, "ampere"),
+    fmt::println("  kit: {} · {} · {} kit · devices {}", scalar_t::dtype_name(), nk_kernel_name(bench.indexes.kernel()),
+                 bit_name(cuda_compute_choices_k, index_t::picked_quads_capability_k, "ampere"),
                  fmt::join(bench.devices, ","));
     fmt::println("  shards: {}, one per device, filled {}", bench.indexes.shards_count(), fmt::join(shard_sizes, " "));
     fmt::println("  batch: {} rows per call", batch_rows);
@@ -261,9 +259,8 @@ bool run_indexes_refinement(streamed_dataset_type_& streamed) {
  *  last - so later runs @c --load it instead of rebuilding. */
 template <typename streamed_dataset_type_>
 bool save_indexes(streamed_dataset_type_& streamed) {
-    using indexes_t = typename streamed_dataset_type_::bench_t::indexes_t;
     auto& bench = streamed.bench;
-    std::string const path = checkpoint_path_of<indexes_t>(bench.settings, bench.settings.save_name);
+    std::string const path = checkpoint_path_of(bench.settings, bench.indexes, bench.settings.save_name);
     // A view of the parts must stage its queries under the factor the rows were rescaled by.
     std::string const scale = fmt::format("{}", streamed.scale);
     safegraphs_custom_field_t const provenance[] = {{"scale", scale}};
@@ -296,7 +293,7 @@ bool run_indexes_search(streamed_dataset_type_& streamed) {
     std::size_t const dimensions = streamed.vectors.extent(1);
     std::size_t const wanted = settings.top_k.value;
     bench_indexer_heads<typename index_t::scalar_t> heads;
-    if (!open_indexer_heads<index_t>(streamed, heads)) return false;
+    if (!open_indexer_heads(bench.indexes, streamed, heads)) return false;
     std::size_t const query_count = searched_count(streamed, heads);
     if (!reserve_results(bench.results, query_count, wanted)) return false;
 
@@ -316,16 +313,17 @@ bool run_indexes_search(streamed_dataset_type_& streamed) {
                                          ? vectors_view_t {heads.navigation.data() + base * dimensions,
                                                            {count, dimensions}}
                                          : stage_batch(streamed, searched_rows(streamed), base, count);
-        std::span<key_t> const keys {bench.results.hit_rows.row(base).data(), count * wanted};
-        std::span<dense_distance_t> const distances {bench.results.hit_distances.row(base).data(), count * wanted};
+        nk::matrix_span<key_t> const keys = bench.results.hit_rows(nk::range(base, base + count), nk::slice);
+        nk::matrix_span<dense_distance_t> const distances = bench.results.hit_distances(nk::range(base, base + count),
+                                                                                        nk::slice);
         auto search = [&](auto const&... ranking) noexcept {
-            return bench.indexes.search(batch, ranking..., bench.executor, config, wanted, keys, distances,
+            return bench.indexes.search(batch, ranking..., bench.executor, config, keys, distances,
                                         std::span<std::size_t> {counts.data(), count});
         };
 
         auto started = steady_clock_t::now();
         auto const [result, status] = [&]() noexcept {
-            if constexpr (scores_indexer<index_t>())
+            if constexpr (!nk::is_integral_dtype<typename index_t::scalar_t>())
                 if (heads.engaged()) return search(heads.rows(base, count));
             return search();
         }();
@@ -369,33 +367,32 @@ struct indexes_search_workload_t {
 
 #pragma region Dispatch Cascade
 
-/** The innermost hop: binds the concrete sharded-index instantiation over every engaged device, builds it in
- *  checkpoint order, then runs @p workload. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t capability_,
-          typename workload_type_>
+/** The innermost hop: binds the concrete sharded-index instantiation over every engaged device,
+ *  builds it under @p kernel in checkpoint order, then runs @p workload. */
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
 int stage_indexes_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
-                          std::span<int const> devices, workload_type_ const& workload) {
-    cuda_indexes_context<dense_vram_indexes<u32_t, stored_dtype_, kernel_, capability_>> bench {settings, devices};
+                          std::span<int const> devices, nk_kernel_kind_t kernel, workload_type_ const& workload) {
+    cuda_indexes_context<dense_vram_indexes<u32_t, stored_dtype_, capability_>> bench {settings, devices, kernel};
     return stream_and_run(dataset, bench, [&](auto& streamed) {
         return prepare_indexes(streamed) && run_indexes_insertion(streamed) && run_indexes_refinement(streamed) &&
                (settings.save_name.empty() || save_indexes(streamed)) && workload.run(streamed);
     });
 }
 
-/** Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal hop into
+/** Kernel axis: admits the runtime metric the stored dtype scores by, the terminal hop into
  *  @ref stage_indexes_and_run; a dot-only workload pins the dot kernel instead. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, cuda_arch_t capability_, typename workload_type_>
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
 int run_indexes_with_metric(utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
                             settings_t const& settings, std::span<int const> devices, workload_type_ const& workload) {
     if constexpr (workload_type_::dot_only_k)
-        return stage_indexes_and_run<dataset_scalar_type_, stored_dtype_, nk_kernel_dot_k, capability_>(
-            dataset, settings, devices, workload);
+        return stage_indexes_and_run<dataset_scalar_type_, stored_dtype_, capability_>(dataset, settings, devices,
+                                                                                       nk_kernel_dot_k, workload);
     else
         return dispatch_kernel<stored_dtype_>(
             settings.kernel,
             [&](auto kernel) {
-                return stage_indexes_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, capability_>(
-                    dataset, settings, devices, workload);
+                return stage_indexes_and_run<dataset_scalar_type_, stored_dtype_, capability_>(
+                    dataset, settings, devices, kernel.value, workload);
             },
             [&](auto metric) {
                 fmt::println("Unsupported metric {} for {} vectors", nk_kernel_name(metric), dtype_name(stored_dtype_));
@@ -407,18 +404,19 @@ int run_indexes_with_metric(utilities::persisted_dataset<dataset_scalar_type_> c
  *  every GPU runs. Every shard keeps its planes in VRAM. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename workload_type_>
 int run_indexes_with_compute(utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
-                             settings_t const& settings, std::span<int const> devices, cuda_arch_t max_compute,
+                             settings_t const& settings, std::span<int const> devices, nk_capability_t max_compute,
                              workload_type_ const& workload) {
-    auto const named = std::ranges::find(cuda_compute_choices_k, max_compute, &capability_choice<cuda_arch_t>::bit);
+    auto const named = std::ranges::find(cuda_compute_choices_k, max_compute, &capability_choice<nk_capability_t>::bit);
     return dispatch_index<std::size(cuda_compute_choices_k)>(
         static_cast<std::size_t>(named - std::begin(cuda_compute_choices_k)),
         [&](auto row) {
-            return run_indexes_with_metric<dataset_scalar_type_, stored_dtype_, cuda_compute_choices_k[row.value].bit>(
-                dataset, settings, devices, workload);
+            return run_indexes_with_metric<dataset_scalar_type_, stored_dtype_,
+                                           cuda_ceiling_of(cuda_compute_choices_k[row.value].bit)>(dataset, settings,
+                                                                                                   devices, workload);
         },
         [&] {
-            return run_indexes_with_metric<dataset_scalar_type_, stored_dtype_, cuda_arch_ampere_k>(dataset, settings,
-                                                                                                    devices, workload);
+            return run_indexes_with_metric<dataset_scalar_type_, stored_dtype_, cuda_ceiling_of(nk_cap_ampere_k)>(
+                dataset, settings, devices, workload);
         });
 }
 
@@ -426,7 +424,8 @@ int run_indexes_with_compute(utilities::persisted_dataset<dataset_scalar_type_> 
  *  units carry the whole device instantiation grid of their dtype. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_indexes_with_stored_dtype(utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
-                                  settings_t const& settings, std::span<int const> devices, cuda_arch_t max_compute) {
+                                  settings_t const& settings, std::span<int const> devices,
+                                  nk_capability_t max_compute) {
     return run_indexes_with_compute<dataset_scalar_type_, stored_dtype_>(dataset, settings, devices, max_compute,
                                                                          indexes_search_workload_t {});
 }

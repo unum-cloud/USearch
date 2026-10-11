@@ -9,9 +9,9 @@ target_include_directories(usearch_test_header_only PRIVATE ${CMAKE_CURRENT_SOUR
 target_link_libraries(usearch_test_header_only PRIVATE fmt::fmt yyjson forkunion::header numkong::header)
 add_test(NAME usearch_test_header_only COMMAND usearch_test_header_only)
 
-# The dense suite lists the per-family test units, sharded per dtype so the instantiation grids build in parallel.
-# Optimization level comes from the configuration: measured on these shards, -O1 costs as much as -O3 and only slows the
-# suite down.
+# The dense suite lists the per-family test units, sharded per dtype so the instantiation grids build in parallel, and
+# keeps the shards of the dtypes `USEARCH_DENSE_DTYPES` compiles. Optimization level comes from the configuration:
+# measured on these shards, -O1 costs as much as -O3 and only slows the suite down.
 add_executable(
     usearch_test
     main.cpp
@@ -41,6 +41,7 @@ add_executable(
     dense/ram_index_u1.cpp
     dense/nvme_indexes.cpp
 )
+usearch_keep_dense_dtypes(usearch_test)
 usearch_setup_target(usearch_test HOST)
 # The capability names come from the C interface's own probes, compiled in rather than linking the whole library.
 target_sources(usearch_test PRIVATE ${PROJECT_SOURCE_DIR}/src/types.cpp)
@@ -77,6 +78,7 @@ if (USEARCH_BUILD_CUDA)
         dense/vram_index_u1.cu
         dense/vram_indexes.cu
     )
+    usearch_keep_dense_dtypes(usearch_test_cuda)
     target_include_directories(
         usearch_test_cuda PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
                                   ${CMAKE_CURRENT_SOURCE_DIR}

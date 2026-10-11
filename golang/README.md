@@ -66,7 +66,7 @@ func main() {
 	options := usearch.DefaultDenseOptions()
 	options.Dimensions = dimensions
 	options.Metric = usearch.DenseMetricAngular
-	options.Quantization = usearch.ScalarF32 // or ScalarBF16, ScalarF16, ScalarE5M2, ScalarE4M3, ScalarE3M2, ScalarE2M3, ScalarI8, ScalarU8, ScalarU1x8
+	options.Quantization = usearch.ScalarBF16 // or ScalarF16, ScalarE5M2, ScalarE4M3, ScalarE3M2, ScalarE2M3, ScalarI8, ScalarU8, ScalarU1x8
 
 	index, err := usearch.DenseInitRam(options, nil) // nil places a shard on every NUMA node
 	if err != nil {
@@ -273,6 +273,7 @@ for query := uint(0); query < matches.Queries(); query++ {
 ```
 
 The candidate-pool breadth rides each call as `ExpansionFactor` rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
+`Traversal: usearch.TraversalScan` skips the walk and scores every row exactly, on RAM and NVMe handles, which gives such a sweep its ground truth.
 
 ## Keys
 

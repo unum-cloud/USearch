@@ -71,6 +71,18 @@ export enum Residency {
 }
 
 /**
+ * How a search reaches the rows it scores.
+ * @enum {string}
+ * @readonly
+ */
+export enum Traversal {
+  /** Walks the graph, scoring the rows the expansion reaches - approximate, the default. */
+  Walk = "walk",
+  /** Scores every row published when the query's scan starts - exact, on RAM and NVMe handles. */
+  Scan = "scan",
+}
+
+/**
  * Enumeration representing the scalar kinds vectors are stored and exchanged in.
  * @enum {string}
  * @readonly

@@ -64,6 +64,7 @@ from usearch.types import (
     RowsViewArguments,
     ScalarKind,
     Status,
+    Traversal,
     Unwritten,
     Verb,
     VramOptions,
@@ -200,18 +201,18 @@ struct DenseOptions(ImplicitlyCopyable):
 
     def __init__(
         out self,
-        metric: DenseMetric,
-        quantization: ScalarKind,
         dimensions: Int,
+        metric: DenseMetric = DenseMetric.ANGULAR,
+        quantization: ScalarKind = ScalarKind.BF16,
         connectivity: Int = 0,
         values_per_key: Int = 0,
     ):
-        """Describes an index by its geometry.
+        """Describes an index by its geometry, angular over `BF16` rows unless told otherwise.
 
         Args:
+            dimensions: Dimensions per vector.
             metric: The metric kind the graph is frozen under.
             quantization: The scalar type vectors are stored as.
-            dimensions: Dimensions per vector.
             connectivity: The connections-per-node bound; zero derives.
             values_per_key: Upper bound on entries sharing one key; zero derives to one.
         """
@@ -556,6 +557,8 @@ struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
 
     var expansion_factor: Int
     """The candidate-pool breadth the walk explores; zero derives."""
+    var traversal: Traversal
+    """A walk, or an exact scan of every row on RAM and NVMe handles; VRAM answers `UNSUPPORTED`."""
     var predicate: Address
     """A `usearch_predicate_t` that must outlive the call; `NULL_ADDRESS` admits all."""
     var predicate_state: Address
@@ -567,6 +570,7 @@ struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
         out self,
         *,
         expansion_factor: Int = 0,
+        traversal: Traversal = Traversal.WALK,
         predicate: Address = NULL_ADDRESS,
         predicate_state: Address = NULL_ADDRESS,
         stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]] = Optional[
@@ -577,11 +581,13 @@ struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
 
         Args:
             expansion_factor: The candidate-pool breadth the walk explores; zero derives.
+            traversal: A walk, or an exact scan of every row on RAM and NVMe handles.
             predicate: A `usearch_predicate_t` that must outlive the call; `NULL_ADDRESS` admits all.
             predicate_state: The opaque state forwarded into every predicate call.
             stats: Receives this call's traversal telemetry; absent skips reporting.
         """
         self.expansion_factor = expansion_factor
+        self.traversal = traversal
         self.predicate = predicate
         self.predicate_state = predicate_state
         self.stats = stats
@@ -902,6 +908,7 @@ struct DenseSearchArguments(ImplicitlyCopyable):
     var arena: Address
     var wanted: c_size_t
     var expansion_factor: c_size_t
+    var traversal: Traversal
     var predicate: Address
     var predicate_state: Address
     var progress: Address
@@ -1531,6 +1538,7 @@ struct _DenseSearchCall[origin: MutOrigin](Call):
     var wanted: Int
     var arena: Pointer[Arena, Self.origin]
     var expansion_factor: Int
+    var traversal: Traversal
     var predicate: Address
     var predicate_state: Address
     var stats: Address
@@ -1556,6 +1564,7 @@ struct _DenseSearchCall[origin: MutOrigin](Call):
                 self.arena[]._address,
                 c_size_t(self.wanted),
                 c_size_t(self.expansion_factor),
+                self.traversal,
                 self.predicate,
                 self.predicate_state,
                 NULL_ADDRESS,
@@ -2827,6 +2836,7 @@ def _search_call[
         wanted,
         arena,
         config.expansion_factor,
+        config.traversal,
         config.predicate,
         config.predicate_state,
         _stats_address(config.stats),

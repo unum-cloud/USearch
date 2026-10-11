@@ -457,6 +457,18 @@ static usearch_status_t call_wanted(call_t* call, MArgument argument, size_t* wa
     return usearch_status_success_k;
 }
 
+/** Reads a traversal by name; the lift answers @c walk for a name it does not recognize, so only a
+ *  round trip tells a misspelling from a deliberate @c walk. */
+static usearch_status_t call_traversal(WolframLibraryData library_data, call_t* call, MArgument argument,
+                                       usearch_traversal_t* traversal) {
+    char* traversal_text = MArgument_getUTF8String(argument);
+    *traversal = usearch_traversal_from_name(bytes_from_text(traversal_text));
+    int const named = traversal_text && strcmp(traversal_text, usearch_traversal_name(*traversal)) == 0;
+    library_data->UTF8String_disown(traversal_text);
+    if (!named) return call_refuse(call, usearch_status_unknown_kind_k, "the traversal is neither walk nor scan");
+    return usearch_status_success_k;
+}
+
 /**
  *  @brief Opens a call on the receiver its two leading IDs name: the index and the executor, a zero
  *      executor meaning the kernel's thread.
@@ -1296,8 +1308,8 @@ EXTERN_C DLLEXPORT int DenseHealth(WolframLibraryData library_data, mint argumen
 
 /**
  *  @brief Calls @c usearch_dense_search: @c queries → @c wanted → @c arena →
- *      @c expansionFactor → the found keys of @b [found,16] bytes, their scores, and one count
- *      per query.
+ *      @c expansionFactor → @c traversal, @c walk or @c scan → the found keys of @b [found,16]
+ *      bytes, their scores, and one count per query.
  *
  *  A query that found fewer than @p wanted matches is not an error, and its count says so.
  */
@@ -1307,10 +1319,13 @@ EXTERN_C DLLEXPORT int DenseSearch(WolframLibraryData library_data, mint argumen
     usearch_rows_view_t queries;
     size_t wanted = 0;
     usearch_arena_t arena = NULL;
+    usearch_traversal_t traversal = usearch_traversal_walk_k;
     if (call_open(arguments, &call) != usearch_status_success_k ||
         call_rows(library_data, &call, MArgument_getMTensor(arguments[receiver_arguments]), &queries, &call.count) !=
             usearch_status_success_k ||
         call_wanted(&call, arguments[receiver_arguments + 1], &wanted) != usearch_status_success_k ||
+        call_traversal(library_data, &call, arguments[receiver_arguments + 4], &traversal) !=
+            usearch_status_success_k ||
         !(arena = call_arena(&call, MArgument_getInteger(arguments[receiver_arguments + 2]))))
         return call_answer(library_data, &call, result);
     call.answer = answer_matches;
@@ -1324,6 +1339,7 @@ EXTERN_C DLLEXPORT int DenseSearch(WolframLibraryData library_data, mint argumen
         .arena = arena,
         .wanted = wanted,
         .expansion_factor = (size_t)MArgument_getInteger(arguments[receiver_arguments + 3]),
+        .traversal = traversal,
     });
     return call_answer(library_data, &call, result);
 }

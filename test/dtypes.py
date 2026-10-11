@@ -16,7 +16,7 @@ from enum import IntEnum
 
 import numpy as np
 import pytest
-from base import batch_sizes
+from base import BATCH_SIZES
 
 import usearch
 from usearch import (
@@ -58,7 +58,7 @@ def test_placeholder_modalities_announce_themselves(modality: str):
         getattr(usearch, modality)()
 
 
-@pytest.mark.parametrize("name", ["Status", "Mood", "DenseMetric", "Scalar", "Residency"])
+@pytest.mark.parametrize("name", ["Status", "Mood", "DenseMetric", "Scalar", "Residency", "Traversal"])
 def test_modes_are_int_enums_of_the_package(name: str):
     """Statuses and modes mirror the C enumerators value for value, so nothing compares as a string."""
     enum = getattr(usearch, name)
@@ -152,7 +152,7 @@ def test_key_malformed_text_carries_a_status():
     assert raised.value.status is Status.MALFORMED
 
 
-@pytest.mark.parametrize("count", batch_sizes)
+@pytest.mark.parametrize("count", BATCH_SIZES)
 def test_identity_packing_roundtrip(count: int):
     """Integer identities survive the trip through the sixteen-byte wire rows."""
     original = np.arange(count, dtype=np.uint64)

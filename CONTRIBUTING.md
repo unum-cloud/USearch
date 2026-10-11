@@ -76,17 +76,17 @@ Without one it prints `- CUDA: no device` and exits 0, skipping every GPU test.
 Those three configurations, and the benchmarking one from [bench/README.md](bench/README.md), are also packaged as CMake presets, so the flag soup below is optional:
 
 ```sh
-cmake --list-presets              # the ones this host can build, from `debug` to `wasm32_wasi` and `msvc_x64`
-cmake --preset release            # configures into `build_release`
-cmake --build --preset release    # builds it
-ctest --preset release            # runs the suites
+cmake --list-presets                   # the ones this host can build, from `host_debug` to `wasm32_wasi_release` and `windows_x64_release`
+cmake --preset host_release            # configures into `build_host_release`
+cmake --build --preset host_release    # builds it
+ctest --preset host_release            # runs the suites
 ```
 
 Every preset writes into `build_<preset name>` and exports a `compile_commands.json` for the language server.
-The development ones build with LLVM through Ninja and link with `lld`; `tsan` uses GCC, and CI rows override the compiler with `-D CMAKE_CXX_COMPILER`.
-The rest match CI: `release_lib` for the C library alone, `linux_aarch64`, `android_arm64`, `android_armv7`, the three WASM toolchains, and `msvc_x64` / `msvc_arm64`.
-Two of them are about GPUs: `dev` compiles the CUDA suites for the host GPU alone, which is the fastest way to iterate and the tree the repo's `.clangd` reads, while `release_cuda` emits a fat binary spanning every architecture from the Ampere floor through both Blackwell lines.
-`trace` adds `-ftime-trace`, dropping a profile beside every object for when a translation unit starts dominating the build.
+The development ones build with LLVM through Ninja and link with `lld`; `host_tsan` uses GCC, and CI rows override the compiler with `-D CMAKE_CXX_COMPILER`.
+The rest match CI: `host_library` for the C library alone, `linux_arm64_library`, `android_arm64_library`, `android_armv7_library`, the three WASM toolchains, and `windows_x64_release` / `windows_arm64_library`.
+Two of them are about GPUs: `cuda_relwithdebinfo` compiles the CUDA suites for the host GPU alone, which is the fastest way to iterate and the tree the repo's `.clangd` reads, while `cuda_release` emits a fat binary spanning every architecture from the Ampere floor through both Blackwell lines.
+`cuda_trace` adds `-ftime-trace`, dropping a profile beside every object for when a translation unit starts dominating the build.
 Machine-specific overrides - a different compiler, `ccache`, a CUDA toolkit outside the default prefix - belong in an untracked `CMakeUserPresets.json` beside it:
 
 ```json
@@ -94,9 +94,9 @@ Machine-specific overrides - a different compiler, `ccache`, a CUDA toolkit outs
     "version": 6,
     "configurePresets": [
         {
-            "name": "dev-local",
-            "inherits": "dev",
-            "binaryDir": "${sourceDir}/build_dev",
+            "name": "cuda_relwithdebinfo_local",
+            "inherits": "cuda_relwithdebinfo",
+            "binaryDir": "${sourceDir}/build_cuda_relwithdebinfo",
             "cacheVariables": {
                 "CMAKE_CUDA_HOST_COMPILER": "/usr/bin/g++-14",
                 "CMAKE_CXX_COMPILER_LAUNCHER": "ccache"
@@ -118,10 +118,13 @@ The CMakeLists.txt file has a number of options you can pass:
   - `USEARCH_BUILD_LIB_C_STUB` - a brute-force stand-in answering the same verbs over the standard library alone, for isolating a binding from the engine while bisecting one.
     It carries the same library names in a `stub/` subdirectory, so pointing a binding at it is a search path rather than a different link line.
   - `USEARCH_BUILD_CUDA` - build the CUDA test & benchmark suites
+  - `USEARCH_DENSE_DTYPES` - how many dense storage dtypes the library, tests and benchmarks compile, from the front of bf16, u1, i8, e4m3, f16, u8, e5m2, i4, u4, e3m2, e2m3, `4` by default and `11` wherever a prebuilt package comes from: the `library`, `wasm` and `windows_x64_release` presets, `pyproject.toml`, the npm scripts, `build.gradle`, `pixi.toml` and the per-binding recipes below. Binding suites skip the kinds a narrower build refuses.
+    The C interface refuses a dtype the build left out with `usearch_status_unsupported_k`; the Rust crate builds from source and keeps the default four.
 - Which GPUs to target:
-  - `USEARCH_CUDA_ARCHITECTURES` - the architectures the CUDA tests, benchmarks and the C interface's dispatch unit compile for, `80;90a;100f;120f` by default: the Ampere floor, then Hopper, architecture-specific, and both Blackwell lines, family-specific so they carry the fp6 and fp4 conversions.
+  - `USEARCH_CUDA_ARCHITECTURES` - the architectures the CUDA tests, benchmarks and the C interface's dispatch unit compile for, `80-real;90a-real;100f-real;120f-real` by default: the Ampere floor, then Hopper, architecture-specific, and both Blackwell lines, family-specific so they carry the fp6 and fp4 conversions.
+    The `-real` suffix skips the PTX, which triples the test objects; the `cuda_release` preset keeps it.
     The library itself ignores the list and compiles one unit per GPU class, each for its own code alone - `80` with its PTX for every GPU outside the other classes, `89`, `90a`, `100f`, which B300 runs as well, and `120f` - and picks the unit by the device's generation at runtime.
-    A NumKong GPU tier turns on in those targets only when every listed architecture runs it, so the default list exercises the Ampere kits alone; iterate on one GPU with its family code, like `100f`, to test that generation's kits.
+    A NumKong GPU tier turns on in those targets only when every listed architecture runs it, so the default list exercises the Ampere kits alone; iterate on one GPU with its family code, like `100f-real`, to test that generation's kits.
 - Which other dependencies to use:
   - `USEARCH_USE_JEMALLOC` - use Jemalloc for memory management
 
@@ -366,9 +369,9 @@ There is no WebAssembly target of its own — the C library is what crosses, and
 - `cmake/toolchain-wasm32-wasi.cmake` builds `wasm32_v128_k` against the WASI SDK, for Wasmtime, Wasmer and the Rust crate.
 
 ```sh
-emcmake cmake -B build_wasm32_emscripten -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=1
-cmake --build build_wasm32_emscripten --target usearch_static usearch_test_c
-ctest --test-dir build_wasm32_emscripten -R '^usearch_test_c$'
+emcmake cmake -B build_wasm32_emscripten_release -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=1
+cmake --build build_wasm32_emscripten_release --target usearch_static usearch_test_c
+ctest --test-dir build_wasm32_emscripten_release -R '^usearch_test_c$'
 ```
 
 The toolchain file must be passed as the single argument `-DCMAKE_TOOLCHAIN_FILE=…`; written with a space, `emcmake` appends its own file, which then wins.
@@ -424,7 +427,7 @@ No C or C++ is compiled there: the engine is CMake's to build, and `-Dlib-dir` n
 It takes the shared library rather than the archive, since Zig answers `linkSystemLibrary("stdc++")` with its own libc++, which leaves a GCC-built archive short of symbols.
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_DENSE_DTYPES=11
 cmake --build build_release --target usearch_shared
 
 zig build                                     # compile check, resolving no symbols
@@ -457,7 +460,7 @@ Swift 6.3 or newer is required: the streaming and checkpoint verbs take `Mutable
 The package links a library CMake built, so the engine is compiled first and the linker is pointed at it:
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_DENSE_DTYPES=11
 cmake --build build_release --target usearch_static
 
 swift build -Xlinker -Lbuild_release
@@ -483,7 +486,7 @@ USearch provides Go bindings, that depend on the C library that must be installe
 So one should first compile the C library, link it with Go, and only then run tests.
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_DENSE_DTYPES=11
 cmake --build build_release --config Release -j
 
 cp build_release/libusearch_static.a golang/         # the archive the cgo directives link
@@ -524,7 +527,7 @@ gradle spotlessApply                    # format Java, Kotlin and Scala
 `-PusearchPrebuilt=<directory>` points every suite at a library that is already built and skips the CMake tasks, which is how CI builds the engine once and tests it from three languages.
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_DENSE_DTYPES=11
 cmake --build build_release --target usearch_static usearch_shared
 gradle -PusearchPrebuilt=$PWD/build_release test
 ```
@@ -595,7 +598,7 @@ It builds from the repository root, and `WOLFRAM_PATH` names the Mathematica ins
 ```sh
 brew install --cask wolfram-engine
 
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_LIB_WOLFRAM=1 \
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_DENSE_DTYPES=11 -D USEARCH_BUILD_LIB_WOLFRAM=1 \
     -D WOLFRAM_PATH=/usr/local/Wolfram/Mathematica
 cmake --build build_release --config Release --target usearch_wolfram
 
@@ -632,9 +635,9 @@ Unpack a [WASI SDK release](https://github.com/WebAssembly/wasi-sdk/releases) an
 
 ```sh
 export WASI_SDK_PATH=/opt/wasi-sdk-34.0-x86_64-linux
-cmake -B build_wasm32_wasi -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=1
-cmake --build build_wasm32_wasi --target usearch_static usearch_test_c
-ctest --test-dir build_wasm32_wasi -R '^usearch_test_c$'
+cmake -B build_wasm32_wasi_release -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=1
+cmake --build build_wasm32_wasi_release --target usearch_static usearch_test_c
+ctest --test-dir build_wasm32_wasi_release -R '^usearch_test_c$'
 ```
 
 `ctest` runs the module under Wasmtime when it is on the path.

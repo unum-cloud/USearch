@@ -29,6 +29,7 @@ import {
   RowsView,
   Scalar,
   Status,
+  Traversal,
   Vector,
   crossing,
   fail,
@@ -94,8 +95,10 @@ export interface DenseRefineConfig {
 
 /** Optional per-call settings of a search. Mirrors `usearch_dense_search_t`. */
 export interface DenseSearchConfig {
-  /** Candidate-pool breadth the walk explores; absent lets the engine derive it. */
+  /** Candidate-pool breadth the walk explores; absent lets the engine derive it, and a scan ignores it. */
   expansionFactor?: number;
+  /** Walks the graph when absent; `Traversal.Scan` scores every row exactly, on RAM and NVMe handles. */
+  traversal?: Traversal;
   /** The reading this call overwrites with its own telemetry; absent skips reporting. */
   stats?: DenseTraversalStats;
 }
@@ -265,7 +268,7 @@ export interface DenseOptions {
   dimensions: number;
   /** How dissimilarity is scored; defaults to `angular`. */
   metric?: DenseMetric;
-  /** The scalar kind rows are stored in; defaults to `f32`. */
+  /** The scalar kind rows are stored in; defaults to `bf16`. */
   quantization?: Scalar;
   /** Neighbors per node; absent derives it from the geometry. */
   connectivity?: number;
@@ -629,7 +632,16 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
     const rows = crossing(queries);
     return this.submit(
       (completion) =>
-        this.compiled.search(this.executor, completion, ...rows, arena, wanted, config.expansionFactor, config.stats),
+        this.compiled.search(
+          this.executor,
+          completion,
+          ...rows,
+          arena,
+          wanted,
+          config.expansionFactor,
+          config.traversal,
+          config.stats,
+        ),
       (landed: CompiledMatches) => new Matches(landed, rows[1]),
     );
   }
@@ -941,7 +953,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
       compiled.CompiledIndex.initRam(
         options.dimensions,
         options.metric ?? DenseMetric.Angular,
-        scalarCodes[options.quantization ?? Scalar.F32],
+        scalarCodes[options.quantization ?? Scalar.BF16],
         options.connectivity,
         options.valuesPerKey,
         memoryDomains,
@@ -963,7 +975,7 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
       compiled.CompiledIndex.initVram(
         options.dimensions,
         options.metric ?? DenseMetric.Angular,
-        scalarCodes[options.quantization ?? Scalar.F32],
+        scalarCodes[options.quantization ?? Scalar.BF16],
         options.connectivity,
         options.valuesPerKey,
         devices,

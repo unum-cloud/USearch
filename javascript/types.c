@@ -54,6 +54,24 @@ static int usearch_js_mood_parse(char const* name) { return (int)usearch_mood_fr
 
 static char const* usearch_js_mood_spell(int mood) { return usearch_mood_name((usearch_mood_t)mood); }
 
+static int usearch_js_traversal_parse(char const* name) {
+    return (int)usearch_traversal_from_name(usearch_js_name_view(name));
+}
+
+static char const* usearch_js_traversal_spell(int traversal) {
+    return usearch_traversal_name((usearch_traversal_t)traversal);
+}
+
+bool usearch_js_traversal_from_value(napi_env env, napi_value value, char const* field, usearch_traversal_t* result) {
+    int traversal = usearch_traversal_walk_k;
+    if (!usearch_js_value_absent(env, value) &&
+        !usearch_js_name_from_value(env, value, field, usearch_js_traversal_parse, usearch_js_traversal_spell,
+                                    &traversal))
+        return false;
+    *result = (usearch_traversal_t)traversal;
+    return true;
+}
+
 bool usearch_js_metric_from_value(napi_env env, napi_value value, char const* field, usearch_dense_metric_t* result) {
     int metric = usearch_dense_metric_unknown_k;
     if (!usearch_js_name_from_value(env, value, field, usearch_js_metric_parse, usearch_js_metric_spell, &metric))

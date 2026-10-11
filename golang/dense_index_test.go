@@ -27,7 +27,8 @@ import (
 const seed = 42
 
 // seededRows returns deterministic unit-length rows, so inner, angular and euclidean rank
-// alike and near-parallel rows stop deciding top-1 by float noise.
+// alike and near-parallel rows stop deciding top-1 by float noise. Each value is one a bf16
+// holds exactly, so a bf16 index hands back the very rows it took.
 func seededRows(rows, dimensions uint) []float32 {
 	generator := rand.New(rand.NewSource(seed))
 	slab := make([]float32, rows*dimensions)
@@ -40,10 +41,16 @@ func seededRows(rows, dimensions uint) []float32 {
 		}
 		magnitude = math.Sqrt(magnitude)
 		for position := range values {
-			values[position] /= float32(magnitude)
+			values[position] = math.Float32frombits(uint32(bfloat16Of(values[position]/float32(magnitude))) << 16)
 		}
 	}
 	return slab
+}
+
+// bfloat16Of rounds a value to the nearest bf16, ties to even.
+func bfloat16Of(value float32) BFloat16 {
+	bits := math.Float32bits(value)
+	return BFloat16((bits + 0x7FFF + (bits>>16)&1) >> 16)
 }
 
 // sequentialKeys names rows one through count.
@@ -85,10 +92,14 @@ func newArena(t *testing.T, executor *Executor) *Arena {
 	return arena
 }
 
-// newIndex builds a reserved index and registers its release.
+// newIndex builds a reserved index and registers its release, skipping a quantization this
+// build's USEARCH_DENSE_DTYPES left out.
 func newIndex(t *testing.T, options DenseOptions, capacity uint) *DenseIndex {
 	t.Helper()
 	index, err := DenseInitRam(options, nil)
+	if errors.Is(err, StatusUnsupported) {
+		t.Skipf("this build leaves %s out", options.Quantization)
+	}
 	if err != nil {
 		t.Fatalf("the index must initialize: %v", err)
 	}
@@ -103,11 +114,10 @@ func newIndex(t *testing.T, options DenseOptions, capacity uint) *DenseIndex {
 	return index
 }
 
-// angularF32 is the geometry most tests want.
-func angularF32(dimensions uint) DenseOptions {
+// angularBF16 is the geometry most tests want.
+func angularBF16(dimensions uint) DenseOptions {
 	options := DefaultDenseOptions()
 	options.Dimensions = dimensions
-	options.Quantization = ScalarF32
 	return options
 }
 
@@ -271,6 +281,7 @@ func TestEnumeratorsSpellTheLibrarysNames(t *testing.T) {
 		{MoodParked, "parked"},
 		{MoodSpinning, "spinning"},
 		{ResidencyVram, "vram"},
+		{TraversalScan, "scan"},
 		{ScalarBF16, "bf16"},
 		{ScalarU1x8, "u1x8"},
 		{ScalarI32, "i32"},
@@ -368,7 +379,7 @@ func TestMatrixViewsRejectBadShapes(t *testing.T) {
 func TestViewsRefuseTheirArenasLaterCalls(t *testing.T) {
 	t.Parallel()
 	const dimensions = 4
-	index, keys, slab := populated(t, angularF32(dimensions), 3)
+	index, keys, slab := populated(t, angularBF16(dimensions), 3)
 	arena, other := newArena(t, nil), newArena(t, nil)
 
 	first, err := index.Get(keys[0], ScalarF32, arena)
@@ -438,7 +449,7 @@ func TestViewsRefuseTheirArenasLaterCalls(t *testing.T) {
 
 func TestClosingTwiceIsHarmless(t *testing.T) {
 	t.Parallel()
-	index, err := DenseInitRam(angularF32(16), nil)
+	index, err := DenseInitRam(angularBF16(16), nil)
 	if err != nil {
 		t.Fatalf("the index must initialize: %v", err)
 	}
@@ -498,8 +509,10 @@ func TestExecutorConstructorsTakeOnlyWhatTheirResidencyHas(t *testing.T) {
 	if _, err := ExecutorForVram([]int32{0}, make([]unsafe.Pointer, 2), 0, 0); !errors.Is(err, StatusShapeMismatch) {
 		t.Errorf("a stream list of the wrong length reported %v", err)
 	}
-	if _, err := DenseViewNvme("index.safegraphs", nil); !errors.Is(err, StatusUnsupported) {
-		t.Errorf("an NVMe view reported %v", err)
+	// The stub has no NVMe residency, so it refuses before looking for the file.
+	if _, err := DenseViewNvme(filepath.Join(t.TempDir(), "absent.safegraphs"), nil); !errors.Is(err, StatusIO) &&
+		!errors.Is(err, StatusUnsupported) {
+		t.Errorf("an NVMe view of an absent checkpoint reported %v", err)
 	}
 }
 
@@ -507,7 +520,7 @@ func TestExecutorConstructorsTakeOnlyWhatTheirResidencyHas(t *testing.T) {
 // handing the library a dangling handle, while a nil one runs the call on the calling goroutine.
 func TestExecutorRefusesUseAfterClose(t *testing.T) {
 	t.Parallel()
-	index := newIndex(t, angularF32(4), 4)
+	index := newIndex(t, angularBF16(4), 4)
 	executor, err := ExecutorForRam(nil, 2, 0)
 	if err != nil {
 		t.Fatalf("the executor must spawn: %v", err)
@@ -553,7 +566,7 @@ func TestExecutorRefusesUseAfterClose(t *testing.T) {
 func TestInsertsAndGetsVectorsIntact(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
-	index, keys, slab := populated(t, angularF32(dimensions), 4)
+	index, keys, slab := populated(t, angularBF16(dimensions), 4)
 
 	// A padded pitch is the layout a mapped dataset arrives in; the rows come back packed.
 	const pitch = 16
@@ -612,7 +625,7 @@ func TestInsertsAndGetsVectorsIntact(t *testing.T) {
 func TestMultiplyLandsEveryRowsPairs(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
-	options := angularF32(dimensions)
+	options := angularBF16(dimensions)
 	options.Metric = DenseMetricInner
 	index, _, slab := populated(t, options, 16)
 	arena := newArena(t, nil)
@@ -635,7 +648,7 @@ func TestMultiplyLandsEveryRowsPairs(t *testing.T) {
 		t.Errorf("a row past the end reported %v", err)
 	}
 
-	angular, _, _ := populated(t, angularF32(dimensions), 4)
+	angular, _, _ := populated(t, angularBF16(dimensions), 4)
 	failed, err := angular.Multiply(RowsOf(slab[:dimensions], dimensions), arena, nil)
 	if !errors.Is(err, StatusConfigMismatch) {
 		t.Errorf("a product over distances reported %v", err)
@@ -651,7 +664,7 @@ func TestCursorsWalkEveryRowOnce(t *testing.T) {
 	t.Parallel()
 	const dimensions = 4
 	const count = 5
-	index, keys, slab := populated(t, angularF32(dimensions), count)
+	index, keys, slab := populated(t, angularBF16(dimensions), count)
 	arena := newArena(t, nil)
 
 	cursor, err := index.On(pool(t)).Cursor()
@@ -710,7 +723,7 @@ func TestCursorsWalkEveryRowOnce(t *testing.T) {
 func TestSearchStreamsYieldNearestFirst(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
-	index, keys, slab := populated(t, angularF32(dimensions), 6)
+	index, keys, slab := populated(t, angularBF16(dimensions), 6)
 	arena := newArena(t, nil)
 
 	if _, err := index.SearchStream(RowsOf(slab[:2*dimensions], dimensions), nil); !errors.Is(err, StatusShapeMismatch) {
@@ -757,7 +770,7 @@ func TestSearchStreamsYieldNearestFirst(t *testing.T) {
 func TestRejectsMalformedShapes(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
-	options := angularF32(dimensions)
+	options := angularBF16(dimensions)
 	options.Metric = DenseMetricInner
 	index, _, slab := populated(t, options, 4)
 	on := index.On(pool(t))
@@ -817,7 +830,7 @@ func TestBatchSearchFillsEveryOutputRow(t *testing.T) {
 		queries    = 8
 		wanted     = 5
 	)
-	index, _, slab := populated(t, angularF32(dimensions), count)
+	index, _, slab := populated(t, angularBF16(dimensions), count)
 
 	var stats DenseTraversalStats
 	outputs, err := index.On(pool(t)).Search(RowsOf(slab[:queries*dimensions], dimensions), wanted, newArena(t, nil),
@@ -858,7 +871,7 @@ func TestBatchSearchFillsEveryOutputRow(t *testing.T) {
 func TestSearchAdmitsOnlyApprovedKeys(t *testing.T) {
 	t.Parallel()
 	const dimensions = 32
-	index, _, slab := populated(t, angularF32(dimensions), 128)
+	index, _, slab := populated(t, angularBF16(dimensions), 128)
 	queries := RowsOf(slab[:3*dimensions], dimensions)
 	on := index.On(pool(t))
 	arena := newArena(t, nil)
@@ -915,7 +928,7 @@ func TestSearchAdmitsOnlyApprovedKeys(t *testing.T) {
 func TestProgressHandlersReportAndStop(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
-	index, _, slab := populated(t, angularF32(dimensions), 32)
+	index, _, slab := populated(t, angularBF16(dimensions), 32)
 	queries := RowsOf(slab[:4*dimensions], dimensions)
 	arena := newArena(t, nil)
 
@@ -941,6 +954,24 @@ func TestProgressHandlersReportAndStop(t *testing.T) {
 	}
 }
 
+// A scan scores every row exactly, so each row queried against its own index finds itself first.
+func TestScanFindsEveryRowItself(t *testing.T) {
+	t.Parallel()
+	const dimensions = 16
+	const count = 64
+	index, keys, slab := populated(t, angularBF16(dimensions), count)
+	outputs, err := index.On(pool(t)).Search(RowsOf(slab, dimensions), 4, newArena(t, nil),
+		&DenseSearchConfig{Traversal: TraversalScan})
+	if err != nil {
+		t.Fatalf("the scan must resolve: %v", err)
+	}
+	for query := uint(0); query < count; query++ {
+		if found, _, err := outputs.Row(query); err != nil || len(found) == 0 || found[0] != keys[query] {
+			t.Errorf("query %d found %v first: %v", query, found, err)
+		}
+	}
+}
+
 // endregion: Search
 
 // region: Metrics & Quantization
@@ -953,12 +984,12 @@ func TestEveryMetricAndQuantizationCrosses(t *testing.T) {
 		metric       DenseMetric
 		quantization Scalar
 	}{
-		{DenseMetricInner, ScalarF32}, {DenseMetricAngular, ScalarF64}, {DenseMetricEuclidean, ScalarBF16}, {DenseMetricAngular, ScalarF16},
+		{DenseMetricInner, ScalarBF16}, {DenseMetricEuclidean, ScalarBF16}, {DenseMetricAngular, ScalarF16},
 		{DenseMetricEuclidean, ScalarE5M2}, {DenseMetricAngular, ScalarE4M3}, {DenseMetricInner, ScalarI8}, {DenseMetricAngular, ScalarU8},
 	}
 	for _, single := range scalars {
 		t.Run(single.metric.String()+"/"+single.quantization.String(), func(t *testing.T) {
-			options := angularF32(dimensions)
+			options := angularBF16(dimensions)
 			options.Metric = single.metric
 			options.Quantization = single.quantization
 			index, _, slab := populated(t, options, 32)
@@ -971,7 +1002,7 @@ func TestEveryMetricAndQuantizationCrosses(t *testing.T) {
 	// Bit-level metrics take packed rows, where a row of 64 dimensions is eight bytes.
 	for _, metric := range []DenseMetric{DenseMetricHamming, DenseMetricJaccard} {
 		t.Run(metric.String()+"/u1x8", func(t *testing.T) {
-			options := angularF32(dimensions)
+			options := angularBF16(dimensions)
 			options.Metric = metric
 			options.Quantization = ScalarU1x8
 			index := newIndex(t, options, 32)
@@ -1010,7 +1041,7 @@ func TestMaxsimSizesItsOutputsOverDocuments(t *testing.T) {
 		documents  = 3
 		queries    = 2
 	)
-	options := angularF32(dimensions)
+	options := angularBF16(dimensions)
 	options.Metric = DenseMetricInner
 	options.ValuesPerKey = tokens
 	index := newIndex(t, options, documents*tokens)
@@ -1048,14 +1079,18 @@ func TestAttendFoldsTheRowsTheLookupNames(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
 	const count = 16
-	options := angularF32(dimensions)
+	options := angularBF16(dimensions)
 	options.Metric = DenseMetricInner
 	index, _, slab := populated(t, options, count)
 
 	arena := newArena(t, nil)
 
 	value := seededRows(1, dimensions)
-	lookup := ValueLookup{Values: RowsOf(value, dimensions), Row: func(Key) (uint, bool) { return 0, true }}
+	stored := make([]BFloat16, dimensions)
+	for position := range stored {
+		stored[position] = bfloat16Of(value[position])
+	}
+	lookup := ValueLookup{Values: RowsOf(stored, dimensions), Row: func(Key) (uint, bool) { return 0, true }}
 	carry := make([]DenseSoftmaxState, 2)
 	attended, err := index.On(pool(t)).Attend(RowsOf(slab[:2*dimensions], dimensions), lookup, arena,
 		&DenseAttendConfig{OutputsScalar: ScalarF64, Carry: carry})
@@ -1080,7 +1115,7 @@ func TestAttendFoldsTheRowsTheLookupNames(t *testing.T) {
 	for name, refused := range map[string]ValueLookup{
 		"missing": {Values: lookup.Values, Row: func(Key) (uint, bool) { return 0, false }},
 		"past":    {Values: lookup.Values, Row: func(Key) (uint, bool) { return 1, true }},
-		"narrow":  {Values: RowsOf(value[:dimensions/2], dimensions/2), Row: lookup.Row},
+		"narrow":  {Values: RowsOf(stored[:dimensions/2], dimensions/2), Row: lookup.Row},
 	} {
 		if _, err := index.Attend(single, refused, arena, nil); !errors.Is(err, StatusShapeMismatch) {
 			t.Errorf("a %s lookup reported %v", name, err)
@@ -1102,7 +1137,7 @@ func TestRefineAndHealthReportTheirSweeps(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
 	const count = 32
-	index, _, _ := populated(t, angularF32(dimensions), count)
+	index, _, _ := populated(t, angularBF16(dimensions), count)
 	on := index.On(pool(t))
 
 	var stats DenseTraversalStats
@@ -1130,10 +1165,13 @@ func TestRefineAndHealthReportTheirSweeps(t *testing.T) {
 func TestMergeConsumesItsDonors(t *testing.T) {
 	t.Parallel()
 	const dimensions = 4
-	index, _, _ := populated(t, angularF32(dimensions), 2)
-	donor, err := DenseInitRam(angularF32(dimensions), nil)
+	index, _, _ := populated(t, angularBF16(dimensions), 2)
+	donor, err := DenseInitRam(angularBF16(dimensions), nil)
 	if err != nil {
 		t.Fatalf("the donor must initialize: %v", err)
+	}
+	if err := donor.Reserve(1); err != nil {
+		t.Fatalf("the donor must reserve: %v", err)
 	}
 	if err := donor.Insert([]Key{KeyFromUint64(7)}, RowsOf(seededRows(1, dimensions), dimensions), nil); err != nil {
 		t.Fatalf("the donor must insert: %v", err)
@@ -1162,10 +1200,10 @@ func TestMergeConsumesItsDonors(t *testing.T) {
 func TestSerializationPreservesEveryOption(t *testing.T) {
 	t.Parallel()
 	const dimensions = 16
-	options := angularF32(dimensions)
+	options := angularBF16(dimensions)
 	options.Metric = DenseMetricEuclidean
 	options.Quantization = ScalarI8
-	options.Connectivity = 24
+	options.Connectivity = 32
 	options.ValuesPerKey = 2
 
 	source, _, _ := populated(t, options, 32)
@@ -1213,11 +1251,14 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 			// The four fields a checkpoint froze, and no more: the placement and ValuesPerKey
 			// are the reader's to choose.
 			if metadata.Dimensions != dimensions || metadata.Metric != DenseMetricEuclidean ||
-				metadata.Quantization != ScalarI8 || metadata.Connectivity != 24 {
+				metadata.Quantization != ScalarI8 || metadata.Connectivity != 32 {
 				t.Errorf("the checkpoint describes %+v", metadata)
 			}
 
 			restored, err := single.restore()
+			if single.name == "view" && errors.Is(err, StatusUnsupported) {
+				return
+			}
 			if err != nil {
 				t.Fatalf("the checkpoint must load: %v", err)
 			}
@@ -1233,6 +1274,9 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 	}
 
 	viewed, err := DenseViewRam(path)
+	if errors.Is(err, StatusUnsupported) {
+		return
+	}
 	if err != nil {
 		t.Fatalf("the checkpoint must map: %v", err)
 	}
@@ -1253,7 +1297,7 @@ func TestDeferredSearchMatchesTheBlockingOne(t *testing.T) {
 	const dimensions = 16
 	const queries = 4
 	const wanted = 5
-	index, _, slab := populated(t, angularF32(dimensions), 64)
+	index, _, slab := populated(t, angularBF16(dimensions), 64)
 	executor := pool(t)
 
 	call := index.Deferred(executor).Search(RowsOf(slab[:queries*dimensions], dimensions), wanted, newArena(t, executor), nil)
@@ -1291,7 +1335,7 @@ func TestDeferredSearchMatchesTheBlockingOne(t *testing.T) {
 func TestDeferredViewsBorrowTheCallersArenas(t *testing.T) {
 	t.Parallel()
 	const dimensions = 4
-	index, keys, slab := populated(t, angularF32(dimensions), 4)
+	index, keys, slab := populated(t, angularBF16(dimensions), 4)
 	executor := pool(t)
 	on := index.Deferred(executor)
 	rows, bytes := newArena(t, executor), newArena(t, executor)
@@ -1338,7 +1382,7 @@ func TestDeferredViewsBorrowTheCallersArenas(t *testing.T) {
 func TestDeferredPredicatesAdmitOnlyApprovedKeys(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
-	index, _, slab := populated(t, angularF32(dimensions), 16)
+	index, _, slab := populated(t, angularBF16(dimensions), 16)
 	executor := pool(t)
 
 	var admissions atomic.Uint64
@@ -1372,7 +1416,7 @@ func TestClosedDeferredCallsStillLand(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
 	const count = 64
-	index := newIndex(t, angularF32(dimensions), count)
+	index := newIndex(t, angularBF16(dimensions), count)
 	executor := pool(t)
 	slab := seededRows(count, dimensions)
 	on := index.Deferred(executor)
@@ -1406,7 +1450,7 @@ func TestDeferredRefusalsReachStatusAndWait(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
 	const count = 16
-	index := newIndex(t, angularF32(dimensions), count)
+	index := newIndex(t, angularBF16(dimensions), count)
 	slab := seededRows(count, dimensions)
 
 	executor, err := ExecutorForRam(nil, 1, 1)
@@ -1444,7 +1488,7 @@ func TestDeferredRefusalsReachStatusAndWait(t *testing.T) {
 func TestDroppedDeferredCallsAreReleased(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
-	index, _, slab := populated(t, angularF32(dimensions), 16)
+	index, _, slab := populated(t, angularBF16(dimensions), 16)
 	executor := pool(t)
 	on := index.Deferred(executor)
 	arena := newArena(t, executor)
@@ -1489,7 +1533,7 @@ func TestSearchesWhileInserting(t *testing.T) {
 		batchRows  = 8
 	)
 
-	index, _, slab := populated(t, angularF32(dimensions), seeded)
+	index, _, slab := populated(t, angularBF16(dimensions), seeded)
 	var writing, reading sync.WaitGroup
 	done := make(chan struct{})
 

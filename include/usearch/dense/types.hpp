@@ -8,18 +8,24 @@
 
 #include <cstring> // `std::memcmp` - keys compare by their bytes, whatever their type
 
-#include <algorithm> // `std::make_heap`, `std::sort_heap`, `std::push_heap`, `std::pop_heap` - the MaxSim selection
-#include <limits>    // `std::numeric_limits` - the reducer's hit ceiling & unscored rows
-#include <span>      // `std::span` - the reducer's rankings & outputs
+#include <limits> // `std::numeric_limits` - the reducer's hit ceiling & unscored rows
+#include <span>   // `std::span` - the reducer's rankings & outputs
 
 #include <numkong/tensor.hpp> // `nk::matrix_view` - the indexer heads
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the reducer's staging
-#include "usearch/utilities/ram_sorts.hpp"   // `radix_group` - the reducer's grouping
+#include "usearch/utilities/ram_sorts.hpp"   // `radix_group`, `partial_sort` - the reducer's grouping & selection
 
 namespace unum {
 namespace usearch {
+
+/** Capability cascade for every scalar, shared by all its metrics: each capability group - the
+ *  CPU's in @c ram_metric.hpp, NVIDIA's in @c vram_metric.cuh - specializes it under a constraint
+ *  on @p caps_. Reading order is the priority order; the first row whose @c available flag is true
+ *  wins, else the fallback does. */
+template <nk::numeric_dtype scalar_, nk_capability_t caps_>
+struct dense_quads_chain;
 
 /** Dense node identifier within one sub-index - 32 bits, matching the 4-billion ceiling. */
 using dense_node_id_t = u32_t;
@@ -148,7 +154,7 @@ struct dense_index_header_t {
     /** The stored @c nk_dtype_t; must match the loading instantiation. */
     u32_t dtype;
 
-    /** The @c nk_kernel_kind_t metric; must match the loading instantiation. */
+    /** The @c nk_kernel_kind_t metric; must match the loading index's kernel. */
     u32_t kernel;
 
     /** Scalar dimensions per vector - one half of the frozen geometry. */
@@ -161,6 +167,10 @@ struct dense_index_header_t {
     u32_t node_count;
 };
 static_assert(sizeof(dense_index_header_t) == 32 && std::is_trivially_copyable_v<dense_index_header_t>);
+
+/** Whether @p scalar_type_ stores real numbers, as indexer scoring needs of its keys. */
+template <typename scalar_type_>
+concept dense_floating_scalar = !nk::is_integral_dtype<scalar_type_>();
 
 /** A lightning indexer, as DeepSeek V4 and GLM 5 pick sparse-attention keys: a node scores `Σₕ wₕ·ReLU(qₕ·k)`
  *  against these heads, and its distance is `1 − score`, while the walk navigates by the query rows,
@@ -187,6 +197,27 @@ struct dummy_heads_t {
     dummy_heads_t row(std::size_t) const noexcept { return {}; }
 };
 
+/** Why @p keys and @p scores cannot hold @p rows rankings side by side with contiguous rows, or
+ *  success. */
+template <typename key_type_, typename score_type_>
+status_t dense_rankings_refusal(std::size_t rows, nk::matrix_span<key_type_> keys,
+                                nk::matrix_span<score_type_> scores) noexcept {
+    if (keys.extent(0) != rows || scores.extent(0) != rows || scores.extent(1) != keys.extent(1))
+        return status_t::config_mismatch_k;
+    if (keys.stride_bytes(1) != sizeof(key_type_) || scores.stride_bytes(1) != sizeof(score_type_))
+        return status_t::unsupported_layout_k;
+    return status_t::success_k;
+}
+
+/** Why @p span cannot take @p rows copied rows of @p columns values each, packed within a row, or
+ *  success; rows may stride past @p columns, and wider rows keep their tails. */
+template <typename value_type_>
+status_t dense_rows_refusal(std::size_t rows, nk::matrix_span<value_type_> span, std::size_t columns) noexcept {
+    if (span.extent(0) != rows || (rows && span.extent(1) < columns)) return status_t::config_mismatch_k;
+    if (rows && span.stride_bytes(1) != sizeof(value_type_)) return status_t::unsupported_layout_k;
+    return status_t::success_k;
+}
+
 /** One ranked hit while @c dense_maxsim_reducer folds a query, then one document's summed maxima. */
 template <typename key_type_>
 struct dense_maxsim_entry {
@@ -203,26 +234,27 @@ struct dense_maxsim_entry {
 
 /**
  *  @brief Late-interaction scores from per-row rankings: each row's best dot per key, summed per key over
- *      its query, the @c wanted largest landing largest first.
+ *      its query, the largest an output row holds landing largest first.
  *
  *  Every row is one query token's ranking under the inner kind, where a distance is @c 1 @c - @c dot, so a
  *  key a row never ranked adds nothing for that row. The staging is sized once by @c reserve, and both the
  *  grouping and the selection run in place, so a reduction never allocates.
  */
-template <typename key_type_, typename allocator_type_>
+template <typename key_type_, typename distance_type_, typename allocator_type_>
 class dense_maxsim_reducer {
   public:
     using key_t = key_type_;
+    using distance_t = distance_type_;
     using entry_t = dense_maxsim_entry<key_t>;
 
     explicit dense_maxsim_reducer(allocator_type_ allocator) noexcept : staged_(allocator), row_best_(allocator) {}
 
-    /** Sizes the staging for queries of @p rows_per_query rankings, each @p width hits wide, keeping
-     *  @p wanted keys per query; a query wider than @c u32_t hits refuses with @c config_mismatch_k. */
-    status_t reserve(std::size_t rows_per_query, std::size_t width, std::size_t wanted) noexcept {
+    /** Sizes the staging for queries of @p rows_per_query rankings, each @p width hits wide; a
+     *  query wider than @c u32_t hits refuses with @c config_mismatch_k. */
+    status_t reserve(std::size_t rows_per_query, std::size_t width) noexcept {
         std::size_t const hits = rows_per_query * width;
         if (hits > (std::numeric_limits<u32_t>::max)()) return status_t::config_mismatch_k;
-        rows_per_query_ = rows_per_query, width_ = width, wanted_ = wanted;
+        rows_per_query_ = rows_per_query;
         if (status_t const sized = staged_.resize_uninitialized(hits); failed(sized)) return sized;
         if (status_t const sized = row_best_.resize_uninitialized(rows_per_query); failed(sized)) return sized;
         for (std::size_t row = 0; row != rows_per_query; ++row) row_best_[row] = unscored_k;
@@ -230,18 +262,18 @@ class dense_maxsim_reducer {
     }
 
     /**
-     *  @param[in] row_keys Keys of every row's ranking, @b [rows,width] row-major.
+     *  @param[in] row_keys Keys of every row's ranking, one ranking per row, at most the reserved
+     *      width.
      *  @param[in] row_distances Distances of the same rankings, parallel to @p row_keys.
-     *  @param[in] row_counts Hits ranked per row, at most the reserved width.
-     *  @param[out] keys The best keys of each query, @b [queries,wanted] row-major.
+     *  @param[in] row_counts Hits ranked per row.
+     *  @param[out] keys The best keys of each query, one query per row, as many as its width.
      *  @param[out] scores Their summed maxima, largest first, parallel to @p keys.
      *  @param[out] counts Keys written per query, one per query.
      *  @return The keys written over every query.
      */
-    template <typename distance_type_>
-    std::size_t operator()(std::span<key_t const> row_keys, std::span<distance_type_ const> row_distances,
-                           std::span<std::size_t const> row_counts, std::span<key_t> keys, std::span<f64_t> scores,
-                           std::span<std::size_t> counts) noexcept {
+    std::size_t operator()(nk::matrix_view<key_t> row_keys, nk::matrix_view<distance_t> row_distances,
+                           std::span<std::size_t const> row_counts, nk::matrix_span<key_t> keys,
+                           nk::matrix_span<f64_t> scores, std::span<std::size_t> counts) noexcept {
         entry_t* const staged = staged_.data();
         std::size_t written = 0;
         for (std::size_t query = 0; query != counts.size(); ++query) {
@@ -249,12 +281,12 @@ class dense_maxsim_reducer {
             for (std::size_t row = 0; row != rows_per_query_; ++row) {
                 std::size_t const ranking = query * rows_per_query_ + row;
                 for (std::size_t hit = 0; hit != row_counts[ranking]; ++hit)
-                    staged[ranked++] = {row_keys[ranking * width_ + hit], static_cast<u32_t>(row),
-                                        1 - static_cast<f64_t>(row_distances[ranking * width_ + hit])};
+                    staged[ranked++] = {row_keys(ranking, hit), static_cast<u32_t>(row),
+                                        1 - static_cast<f64_t>(row_distances(ranking, hit))};
             }
 
             // Grouped by key in place, each key's run adds every row's best dot once, restoring the row slots.
-            radix_group(std::span<entry_t> {staged, ranked}, &entry_t::key);
+            radix_group(to_writable_span(staged_).first(ranked), &entry_t::key);
             std::size_t unique = 0;
             for (std::size_t run = 0, end = 0; run != ranked; run = end) {
                 while (end != ranked && same_key_(staged[end].key, staged[run].key)) ++end;
@@ -266,18 +298,10 @@ class dense_maxsim_reducer {
                 staged[unique++] = {staged[run].key, 0, sum};
             }
 
-            // A heap topped by the worst kept key selects the best `wanted` in place.
-            std::size_t const kept = min_of(wanted_, unique);
-            std::make_heap(staged, staged + kept, better_);
-            for (std::size_t candidate = kept; kept && candidate != unique; ++candidate) {
-                if (!better_(staged[candidate], staged[0])) continue;
-                std::pop_heap(staged, staged + kept, better_);
-                staged[kept - 1] = staged[candidate];
-                std::push_heap(staged, staged + kept, better_);
-            }
-            std::sort_heap(staged, staged + kept, better_);
+            std::size_t const kept = min_of(keys.extent(1), unique);
+            partial_sort(to_writable_span(staged_).first(unique), kept, better_);
             for (std::size_t rank = 0; rank != kept; ++rank)
-                keys[query * wanted_ + rank] = staged[rank].key, scores[query * wanted_ + rank] = staged[rank].score;
+                keys(query, rank) = staged[rank].key, scores(query, rank) = staged[rank].score;
             counts[query] = kept;
             written += kept;
         }
@@ -301,7 +325,7 @@ class dense_maxsim_reducer {
 
     growing_buffer<entry_t, allocator_type_> staged_;
     growing_buffer<f64_t, allocator_type_> row_best_;
-    std::size_t rows_per_query_ = 0, width_ = 0, wanted_ = 0;
+    std::size_t rows_per_query_ = 0;
 };
 
 } // namespace usearch

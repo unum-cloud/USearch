@@ -488,6 +488,32 @@ public final class Types {
         }
     }
 
+    /** How a search reaches the indexed rows it scores. */
+    public enum Traversal {
+
+        /** Walks the graph, scoring the rows the expansion reaches - approximate, the default. */
+        WALK(0),
+        /** Scores every row published when the query's scan starts - exact, on RAM and NVMe handles. */
+        SCAN(1);
+
+        private final int code;
+
+        Traversal(int code) {
+            this.code = code;
+        }
+
+        /** The C enumerator's numeric value. */
+        public int code() {
+            return code;
+        }
+
+        /** Renders the traversal as its C enumerator's stem. Calls {@code usearch_traversal_name}. */
+        @Override
+        public String toString() {
+            return Library.text(TRAVERSAL_NAME, code);
+        }
+    }
+
     /**
      * The workers every fanned-out verb runs on, shared across indexes: an executor owns host threads
      * or device streams and their scratch, an index owns rows.
@@ -1733,6 +1759,7 @@ public final class Types {
     private static final MethodHandle SCALAR_NAME = Library.namer("usearch_scalar_name");
     private static final MethodHandle MOOD_NAME = Library.namer("usearch_mood_name");
     private static final MethodHandle RESIDENCY_NAME = Library.namer("usearch_residency_name");
+    private static final MethodHandle TRAVERSAL_NAME = Library.namer("usearch_traversal_name");
 
     private static final MethodHandle OUTCOME_WAIT =
             Library.downcall("usearch_outcome_wait", FunctionDescriptor.of(Library.ENUM, Library.POINTER));

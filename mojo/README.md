@@ -21,7 +21,7 @@ from usearch import Arena, DenseIndex, DenseMetric, DenseOptions, Executor, Key,
 
 def main() raises:
     var library = Library()
-    var options = DenseOptions(DenseMetric.ANGULAR, ScalarKind.F32, dimensions=3)
+    var options = DenseOptions(3, DenseMetric.ANGULAR, ScalarKind.BF16)  # the defaults, spelled out
     var index = DenseIndex.init_ram(library, options)  # one shard on every NUMA node
     index.reserve(1_000)
 
@@ -151,6 +151,7 @@ for query in range(len(matches)):
 A `get` or `attend` answers `DenseVectors`, whose every row is exactly `columns()` values wide, as the engine reported them, however far apart the engine laid the rows.
 
 The candidate-pool breadth rides each call as `expansion_factor` rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
+`DenseSearchConfig(traversal=Traversal.SCAN)` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth.
 
 ## Keys
 

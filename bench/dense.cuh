@@ -178,14 +178,39 @@ int dispatch_value(decltype(value_) runtime, auto on_value, auto on_unknown) {
     else return dispatch_value<rest_...>(runtime, on_value, on_unknown);
 }
 
-/** Packed bits cast into no other storage: a bit file reaches the u1 shard when @p stored_dtypes_ lists one, and
- *  every other file dispatches over @p stored_dtypes_ in full. */
+/** Whether the build compiles @p dtype as storage: the first `USEARCH_DENSE_DTYPES` rungs of the
+ *  library's ladder, and the f32 reference only the benchmarks store. */
+constexpr bool stored_dtype_compiled(nk_dtype_t dtype) noexcept {
+    switch (dtype) {
+    case nk_f32_k:
+    case nk_bf16_k: return true;
+    case nk_u1_k: return USEARCH_DENSE_DTYPES >= 2;
+    case nk_i8_k: return USEARCH_DENSE_DTYPES >= 3;
+    case nk_e4m3_k: return USEARCH_DENSE_DTYPES >= 4;
+    case nk_f16_k: return USEARCH_DENSE_DTYPES >= 5;
+    case nk_u8_k: return USEARCH_DENSE_DTYPES >= 6;
+    case nk_e5m2_k: return USEARCH_DENSE_DTYPES >= 7;
+    case nk_i4_k: return USEARCH_DENSE_DTYPES >= 8;
+    case nk_u4_k: return USEARCH_DENSE_DTYPES >= 9;
+    case nk_e3m2_k: return USEARCH_DENSE_DTYPES >= 10;
+    case nk_e2m3_k: return USEARCH_DENSE_DTYPES >= 11;
+    default: return false;
+    }
+}
+
+/** Packed bits cast into no other storage: a bit file reaches the u1 shard when @p stored_dtypes_
+ *  lists one, and every other file dispatches over @p stored_dtypes_ in full; a dtype the build
+ *  leaves out takes @p on_unknown. */
 template <typename dataset_scalar_type_, nk_dtype_t... stored_dtypes_>
 int dispatch_stored_value(nk_dtype_t dtype, auto on_dtype, auto on_unknown) {
+    auto on_compiled = [&](auto stored) {
+        if constexpr (stored_dtype_compiled(decltype(stored)::value)) return on_dtype(stored);
+        else return on_unknown(decltype(stored)::value);
+    };
     if constexpr (!std::is_same_v<dataset_scalar_type_, nk::u1x8_t>)
-        return dispatch_value<stored_dtypes_...>(dtype, on_dtype, on_unknown);
+        return dispatch_value<stored_dtypes_...>(dtype, on_compiled, on_unknown);
     else if constexpr (((stored_dtypes_ == nk_u1_k) || ...))
-        return dispatch_value<nk_u1_k>(dtype, on_dtype, on_unknown);
+        return dispatch_value<nk_u1_k>(dtype, on_compiled, on_unknown);
     else return on_unknown(dtype);
 }
 
@@ -566,11 +591,11 @@ struct checkpoint_paths_t {
  *  instantiating the same combination computes the same names, and a mismatched one finds
  *  nothing. */
 template <typename index_type_>
-static checkpoint_paths_t checkpoint_paths_of(settings_t const& settings, std::string_view name, std::size_t slot,
-                                              std::size_t slot_count) {
-    std::string const prefix = fmt::format(
+static checkpoint_paths_t checkpoint_paths_of(settings_t const& settings, index_type_ const& index,
+                                              std::string_view name, std::size_t slot, std::size_t slot_count) {
+    std::string const prefix = fmt::format( //
         "{}/{}-{}-{}-c{}-{}-{}", settings.checkpoints_dir, name, index_type_::scalar_t::dtype_name(),
-        nk_kernel_name(index_type_::kernel_kind_k), settings.connectivity.value, slot, slot_count);
+        nk_kernel_name(index.kernel()), settings.connectivity.value, slot, slot_count);
     return {fmt::format("{}.vectors.{}bin", prefix, index_type_::scalar_t::dtype_name()), //
             prefix + ".neighbors.ibin", prefix + ".rows.ibin"};
 }
@@ -600,7 +625,7 @@ template <typename index_type_>
 static bool load_checkpoint(settings_t const& settings, index_type_& index, std::size_t dimensions,
                             std::span<u32_t> id_to_row, std::size_t slot, std::size_t slot_count) {
     using scalar_t = typename index_type_::scalar_t;
-    checkpoint_paths_t const paths = checkpoint_paths_of<index_type_>(settings, settings.load_name, slot, slot_count);
+    checkpoint_paths_t const paths = checkpoint_paths_of(settings, index, settings.load_name, slot, slot_count);
     auto [vectors_mapping, vectors_map_status] = mapped_file_t::read(paths.vectors);
     auto [neighbors_mapping, neighbors_map_status] = mapped_file_t::read(paths.neighbors);
     auto [rows_mapping, rows_map_status] = mapped_file_t::read(paths.rows);
@@ -692,7 +717,7 @@ static std::size_t save_checkpoint(settings_t const& settings, index_type_& inde
         return 0;
     }
 
-    checkpoint_paths_t const paths = checkpoint_paths_of<index_type_>(settings, settings.save_name, slot, slot_count);
+    checkpoint_paths_t const paths = checkpoint_paths_of(settings, index, settings.save_name, slot, slot_count);
     nk::matrix_view<u32_t> const rows_map_view {id_to_row.data(), {shape.nodes, 1}};
     bool const written =
         utilities::matrix_save<scalar_t>(paths.vectors.c_str(), vectors.view()) == status_t::success_k &&

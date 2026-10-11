@@ -2,34 +2,34 @@
   "version": "2.0.0",
   "tasks": [
     {
-      "label": "Build Debug",
+      "label": "Build Host Debug",
       "detail": "Unoptimized C++ and C suites, sanitizers armed",
-      "command": "cmake --preset debug && cmake --build --preset debug",
+      "command": "cmake --preset host_debug && cmake --build --preset host_debug",
       "args": [],
       "type": "shell",
       "problemMatcher": ["$gcc"]
     },
     {
-      "label": "Build Release",
+      "label": "Build Host Release",
       "detail": "Every CPU target, optimized",
-      "command": "cmake --preset release && cmake --build --preset release",
+      "command": "cmake --preset host_release && cmake --build --preset host_release",
       "args": [],
       "type": "shell",
       "group": "build",
       "problemMatcher": ["$gcc"]
     },
     {
-      "label": "Build Profile",
+      "label": "Build Host Profile",
       "detail": "The profiling configuration bench/README.md measures with",
-      "command": "cmake --preset profile && cmake --build --preset profile",
+      "command": "cmake --preset host_profile && cmake --build --preset host_profile",
       "args": [],
       "type": "shell",
       "problemMatcher": ["$gcc"]
     },
     {
-      "label": "Build Dev",
+      "label": "Build CUDA RelWithDebInfo",
       "detail": "Everything including CUDA, narrowed to the host GPU - the tree the language server reads",
-      "command": "cmake --preset dev && cmake --build --preset dev",
+      "command": "cmake --preset cuda_relwithdebinfo && cmake --build --preset cuda_relwithdebinfo",
       "args": [],
       "type": "shell",
       "group": {
@@ -39,9 +39,9 @@
       "problemMatcher": ["$nvcc", "$gcc"]
     },
     {
-      "label": "Test Dev",
-      "detail": "CTest over the dev tree",
-      "command": "ctest --preset dev",
+      "label": "Test CUDA RelWithDebInfo",
+      "detail": "CTest over the cuda_relwithdebinfo tree",
+      "command": "ctest --preset cuda_relwithdebinfo",
       "args": [],
       "type": "shell",
       "group": {

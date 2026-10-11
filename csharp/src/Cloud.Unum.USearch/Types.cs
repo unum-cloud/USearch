@@ -150,6 +150,12 @@ public static partial class Names
     /// <returns>The canonical spelling.</returns>
     public static string Name(this Residency residency) => Spelled(usearch_residency_name(residency));
 
+    /// <summary>Spells a traversal, as <see cref="Traversal.Scan"/> spells "scan". Calls
+    /// <c>usearch_traversal_name</c>.</summary>
+    /// <param name="traversal">The traversal to spell.</param>
+    /// <returns>The canonical spelling.</returns>
+    public static string Name(this Traversal traversal) => Spelled(usearch_traversal_name(traversal));
+
     /// <summary>Reads a status back from its spelling. Calls <c>usearch_status_from_name</c>.</summary>
     /// <param name="name">The canonical spelling.</param>
     /// <param name="status">The status it spells.</param>
@@ -188,6 +194,16 @@ public static partial class Names
     {
         residency = Read(name, static view => usearch_residency_from_name(view));
         return residency.Name() == name;
+    }
+
+    /// <summary>Reads a traversal back from its spelling. Calls <c>usearch_traversal_from_name</c>.</summary>
+    /// <param name="name">The canonical spelling.</param>
+    /// <param name="traversal">The traversal it spells.</param>
+    /// <returns>True when the spelling names a traversal, false otherwise.</returns>
+    public static bool TryParse(string name, out Traversal traversal)
+    {
+        traversal = Read(name, static view => usearch_traversal_from_name(view));
+        return traversal.Name() == name;
     }
 
     /// <summary>Copies a static spelling out of the library.</summary>
@@ -846,6 +862,16 @@ public enum Residency : int
     Vram = 1,
     /// <summary>Persisted storage, traversed through pluggable I/O engines and sized past RAM.</summary>
     Nvme = 2,
+}
+
+/// <summary>How a search reaches the indexed rows it scores. Mirrors <c>usearch_traversal_t</c>.</summary>
+public enum Traversal : int
+{
+    /// <summary>Walk the graph, scoring the rows the expansion reaches - approximate, the default.</summary>
+    Walk = 0,
+    /// <summary>Score every row published when the query's scan starts - exact, on RAM and NVMe
+    /// handles.</summary>
+    Scan = 1,
 }
 
 /// <summary>What an executor does with its threads or streams once it goes idle. Mirrors
@@ -1721,6 +1747,14 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
     internal static partial Residency usearch_residency_from_name(NativeBytesView name);
+
+    [LibraryImport(LibraryName)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial IntPtr usearch_traversal_name(Traversal traversal);
+
+    [LibraryImport(LibraryName)]
+    [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
+    internal static partial Traversal usearch_traversal_from_name(NativeBytesView name);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

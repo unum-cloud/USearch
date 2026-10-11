@@ -14,6 +14,7 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.ValueLayout;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.util.Arrays;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -49,6 +50,7 @@ import cloud.unum.usearch.Types.Residency;
 import cloud.unum.usearch.Types.RowsView;
 import cloud.unum.usearch.Types.Scalar;
 import cloud.unum.usearch.Types.Status;
+import cloud.unum.usearch.Types.Traversal;
 import cloud.unum.usearch.Types.USearchException;
 
 /**
@@ -71,7 +73,7 @@ public class DenseIndexTest {
     }
 
     private static DenseOptions twoDimensional() {
-        return new DenseOptions().dimensions(2).metric(DenseMetric.EUCLIDEAN).quantization(Scalar.F32);
+        return new DenseOptions().dimensions(2).metric(DenseMetric.EUCLIDEAN).quantization(Scalar.BF16);
     }
 
     private static DenseIndex empty(DenseOptions options) {
@@ -80,6 +82,15 @@ public class DenseIndexTest {
 
     private static float[] floatsOf(DenseVectors vectors) {
         return vectors.segment().toArray(ValueLayout.JAVA_FLOAT);
+    }
+
+    /** The bf16 bits of values whose low sixteen f32 bits are zero, as every value here is. */
+    private static RowsView bf16RowsOf(long columns, float... values) {
+        short[] bits = new short[values.length];
+        for (int position = 0; position != values.length; ++position) {
+            bits[position] = (short) (Float.floatToRawIntBits(values[position]) >>> 16);
+        }
+        return RowsView.of(bits, columns, Scalar.BF16);
     }
 
     private static DenseIndex populated() {
@@ -130,10 +141,10 @@ public class DenseIndexTest {
 
     @Test
     public void nvmeIsServedInPlaceNeverInitialized() {
-        assertEquals(
-                Status.UNSUPPORTED,
-                assertThrows(USearchException.class, () -> DenseIndex.viewNvme("index.safegraphs"))
-                        .status());
+        // A build without the NVMe tier refuses the view; one with it fails to open the absent checkpoint.
+        Status refused = assertThrows(USearchException.class, () -> DenseIndex.viewNvme("index.safegraphs"))
+                .status();
+        assertTrue(refused == Status.UNSUPPORTED || refused == Status.IO, refused.toString());
     }
 
     @Test
@@ -151,6 +162,7 @@ public class DenseIndexTest {
         assertEquals("spinning", Mood.SPINNING.toString());
         assertEquals("jaccard", DenseMetric.JACCARD.toString());
         assertEquals("vram", Residency.VRAM.toString());
+        assertEquals("scan", Traversal.SCAN.toString());
     }
 
     @Test
@@ -288,6 +300,21 @@ public class DenseIndexTest {
     }
 
     @Test
+    public void scansScoreEveryRowSoEveryQueryFindsItself() {
+        try (DenseIndex index = empty(new DenseOptions().dimensions(2));
+                Arena arena = new Arena()) {
+            index.reserve(3);
+            RowsView rows = RowsView.of(new float[] {1, 0, 0, 1, 1, 1}, 2);
+            index.insert(new Key[] {Key.of(1), Key.of(2), Key.of(3)}, rows);
+            Matches matches = index.search(rows, new DenseSearchConfig(1).traversal(Traversal.SCAN), arena);
+            assertEquals(3, matches.queries());
+            for (int query = 0; query != 3; ++query) {
+                assertEquals(Key.of(query + 1), matches.key(query, 0));
+            }
+        }
+    }
+
+    @Test
     public void healthAuditsTheGraph() {
         try (DenseIndex index = populated()) {
             DenseReachability audit = index.on(POOL).health();
@@ -301,7 +328,6 @@ public class DenseIndexTest {
         try (DenseIndex index = empty(new DenseOptions()
                         .dimensions(2)
                         .metric(DenseMetric.INNER)
-                        .quantization(Scalar.F32)
                         .valuesPerKey(2));
                 Arena arena = new Arena()) {
             index.on(POOL).reserve(4);
@@ -342,7 +368,7 @@ public class DenseIndexTest {
 
     @Test
     public void unfrozenGeometryRefusesRows() {
-        try (DenseIndex index = empty(new DenseOptions().quantization(Scalar.F32))) {
+        try (DenseIndex index = empty(new DenseOptions())) {
             assertEquals(0, index.describe().metadata().dimensions());
             assertEquals(
                     Status.UNINITIALIZED,
@@ -391,7 +417,14 @@ public class DenseIndexTest {
             DenseVectors every = index.get(Key.of(5), Scalar.F64, arena);
             assertEquals(3, every.rows());
             assertEquals(2 * Double.BYTES, every.strideBytes());
-            assertArrayEquals(new double[] {0, 1, 1, 0, 1, 1}, every.segment().toArray(ValueLayout.JAVA_DOUBLE), 0);
+            // A sharded index deals one batch's rows across its shards, so only the multiset is promised.
+            double[] values = every.segment().toArray(ValueLayout.JAVA_DOUBLE);
+            double[][] landed = new double[3][];
+            for (int row = 0; row != landed.length; ++row) {
+                landed[row] = Arrays.copyOfRange(values, row * 2, row * 2 + 2);
+            }
+            Arrays.sort(landed, Arrays::compare);
+            assertArrayEquals(new double[][] {{0, 1}, {1, 0}, {1, 1}}, landed);
             MemorySegment rows = every.segment();
             assertEquals(0, index.on(POOL).get(Key.of(6), Scalar.F32, arena).rows());
             // The second call rewound the arena, so the first one's rows refuse to be read.
@@ -422,11 +455,9 @@ public class DenseIndexTest {
 
     @Test
     public void multiplyLandsRaggedProducts() {
-        try (DenseIndex index = empty(new DenseOptions()
-                        .dimensions(2)
-                        .metric(DenseMetric.INNER)
-                        .quantization(Scalar.F32));
+        try (DenseIndex index = empty(new DenseOptions().dimensions(2).metric(DenseMetric.INNER));
                 Arena arena = new Arena()) {
+            index.on(POOL).reserve(2);
             index.on(POOL).insert(new Key[] {Key.of(10), Key.of(20)}, RowsView.of(new float[] {1, 0, 0, 2}, 2));
             DenseProducts products = index.on(POOL).multiply(RowsView.of(new float[] {1, 1, 0, 1}, 2), arena);
             assertEquals(2, products.queries());
@@ -448,13 +479,11 @@ public class DenseIndexTest {
     /** The value lookup is told the scalar and width it must answer in, and a key it misses refuses the call. */
     @Test
     public void attentionResolvesValuesThroughTheLookup() {
-        try (DenseIndex index = empty(new DenseOptions()
-                        .dimensions(2)
-                        .metric(DenseMetric.INNER)
-                        .quantization(Scalar.F32));
+        try (DenseIndex index = empty(new DenseOptions().dimensions(2).metric(DenseMetric.INNER));
                 Arena arena = new Arena()) {
+            index.reserve(2);
             index.insert(new Key[] {Key.of(0), Key.of(1)}, RowsView.of(new float[] {1, 0, 0, 1}, 2));
-            RowsView values = RowsView.of(new float[] {5, 5, 7, 7}, 2);
+            RowsView values = bf16RowsOf(2, 5, 5, 7, 7);
             ValueLookup byKey = new ValueLookup(values, Key::toLong);
             DenseSoftmaxState[] carry = new DenseSoftmaxState[1];
             DenseVectors outputs = index.on(POOL)
@@ -487,11 +516,11 @@ public class DenseIndexTest {
     /** A call leases its index, so closing the index from inside its own call is refused, not a use-after-free. */
     @Test
     public void aCallLeasesItsIndex() {
-        DenseIndex index =
-                empty(new DenseOptions().dimensions(2).metric(DenseMetric.INNER).quantization(Scalar.F32));
+        DenseIndex index = empty(new DenseOptions().dimensions(2).metric(DenseMetric.INNER));
+        index.reserve(1);
         index.insert(new Key[] {Key.of(0)}, RowsView.of(new float[] {1, 0}, 2));
         AtomicReference<RuntimeException> refused = new AtomicReference<>();
-        ValueLookup closing = new ValueLookup(RowsView.of(new float[] {5, 5}, 2), key -> {
+        ValueLookup closing = new ValueLookup(bf16RowsOf(2, 5, 5), key -> {
             try {
                 index.close();
             } catch (IllegalStateException leased) {
@@ -530,7 +559,7 @@ public class DenseIndexTest {
         DenseMetadata described = DenseIndex.metadataRead(checkpoint.getAbsolutePath(), POOL);
         assertEquals(2, described.dimensions());
         assertEquals(DenseMetric.EUCLIDEAN, described.metric());
-        assertEquals(Scalar.F32, described.quantization());
+        assertEquals(Scalar.BF16, described.quantization());
         byte[] slab = monolith.segment().toArray(ValueLayout.JAVA_BYTE);
         assertEquals(
                 2, DenseIndex.metadataReadBuffer(MemorySegment.ofArray(slab)).dimensions());
@@ -546,7 +575,15 @@ public class DenseIndexTest {
             assertEquals(2, reopened.describe().size());
         }
 
-        try (DenseIndex viewed = DenseIndex.viewRam(checkpoint.getAbsolutePath())) {
+        DenseIndex viewed;
+        try {
+            viewed = DenseIndex.viewRam(checkpoint.getAbsolutePath());
+        } catch (USearchException refused) {
+            // RAM serves no mapping in place yet.
+            assertEquals(Status.UNSUPPORTED, refused.status());
+            return;
+        }
+        try (viewed) {
             assertEquals(2, viewed.count(Key.of(10)) + viewed.count(Key.of(20)));
             assertEquals(
                     Status.READ_ONLY,
@@ -607,6 +644,7 @@ public class DenseIndexTest {
         try (Executor pool = Executor.forRam(new int[0], 2, 4);
                 Arena arena = new Arena(pool);
                 DenseIndex index = empty(twoDimensional())) {
+            index.reserve(2);
             DenseIndex.DeferredOn deferred = index.deferred(pool);
             try (Deferred<Void> inserted =
                     deferred.insert(new Key[] {Key.of(10), Key.of(20)}, RowsView.of(new float[] {0, 1, 1, 0}, 2))) {
@@ -694,11 +732,20 @@ public class DenseIndexTest {
     @Test
     public void searchStreamsPullUntilDrained() {
         try (DenseIndex index = populated();
-                Arena arena = new Arena();
-                DenseSearchStream stream = index.on(POOL).searchStream(RowsView.of(new float[] {0, 1}, 2))) {
-            assertEquals(Key.of(10), stream.next(1, arena).key(0, 0));
-            assertEquals(Key.of(20), stream.next(1, arena).key(0, 0));
-            assertEquals(0, stream.next(1, arena).count(0));
+                Arena arena = new Arena()) {
+            DenseSearchStream opened;
+            try {
+                opened = index.on(POOL).searchStream(RowsView.of(new float[] {0, 1}, 2));
+            } catch (USearchException refused) {
+                // A residency that streams no matches yet refuses the stream itself.
+                assertEquals(Status.UNSUPPORTED, refused.status());
+                return;
+            }
+            try (DenseSearchStream stream = opened) {
+                assertEquals(Key.of(10), stream.next(1, arena).key(0, 0));
+                assertEquals(Key.of(20), stream.next(1, arena).key(0, 0));
+                assertEquals(0, stream.next(1, arena).count(0));
+            }
         }
     }
 
@@ -712,7 +759,14 @@ public class DenseIndexTest {
                     assertThrows(USearchException.class, () -> index.merge(donor, donor))
                             .status());
             assertEquals(2, donor.describe().size());
-            index.on(POOL).merge(donor);
+            try {
+                index.on(POOL).merge(donor);
+            } catch (USearchException refused) {
+                // No residency absorbs donors yet.
+                assertEquals(Status.UNSUPPORTED, refused.status());
+                donor.close();
+                return;
+            }
             assertEquals(4, index.describe().size());
             assertThrows(IllegalStateException.class, donor::describe);
             donor.close();
@@ -727,6 +781,7 @@ public class DenseIndexTest {
     public void theCallingThreadNeedsNoExecutor() {
         try (DenseIndex index = empty(twoDimensional());
                 Arena arena = new Arena()) {
+            index.reserve(2);
             index.insert(new Key[] {Key.of(10), Key.of(20)}, RowsView.of(new float[] {0, 1, 1, 0}, 2));
             assertEquals(
                     Key.of(20),

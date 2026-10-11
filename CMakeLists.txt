@@ -59,11 +59,52 @@ endif ()
 # The library compiles one unit per GPU class, each for its own architecture alone - "80" with its PTX for every GPU
 # without a class, "89", "90a", "100f" and "120f" - and ignores this list. The CUDA tests, benchmarks and the dispatch
 # unit compile one pass per entry, and a NumKong GPU capability turns on in them only when every entry runs it, so
-# iterate on one GPU with its family code, like "100f", to test that generation's kits.
+# iterate on one GPU with its family code, like "100f-real", to test that generation's kits. The "-real" entries skip
+# the PTX, which would triple the objects of builds that never meet an unknown GPU.
 set(USEARCH_CUDA_ARCHITECTURES
-    "80;90a;100f;120f"
+    "80-real;90a-real;100f-real;120f-real"
     CACHE STRING "GPU architectures the CUDA tests, benchmarks & dispatch unit compile for"
 )
+
+# The library, its tests and benchmarks compile the first N storage dtypes of the ladder bf16, u1, i8, e4m3, f16, u8,
+# e5m2, i4, u4, e3m2, e2m3, and the C interface refuses the rest with `usearch_status_unsupported_k`. The default four
+# cover the common embeddings at a fraction of the build; the prebuilt packages compile all eleven.
+set(USEARCH_DENSE_DTYPES
+    "4"
+    CACHE STRING "How many dense storage dtypes to compile, from 1 to 11"
+)
+if (NOT USEARCH_DENSE_DTYPES MATCHES "^([1-9]|1[01])$")
+    message(FATAL_ERROR "USEARCH_DENSE_DTYPES must be an integer from 1 to 11, found \"${USEARCH_DENSE_DTYPES}\"")
+endif ()
+set(usearch_dense_dtypes_ladder_
+    bf16
+    u1
+    i8
+    e4m3
+    f16
+    u8
+    e5m2
+    i4
+    u4
+    e3m2
+    e2m3
+)
+
+# Drops from @p target the per-dtype units, named by their `_<dtype>` suffix, of the dtypes the ladder leaves out; the
+# f32 and f64 units are the suites' own references and always stay.
+function (usearch_keep_dense_dtypes target)
+    list(SUBLIST usearch_dense_dtypes_ladder_ 0 ${USEARCH_DENSE_DTYPES} compiled_)
+    get_target_property(sources_ ${target} SOURCES)
+    set(kept_)
+    foreach (source_ IN LISTS sources_)
+        get_filename_component(stem_ ${source_} NAME_WE)
+        string(REGEX MATCH "[^_]+$" dtype_ ${stem_})
+        if (dtype_ IN_LIST compiled_ OR NOT dtype_ IN_LIST usearch_dense_dtypes_ladder_)
+            list(APPEND kept_ ${source_})
+        endif ()
+    endforeach ()
+    set_target_properties(${target} PROPERTIES SOURCES "${kept_}")
+endfunction ()
 
 # Sets @p output to `capability_macro=1` where every one of the architectures, without CMake's "-real" or "-virtual", is
 # one of NumKong's cached `nk_target_<capability>_architectures`, and to `capability_macro=0` otherwise. NumKong's
@@ -432,7 +473,7 @@ endforeach ()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 usearch_sibling(
-    numkong numkong::header https://github.com/ashvardanian/NumKong af8b1ee99553f849006d1b13572c963111bb7f32
+    numkong numkong::header https://github.com/ashvardanian/NumKong b1c58ad70d996e8f347faf64a080df04a475d57b
 )
 usearch_sibling(
     forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 075d14137420f204ff175acd2d29c22e163e241c
@@ -503,6 +544,9 @@ endif ()
 if (USEARCH_IS_MAIN_PROJECT)
     enable_testing()
 endif ()
+
+# The arms, their dispatch and the suites below all read one ladder length.
+add_compile_definitions(USEARCH_DENSE_DTYPES=${USEARCH_DENSE_DTYPES})
 
 # Every consumer of the pre-instantiated library needs this, the C interface included - its implementation is
 # `src/dense_index.cpp` and the per-dtype shards beside it.

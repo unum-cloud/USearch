@@ -446,6 +446,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
             call.arena("arena", arena);
             call.size("wanted", config.wanted);
             call.size("expansion_factor", config.expansionFactor);
+            call.enumeration("traversal", config.traversal.code());
             call.stats("stats", config.stats);
             return () -> Matches.lift(call, matches, queries.rows());
         });

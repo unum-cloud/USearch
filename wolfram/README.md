@@ -10,7 +10,7 @@ This directory is a subdirectory of the root project rather than a project of it
 Set `WOLFRAM_PATH` to your Mathematica installation if it is not detected automatically.
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_LIB_WOLFRAM=1 \
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_LIB_WOLFRAM=1 -D USEARCH_DENSE_DTYPES=11 \
     -D WOLFRAM_PATH=/usr/local/Wolfram/Mathematica
 cmake --build build_release --config Release --target usearch_wolfram
 
@@ -19,6 +19,8 @@ cmake --build build_release --config Release --target usearch_wolfram
 #   build_release/usearch_wolfram.dylib  on macOS
 #   build_release/usearch_wolfram.dll    on Windows
 ```
+
+`USEARCH_DENSE_DTYPES=11` compiles every dense storage type; the default four, `bf16`, `u1x8`, `i8` and `e4m3`, build faster but refuse the other seven.
 
 It is the one library here without a `lib` prefix, because Wolfram finds a library dropped into `LibraryResources/$SystemID` by its bare name.
 
@@ -32,7 +34,7 @@ PrependTo[$LibraryPath, "build_release"];
 Get["wolfram/USearch.wl"];
 
 (* Create an index: metric, quantization, dimensions *)
-index = DenseInitRam["inner", "f32", 3];
+index = DenseInitRam["inner", "bf16", 3];
 DenseReserve[index, 10];
 
 (* Insert a batch, one key per vector row *)
@@ -118,8 +120,8 @@ ExecutorDrain[executor, "parked"]                                    (* or "spin
 Where the payload lives is the constructor's name, as in the C lifecycle verbs, so a residency an index lacks has no constructor to call.
 
 ```wolfram
-DenseInitRam["inner", "f32", 768, "MemoryDomains"->{0, 1}, "Connectivity"->0, "ValuesPerKey"->0]
-DenseInitVram["inner", "f32", 768, "Devices"->{0, 1, 2, 3}]
+DenseInitRam["inner", "bf16", 768, "MemoryDomains"->{0, 1}, "Connectivity"->0, "ValuesPerKey"->0]
+DenseInitVram["inner", "bf16", 768, "Devices"->{0, 1, 2, 3}]
 DenseLoadRam["index.safegraphs", "Executor"->executor, "MemoryDomains"->{}, "ValuesPerKey"->0]
 DenseLoadVram["index.safegraphs", "Executor"->gpu, "Devices"->{0}]
 DenseViewRam["index.safegraphs"]                                   (* read-only, served from the mapping *)
@@ -151,6 +153,7 @@ DenseMetadataReadBuffer[monolith]
 - `VersionName[]`, `CapabilitiesCompiled[]` and `CapabilitiesAvailable[]` describe the library itself.
 
 The candidate-pool breadth rides each call in the C interface rather than the handle, so it is an `"ExpansionFactor"` option on every verb that walks the graph, zero deriving it.
+`DenseSearch` also takes `"Traversal"->"scan"`, which skips the walk and scores every row exactly, on RAM and NVMe handles.
 
 ## Notes
 
@@ -162,7 +165,7 @@ The candidate-pool breadth rides each call in the C interface rather than the ha
   An integer identity is the encoding of a number below 2⁶⁴, so it parks in the low eight bytes with the rest zeroed.
   A UUID is the number its hexadecimal digits spell, `FromDigits[StringDelete[uuid, "-"], 16]`.
 - A failing call answers `Failure[status, <|"MessageTemplate"->detail|>]`, where the status is the C name such as `shape-mismatch`, `io` or `read-only`, and the detail the engine's message.
-- Metrics are `inner`, `angular`, `euclidean`, `hamming`, and `jaccard`; quantizations are `f64`, `f32`, `bf16`, `f16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`, `i8`, `i4x2`, `u8`, `u4x2`, and `u1x8`; moods are `parked` and `spinning`.
+- Metrics are `inner`, `angular`, `euclidean`, `hamming`, and `jaccard`; quantizations are `bf16`, `f16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`, `i8`, `i4x2`, `u8`, `u4x2`, and `u1x8`; `DenseInitRam[dimensions]` makes an `angular` `bf16` index; moods are `parked` and `spinning`.
 
 ## Design
 

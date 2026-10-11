@@ -25,6 +25,7 @@ import cloud.unum.usearch.Types.Monolith;
 import cloud.unum.usearch.Types.RowsView;
 import cloud.unum.usearch.Types.Scalar;
 import cloud.unum.usearch.Types.Status;
+import cloud.unum.usearch.Types.Traversal;
 import cloud.unum.usearch.Types.USearchException;
 import cloud.unum.usearch.Types.Verb;
 
@@ -61,7 +62,7 @@ import cloud.unum.usearch.Types.Verb;
  * of them and is not repeated.
  *
  * <pre>{@code
- * DenseOptions options = new DenseOptions().dimensions(2).quantization(Scalar.F32);
+ * DenseOptions options = new DenseOptions().dimensions(2);
  * try (Executor pool = Executor.forRam(new int[0], 0, 0);
  *         Arena arena = new Arena(pool);
  *         DenseIndex index = DenseIndex.initRam(options, new int[0])) {
@@ -556,6 +557,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
 
         final long wanted;
         long expansionFactor;
+        Traversal traversal = Traversal.WALK;
 
         @Nullable
         DenseTraversalStats stats;
@@ -576,6 +578,15 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
          */
         public DenseSearchConfig expansionFactor(long expansionFactor) {
             this.expansionFactor = DenseVerbs.nonNegative(expansionFactor);
+            return this;
+        }
+
+        /**
+         * A walk, the default, or an exact scan of every row on RAM and NVMe handles; a VRAM handle
+         * refuses a scan as UNSUPPORTED.
+         */
+        public DenseSearchConfig traversal(Traversal traversal) {
+            this.traversal = traversal;
             return this;
         }
 
@@ -1641,6 +1652,8 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.POINTER.withName("arena"),
                     Library.SIZE.withName("wanted"),
                     Library.SIZE.withName("expansion_factor"),
+                    Library.ENUM.withName("traversal"),
+                    Library.padding(),
                     Library.POINTER.withName("predicate"),
                     Library.POINTER.withName("predicate_state"),
                     PROGRESS,

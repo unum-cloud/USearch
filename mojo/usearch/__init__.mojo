@@ -8,11 +8,11 @@ that read products, attention, and late-interaction scores off the same walk.
 The engine is reached by `dlopen`, so a consumer builds with no linker flags at all:
 
 ```mojo
-from usearch import Arena, DenseIndex, DenseMetric, DenseOptions, Executor, Key, Library, RowsView, ScalarKind
+from usearch import Arena, DenseIndex, DenseOptions, Executor, Key, Library, RowsView
 
 def main() raises:
     var library = Library()
-    var index = DenseIndex.init_ram(library, DenseOptions(DenseMetric.ANGULAR, ScalarKind.F32, dimensions=3))
+    var index = DenseIndex.init_ram(library, DenseOptions(dimensions=3))
     index.reserve(2)
 
     var vectors = [Float32(1), 0, 0, Float32(0), 1, 0]
@@ -78,6 +78,7 @@ from .types import (
     RowsView,
     ScalarKind,
     Status,
+    Traversal,
     VramOptions,
 )
 

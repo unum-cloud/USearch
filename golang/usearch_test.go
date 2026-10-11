@@ -109,7 +109,6 @@ func ExampleDenseIndex() {
 	options := usearch.DefaultDenseOptions()
 	options.Dimensions = 3
 	options.Metric = usearch.DenseMetricEuclidean
-	options.Quantization = usearch.ScalarF32
 
 	index, err := usearch.DenseInitRam(options, nil)
 	if err != nil {
@@ -147,7 +146,6 @@ func ExampleDenseIndex_Deferred() {
 	options := usearch.DefaultDenseOptions()
 	options.Dimensions = 3
 	options.Metric = usearch.DenseMetricEuclidean
-	options.Quantization = usearch.ScalarF32
 
 	index, err := usearch.DenseInitRam(options, nil)
 	if err != nil {
@@ -160,6 +158,9 @@ func ExampleDenseIndex_Deferred() {
 	}
 	defer executor.Close()
 
+	if err := index.Reserve(3); err != nil {
+		log.Fatal(err)
+	}
 	rows := []float32{1, 0, 0, 0, 1, 0, 0, 0, 1}
 	keys := []usearch.Key{usearch.KeyFromUint64(1), usearch.KeyFromUint64(2), usearch.KeyFromUint64(3)}
 	if err := index.On(executor).Insert(keys, usearch.RowsOf(rows, 3), nil); err != nil {

@@ -697,12 +697,14 @@ public sealed unsafe class DenseIndex : IDisposable
     /// from the geometry.</param>
     /// <param name="predicate">The per-key admission predicate; null admits every key.</param>
     /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
+    /// <param name="traversal">A walk, the default, or an exact scan of every row on RAM and NVMe
+    /// handles; a VRAM handle refuses a scan as <see cref="Status.Unsupported"/>.</param>
     /// <returns>The run, one row per query, readable until the arena's next call.</returns>
     public Matches Search(
         RowsView queries, int wanted, Arena arena, ulong expansionFactor = 0, Func<Key, bool>? predicate = null,
-        DenseTraversalStats? stats = null) =>
+        DenseTraversalStats? stats = null, Traversal traversal = Traversal.Walk) =>
         Calls.Block(new DenseSearchCall(
-            new(this._handle, null), queries, wanted, arena, expansionFactor, predicate, stats)).Result;
+            new(this._handle, null), queries, wanted, arena, expansionFactor, predicate, stats, traversal)).Result;
 
     /// <summary>
     /// Scores multi-row queries against multi-row entries by late interaction: every query row
@@ -960,14 +962,15 @@ public static class DenseVerbs
     /// <inheritdoc cref="DenseIndex.Search"/>
     public static Matches Search(
         this DenseIndexOn on, RowsView queries, int wanted, Arena arena, ulong expansionFactor = 0,
-        Func<Key, bool>? predicate = null, DenseTraversalStats? stats = null) =>
-        Calls.Block(new DenseSearchCall(Of(on), queries, wanted, arena, expansionFactor, predicate, stats)).Result;
+        Func<Key, bool>? predicate = null, DenseTraversalStats? stats = null, Traversal traversal = Traversal.Walk) =>
+        Calls.Block(new DenseSearchCall(
+            Of(on), queries, wanted, arena, expansionFactor, predicate, stats, traversal)).Result;
 
     /// <inheritdoc cref="DenseIndex.Search"/>
     public static Deferred<Matches> Search(
         this DenseIndexDeferredOn on, RowsView queries, int wanted, Arena arena, ulong expansionFactor = 0,
-        Func<Key, bool>? predicate = null, DenseTraversalStats? stats = null) =>
-        Calls.Defer(new DenseSearchCall(Of(on), queries, wanted, arena, expansionFactor, predicate, stats));
+        Func<Key, bool>? predicate = null, DenseTraversalStats? stats = null, Traversal traversal = Traversal.Walk) =>
+        Calls.Defer(new DenseSearchCall(Of(on), queries, wanted, arena, expansionFactor, predicate, stats, traversal));
 
     /// <inheritdoc cref="DenseIndex.Maxsim"/>
     public static Matches Maxsim(
@@ -1312,7 +1315,7 @@ internal unsafe struct DenseHealthCall(CallHandles handles) : ICall<DenseReachab
 /// <summary>A search; see <see cref="DenseIndex.Search"/>.</summary>
 internal unsafe struct DenseSearchCall(
     CallHandles handles, RowsView queries, int wanted, Arena arena, ulong expansionFactor, Func<Key, bool>? predicate,
-    DenseTraversalStats? stats) : ICall<Matches>
+    DenseTraversalStats? stats, Traversal traversal) : ICall<Matches>
 {
     private readonly Admitting? _admitting = predicate is null ? null : new Admitting(predicate);
     private GCHandle _registration;
@@ -1344,7 +1347,7 @@ internal unsafe struct DenseSearchCall(
                 Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome, Completion = completion,
                 Count = (nuint)queries.Rows, Queries = queries.AsView(rows),
                 Matches = (NativeMatchesView*)landing->View, Arena = lent.Pointer, Wanted = bound,
-                ExpansionFactor = (nuint)expansionFactor,
+                ExpansionFactor = (nuint)expansionFactor, Traversal = traversal,
                 Predicate = this._admitting is null ? null : &Admitting.Admits,
                 PredicateState = this._admitting is null ? IntPtr.Zero : GCHandle.ToIntPtr(this._registration),
                 Stats = (NativeDenseTraversalStats*)landing->Report,
@@ -2353,6 +2356,7 @@ internal unsafe struct NativeDenseSearch
     public IntPtr Arena;
     public nuint Wanted;
     public nuint ExpansionFactor;
+    public Traversal Traversal;
     public delegate* unmanaged[Cdecl]<Key, IntPtr, Admission> Predicate;
     public IntPtr PredicateState;
     public IntPtr Progress;

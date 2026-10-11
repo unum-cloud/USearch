@@ -170,6 +170,7 @@ static char const* spell_mood(int value) { return usearch_mood_name((usearch_moo
 static char const* spell_dense_metric(int value) { return usearch_dense_metric_name((usearch_dense_metric_t)value); }
 static char const* spell_scalar(int value) { return usearch_scalar_name((usearch_scalar_t)value); }
 static char const* spell_residency(int value) { return usearch_residency_name((usearch_residency_t)value); }
+static char const* spell_traversal(int value) { return usearch_traversal_name((usearch_traversal_t)value); }
 
 usearch_py_enum_t usearch_py_status = {"Status", usearch_status_success_k, usearch_status_invalid_argument_k,
                                        spell_status, NULL};
@@ -179,6 +180,8 @@ usearch_py_enum_t usearch_py_dense_metric = {"DenseMetric", usearch_dense_metric
 usearch_py_enum_t usearch_py_scalar = {"Scalar", usearch_scalar_f64_k, usearch_scalar_u1x8_k, spell_scalar, NULL};
 usearch_py_enum_t usearch_py_residency = {"Residency", usearch_residency_ram_k, usearch_residency_nvme_k,
                                           spell_residency, NULL};
+usearch_py_enum_t usearch_py_traversal = {"Traversal", usearch_traversal_walk_k, usearch_traversal_scan_k,
+                                          spell_traversal, NULL};
 
 /** The C spelling of @p value, or NULL when C names no member by it. */
 static char const* enum_spelling(usearch_py_enum_t const* mirrored, long value) {
@@ -215,8 +218,8 @@ static int enum_register(PyObject* module, PyObject* int_enum, PyObject* keyword
 }
 
 int usearch_py_register_enums(PyObject* module) {
-    usearch_py_enum_t* const mirrored[] = {&usearch_py_status, &usearch_py_mood, &usearch_py_dense_metric,
-                                           &usearch_py_scalar, &usearch_py_residency};
+    usearch_py_enum_t* const mirrored[] = {&usearch_py_status, &usearch_py_mood,      &usearch_py_dense_metric,
+                                           &usearch_py_scalar, &usearch_py_residency, &usearch_py_traversal};
     PyObject* const enum_module = PyImport_ImportModule("enum");
     PyObject* const int_enum = enum_module ? PyObject_GetAttrString(enum_module, "IntEnum") : NULL;
     PyObject* keywords = int_enum ? PyDict_New() : NULL;

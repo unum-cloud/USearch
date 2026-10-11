@@ -241,8 +241,9 @@ typedef enum usearch_status_t {
      *  published nothing, so the handle carries whatever it did before the call. */
     usearch_status_cancelled_k = 15,
 
-    /** The verb is declared for every residency but this one does not implement it; no retry,
-     *  option, or smaller request can help, so a caller picks another residency. */
+    /** The verb is declared for every residency but this one does not implement it, nor the
+     *  requested traversal, or the build left the requested quantization out; no retry, option, or
+     *  smaller request can help, so a caller picks another residency, traversal or build. */
     usearch_status_unsupported_k = 16,
 
     /** An argument breaks the verb's contract - a required pointer left @c NULL, inputs inside
@@ -464,7 +465,14 @@ typedef enum usearch_cpu_class_t {
     /** Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512. */
     usearch_cpu_class_amd_genoa_k,
 
-    /** Diamond Rapids-class x86: the AVX-512 lineage plus AVX10.2's FP8 conversions,
+    /** Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16 &
+     *  AMX-INT8 tiles. */
+    usearch_cpu_class_intel_sapphire_k,
+
+    /** Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles. */
+    usearch_cpu_class_intel_granite_k,
+
+    /** Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions,
      *  TPAUSE waits, CMPCCXADD conditional adds. */
     usearch_cpu_class_intel_diamond_k,
 
@@ -475,6 +483,9 @@ typedef enum usearch_cpu_class_t {
     /** Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2,
      *  Cortex-A710 & X2 class silicon. */
     usearch_cpu_class_apple_m2_k,
+
+    /** Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles. */
+    usearch_cpu_class_apple_m4_k,
 
     /** Graviton5-class Arm - Neoverse V3, Armv9.2: monitored waits guaranteed. */
     usearch_cpu_class_aws_g5_k,
@@ -537,6 +548,17 @@ typedef enum usearch_residency_t {
     /** Persisted index traversed through pluggable I/O engines, sized past RAM. */
     usearch_residency_nvme_k = 2,
 } usearch_residency_t;
+
+/** How a search reaches the indexed rows it scores. */
+typedef enum usearch_traversal_t {
+
+    /** Walk the graph, scoring the rows the expansion reaches - approximate, the default. */
+    usearch_traversal_walk_k = 0,
+
+    /** Score every row published when the query's scan starts - exact, the ground truth a walk
+     *  approximates. */
+    usearch_traversal_scan_k = 1,
+} usearch_traversal_t;
 
 /**
  *  @brief The host memory domains a RAM-resident index places its shards in - one shard per
@@ -975,6 +997,12 @@ USEARCH_EXPORT char const* usearch_residency_name(usearch_residency_t residency)
 
 /** Reads a residency back; @c usearch_residency_ram_k when unrecognized. */
 USEARCH_EXPORT usearch_residency_t usearch_residency_from_name(usearch_bytes_view_t name);
+
+/** The canonical spelling of a traversal, as @c usearch_traversal_scan_k spells "scan". */
+USEARCH_EXPORT char const* usearch_traversal_name(usearch_traversal_t traversal);
+
+/** Reads a traversal back; @c usearch_traversal_walk_k when unrecognized. */
+USEARCH_EXPORT usearch_traversal_t usearch_traversal_from_name(usearch_bytes_view_t name);
 
 /** The canonical spelling of a mood, as @c usearch_mood_parked_k spells "parked". */
 USEARCH_EXPORT char const* usearch_mood_name(usearch_mood_t mood);

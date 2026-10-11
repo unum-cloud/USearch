@@ -7,7 +7,6 @@ import struct
 import numpy as np
 import numpy.typing as npt
 
-# The extension names the scalar type, since the header carries only the shape.
 _EXTENSION_DTYPES: dict[str, type[np.generic]] = {
     ".fbin": np.float32,
     ".f32bin": np.float32,
@@ -18,6 +17,7 @@ _EXTENSION_DTYPES: dict[str, type[np.generic]] = {
     ".bbin": np.uint8,
     ".i8bin": np.int8,
 }
+"""The scalar type each extension names, since the header carries only the shape."""
 
 
 def _dtype_for(filename: str) -> type[np.generic] | None:
@@ -32,9 +32,9 @@ def load_matrix(
     *,
     view: bool = False,
     dtype: npt.DTypeLike | None = None,
-) -> np.ndarray:
+) -> npt.NDArray[np.generic]:
     """Reads a matrix from an ``.fbin``, ``.f32bin``, ``.dbin``, ``.hbin``, ``.ibin``, ``.i32bin``, ``.bbin``,
-    or ``.i8bin`` file.
+    or ``.i8bin`` file, in the scalar type its extension or *dtype* names, hence the generic dtype.
 
     Reads *count_rows* rows starting at *start_row*, or every row when *count_rows* is None. Setting
     *view* memory-maps the file rather than loading it into RAM, which is how a dataset larger than
@@ -62,11 +62,12 @@ def load_matrix(
         return np.fromfile(file, count=count * columns, dtype=scalar).reshape(count, columns)
 
 
-def save_matrix(vectors: np.ndarray, filename: str) -> None:
+def save_matrix(vectors: npt.NDArray[np.generic], filename: str) -> None:
     """Writes a matrix to an ``.fbin``, ``.f32bin``, ``.dbin``, ``.hbin``, ``.ibin``, ``.i32bin``, ``.bbin``,
     or ``.i8bin`` file.
 
-    An extension naming a scalar type converts the rows into it; any other keeps the matrix's own.
+    An extension naming a scalar type converts the rows into it; any other keeps the matrix's own,
+    so *vectors* may hold any scalar type.
     """
     if vectors.ndim != 2:
         raise ValueError(f"expected a matrix, got {vectors.ndim} dimensions")

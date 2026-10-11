@@ -801,6 +801,29 @@ public struct Residency: Hashable, Sendable, CustomStringConvertible {
     init(raw: usearch_residency_t) { self.raw = raw }
 }
 
+/// How a search reaches the rows it scores, carrying the C enumerator.
+public struct Traversal: Hashable, Sendable, CustomStringConvertible {
+    /// The C enumerator.
+    let raw: usearch_traversal_t
+
+    /// Walks the graph, scoring the rows the expansion reaches - approximate, the default.
+    public static let walk = Traversal(raw: usearch_traversal_walk_k)
+    /// Scores every row published when the query's scan starts - exact, on RAM and NVMe handles.
+    public static let scan = Traversal(raw: usearch_traversal_scan_k)
+
+    /// The traversal rendered as the library spells it. Calls `usearch_traversal_name`.
+    public var description: String { String(cString: usearch_traversal_name(raw)) }
+
+    /// Reads a spelling back, and nil for one no traversal carries. Calls
+    /// `usearch_traversal_from_name`.
+    public init?(name: String) {
+        guard let raw = parsed(name, usearch_traversal_from_name, usearch_traversal_name) else { return nil }
+        self.raw = raw
+    }
+
+    init(raw: usearch_traversal_t) { self.raw = raw }
+}
+
 /// What an executor does with its threads or streams once it goes idle, carrying the C enumerator.
 public struct Mood: Hashable, Sendable, CustomStringConvertible {
     /// The C enumerator.

@@ -66,6 +66,7 @@ from usearch.types import (
     Residency,
     ScalarKind,
     Status,
+    Traversal,
     text_at,
 )
 
@@ -140,6 +141,10 @@ struct Symbols:
     """`usearch_residency_name`."""
     var residency_from_name: FromName
     """`usearch_residency_from_name`."""
+    var traversal_name: NameOf
+    """`usearch_traversal_name`."""
+    var traversal_from_name: FromName
+    """`usearch_traversal_from_name`."""
     var mood_name: NameOf
     """`usearch_mood_name`."""
     var mood_from_name: FromName
@@ -256,6 +261,8 @@ struct Symbols:
         self.scalar_from_name = _resolve[FromName](handle, "usearch_scalar_from_name")
         self.residency_name = _resolve[NameOf](handle, "usearch_residency_name")
         self.residency_from_name = _resolve[FromName](handle, "usearch_residency_from_name")
+        self.traversal_name = _resolve[NameOf](handle, "usearch_traversal_name")
+        self.traversal_from_name = _resolve[FromName](handle, "usearch_traversal_from_name")
         self.mood_name = _resolve[NameOf](handle, "usearch_mood_name")
         self.mood_from_name = _resolve[FromName](handle, "usearch_mood_from_name")
         self.dense_metric_name = _resolve[NameOf](handle, "usearch_dense_metric_name")
@@ -412,6 +419,14 @@ struct Library(ImplicitlyCopyable):
     def residency_from_name(self, name: StringSlice) -> Residency:
         """Reads a spelling back; `RAM` when unrecognized. Calls `usearch_residency_from_name`."""
         return Residency(self.symbols().residency_from_name(BytesView.of(name).untracked()))
+
+    def traversal_name(self, traversal: Traversal) -> String:
+        """The engine's spelling of a traversal, as `SCAN` spells "scan". Calls `usearch_traversal_name`."""
+        return text_at(self.symbols().traversal_name(traversal.code))
+
+    def traversal_from_name(self, name: StringSlice) -> Traversal:
+        """Reads a spelling back; `WALK` when unrecognized. Calls `usearch_traversal_from_name`."""
+        return Traversal(self.symbols().traversal_from_name(BytesView.of(name).untracked()))
 
     def mood_name(self, mood: Mood) -> String:
         """The engine's spelling of a mood, as `PARKED` spells "parked". Calls `usearch_mood_name`."""

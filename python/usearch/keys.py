@@ -8,11 +8,12 @@ since `usearch.Key` reads an `int`, a `str`, a `uuid.UUID`, or sixteen raw bytes
 from __future__ import annotations
 
 import numpy as np
+import numpy.typing as npt
 
 __all__ = ["integers_to_keys", "keys_to_integers"]
 
 
-def integers_to_keys(values) -> np.ndarray:
+def integers_to_keys(values) -> npt.NDArray[np.uint8]:
     """Packs integer identities into the ``(N, 16)`` big-endian rows every batch verb takes.
 
     Takes anything NumPy reads as unsigned integers, one identity per row, and returns a
@@ -24,7 +25,7 @@ def integers_to_keys(values) -> np.ndarray:
     return rows
 
 
-def keys_to_integers(keys) -> np.ndarray:
+def keys_to_integers(keys) -> npt.NDArray[np.uint64]:
     """Unpacks the low eight bytes of each identity, the half integer keys sit in.
 
     Takes an ``(..., 16)`` buffer of identity bytes, such as ``Matches.keys``, and returns a

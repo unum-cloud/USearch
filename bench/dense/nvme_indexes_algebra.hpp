@@ -53,8 +53,9 @@ bool save_nvme_pairs(nvme_context<nvme_type_>& nvme, algebra_settings_t const& a
     do {
         width = widest;
         keys.resize(judged * width), products.resize(judged * width);
-        auto const [result, status] = nvme.viewed.multiply(rows, nvme.executor, config, width, std::span {keys},
-                                                           std::span {products}, std::span {counts});
+        auto const [result, status] = nvme.viewed.multiply(
+            rows, nvme.executor, config, nk::matrix_span<u32_t> {keys.data(), judged, width},
+            nk::matrix_span<typename nvme_type_::dot_result_t> {products.data(), judged, width}, std::span {counts});
         if (failed(status))
             return fmt::println("Multiply refused the judged rows: {}", status_to_string(status)), false;
         for (std::size_t const count : counts) widest = std::max(widest, count);
@@ -116,9 +117,10 @@ bool run_nvme_algebra(streamed_dataset_type_& streamed, algebra_settings_t const
     std::vector<std::size_t> counts(query_count);
     std::vector<u64_t> latencies_ns(query_count);
     auto started = steady_clock_t::now();
-    auto const [multiply_result, multiply_status] = nvme.viewed.multiply(inputs.rows, nvme.executor, config, wanted,
-                                                                         std::span {multiplied}, std::span {products},
-                                                                         std::span {counts}, std::span {latencies_ns});
+    auto const [multiply_result, multiply_status] = nvme.viewed.multiply(
+        inputs.rows, nvme.executor, config, nk::matrix_span<key_t> {multiplied.data(), query_count, wanted},
+        nk::matrix_span<dot_result_t> {products.data(), query_count, wanted}, std::span {counts},
+        std::span {latencies_ns});
     double const multiply_seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
     if (failed(multiply_status))
         return fmt::println("Multiply refused {} rows: {}", query_count, status_to_string(multiply_status)), false;
@@ -142,23 +144,21 @@ bool run_nvme_algebra(streamed_dataset_type_& streamed, algebra_settings_t const
     std::vector<dense_softmax_state_t> carry(query_count);
     std::vector<u64_t> token_latencies_ns(token_count);
     started = steady_clock_t::now();
+    nk::matrix_span<f32_t> const attended_rows {outputs.data(), query_count, columns};
     auto const [attended, attend_status] = nvme.viewed.attend(inputs.rows, head_count, value_of, inputs.score_scale,
-                                                              std::span {outputs}, std::span {carry}, nvme.executor,
-                                                              config, std::span {token_latencies_ns});
+                                                              attended_rows, std::span {carry}, nvme.executor, config,
+                                                              std::span {token_latencies_ns});
     double const attend_seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
     if (failed(attend_status))
         return fmt::println("Attend refused {} queries: {}", token_count, status_to_string(attend_status)), false;
     report_attend_metrics(query_count, head_count, nodes_count, attend_seconds, attended.computed_distances);
     report_storage_metrics("query", token_count, attend_seconds, attended, std::span {token_latencies_ns});
-    return judge_attention(streamed, algebra, inputs, std::span<f32_t> {outputs});
+    return judge_attention(streamed, algebra, inputs, attended_rows);
 }
 
 /** The algebra workload the cascade ends in: graph products and graph attention over the viewed
  *  parts, judged against the exact oracle. */
 struct nvme_algebra_workload_t {
-
-    /** Both verbs are defined over the dot kernel alone, so the cascade pins it. */
-    static constexpr bool dot_only_k = true;
 
     /** The algebra knobs, borrowed for the run's lifetime. */
     algebra_settings_t const& algebra;

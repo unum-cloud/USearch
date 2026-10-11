@@ -266,7 +266,7 @@ typedef struct usearch_py_enum_t {
 } usearch_py_enum_t;
 
 extern usearch_py_enum_t usearch_py_status, usearch_py_mood, usearch_py_dense_metric, usearch_py_scalar,
-    usearch_py_residency;
+    usearch_py_residency, usearch_py_traversal;
 
 /**
  *  @brief Builds every mirrored enum's class from `enum.IntEnum` and adds it to @p module, one

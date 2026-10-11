@@ -97,6 +97,7 @@
  *  @c usearch_dense_cursor_init answers on RAM, while VRAM rows are read back through a search.
  *  @c usearch_dense_get, @c usearch_dense_save_buffer, @c usearch_dense_multiply and
  *  @c usearch_dense_maxsim answer on RAM but not on VRAM, the first three waiting on device arenas.
+ *  A search with @c usearch_traversal_scan_k answers on RAM and NVMe, waiting on device scans.
  *  @c usearch_dense_attend answers on both, resolving value rows through @c value_lookup, a host
  *  function on RAM and a device one on VRAM.
  *  @c usearch_dense_search_stream_init and @c usearch_dense_merge are unsupported on both.
@@ -232,7 +233,10 @@ typedef struct usearch_dense_init_ram_t {
     /** The metric kind used for distance calculations between vectors. */
     usearch_dense_metric_t metric;
 
-    /** The scalar type vectors are stored & quantized into. */
+    /** The scalar type vectors are stored & quantized into. A build compiles the first
+     *  `USEARCH_DENSE_DTYPES` of bf16, u1x8, i8, e4m3, f16, u8, e5m2, i4x2, u4x2, e3m2 and e2m3,
+     *  four by default and all eleven in the prebuilt packages, and refuses the rest with
+     *  @c usearch_status_unsupported_k. */
     usearch_scalar_t quantization;
 
     /** The number of dimensions in the indexed vectors. */
@@ -756,8 +760,11 @@ typedef struct usearch_dense_search_t {
     /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
     size_t wanted;
 
-    /** The @b optional candidate-pool breadth the walk explores; zero derives. */
+    /** The @b optional candidate-pool breadth a walk explores; zero derives, a scan ignores it. */
     size_t expansion_factor;
+
+    /** How rows are reached: a walk, the default, or an exact scan of every row on RAM and NVMe. */
+    usearch_traversal_t traversal;
 
     /** The @b optional per-key admission callback; @c NULL admits everything. */
     usearch_predicate_t predicate;
@@ -776,10 +783,22 @@ typedef struct usearch_dense_search_t {
 } usearch_dense_search_t;
 
 /**
- *  @brief Performs k-Approximate Nearest Neighbors Search for a run of queries - the native batch
- *      operation, parallelized internally; one query is a count of one. Never writes to the
- *      graph, so any number may overlap with concurrent insertions. @ref dense_index_concurrency
+ *  @brief Performs k-Nearest Neighbors Search for a run of queries, approximate by walking the
+ *      graph or exact by scanning every row - the native batch operation, parallelized internally.
  *  @retval usearch_status_device_k A @c predicate on a VRAM handle, or a VRAM search before device merges.
+ *  @retval usearch_status_unsupported_k A @c usearch_traversal_scan_k scan of a VRAM handle.
+ *
+ *  One query is a count of one. Never writes to the index, so any number may overlap with
+ *  insertions. @ref dense_index_concurrency
+ *
+ *  A scan walks no graph. On RAM the queries split into blocks, each taken by one of the executor's
+ *  threads: a block of many queries packs once into the operand layout of the CPU's matrix kernels
+ *  and streams every stored row against the pack where it lies, while a lone query takes the walk's
+ *  own 4-way kernels. On NVMe the queries pack once and the threads split the value column instead,
+ *  each run landing beside its keys, so the column is read once and in order. Either way each
+ *  query's matches merge into its output row as the pass advances. A @c predicate is asked only
+ *  about rows closer than the worst match the query already holds, which makes the scan the
+ *  fallback for filters too selective for a walk to cross.
  *
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
  *  the traversal rather than terminating it, so recall does not collapse at low selectivity - the
@@ -874,7 +893,7 @@ typedef struct usearch_dense_get_t {
 
 /**
  *  @brief Retrieves every vector stored under one key into @c arena, one row per entry sharing the
- *      key, in insertion order - one call, however many there turn out to be.
+ *      key, shard by shard and in insertion order within each - one call, however many there are.
  *
  *  The rows span @c written entries; an absent key leaves @c vectors->data @c NULL.
  */

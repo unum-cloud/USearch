@@ -287,6 +287,18 @@ usearch_residency_t usearch_residency_from_name(usearch_bytes_view_t name) {
     return usearch_residency_ram_k;
 }
 
+char const* usearch_traversal_name(usearch_traversal_t traversal) {
+    switch (traversal) {
+    case usearch_traversal_walk_k: return "walk";
+    case usearch_traversal_scan_k: return "scan";
+    default: return "unknown";
+    }
+}
+
+usearch_traversal_t usearch_traversal_from_name(usearch_bytes_view_t name) {
+    return named(name, "scan") ? usearch_traversal_scan_k : usearch_traversal_walk_k;
+}
+
 char const* usearch_mood_name(usearch_mood_t mood) {
     switch (mood) {
     case usearch_mood_parked_k: return "parked";

@@ -66,7 +66,7 @@ Every output whose length scales with the call lands in an `Arena` the verb take
 ```java
 public class Main {
     public static void main(String[] arguments) {
-        DenseOptions options = new DenseOptions().dimensions(3).metric(DenseMetric.ANGULAR).quantization(Scalar.F32);
+        DenseOptions options = new DenseOptions().dimensions(3).metric(DenseMetric.ANGULAR).quantization(Scalar.BF16);
         try (Executor pool = Executor.forRam(new int[0], 0, 0);
                 Arena arena = new Arena(pool);
                 DenseIndex index = DenseIndex.initRam(options, new int[0])) {
@@ -187,7 +187,7 @@ A heap segment is copied across the boundary for the duration of one call, since
 A native segment is addressed in place with no copy at all, which is the argument to reach for when a batch is large.
 A segment over a direct `ByteBuffer` captures the buffer's position and limit once, so moving the buffer later cannot widen what a call reads.
 
-Quantization kinds run from the widest dynamic range down: `F64`, `F32`, `BF16`, `F16`, `E5M2`, `E4M3`, `E3M2`, `E2M3`, `I8`, `I4X2`, `U8`, `U4X2`, `U1X8`.
+Quantization kinds run from the widest dynamic range down: `BF16`, the default, `F16`, `E5M2`, `E4M3`, `E3M2`, `E2M3`, `I8`, `I4X2`, `U8`, `U4X2`, `U1X8`; `F64` and `F32` cross as inputs and outputs only.
 Sub-byte kinds count logical dimensions, so sixteen `U1X8` dimensions occupy two bytes per row.
 
 ## Ranked Outputs
@@ -198,6 +198,7 @@ The wanted count is the "k" in kANN and bounds `columns`, the row width of both 
 ```java
 Matches matches = index.on(pool).search(queries, 10, arena);
 Matches wider = index.on(pool).search(queries, new DenseSearchConfig(10).expansionFactor(64), arena);
+Matches exact = index.on(pool).search(queries, new DenseSearchConfig(10).traversal(Traversal.SCAN), arena);
 ```
 
 `count`, `key` and `score` all address one query's row by its position, so no call site multiplies out an offset of its own, and slots past a query's count hold memory the engine never wrote and are refused.
@@ -412,7 +413,7 @@ Nullness is part of the contract.
 The package is `@NullMarked`, so a Kotlin caller gets real non-null types across the whole boundary rather than platform types, and the compiler refuses a null where the API does not accept one:
 
 ```kotlin
-val index: DenseIndex = DenseIndex.initRam(DenseOptions().dimensions(2).quantization(Scalar.F32), intArrayOf())
+val index: DenseIndex = DenseIndex.initRam(DenseOptions().dimensions(2).quantization(Scalar.BF16), intArrayOf())
 index.use { ... }                       // AutoCloseable is Kotlin's `use`
 Arena(pool).use { arena ->
     val matches = withContext(Dispatchers.IO) { index.deferred(pool).search(queries, 10, arena).use { it.join() } }

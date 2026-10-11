@@ -5,19 +5,21 @@
  *  @brief Device metric kits for the dense VRAM indexes - the GPU twin of @c ram_metric.hpp.
  *
  *  A kit binds one storage dtype to one GPU generation, named like the CPU kits -
- *  @b dtype_generation_kit - with the metric as its parameter. The generation slot names the oldest
- *  tier whose instructions the kit needs: @c ampere for the sm_80 floor, @c ada for the fp8
- *  conversions, @c blackwell for the mixed-precision multiply-adds and the fp6 conversions. Each
- *  tier's kits sit behind its @c NUMKONG_TARGET_* gate and a chain picks among them under the
- *  caller's ceiling, exactly like the CPU chains, so a unit compiled for one architecture compiles
- *  the kits that architecture runs. The arithmetic lives in named device primitives; a kit binds them.
+ *  @b dtype_generation_quads_kit_t. The generation slot names the oldest tier whose instructions
+ *  the kit needs: @c ampere for the sm_80 floor, @c ada for the fp8 conversions, @c blackwell for
+ *  the mixed-precision multiply-adds and the fp6 conversions. Each tier's kits sit behind its
+ *  @c NUMKONG_TARGET_* gate and a chain picks among them under the caller's ceiling, exactly like
+ *  the CPU chains, so a unit compiled for one architecture compiles the kits that architecture
+ *  runs. The arithmetic lives in named device primitives; a kit binds them.
  *
- *  Fragments are 16-byte register tiles, and metrics with precomputable norms finalize "through the
- *  dot". Row geometry - how many fragments span one vector, how many lanes cooperate on a row - is
- *  runtime state of the planes view, not the kit: dimensions are frozen by the first @c reserve,
- *  never by a type. The cross-lane reduction is deliberately not a kit member - one shuffle tree
- *  serves every kit. Distances take both sides' norms, as the CPU finalizers do, so a symmetric
- *  candidate-to-candidate distance is the same call.
+ *  Fragments are 16 bytes of scalars held in registers, and metrics with precomputable norms
+ *  finalize "through the dot". Row geometry - how many fragments span one vector, how many lanes
+ *  cooperate on a row - and the metric are runtime state of the planes view, not the kit:
+ *  dimensions are frozen by the first @c reserve, never by a type, and the metric only steers the
+ *  scalar epilogue, so one kernel serves every metric of a dtype. The cross-lane reduction is
+ *  deliberately not a kit member - one shuffle tree serves every kit. Distances take both sides'
+ *  norms, as the CPU finalizers do, so a symmetric candidate-to-candidate distance is the same
+ *  call.
  *
  *  Families sort from the widest numeric types to the smallest & most exotic: 16-bit floats, 8-bit
  *  integers, minifloats, packed nibbles, packed bits. Norms are the CPU's @c vector_norms over each
@@ -31,8 +33,8 @@
 #include <cuda_bf16.h> // `__nv_bfloat162` packed math, sm_80+
 #include <cuda_fp16.h> // `__half2` packed math
 
-#include <numkong/capabilities.h> // `nk_kernel_kind_t` - the chains key on it
-#include <numkong/numkong.hpp>
+#include <numkong/capabilities.h> // `nk_kernel_kind_t` - the epilogues switch on it
+#include <numkong/types.hpp>      // `nk::bf16_t` & the other scalars the kits load
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_device.hpp"
@@ -44,17 +46,18 @@ namespace unum {
 namespace usearch {
 
 template <typename kit_>
-concept dense_cuda_kit = requires(
+concept dense_cuda_quads_kit = requires(
     typename kit_::fragment_t fragment, typename kit_::dot_t dot, typename kit_::weighted_t weighted,
-    typename kit_::norms_accumulator_t norms_accumulator, typename kit_::norms_t norms, dense_distance_t ranked) {
+    typename kit_::norms_accumulator_t norms_accumulator, typename kit_::norms_t norms, dense_distance_t ranked,
+    nk_kernel_kind_t kernel) {
     typename kit_::scalar_t;
-    { kit_::arch_k } -> std::convertible_to<cuda_arch_t>;
+    { kit_::capability_k } -> std::convertible_to<nk_capability_t>;
     { kit_::accumulate_dot(fragment, fragment, dot) } -> std::same_as<typename kit_::dot_t>;
     { kit_::accumulate_weighted(fragment, f32_t {}, weighted) } -> std::same_as<typename kit_::weighted_t>;
     { kit_::accumulate_norms(fragment, norms_accumulator) } -> std::same_as<typename kit_::norms_accumulator_t>;
     { kit_::partials_to_norms(norms_accumulator) } -> std::same_as<typename kit_::norms_t>;
-    { kit_::distance(dot, norms, norms) } -> std::same_as<dense_distance_t>;
-    { kit_::convert_to_distance(ranked) } -> std::same_as<dense_distance_t>;
+    { kit_::distance(kernel, dot, norms, norms) } -> std::same_as<dense_distance_t>;
+    { kit_::convert_to_distance(kernel, ranked) } -> std::same_as<dense_distance_t>;
 };
 
 /** Generic cross-lane reduction: folds sub-warp partials of width @p lanes_per_row
@@ -123,73 +126,54 @@ __device__ __forceinline__ dense_distance_t dense_cuda_angular_through_dot(f32_t
     return dot == 0.0f ? 0.0f : 1.0f;
 }
 
-/** A numeric kit's distance for @p kernel_ "through the dot": @b 1-dot for the inner product, monotone
- *  decreasing and negative-safe, the clamped angular, and the squared Euclidean the walk ranks by. */
-template <nk_kernel_kind_t kernel_, typename dot_type_>
-__device__ __forceinline__ dense_distance_t dense_cuda_distance(dot_type_ dot, vector_norms<dot_type_> query,
+/** A numeric kit's distance for @p kernel "through the dot": @b 1-dot for the inner product,
+ *  monotone decreasing and negative-safe, the clamped angular, and the squared Euclidean the walk
+ *  ranks by. The index validates @p kernel at compile time, so the fallback only ever sees the
+ *  Euclidean pair. */
+template <typename dot_type_>
+__device__ __forceinline__ dense_distance_t dense_cuda_distance(nk_kernel_kind_t kernel, dot_type_ dot,
+                                                                vector_norms<dot_type_> query,
                                                                 vector_norms<dot_type_> target) noexcept {
     f32_t const dot_value = static_cast<f32_t>(dot);
-    if constexpr (kernel_ == nk_kernel_dot_k) return 1.0f - dot_value;
-    else if constexpr (kernel_ == nk_kernel_angular_k)
+    switch (kernel) {
+    case nk_kernel_dot_k: return 1.0f - dot_value;
+    case nk_kernel_angular_k:
         return dense_cuda_angular_through_dot(dot_value, static_cast<f32_t>(query.sumsq),
                                               static_cast<f32_t>(target.sumsq));
-    else {
-        static_assert(kernel_ == nk_kernel_sqeuclidean_k || kernel_ == nk_kernel_euclidean_k,
-                      "Numeric vectors score by dot, angular or euclidean");
-        return static_cast<f32_t>(query.sumsq) + static_cast<f32_t>(target.sumsq) - 2.0f * dot_value;
+    default: return static_cast<f32_t>(query.sumsq) + static_cast<f32_t>(target.sumsq) - 2.0f * dot_value;
     }
 }
 
 /** Output-boundary finalize, the CPU kits' @c convert_to_distances in miniature: the traversal ranks
  *  on raw @c distance values end to end, and only the matches a caller receives pass through here -
  *  identity unless a metric owes a monotone transform, like Euclidean's square root. */
-template <nk_kernel_kind_t kernel_>
-__device__ __forceinline__ dense_distance_t dense_cuda_convert_to_distance(dense_distance_t ranked) noexcept {
-    if constexpr (kernel_ == nk_kernel_euclidean_k) return sqrtf(fmaxf(ranked, 0.0f));
-    else return ranked;
+__device__ __forceinline__ dense_distance_t dense_cuda_convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+    return kernel == nk_kernel_euclidean_k ? sqrtf(fmaxf(ranked, 0.0f)) : ranked;
 }
 
 #pragma endregion Metrics
 
 /** The kits every chain names, declared whether or not their tier is compiled in. */
-template <nk_kernel_kind_t kernel_>
-struct f16_ampere_kit;
-template <nk_kernel_kind_t kernel_>
-struct f16_blackwell_kit;
-template <nk_kernel_kind_t kernel_>
-struct bf16_ampere_kit;
-template <nk_kernel_kind_t kernel_>
-struct bf16_blackwell_kit;
-template <nk_kernel_kind_t kernel_>
-struct i8_ampere_kit;
-template <nk_kernel_kind_t kernel_>
-struct u8_ampere_kit;
-template <nk_kernel_kind_t kernel_>
-struct e5m2_ampere_kit;
-template <nk_kernel_kind_t kernel_>
-struct e5m2_ada_kit;
-template <nk_kernel_kind_t kernel_>
-struct e5m2_blackwell_kit;
-template <nk_kernel_kind_t kernel_>
-struct e4m3_ampere_kit;
-template <nk_kernel_kind_t kernel_>
-struct e4m3_ada_kit;
-template <nk_kernel_kind_t kernel_>
-struct e4m3_blackwell_kit;
-template <nk_kernel_kind_t kernel_>
-struct e3m2_ampere_kit;
-template <nk_kernel_kind_t kernel_>
-struct e3m2_blackwell_kit;
-template <nk_kernel_kind_t kernel_>
-struct e2m3_ampere_kit;
-template <nk_kernel_kind_t kernel_>
-struct e2m3_blackwell_kit;
-template <nk_kernel_kind_t kernel_>
-struct i4x2_ampere_kit;
-template <nk_kernel_kind_t kernel_>
-struct u4x2_ampere_kit;
-template <nk_kernel_kind_t kernel_>
-struct u1x8_ampere_kit;
+struct f16_ampere_quads_kit_t;
+struct f16_blackwell_quads_kit_t;
+struct bf16_ampere_quads_kit_t;
+struct bf16_blackwell_quads_kit_t;
+struct i8_ampere_quads_kit_t;
+struct u8_ampere_quads_kit_t;
+struct e5m2_ampere_quads_kit_t;
+struct e5m2_ada_quads_kit_t;
+struct e5m2_blackwell_quads_kit_t;
+struct e4m3_ampere_quads_kit_t;
+struct e4m3_ada_quads_kit_t;
+struct e4m3_blackwell_quads_kit_t;
+struct e3m2_ampere_quads_kit_t;
+struct e3m2_blackwell_quads_kit_t;
+struct e2m3_ampere_quads_kit_t;
+struct e2m3_blackwell_quads_kit_t;
+struct i4x2_ampere_quads_kit_t;
+struct u4x2_ampere_quads_kit_t;
+struct u1x8_ampere_quads_kit_t;
 
 #pragma region Half Precision Floats
 
@@ -270,9 +254,8 @@ __device__ __forceinline__ std::array<f32_t, 8> dense_cuda_weighted_bf16x8_amper
 }
 
 /** f16 kit - the sm_80 floor. */
-template <nk_kernel_kind_t kernel_>
-struct f16_ampere_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct f16_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -293,18 +276,19 @@ struct f16_ampere_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
 /** bf16 kit - the sm_80 floor. */
-template <nk_kernel_kind_t kernel_>
-struct bf16_ampere_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct bf16_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -325,11 +309,13 @@ struct bf16_ampere_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
@@ -379,9 +365,8 @@ __device__ __forceinline__ f32_t dense_cuda_dot_bf16x8_blackwell(uint4 a, uint4 
 }
 
 /** f16 kit - Blackwell, @c fma.rn.f32.f16. */
-template <nk_kernel_kind_t kernel_>
-struct f16_blackwell_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+struct f16_blackwell_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -402,18 +387,19 @@ struct f16_blackwell_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
 /** bf16 kit - Blackwell, @c fma.rn.f32.bf16. */
-template <nk_kernel_kind_t kernel_>
-struct bf16_blackwell_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+struct bf16_blackwell_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -434,11 +420,13 @@ struct bf16_blackwell_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
@@ -512,9 +500,8 @@ __device__ __forceinline__ std::array<f32_t, 16> dense_cuda_weighted_u8x16_amper
 }
 
 /** i8 kit - the sm_80 floor. */
-template <nk_kernel_kind_t kernel_>
-struct i8_ampere_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct i8_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -535,18 +522,19 @@ struct i8_ampere_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(int2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
 /** u8 kit - the sm_80 floor. */
-template <nk_kernel_kind_t kernel_>
-struct u8_ampere_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct u8_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::u8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -567,11 +555,13 @@ struct u8_ampere_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(uint2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
@@ -682,9 +672,8 @@ struct e2m3_ampere_widening_t {
 };
 
 /** e5m2 kit - the sm_80 floor, widening by shifts. */
-template <nk_kernel_kind_t kernel_>
-struct e5m2_ampere_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct e5m2_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -705,18 +694,19 @@ struct e5m2_ampere_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
 /** e4m3 kit - the sm_80 floor, widening by hand. */
-template <nk_kernel_kind_t kernel_>
-struct e4m3_ampere_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct e4m3_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -737,18 +727,19 @@ struct e4m3_ampere_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
 /** e3m2 kit - the sm_80 floor, widening by hand. */
-template <nk_kernel_kind_t kernel_>
-struct e3m2_ampere_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct e3m2_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::e3m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -769,18 +760,19 @@ struct e3m2_ampere_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
 /** e2m3 kit - the sm_80 floor, widening by hand. */
-template <nk_kernel_kind_t kernel_>
-struct e2m3_ampere_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct e2m3_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::e2m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -801,11 +793,13 @@ struct e2m3_ampere_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
@@ -838,9 +832,8 @@ struct e5m2_ada_widening_t {
 };
 
 /** e5m2 kit - Ada, widening through the conversion. */
-template <nk_kernel_kind_t kernel_>
-struct e5m2_ada_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ada_k;
+struct e5m2_ada_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ada_k;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -861,18 +854,19 @@ struct e5m2_ada_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
 /** e4m3 kit - Ada, widening through the conversion. */
-template <nk_kernel_kind_t kernel_>
-struct e4m3_ada_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ada_k;
+struct e4m3_ada_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ada_k;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -893,11 +887,13 @@ struct e4m3_ada_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
@@ -946,9 +942,8 @@ struct e2m3_blackwell_widening_t {
 };
 
 /** e5m2 kit - Blackwell, converted halves through @c fma.rn.f32.f16. */
-template <nk_kernel_kind_t kernel_>
-struct e5m2_blackwell_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+struct e5m2_blackwell_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -969,18 +964,19 @@ struct e5m2_blackwell_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
 /** e4m3 kit - Blackwell, converted halves through @c fma.rn.f32.f16. */
-template <nk_kernel_kind_t kernel_>
-struct e4m3_blackwell_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+struct e4m3_blackwell_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1001,18 +997,19 @@ struct e4m3_blackwell_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
 /** e3m2 kit - Blackwell, the one-instruction conversion into @c fma.rn.f32.f16. */
-template <nk_kernel_kind_t kernel_>
-struct e3m2_blackwell_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+struct e3m2_blackwell_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
     using scalar_t = nk::e3m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1033,18 +1030,19 @@ struct e3m2_blackwell_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
 /** e2m3 kit - Blackwell, the one-instruction conversion into @c fma.rn.f32.f16. */
-template <nk_kernel_kind_t kernel_>
-struct e2m3_blackwell_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+struct e2m3_blackwell_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
     using scalar_t = nk::e2m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1065,11 +1063,13 @@ struct e2m3_blackwell_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
@@ -1180,9 +1180,8 @@ __device__ __forceinline__ std::array<f32_t, 32> dense_cuda_weighted_u4x32_amper
 }
 
 /** i4x2 kit - the sm_80 floor, the byte engine over unpacked nibbles. */
-template <nk_kernel_kind_t kernel_>
-struct i4x2_ampere_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct i4x2_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::i4x2_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -1203,18 +1202,19 @@ struct i4x2_ampere_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(int2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
 /** u4x2 kit - the sm_80 floor, the byte engine over unpacked nibbles. */
-template <nk_kernel_kind_t kernel_>
-struct u4x2_ampere_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct u4x2_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::u4x2_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -1235,11 +1235,13 @@ struct u4x2_ampere_kit {
     static __device__ __forceinline__ norms_t partials_to_norms(uint2 moments) noexcept {
         return {moments.x, moments.y};
     }
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        return dense_cuda_distance<kernel_>(dot, query, target);
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_cuda_distance(kernel, dot, query, target);
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
-        return dense_cuda_convert_to_distance<kernel_>(ranked);
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_cuda_convert_to_distance(kernel, ranked);
     }
 };
 
@@ -1268,9 +1270,8 @@ __device__ __forceinline__ std::array<f32_t, 128> dense_cuda_weighted_u1x128_amp
 
 /** u1x8 kit - the sm_80 floor: the "dot" is the intersection popcount, and the norms store each row's
  *  set-bit count, the currency of Jaccard's union, mirrored into both fields. */
-template <nk_kernel_kind_t kernel_>
-struct u1x8_ampere_kit {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct u1x8_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::u1x8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -1295,16 +1296,19 @@ struct u1x8_ampere_kit {
 
     /** Hamming is |a| + |b| - 2·intersection, never negative since the intersection is bounded by either
      *  count; Jaccard is 1 - intersection / union, and two empty sets are identical, distance zero. */
-    static __device__ __forceinline__ dense_distance_t distance(dot_t dot, norms_t query, norms_t target) noexcept {
-        if constexpr (kernel_ == nk_kernel_dot_k) return 1.0f - static_cast<f32_t>(dot);
-        else if constexpr (kernel_ == nk_kernel_hamming_k) return static_cast<f32_t>(query.sum + target.sum - 2 * dot);
-        else {
-            static_assert(kernel_ == nk_kernel_jaccard_k, "Bit vectors score by dot, hamming or jaccard");
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        switch (kernel) {
+        case nk_kernel_dot_k: return 1.0f - static_cast<f32_t>(dot);
+        case nk_kernel_hamming_k: return static_cast<f32_t>(query.sum + target.sum - 2 * dot);
+        default: {
             u32_t const unions = query.sum + target.sum - dot;
             return unions ? 1.0f - static_cast<f32_t>(dot) / static_cast<f32_t>(unions) : 0.0f;
         }
+        }
     }
-    static __device__ __forceinline__ dense_distance_t convert_to_distance(dense_distance_t ranked) noexcept {
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t,
+                                                                           dense_distance_t ranked) noexcept {
         return ranked;
     }
 };
@@ -1313,109 +1317,107 @@ struct u1x8_ampere_kit {
 
 #pragma region Chains
 
-/** The dispatch entry every index instantiation resolves through - the CPU chains' twin: one row per
- *  generation, newest first, each gated on its tier being compiled in and admitted by the caller's
- *  @p caps_, over the Ampere floor. Two ceilings in one binary run different rows on one device. */
-template <nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t caps_>
-struct dense_cuda_kit_chain;
-
-template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_f16_k, kernel_, caps_> {
-    using kit_t = typename first_available_kit<                                                                    //
-        f16_ampere_kit<kernel_>,                                                                                   //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k, f16_blackwell_kit<kernel_>>, //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, f16_blackwell_kit<kernel_>>        //
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::f16_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                      //
+        f16_ampere_quads_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, f16_blackwell_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, f16_blackwell_quads_kit_t>        //
         >::type;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_bf16_k, kernel_, caps_> {
-    using kit_t = typename first_available_kit< //
-        bf16_ampere_kit<kernel_>,               //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k,
-                    bf16_blackwell_kit<kernel_>>,                                                            //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, bf16_blackwell_kit<kernel_>> //
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::bf16_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                       //
+        bf16_ampere_quads_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, bf16_blackwell_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, bf16_blackwell_quads_kit_t>        //
         >::type;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_i8_k, kernel_, caps_> {
-    using kit_t = i8_ampere_kit<kernel_>;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::i8_t, caps_> {
+    using kit_t = i8_ampere_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_u8_k, kernel_, caps_> {
-    using kit_t = u8_ampere_kit<kernel_>;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::u8_t, caps_> {
+    using kit_t = u8_ampere_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_e5m2_k, kernel_, caps_> {
-    using kit_t = typename first_available_kit< //
-        e5m2_ampere_kit<kernel_>,               //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k,
-                    e5m2_blackwell_kit<kernel_>>,                                                             //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, e5m2_blackwell_kit<kernel_>>, //
-        chain_layer<NUMKONG_TARGET_ADA && caps_ >= cuda_arch_ada_k,
-                    e5m2_ada_kit<kernel_>> //
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::e5m2_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                       //
+        e5m2_ampere_quads_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, e5m2_blackwell_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, e5m2_blackwell_quads_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_ADA && (caps_ & nk_cap_ada_k) != 0, e5m2_ada_quads_kit_t>                          //
         >::type;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_e4m3_k, kernel_, caps_> {
-    using kit_t = typename first_available_kit< //
-        e4m3_ampere_kit<kernel_>,               //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k,
-                    e4m3_blackwell_kit<kernel_>>,                                                             //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, e4m3_blackwell_kit<kernel_>>, //
-        chain_layer<NUMKONG_TARGET_ADA && caps_ >= cuda_arch_ada_k,
-                    e4m3_ada_kit<kernel_>> //
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::e4m3_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                       //
+        e4m3_ampere_quads_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, e4m3_blackwell_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, e4m3_blackwell_quads_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_ADA && (caps_ & nk_cap_ada_k) != 0, e4m3_ada_quads_kit_t>                          //
         >::type;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_e3m2_k, kernel_, caps_> {
-    using kit_t = typename first_available_kit< //
-        e3m2_ampere_kit<kernel_>,               //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k,
-                    e3m2_blackwell_kit<kernel_>>,                                                            //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, e3m2_blackwell_kit<kernel_>> //
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::e3m2_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                       //
+        e3m2_ampere_quads_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, e3m2_blackwell_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, e3m2_blackwell_quads_kit_t>        //
         >::type;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_e2m3_k, kernel_, caps_> {
-    using kit_t = typename first_available_kit< //
-        e2m3_ampere_kit<kernel_>,               //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k,
-                    e2m3_blackwell_kit<kernel_>>,                                                            //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, e2m3_blackwell_kit<kernel_>> //
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::e2m3_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                       //
+        e2m3_ampere_quads_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, e2m3_blackwell_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, e2m3_blackwell_quads_kit_t>        //
         >::type;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_i4_k, kernel_, caps_> {
-    using kit_t = i4x2_ampere_kit<kernel_>;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::i4x2_t, caps_> {
+    using kit_t = i4x2_ampere_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_u4_k, kernel_, caps_> {
-    using kit_t = u4x2_ampere_kit<kernel_>;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::u4x2_t, caps_> {
+    using kit_t = u4x2_ampere_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <nk_kernel_kind_t kernel_, cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_u1_k, kernel_, caps_> {
-    using kit_t = u1x8_ampere_kit<kernel_>;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::u1x8_t, caps_> {
+    using kit_t = u1x8_ampere_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 #pragma endregion Chains

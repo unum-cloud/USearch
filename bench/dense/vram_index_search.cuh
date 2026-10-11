@@ -33,14 +33,22 @@ namespace unum::usearch::bench::dense {
 
 #pragma region Options and Styling
 
-/** Compute ceilings the device kit chains adapt, ascending and named by NumKong's GPU tiers; the floor
- *  the table never lists is the Ampere kits. */
-inline constexpr capability_choice<cuda_arch_t> cuda_compute_choices_k[] = {
-    {"ada", cuda_arch_ada_k},
-    {"hopper", cuda_arch_hopper_k},
-    {"blackwell", cuda_arch_blackwell_k},
-    {"blackwellrtx", cuda_arch_blackwellrtx_k},
+/** NumKong's NVIDIA capabilities the device kit chains adapt, ascending; the floor the table never
+ *  lists is the Ampere kits, and @c cuda_ceiling_of turns a row into the mask it instantiates. */
+inline constexpr capability_choice<nk_capability_t> cuda_compute_choices_k[] = {
+    {"ada", nk_cap_ada_k},
+    {"hopper", nk_cap_hopper_k},
+    {"blackwell", nk_cap_blackwell_k},
+    {"blackwellrtx", nk_cap_blackwellrtx_k},
 };
+
+/** The NVIDIA capabilities one row instantiates: the Ampere & Ada bits accumulate, as NumKong
+ *  detects them, while @p generation alone stands for Hopper, Blackwell or RTX Blackwell, which run
+ *  only their own kits. */
+constexpr nk_capability_t cuda_ceiling_of(nk_capability_t generation) noexcept {
+    nk_capability_t const ampere = nk_cap_cuda_k | nk_cap_ampere_k;
+    return generation == nk_cap_ampere_k ? ampere : ampere | nk_cap_ada_k | generation;
+}
 
 /** The device knobs the CUDA binaries parse beside @c settings_t, before any dtype is known. */
 struct cuda_cli_t {
@@ -97,13 +105,14 @@ struct cuda_bench_context {
     using vectors_view_t = typename index_t::vectors_view_t;
     using node_id_t = typename index_t::node_id_t;
 
-    static constexpr nk_kernel_kind_t kernel_kind_k = index_t::kernel_kind_k;
-
     /** The parsed CLI, borrowed for the run's lifetime. */
     settings_t const& settings;
 
     /** The CUDA ordinal every plane and launch of this run lands on. */
     int device = 0;
+
+    /** The metric the index scores by - the CLI's, or dot where the workload pins it. */
+    nk_kernel_kind_t kernel;
 
     /** The one index under measurement. */
     std::unique_ptr<index_t> index;
@@ -117,7 +126,8 @@ struct cuda_bench_context {
     /** The backend-neutral judgment state both phases fill. */
     bench_results_t results;
 
-    cuda_bench_context(settings_t const& settings, int device) noexcept : settings(settings), device(device) {}
+    cuda_bench_context(settings_t const& settings, int device, nk_kernel_kind_t kernel) noexcept
+        : settings(settings), device(device), kernel(kernel) {}
 };
 
 /** Builds the device index, reserves it for the viewed rows, restores an optional checkpoint, and
@@ -144,7 +154,8 @@ bool prepare(streamed_dataset_type_& streamed) {
 
     using vectors_allocator_t = typename index_t::vectors_allocator_t;
     using neighbors_allocator_t = typename index_t::neighbors_allocator_t;
-    bench.index = std::make_unique<index_t>(vectors_allocator_t {bench.device}, neighbors_allocator_t {bench.device});
+    bench.index = std::make_unique<index_t>(bench.kernel, vectors_allocator_t {bench.device},
+                                            neighbors_allocator_t {bench.device});
     index_t& index = *bench.index;
     streamed.id_to_row.resize(rows);
 
@@ -244,7 +255,7 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     fmt::println("  shape: {} × {}d", inserted_rows, streamed.vectors.extent(1));
     if (bench.settings.skip_vectors.value) fmt::println("  topping: {} loaded rows", bench.settings.skip_vectors.value);
     fmt::println("  kit: {} · {} · {} kit · device {}", scalar_t::dtype_name(), nk_kernel_name(bench.settings.kernel),
-                 bit_name(cuda_compute_choices_k, index_t::picked_capability_k, "ampere"), bench.device);
+                 bit_name(cuda_compute_choices_k, index_t::picked_quads_capability_k, "ampere"), bench.device);
     fmt::println("  batch: {} rows per launch", batch_rows);
     fmt::println("  wall: {:.2f} s", seconds);
     fmt::println("  throughput: {} IPS", humanized(double(inserted_rows) / seconds));
@@ -333,7 +344,7 @@ bool run_search(streamed_dataset_type_& streamed) {
     std::size_t const top_k = settings.top_k.value;
     std::size_t const node_count = bench.index->size();
     bench_indexer_heads<typename index_t::scalar_t> heads;
-    if (!open_indexer_heads<index_t>(streamed, heads)) return false;
+    if (!open_indexer_heads(*bench.index, streamed, heads)) return false;
     std::size_t const query_count = searched_count(streamed, heads);
     if (!reserve_results(bench.results, query_count, top_k)) return false;
 
@@ -366,7 +377,7 @@ bool run_search(streamed_dataset_type_& streamed) {
 
         auto started = steady_clock_t::now();
         auto const [result, status] = [&]() noexcept {
-            if constexpr (scores_indexer<index_t>())
+            if constexpr (!nk::is_integral_dtype<typename index_t::scalar_t>())
                 if (heads.engaged()) return search(heads.rows(offset, batch));
             return search();
         }();
@@ -478,36 +489,36 @@ int stream_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dat
     return phases(streamed) ? 0 : 1;
 }
 
-/** The innermost hop: binds the concrete CUDA-index instantiation, builds the index in checkpoint
- *  order, then runs @p workload. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, cuda_arch_t capability_,
+/** The innermost hop: binds the concrete CUDA-index instantiation, builds the index under @p kernel
+ *  in checkpoint order, then runs @p workload. */
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_,
           typename plane_allocator_, typename workload_type_>
 int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
-                  int device, workload_type_ const& workload) {
-    using index_t = dense_vram_index<stored_dtype_, kernel_, capability_, plane_allocator_, plane_allocator_,
-                                     cuda_device_allocator_t>;
-    cuda_bench_context<index_t> bench {settings, device};
+                  int device, nk_kernel_kind_t kernel, workload_type_ const& workload) {
+    using index_t =
+        dense_vram_index<stored_dtype_, capability_, plane_allocator_, plane_allocator_, cuda_device_allocator_t>;
+    cuda_bench_context<index_t> bench {settings, device, kernel};
     return stream_and_run(dataset, bench, [&](auto& streamed) {
         return prepare(streamed) && run_insertion(streamed) && run_refinement(streamed) &&
                (settings.save_name.empty() || save_index(streamed)) && workload.run(streamed);
     });
 }
 
-/** Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal hop into
+/** Kernel axis: admits the runtime metric the stored dtype scores by, the terminal hop into
  *  @ref stage_and_run; a dot-only workload pins the dot kernel instead. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, cuda_arch_t capability_, typename plane_allocator_,
-          typename workload_type_>
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_,
+          typename plane_allocator_, typename workload_type_>
 int run_with_metric(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                     int device, workload_type_ const& workload) {
     if constexpr (workload_type_::dot_only_k)
-        return stage_and_run<dataset_scalar_type_, stored_dtype_, nk_kernel_dot_k, capability_, plane_allocator_>(
-            dataset, settings, device, workload);
+        return stage_and_run<dataset_scalar_type_, stored_dtype_, capability_, plane_allocator_>(
+            dataset, settings, device, nk_kernel_dot_k, workload);
     else
         return dispatch_kernel<stored_dtype_>(
             settings.kernel,
             [&](auto kernel) {
-                return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, capability_, plane_allocator_>(
-                    dataset, settings, device, workload);
+                return stage_and_run<dataset_scalar_type_, stored_dtype_, capability_, plane_allocator_>(
+                    dataset, settings, device, kernel.value, workload);
             },
             [&](auto metric) {
                 fmt::println("Unsupported metric {} for {} vectors", nk_kernel_name(metric), dtype_name(stored_dtype_));
@@ -519,17 +530,18 @@ int run_with_metric(utilities::persisted_dataset<dataset_scalar_type_> const& da
  *  compare generations side by side; past the tail sit the Ampere kits every GPU runs. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename plane_allocator_, typename workload_type_>
 int run_with_compute(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
-                     int device, cuda_arch_t max_compute, workload_type_ const& workload) {
-    auto const named = std::ranges::find(cuda_compute_choices_k, max_compute, &capability_choice<cuda_arch_t>::bit);
+                     int device, nk_capability_t max_compute, workload_type_ const& workload) {
+    auto const named = std::ranges::find(cuda_compute_choices_k, max_compute, &capability_choice<nk_capability_t>::bit);
     return dispatch_index<std::size(cuda_compute_choices_k)>(
         static_cast<std::size_t>(named - std::begin(cuda_compute_choices_k)),
         [&](auto row) {
-            return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_compute_choices_k[row.value].bit,
-                                   plane_allocator_>(dataset, settings, device, workload);
+            return run_with_metric<dataset_scalar_type_, stored_dtype_,
+                                   cuda_ceiling_of(cuda_compute_choices_k[row.value].bit), plane_allocator_>(
+                dataset, settings, device, workload);
         },
         [&] {
-            return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_arch_ampere_k, plane_allocator_>(
-                dataset, settings, device, workload);
+            return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_ceiling_of(nk_cap_ampere_k),
+                                   plane_allocator_>(dataset, settings, device, workload);
         });
 }
 
@@ -544,7 +556,7 @@ int run_with_compute(utilities::persisted_dataset<dataset_scalar_type_> const& d
  */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_with_stored_dtype(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
-                          int device, cuda_arch_t max_compute, cuda_address_space_t plane_space) {
+                          int device, nk_capability_t max_compute, cuda_address_space_t plane_space) {
     return plane_space == cuda_address_space_t::managed_k
                ? run_with_compute<dataset_scalar_type_, stored_dtype_, cuda_managed_allocator<std::byte>>( //
                      dataset, settings, device, max_compute, search_workload_t {})
@@ -576,14 +588,15 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
 
     // A named ceiling caps which kit-chain rows the cascade may select; "ampere" keeps just the floor.
     // Capping above what this binary compiled is harmless: a row also needs its tier compiled in.
-    cuda_arch_t max_compute = cuda_compute_choices_k[std::size(cuda_compute_choices_k) - 1].bit;
-    if (device_cli.max_compute_name == "ampere") max_compute = cuda_arch_ampere_k;
+    nk_capability_t max_compute = cuda_compute_choices_k[std::size(cuda_compute_choices_k) - 1].bit;
+    if (device_cli.max_compute_name == "ampere") max_compute = nk_cap_ampere_k;
     else if (!device_cli.max_compute_name.empty()) {
         std::size_t const named = index_of_name(cuda_compute_choices_k, device_cli.max_compute_name);
         if (named == std::size(cuda_compute_choices_k)) {
             fmt::println(
                 stderr, "--max-compute=\"{}\" does not parse, expected one of ampere, {}", device_cli.max_compute_name,
-                fmt::join(cuda_compute_choices_k | std::views::transform(&capability_choice<cuda_arch_t>::name), ", "));
+                fmt::join(cuda_compute_choices_k | std::views::transform(&capability_choice<nk_capability_t>::name),
+                          ", "));
             std::exit(1);
         }
         max_compute = cuda_compute_choices_k[named].bit;
