@@ -18,6 +18,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 	"unsafe"
 )
 
@@ -69,6 +70,21 @@ func pool(t *testing.T) *Executor {
 	return executor
 }
 
+// newArena makes an arena for calls on executor and registers its release.
+func newArena(t *testing.T, executor *Executor) *Arena {
+	t.Helper()
+	arena, err := NewArena(executor)
+	if err != nil {
+		t.Fatalf("the arena must be made: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := arena.Close(); err != nil {
+			t.Errorf("the arena must close: %v", err)
+		}
+	})
+	return arena
+}
+
 // newIndex builds a reserved index and registers its release.
 func newIndex(t *testing.T, options DenseOptions, capacity uint) *DenseIndex {
 	t.Helper()
@@ -110,11 +126,14 @@ func populated(t *testing.T, options DenseOptions, count uint) (*DenseIndex, []K
 // searchOne runs one query and reports how many matches came back.
 func searchOne(t *testing.T, index *DenseIndex, query []float32, dimensions uint) uint {
 	t.Helper()
-	matches, err := index.On(pool(t)).Search(RowsOf(query, dimensions), 1, nil)
+	matches, err := index.On(pool(t)).Search(RowsOf(query, dimensions), 1, newArena(t, nil), nil)
 	if err != nil {
 		t.Fatalf("the search must run: %v", err)
 	}
-	keys, _ := matches.Row(0)
+	keys, _, err := matches.Row(0)
+	if err != nil {
+		t.Fatalf("the matches must read: %v", err)
+	}
 	return uint(len(keys))
 }
 
@@ -251,8 +270,10 @@ func TestEnumeratorsSpellTheLibrarysNames(t *testing.T) {
 		{Status(4242), "unrecognized"},
 		{MoodParked, "parked"},
 		{MoodSpinning, "spinning"},
+		{ResidencyVram, "vram"},
 		{ScalarBF16, "bf16"},
 		{ScalarU1x8, "u1x8"},
+		{ScalarI32, "i32"},
 		{DenseMetricInner, "inner"},
 		{DenseMetricJaccard, "jaccard"},
 	} {
@@ -342,28 +363,72 @@ func TestMatrixViewsRejectBadShapes(t *testing.T) {
 
 // region: Results
 
-// A count above the room reserved for it is the library's way of reporting truncation, so the
-// borrow is trimmed to what was actually written rather than to what was found.
-func TestOutputsTrimToTheRoomTheyReserved(t *testing.T) {
+// A view reads its arena only while that arena still holds the call that wrote it: the next call
+// given the arena, or its Close, retires the view, while a call refused as contended rewinds nothing.
+func TestViewsRefuseTheirArenasLaterCalls(t *testing.T) {
 	t.Parallel()
-	const wanted = 2
-	counts := []uint{wanted + 3, 1, 0}
-	outputs, err := MatchesSpanOf(make([]Key, len(counts)*wanted), make([]Distance, len(counts)*wanted), counts)
+	const dimensions = 4
+	index, keys, slab := populated(t, angularF32(dimensions), 3)
+	arena, other := newArena(t, nil), newArena(t, nil)
+
+	first, err := index.Get(keys[0], ScalarF32, arena)
 	if err != nil {
-		t.Fatalf("the slabs must adopt: %v", err)
+		t.Fatalf("the first row must come back: %v", err)
 	}
-	if outputs.Queries() != uint(len(counts)) || outputs.Wanted() != wanted {
-		t.Fatalf("the outputs describe %d queries of %d", outputs.Queries(), outputs.Wanted())
+	if _, err := index.Get(keys[1], ScalarF32, other); err != nil {
+		t.Fatalf("another arena must serve: %v", err)
+	}
+	if values, err := DenseValues[float32](first); err != nil || !slices.Equal(values, slab[:dimensions]) {
+		t.Fatalf("a call on another arena disturbed the view: %v, %v", values, err)
+	}
+	second, err := index.Get(keys[2], ScalarF32, arena)
+	if err != nil {
+		t.Fatalf("the rewound arena must serve: %v", err)
+	}
+	if first.raw.data != second.raw.data {
+		t.Error("a rewound arena must land the next rows where the last ones were")
+	}
+	if _, err := DenseValues[float32](first); !errors.Is(err, StatusUninitialized) {
+		t.Errorf("a view over a rewound arena read with %v", err)
 	}
 
-	for query, count := range counts {
-		keys, scores := outputs.Row(uint(query))
-		if expected := min(count, wanted); uint(len(keys)) != expected || uint(len(scores)) != expected {
-			t.Errorf("query %d reporting %d borrowed %d matches", query, count, len(keys))
+	// A deferred call borrows its arena until final, so a call contending for it rewinds nothing.
+	executor := pool(t)
+	release := make(chan struct{})
+	held := index.Deferred(executor).Search(RowsOf(slab[:dimensions], dimensions), 2, arena,
+		&DenseSearchConfig{Predicate: func(Key) bool { <-release; return true }})
+	if _, err := index.Get(keys[0], ScalarF32, arena); !errors.Is(err, StatusContended) {
+		t.Errorf("a call on a held arena reported %v", err)
+	}
+	close(release)
+	matches, err := held.Wait()
+	if err != nil {
+		t.Fatalf("the holding call must succeed: %v", err)
+	}
+	if found, _, err := matches.Row(0); err != nil || len(found) != 2 {
+		t.Fatalf("the holding call's view read %d matches: %v", len(found), err)
+	}
+	if _, err := DenseValues[float32](second); !errors.Is(err, StatusUninitialized) {
+		t.Errorf("a view retired by a deferred call read with %v", err)
+	}
+
+	if err := arena.Close(); err != nil {
+		t.Fatalf("the arena must close: %v", err)
+	}
+	if _, _, err := matches.Row(0); !errors.Is(err, StatusUninitialized) {
+		t.Errorf("a view over a closed arena read with %v", err)
+	}
+	for name, refused := range map[string]*Arena{"closed": arena, "nil": nil} {
+		if _, err := index.Get(keys[0], ScalarF32, refused); !errors.Is(err, StatusInvalidArgument) {
+			t.Errorf("a %s arena served with %v", name, err)
 		}
 	}
-	if keys, scores := outputs.Row(uint(len(counts))); keys != nil || scores != nil {
-		t.Error("a query past the end must borrow nothing")
+	if _, _, err := (MatchesView{}).Row(0); !errors.Is(err, StatusUninitialized) {
+		t.Errorf("a view no call wrote read with %v", err)
+	}
+	device := exported{arena: &Arena{residency: ResidencyVram}}
+	if err := device.host(); !errors.Is(err, StatusDevice) {
+		t.Errorf("a view over device memory read with %v", err)
 	}
 }
 
@@ -465,11 +530,14 @@ func TestExecutorRefusesUseAfterClose(t *testing.T) {
 	if err := index.On(executor).Insert(sequentialKeys(1), RowsOf(slab, 4), nil); !errors.Is(err, StatusInvalidArgument) {
 		t.Errorf("a released executor inserted with %v", err)
 	}
-	if _, err := index.On(executor).Get(KeyFromUint64(1), ScalarF64, nil); !errors.Is(err, StatusInvalidArgument) {
+	if _, err := index.On(executor).Get(KeyFromUint64(1), ScalarF64, newArena(t, nil)); !errors.Is(err, StatusInvalidArgument) {
 		t.Errorf("a released executor exported with %v", err)
 	}
 	if _, err := DenseLoadRam("index.safegraphs", &DenseLoadRamConfig{Executor: executor}); !errors.Is(err, StatusInvalidArgument) {
 		t.Errorf("a released executor loaded with %v", err)
+	}
+	if _, err := NewArena(executor); !errors.Is(err, StatusInvalidArgument) {
+		t.Errorf("a released executor made an arena with %v", err)
 	}
 	if err := index.Insert(sequentialKeys(1), RowsOf(slab, 4), nil); err != nil {
 		t.Errorf("the index must insert on the calling goroutine: %v", err)
@@ -500,113 +568,91 @@ func TestInsertsAndGetsVectorsIntact(t *testing.T) {
 	if held, err := index.Contains(KeyFromUint64(999)); err != nil || held {
 		t.Fatalf("an absent key reported %v: %v", held, err)
 	}
-	vectors, err := index.On(pool(t)).Get(keys[1], ScalarF32, nil)
+	arena := newArena(t, nil)
+	vectors, err := index.On(pool(t)).Get(keys[1], ScalarF32, arena)
 	if err != nil {
 		t.Fatalf("the rows must come back: %v", err)
 	}
-	defer vectors.Close()
 	if vectors.Rows() != 2 || vectors.Stride() != dimensions*4 || vectors.Columns() != dimensions || vectors.Scalar() != ScalarF32 {
 		t.Fatalf("the key exported %d rows of %d at a stride of %d", vectors.Rows(), vectors.Columns(), vectors.Stride())
 	}
-	restored := DenseValues[float32](vectors)
+	restored, err := DenseValues[float32](vectors)
+	if err != nil {
+		t.Fatalf("the rows must read: %v", err)
+	}
 	expected := append(slices.Clone(slab[dimensions:2*dimensions]), padded[:dimensions]...)
 	for position, value := range restored {
 		if !nearly(float64(value), float64(expected[position]), 1e-6) {
 			t.Fatalf("value %d came back as %v, not %v", position, value, expected[position])
 		}
 	}
+	if _, err := DenseValues[float64](vectors); !errors.Is(err, StatusInvalidArgument) {
+		t.Errorf("rows read as another scalar type reported %v", err)
+	}
 
 	// Sub-byte kinds export at the stride the library reports, not one this side derives.
-	packed, err := index.Get(keys[0], ScalarU1x8, nil)
-	if err != nil || packed.Rows() != 1 || packed.Stride() != dimensions/8 || len(DenseValues[U1x8Scalar](packed)) != 1 {
+	packed, err := index.Get(keys[0], ScalarU1x8, arena)
+	if err != nil || packed.Rows() != 1 || packed.Stride() != dimensions/8 {
 		t.Fatalf("a packed export spans %d rows at a stride of %d: %v", packed.Rows(), packed.Stride(), err)
 	}
-	packed.Close()
+	if values, err := DenseValues[U1x8Scalar](packed); err != nil || len(values) != 1 {
+		t.Fatalf("a packed export read %d values: %v", len(values), err)
+	}
 
-	absent, err := index.Get(KeyFromUint64(999), ScalarF32, nil)
-	if err != nil || absent.Rows() != 0 || len(DenseValues[float32](absent)) != 0 {
+	absent, err := index.Get(KeyFromUint64(999), ScalarF32, arena)
+	if err != nil || absent.Rows() != 0 {
 		t.Fatalf("an absent key exported %d rows: %v", absent.Rows(), err)
 	}
-}
-
-// A lent arena is rewound by the next call it serves, so one loop allocates once, while a result
-// landed without one owns its arena and outlives every later call.
-func TestArenasOutliveOrYieldToTheNextCall(t *testing.T) {
-	t.Parallel()
-	const dimensions = 4
-	index, keys, slab := populated(t, angularF32(dimensions), 3)
-
-	owned, err := index.Get(keys[0], ScalarF32, nil)
-	if err != nil {
-		t.Fatalf("the first row must come back: %v", err)
-	}
-	defer owned.Close()
-
-	var arena Arena
-	defer arena.Close()
-	first, err := index.Get(keys[1], ScalarF32, &arena)
-	if err != nil {
-		t.Fatalf("the second row must land in the arena: %v", err)
-	}
-	handle := arena.handle
-	second, err := index.Get(keys[2], ScalarF32, &arena)
-	if err != nil || arena.handle != handle {
-		t.Fatalf("the arena must be rewound, not replaced: %v", err)
-	}
-	if first.data != second.data {
-		t.Error("a rewound arena must land the next rows where the last ones were")
-	}
-	if err := second.Close(); err != nil || arena.handle != handle {
-		t.Fatal("closing a result must leave a lent arena to its owner")
-	}
-
-	for position, value := range DenseValues[float32](owned) {
-		if !nearly(float64(value), float64(slab[position]), 1e-6) {
-			t.Fatalf("the owned result changed under later calls at %d: %v", position, value)
-		}
+	if values, err := DenseValues[float32](absent); err != nil || len(values) != 0 {
+		t.Fatalf("an absent key read %d values: %v", len(values), err)
 	}
 }
 
-// Products land ragged, so the offsets the binding allocates are what splits them into rows.
+// Products land ragged, so the offsets the library writes beside them are what split them into rows.
 func TestMultiplyLandsEveryRowsPairs(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
 	options := angularF32(dimensions)
 	options.Metric = DenseMetricInner
 	index, _, slab := populated(t, options, 16)
+	arena := newArena(t, nil)
 
 	var stats DenseTraversalStats
-	products, err := index.On(pool(t)).Multiply(RowsOf(slab[:3*dimensions], dimensions),
+	products, err := index.On(pool(t)).Multiply(RowsOf(slab[:3*dimensions], dimensions), arena,
 		&DenseMultiplyConfig{Wanted: 4, Stats: &stats})
 	if err != nil {
 		t.Fatalf("the product must resolve: %v", err)
 	}
-	defer products.Close()
 	if products.Rows() != 3 || products.Required() < 3*4 {
 		t.Fatalf("the product spans %d rows of %d pairs", products.Rows(), products.Required())
 	}
 	for row := uint(0); row < products.Rows(); row++ {
-		if keys, scores := products.Row(row); len(keys) != 4 || len(scores) != 4 {
-			t.Errorf("row %d kept %d pairs", row, len(keys))
+		if keys, scores, err := products.Row(row); err != nil || len(keys) != 4 || len(scores) != 4 {
+			t.Errorf("row %d kept %d pairs: %v", row, len(keys), err)
 		}
 	}
-	if keys, scores := products.Row(3); keys != nil || scores != nil {
-		t.Error("a row past the end must borrow nothing")
+	if _, _, err := products.Row(3); !errors.Is(err, StatusInvalidArgument) {
+		t.Errorf("a row past the end reported %v", err)
 	}
 
 	angular, _, _ := populated(t, angularF32(dimensions), 4)
-	if _, err := angular.Multiply(RowsOf(slab[:dimensions], dimensions), nil); !errors.Is(err, StatusConfigMismatch) {
+	failed, err := angular.Multiply(RowsOf(slab[:dimensions], dimensions), arena, nil)
+	if !errors.Is(err, StatusConfigMismatch) {
 		t.Errorf("a product over distances reported %v", err)
+	}
+	if failed.Rows() != 0 {
+		t.Errorf("a failed product spans %d rows", failed.Rows())
 	}
 }
 
-// A cursor takes the row width from the caller's matrix, so the rows it lands must be the ones
-// inserted, in the scalar kind the caller asked for.
+// A cursor takes the row width from the index, so the rows it lands must be the ones inserted, in
+// the scalar kind the caller asked for.
 func TestCursorsWalkEveryRowOnce(t *testing.T) {
 	t.Parallel()
 	const dimensions = 4
 	const count = 5
 	index, keys, slab := populated(t, angularF32(dimensions), count)
+	arena := newArena(t, nil)
 
 	cursor, err := index.On(pool(t)).Cursor()
 	if err != nil {
@@ -615,18 +661,24 @@ func TestCursorsWalkEveryRowOnce(t *testing.T) {
 	defer cursor.Close()
 	walked := make([]Key, 0, count)
 	rows := make([]float64, 0, count*dimensions)
-	batch := make([]Key, 2)
-	values := make([]float64, 2*dimensions)
 	for {
-		written, err := cursor.NextBatch(batch, RowsOf(values, dimensions))
+		batch, err := cursor.NextBatch(2, ScalarF64, arena)
 		if err != nil {
 			t.Fatalf("the cursor must pull: %v", err)
 		}
-		if written == 0 {
+		if batch.Written() == 0 {
 			break
 		}
-		walked = append(walked, batch[:written]...)
-		rows = append(rows, values[:written*dimensions]...)
+		pulled, err := batch.Keys()
+		if err != nil {
+			t.Fatalf("the keys must read: %v", err)
+		}
+		values, err := DenseValues[float64](batch.Vectors())
+		if err != nil {
+			t.Fatalf("the rows must read: %v", err)
+		}
+		walked = append(walked, pulled...)
+		rows = append(rows, values...)
 	}
 	if !slices.Equal(walked, keys) {
 		t.Fatalf("the cursor walked %v", walked)
@@ -642,13 +694,14 @@ func TestCursorsWalkEveryRowOnce(t *testing.T) {
 		t.Fatalf("a keys-only cursor must open: %v", err)
 	}
 	defer keysOnly.Close()
-	if written, err := keysOnly.NextKeys(make([]Key, count+1)); err != nil || written != count {
-		t.Errorf("a keys-only pull wrote %d keys: %v", written, err)
+	batch, err := keysOnly.NextKeys(count+1, arena)
+	if err != nil || batch.Written() != count || batch.Vectors().Rows() != 0 {
+		t.Errorf("a keys-only pull wrote %d keys and %d rows: %v", batch.Written(), batch.Vectors().Rows(), err)
 	}
 	if err := keysOnly.Close(); err != nil {
 		t.Fatalf("the cursor must close: %v", err)
 	}
-	if _, err := keysOnly.NextKeys(batch); !errors.Is(err, StatusInvalidArgument) {
+	if _, err := keysOnly.NextKeys(2, arena); !errors.Is(err, StatusInvalidArgument) {
 		t.Errorf("a closed cursor pulled with %v", err)
 	}
 }
@@ -658,6 +711,7 @@ func TestSearchStreamsYieldNearestFirst(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
 	index, keys, slab := populated(t, angularF32(dimensions), 6)
+	arena := newArena(t, nil)
 
 	if _, err := index.SearchStream(RowsOf(slab[:2*dimensions], dimensions), nil); !errors.Is(err, StatusShapeMismatch) {
 		t.Errorf("a two-row stream opened with %v", err)
@@ -670,27 +724,26 @@ func TestSearchStreamsYieldNearestFirst(t *testing.T) {
 		t.Fatalf("the stream must open: %v", err)
 	}
 	defer stream.Close()
-	found := make([]Key, 4)
-	distances := make([]Distance, 4)
-	total := uint(0)
+	total := 0
 	for {
-		written, err := stream.Next(found, distances)
+		matches, err := stream.Next(4, arena)
 		if err != nil {
 			t.Fatalf("the stream must pull: %v", err)
 		}
-		if written == 0 {
+		found, _, err := matches.Row(0)
+		if err != nil {
+			t.Fatalf("the pull must read: %v", err)
+		}
+		if len(found) == 0 {
 			break
 		}
 		if total == 0 && found[0] != keys[0] {
 			t.Errorf("the stream opened with %v", found[0])
 		}
-		total += written
+		total += len(found)
 	}
 	if total != 6 {
 		t.Errorf("the stream yielded %d of 6 entries", total)
-	}
-	if _, err := stream.Next(found, distances[:1]); !errors.Is(err, StatusShapeMismatch) {
-		t.Errorf("unequal slabs pulled with %v", err)
 	}
 }
 
@@ -698,9 +751,9 @@ func TestSearchStreamsYieldNearestFirst(t *testing.T) {
 
 // region: Shape Rejection
 
-// The keys-to-rows, documents-to-rows, wanted-to-span and carry-to-queries guards are this
-// binding's, since each call has one count and C pointers carry no lengths; widths and capacities
-// cross untouched and come back refused by the library.
+// The keys-to-rows, documents-to-rows and carry-to-queries guards are this binding's, since each
+// call has one count and C pointers carry no lengths; widths cross untouched and come back refused
+// by the library.
 func TestRejectsMalformedShapes(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
@@ -708,6 +761,7 @@ func TestRejectsMalformedShapes(t *testing.T) {
 	options.Metric = DenseMetricInner
 	index, _, slab := populated(t, options, 4)
 	on := index.On(pool(t))
+	arena := newArena(t, nil)
 	queries := RowsOf(slab[:2*dimensions], dimensions)
 	narrow := make([]float32, dimensions/2)
 
@@ -722,44 +776,21 @@ func TestRejectsMalformedShapes(t *testing.T) {
 			return on.Insert(sequentialKeys(1), RowsOf(narrow, dimensions/2), nil)
 		}},
 		{"queries of the wrong width", func() error {
-			_, err := on.Search(RowsOf(narrow, dimensions/2), 4, nil)
-			return err
-		}},
-		{"fewer output rows than queries", func() error {
-			lent, _ := MatchesSpanOf(make([]Key, 4), make([]Distance, 4), make([]uint, 1))
-			_, err := on.Search(queries, 4, &DenseSearchConfig{Matches: &lent})
-			return err
-		}},
-		{"more wanted than the span holds", func() error {
-			lent, _ := MatchesSpanOf(make([]Key, 4), make([]Distance, 4), make([]uint, 2))
-			_, err := on.Search(queries, 3, &DenseSearchConfig{Matches: &lent})
-			return err
-		}},
-		{"outputs of unequal shape", func() error {
-			_, err := MatchesSpanOf(make([]Key, 4), make([]Distance, 8), make([]uint, 2))
-			return err
-		}},
-		{"outputs that do not divide into rows", func() error {
-			_, err := MatchesSpanOf(make([]Key, 5), make([]Distance, 5), make([]uint, 2))
-			return err
-		}},
-		{"outputs holding no query at all", func() error {
-			_, err := MatchesSpanOf(make([]Key, 4), make([]Distance, 4), nil)
+			_, err := on.Search(RowsOf(narrow, dimensions/2), 4, arena, nil)
 			return err
 		}},
 		{"queries that do not divide into documents", func() error {
-			_, err := on.Maxsim(queries, 3, 4, nil)
+			_, err := on.Maxsim(queries, 3, 4, arena, nil)
 			return err
 		}},
 		{"documents of no rows", func() error {
-			_, err := on.Maxsim(queries, 0, 4, nil)
+			_, err := on.Maxsim(queries, 0, 4, arena, nil)
 			return err
 		}},
 		{"a carry shorter than the queries", func() error {
 			lookup := ValueLookup{Values: RowsOf(slab, dimensions), Row: func(Key) (uint, bool) { return 0, true }}
-			outputs := make([]float32, 2*dimensions)
-			return on.Attend(queries, lookup, RowsOf(outputs, dimensions),
-				&DenseAttendConfig{Carry: make([]DenseSoftmaxState, 1)})
+			_, err := on.Attend(queries, lookup, arena, &DenseAttendConfig{Carry: make([]DenseSoftmaxState, 1)})
+			return err
 		}},
 	}
 
@@ -776,8 +807,8 @@ func TestRejectsMalformedShapes(t *testing.T) {
 
 // region: Search
 
-// A batch is where the output row stride earns its keep: every query's slice must land in its
-// own row, and the three positional size_t fields of the telemetry must land in theirs.
+// A batch is where the output row pitch earns its keep: every query's slice must land in its own
+// row, and the three positional size_t fields of the telemetry must land in theirs.
 func TestBatchSearchFillsEveryOutputRow(t *testing.T) {
 	t.Parallel()
 	const (
@@ -789,18 +820,25 @@ func TestBatchSearchFillsEveryOutputRow(t *testing.T) {
 	index, _, slab := populated(t, angularF32(dimensions), count)
 
 	var stats DenseTraversalStats
-	outputs, err := index.On(pool(t)).Search(RowsOf(slab[:queries*dimensions], dimensions), wanted,
+	outputs, err := index.On(pool(t)).Search(RowsOf(slab[:queries*dimensions], dimensions), wanted, newArena(t, nil),
 		&DenseSearchConfig{Stats: &stats})
 	if err != nil {
 		t.Fatalf("the batch must resolve: %v", err)
 	}
-	if outputs.Queries() != queries {
-		t.Fatalf("the outputs describe %d of %d queries", outputs.Queries(), queries)
+	if outputs.Queries() != queries || outputs.Columns() != wanted {
+		t.Fatalf("the outputs describe %d queries of %d", outputs.Queries(), outputs.Columns())
 	}
 	for query := uint(0); query < queries; query++ {
-		if found, distances := outputs.Row(query); uint(len(found)) != wanted || uint(len(distances)) != wanted {
-			t.Fatalf("query %d reported %d of %d matches", query, len(found), wanted)
+		found, distances, err := outputs.Row(query)
+		if err != nil || uint(len(found)) != wanted || uint(len(distances)) != wanted {
+			t.Fatalf("query %d reported %d of %d matches: %v", query, len(found), wanted, err)
 		}
+		if found[0] != KeyFromUint64(uint64(query)+1) {
+			t.Errorf("query %d found %v nearest", query, found[0])
+		}
+	}
+	if _, _, err := outputs.Row(queries); !errors.Is(err, StatusInvalidArgument) {
+		t.Errorf("a query past the end reported %v", err)
 	}
 
 	// Three positional size_t fields, so a swap in the C struct would go unseen otherwise.
@@ -813,23 +851,6 @@ func TestBatchSearchFillsEveryOutputRow(t *testing.T) {
 		total.Restarts != 2*stats.Restarts {
 		t.Errorf("accumulating %+v gave %+v", stats, total)
 	}
-
-	// A lent span wider than the wanted count lands each row at the span's own pitch.
-	lent, err := MatchesSpanOf(make([]Key, queries*(wanted+2)), make([]Distance, queries*(wanted+2)), make([]uint, queries))
-	if err != nil {
-		t.Fatalf("the slabs must adopt: %v", err)
-	}
-	landed, err := index.Search(RowsOf(slab[:queries*dimensions], dimensions), wanted, &DenseSearchConfig{Matches: &lent})
-	if err != nil {
-		t.Fatalf("the batch must land in the lent span: %v", err)
-	}
-	for query := uint(0); query < queries; query++ {
-		into, _ := landed.Row(query)
-		allocated, _ := outputs.Row(query)
-		if !slices.Equal(into, allocated) {
-			t.Fatalf("query %d landed %v rather than %v", query, into, allocated)
-		}
-	}
 }
 
 // The predicate crosses as a cgo handle and runs on the library's worker threads - the most
@@ -840,18 +861,22 @@ func TestSearchAdmitsOnlyApprovedKeys(t *testing.T) {
 	index, _, slab := populated(t, angularF32(dimensions), 128)
 	queries := RowsOf(slab[:3*dimensions], dimensions)
 	on := index.On(pool(t))
+	arena := newArena(t, nil)
 
 	even := func(key Key) bool {
 		value, integral := key.Uint64()
 		return integral && value%2 == 0
 	}
-	admitted, err := on.Search(queries, 10, &DenseSearchConfig{ExpansionFactor: 64, Predicate: even})
+	admitted, err := on.Search(queries, 10, arena, &DenseSearchConfig{ExpansionFactor: 64, Predicate: even})
 	if err != nil {
 		t.Fatalf("the filtered batch must resolve: %v", err)
 	}
 	seen := 0
 	for query := uint(0); query < 3; query++ {
-		found, _ := admitted.Row(query)
+		found, _, err := admitted.Row(query)
+		if err != nil {
+			t.Fatalf("query %d must read: %v", query, err)
+		}
 		for _, key := range found {
 			if !even(key) {
 				t.Fatalf("query %d admitted %v", query, key)
@@ -863,49 +888,56 @@ func TestSearchAdmitsOnlyApprovedKeys(t *testing.T) {
 		t.Fatal("the filter admitted nothing at all")
 	}
 
-	// Admitting nothing is a result, not a failure, and a panic rejects rather than unwinding.
-	for name, predicate := range map[string]Predicate{
-		"rejecting": func(Key) bool { return false },
-		"panicking": func(Key) bool { panic("a caller's bug") },
-	} {
-		rejected, err := on.Search(queries, 10, &DenseSearchConfig{Predicate: predicate})
-		if err != nil {
-			t.Fatalf("a %s filter must still resolve: %v", name, err)
+	// Admitting nothing is a result, not a failure.
+	rejected, err := on.Search(queries, 10, arena, &DenseSearchConfig{Predicate: func(Key) bool { return false }})
+	if err != nil {
+		t.Fatalf("a rejecting filter must still resolve: %v", err)
+	}
+	for query := uint(0); query < 3; query++ {
+		if found, _, _ := rejected.Row(query); len(found) != 0 {
+			t.Fatalf("a rejecting filter admitted %d matches", len(found))
 		}
-		for query := uint(0); query < 3; query++ {
-			if found, _ := rejected.Row(query); len(found) != 0 {
-				t.Fatalf("a %s filter admitted %d matches", name, len(found))
-			}
-		}
+	}
+
+	// A panic rejects rather than unwinding, and the first one becomes the call's error.
+	bug := errors.New("a caller's bug")
+	if _, err := on.Search(queries, 10, arena, &DenseSearchConfig{Predicate: func(Key) bool { panic(bug) }}); err != bug {
+		t.Errorf("a panicking filter reported %v", err)
+	}
+	if _, err := on.Search(queries, 10, arena, &DenseSearchConfig{Predicate: func(Key) bool { panic("odd") }}); err == nil ||
+		err.Error() != "usearch: a callback panicked: odd" {
+		t.Errorf("a filter panicking with a string reported %v", err)
 	}
 }
 
 // A handler is called with growing counts and stops the call at the first false, under the status
-// a stop reports, and a panic inside it reads as a stop.
+// a stop reports, and a panic inside it stops the call and becomes its error.
 func TestProgressHandlersReportAndStop(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
 	index, _, slab := populated(t, angularF32(dimensions), 32)
 	queries := RowsOf(slab[:4*dimensions], dimensions)
+	arena := newArena(t, nil)
 
 	var reports atomic.Uint64
 	reporting := func(completed, total uint) bool {
 		reports.Add(1)
 		return completed <= total
 	}
-	if _, err := index.Search(queries, 3, &DenseSearchConfig{Progress: reporting}); err != nil {
+	if _, err := index.Search(queries, 3, arena, &DenseSearchConfig{Progress: reporting}); err != nil {
 		t.Fatalf("a reporting search must resolve: %v", err)
 	}
 	if reports.Load() == 0 {
 		t.Error("the handler was never called")
 	}
-	for name, progress := range map[string]ProgressCallback{
-		"stopping":  func(uint, uint) bool { return false },
-		"panicking": func(uint, uint) bool { panic("a caller's bug") },
-	} {
-		if _, err := index.Search(queries, 3, &DenseSearchConfig{Progress: progress}); !errors.Is(err, StatusCancelled) {
-			t.Errorf("a %s handler reported %v", name, err)
-		}
+	stopping := func(uint, uint) bool { return false }
+	if _, err := index.Search(queries, 3, arena, &DenseSearchConfig{Progress: stopping}); !errors.Is(err, StatusCancelled) {
+		t.Errorf("a stopping handler reported %v", err)
+	}
+	bug := errors.New("a caller's bug")
+	panicking := func(uint, uint) bool { panic(bug) }
+	if _, err := index.Search(queries, 3, arena, &DenseSearchConfig{Progress: panicking}); err != bug {
+		t.Errorf("a panicking handler reported %v", err)
 	}
 }
 
@@ -953,11 +985,11 @@ func TestEveryMetricAndQuantizationCrosses(t *testing.T) {
 			if err := index.Insert(sequentialKeys(rows), RowsOf(packed, dimensions), nil); err != nil {
 				t.Fatalf("packed rows must insert: %v", err)
 			}
-			outputs, err := index.Search(RowsOf(packed[:dimensions/8], dimensions), 4, nil)
+			outputs, err := index.Search(RowsOf(packed[:dimensions/8], dimensions), 4, newArena(t, nil), nil)
 			if err != nil {
 				t.Fatalf("packed rows must search: %v", err)
 			}
-			if found, _ := outputs.Row(0); len(found) == 0 {
+			if found, _, _ := outputs.Row(0); len(found) == 0 {
 				t.Error("a packed walk reported no matches")
 			}
 		})
@@ -996,13 +1028,13 @@ func TestMaxsimSizesItsOutputsOverDocuments(t *testing.T) {
 
 	var stats DenseTraversalStats
 	outputs, err := index.On(pool(t)).Maxsim(RowsOf(slab[:queries*tokens*dimensions], dimensions), tokens, documents,
-		&DenseMaxsimConfig{Stats: &stats})
+		newArena(t, nil), &DenseMaxsimConfig{Stats: &stats})
 	if err != nil {
 		t.Fatalf("the late interaction must resolve: %v", err)
 	}
 	for query := uint(0); query < queries; query++ {
-		if found, _ := outputs.Row(query); len(found) != documents {
-			t.Errorf("query %d scored %d of %d documents", query, len(found), documents)
+		if found, _, err := outputs.Row(query); err != nil || len(found) != documents {
+			t.Errorf("query %d scored %d of %d documents: %v", query, len(found), documents, err)
 		}
 	}
 	if stats.ComputedDistances == 0 {
@@ -1020,36 +1052,46 @@ func TestAttendFoldsTheRowsTheLookupNames(t *testing.T) {
 	options.Metric = DenseMetricInner
 	index, _, slab := populated(t, options, count)
 
+	arena := newArena(t, nil)
+
 	value := seededRows(1, dimensions)
 	lookup := ValueLookup{Values: RowsOf(value, dimensions), Row: func(Key) (uint, bool) { return 0, true }}
-	outputs := make([]float32, 2*dimensions)
 	carry := make([]DenseSoftmaxState, 2)
-	if err := index.On(pool(t)).Attend(RowsOf(slab[:2*dimensions], dimensions), lookup, RowsOf(outputs, dimensions),
-		&DenseAttendConfig{Carry: carry}); err != nil {
+	attended, err := index.On(pool(t)).Attend(RowsOf(slab[:2*dimensions], dimensions), lookup, arena,
+		&DenseAttendConfig{OutputsScalar: ScalarF64, Carry: carry})
+	if err != nil {
 		t.Fatalf("the attention must resolve: %v", err)
 	}
-	for position, attended := range outputs {
-		if !nearly(float64(attended), float64(value[position%dimensions]), 1e-4) {
-			t.Fatalf("output %d attended to %v, not %v", position, attended, value[position%dimensions])
+	outputs, err := DenseValues[float64](attended)
+	if err != nil || attended.Rows() != 2 || len(outputs) != 2*dimensions {
+		t.Fatalf("the attention wrote %d rows of %d values: %v", attended.Rows(), len(outputs), err)
+	}
+	for position, output := range outputs {
+		if !nearly(output, float64(value[position%dimensions]), 1e-4) {
+			t.Fatalf("output %d attended to %v, not %v", position, output, value[position%dimensions])
 		}
 	}
 	if carry[0].Partition <= 0 {
 		t.Errorf("the carry reported %+v", carry[0])
 	}
 
-	// A missing row, a panicking lookup and values of another width are a wrong softmax, never a smaller one.
+	// A missing row and values of another width are a wrong softmax, never a smaller one.
+	single := RowsOf(slab[:dimensions], dimensions)
 	for name, refused := range map[string]ValueLookup{
-		"missing":   {Values: lookup.Values, Row: func(Key) (uint, bool) { return 0, false }},
-		"past":      {Values: lookup.Values, Row: func(Key) (uint, bool) { return 1, true }},
-		"panicking": {Values: lookup.Values, Row: func(Key) (uint, bool) { panic("a caller's bug") }},
-		"narrow":    {Values: RowsOf(value[:dimensions/2], dimensions/2), Row: lookup.Row},
+		"missing": {Values: lookup.Values, Row: func(Key) (uint, bool) { return 0, false }},
+		"past":    {Values: lookup.Values, Row: func(Key) (uint, bool) { return 1, true }},
+		"narrow":  {Values: RowsOf(value[:dimensions/2], dimensions/2), Row: lookup.Row},
 	} {
-		if err := index.Attend(RowsOf(slab[:dimensions], dimensions), refused, RowsOf(outputs[:dimensions], dimensions), nil); !errors.Is(err, StatusShapeMismatch) {
+		if _, err := index.Attend(single, refused, arena, nil); !errors.Is(err, StatusShapeMismatch) {
 			t.Errorf("a %s lookup reported %v", name, err)
 		}
 	}
-	if err := index.Attend(RowsOf(slab[:dimensions], dimensions), ValueLookup{Values: lookup.Values},
-		RowsOf(outputs[:dimensions], dimensions), nil); !errors.Is(err, StatusInvalidArgument) {
+	bug := errors.New("a caller's bug")
+	panicking := ValueLookup{Values: lookup.Values, Row: func(Key) (uint, bool) { panic(bug) }}
+	if _, err := index.Attend(single, panicking, arena, nil); err != bug {
+		t.Errorf("a panicking lookup reported %v", err)
+	}
+	if _, err := index.Attend(single, ValueLookup{Values: lookup.Values}, arena, nil); !errors.Is(err, StatusInvalidArgument) {
 		t.Errorf("a lookup without a row function reported %v", err)
 	}
 }
@@ -1133,11 +1175,14 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 		t.Fatalf("the checkpoint must write: %v", err)
 	}
 
-	buffer, err := on.SaveBuffer(nil)
-	if err != nil || len(buffer.Bytes) == 0 {
-		t.Fatalf("the index serializes to %d bytes: %v", len(buffer.Bytes), err)
+	monolith, err := on.SaveBuffer(newArena(t, nil), nil)
+	if err != nil {
+		t.Fatalf("the index must serialize: %v", err)
 	}
-	defer buffer.Close()
+	buffer, err := monolith.Bytes()
+	if err != nil || len(buffer) == 0 {
+		t.Fatalf("the index serializes to %d bytes: %v", len(buffer), err)
+	}
 
 	for _, single := range []struct {
 		name     string
@@ -1151,10 +1196,10 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 			}},
 		{"buffer",
 			func() (DenseMetadata, error) {
-				return DenseMetadataReadBuffer(buffer.Bytes, &DenseMetadataReadBufferConfig{Executor: pool(t)})
+				return DenseMetadataReadBuffer(buffer, &DenseMetadataReadBufferConfig{Executor: pool(t)})
 			},
 			func() (*DenseIndex, error) {
-				return DenseLoadRamBuffer(buffer.Bytes, &DenseLoadRamBufferConfig{Executor: pool(t), ValuesPerKey: 2})
+				return DenseLoadRamBuffer(buffer, &DenseLoadRamBufferConfig{Executor: pool(t), ValuesPerKey: 2})
 			}},
 		{"view",
 			func() (DenseMetadata, error) { return DenseMetadataRead(path, nil) },
@@ -1201,8 +1246,8 @@ func TestSerializationPreservesEveryOption(t *testing.T) {
 
 // region: Deferred Calls
 
-// A deferred search pins its queries and owns its outputs, and answers what the blocking one
-// does once drained and waited on.
+// A deferred search pins its queries and borrows its arena, and answers what the blocking one does
+// once waited on, as many times as it is asked.
 func TestDeferredSearchMatchesTheBlockingOne(t *testing.T) {
 	t.Parallel()
 	const dimensions = 16
@@ -1211,65 +1256,67 @@ func TestDeferredSearchMatchesTheBlockingOne(t *testing.T) {
 	index, _, slab := populated(t, angularF32(dimensions), 64)
 	executor := pool(t)
 
-	call := index.Deferred(executor).Search(RowsOf(slab[:queries*dimensions], dimensions), wanted, nil)
+	call := index.Deferred(executor).Search(RowsOf(slab[:queries*dimensions], dimensions), wanted, newArena(t, executor), nil)
 	if status := call.Status(); status != StatusDeferred {
 		t.Fatalf("a submitted call reported %v", status)
 	}
 	runtime.GC() // the pins, not the variables, keep everything the library reads in place
-	if err := executor.Drain(MoodParked); err != nil {
-		t.Fatalf("the executor must drain: %v", err)
-	}
-	if status := call.Status(); status != StatusSuccess {
-		t.Fatalf("a drained call reported %v", status)
-	}
 	deferred, err := call.Wait()
 	if err != nil {
 		t.Fatalf("the call must succeed: %v", err)
 	}
+	if status := call.Status(); status != StatusSuccess {
+		t.Fatalf("a waited call reported %v", status)
+	}
+	again, err := call.Wait()
+	if err != nil || again != deferred {
+		t.Fatalf("a second wait found %+v rather than %+v: %v", again, deferred, err)
+	}
 
-	blocking, err := index.Search(RowsOf(slab[:queries*dimensions], dimensions), wanted, nil)
+	blocking, err := index.Search(RowsOf(slab[:queries*dimensions], dimensions), wanted, newArena(t, nil), nil)
 	if err != nil {
 		t.Fatalf("the blocking search must succeed: %v", err)
 	}
 	for query := uint(0); query < queries; query++ {
-		later, _ := deferred.Row(query)
-		now, _ := blocking.Row(query)
-		if !slices.Equal(later, now) {
+		later, _, _ := deferred.Row(query)
+		now, _, _ := blocking.Row(query)
+		if len(now) != wanted || !slices.Equal(later, now) {
 			t.Fatalf("query %d found %v rather than %v", query, later, now)
 		}
 	}
 }
 
-// An owned arena and owned outputs travel with the call and come back with its result.
-func TestDeferredCallsHandBackWhatTheyOwned(t *testing.T) {
+// A deferred call's view borrows the caller's arena as a blocking one's does, so the arena's next call
+// retires it.
+func TestDeferredViewsBorrowTheCallersArenas(t *testing.T) {
 	t.Parallel()
 	const dimensions = 4
 	index, keys, slab := populated(t, angularF32(dimensions), 4)
 	executor := pool(t)
 	on := index.Deferred(executor)
+	rows, bytes := newArena(t, executor), newArena(t, executor)
 
-	found := on.Get(keys[2], ScalarF32, nil)
-	buffer := on.SaveBuffer(nil)
+	found := on.Get(keys[2], ScalarF32, rows)
+	buffer := on.SaveBuffer(bytes, nil)
 	counted := on.Count(keys[3])
 	described := on.Describe()
-	if err := executor.Drain(MoodParked); err != nil {
-		t.Fatalf("the executor must drain: %v", err)
-	}
 
 	vectors, err := found.Wait()
 	if err != nil {
 		t.Fatalf("the rows must come back: %v", err)
 	}
-	defer vectors.Close()
-	if !slices.Equal(DenseValues[float32](vectors), slab[2*dimensions:3*dimensions]) {
-		t.Errorf("the rows came back as %v", DenseValues[float32](vectors))
+	if values, err := DenseValues[float32](vectors); err != nil || !slices.Equal(values, slab[2*dimensions:3*dimensions]) {
+		t.Errorf("the rows came back as %v: %v", values, err)
 	}
 	monolith, err := buffer.Wait()
 	if err != nil {
 		t.Fatalf("the monolith must come back: %v", err)
 	}
-	defer monolith.Close()
-	if metadata, err := DenseMetadataReadBuffer(monolith.Bytes, nil); err != nil || metadata.Dimensions != dimensions {
+	serialized, err := monolith.Bytes()
+	if err != nil {
+		t.Fatalf("the monolith must read: %v", err)
+	}
+	if metadata, err := DenseMetadataReadBuffer(serialized, nil); err != nil || metadata.Dimensions != dimensions {
 		t.Errorf("the monolith describes %+v: %v", metadata, err)
 	}
 	if entries, err := counted.Wait(); err != nil || entries != 1 {
@@ -1278,15 +1325,20 @@ func TestDeferredCallsHandBackWhatTheyOwned(t *testing.T) {
 	if description, err := described.Wait(); err != nil || description.Size != 4 {
 		t.Errorf("the description came back as %+v: %v", description, err)
 	}
+	if _, err := index.On(executor).Get(keys[0], ScalarF32, rows); err != nil {
+		t.Fatalf("the waited call's arena must serve the next one: %v", err)
+	}
+	if _, err := DenseValues[float32](vectors); !errors.Is(err, StatusUninitialized) {
+		t.Errorf("a deferred view over a rewound arena read with %v", err)
+	}
 }
 
-// A blocking call on an executor without threads of its own first runs the deferred calls it
-// holds, so a predicate re-enters Go from inside that blocking call - which is why no verb naming
-// an executor claims `nocallback`.
-func TestBlockingCallsRunTheCallbacksOfHeldOnes(t *testing.T) {
+// A deferred predicate re-enters Go from whichever thread runs the call, the waiting one included,
+// and admits only what it approves.
+func TestDeferredPredicatesAdmitOnlyApprovedKeys(t *testing.T) {
 	t.Parallel()
 	const dimensions = 8
-	index, keys, slab := populated(t, angularF32(dimensions), 16)
+	index, _, slab := populated(t, angularF32(dimensions), 16)
 	executor := pool(t)
 
 	var admissions atomic.Uint64
@@ -1295,11 +1347,8 @@ func TestBlockingCallsRunTheCallbacksOfHeldOnes(t *testing.T) {
 		value, _ := key.Uint64()
 		return value%2 == 1
 	}
-	call := index.Deferred(executor).Search(RowsOf(slab[:dimensions], dimensions), 4,
+	call := index.Deferred(executor).Search(RowsOf(slab[:dimensions], dimensions), 4, newArena(t, executor),
 		&DenseSearchConfig{Predicate: odd})
-	if _, err := index.On(executor).Count(keys[0]); err != nil {
-		t.Fatalf("the blocking count must run: %v", err)
-	}
 	matches, err := call.Wait()
 	if err != nil {
 		t.Fatalf("the filtered call must succeed: %v", err)
@@ -1307,7 +1356,10 @@ func TestBlockingCallsRunTheCallbacksOfHeldOnes(t *testing.T) {
 	if admissions.Load() == 0 {
 		t.Error("the predicate never ran")
 	}
-	found, _ := matches.Row(0)
+	found, _, err := matches.Row(0)
+	if err != nil {
+		t.Fatalf("the matches must read: %v", err)
+	}
 	for _, key := range found {
 		if !odd(key) {
 			t.Fatalf("the filter admitted %v", key)
@@ -1326,11 +1378,8 @@ func TestClosedDeferredCallsStillLand(t *testing.T) {
 	on := index.Deferred(executor)
 
 	inserted := on.Insert(sequentialKeys(count), RowsOf(slab, dimensions), nil)
-	discarded := on.Get(KeyFromUint64(1), ScalarF32, nil)
-	kept := on.Get(KeyFromUint64(1), ScalarF32, nil)
-	if err := executor.Drain(MoodParked); err != nil {
-		t.Fatalf("the executor must drain: %v", err)
-	}
+	discarded := on.Get(KeyFromUint64(1), ScalarF32, newArena(t, executor))
+	kept := on.Get(KeyFromUint64(1), ScalarF32, newArena(t, executor))
 	for _, call := range []interface{ Close() error }{inserted, discarded, discarded} {
 		if err := call.Close(); err != nil {
 			t.Fatalf("a closed call reported %v", err)
@@ -1340,12 +1389,11 @@ func TestClosedDeferredCallsStillLand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the rows must come back: %v", err)
 	}
-	defer vectors.Close()
 	if err := kept.Close(); err != nil {
 		t.Fatalf("closing a waited call reported %v", err)
 	}
-	if !slices.Equal(DenseValues[float32](vectors), slab[:dimensions]) {
-		t.Errorf("the rows came back as %v", DenseValues[float32](vectors))
+	if values, err := DenseValues[float32](vectors); err != nil || !slices.Equal(values, slab[:dimensions]) {
+		t.Errorf("the rows came back as %v: %v", values, err)
 	}
 	if description, err := index.Describe(); err != nil || description.Size != count {
 		t.Fatalf("the index holds %d of %d entries: %v", description.Size, count, err)
@@ -1375,9 +1423,6 @@ func TestDeferredRefusalsReachStatusAndWait(t *testing.T) {
 	if _, err := second.Wait(); !errors.Is(err, StatusContended) {
 		t.Errorf("a submission past the table finished with %v", err)
 	}
-	if err := executor.Drain(MoodParked); err != nil {
-		t.Fatalf("the executor must drain: %v", err)
-	}
 	if _, err := first.Wait(); err != nil {
 		t.Fatalf("the first submission must succeed: %v", err)
 	}
@@ -1392,6 +1437,39 @@ func TestDeferredRefusalsReachStatusAndWait(t *testing.T) {
 	if description, err := index.Describe(); err != nil || description.Size != count {
 		t.Fatalf("the index holds %d of %d entries: %v", description.Size, count, err)
 	}
+}
+
+// A Deferred dropped unfinished keeps everything its call reads until the call is final, and the
+// collector releases it then; a refused one is released at once.
+func TestDroppedDeferredCallsAreReleased(t *testing.T) {
+	t.Parallel()
+	const dimensions = 8
+	index, _, slab := populated(t, angularF32(dimensions), 16)
+	executor := pool(t)
+	on := index.Deferred(executor)
+	arena := newArena(t, executor)
+
+	released := make(chan struct{})
+	func() {
+		witness := new([4]int64)
+		runtime.AddCleanup(witness, func(released chan struct{}) { close(released) }, released)
+		on.Search(RowsOf(slab[:dimensions], dimensions), 4, arena,
+			&DenseSearchConfig{Predicate: func(Key) bool { return witness[0] == 0 }})
+		on.Insert(sequentialKeys(1), RowsOf(slab, dimensions), nil)
+	}()
+	runtime.GC()
+	if err := executor.Drain(MoodParked); err != nil {
+		t.Fatalf("the executor must drain: %v", err)
+	}
+	for collections := 0; collections < 1000; collections++ {
+		runtime.GC()
+		select {
+		case <-released:
+			return
+		case <-time.After(time.Millisecond):
+		}
+	}
+	t.Fatal("the dropped call still holds its predicate")
 }
 
 // endregion: Deferred Calls
@@ -1437,6 +1515,7 @@ func TestSearchesWhileInserting(t *testing.T) {
 	for reader := 0; reader < writers; reader++ {
 		reading.Add(1)
 		mine := index.On(pool(t))
+		arena := newArena(t, nil)
 		go func() {
 			defer reading.Done()
 			query := RowsOf(slab[:dimensions], dimensions)
@@ -1446,7 +1525,7 @@ func TestSearchesWhileInserting(t *testing.T) {
 					return
 				default:
 				}
-				if _, err := mine.Search(query, 10, nil); err != nil {
+				if _, err := mine.Search(query, 10, arena, nil); err != nil {
 					t.Errorf("a concurrent search failed: %v", err)
 					return
 				}

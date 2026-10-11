@@ -126,11 +126,19 @@ func ExampleDenseIndex() {
 		log.Fatal(err)
 	}
 
-	matches, err := index.Search(usearch.RowsOf([]float32{0, 1, 0}, 3), 2, nil)
+	arena, err := usearch.NewArena(nil)
 	if err != nil {
 		log.Fatal(err)
 	}
-	found, _ := matches.Row(0)
+	defer arena.Close()
+	matches, err := index.Search(usearch.RowsOf([]float32{0, 1, 0}, 3), 2, arena, nil)
+	if err != nil {
+		log.Fatal(err)
+	}
+	found, _, err := matches.Row(0) // valid until the next call given arena
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Println(found[0])
 	// Output: 00000000-0000-0000-0000-000000000002
 }
@@ -158,15 +166,20 @@ func ExampleDenseIndex_Deferred() {
 		log.Fatal(err)
 	}
 
-	call := index.Deferred(executor).Search(usearch.RowsOf([]float32{0, 0, 1}, 3), 1, nil)
-	if err := executor.Drain(usearch.MoodParked); err != nil {
-		log.Fatal(err)
-	}
-	matches, err := call.Wait()
+	arena, err := usearch.NewArena(executor)
 	if err != nil {
 		log.Fatal(err)
 	}
-	found, _ := matches.Row(0)
+	defer arena.Close()
+	call := index.Deferred(executor).Search(usearch.RowsOf([]float32{0, 0, 1}, 3), 1, arena, nil)
+	matches, err := call.Wait() // a view borrowing arena, as a blocking call's does
+	if err != nil {
+		log.Fatal(err)
+	}
+	found, _, err := matches.Row(0)
+	if err != nil {
+		log.Fatal(err)
+	}
 	fmt.Println(found[0])
 	// Output: 00000000-0000-0000-0000-000000000003
 }

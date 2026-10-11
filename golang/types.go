@@ -50,6 +50,8 @@ import (
 #cgo noescape usearch_executor_for_nvme
 #cgo nocallback usearch_executor_for_nvme
 #cgo noescape usearch_executor_drain
+#cgo noescape usearch_arena_init
+#cgo nocallback usearch_arena_init
 
 #include "shim.h"
 */
@@ -73,7 +75,7 @@ const (
 	StatusDeferred Status = C.usearch_status_deferred_k
 	// StatusOutOfMemory means an allocation or reservation could not be satisfied.
 	StatusOutOfMemory Status = C.usearch_status_out_of_memory_k
-	// StatusShapeMismatch means dimensionality, row counts, or output capacity disagree.
+	// StatusShapeMismatch means dimensionality or row counts disagree.
 	StatusShapeMismatch Status = C.usearch_status_shape_mismatch_k
 	// StatusUnsupportedLayout means a stride or packing the engine cannot traverse.
 	StatusUnsupportedLayout Status = C.usearch_status_unsupported_layout_k
@@ -264,6 +266,8 @@ const (
 	ScalarI8 Scalar = C.usearch_scalar_i8_k
 	// ScalarI4x2 packs two 4-bit signed integers per byte.
 	ScalarI4x2 Scalar = C.usearch_scalar_i4x2_k
+	// ScalarI32 is a 32-bit signed integer, the coordinates of geospatial points.
+	ScalarI32 Scalar = C.usearch_scalar_i32_k
 	// ScalarU8 is an 8-bit unsigned integer.
 	ScalarU8 Scalar = C.usearch_scalar_u8_k
 	// ScalarU4x2 packs two 4-bit unsigned integers per byte.
@@ -360,8 +364,7 @@ func scalarOf[Value Element]() Scalar {
 // region: Row Views
 
 // RowsView borrows a caller-owned slab as rows of equal width: a base pointer, a row count, and
-// a byte pitch between consecutive rows. It is the shape every batch argument and every batch
-// takes, read as a view where a verb reads rows and written as a span where it lands them.
+// a byte pitch between consecutive rows. It is the shape every batch argument takes.
 //
 // A RowsView borrows and never owns. It stays valid only as long as the slice it was built
 // from, which the binding pins until each call it crosses is final: the collector traces the
@@ -457,102 +460,42 @@ func (matrix RowsView) lower(call *call) C.usearch_rows_view_t {
 	}
 }
 
-// lowerSpan lends the rows as the span a verb lands rows in, one per row of the matrix.
-func (matrix RowsView) lowerSpan(call *call) C.usearch_rows_span_t {
-	call.pinner.Pin(matrix.pointer)
-	return C.usearch_rows_span_t{
-		data:     matrix.pointer,
-		stride:   C.size_t(matrix.stride),
-		columns:  C.size_t(matrix.dimensions),
-		capacity: C.size_t(matrix.rows),
-		scalar:   C.usearch_scalar_t(matrix.scalar),
-	}
-}
-
 // endregion: Row Views
 
 // region: Matches
 
-// MatchesSpan is where a ranked run lands - three slabs sized together, holding a
-// queries-by-columns matrix of keys, the scores positionally paired with them, and one match
-// count per query. A search lands distances, nearest first; a late interaction lands summed
-// similarities, largest first.
+// MatchesView is a ranked run a call wrote into its arena: per query, up to Columns keys and the
+// scores positionally paired with them. A search writes distances, nearest first; a late
+// interaction writes summed similarities, largest first.
 //
-// A verb allocates one for its own result, or lands its run in one the caller lends, whose
-// width may exceed the call's wanted count to land rows inside a wider matrix.
-//
-// Mirrors usearch_matches_span_t.
-type MatchesSpan struct {
-	keys    []Key
-	scores  []Distance
-	counts  []uint
-	columns uint
+// Mirrors usearch_matches_view_t.
+type MatchesView struct {
+	exported
+	raw     C.usearch_matches_view_t
+	queries uint
 }
 
-// packedMatches sizes the three slabs for a batch of queries, each reporting up to wanted matches.
-func packedMatches(queries, wanted uint) MatchesSpan {
-	return MatchesSpan{
-		keys:    make([]Key, queries*wanted),
-		scores:  make([]Distance, queries*wanted),
-		counts:  make([]uint, queries),
-		columns: wanted,
-	}
-}
+// Queries reports how many queries the call resolved.
+func (matches MatchesView) Queries() uint { return matches.queries }
 
-// MatchesSpanOf lends slabs the caller already owns - the path for a sweep that reuses one
-// set of buffers. The row width follows from the lengths, so lengths that cannot be read as one
-// shape are refused here.
-func MatchesSpanOf(keys []Key, scores []Distance, counts []uint) (MatchesSpan, error) {
-	if len(counts) == 0 {
-		return MatchesSpan{}, fail(StatusShapeMismatch, "a run must hold at least one query")
-	}
-	if len(keys) != len(scores) {
-		return MatchesSpan{}, fail(StatusShapeMismatch, "the key and score slabs are not the same shape")
-	}
-	if len(keys)%len(counts) != 0 {
-		return MatchesSpan{}, fail(StatusShapeMismatch, "the slabs do not divide into one row per query")
-	}
-	columns := uint(len(keys) / len(counts))
-	return MatchesSpan{keys: keys, scores: scores, counts: counts, columns: columns}, nil
-}
+// Columns reports the width of every row the call wrote, at most its wanted - the "k" in "kANN".
+func (matches MatchesView) Columns() uint { return uint(matches.raw.columns) }
 
-// Wanted reports the upper bound on matches per query - the width of every row.
-func (matches *MatchesSpan) Wanted() uint { return matches.columns }
-
-// Queries reports how many queries the slabs were sized for.
-func (matches *MatchesSpan) Queries() uint { return uint(len(matches.counts)) }
-
-// Counts borrows the per-query match counts.
-func (matches *MatchesSpan) Counts() []uint { return matches.counts }
-
-// Row borrows one query's keys and scores, trimmed to the count that query reported.
-// Nothing is copied, and an out-of-range query yields two empty slices.
-func (matches *MatchesSpan) Row(query uint) ([]Key, []Distance) {
-	if query >= uint(len(matches.counts)) {
-		return nil, nil
+// Row borrows one query's keys and scores from the arena, trimmed to the count that query reported,
+// and refused with StatusInvalidArgument when query is not below Queries.
+func (matches MatchesView) Row(query uint) ([]Key, []Distance, error) {
+	if err := matches.host(); err != nil {
+		return nil, nil, err
 	}
-	count := min(matches.counts[query], matches.columns)
-	from := query * matches.columns
-	return matches.keys[from : from+count], matches.scores[from : from+count]
-}
-
-// lower lends the slabs to a call keeping up to wanted matches per query, which checks their
-// capacity against its query count. The strides have no length, so only this side sees wanted
-// overrun the row.
-func (matches *MatchesSpan) lower(call *call, wanted uint) (C.usearch_matches_span_t, *Error) {
-	if wanted > matches.columns {
-		return C.usearch_matches_span_t{}, fail(StatusShapeMismatch, "the wanted count overruns the rows of the span")
+	if query >= matches.queries {
+		return nil, nil, fail(StatusInvalidArgument, "the query is not below the call's count")
 	}
-	// A zero stride is refused even when nothing lands, so a zero-wide row still strides by one.
-	return C.usearch_matches_span_t{
-		keys:          (*C.usearch_key_t)(unsafe.Pointer(lend(call, matches.keys))),
-		keys_stride:   C.size_t(max(matches.columns, 1) * uint(unsafe.Sizeof(Key{}))),
-		scores:        (*C.usearch_distance_t)(unsafe.Pointer(lend(call, matches.scores))),
-		scores_stride: C.size_t(max(matches.columns, 1) * uint(unsafe.Sizeof(Distance(0)))),
-		counts:        (*C.size_t)(unsafe.Pointer(lend(call, matches.counts))),
-		capacity:      C.size_t(len(matches.counts)),
-		wanted:        C.size_t(wanted),
-	}, nil
+	columns := matches.Columns()
+	count := min(unsafe.Slice((*uint)(unsafe.Pointer(matches.raw.counts)), matches.queries)[query], columns)
+	from := query * columns
+	keys := unsafe.Slice((*Key)(unsafe.Pointer(matches.raw.keys)), matches.queries*columns)
+	scores := unsafe.Slice((*Distance)(unsafe.Pointer(matches.raw.scores)), matches.queries*columns)
+	return keys[from : from+count], scores[from : from+count], nil
 }
 
 // endregion: Matches
@@ -561,23 +504,30 @@ func (matches *MatchesSpan) lower(call *call, wanted uint) (C.usearch_matches_sp
 
 // Predicate admits a candidate key into a filtered search, or passes over it. It runs on the
 // executor's threads together, so it must be safe for concurrent use, and a panic inside it
-// rejects the key.
+// rejects the key and becomes the call's error.
 //
 // Mirrors usearch_predicate_t.
 type Predicate func(key Key) bool
 
 // ProgressCallback is called with the units a long call finished so far and the units it
 // finishes unless stopped; false stops it wherever the verb can stop. It never runs on two
-// threads at once, and a panic inside it stops the call.
+// threads at once, and a panic inside it stops the call and becomes its error.
 //
 // Mirrors usearch_progress_callback_t.
 type ProgressCallback func(completed, total uint) bool
 
+// upcall is a Go value a C callback reaches, and the call its panics fail.
+type upcall struct {
+	call  *call
+	value any
+}
+
 //export usearchAdmits
 func usearchAdmits(key C.usearch_key_t, state unsafe.Pointer) (admission C.usearch_admission_t) {
+	upcall := (*cgo.Handle)(state).Value().(upcall)
 	admission = C.usearch_reject_k
-	defer func() { _ = recover() }() // a panic unwinding through C frames would skip their unlocks
-	if (*cgo.Handle)(state).Value().(Predicate)(keyFromRaw(key)) {
+	defer func() { upcall.call.latch(recover()) }() // a panic unwinding through C frames would skip their unlocks
+	if upcall.value.(Predicate)(keyFromRaw(key)) {
 		admission = C.usearch_admit_k
 	}
 	return admission
@@ -585,9 +535,10 @@ func usearchAdmits(key C.usearch_key_t, state unsafe.Pointer) (admission C.usear
 
 //export usearchContinues
 func usearchContinues(completed, total C.size_t, state unsafe.Pointer) (continuation C.usearch_continuation_t) {
+	upcall := (*cgo.Handle)(state).Value().(upcall)
 	continuation = C.usearch_cancel_k
-	defer func() { _ = recover() }()
-	if (*cgo.Handle)(state).Value().(ProgressCallback)(uint(completed), uint(total)) {
+	defer func() { upcall.call.latch(recover()) }()
+	if upcall.value.(ProgressCallback)(uint(completed), uint(total)) {
 		continuation = C.usearch_continue_k
 	}
 	return continuation
@@ -613,7 +564,7 @@ func (call *call) progress(progress ProgressCallback) (C.usearch_progress_callba
 // closure it names holds Go pointers the cgo rules forbid handing to C.
 func (call *call) callback(value any) unsafe.Pointer {
 	handle := pin(call, new(cgo.Handle))
-	*handle = cgo.NewHandle(value)
+	*handle = cgo.NewHandle(upcall{call: call, value: value})
 	call.handles = append(call.handles, *handle)
 	return unsafe.Pointer(handle)
 }
@@ -639,7 +590,28 @@ func (call *call) callback(value any) unsafe.Pointer {
 //
 // Mirrors usearch_executor_t.
 type Executor struct {
-	handle C.usearch_executor_t
+	handle    C.usearch_executor_t
+	residency Residency
+}
+
+// Residency is where a handle keeps its payload, and where an executor computes and places the
+// arenas it makes.
+//
+// Mirrors usearch_residency_t.
+type Residency int32
+
+const (
+	// ResidencyRam is volatile host memory, traversed by CPU threads.
+	ResidencyRam Residency = C.usearch_residency_ram_k
+	// ResidencyVram is accelerator memory, traversed by GPU warps on a chosen device.
+	ResidencyVram Residency = C.usearch_residency_vram_k
+	// ResidencyNvme is persisted storage, traversed through pluggable I/O engines and sized past RAM.
+	ResidencyNvme Residency = C.usearch_residency_nvme_k
+)
+
+// String renders the residency as the library spells it. Calls usearch_residency_name.
+func (residency Residency) String() string {
+	return C.GoString(C.usearch_residency_name(C.usearch_residency_t(residency)))
 }
 
 // Mood is what an executor does with its threads or streams once it goes idle.
@@ -667,7 +639,7 @@ func (mood Mood) String() string {
 // the ordered publication path. Calls usearch_executor_for_ram.
 func ExecutorForRam(memoryDomains []int32, threads, deferredLimit uint) (*Executor, error) {
 	lent := open[*Executor]()
-	executor := new(Executor)
+	executor := &Executor{residency: ResidencyRam}
 	C.usearch_executor_for_ram(&C.usearch_executor_for_ram_t{
 		executor:       pin(&lent.call, &executor.handle),
 		outcome:        lent.outcome,
@@ -684,7 +656,7 @@ func ExecutorForRam(memoryDomains []int32, threads, deferredLimit uint) (*Execut
 // must outlive the executor, and keeps its lender's mood. Calls usearch_executor_on_pool.
 func ExecutorOnPool(memoryDomains []int32, pool unsafe.Pointer, deferredLimit uint) (*Executor, error) {
 	lent := open[*Executor]()
-	executor := new(Executor)
+	executor := &Executor{residency: ResidencyRam}
 	C.usearch_executor_on_pool(&C.usearch_executor_on_pool_t{
 		executor:       pin(&lent.call, &executor.handle),
 		outcome:        lent.outcome,
@@ -703,7 +675,7 @@ func ExecutorOnPool(memoryDomains []int32, pool unsafe.Pointer, deferredLimit ui
 // Zero threads derives from those devices' queue capabilities. Calls usearch_executor_for_nvme.
 func ExecutorForNvme(paths []string, threads, deferredLimit uint) (*Executor, error) {
 	lent := open[*Executor]()
-	executor := new(Executor)
+	executor := &Executor{residency: ResidencyNvme}
 	C.usearch_executor_for_nvme(&C.usearch_executor_for_nvme_t{
 		executor:       pin(&lent.call, &executor.handle),
 		outcome:        lent.outcome,
@@ -727,7 +699,7 @@ func ExecutorForVram(devices []int32, streams []unsafe.Pointer, scratchLimit, de
 		return nil, fail(StatusShapeMismatch, "pass no streams or one per device")
 	}
 	lent := open[*Executor]()
-	executor := new(Executor)
+	executor := &Executor{residency: ResidencyVram}
 	C.usearch_executor_for_vram(&C.usearch_executor_for_vram_t{
 		executor:       pin(&lent.call, &executor.handle),
 		outcome:        lent.outcome,
@@ -782,50 +754,96 @@ func (executor *Executor) lower() (C.usearch_executor_t, *Error) {
 
 // region: Arenas
 
-// Arena holds the outputs only a call can size - Get's rows, Multiply's products, SaveBuffer's
-// bytes - so a steady loop allocates once.
+// Arena is memory the library writes every output whose length scales with a call into - matches,
+// rows, products, monoliths, cursor and stream batches alike - reused so a steady loop allocates once.
 //
-// The zero value holds nothing; the first call handed it creates the memory where that call's
-// executor computes, and every later call rewinds and refills it. A result landed in an arena
-// stays valid until the arena serves another call or is closed, so a caller keeping one result
-// past the next call hands that call another arena, or none. An arena serves one call at a time;
-// a second concurrent one reports StatusContended, so a zero arena is first handed out by one
-// goroutine.
+// Every call given an arena rewinds and refills it, so the views of its previous call refuse access
+// from then on with StatusUninitialized, as they do once it is closed; to keep one call's views
+// past the next, give that call another arena. An arena serves one call at a time, and a second
+// overlapping it fails with StatusContended. Deferred verbs borrow it as blocking ones do, since
+// Close waits for every deferred call naming it. A slice an accessor already handed out is never
+// checked again, so drop it before the arena's next call.
 //
 // Mirrors usearch_arena_t.
 type Arena struct {
-	handle C.usearch_arena_t
+	handle    C.usearch_arena_t
+	residency Residency
+	// generation counts the calls that rewound the arena, so a view knows when its memory moved on.
+	generation atomic.Uint64
 }
 
-// Close releases the memory, waiting for every deferred call naming the arena. It is idempotent,
-// and leaves the arena reusable as a zero value. Calls usearch_arena_free.
+// NewArena makes an empty arena where executor computes, host pages or the memory of its GPU,
+// decided once; a nil executor makes host pages for calls on the calling goroutine. Nothing is
+// allocated until a call writes into it, and it may outlive its executor. Calls usearch_arena_init.
+func NewArena(executor *Executor) (*Arena, error) {
+	handle, refusal := executor.lower()
+	if refusal != nil {
+		return nil, refusal
+	}
+	arena := &Arena{residency: ResidencyRam}
+	if executor != nil {
+		arena.residency = executor.residency
+	}
+	lent := open[*Arena]()
+	C.usearch_arena_init(&C.usearch_arena_init_t{
+		arena:    pin(&lent.call, &arena.handle),
+		executor: handle,
+		outcome:  lent.outcome,
+	})
+	lent.result = func() *Arena { return arena }
+	return block(lent)
+}
+
+// Residency reports where the arena's memory lives. A ResidencyVram arena holds device memory, which
+// no Go code may read, so the accessors of its views refuse with StatusDevice.
+func (arena *Arena) Residency() Residency { return arena.residency }
+
+// Close releases the memory, waiting for every deferred call naming the arena, and turns every view
+// over it away. It is idempotent, and a closed arena must not be used again. Calls
+// usearch_arena_free.
 func (arena *Arena) Close() error {
 	if arena == nil || arena.handle == nil {
 		return nil
 	}
 	C.usearch_arena_free(arena.handle)
 	arena.handle = nil
+	arena.generation.Add(1)
 	return nil
 }
 
-// landing is where a result's outputs live: the caller's arena, or a fresh one the result owns
-// and its Close frees. Slices a result borrows from it are invisible to the collector, so reading
-// them after that Close, or after a lent arena serves another call, reads freed memory.
-type landing struct {
-	owned *Arena
-}
-
-// land picks the arena a call writes into, creating one for the result when the caller lent none.
-func land(arena *Arena) (*Arena, landing) {
-	if arena != nil {
-		return arena, landing{}
+// lower reports the handle a verb hands across, refusing a nil or closed arena before the call does.
+func (arena *Arena) lower() (C.usearch_arena_t, *Error) {
+	if arena == nil || arena.handle == nil {
+		return nil, fail(StatusInvalidArgument, "the arena is closed or was never made")
 	}
-	owned := new(Arena)
-	return owned, landing{owned: owned}
+	return arena.handle, nil
 }
 
-// Close frees the arena the call created for this result, and does nothing for a lent one.
-func (landing landing) Close() error { return landing.owned.Close() }
+// exported is the arena a view lives in, and which of the arena's calls wrote it.
+type exported struct {
+	arena      *Arena
+	generation uint64
+}
+
+// rewound records that a call crossed with arena, retiring the views of its earlier calls, and
+// answers where this call's views live. A call refused as contended rewound nothing.
+func (call *call) rewound(arena *Arena) exported {
+	if call.status() == StatusContended {
+		return exported{}
+	}
+	return exported{arena: arena, generation: arena.generation.Add(1)}
+}
+
+// host refuses a view whose arena has been rewound or closed since, or holds device memory.
+func (view exported) host() error {
+	if view.arena == nil || view.arena.generation.Load() != view.generation {
+		return fail(StatusUninitialized, "the view's arena served another call or was closed since")
+	}
+	if view.arena.residency == ResidencyVram {
+		return fail(StatusDevice, "the view is device memory")
+	}
+	return nil
+}
 
 // endregion: Arenas
 
@@ -844,6 +862,8 @@ type call struct {
 	handles []cgo.Handle
 	// refusal is a fault this binding caught before the call crossed.
 	refusal *Error
+	// panicked is the first panic one of its callbacks raised, recovered there and reported here.
+	panicked atomic.Pointer[error]
 	// discard frees what the call produced, once no result will hand it out.
 	discard func()
 }
@@ -867,9 +887,28 @@ func (lent *lent[Result]) refuse(refusal *Error) *lent[Result] {
 	return lent
 }
 
+// status reads the outcome word without waiting.
+func (call *call) status() Status {
+	return Status(C.usearch_outcome_status(call.outcome))
+}
+
+// latch keeps the first panic a callback raised, so the call reports it once final.
+func (call *call) latch(recovered any) {
+	if recovered == nil {
+		return
+	}
+	err, isError := recovered.(error)
+	if !isError {
+		err = fmt.Errorf("usearch: a callback panicked: %v", recovered)
+	}
+	call.panicked.CompareAndSwap(nil, &err)
+}
+
 // settle waits until the call is final, releases everything it lent, and reports its failure.
 func (call *call) settle() error {
-	C.usearch_outcome_wait(call.outcome)
+	if call.status() == StatusDeferred {
+		C.usearch_outcome_wait(call.outcome)
+	}
 	call.pinner.Unpin()
 	for _, handle := range call.handles {
 		handle.Delete()
@@ -877,6 +916,9 @@ func (call *call) settle() error {
 	call.handles = nil
 	if call.refusal != nil {
 		return call.refusal
+	}
+	if panicked := call.panicked.Load(); panicked != nil {
+		return *panicked
 	}
 	return check(*call.outcome)
 }
@@ -903,36 +945,51 @@ func block[Result any](lent *lent[Result]) (Result, error) {
 	return produced, nil
 }
 
-// Deferred is a submitted call, which owns its outcome, inputs, outputs and arena until it is
-// final. Status polls without blocking, Wait blocks until the call is final and hands back what it
-// produced, and Close waits the same way and frees what no one took. A Deferred dropped without
-// Wait or Close keeps its pins, which the runtime reports as a leaked runtime.Pinner.
+// Deferred is a submitted call, which holds its outcome and inputs until it is final. Status
+// polls without blocking, Wait blocks until the call is final and hands back what it produced, and
+// Close waits the same way and frees what no one took. A Deferred dropped without
+// Wait or Close is released by the collector once the call is final, never blocking on it: until
+// then every later collection checks it again.
 //
-// An executor without threads of its own may hold a deferred call until its next Drain, blocking
-// call or Close, so drain it before a Wait there. A failure the binding catches before the call
-// crosses is reported here too, like any other.
+// A failure the binding catches before the call crosses is reported here too, like any other.
 //
 // Binding-only; Wait and Close call usearch_outcome_wait.
 type Deferred[Result any] struct {
-	lent *lent[Result]
+	lent    *lent[Result]
+	cleanup runtime.Cleanup
 }
 
-// submitted hands a call to its caller, who waits on it or closes it.
+// submitted hands a call to its caller, who waits on it or closes it, or drops it to the collector.
 func submitted[Result any](lent *lent[Result]) *Deferred[Result] {
-	return &Deferred[Result]{lent: lent}
+	deferred := &Deferred[Result]{lent: lent}
+	deferred.cleanup = runtime.AddCleanup(deferred, release[Result], lent)
+	return deferred
+}
+
+// release frees a dropped call once it is final, and otherwise hands it to another dropped Deferred
+// for the next collection, since the collector's goroutine must not block.
+func release[Result any](lent *lent[Result]) {
+	if lent.status() == StatusDeferred {
+		submitted(lent)
+		return
+	}
+	_ = lent.settle()
+	lent.drop()
 }
 
 // Status reports StatusDeferred until the call is final, then its final status, without blocking.
+// Calls usearch_outcome_status.
 func (deferred *Deferred[Result]) Status() Status {
 	if deferred.lent.refusal != nil {
 		return deferred.lent.refusal.Status
 	}
-	return Status(atomic.LoadInt32((*int32)(unsafe.Pointer(&deferred.lent.outcome.status))))
+	return deferred.lent.status()
 }
 
-// Wait blocks until the call is final, releases its pins, then hands back what it produced; one
-// goroutine waits at a time. Calls usearch_outcome_wait.
+// Wait blocks until the call is final, releases its pins, then hands back what it produced, as
+// many times as it is asked; one goroutine waits at a time. Calls usearch_outcome_wait.
 func (deferred *Deferred[Result]) Wait() (Result, error) {
+	deferred.cleanup.Stop()
 	return block(deferred.lent)
 }
 
@@ -940,6 +997,7 @@ func (deferred *Deferred[Result]) Wait() (Result, error) {
 // has not handed out, and reports the call's failure. It is idempotent and safe after Wait. Calls
 // usearch_outcome_wait.
 func (deferred *Deferred[Result]) Close() error {
+	deferred.cleanup.Stop()
 	err := deferred.lent.settle()
 	deferred.lent.drop()
 	return err
@@ -964,15 +1022,13 @@ func CapabilitiesAvailable() string { return C.GoString(C.usearch_capabilities_a
 
 // region: Helpers
 
-// A count crosses as a C size_t, a key is reinterpreted rather than copied, and a status word is
-// loaded atomically as 32 bits, so each pair must agree in width on every platform this package
-// builds for. A constant overflows, and fails the build, the moment one of them diverges.
+// A count crosses as a C size_t and a key is reinterpreted rather than copied, so each pair must
+// agree in width on every platform this package builds for. A constant overflows, and fails the
+// build, the moment one of them diverges.
 const _ = uint(unsafe.Sizeof(C.size_t(0))) - uint(unsafe.Sizeof(uint(0)))
 const _ = uint(unsafe.Sizeof(uint(0))) - uint(unsafe.Sizeof(C.size_t(0)))
 const _ = uint(unsafe.Sizeof(C.usearch_key_t{})) - uint(unsafe.Sizeof(Key{}))
 const _ = uint(unsafe.Sizeof(Key{})) - uint(unsafe.Sizeof(C.usearch_key_t{}))
-const _ = uint(unsafe.Sizeof(C.usearch_status_t(0))) - uint(unsafe.Sizeof(int32(0)))
-const _ = uint(unsafe.Sizeof(int32(0))) - uint(unsafe.Sizeof(C.usearch_status_t(0)))
 
 // pin keeps a Go object in place until the call is final and hands back its address.
 func pin[Value any](call *call, value *Value) *Value {
@@ -1041,15 +1097,6 @@ func (call *call) keys(keys []Key) C.usearch_keys_view_t {
 	return C.usearch_keys_view_t{
 		data:   (*C.usearch_key_t)(unsafe.Pointer(lend(call, keys))),
 		stride: C.size_t(unsafe.Sizeof(Key{})),
-	}
-}
-
-// keysSpan lends a packed key slice as the run a verb writes, bounded by its length.
-func (call *call) keysSpan(keys []Key) C.usearch_keys_span_t {
-	return C.usearch_keys_span_t{
-		data:     (*C.usearch_key_t)(unsafe.Pointer(lend(call, keys))),
-		stride:   C.size_t(unsafe.Sizeof(Key{})),
-		capacity: C.size_t(len(keys)),
 	}
 }
 

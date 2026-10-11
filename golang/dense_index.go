@@ -241,7 +241,7 @@ func (call *call) stats(stats *DenseTraversalStats) *C.usearch_dense_traversal_s
 // Values must be as wide as the keys and stored in the index's own quantization, since the call
 // reads them as such; a key Row names no row of Values for, or values of another shape, refuse
 // the call with StatusShapeMismatch. Row runs on the executor's threads together, so it must be
-// safe for concurrent use, and a panic inside it answers no row.
+// safe for concurrent use, and a panic inside it answers no row and becomes the call's error.
 //
 // Mirrors usearch_value_lookup_t.
 type ValueLookup struct {
@@ -370,9 +370,6 @@ type DenseRefineConfig struct {
 //
 // Mirrors usearch_dense_search_t.
 type DenseSearchConfig struct {
-	// Matches lends the span the run lands in, at least as wide as the wanted count; nil
-	// allocates a fresh one.
-	Matches *MatchesSpan
 	// ExpansionFactor is the candidate-pool breadth the walk explores; zero derives it from
 	// the geometry.
 	ExpansionFactor uint
@@ -381,7 +378,7 @@ type DenseSearchConfig struct {
 	// refuses one with StatusDevice.
 	Predicate Predicate
 	// Progress reports the queries resolved and stops wherever it says to; a stopped search
-	// reports StatusCancelled and leaves every output row indeterminate.
+	// reports StatusCancelled and returns no matches.
 	Progress ProgressCallback
 	// Stats is where the traversal telemetry lands, overwritten by the call.
 	Stats *DenseTraversalStats
@@ -391,9 +388,6 @@ type DenseSearchConfig struct {
 //
 // Mirrors usearch_dense_maxsim_t.
 type DenseMaxsimConfig struct {
-	// Matches lends the span the scored keys land in, at least as wide as the wanted count; nil
-	// allocates a fresh one.
-	Matches *MatchesSpan
 	// ExpansionFactor is the candidate-pool breadth the walk explores; zero derives it from
 	// the geometry.
 	ExpansionFactor uint
@@ -408,9 +402,6 @@ type DenseMaxsimConfig struct {
 //
 // Mirrors usearch_dense_multiply_t.
 type DenseMultiplyConfig struct {
-	// Arena is rewound and refilled with the products; nil lands them in a fresh one the result
-	// owns.
-	Arena *Arena
 	// Wanted bounds the pairs kept per left row, the first ones its walk scored; zero keeps every
 	// pair.
 	Wanted uint
@@ -430,9 +421,11 @@ type DenseAttendConfig struct {
 	// HeadCount is the query heads sharing the index's key-value head, and with it one walk per
 	// token: row t * HeadCount + h is head h of token t, so it must divide the rows; zero means one.
 	HeadCount uint
-	// Carry is where the online-softmax state lands, one entry per query row, which folds this
-	// call into another over the same queries by partial-softmax rescaling.
+	// Carry is the online-softmax state, one entry per query row and lent by the caller, which
+	// folds this call into another over the same queries by partial-softmax rescaling.
 	Carry []DenseSoftmaxState
+	// OutputsScalar is the scalar type the attended rows land as; zero takes the queries' own.
+	OutputsScalar Scalar
 	// ExpansionFactor is the candidate-pool breadth; zero derives it. A wider pool walks further,
 	// folding more of the tail.
 	ExpansionFactor uint
@@ -465,9 +458,6 @@ type DenseSaveConfig struct {
 //
 // Mirrors usearch_dense_save_buffer_t.
 type DenseSaveBufferConfig struct {
-	// Arena is rewound and refilled with the monolith; nil lands it in a fresh one the result
-	// owns.
-	Arena *Arena
 	// Progress reports the bytes written and stops wherever it says to; a stopped save leaves no
 	// monolith.
 	Progress ProgressCallback
@@ -486,73 +476,112 @@ type DenseSearchStreamInitConfig struct {
 
 // region: Results
 
-// DenseVectors is the rows Get exported, packed one per entry sharing the key, inside an arena,
-// shaped by the stride and columns the library reported.
+// DenseVectors is the rows a call wrote packed into its arena: Get's entries sharing a key, Attend's
+// attended rows, or a cursor batch's rows.
+//
+// Mirrors usearch_rows_view_t.
 type DenseVectors struct {
-	landing
-	data    unsafe.Pointer
-	rows    uint
-	stride  uint
-	columns uint
-	scalar  Scalar
+	exported
+	raw  C.usearch_rows_view_t
+	rows uint
 }
 
-// Rows reports how many entries the key holds; zero when it is absent.
+// Rows reports how many rows the call wrote; zero when Get found the key absent.
 func (vectors DenseVectors) Rows() uint { return vectors.rows }
 
 // Stride reports the byte pitch between consecutive rows.
-func (vectors DenseVectors) Stride() uint { return vectors.stride }
+func (vectors DenseVectors) Stride() uint { return uint(vectors.raw.stride) }
 
-// Columns reports the values in each row, as the library landed them.
-func (vectors DenseVectors) Columns() uint { return vectors.columns }
+// Columns reports the values in each row, as the library wrote them.
+func (vectors DenseVectors) Columns() uint { return uint(vectors.raw.columns) }
 
-// Scalar reports the scalar type the rows were exported as.
-func (vectors DenseVectors) Scalar() Scalar { return vectors.scalar }
+// Scalar reports the scalar type the rows were written as.
+func (vectors DenseVectors) Scalar() Scalar { return Scalar(vectors.raw.scalar) }
 
-// DenseValues borrows the exported rows as one slab of values, rows end to end.
-//
-// Panics when Value is not the kind the rows were exported as - a caller's mistake rather than
-// a condition the library could report.
-func DenseValues[Value Element](vectors DenseVectors) []Value {
-	if scalar := scalarOf[Value](); scalar != vectors.scalar {
-		panic("usearch: rows exported as " + vectors.scalar.String() + " cannot be read as " + scalar.String())
+// DenseValues borrows the rows from their arena as one slab of values, rows end to end, refused with
+// StatusInvalidArgument when Value is not the scalar type they were written as.
+func DenseValues[Value Element](vectors DenseVectors) ([]Value, error) {
+	if err := vectors.host(); err != nil {
+		return nil, err
+	}
+	if vectors.rows == 0 {
+		return nil, nil
+	}
+	if scalar := scalarOf[Value](); scalar != vectors.Scalar() {
+		return nil, fail(StatusInvalidArgument, "rows written as "+vectors.Scalar().String()+" cannot be read as "+scalar.String())
 	}
 	var element Value
-	return unsafe.Slice((*Value)(vectors.data), vectors.rows*vectors.stride/uint(unsafe.Sizeof(element)))
+	return unsafe.Slice((*Value)(vectors.raw.data), vectors.rows*vectors.Stride()/uint(unsafe.Sizeof(element))), nil
 }
 
-// DenseProducts is the ragged sparse product Multiply lands in an arena: per left row, every pair
+// DenseProducts is the ragged sparse product Multiply wrote into its arena: per left row, every pair
 // its walk scored, in traversal order.
+//
+// Mirrors usearch_matches_tape_view_t.
 type DenseProducts struct {
-	landing
-	offsets  []uint
-	keys     []Key
-	scores   []Distance
+	exported
+	raw      C.usearch_matches_tape_view_t
+	rows     uint
 	required uint
 }
 
 // Rows reports how many left rows the call multiplied.
-func (products DenseProducts) Rows() uint { return uint(len(products.offsets)) - 1 }
+func (products DenseProducts) Rows() uint { return products.rows }
 
 // Required reports the pairs the walks scored across every row, before the wanted bound cut any.
 func (products DenseProducts) Required() uint { return products.required }
 
-// Row borrows one left row's pairs - a key naming each indexed row, and its product. An
-// out-of-range row yields two empty slices.
-func (products DenseProducts) Row(row uint) ([]Key, []Distance) {
-	if row >= products.Rows() {
-		return nil, nil
+// Row borrows one left row's pairs from the arena - a key naming each indexed row, and its product -
+// refused with StatusInvalidArgument when row is not below Rows.
+func (products DenseProducts) Row(row uint) ([]Key, []Distance, error) {
+	if err := products.host(); err != nil {
+		return nil, nil, err
 	}
-	from, to := products.offsets[row], products.offsets[row+1]
-	return products.keys[from:to], products.scores[from:to]
+	if row >= products.rows {
+		return nil, nil, fail(StatusInvalidArgument, "the row is not below the call's count")
+	}
+	offsets := unsafe.Slice((*uint)(unsafe.Pointer(products.raw.offsets)), products.rows+1)
+	keys := unsafe.Slice((*Key)(unsafe.Pointer(products.raw.keys)), offsets[products.rows])
+	scores := unsafe.Slice((*Distance)(unsafe.Pointer(products.raw.scores)), offsets[products.rows])
+	return keys[offsets[row]:offsets[row+1]], scores[offsets[row]:offsets[row+1]], nil
 }
 
-// Monolith is the serialized index SaveBuffer lands in an arena.
+// Monolith is the serialized index SaveBuffer wrote into its arena.
 type Monolith struct {
-	landing
-	// Bytes is the monolith, borrowed from the arena.
-	Bytes []byte
+	exported
+	raw C.usearch_bytes_view_t
 }
+
+// Bytes borrows the monolith from its arena.
+func (monolith Monolith) Bytes() ([]byte, error) {
+	if err := monolith.host(); err != nil {
+		return nil, err
+	}
+	return unsafe.Slice((*byte)(unsafe.Pointer(monolith.raw.data)), monolith.raw.length), nil
+}
+
+// DenseBatch is one cursor pull written into its arena: the keys, and beside them the rows when
+// NextBatch asked for them.
+type DenseBatch struct {
+	exported
+	keys    C.usearch_keys_view_t
+	vectors DenseVectors
+	written uint
+}
+
+// Written reports the entries the pull wrote; zero means the walk is exhausted.
+func (batch DenseBatch) Written() uint { return batch.written }
+
+// Keys borrows the entries' keys from the arena.
+func (batch DenseBatch) Keys() ([]Key, error) {
+	if err := batch.host(); err != nil {
+		return nil, err
+	}
+	return unsafe.Slice((*Key)(unsafe.Pointer(batch.keys.data)), batch.written), nil
+}
+
+// Vectors reports the entries' rows, one per key; none for NextKeys.
+func (batch DenseBatch) Vectors() DenseVectors { return batch.vectors }
 
 // endregion: Results
 
@@ -865,8 +894,8 @@ type DenseIndexOn struct {
 // Deferred, offering every verb of DenseIndexOn with the same arguments but the blocking-only sugar,
 // cursors and streams. Binding-only.
 //
-// The library reads a deferred call's inputs and writes its outputs until the call is final, so
-// the slices a verb is handed must not change until then.
+// The library reads a deferred call's inputs until the call is final, so the slices a verb is
+// handed must not change until then; its arena is borrowed, as a blocking verb borrows it.
 type DenseIndexDeferredOn struct {
 	denseReceiver
 }
@@ -924,18 +953,18 @@ func (on DenseIndexOn) Contains(key Key) (bool, error) {
 	return counted != 0, err
 }
 
-// Get exports every vector stored under a key, one row per entry sharing the key, in insertion
-// order, converted to the given scalar kind - one call, however many there turn out to be.
+// Get exports every vector stored under a key into arena, one row per entry sharing the key, in
+// insertion order, converted to the outputsScalar kind - one call, however many there turn out to be.
 //
-// A nil arena lands the rows in a fresh one the result owns until its Close; a lent arena is
-// rewound, and the rows stay valid until it serves another call. Calls usearch_dense_get.
-func (on DenseIndexOn) Get(key Key, scalar Scalar, arena *Arena) (DenseVectors, error) {
-	return block(on.get(C.usearch_completion_blocking_k, key, scalar, arena))
+// The call rewinds arena, and the rows stay readable until it serves another call. Calls
+// usearch_dense_get.
+func (on DenseIndexOn) Get(key Key, outputsScalar Scalar, arena *Arena) (DenseVectors, error) {
+	return block(on.get(C.usearch_completion_blocking_k, key, outputsScalar, arena))
 }
 
 // Get submits DenseIndexOn.Get. Calls usearch_dense_get.
-func (on DenseIndexDeferredOn) Get(key Key, scalar Scalar, arena *Arena) *Deferred[DenseVectors] {
-	return submitted(on.get(C.usearch_completion_deferred_k, key, scalar, arena))
+func (on DenseIndexDeferredOn) Get(key Key, outputsScalar Scalar, arena *Arena) *Deferred[DenseVectors] {
+	return submitted(on.get(C.usearch_completion_deferred_k, key, outputsScalar, arena))
 }
 
 // Insert adds a matrix of vectors under their keys - the native batch operation, where a
@@ -990,18 +1019,19 @@ func (on DenseIndexDeferredOn) Health() *Deferred[DenseReachability] {
 	return submitted(on.health(C.usearch_completion_deferred_k))
 }
 
-// Search resolves a matrix of queries into up to wanted nearest matches apiece - the native batch
-// path, parallelized internally, and filtered when the config carries a predicate.
+// Search resolves a matrix of queries into up to wanted nearest matches apiece, written into arena
+// - the native batch path, parallelized internally, and filtered when the config carries a predicate.
 //
 // Never writes to the graph, so any number of these may overlap with concurrent insertions.
 // Calls usearch_dense_search.
-func (on DenseIndexOn) Search(queries RowsView, wanted uint, config *DenseSearchConfig) (MatchesSpan, error) {
-	return block(on.search(C.usearch_completion_blocking_k, queries, wanted, config))
+func (on DenseIndexOn) Search(queries RowsView, wanted uint, arena *Arena, config *DenseSearchConfig) (MatchesView, error) {
+	return block(on.search(C.usearch_completion_blocking_k, queries, wanted, arena, config))
 }
 
 // Search submits DenseIndexOn.Search. Calls usearch_dense_search.
-func (on DenseIndexDeferredOn) Search(queries RowsView, wanted uint, config *DenseSearchConfig) *Deferred[MatchesSpan] {
-	return submitted(on.search(C.usearch_completion_deferred_k, queries, wanted, config))
+func (on DenseIndexDeferredOn) Search(queries RowsView, wanted uint, arena *Arena,
+	config *DenseSearchConfig) *Deferred[MatchesView] {
+	return submitted(on.search(C.usearch_completion_deferred_k, queries, wanted, arena, config))
 }
 
 // Maxsim scores multi-row queries against multi-row entries by late interaction: every
@@ -1013,14 +1043,15 @@ func (on DenseIndexDeferredOn) Search(queries RowsView, wanted uint, config *Den
 //
 // See https://arxiv.org/abs/2004.12832 - ColBERT, which introduced this scoring. Calls
 // usearch_dense_maxsim.
-func (on DenseIndexOn) Maxsim(queries RowsView, rowsPerQuery, wanted uint, config *DenseMaxsimConfig) (MatchesSpan, error) {
-	return block(on.maxsim(C.usearch_completion_blocking_k, queries, rowsPerQuery, wanted, config))
+func (on DenseIndexOn) Maxsim(queries RowsView, rowsPerQuery, wanted uint, arena *Arena,
+	config *DenseMaxsimConfig) (MatchesView, error) {
+	return block(on.maxsim(C.usearch_completion_blocking_k, queries, rowsPerQuery, wanted, arena, config))
 }
 
 // Maxsim submits DenseIndexOn.Maxsim. Calls usearch_dense_maxsim.
-func (on DenseIndexDeferredOn) Maxsim(queries RowsView, rowsPerQuery, wanted uint,
-	config *DenseMaxsimConfig) *Deferred[MatchesSpan] {
-	return submitted(on.maxsim(C.usearch_completion_deferred_k, queries, rowsPerQuery, wanted, config))
+func (on DenseIndexDeferredOn) Maxsim(queries RowsView, rowsPerQuery, wanted uint, arena *Arena,
+	config *DenseMaxsimConfig) *Deferred[MatchesView] {
+	return submitted(on.maxsim(C.usearch_completion_deferred_k, queries, rowsPerQuery, wanted, arena, config))
 }
 
 // Multiply is the approximate sparse product of a matrix against the indexed rows - the linear
@@ -1028,18 +1059,19 @@ func (on DenseIndexDeferredOn) Maxsim(queries RowsView, rowsPerQuery, wanted uin
 // nearest. Pairs arrive in traversal order rather than sorted, and the pairs the walk never
 // reaches are the low and negative products. Runs on an inner-product index alone.
 //
-// The arena works as Get's does. Calls usearch_dense_multiply.
-func (on DenseIndexOn) Multiply(left RowsView, config *DenseMultiplyConfig) (DenseProducts, error) {
-	return block(on.multiply(C.usearch_completion_blocking_k, left, config))
+// How many pairs a walk scores is known only once it finishes, so the products, keys and offsets
+// land in arena, as Get's rows do. Calls usearch_dense_multiply.
+func (on DenseIndexOn) Multiply(left RowsView, arena *Arena, config *DenseMultiplyConfig) (DenseProducts, error) {
+	return block(on.multiply(C.usearch_completion_blocking_k, left, arena, config))
 }
 
 // Multiply submits DenseIndexOn.Multiply. Calls usearch_dense_multiply.
-func (on DenseIndexDeferredOn) Multiply(left RowsView, config *DenseMultiplyConfig) *Deferred[DenseProducts] {
-	return submitted(on.multiply(C.usearch_completion_deferred_k, left, config))
+func (on DenseIndexDeferredOn) Multiply(left RowsView, arena *Arena, config *DenseMultiplyConfig) *Deferred[DenseProducts] {
+	return submitted(on.multiply(C.usearch_completion_deferred_k, left, arena, config))
 }
 
 // Attend is softmax attention of every query row over every indexed key its walk scores, folded
-// as Flash Attention folds key tiles, with no top-k cut, landing one row per query in outputs,
+// as Flash Attention folds key tiles, with no top-k cut, writing one row per query into arena,
 // already divided by the partition.
 //
 // The index holds one layer's keys for one key-value head and no values, so lookup resolves every
@@ -1047,15 +1079,15 @@ func (on DenseIndexDeferredOn) Multiply(left RowsView, config *DenseMultiplyConf
 //
 // See https://arxiv.org/abs/2205.14135 - Flash Attention, whose recurrence this reuses. Calls
 // usearch_dense_attend.
-func (on DenseIndexOn) Attend(queries RowsView, lookup ValueLookup, outputs RowsView, config *DenseAttendConfig) error {
-	_, err := block(on.attend(C.usearch_completion_blocking_k, queries, lookup, outputs, config))
-	return err
+func (on DenseIndexOn) Attend(queries RowsView, lookup ValueLookup, arena *Arena,
+	config *DenseAttendConfig) (DenseVectors, error) {
+	return block(on.attend(C.usearch_completion_blocking_k, queries, lookup, arena, config))
 }
 
 // Attend submits DenseIndexOn.Attend. Calls usearch_dense_attend.
-func (on DenseIndexDeferredOn) Attend(queries RowsView, lookup ValueLookup, outputs RowsView,
-	config *DenseAttendConfig) *Deferred[struct{}] {
-	return submitted(on.attend(C.usearch_completion_deferred_k, queries, lookup, outputs, config))
+func (on DenseIndexDeferredOn) Attend(queries RowsView, lookup ValueLookup, arena *Arena,
+	config *DenseAttendConfig) *Deferred[DenseVectors] {
+	return submitted(on.attend(C.usearch_completion_deferred_k, queries, lookup, arena, config))
 }
 
 // Merge absorbs every donor into this index, wiring cross-links via landmark stitching - cheaper
@@ -1087,16 +1119,15 @@ func (on DenseIndexDeferredOn) Save(path string, config *DenseSaveConfig) *Defer
 	return submitted(on.save(C.usearch_completion_deferred_k, path, config))
 }
 
-// SaveBuffer serializes the index as one monolith, a size only the call itself can discover.
-//
-// The arena works as Get's does. Calls usearch_dense_save_buffer.
-func (on DenseIndexOn) SaveBuffer(config *DenseSaveBufferConfig) (Monolith, error) {
-	return block(on.saveBuffer(C.usearch_completion_blocking_k, config))
+// SaveBuffer serializes the index as one monolith into arena, a size only the call itself can
+// discover. Calls usearch_dense_save_buffer.
+func (on DenseIndexOn) SaveBuffer(arena *Arena, config *DenseSaveBufferConfig) (Monolith, error) {
+	return block(on.saveBuffer(C.usearch_completion_blocking_k, arena, config))
 }
 
 // SaveBuffer submits DenseIndexOn.SaveBuffer. Calls usearch_dense_save_buffer.
-func (on DenseIndexDeferredOn) SaveBuffer(config *DenseSaveBufferConfig) *Deferred[Monolith] {
-	return submitted(on.saveBuffer(C.usearch_completion_deferred_k, config))
+func (on DenseIndexDeferredOn) SaveBuffer(arena *Arena, config *DenseSaveBufferConfig) *Deferred[Monolith] {
+	return submitted(on.saveBuffer(C.usearch_completion_deferred_k, arena, config))
 }
 
 // endregion: Receivers
@@ -1179,42 +1210,32 @@ func (receiver denseReceiver) count(completion C.usearch_completion_t, key Key) 
 	return lent
 }
 
-func (receiver denseReceiver) get(completion C.usearch_completion_t, key Key, scalar Scalar,
+func (receiver denseReceiver) get(completion C.usearch_completion_t, key Key, outputsScalar Scalar,
 	arena *Arena) *lent[DenseVectors] {
 	lent := open[DenseVectors]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
 		return lent.refuse(refusal)
 	}
-	arena, landing := land(arena)
-	lent.discard = func() { _ = landing.Close() }
-	exported := pin(&lent.call, new(struct {
-		data                     unsafe.Pointer
-		written, stride, columns C.size_t
-	}))
-	C.usearch_dense_get(&C.usearch_dense_get_t{
-		index:      index,
-		executor:   executor,
-		outcome:    lent.outcome,
-		completion: completion,
-		key:        key.toRaw(),
-		scalar:     C.usearch_scalar_t(scalar),
-		vectors:    &exported.data,
-		written:    &exported.written,
-		stride:     &exported.stride,
-		columns:    &exported.columns,
-		arena:      pin(&lent.call, &arena.handle),
-	})
-	lent.result = func() DenseVectors {
-		return DenseVectors{
-			landing: landing,
-			data:    exported.data,
-			rows:    uint(exported.written),
-			stride:  uint(exported.stride),
-			columns: uint(exported.columns),
-			scalar:  scalar,
-		}
+	memory, refusal := arena.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
 	}
+	vectors := pin(&lent.call, new(C.usearch_rows_view_t))
+	written := pin(&lent.call, new(C.size_t))
+	C.usearch_dense_get(&C.usearch_dense_get_t{
+		index:          index,
+		executor:       executor,
+		outcome:        lent.outcome,
+		completion:     completion,
+		key:            key.toRaw(),
+		vectors:        vectors,
+		written:        written,
+		arena:          memory,
+		outputs_scalar: C.usearch_scalar_t(outputsScalar),
+	})
+	view := lent.rewound(arena)
+	lent.result = func() DenseVectors { return DenseVectors{exported: view, raw: *vectors, rows: uint(*written)} }
 	return lent
 }
 
@@ -1293,29 +1314,21 @@ func (receiver denseReceiver) health(completion C.usearch_completion_t) *lent[De
 	return lent
 }
 
-// landed picks the span a ranked call lands in: the one the caller lent, or a fresh one.
-func landed(lent *MatchesSpan, queries, wanted uint) MatchesSpan {
-	if lent != nil {
-		return *lent
-	}
-	return packedMatches(queries, wanted)
-}
-
 func (receiver denseReceiver) search(completion C.usearch_completion_t, queries RowsView, wanted uint,
-	config *DenseSearchConfig) *lent[MatchesSpan] {
+	arena *Arena, config *DenseSearchConfig) *lent[MatchesView] {
 	if config == nil {
 		config = new(DenseSearchConfig)
 	}
-	lent := open[MatchesSpan]()
+	lent := open[MatchesView]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
 		return lent.refuse(refusal)
 	}
-	matches := landed(config.Matches, queries.rows, wanted)
-	span, refusal := matches.lower(&lent.call, wanted)
+	memory, refusal := arena.lower()
 	if refusal != nil {
 		return lent.refuse(refusal)
 	}
+	matches := pin(&lent.call, new(C.usearch_matches_view_t))
 	predicate, predicateState := lent.predicate(config.Predicate)
 	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_search(&C.usearch_dense_search_t{
@@ -1325,7 +1338,9 @@ func (receiver denseReceiver) search(completion C.usearch_completion_t, queries 
 		completion:       completion,
 		count:            C.size_t(queries.rows),
 		queries:          queries.lower(&lent.call),
-		matches:          span,
+		matches:          matches,
+		arena:            memory,
+		wanted:           C.size_t(wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
 		predicate:        predicate,
 		predicate_state:  predicateState,
@@ -1333,16 +1348,17 @@ func (receiver denseReceiver) search(completion C.usearch_completion_t, queries 
 		progress_state:   progressState,
 		stats:            lent.stats(config.Stats),
 	})
-	lent.result = func() MatchesSpan { return matches }
+	view := lent.rewound(arena)
+	lent.result = func() MatchesView { return MatchesView{exported: view, raw: *matches, queries: queries.rows} }
 	return lent
 }
 
 func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries RowsView, rowsPerQuery, wanted uint,
-	config *DenseMaxsimConfig) *lent[MatchesSpan] {
+	arena *Arena, config *DenseMaxsimConfig) *lent[MatchesView] {
 	if config == nil {
 		config = new(DenseMaxsimConfig)
 	}
-	lent := open[MatchesSpan]()
+	lent := open[MatchesView]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
 		return lent.refuse(refusal)
@@ -1351,12 +1367,12 @@ func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries 
 	if rowsPerQuery == 0 || queries.rows%rowsPerQuery != 0 {
 		return lent.refuse(fail(StatusShapeMismatch, "the query rows do not divide into whole queries"))
 	}
-	count := queries.rows / rowsPerQuery
-	matches := landed(config.Matches, count, wanted)
-	span, refusal := matches.lower(&lent.call, wanted)
+	memory, refusal := arena.lower()
 	if refusal != nil {
 		return lent.refuse(refusal)
 	}
+	count := queries.rows / rowsPerQuery
+	matches := pin(&lent.call, new(C.usearch_matches_view_t))
 	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_maxsim(&C.usearch_dense_maxsim_t{
 		index:            index,
@@ -1366,17 +1382,20 @@ func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries 
 		count:            C.size_t(count),
 		queries:          queries.lower(&lent.call),
 		rows_per_query:   C.size_t(rowsPerQuery),
-		matches:          span,
+		matches:          matches,
+		arena:            memory,
+		wanted:           C.size_t(wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
 		progress:         progress,
 		progress_state:   progressState,
 		stats:            lent.stats(config.Stats),
 	})
-	lent.result = func() MatchesSpan { return matches }
+	view := lent.rewound(arena)
+	lent.result = func() MatchesView { return MatchesView{exported: view, raw: *matches, queries: count} }
 	return lent
 }
 
-func (receiver denseReceiver) multiply(completion C.usearch_completion_t, left RowsView,
+func (receiver denseReceiver) multiply(completion C.usearch_completion_t, left RowsView, arena *Arena,
 	config *DenseMultiplyConfig) *lent[DenseProducts] {
 	if config == nil {
 		config = new(DenseMultiplyConfig)
@@ -1386,14 +1405,12 @@ func (receiver denseReceiver) multiply(completion C.usearch_completion_t, left R
 	if refusal != nil {
 		return lent.refuse(refusal)
 	}
-	arena, landing := land(config.Arena)
-	lent.discard = func() { _ = landing.Close() }
-	offsets := make([]uint, left.rows+1)
-	exported := pin(&lent.call, new(struct {
-		keys     *C.usearch_key_t
-		scores   *C.usearch_distance_t
-		required C.size_t
-	}))
+	memory, refusal := arena.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	products := pin(&lent.call, new(C.usearch_matches_tape_view_t))
+	required := pin(&lent.call, new(C.size_t))
 	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_multiply(&C.usearch_dense_multiply_t{
 		index:            index,
@@ -1402,36 +1419,28 @@ func (receiver denseReceiver) multiply(completion C.usearch_completion_t, left R
 		completion:       completion,
 		count:            C.size_t(left.rows),
 		left:             left.lower(&lent.call),
-		offsets:          (*C.size_t)(unsafe.Pointer(lend(&lent.call, offsets))),
-		keys:             &exported.keys,
-		scores:           &exported.scores,
-		arena:            pin(&lent.call, &arena.handle),
-		required:         &exported.required,
+		products:         products,
+		required:         required,
+		arena:            memory,
 		wanted:           C.size_t(config.Wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
 		progress:         progress,
 		progress_state:   progressState,
 		stats:            lent.stats(config.Stats),
 	})
+	view := lent.rewound(arena)
 	lent.result = func() DenseProducts {
-		pairs := offsets[left.rows]
-		return DenseProducts{
-			landing:  landing,
-			offsets:  offsets,
-			keys:     unsafe.Slice((*Key)(unsafe.Pointer(exported.keys)), pairs),
-			scores:   unsafe.Slice((*Distance)(unsafe.Pointer(exported.scores)), pairs),
-			required: uint(exported.required),
-		}
+		return DenseProducts{exported: view, raw: *products, rows: left.rows, required: uint(*required)}
 	}
 	return lent
 }
 
 func (receiver denseReceiver) attend(completion C.usearch_completion_t, queries RowsView, lookup ValueLookup,
-	outputs RowsView, config *DenseAttendConfig) *lent[struct{}] {
+	arena *Arena, config *DenseAttendConfig) *lent[DenseVectors] {
 	if config == nil {
 		config = new(DenseAttendConfig)
 	}
-	lent := open[struct{}]()
+	lent := open[DenseVectors]()
 	index, executor, refusal := receiver.lower()
 	if refusal != nil {
 		return lent.refuse(refusal)
@@ -1443,7 +1452,12 @@ func (receiver denseReceiver) attend(completion C.usearch_completion_t, queries 
 	if config.Carry != nil && uint(len(config.Carry)) < queries.rows {
 		return lent.refuse(fail(StatusShapeMismatch, "the softmax carry holds fewer entries than there are queries"))
 	}
+	memory, refusal := arena.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
 	lent.pinner.Pin(lookup.Values.pointer)
+	outputs := pin(&lent.call, new(C.usearch_rows_view_t))
 	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_attend(&C.usearch_dense_attend_t{
 		index:              index,
@@ -1455,23 +1469,34 @@ func (receiver denseReceiver) attend(completion C.usearch_completion_t, queries 
 		head_count:         C.size_t(config.HeadCount),
 		value_lookup:       C.usearch_go_looks_up_values(),
 		value_lookup_state: lent.callback(lookup),
-		outputs:            outputs.lowerSpan(&lent.call),
 		carry:              (*C.usearch_dense_softmax_state_t)(unsafe.Pointer(lend(&lent.call, config.Carry))),
+		outputs:            outputs,
+		arena:              memory,
+		outputs_scalar:     C.usearch_scalar_t(config.OutputsScalar),
 		expansion_factor:   C.size_t(config.ExpansionFactor),
 		score_scale:        C.float(config.ScoreScale),
 		progress:           progress,
 		progress_state:     progressState,
 		stats:              lent.stats(config.Stats),
 	})
+	view := lent.rewound(arena)
+	lent.result = func() DenseVectors { return DenseVectors{exported: view, raw: *outputs, rows: queries.rows} }
 	return lent
 }
 
 //export usearchLooksUpValues
 func usearchLooksUpValues(state unsafe.Pointer, keys *C.usearch_key_t, count C.size_t, scalar C.usearch_scalar_t,
 	columns C.size_t, rows *unsafe.Pointer) {
-	lookup := (*cgo.Handle)(state).Value().(ValueLookup)
+	upcall := (*cgo.Handle)(state).Value().(upcall)
+	lookup := upcall.value.(ValueLookup)
 	values := lookup.Values
 	found := unsafe.Slice(rows, count)
+	defer func() {
+		if recovered := recover(); recovered != nil { // a panic unwinding through C frames would skip their unlocks
+			clear(found)
+			upcall.call.latch(recovered)
+		}
+	}()
 	// The library reads rows of its own shape, so values of another one answer no row at all.
 	shaped := Scalar(scalar) == values.scalar && uint(columns) == values.dimensions
 	for position, key := range unsafe.Slice((*Key)(unsafe.Pointer(keys)), count) {
@@ -1479,16 +1504,10 @@ func usearchLooksUpValues(state unsafe.Pointer, keys *C.usearch_key_t, count C.s
 		if !shaped {
 			continue
 		}
-		if row, ok := lookup.find(key); ok && row < values.rows {
+		if row, ok := lookup.Row(key); ok && row < values.rows {
 			found[position] = unsafe.Add(values.pointer, row*values.stride)
 		}
 	}
-}
-
-// find names the row of Values holding a key's value; a panic inside Row answers none.
-func (lookup ValueLookup) find(key Key) (row uint, found bool) {
-	defer func() { _ = recover() }() // a panic unwinding through C frames would skip their unlocks
-	return lookup.Row(key)
 }
 
 func (receiver denseReceiver) merge(completion C.usearch_completion_t, donors []*DenseIndex,
@@ -1554,7 +1573,7 @@ func (receiver denseReceiver) save(completion C.usearch_completion_t, path strin
 	return lent
 }
 
-func (receiver denseReceiver) saveBuffer(completion C.usearch_completion_t,
+func (receiver denseReceiver) saveBuffer(completion C.usearch_completion_t, arena *Arena,
 	config *DenseSaveBufferConfig) *lent[Monolith] {
 	if config == nil {
 		config = new(DenseSaveBufferConfig)
@@ -1564,27 +1583,24 @@ func (receiver denseReceiver) saveBuffer(completion C.usearch_completion_t,
 	if refusal != nil {
 		return lent.refuse(refusal)
 	}
-	arena, landing := land(config.Arena)
-	lent.discard = func() { _ = landing.Close() }
-	exported := pin(&lent.call, new(struct {
-		bytes  *C.uint8_t
-		length C.size_t
-	}))
+	memory, refusal := arena.lower()
+	if refusal != nil {
+		return lent.refuse(refusal)
+	}
+	monolith := pin(&lent.call, new(C.usearch_bytes_view_t))
 	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_save_buffer(&C.usearch_dense_save_buffer_t{
 		index:          index,
 		executor:       executor,
 		outcome:        lent.outcome,
 		completion:     completion,
-		bytes:          &exported.bytes,
-		length:         &exported.length,
-		arena:          pin(&lent.call, &arena.handle),
+		monolith:       monolith,
+		arena:          memory,
 		progress:       progress,
 		progress_state: progressState,
 	})
-	lent.result = func() Monolith {
-		return Monolith{landing: landing, Bytes: unsafe.Slice((*byte)(unsafe.Pointer(exported.bytes)), exported.length)}
-	}
+	view := lent.rewound(arena)
+	lent.result = func() Monolith { return Monolith{exported: view, raw: *monolith} }
 	return lent
 }
 
@@ -1620,36 +1636,59 @@ func (on DenseIndexOn) Cursor() (*DenseCursor, error) {
 	return block(lent)
 }
 
-// NextKeys copies the next keys into keys, returning how many were written; zero means the walk
-// is exhausted. Calls usearch_dense_cursor_next.
-func (cursor *DenseCursor) NextKeys(keys []Key) (uint, error) {
-	return cursor.NextBatch(keys, RowsView{})
+// NextKeys copies up to wanted next keys into arena; a batch of none means the walk is exhausted.
+// Calls usearch_dense_cursor_next.
+func (cursor *DenseCursor) NextKeys(wanted uint, arena *Arena) (DenseBatch, error) {
+	return cursor.next(wanted, ScalarUnknown, nil, arena)
 }
 
-// NextBatch copies the next entries into keys and vectors, which needs room for as many rows as
-// there are keys, in the scalar kind and width it was built with, returning the rows written;
-// zero means the walk is exhausted. Calls usearch_dense_cursor_next.
-func (cursor *DenseCursor) NextBatch(keys []Key, vectors RowsView) (uint, error) {
+// NextBatch copies up to wanted next entries into arena, their rows converted to outputsScalar beside their
+// keys; a batch of none means the walk is exhausted. Calls usearch_dense_cursor_next.
+func (cursor *DenseCursor) NextBatch(wanted uint, outputsScalar Scalar, arena *Arena) (DenseBatch, error) {
+	return cursor.next(wanted, outputsScalar, new(C.usearch_rows_view_t), arena)
+}
+
+// next pulls a batch, exporting rows only when vectors names where their view lands.
+func (cursor *DenseCursor) next(wanted uint, outputsScalar Scalar, vectors *C.usearch_rows_view_t,
+	arena *Arena) (DenseBatch, error) {
 	index, executor, refusal := cursor.receiver.lower()
 	if refusal == nil && cursor.handle == nil {
 		refusal = fail(StatusInvalidArgument, "the cursor is closed")
 	}
 	if refusal != nil {
-		return 0, refusal
+		return DenseBatch{}, refusal
 	}
-	lent := open[uint]()
+	memory, refusal := arena.lower()
+	if refusal != nil {
+		return DenseBatch{}, refusal
+	}
+	lent := open[DenseBatch]()
+	keys := pin(&lent.call, new(C.usearch_keys_view_t))
 	written := pin(&lent.call, new(C.size_t))
+	if vectors != nil {
+		lent.pinner.Pin(vectors)
+	}
 	C.usearch_dense_cursor_next(&C.usearch_dense_cursor_next_t{
-		index:      index,
-		executor:   executor,
-		outcome:    lent.outcome,
-		completion: C.usearch_completion_blocking_k,
-		cursor:     cursor.handle,
-		keys:       lent.keysSpan(keys),
-		vectors:    vectors.lowerSpan(&lent.call),
-		written:    written,
+		index:          index,
+		executor:       executor,
+		outcome:        lent.outcome,
+		completion:     C.usearch_completion_blocking_k,
+		cursor:         cursor.handle,
+		keys:           keys,
+		vectors:        vectors,
+		written:        written,
+		arena:          memory,
+		wanted:         C.size_t(wanted),
+		outputs_scalar: C.usearch_scalar_t(outputsScalar),
 	})
-	lent.result = func() uint { return uint(*written) }
+	view := lent.rewound(arena)
+	lent.result = func() DenseBatch {
+		batch := DenseBatch{exported: view, keys: *keys, written: uint(*written)}
+		if vectors != nil {
+			batch.vectors = DenseVectors{exported: view, raw: *vectors, rows: batch.written}
+		}
+		return batch
+	}
 	return block(lent)
 }
 
@@ -1701,31 +1740,34 @@ func (on DenseIndexOn) SearchStream(query RowsView, config *DenseSearchStreamIni
 	return block(lent)
 }
 
-// Next pulls the next-nearest matches into keys and distances, as many as they hold, returning
-// how many were written; zero means the walk is drained. Calls usearch_dense_search_stream_next.
-func (stream *DenseSearchStream) Next(keys []Key, distances []Distance) (uint, error) {
+// Next pulls up to wanted next-nearest matches into arena, as the one row of a search; a row of none
+// means the walk is drained. Calls usearch_dense_search_stream_next.
+func (stream *DenseSearchStream) Next(wanted uint, arena *Arena) (MatchesView, error) {
 	index, executor, refusal := stream.receiver.lower()
 	if refusal == nil && stream.handle == nil {
 		refusal = fail(StatusInvalidArgument, "the stream is closed")
 	}
-	if refusal == nil && len(keys) != len(distances) {
-		refusal = fail(StatusShapeMismatch, "the key and distance slabs are not the same shape")
-	}
 	if refusal != nil {
-		return 0, refusal
+		return MatchesView{}, refusal
 	}
-	lent := open[uint]()
-	matches := MatchesSpan{keys: keys, scores: distances, counts: make([]uint, 1), columns: uint(len(keys))}
-	span, _ := matches.lower(&lent.call, matches.columns)
+	memory, refusal := arena.lower()
+	if refusal != nil {
+		return MatchesView{}, refusal
+	}
+	lent := open[MatchesView]()
+	matches := pin(&lent.call, new(C.usearch_matches_view_t))
 	C.usearch_dense_search_stream_next(&C.usearch_dense_search_stream_next_t{
 		index:      index,
 		executor:   executor,
 		outcome:    lent.outcome,
 		completion: C.usearch_completion_blocking_k,
 		stream:     stream.handle,
-		matches:    span,
+		matches:    matches,
+		arena:      memory,
+		wanted:     C.size_t(wanted),
 	})
-	lent.result = func() uint { return matches.counts[0] }
+	view := lent.rewound(arena)
+	lent.result = func() MatchesView { return MatchesView{exported: view, raw: *matches, queries: 1} }
 	return block(lent)
 }
 
