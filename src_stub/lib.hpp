@@ -42,6 +42,7 @@
 #include <string_view>   // `std::string_view` - a byte run read as text
 #include <type_traits>   // `std::is_nothrow_move_constructible_v`
 #include <unordered_map> // `std::unordered_map`, `std::unordered_multimap`
+#include <variant>       // `std::variant`, `std::visit` - the deferred calls' arguments
 #include <vector>        // `std::vector`
 
 #include "usearch/usearch.h" // every argument structure a deferred call copies

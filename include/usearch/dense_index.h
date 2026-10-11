@@ -96,6 +96,7 @@
  *  @c usearch_dense_cursor_init answers on RAM only; VRAM rows are read back through a search.
  *  @c usearch_dense_get, @c usearch_dense_save_buffer, @c usearch_dense_multiply and
  *  @c usearch_dense_maxsim answer on RAM only, the first three waiting on device arenas.
+ *  A search with @c usearch_traversal_scan_k answers on RAM only, waiting on device scans.
  *  @c usearch_dense_attend answers on both, resolving value rows through @c value_lookup, a host
  *  function on RAM and a device one on VRAM.
  *  @c usearch_dense_search_stream_init and @c usearch_dense_merge are unsupported on both.
@@ -748,8 +749,11 @@ typedef struct usearch_dense_search_t {
     /** Where the run lands. */
     usearch_matches_span_t matches;
 
-    /** The @b optional candidate-pool breadth the walk explores; zero derives. */
+    /** The @b optional candidate-pool breadth the walk explores; zero derives, and a scan ignores it. */
     size_t expansion_factor;
+
+    /** How rows are reached: a walk, the default, or an exact scan of every row on RAM handles. */
+    usearch_traversal_t traversal;
 
     /** The @b optional per-key admission callback; @c NULL admits everything. */
     usearch_predicate_t predicate;
@@ -768,11 +772,20 @@ typedef struct usearch_dense_search_t {
 } usearch_dense_search_t;
 
 /**
- *  @brief Performs k-Approximate Nearest Neighbors Search for a run of queries - the native batch
- *      operation, parallelized internally; one query is a count of one. Never writes to the
- *      graph, so any number may overlap with concurrent insertions. @ref dense_index_concurrency
+ *  @brief Performs k-Nearest Neighbors Search for a run of queries, approximate by walking the
+ *      graph or exact by scanning every row - the native batch operation, parallelized internally.
+ *      Never writes to the index, so any number may overlap with insertions. @ref dense_index_concurrency
  *  @retval usearch_status_shape_mismatch_k @c matches.capacity is below @c count.
  *  @retval usearch_status_device_k A @c predicate on a VRAM handle, or device output spans there.
+ *  @retval usearch_status_unsupported_k A @c usearch_traversal_scan_k scan of a handle outside RAM.
+ *
+ *  A scan walks no graph. The queries split into blocks, each taken by one of the executor's
+ *  threads: a block of many queries packs once into the operand layout of the CPU's matrix kernels
+ *  and streams every stored row against the pack where it lies, while a lone query takes the walk's
+ *  own 4-way kernels. Either way a block costs one pass over the index, and each query's matches
+ *  merge into its output row as the pass advances. A @c predicate is then asked only about rows
+ *  closer than the worst match the query already holds - which makes the scan the fallback for
+ *  filters too selective for a walk to cross.
  *
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
  *  the traversal rather than terminating it, so recall does not collapse at low selectivity - the

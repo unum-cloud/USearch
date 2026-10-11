@@ -1436,6 +1436,10 @@ struct dense_ram_index {
         /** Reader contract; @c immutable_k - or stronger - drops every atomic in the traversal
          *  when the caller certifies no concurrent mutators. */
         synchronization_t synchronization = synchronization_t::concurrent_k;
+
+        /** How rows are reached; @c scan_k scores every published row exactly, ignoring the breadth,
+         *  and only the sharded index's @c search and @c search_if implement it yet. */
+        traversal_t traversal = traversal_t::walk_k;
     };
 
     /** Telemetry of one @c search() call; matches stay in the caller's context. */
@@ -2935,6 +2939,7 @@ struct dense_ram_index {
     expected<search_result_t> search_below_(vector_view_t query_vector, dense_traversal_context_t& context,
                                             search_config_t config, fold_type_&& fold, results_array_t const& bound,
                                             rescoring_type_ const& rescoring, node_id_t first_invisible_id) noexcept {
+        if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
         // Every distance kernel takes its width from the geometry, so a narrower query would be over-read.
         geometry_t const frozen = geometry();
         if (frozen && query_vector.size() != frozen.dimensions()) return {{}, status_t::config_mismatch_k};
@@ -3007,6 +3012,135 @@ struct dense_ram_index {
                                                                  first_invisible_id);
         std::swap(context.results, context.refining_candidates);
         return result;
+    }
+
+    /** Queries one exact-scan block takes: a whole number of tiles when a matrix engine multiplies the scalar
+     *  and @p queries_count fills one, shared across @p threads up to the kit's pack; else one query. */
+    static constexpr std::size_t scan_width(std::size_t queries_count, std::size_t threads) noexcept {
+        if constexpr (!tiles_chain_t::has_tiles_k) return 1;
+        else {
+            using tiles_kit_t = typename tiles_chain_t::kit_t;
+            if (queries_count < tiles_kit_t::tile_columns_k) return 1;
+            std::size_t const share = divide_round_up(queries_count, max_of<std::size_t>(threads, 1));
+            return min_of(round_up_to_multiple(share, tiles_kit_t::tile_columns_k), tiles_kit_t::pack_columns_k);
+        }
+    }
+
+    /**
+     *  @brief The exact sibling of @c walk_: scores every row below @p first_invisible_id against each query of
+     *      @p block, landing each row that beats a query's worst match through @p land.
+     *
+     *  A block of many queries streams through the matrix engine, a single query through the 4-way kits; both
+     *  finalize through @c quads_kit_t, so the distances match the walk's. @p admits sees a row only once it
+     *  beats some query's worst match, and at most once per block.
+     */
+    template <typename admits_type_, typename land_type_>
+    status_t scan_(vectors_view_t block, admits_type_&& admits, land_type_&& land, dense_traversal_context_t& context,
+                   node_id_t first_invisible_id) noexcept {
+        if constexpr (tiles_chain_t::has_tiles_k)
+            if (block.extent(0) > 1) return scan_tiles_(block, admits, land, context, first_invisible_id);
+        return scan_quads_(block.row(0).as_vector(), admits, land, context, first_invisible_id);
+    }
+
+    /** Whether @p admits lets @p node into the matches - always, under the dummy predicate. */
+    template <typename admits_type_>
+    static bool admitted_(admits_type_& admits, dense_node_id_t node) noexcept {
+        if constexpr (std::is_same_v<std::decay_t<admits_type_>, dummy_predicate_t>) return true;
+        else return admits(node) == admission_t::admit_k;
+    }
+
+    /** One query against every row, four rows per kernel call, each landing as it beats the worst match. */
+    template <typename admits_type_, typename land_type_>
+    status_t scan_quads_(vector_view_t query, admits_type_& admits, land_type_& land,
+                         dense_traversal_context_t& context, node_id_t first_invisible_id) noexcept {
+        vector_norms_t const query_norms = dense_norms(query);
+        distance_t threshold = std::numeric_limits<distance_t>::max();
+        for (std::size_t chunk = 0, first = 0; first < first_invisible_id;
+             first += chunk_schedule_t::rows_in(chunk++)) {
+            std::size_t const rows_count = min_of(chunk_schedule_t::rows_in(chunk), first_invisible_id - first);
+            for (std::size_t row = 0; row < rows_count; row += 4) {
+                std::size_t const lanes = min_of<std::size_t>(4, rows_count - row);
+                std::array<vector_view_t, 4> lane_rows;
+                std::array<vector_norms_t, 4> lane_norms;
+                for (std::size_t lane = 0; lane != 4; ++lane) {
+                    location_t const location {chunk, row + min_of(lane, lanes - 1)};
+                    lane_rows[lane] = vector_for(location);
+                    lane_norms[lane] = norm_for(location);
+                }
+                std::array<distance_t, 4> const lane_distances = distances(query, query_norms, lane_rows, lane_norms);
+                for (std::size_t lane = 0; lane != lanes; ++lane) {
+                    dense_node_id_t const node = static_cast<dense_node_id_t>(first + row + lane);
+                    if (lane_distances[lane] < threshold && admitted_(admits, node))
+                        threshold = land(0, {node, lane_distances[lane]});
+                }
+            }
+        }
+        context.computed_distances += first_invisible_id;
+        return status_t::success_k;
+    }
+
+    /** A block of queries packed once, every chunk streamed against the pack in calls of the kit's
+     *  @c stream_rows_k, and each row of dots finalized against four queries at a time. */
+    template <typename admits_type_, typename land_type_>
+    status_t scan_tiles_(vectors_view_t block, admits_type_& admits, land_type_& land,
+                         dense_traversal_context_t& context, node_id_t first_invisible_id) noexcept
+        requires(tiles_chain_t::has_tiles_k)
+    {
+        using tiles_kit_t = typename tiles_chain_t::kit_t;
+        using finalized_vec_t = typename quads_kit_t::finalized_vec_t;
+        using raw_dot_t = typename dot_result_t::raw_t;
+        static_assert(sizeof(finalized_vec_t) == 4 * sizeof(raw_dot_t), "A finalizer takes four dot lanes");
+        std::size_t const columns = block.extent(0), dimensions = this->dimensions();
+        nk_size_t packed_bytes = 0;
+        if (tiles_kit_t::pack_size(tiles_kit_t::pack_columns_k, dimensions, &packed_bytes) != nk_success_k ||
+            failed(context.reserve_tiles(packed_bytes, tiles_kit_t::stream_rows_k, tiles_kit_t::pack_columns_k)))
+            return status_t::bad_alloc_k;
+        [[maybe_unused]] nk_status_t const packed = tiles_kit_t::pack(
+            block.raw_values_data(), columns, dimensions, static_cast<std::size_t>(block.stride_bytes(0)),
+            context.packed_queries.data(), 0, columns, nullptr);
+        assert(packed == nk_success_k && "A matrix engine packs any block");
+
+        alignas(16) std::array<dot_result_t, tiles_kit_t::pack_columns_k> query_sumsqs {};
+        std::array<distance_t, tiles_kit_t::pack_columns_k> thresholds, row_distances;
+        for (std::size_t column = 0; column != columns; ++column) {
+            query_sumsqs[column] = dense_norms(block.row(column).as_vector()).sumsq;
+            thresholds[column] = std::numeric_limits<distance_t>::max();
+        }
+        nk::matrix_span<raw_dot_t> const dots = context.step_dots.span();
+        for (std::size_t chunk = 0, first = 0; first < first_invisible_id;
+             first += chunk_schedule_t::rows_in(chunk++)) {
+            std::size_t const chunk_rows = min_of(chunk_schedule_t::rows_in(chunk), first_invisible_id - first);
+            for (std::size_t offset = 0; offset < chunk_rows; offset += tiles_kit_t::stream_rows_k) {
+                std::size_t const rows_count = min_of(tiles_kit_t::stream_rows_k, chunk_rows - offset);
+                vectors_view_t const rows = vectors_chunks_[chunk](nk::range(offset, offset + rows_count), nk::slice);
+                [[maybe_unused]] nk_status_t const scored = tiles_kit_t::dots_packed(
+                    rows.raw_values_data(), context.packed_queries.data(), dots.data(), rows_count, columns, dimensions,
+                    static_cast<std::size_t>(rows.stride_bytes(0)), static_cast<std::size_t>(dots.stride_bytes(0)),
+                    nullptr);
+                assert(scored == nk_success_k && "A matrix engine scores any call");
+                for (std::size_t row = 0; row != rows_count; ++row) {
+                    // The finalizer's seats are symmetric, so the stored row takes the query's against four queries.
+                    std::span<raw_dot_t const> const row_dots = to_span(dots.row(row).as_vector());
+                    dot_result_t const row_sumsq = norm_for({chunk, offset + row}).sumsq;
+                    for (std::size_t column = 0; column < columns; column += 4) {
+                        std::array<f32_t, 4> const quad = convert_to_distances<quads_kit_t>(
+                            kernel_, *reinterpret_cast<finalized_vec_t const*>(&row_dots[column]), row_sumsq,
+                            *reinterpret_cast<finalized_vec_t const*>(&query_sumsqs[column]));
+                        std::memcpy(&row_distances[column], quad.data(), sizeof(quad));
+                    }
+                    bool closer = false;
+                    for (std::size_t column = 0; column != columns; ++column)
+                        closer |= row_distances[column] < thresholds[column];
+                    dense_node_id_t const node = static_cast<dense_node_id_t>(first + offset + row);
+                    if (!closer || !admitted_(admits, node)) continue;
+                    for (std::size_t column = 0; column != columns; ++column)
+                        if (row_distances[column] < thresholds[column])
+                            thresholds[column] = land(column, {node, row_distances[column]});
+                }
+            }
+        }
+        context.computed_distances += first_invisible_id * columns;
+        return status_t::success_k;
     }
 
     /** What a search walks: the IDs below its watermark snapshot, published for every reader. */

@@ -2210,10 +2210,14 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                     arguments->expansion_factor, arguments->progress, arguments->progress_state, arguments->stats,
                     outcome,
                     [&](auto view, auto rows, auto& executor, auto config, auto keys, auto distances, auto counts) {
+                        if constexpr (is_ram_index<variant_type_>)
+                            config.traversal = static_cast<traversal_t>(arguments->traversal);
                         return view.search(rows, executor, config, keys, distances, counts, predicate);
                     });
             };
-            if (!keyed.callback) search_with(dummy_predicate_t {});
+            if (!is_ram_index<variant_type_> && arguments->traversal != usearch_traversal_walk_k)
+                propagate_error(usearch_status_unsupported_k, outcome, "Scans run on RAM handles alone");
+            else if (!keyed.callback) search_with(dummy_predicate_t {});
             else if constexpr (!is_ram_index<variant_type_>)
                 propagate_error(usearch_status_device_k, outcome, "A host predicate cannot narrow a device walk");
             else search_with(keyed);

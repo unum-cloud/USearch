@@ -263,9 +263,9 @@ typedef enum usearch_status_t {
      *  published nothing, so the handle carries whatever it did before the call. */
     usearch_status_cancelled_k = 15,
 
-    /** The verb is declared for every residency but this one does not implement it, or the build
-     *  left the requested quantization out; no retry, option, or smaller request can help, so a
-     *  caller picks another residency or build. */
+    /** The verb is declared for every residency but this one does not implement it, nor the requested
+     *  traversal, or the build left the requested quantization out; no retry, option, or smaller request
+     *  can help, so a caller picks another residency, traversal or build. */
     usearch_status_unsupported_k = 16,
 
     /** An argument breaks the verb's contract - a required pointer left @c NULL, inputs inside
@@ -568,6 +568,16 @@ typedef enum usearch_residency_t {
     /** Persisted index traversed through pluggable I/O engines, sized past RAM. */
     usearch_residency_nvme_k = 2,
 } usearch_residency_t;
+
+/** How a search reaches the indexed rows it scores. */
+typedef enum usearch_traversal_t {
+
+    /** Walk the graph, scoring the rows the expansion reaches - approximate, the default. */
+    usearch_traversal_walk_k = 0,
+
+    /** Score every row published when the query's scan starts - exact, the ground truth a walk approximates. */
+    usearch_traversal_scan_k = 1,
+} usearch_traversal_t;
 
 /**
  *  @brief The host memory domains a RAM-resident index places its shards in - one shard per

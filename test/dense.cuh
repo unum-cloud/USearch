@@ -200,13 +200,13 @@ struct dense_arena_context {
     typename indexes_type_::executor_t::arena_t arena;
 
     /** The traversal context, allocating from the arena beside it. */
-    typename indexes_type_::traversal_t context;
+    typename indexes_type_::dense_traversal_context_t context;
 
     /** The arena reservation's answer; every use checks it before walking. */
     status_t status;
 
     explicit dense_arena_context(indexes_type_& indexes) noexcept
-        : arena(global_allocator), context(typename indexes_type_::traversal_t::allocator_t {arena}),
+        : arena(global_allocator), context(typename indexes_type_::dense_traversal_context_t::allocator_t {arena}),
           status(arena.reserve_exactly(indexes.shard(0).traversal_memory_usage())) {}
     dense_arena_context(dense_arena_context&&) = delete;
     dense_arena_context(dense_arena_context const&) = delete;
@@ -273,7 +273,7 @@ struct dense_indexes_row_driver<indexes_type_> {
 
     dense_indexes_row_driver(indexes_type_& indexes, dense_indexes_executor<indexes_type_>&) noexcept
         : arena(indexes), status(arena.status) {}
-    typename indexes_type_::traversal_t& handle() noexcept { return arena.context; }
+    typename indexes_type_::dense_traversal_context_t& handle() noexcept { return arena.context; }
 };
 
 /** Every row of @p view widened to @c f32, row-major - exact for every stored scalar kind. */
@@ -825,6 +825,102 @@ std::size_t test_dense_indexes_indexer_search(u64_t seed) {
         }
         return failures;
     }
+}
+
+/**
+ *  @brief Sharded scans against a one-to-one oracle over every stored row.
+ *
+ *  Two shards hold more rows than one first chunk, and the queries outnumber one packed block, so the scan
+ *  crosses both seams. Each query - a stored row - ranks its true nearest at their own distances, a NaN for
+ *  a self-match included; a predicate narrows the same ranking to the keys it admits; and a request wider
+ *  than the store returns every row. RAM only: device scans are not wired yet.
+ */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+    requires ram_indexes<indexes_type_>
+std::size_t test_dense_indexes_scan(u64_t seed) {
+    using scalar_t = typename indexes_type_::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    using distance_t = typename indexes_type_::distance_t;
+    constexpr nk_capability_t caps_k = indexes_type_::index_t::picked_quads_capability_k;
+    constexpr std::size_t rows_count = 2100, queries_count = 260, wanted = 10, wide_queries_count = 3;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+
+    dense_indexes_executor<indexes_type_> driver;
+    if (failed(driver.status)) return failures + expect(false);
+    indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(indexes)));
+    failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
+    auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_scan"));
+    std::vector<key_t> keys(rows_count);
+    for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(1 + row);
+    failures += expect(
+        succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
+
+    // Every query against every row through the one-to-one kernel the walk scores with.
+    auto const queries = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
+    auto oracle = nk::matrix<distance_t>::zeros({queries_count, rows_count}).value;
+    for (std::size_t query = 0; query != queries_count; ++query) {
+        auto const query_vector = queries.row(query).as_vector();
+        auto const query_norms = usearch::dense_norms<caps_k, scalar_t>(query_vector);
+        for (std::size_t row = 0; row != rows_count; ++row) {
+            auto const row_vector = vectors.view().row(row).as_vector();
+            oracle(query, row) = usearch::distance<caps_k, scalar_t>(
+                kernel_, query_vector, query_norms, row_vector, usearch::dense_norms<caps_k, scalar_t>(row_vector));
+        }
+    }
+
+    auto found_keys = nk::matrix<key_t>::zeros({queries_count, wanted}).value;
+    auto found_distances = nk::matrix<distance_t>::zeros({queries_count, wanted}).value;
+    auto wide_keys = nk::matrix<key_t>::zeros({wide_queries_count, rows_count}).value;
+    auto wide_distances = nk::matrix<distance_t>::zeros({wide_queries_count, rows_count}).value;
+    std::vector<std::size_t> counts(queries_count);
+    auto all = [](key_t) noexcept { return true; };
+    auto even = [](key_t key) noexcept { return static_cast<std::size_t>(key) % 2 == 0; };
+    auto admit_even = [&](key_t key) noexcept { return even(key) ? admission_t::admit_k : admission_t::reject_k; };
+    // One query's found ranking against the oracle's, sorted over the keys `admits` lets through.
+    auto expect_ranking = [&](nk::matrix_view<key_t> ranked_keys, nk::matrix_view<distance_t> ranked_distances,
+                              std::size_t query, auto admits) {
+        std::vector<distance_t> admitted;
+        for (std::size_t row = 0; row != rows_count; ++row)
+            if (admits(keys[row])) admitted.push_back(oracle(query, row));
+        std::sort(admitted.begin(), admitted.end());
+        std::size_t ranking_failures = expect_eq(counts[query], min_of(ranked_keys.extent(1), admitted.size()));
+        for (std::size_t rank = 0; rank != min_of(counts[query], admitted.size()); ++rank) {
+            key_t const key = ranked_keys(query, rank);
+            distance_t const distance = ranked_distances(query, rank);
+            ranking_failures += expect(admits(key));
+            ranking_failures += expect_near(distance, admitted[rank]);
+            ranking_failures += expect_near(distance, oracle(query, static_cast<std::size_t>(key) - 1));
+        }
+        return ranking_failures;
+    };
+
+    typename indexes_type_::search_config_t const scan {.traversal = traversal_t::scan_k};
+    auto const [found, status] = indexes.search(queries, driver.executor, scan, found_keys.span(),
+                                                found_distances.span(), std::span {counts});
+    failures += expect(succeeded(status));
+    failures += expect_eq(found.computed_distances, queries_count * rows_count);
+    for (std::size_t query = 0; query != queries_count; ++query)
+        failures += expect_ranking(found_keys.view(), found_distances.view(), query, all);
+
+    auto const filtered_status = indexes
+                                     .search_if(queries, driver.executor, scan, found_keys.span(),
+                                                found_distances.span(), std::span {counts}, admit_even)
+                                     .status;
+    failures += expect(succeeded(filtered_status));
+    for (std::size_t query = 0; query != queries_count; ++query)
+        failures += expect_ranking(found_keys.view(), found_distances.view(), query, even);
+
+    auto const wide_queries = vectors(nk::range(std::size_t {0}, wide_queries_count), nk::slice);
+    auto const wide_status = indexes
+                                 .search(wide_queries, driver.executor, scan, wide_keys.span(), wide_distances.span(),
+                                         std::span {counts}.first(wide_queries_count))
+                                 .status;
+    failures += expect(succeeded(wide_status));
+    for (std::size_t query = 0; query != wide_queries_count; ++query)
+        failures += expect_ranking(wide_keys.view(), wide_distances.view(), query, all);
+    return failures;
 }
 
 #pragma endregion Search

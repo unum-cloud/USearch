@@ -267,6 +267,22 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     for (size_t row = 0; row != collection_size; ++row)
         expect(counts[row] == 0 || found_keys[row].bytes[15] % 2 == 0, "A predicate must narrow the matches");
 
+    // Where the walk may miss a few self-queries, an exact scan finds every one.
+    usearch_dense_search(&(usearch_dense_search_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = collection_size,
+                                                    .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
+                                                    .matches = {found_keys, sizeof(usearch_key_t), found_distances,
+                                                                sizeof(usearch_distance_t), counts, collection_size, 1},
+                                                    .traversal = usearch_traversal_scan_k});
+    expect(!outcome.message, outcome.message);
+    for (size_t row = 0; row != collection_size; ++row) {
+        usearch_key_t const expected = key_of(row);
+        expect(counts[row] == 1 && memcmp(found_keys[row].bytes, expected.bytes, sizeof(expected.bytes)) == 0,
+               "An exact scan must find every self-query itself");
+    }
+
     free(counts);
     free(found_distances);
     free(found_keys);

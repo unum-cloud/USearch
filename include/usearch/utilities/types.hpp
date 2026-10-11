@@ -290,7 +290,7 @@ constexpr char const* status_to_string(status_t status) noexcept {
     case status_t::config_mismatch_k: return "the request contradicts the frozen configuration";
     case status_t::contended_k: return "a synchronization contract was violated concurrently";
     case status_t::cancelled_k: return "a progress callback asked the operation to stop";
-    case status_t::unsupported_k: return "this residency does not implement the verb";
+    case status_t::unsupported_k: return "this residency does not implement the verb or its traversal";
     case status_t::deferred_k: return "the call was submitted deferred and is not final yet";
     case status_t::invalid_argument_k: return "an argument breaks the verb's contract";
     }
@@ -421,6 +421,16 @@ enum class synchronization_t : u32_t {
 
     /** Sole ownership - nothing else touches the index, readers included. */
     exclusive_k,
+};
+
+/** How a search reaches the rows it scores, mirroring @c usearch_traversal_t. */
+enum class traversal_t : u32_t {
+
+    /** Walk the graph, scoring the rows the expansion reaches - approximate, the default. */
+    walk_k = usearch_traversal_walk_k,
+
+    /** Score every published row - exact, ignoring the expansion factor. */
+    scan_k = usearch_traversal_scan_k,
 };
 
 enum connectivity_t : u32_t {
