@@ -48,7 +48,8 @@ bool run_indexes_algebra(streamed_dataset_type_& streamed, algebra_settings_t co
     std::iota(rows.begin(), rows.end(), u32_t {0});
     algebra_inputs<typename bench_t::scalar_t> inputs;
     if (!open_algebra_inputs(streamed, algebra, rows, inputs)) return false;
-    std::size_t const query_count = inputs.rows.extent(0), columns = inputs.values.columns, judged = inputs.judged;
+    std::size_t const query_count = inputs.rows.extent(0), columns = inputs.value_rows.extent(1),
+                      judged = inputs.judged;
     typename index_t::search_config_t config;
     config.expansion_factor = static_cast<typename bench_t::small_size_t>(settings.expansion_search.value);
     config.synchronization = synchronization_t::immutable_k;
@@ -77,13 +78,13 @@ bool run_indexes_algebra(streamed_dataset_type_& streamed, algebra_settings_t co
     report_multiply_metrics(query_count, nodes_count, multiply_seconds, sums.computed_distances);
 
     // Every shard's device reads the one table, so it lives in managed memory, each device keeping a read-only copy.
-    std::size_t const row_bytes = inputs.values.row_bytes(), pitch = round_up_to_multiple<std::size_t>(row_bytes, 16);
+    std::size_t const row_bytes = inputs.value_row_bytes(), pitch = round_up_to_multiple<std::size_t>(row_bytes, 16);
     std::size_t const attend_rows = round_up_to_multiple(batch_rows, head_count);
     cuda_managed_allocator<byte_t> device_values;
     auto device_outputs = cuda_make_unique(cuda_device_allocator_t {nullptr, bench.devices.front()},
                                            attend_rows * columns * sizeof(f32_t));
     if (failed(device_values.reserve_range(nodes_count * pitch, bench.devices.front())) || !device_outputs ||
-        cudaMemcpy2D(device_values.base(), pitch, inputs.values.stored.data(), row_bytes, row_bytes, nodes_count,
+        cudaMemcpy2D(device_values.base(), pitch, inputs.node_values.data(), row_bytes, row_bytes, nodes_count,
                      cudaMemcpyDefault) != cudaSuccess ||
         cudaMemAdvise(device_values.base(), nodes_count * pitch, cudaMemAdviseSetReadMostly, cudaMemLocation {}) !=
             cudaSuccess) {
@@ -136,10 +137,6 @@ struct indexes_algebra_workload_t {
         return run_indexes_algebra(streamed, algebra);
     }
 };
-
-#pragma endregion
-
-#pragma region Dispatch Cascade
 
 /** The algebra shard hop: the compute ceiling below one stored dtype under the dot kernel, so the per-dtype shards
  *  carry the whole device instantiation grid of their dtype. */

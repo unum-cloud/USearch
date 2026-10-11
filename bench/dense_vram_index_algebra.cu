@@ -174,7 +174,7 @@ int bench_dense_vram_index_algebra(int argc, char const* const* argv) {
                                 utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
                                 settings_t const& settings, std::span<int const> devices, cuda_arch_t max_compute,
                                 cuda_address_space_t plane_space) {
-        if (!resolve_algebra_settings(settings, algebra)) return 1;
+        if (!resolve_algebra_settings(settings)) return 1;
         print(algebra);
         return dispatch_stored_value<dataset_scalar_type_, nk_bf16_k, nk_f16_k, nk_e5m2_k, nk_e4m3_k, nk_e3m2_k,
                                      nk_e2m3_k, nk_i8_k, nk_i4_k, nk_u8_k, nk_u4_k>(

@@ -131,7 +131,7 @@ int bench_dense_ram_index_algebra(int argc, char const* const* argv) {
     return run_cpu_bench(
         argc, argv, "usearch_bench_dense_ram_index_algebra",
         [&]<typename dataset_scalar_type_>(bench_launch<dataset_scalar_type_> const& launch) {
-            if (!resolve_algebra_settings(launch.settings, algebra)) return 1;
+            if (!resolve_algebra_settings(launch.settings)) return 1;
             print(algebra);
             return dispatch_stored_value<dataset_scalar_type_, nk_bf16_k, nk_f16_k, nk_e5m2_k, nk_e4m3_k, nk_e3m2_k,
                                          nk_e2m3_k, nk_i8_k, nk_i4_k, nk_u8_k, nk_u4_k>(

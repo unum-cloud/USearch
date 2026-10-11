@@ -23,7 +23,7 @@
 
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::uint64_t`
-#include <cstdlib> // `std::exit`
+#include <cstdlib> // `std::exit`, `std::strtod`
 
 #include <array>        // `std::array`
 #include <charconv>     // `std::from_chars`
@@ -103,7 +103,7 @@ struct flag_t {
     std::string_view name;
     std::string_view placeholder;
     std::string_view help;
-    std::variant<std::string_view*, count_t*, counts_t*, switch_t*, std::chrono::milliseconds*, std::uint32_t*>
+    std::variant<std::string_view*, count_t*, counts_t*, switch_t*, std::chrono::milliseconds*, std::uint32_t*, double*>
         destination;
 };
 
@@ -181,6 +181,15 @@ inline std::optional<std::uint32_t> parse_seed(std::string_view text) noexcept {
     return seed;
 }
 
+/** A non-negative real, like "0.125" or "1e-3". */
+inline std::optional<double> parse_real(std::string_view text) noexcept {
+    // Text values view the tail of their `argv` entry, so `strtod` stops at its terminator.
+    char* end = nullptr;
+    double const real = std::strtod(text.data(), &end);
+    if (text.empty() || end != text.data() + text.size() || !(real >= 0)) return std::nullopt;
+    return real;
+}
+
 #pragma endregion Values
 
 #pragma region Arguments
@@ -202,6 +211,12 @@ inline std::optional<std::uint32_t> parse_seed(std::string_view text) noexcept {
         std::optional<std::uint32_t> const parsed = parse_seed(value);
         if (!parsed) return argument_status_t::invalid_number_k;
         **seed = *parsed;
+        return argument_status_t::parsed_k;
+    }
+    if (auto const* real = std::get_if<double*>(&flag.destination)) {
+        std::optional<double> const parsed = parse_real(value);
+        if (!parsed) return argument_status_t::invalid_number_k;
+        **real = *parsed;
         return argument_status_t::parsed_k;
     }
     return argument_status_t::unexpected_value_k;
@@ -278,6 +293,7 @@ inline std::optional<std::uint32_t> parse_seed(std::string_view text) noexcept {
         return (*counts)->minimum ? "positive counts like 64,128" : "unsigned integers like 0,1";
     if (std::holds_alternative<std::chrono::milliseconds*>(flag.destination)) return "a duration like 200ms or 10s";
     if (std::holds_alternative<std::uint32_t*>(flag.destination)) return "an unsigned integer or random";
+    if (std::holds_alternative<double*>(flag.destination)) return "a non-negative real";
     if (std::holds_alternative<switch_t*>(flag.destination)) return "no value";
     return "a value";
 }

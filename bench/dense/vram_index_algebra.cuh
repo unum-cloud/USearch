@@ -54,7 +54,8 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
     std::size_t const wanted = settings.expansion_search.value;
     algebra_inputs<typename bench_t::scalar_t> inputs;
     if (!open_algebra_inputs(streamed, algebra, {streamed.id_to_row.data(), nodes_count}, inputs)) return false;
-    std::size_t const query_count = inputs.rows.extent(0), columns = inputs.values.columns, judged = inputs.judged;
+    std::size_t const query_count = inputs.rows.extent(0), columns = inputs.value_rows.extent(1),
+                      judged = inputs.judged;
     typename index_t::search_config_t config;
     config.expansion_factor = static_cast<typename bench_t::small_size_t>(settings.expansion_search.value);
     config.synchronization = synchronization_t::immutable_k;
@@ -84,13 +85,13 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
     report_multiply_metrics(query_count, nodes_count, multiply_seconds, bench.lane.computed_distances);
 
     // Rows a 16-byte pitch apart, the alignment the lookup's fragment rows promise.
-    std::size_t const row_bytes = inputs.values.row_bytes(), pitch = round_up_to_multiple<std::size_t>(row_bytes, 16);
+    std::size_t const row_bytes = inputs.value_row_bytes(), pitch = round_up_to_multiple<std::size_t>(row_bytes, 16);
     std::size_t const attend_rows = round_up_to_multiple(batch_rows, head_count);
     auto device_values = cuda_make_unique(cuda_device_allocator_t {nullptr, bench.device}, nodes_count * pitch);
     auto device_outputs = cuda_make_unique(cuda_device_allocator_t {nullptr, bench.device},
                                            attend_rows * columns * sizeof(f32_t));
     if (!device_values || !device_outputs ||
-        cudaMemcpy2D(device_values.get(), pitch, inputs.values.stored.data(), row_bytes, row_bytes, nodes_count,
+        cudaMemcpy2D(device_values.get(), pitch, inputs.node_values.data(), row_bytes, row_bytes, nodes_count,
                      cudaMemcpyHostToDevice) != cudaSuccess) {
         fmt::println("Failed to place {:.2f} GB of values on device {}", gigabytes(nodes_count * pitch), bench.device);
         return false;
@@ -141,10 +142,6 @@ struct algebra_workload_t {
         return run_algebra(streamed, algebra);
     }
 };
-
-#pragma endregion
-
-#pragma region Dispatch Cascade
 
 /** The algebra shard hop: the memory-axis split of @ref run_with_stored_dtype, with the cascade ending in the
  *  algebra workload, so the per-dtype shards carry the whole device instantiation grid of their dtype. */

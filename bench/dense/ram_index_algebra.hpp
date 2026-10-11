@@ -54,7 +54,8 @@ bool run_algebra(streamed_dataset_type_& streamed, fu_pool_t pool, algebra_setti
     std::size_t const nodes_count = bench.index->size(), head_count = algebra.head_count.value;
     algebra_inputs<typename bench_t::scalar_t> inputs;
     if (!open_algebra_inputs(streamed, algebra, {streamed.id_to_row.data(), nodes_count}, inputs)) return false;
-    std::size_t const query_count = inputs.rows.extent(0), columns = inputs.values.columns, judged = inputs.judged;
+    std::size_t const query_count = inputs.rows.extent(0), columns = inputs.value_rows.extent(1),
+                      judged = inputs.judged;
     std::size_t threads = 0;
     [[maybe_unused]] fu_status_t const counted = fu_pool_threads_count(pool, &threads);
 
@@ -68,7 +69,7 @@ bool run_algebra(streamed_dataset_type_& streamed, fu_pool_t pool, algebra_setti
     std::vector<std::vector<scored_pair_t>> pairs(algebra.pairs_path.empty() ? 0 : judged);
     std::vector<f32_t> outputs(query_count * columns);
     std::vector<dense_softmax_state_t> carry(threads * head_count);
-    auto const values = inputs.values.view(inputs.values.stored.data());
+    auto const values = inputs.node_values_view();
     auto const value_of = [&](std::span<dense_node_id_t const> nodes,
                               std::span<typename index_t::vector_view_t> rows) noexcept {
         for (std::size_t lane = 0; lane != nodes.size(); ++lane) rows[lane] = values.row(nodes[lane]).as_vector();
@@ -135,10 +136,6 @@ struct algebra_workload_t {
         return run_algebra(streamed, pool, algebra);
     }
 };
-
-#pragma endregion
-
-#pragma region Dispatch Cascade
 
 /** The algebra shard hop: everything below one stored dtype under the dot kernel, so a per-dtype shard
  *  translation unit carries the whole instantiation grid of its dtype. */

@@ -12,10 +12,8 @@
  */
 #pragma once
 
-#include <cmath>   // `std::exp` & `std::sin` for the attention oracle
-#include <cstdio>  // `std::fopen`, `std::fwrite` - the pair dumps
-#include <cstdlib> // `std::strtod` - the attend scale
-#include <cstring> // `std::memcpy` - the bf16 value rows
+#include <cmath>  // `std::exp` & `std::sin` for the attention oracle
+#include <cstdio> // `std::fopen`, `std::fwrite` - the pair dumps
 
 #include <limits> // `std::numeric_limits` for the oracle's running maximum
 
@@ -43,9 +41,6 @@ struct algebra_settings_t {
      *  that many `u32` key rows and `f32` dots. */
     std::string_view pairs_path;
 
-    /** The `--attend-scale` factor as spelled, which @ref resolve_algebra_settings parses. */
-    std::string_view attend_scale_text;
-
     /** The factor turning a dot into a logit; zero takes the reciprocal square root of the dimensions. */
     double attend_scale = 0;
 };
@@ -62,26 +57,16 @@ inline std::array<flag_t, 5> algebra_flags(settings_t& settings, algebra_setting
          &algebra.reference_path},
         {"--pairs", "path", "file receiving every pair each judged query's multiply scored", &algebra.pairs_path},
         {"--attend-scale", "factor", "dot-to-logit factor; one over the root of the dimensions by default",
-         &algebra.attend_scale_text},
+         &algebra.attend_scale},
     }};
 }
 
-/** Checks the algebra flags against the shared ones, printing the first that does not parse: the metric must
- *  stay the dot both verbs are defined over, and the attend scale must be a non-negative real. */
-inline bool resolve_algebra_settings(settings_t const& settings, algebra_settings_t& algebra) {
-    if (settings.kernel != nk_kernel_dot_k)
-        return fmt::println(stderr,
-                            "--metric=\"{}\" does not parse, expected dot, the only kernel of multiply and attend",
-                            settings.metric_name),
-               false;
-    if (algebra.attend_scale_text.empty()) return true;
-    // Text values view the tail of their `argv` entry, so `strtod` stops at its terminator.
-    char* end = nullptr;
-    algebra.attend_scale = std::strtod(algebra.attend_scale_text.data(), &end);
-    if (end == algebra.attend_scale_text.data() + algebra.attend_scale_text.size() && algebra.attend_scale >= 0)
-        return true;
-    fmt::println(stderr, "--attend-scale=\"{}\" does not parse, expected a non-negative real",
-                 algebra.attend_scale_text);
+/** Checks the algebra flags against the shared ones: the metric must stay the dot both verbs are
+ *  defined over. */
+inline bool resolve_algebra_settings(settings_t const& settings) {
+    if (settings.kernel == nk_kernel_dot_k) return true;
+    fmt::println(stderr, "--metric=\"{}\" does not parse, expected dot, the only kernel of multiply and attend",
+                 settings.metric_name);
     return false;
 }
 
@@ -112,109 +97,8 @@ bool map_bench_matrix(std::string_view path, mapped_file_t& mapping, nk::matrix_
     return true;
 }
 
-/** Value rows addressed by viewed dataset row: a mapped `--values` file, or a deterministic synthetic table. */
-struct attention_value_rows_t {
-
-    /** The `--values` file, when one was given. */
-    mapped_file_t mapping;
-
-    /** The synthetic rows, when no file was given. */
-    std::vector<nk::bf16_t> synthetic;
-
-    /** One bf16 value row per viewed dataset row. */
-    nk::matrix_view<nk::bf16_t> rows;
-};
-
-/** Opens `--values` over the viewed rows from @p first_row, @p columns wide like the keys, or draws the synthetic
- *  table in its absence. */
-inline bool open_attention_value_rows(algebra_settings_t const& algebra, std::size_t first_row, std::size_t rows_count,
-                                      std::size_t columns, attention_value_rows_t& values) {
-    if (algebra.values_path.empty()) {
-        values.synthetic.resize(rows_count * columns);
-        std::vector<f32_t> row_values(columns);
-        for (std::size_t row = 0; row != rows_count; ++row) {
-            for (std::size_t column = 0; column != columns; ++column)
-                row_values[column] = static_cast<f32_t>(std::sin(0.37 * double(row) + 0.11 * double(column)));
-            [[maybe_unused]] nk_status_t const cast = nk_cast_serial(
-                row_values.data(), nk_f32_k, values.synthetic.data() + row * columns, nk_bf16_k, columns, nullptr);
-        }
-        values.rows = {values.synthetic.data(), rows_count, columns};
-        return true;
-    }
-    nk::matrix_view<nk::bf16_t> mapped;
-    if (!map_bench_matrix(algebra.values_path, values.mapping, mapped)) return false;
-    if (mapped.extent(0) < first_row + rows_count || mapped.extent(1) != columns)
-        return fmt::println("--values {} must be a .bf16bin of at least {} rows of {} columns", algebra.values_path,
-                            first_row + rows_count, columns),
-               false;
-    values.rows = mapped(nk::range(first_row, first_row + rows_count), nk::slice);
-    return true;
-}
-
-/** The node-addressed copy attend looks up, as wide as the keys and stored like them, so every backend finds each
- *  value row under its own node. */
-template <typename scalar_type_>
-struct attention_values {
-
-    /** Columns per value row. */
-    std::size_t columns = 0;
-
-    /** The factor every stored value carries; attended rows divide by it. */
-    f32_t scale = 1;
-
-    /** The rows, one per node ID, back to back. */
-    std::vector<byte_t> stored;
-
-    /** Bytes of one stored row. */
-    std::size_t row_bytes() const noexcept { return columns * nk_dtype_bits(scalar_type_::dtype()) / 8; }
-
-    /** The value view over @p data, wherever the rows were copied. */
-    nk::matrix_view<scalar_type_> view(byte_t const* data) const noexcept {
-        return {reinterpret_cast<scalar_type_ const*>(data), stored.size() / row_bytes(), columns};
-    }
-};
-
-/** Gathers @p value_rows into node order through @p id_to_row, stored like the keys; integer and byte-sized
- *  kinds map the largest magnitude onto their own, as the keys do, so small values keep their precision. */
-template <typename scalar_type_>
-attention_values<scalar_type_> make_attention_values(std::span<u32_t const> id_to_row,
-                                                     nk::matrix_view<nk::bf16_t> value_rows) {
-    std::size_t const columns = value_rows.extent(1);
-    attention_values<scalar_type_> values {columns};
-    values.stored.resize(id_to_row.size() * values.row_bytes());
-    if constexpr (std::is_same_v<scalar_type_, nk::bf16_t>) {
-        for (std::size_t node = 0; node != id_to_row.size(); ++node)
-            std::memcpy(values.stored.data() + node * values.row_bytes(), value_rows.row(id_to_row[node]).data(),
-                        values.row_bytes());
-        return values;
-    }
-    std::vector<f32_t> widened(columns);
-    if constexpr (nk::is_integral_dtype<scalar_type_>() || sizeof(scalar_type_) == 1) {
-        f32_t largest = 0;
-        for (std::size_t row = 0; row != value_rows.extent(0); ++row) {
-            widen_row(value_rows.row(row).as_vector(), std::span {widened});
-            for (f32_t const value : widened) largest = std::max(largest, std::abs(value));
-        }
-        values.scale = largest > 0 ? component_max<scalar_type_>() / largest : 1;
-    }
-    for (std::size_t node = 0; node != id_to_row.size(); ++node) {
-        widen_row(value_rows.row(id_to_row[node]).as_vector(), std::span {widened});
-        for (f32_t& value : widened) value *= values.scale;
-        [[maybe_unused]] nk_status_t const cast = nk_cast_serial(widened.data(), nk_f32_k,
-                                                                 values.stored.data() + node * values.row_bytes(),
-                                                                 scalar_type_::dtype(), columns, nullptr);
-    }
-    return values;
-}
-
-/** The logit scale @c --attend-scale asks for, or the reciprocal square root of the dimensions. */
-inline f32_t attention_score_scale(algebra_settings_t const& algebra, std::size_t dimensions) noexcept {
-    return algebra.attend_scale ? static_cast<f32_t>(algebra.attend_scale)
-                                : static_cast<f32_t>(1 / std::sqrt(double(dimensions)));
-}
-
-/** What both phases read, opened before any clock: the queries staged in the stored scalar, the value rows and
- *  their node-addressed copy, and the logit scales. */
+/** What both phases read, opened before any clock: the queries staged in the stored scalar, the
+ *  value rows, and the logit scales. */
 template <typename scalar_type_>
 struct algebra_inputs {
 
@@ -223,14 +107,34 @@ struct algebra_inputs {
     std::vector<scalar_type_> staged;
     nk::matrix_view<scalar_type_> rows;
 
-    attention_value_rows_t value_rows;
-    attention_values<scalar_type_> values;
+    /** One bf16 value row per viewed dataset row, as wide as the keys, which the oracle reads: the
+     *  mapped `--values` file, or a deterministic synthetic table. */
+    mapped_file_t values_file;
+    std::vector<nk::bf16_t> synthetic_values;
+    nk::matrix_view<nk::bf16_t> value_rows;
 
-    /** The logit scale over the dataset's own scalars, and over the rescaled keys and queries the index scores. */
+    /** The same rows in node order, stored like the keys, which attend looks up. Every value
+     *  carries @c value_offset, so unsigned kinds keep their negatives, under @c value_scale, so
+     *  integer and byte-sized kinds spend their whole range; attended rows undo both. */
+    std::vector<byte_t> node_values;
+    f32_t value_offset = 0, value_scale = 1;
+
+    /** The logit scale over the dataset's own scalars, and over the rescaled keys and queries the
+     *  index scores. */
     f32_t oracle_scale = 0, score_scale = 0;
 
     /** Queries the oracle judges. */
     std::size_t judged = 0;
+
+    /** Bytes of one node-ordered value row. */
+    std::size_t value_row_bytes() const noexcept {
+        return value_rows.extent(1) * nk_dtype_bits(scalar_type_::dtype()) / 8;
+    }
+
+    nk::matrix_view<scalar_type_> node_values_view() const noexcept {
+        return {reinterpret_cast<scalar_type_ const*>(node_values.data()), node_values.size() / value_row_bytes(),
+                value_rows.extent(1)};
+    }
 };
 
 /** Opens everything @ref algebra_inputs holds for the searched queries of @p streamed, with value rows
@@ -240,19 +144,62 @@ bool open_algebra_inputs(streamed_dataset_type_ const& streamed, algebra_setting
                          std::span<u32_t const> id_to_row, algebra_inputs<scalar_type_>& inputs) {
     settings_t const& settings = streamed.bench.settings;
     std::size_t const rows_count = streamed.vectors.extent(0), dimensions = streamed.vectors.extent(1);
+    std::size_t const first_row = settings.first_vector.value;
     if (!settings.heads_path.empty() || !settings.weights_path.empty())
         return fmt::println("--heads ranks searches alone; attend weighs plain logits"), false;
-    if (!open_attention_value_rows(algebra, settings.first_vector.value, rows_count, dimensions, inputs.value_rows))
-        return false;
+
+    std::vector<f32_t> widened(dimensions);
+    if (algebra.values_path.empty()) {
+        inputs.synthetic_values.resize(rows_count * dimensions);
+        for (std::size_t row = 0; row != rows_count; ++row) {
+            for (std::size_t column = 0; column != dimensions; ++column)
+                widened[column] = static_cast<f32_t>(std::sin(0.37 * double(row) + 0.11 * double(column)));
+            [[maybe_unused]] nk_status_t const cast = nk_cast_serial(widened.data(), nk_f32_k,
+                                                                     inputs.synthetic_values.data() + row * dimensions,
+                                                                     nk_bf16_k, dimensions, nullptr);
+        }
+        inputs.value_rows = {inputs.synthetic_values.data(), rows_count, dimensions};
+    }
+    else {
+        nk::matrix_view<nk::bf16_t> mapped;
+        if (!map_bench_matrix(algebra.values_path, inputs.values_file, mapped)) return false;
+        if (mapped.extent(0) < first_row + rows_count || mapped.extent(1) != dimensions)
+            return fmt::println("--values {} must be a .bf16bin of at least {} rows of {} columns", algebra.values_path,
+                                first_row + rows_count, dimensions),
+                   false;
+        inputs.value_rows = mapped(nk::range(first_row, first_row + rows_count), nk::slice);
+    }
+
+    if constexpr (nk::is_integral_dtype<scalar_type_>() || sizeof(scalar_type_) == 1) {
+        f32_t largest = 0;
+        for (std::size_t row = 0; row != rows_count; ++row) {
+            widen_row(inputs.value_rows.row(row).as_vector(), std::span {widened});
+            for (f32_t const value : widened) largest = std::max(largest, std::abs(value));
+        }
+        // A cast to an unsigned kind would clamp every negative value to zero.
+        if constexpr (nk::is_integral_dtype<scalar_type_>() && !nk::is_signed_dtype<scalar_type_>())
+            inputs.value_offset = largest;
+        if (largest > 0) inputs.value_scale = component_max<scalar_type_>() / (largest + inputs.value_offset);
+    }
+    std::size_t const row_bytes = inputs.value_row_bytes();
+    inputs.node_values.resize(id_to_row.size() * row_bytes);
+    for (std::size_t node = 0; node != id_to_row.size(); ++node) {
+        widen_row(inputs.value_rows.row(id_to_row[node]).as_vector(), std::span {widened});
+        for (f32_t& value : widened) value = (value + inputs.value_offset) * inputs.value_scale;
+        [[maybe_unused]] nk_status_t const cast = nk_cast_serial(widened.data(), nk_f32_k,
+                                                                 inputs.node_values.data() + node * row_bytes,
+                                                                 scalar_type_::dtype(), dimensions, nullptr);
+    }
+
     inputs.staged = stage_rows<scalar_type_>(searched_rows(streamed), streamed.scale);
     std::size_t const head_count = algebra.head_count.value;
     std::size_t const queries_count = searched_rows(streamed).extent(0) / head_count * head_count;
     inputs.rows = {inputs.staged.data(), queries_count, dimensions};
     inputs.judged = std::min(settings.oracle_queries.value, queries_count);
-    inputs.oracle_scale = attention_score_scale(algebra, dimensions);
+    inputs.oracle_scale = algebra.attend_scale ? static_cast<f32_t>(algebra.attend_scale)
+                                               : static_cast<f32_t>(1 / std::sqrt(double(dimensions)));
     // The index scores keys and queries both rescaled on ingest, so its logits undo the factor twice.
     inputs.score_scale = inputs.oracle_scale / (streamed.scale * streamed.scale);
-    inputs.values = make_attention_values<scalar_type_>(id_to_row, inputs.value_rows.rows);
     return true;
 }
 
@@ -376,14 +323,13 @@ inline void report_attend_metrics(std::size_t rows_count, std::size_t head_count
 template <typename scalar_type_, typename streamed_dataset_type_>
 bool judge_attention(streamed_dataset_type_ const& streamed, algebra_settings_t const& algebra,
                      algebra_inputs<scalar_type_> const& inputs, std::span<f32_t> outputs) {
-    std::size_t const judged = inputs.judged, columns = inputs.values.columns;
-    if (inputs.values.scale != 1)
-        for (f32_t& value : outputs.first(judged * columns)) value /= inputs.values.scale;
+    std::size_t const judged = inputs.judged, columns = inputs.value_rows.extent(1);
+    // Softmax weights sum to one, so an attended row carries the values' shift and scale whole.
+    for (f32_t& value : outputs.first(judged * columns)) value = value / inputs.value_scale - inputs.value_offset;
     auto const started = steady_clock_t::now();
     std::vector<exact_attention_t> const exact = algebra.reference_path.empty()
                                                      ? exact_attention(streamed.vectors, searched_rows(streamed),
-                                                                       judged, inputs.oracle_scale,
-                                                                       inputs.value_rows.rows)
+                                                                       judged, inputs.oracle_scale, inputs.value_rows)
                                                      : load_exact_attention(algebra.reference_path, judged, columns);
     if (exact.size() != judged)
         return fmt::println("--reference {} must hold {} rows of {} columns", algebra.reference_path, judged,

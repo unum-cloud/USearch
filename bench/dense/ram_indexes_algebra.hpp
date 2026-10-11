@@ -44,7 +44,8 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
     std::iota(rows.begin(), rows.end(), u32_t {0});
     algebra_inputs<typename bench_t::scalar_t> inputs;
     if (!open_algebra_inputs(streamed, algebra, rows, inputs)) return false;
-    std::size_t const query_count = inputs.rows.extent(0), columns = inputs.values.columns, judged = inputs.judged;
+    std::size_t const query_count = inputs.rows.extent(0), columns = inputs.value_rows.extent(1),
+                      judged = inputs.judged;
 
     typename index_t::search_config_t config;
     config.expansion_factor = static_cast<typename bench_t::small_size_t>(settings.expansion_search.value);
@@ -81,7 +82,7 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
     if (!algebra.pairs_path.empty() && !save_scored_pairs(algebra.pairs_path, pairs))
         return fmt::println("Failed to write --pairs {}", algebra.pairs_path), false;
 
-    auto const values = inputs.values.view(inputs.values.stored.data());
+    auto const values = inputs.node_values_view();
     auto const value_of = [&](std::span<key_t const> value_keys, std::span<vector_view_t> value_rows) noexcept {
         for (std::size_t lane = 0; lane != value_keys.size(); ++lane)
             value_rows[lane] = values.row(value_keys[lane]).as_vector();
@@ -115,10 +116,6 @@ struct algebra_workload_t {
         return run_algebra(streamed, algebra);
     }
 };
-
-#pragma endregion
-
-#pragma region Dispatch Cascade
 
 /** The algebra shard hop: everything below one stored dtype under the dot kernel, so a per-dtype shard translation
  *  unit carries the whole instantiation grid of its dtype. */
