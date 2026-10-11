@@ -52,9 +52,10 @@ option(USEARCH_BUILD_CUDA "Compile CUDA index tests & benchmarks" ${USEARCH_CAN_
 # The library compiles one unit per GPU class, each for its own architecture alone - "80" with its PTX for every GPU
 # without a class, "89", "90a", "100f" and "120f" - and ignores this list. The CUDA tests, benchmarks and the dispatch
 # unit compile one pass per entry, and a NumKong GPU capability turns on in them only when every entry runs it, so
-# iterate on one GPU with its family code, like "100f", to test that generation's kits.
+# iterate on one GPU with its family code, like "100f-real", to test that generation's kits. The "-real" entries skip
+# the PTX, which would triple the objects of builds that never meet an unknown GPU.
 set(USEARCH_CUDA_ARCHITECTURES
-    "80;90a;100f;120f"
+    "80-real;90a-real;100f-real;120f-real"
     CACHE STRING "GPU architectures the CUDA tests, benchmarks & dispatch unit compile for"
 )
 

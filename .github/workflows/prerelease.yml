@@ -76,10 +76,10 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y build-essential g++-14 lld libjemalloc-dev libomp-dev
-          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=gcc-14 -D CMAKE_CXX_COMPILER=g++-14 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_USE_JEMALLOC=1
-          cmake --build --preset relwithdebinfo
+          cmake --preset host_relwithdebinfo -D CMAKE_C_COMPILER=gcc-14 -D CMAKE_CXX_COMPILER=g++-14 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_USE_JEMALLOC=1
+          cmake --build --preset host_relwithdebinfo
       - name: Test C and C++
-        run: ctest --preset relwithdebinfo
+        run: ctest --preset host_relwithdebinfo
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
@@ -145,7 +145,7 @@ jobs:
       - name: Test .NET
         run: |
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
-          cp "${{ github.workspace }}/build_relwithdebinfo/libusearch_shared.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
+          cp "${{ github.workspace }}/build_host_relwithdebinfo/libusearch_shared.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           dotnet test -c Debug --logger "console;verbosity=detailed"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
@@ -154,7 +154,7 @@ jobs:
         # With `LD_DEBUG=all` we detect the addresses of the libraries that are loaded
       - name: Test GoLang
         run: |
-          sudo cp ${{ github.workspace }}/build_relwithdebinfo/libusearch_shared.so /usr/lib/libusearch_shared.so
+          sudo cp ${{ github.workspace }}/build_host_relwithdebinfo/libusearch_shared.so /usr/lib/libusearch_shared.so
           sudo cp -r ${{ github.workspace }}/include/usearch /usr/include/
           test -z "$(gofmt -l .)"
           go vet ./...
@@ -177,10 +177,10 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y build-essential lld libjemalloc-dev libomp-dev
-          cmake --preset debug -D CMAKE_C_COMPILER=gcc -D CMAKE_CXX_COMPILER=g++
-          cmake --build --preset debug
+          cmake --preset host_debug -D CMAKE_C_COMPILER=gcc -D CMAKE_CXX_COMPILER=g++
+          cmake --build --preset host_debug
       - name: Test C/C++
-        run: ctest --preset debug
+        run: ctest --preset host_debug
 
   verify_clients:
     name: Check Promela models and GenMC clients
@@ -236,10 +236,10 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y build-essential clang-20 lld libjemalloc-dev
-          cmake --preset relwithdebinfo -D CMAKE_C_COMPILER=clang-20 -D CMAKE_CXX_COMPILER=clang++-20 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_USE_JEMALLOC=1
-          cmake --build --preset relwithdebinfo
+          cmake --preset host_relwithdebinfo -D CMAKE_C_COMPILER=clang-20 -D CMAKE_CXX_COMPILER=clang++-20 -D USEARCH_BUILD_LIB_C=1 -D USEARCH_USE_JEMALLOC=1
+          cmake --build --preset host_relwithdebinfo
       - name: Test C and C++
-        run: ctest --preset relwithdebinfo
+        run: ctest --preset host_relwithdebinfo
 
         # JavaScript
       - name: Set up Node.js
@@ -287,7 +287,7 @@ jobs:
       - name: Test .NET
         run: |
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
-          cp "${{ github.workspace }}/build_relwithdebinfo/libusearch_shared.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
+          cp "${{ github.workspace }}/build_host_relwithdebinfo/libusearch_shared.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           dotnet test -c Debug --logger "console;verbosity=detailed"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
@@ -308,10 +308,10 @@ jobs:
           brew update
           brew reinstall cmake
           # Apple's linker is fast already; the preset's `lld` stands in for GNU `ld` on Linux
-          cmake --preset relwithdebinfo -D USEARCH_BUILD_LIB_C=1 -D CMAKE_EXE_LINKER_FLAGS= -D CMAKE_SHARED_LINKER_FLAGS=
-          cmake --build --preset relwithdebinfo
+          cmake --preset host_relwithdebinfo -D USEARCH_BUILD_LIB_C=1 -D CMAKE_EXE_LINKER_FLAGS= -D CMAKE_SHARED_LINKER_FLAGS=
+          cmake --build --preset host_relwithdebinfo
       - name: Test C and C++
-        run: ctest --preset relwithdebinfo
+        run: ctest --preset host_relwithdebinfo
 
         # JavaScript
       - name: Set up Node.js
@@ -359,7 +359,7 @@ jobs:
       - name: Test .NET
         run: |
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
-          cp "${{ github.workspace }}/build_relwithdebinfo/libusearch_shared.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
+          cp "${{ github.workspace }}/build_host_relwithdebinfo/libusearch_shared.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
           dotnet test -c Debug --logger "console;verbosity=minimal" --filter "FullyQualifiedName!=Cloud.Unum.USearch.Tests.UsearchIndexTests.PersistAndRestore"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
@@ -374,10 +374,10 @@ jobs:
         run: git submodule update --init --recursive
       - name: Build C Library
         run: |
-          cmake --preset release_lib
-          cmake --build --preset release_lib --target usearch_static
+          cmake --preset host_library
+          cmake --build --preset host_library --target usearch_static
       - name: Test Swift
-        run: swift test -Xlinker -L${{ github.workspace }}/build_release_lib
+        run: swift test -Xlinker -L${{ github.workspace }}/build_host_library
 
   test_windows_x86:
     name: Test on Windows x86
@@ -392,10 +392,10 @@ jobs:
       - name: Build C/C++
         run: |
           choco install cmake
-          cmake --preset msvc_x64
-          cmake --build --preset msvc_x64
+          cmake --preset windows_x64_release
+          cmake --build --preset windows_x64_release
       - name: Test C and C++
-        run: ctest --preset msvc_x64
+        run: ctest --preset windows_x64_release
 
         # Python
       - name: Set up Python ${{ env.PYTHON_VERSION }}
@@ -440,7 +440,7 @@ jobs:
       - name: Test .NET
         run: |
           mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
-          cp "${{ github.workspace }}\build_msvc_x64\libusearch_shared.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
+          cp "${{ github.workspace }}\build_windows_x64_release\libusearch_shared.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
           dotnet test -c Debug --logger "console;verbosity=detailed"
         shell: bash
         working-directory: ${{ github.workspace }}/csharp
@@ -461,12 +461,12 @@ jobs:
       - name: Build C/C++ for Arm64
         run: |
           choco install cmake
-          cmake --preset msvc_arm64
-          cmake --build --preset msvc_arm64
+          cmake --preset windows_arm64_library
+          cmake --build --preset windows_arm64_library
 
       - name: Verify ARM64 build artifacts
         run: |
-          if (!(Test-Path "build_msvc_arm64\libusearch_shared.dll")) { exit 1 }
+          if (!(Test-Path "build_windows_arm64_library\libusearch_shared.dll")) { exit 1 }
           Write-Host "ARM64 DLL built successfully"
 
   build_docker:
@@ -619,18 +619,18 @@ jobs:
 
       - name: Build C/C++
         run: |
-          cmake --preset release_lib \
+          cmake --preset host_library \
             -D CMAKE_C_COMPILER_TARGET=${{ matrix.target }} \
             -D CMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
             -D CMAKE_SYSTEM_NAME=Linux \
             -D CMAKE_SYSTEM_PROCESSOR=${{ matrix.arch }}
 
-          cmake --build --preset release_lib
+          cmake --build --preset host_library
 
         # We can't run the produced builds, but we can make sure they exist
       - name: Test artifacts presence
         run: |
-          test -e build_release_lib/libusearch_shared.so
+          test -e build_host_library/libusearch_shared.so
 
   # One row per checked-in WebAssembly toolchain. A module carries one SIMD tier, width and threads choice, so each
   # row is a whole build; its C test runs under the matrix's Node for Emscripten and under Wasmtime for WASI.
@@ -641,9 +641,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { preset: wasm32_emscripten, sdk: emscripten, node: 22 }
-          - { preset: wasm64_emscripten, sdk: emscripten, node: 24 }
-          - { preset: wasm32_wasi, sdk: wasi }
+          - { preset: wasm32_emscripten_release, sdk: emscripten, node: 22 }
+          - { preset: wasm64_emscripten_release, sdk: emscripten, node: 24 }
+          - { preset: wasm32_wasi_release, sdk: wasi }
 
     steps:
       - name: Checkout
@@ -683,12 +683,12 @@ jobs:
         include:
           - processor: armv7a
             abi: armeabi-v7a
-            preset: android_armv7
+            preset: android_armv7_library
             target: armv7-linux-androideabi
             arch: arm32
           - processor: aarch64
             abi: arm64-v8a
-            preset: android_arm64
+            preset: android_arm64_library
             target: aarch64-linux-android
             arch: arm64
     steps:

@@ -34,20 +34,20 @@ The `Queries` block reports the throughput in QPS, the latency, the distances an
 
 ### Building
 
-Every number below comes from a Release build: the `release` preset for the CPU binaries, and `release_cuda` for the CUDA ones, narrowed to the host GPU's family code, like `-DUSEARCH_CUDA_ARCHITECTURES=100f` on a B200 or B300.
+Every number below comes from a Release build: the `host_release` preset for the CPU binaries, and `cuda_release` for the CUDA ones, narrowed to the host GPU's family code, like `-DUSEARCH_CUDA_ARCHITECTURES=100f` on a B200 or B300.
 The CUDA bench compiles a generation's kits only when every listed architecture runs them, so the preset's own list measures the Ampere kits alone, whatever the GPU.
-The `profile` preset keeps the same optimization and adds the symbols `perf` needs; `dev` is the `-O2` iteration tree and measures nothing.
+The `host_profile` preset keeps the same optimization and adds the symbols `perf` needs; `cuda_relwithdebinfo` is the `-O2` iteration tree and measures nothing.
 
 ```sh
-cmake --preset release && cmake --build --preset release --target usearch_bench_dense_ram_index_search usearch_bench_dense_ram_indexes_search usearch_bench_dense_ram_index_algebra usearch_bench_dense_ram_indexes_algebra usearch_bench_dense_ram_metric
-cmake --preset release_cuda -DUSEARCH_CUDA_ARCHITECTURES=100f && cmake --build build_release_cuda --target usearch_bench_dense_vram_index_search usearch_bench_dense_vram_indexes_search usearch_bench_dense_vram_index_algebra usearch_bench_dense_vram_indexes_algebra
+cmake --preset host_release && cmake --build --preset host_release --target usearch_bench_dense_ram_index_search usearch_bench_dense_ram_indexes_search usearch_bench_dense_ram_index_algebra usearch_bench_dense_ram_indexes_algebra usearch_bench_dense_ram_metric
+cmake --preset cuda_release -DUSEARCH_CUDA_ARCHITECTURES=100f && cmake --build build_cuda_release --target usearch_bench_dense_vram_index_search usearch_bench_dense_vram_indexes_search usearch_bench_dense_vram_index_algebra usearch_bench_dense_vram_indexes_algebra
 ```
 
-Every binary lands at the top of its build tree, so the CPU ones are in `build_release/` and the CUDA ones in `build_release_cuda/`.
+Every binary lands at the top of its build tree, so the CPU ones are in `build_host_release/` and the CUDA ones in `build_cuda_release/`.
 Every benchmark is memory-hungry at 100M and above, so run it under a cgroup cap rather than trusting it to refuse.
 
 ```sh
-systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- build_release/usearch_bench_dense_ram_indexes_search ...
+systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- build_host_release/usearch_bench_dense_ram_indexes_search ...
 ```
 
 ### Running
@@ -55,7 +55,7 @@ systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- build_release/
 The search binaries share one dataset triple and one tuning vocabulary, and the algebra binaries take the same build flags; `--help` prints the full list for each.
 
 ```sh
-build_release/usearch_bench_dense_ram_indexes_search \
+build_host_release/usearch_bench_dense_ram_indexes_search \
     --vectors data/sift-10m/base.10M.u8bin \
     --queries data/sift-10m/query.public.10K.u8bin \
     --neighbors data/sift-10m/groundtruth.public.10K.ibin \
@@ -110,7 +110,7 @@ The indexer ranks floating-point keys under the dot kernel, and its walks naviga
 An indexer's selection is judged against the exact scan's top rows, saved once as `--neighbors`:
 
 ```sh
-build_release/usearch_bench_dense_ram_index_search --vectors keys.bf16bin --heads queries.bf16bin --weights weights.fbin \
+build_host_release/usearch_bench_dense_ram_index_search --vectors keys.bf16bin --heads queries.bf16bin --weights weights.fbin \
     --neighbors truth-global.ibin --metric dot
 ```
 
@@ -122,7 +122,7 @@ A heal follows, re-linking whatever no search can reach, and the report ends wit
 This is what a cheap ingestion pays for - a narrow `--expansion-add` topped with one or two wide passes, rather than one expensive build:
 
 ```sh
-build_release_cuda/usearch_bench_dense_vram_index_search \
+build_cuda_release/usearch_bench_dense_vram_index_search \
     --vectors data/sift-10m/base.10M.u8bin --queries data/sift-10m/query.public.10K.u8bin \
     --neighbors data/sift-10m/groundtruth.public.10K.ibin --stored-dtype u8 --metric euclidean \
     --connectivity 16 --expansion-add 32 --expansion-search 64 --max-refines 2 --expansion-refine 128
@@ -136,8 +136,8 @@ A checkpoint is a name under `--checkpoints-dir`, stamped with the dtype, the me
 The GPU builds a base an order of magnitude faster than the CPU, so the fast way to a large CPU graph is a GPU base topped up on the CPU: build the first rows on the device, save, then reload on the CPU and insert the rest.
 
 ```sh
-build_release_cuda/usearch_bench_dense_vram_index_search --vectors data/sift-100m/base.100M.u8bin --metric euclidean --max-vectors 90000000 --save sift90m
-build_release/usearch_bench_dense_ram_index_search --vectors data/sift-100m/base.100M.u8bin --queries ... --neighbors ... --metric euclidean --load sift90m --skip-vectors 90000000
+build_cuda_release/usearch_bench_dense_vram_index_search --vectors data/sift-100m/base.100M.u8bin --metric euclidean --max-vectors 90000000 --save sift90m
+build_host_release/usearch_bench_dense_ram_index_search --vectors data/sift-100m/base.100M.u8bin --queries ... --neighbors ... --metric euclidean --load sift90m --skip-vectors 90000000
 ```
 
 The second run reports `topping: 90000000 loaded rows`, inserts the remaining ten million, and judges the full graph against the 100M ground truth.
@@ -150,7 +150,7 @@ They pin the dot kernel, the only one both verbs are defined over, so `--metric`
 They store only the dot kernel's dtypes, `bf16` through `u4`, so an `.fbin` file needs a `--stored-dtype`.
 
 ```sh
-build_release/usearch_bench_dense_ram_index_algebra \
+build_host_release/usearch_bench_dense_ram_index_algebra \
     --vectors data/wiki-1m/base.1M.fbin \
     --queries data/wiki-1m/query.public.100K.fbin \
     --stored-dtype bf16 --oracle-queries 16
@@ -175,7 +175,7 @@ Candidates are drawn at random from a 256 MB pool, so they stream from RAM, and 
 Rows are named `kernel/scalar/caps/shape/dimensions`, like `dot/bf16/neon/1to4/768d`, with `numkong` as the baseline's tier.
 
 ```sh
-build_release/usearch_bench_dense_ram_metric --filter 'dot/bf16/.*/1to[14]/768d' --time-limit 2s
+build_host_release/usearch_bench_dense_ram_metric --filter 'dot/bf16/.*/1to[14]/768d' --time-limit 2s
 ```
 
 - `--seed` defaults to `42`: seed the row picks and the adjacency noise derive from, or `random`.
@@ -256,7 +256,7 @@ Provision them before launch and declare them with `--huge-pages`, so a run that
 
 ```sh
 sudo sysctl -w vm.nr_hugepages=16384
-build_release/usearch_bench_dense_ram_indexes_search --huge-pages 16384 ...
+build_host_release/usearch_bench_dense_ram_indexes_search --huge-pages 16384 ...
 ```
 
 The pool splits per NUMA domain, so a single-domain run must fit its domain's share.
@@ -264,11 +264,11 @@ The pool splits per NUMA domain, so a single-domain run must fit its domain's sh
 ## Profiling
 
 ```sh
-sudo -E perf stat -d build_profile/usearch_bench_dense_ram_index_search ...
-sudo -E perf mem -d build_profile/usearch_bench_dense_ram_index_search ...
-sudo -E perf record -F 1000 build_profile/usearch_bench_dense_ram_index_search ...
-perf record -d -e arm_spe// -- build_profile/usearch_bench_dense_ram_index_search ...
-sudo perf stat -e 'faults,dTLB-loads,dTLB-load-misses,cache-misses,cache-references' build_profile/usearch_bench_dense_ram_index_search ...
+sudo -E perf stat -d build_host_profile/usearch_bench_dense_ram_index_search ...
+sudo -E perf mem -d build_host_profile/usearch_bench_dense_ram_index_search ...
+sudo -E perf record -F 1000 build_host_profile/usearch_bench_dense_ram_index_search ...
+perf record -d -e arm_spe// -- build_host_profile/usearch_bench_dense_ram_index_search ...
+sudo perf stat -e 'faults,dTLB-loads,dTLB-load-misses,cache-misses,cache-references' build_host_profile/usearch_bench_dense_ram_index_search ...
 ```
 
 A dTLB miss rate near 3% and a cache-miss rate near 7% are typical of a healthy 1M run; stalls closer to 90% are the signal to provision huge pages and revisit allocation alignment.

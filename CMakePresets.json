@@ -69,28 +69,29 @@
       }
     },
     {
-      "name": "debug",
+      "name": "host_debug",
       "inherits": [
         "base",
         "clang"
       ],
-      "displayName": "Debug - unit tests with sanitizers",
+      "displayName": "Host Debug - unit tests with sanitizers",
       "description": "Unoptimized C++ and C suites; the compiler wiring arms the leak sanitizer here.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_BENCH": "OFF",
-        "USEARCH_BUILD_LIB_C": "ON"
+        "USEARCH_BUILD_LIB_C": "ON",
+        "USEARCH_BUILD_CUDA": "OFF"
       }
     },
     {
-      "name": "check",
+      "name": "host_check",
       "inherits": [
         "base",
         "clang"
       ],
-      "displayName": "Check - fastest compile cycle",
-      "description": "Does it still compile, nothing more. `-O0` is the one flag that moves the needle on these instantiation grids: measured per shard, -O3 and -O1 both cost ~9.8s while -O0 costs 3.5s, against a 2.8s front-end floor. The `.cu` units join wherever a CUDA toolkit is found, with `ptxas` at `-O0` too, since optimizing each class unit's kernels is what dominates their build.",
+      "displayName": "Host Check - fastest compile cycle",
+      "description": "Does it still compile, nothing more. `-O0` is the one flag that moves the needle on these instantiation grids: measured per shard, -O3 and -O1 both cost ~9.8s while -O0 costs 3.5s, against a 2.8s front-end floor.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O0 -g0 -DNDEBUG",
@@ -98,45 +99,58 @@
         "CMAKE_CUDA_FLAGS_RELWITHDEBINFO": "-O0 -Xptxas -O0 -DNDEBUG",
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_BENCH": "ON",
-        "USEARCH_BUILD_LIB_C": "ON"
+        "USEARCH_BUILD_LIB_C": "ON",
+        "USEARCH_BUILD_CUDA": "OFF"
       }
     },
     {
-      "name": "relwithdebinfo",
+      "name": "cuda_check",
+      "inherits": "host_check",
+      "displayName": "CUDA Check - fastest compile cycle with the `.cu` units",
+      "description": "Same as `host_check`, plus the `.cu` units, with `ptxas` at `-O0` too, since optimizing each class unit's kernels is what dominates their build.",
+      "cacheVariables": {
+        "USEARCH_BUILD_CUDA": "ON",
+        "USEARCH_CUDA_ARCHITECTURES": "native"
+      }
+    },
+    {
+      "name": "host_relwithdebinfo",
       "inherits": [
         "base",
         "clang"
       ],
-      "displayName": "RelWithDebInfo - optimized tests with symbols",
+      "displayName": "Host RelWithDebInfo - optimized tests with symbols",
       "description": "Optimized, with full DWARF for stepping through the suites.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "USEARCH_BUILD_TEST": "ON",
-        "USEARCH_BUILD_BENCH": "OFF"
+        "USEARCH_BUILD_BENCH": "OFF",
+        "USEARCH_BUILD_CUDA": "OFF"
       }
     },
     {
-      "name": "release",
+      "name": "host_release",
       "inherits": [
         "base",
         "clang"
       ],
-      "displayName": "Release - every CPU target",
+      "displayName": "Host Release - every CPU target",
       "description": "The full CPU matrix: C++ suite, benchmarks, the C 99 library and its test.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_BENCH": "ON",
-        "USEARCH_BUILD_LIB_C": "ON"
+        "USEARCH_BUILD_LIB_C": "ON",
+        "USEARCH_BUILD_CUDA": "OFF"
       }
     },
     {
-      "name": "profile",
+      "name": "host_profile",
       "inherits": [
         "base",
         "clang"
       ],
-      "displayName": "Profile - benchmarks under perf",
+      "displayName": "Host Profile - benchmarks under perf",
       "description": "The profiling tree behind bench/README.md: full optimization, plus the symbols `perf` needs to attribute samples.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
@@ -144,16 +158,17 @@
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O3 -g -DNDEBUG",
         "USEARCH_BUILD_TEST": "OFF",
         "USEARCH_BUILD_BENCH": "ON",
-        "USEARCH_BUILD_LIB_C": "ON"
+        "USEARCH_BUILD_LIB_C": "ON",
+        "USEARCH_BUILD_CUDA": "OFF"
       }
     },
     {
-      "name": "tsan",
+      "name": "host_tsan",
       "inherits": [
         "base",
         "gcc"
       ],
-      "displayName": "TSan - concurrency suites under ThreadSanitizer",
+      "displayName": "Host TSan - concurrency suites under ThreadSanitizer",
       "description": "GCC & -fsanitize=thread over RelWithDebInfo - the Debug wiring arms ASan & LSan, which TSan cannot share a process with. -O1 keeps the instrumented suites tolerable, and the mutex annotations in sanitizers.hpp light up under this preset alone. Built with GCC: Clang here ships no compiler-rt.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
@@ -161,16 +176,17 @@
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O1 -g -DNDEBUG -fsanitize=thread -fno-omit-frame-pointer",
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_BENCH": "OFF",
-        "USEARCH_BUILD_LIB_C": "OFF"
+        "USEARCH_BUILD_LIB_C": "OFF",
+        "USEARCH_BUILD_CUDA": "OFF"
       }
     },
     {
-      "name": "dev",
+      "name": "cuda_relwithdebinfo",
       "inherits": [
         "base",
         "clang"
       ],
-      "displayName": "Dev - everything, CUDA included",
+      "displayName": "CUDA RelWithDebInfo - everything, CUDA included",
       "description": "The iteration tree, and the only one covering the `.cu` units - so `.clangd` reads its database. Optimized enough to run, with line tables instead of full DWARF and the fat binary narrowed to the host GPU.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
@@ -185,43 +201,43 @@
       }
     },
     {
-      "name": "trace",
-      "inherits": "dev",
-      "displayName": "Trace - where the build time goes",
+      "name": "cuda_trace",
+      "inherits": "cuda_relwithdebinfo",
+      "displayName": "CUDA Trace - where the build time goes",
       "description": "Emits a .json next to every object; open them in a flame-graph viewer or aggregate with ClangBuildAnalyzer to see which instantiations dominate.",
       "cacheVariables": {
         "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG -ftime-trace"
       }
     },
     {
-      "name": "release_cuda",
-      "inherits": "dev",
-      "displayName": "Release CUDA - every architecture, Ampere through Blackwell",
-      "description": "Same targets as `dev`, at Release and emitting every architecture rather than the host GPU - what shipping artifacts and cross-machine runs need.",
+      "name": "cuda_release",
+      "inherits": "cuda_relwithdebinfo",
+      "displayName": "CUDA Release - every architecture, Ampere through Blackwell",
+      "description": "Same targets as `cuda_relwithdebinfo`, at Release and emitting every architecture rather than the host GPU - what shipping artifacts and cross-machine runs need.",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "USEARCH_CUDA_ARCHITECTURES": "80;90a;100f;120f"
       }
     },
     {
-      "name": "release_lib",
+      "name": "host_library",
       "inherits": [
         "base",
         "library"
       ],
-      "displayName": "Release - the C 99 library alone, for packaging"
+      "displayName": "Host Library - the C 99 library alone, for packaging"
     },
     {
-      "name": "linux_aarch64",
+      "name": "linux_arm64_library",
       "inherits": [
         "base",
         "library"
       ],
-      "displayName": "Linux AArch64 - the C 99 library through Clang and LLD",
+      "displayName": "Linux ARM64 Library - the C 99 library through Clang and LLD",
       "toolchainFile": "${sourceDir}/cmake/toolchain-aarch64-llvm.cmake"
     },
     {
-      "name": "android_arm64",
+      "name": "android_arm64_library",
       "inherits": [
         "base",
         "library"
@@ -234,7 +250,7 @@
       }
     },
     {
-      "name": "android_armv7",
+      "name": "android_armv7_library",
       "inherits": [
         "base",
         "library"
@@ -247,7 +263,7 @@
       }
     },
     {
-      "name": "wasm32_emscripten",
+      "name": "wasm32_emscripten_release",
       "inherits": [
         "base",
         "wasm"
@@ -258,7 +274,7 @@
       }
     },
     {
-      "name": "wasm64_emscripten",
+      "name": "wasm64_emscripten_release",
       "inherits": [
         "base",
         "wasm"
@@ -269,7 +285,7 @@
       }
     },
     {
-      "name": "wasm32_wasi",
+      "name": "wasm32_wasi_release",
       "inherits": [
         "base",
         "wasm"
@@ -277,7 +293,7 @@
       "toolchainFile": "${sourceDir}/cmake/toolchain-wasm32-wasi.cmake"
     },
     {
-      "name": "msvc_x64",
+      "name": "windows_x64_release",
       "inherits": [
         "base",
         "windows"
@@ -291,7 +307,7 @@
       }
     },
     {
-      "name": "msvc_arm64",
+      "name": "windows_arm64_library",
       "inherits": [
         "base",
         "windows",
@@ -303,73 +319,78 @@
   ],
   "buildPresets": [
     {
-      "name": "debug",
-      "configurePreset": "debug",
+      "name": "host_debug",
+      "configurePreset": "host_debug",
       "jobs": 0
     },
     {
-      "name": "check",
-      "configurePreset": "check",
+      "name": "host_check",
+      "configurePreset": "host_check",
       "jobs": 0
     },
     {
-      "name": "relwithdebinfo",
-      "configurePreset": "relwithdebinfo",
+      "name": "cuda_check",
+      "configurePreset": "cuda_check",
       "jobs": 0
     },
     {
-      "name": "release",
-      "configurePreset": "release",
+      "name": "host_relwithdebinfo",
+      "configurePreset": "host_relwithdebinfo",
       "jobs": 0
     },
     {
-      "name": "profile",
-      "configurePreset": "profile",
+      "name": "host_release",
+      "configurePreset": "host_release",
       "jobs": 0
     },
     {
-      "name": "tsan",
-      "configurePreset": "tsan",
+      "name": "host_profile",
+      "configurePreset": "host_profile",
       "jobs": 0
     },
     {
-      "name": "dev",
-      "configurePreset": "dev",
+      "name": "host_tsan",
+      "configurePreset": "host_tsan",
       "jobs": 0
     },
     {
-      "name": "trace",
-      "configurePreset": "trace",
+      "name": "cuda_relwithdebinfo",
+      "configurePreset": "cuda_relwithdebinfo",
       "jobs": 0
     },
     {
-      "name": "release_cuda",
-      "configurePreset": "release_cuda",
+      "name": "cuda_trace",
+      "configurePreset": "cuda_trace",
       "jobs": 0
     },
     {
-      "name": "release_lib",
-      "configurePreset": "release_lib",
+      "name": "cuda_release",
+      "configurePreset": "cuda_release",
       "jobs": 0
     },
     {
-      "name": "linux_aarch64",
-      "configurePreset": "linux_aarch64",
+      "name": "host_library",
+      "configurePreset": "host_library",
       "jobs": 0
     },
     {
-      "name": "android_arm64",
-      "configurePreset": "android_arm64",
+      "name": "linux_arm64_library",
+      "configurePreset": "linux_arm64_library",
       "jobs": 0
     },
     {
-      "name": "android_armv7",
-      "configurePreset": "android_armv7",
+      "name": "android_arm64_library",
+      "configurePreset": "android_arm64_library",
       "jobs": 0
     },
     {
-      "name": "wasm32_emscripten",
-      "configurePreset": "wasm32_emscripten",
+      "name": "android_armv7_library",
+      "configurePreset": "android_armv7_library",
+      "jobs": 0
+    },
+    {
+      "name": "wasm32_emscripten_release",
+      "configurePreset": "wasm32_emscripten_release",
       "jobs": 0,
       "targets": [
         "usearch_static",
@@ -377,8 +398,8 @@
       ]
     },
     {
-      "name": "wasm64_emscripten",
-      "configurePreset": "wasm64_emscripten",
+      "name": "wasm64_emscripten_release",
+      "configurePreset": "wasm64_emscripten_release",
       "jobs": 0,
       "targets": [
         "usearch_static",
@@ -386,8 +407,8 @@
       ]
     },
     {
-      "name": "wasm32_wasi",
-      "configurePreset": "wasm32_wasi",
+      "name": "wasm32_wasi_release",
+      "configurePreset": "wasm32_wasi_release",
       "jobs": 0,
       "targets": [
         "usearch_static",
@@ -395,14 +416,14 @@
       ]
     },
     {
-      "name": "msvc_x64",
-      "configurePreset": "msvc_x64",
+      "name": "windows_x64_release",
+      "configurePreset": "windows_x64_release",
       "jobs": 0,
       "configuration": "Release"
     },
     {
-      "name": "msvc_arm64",
-      "configurePreset": "msvc_arm64",
+      "name": "windows_arm64_library",
+      "configurePreset": "windows_arm64_library",
       "jobs": 0,
       "configuration": "Release"
     }
@@ -419,37 +440,37 @@
       }
     },
     {
-      "name": "debug",
+      "name": "host_debug",
       "inherits": "base",
-      "configurePreset": "debug"
+      "configurePreset": "host_debug"
     },
     {
-      "name": "relwithdebinfo",
+      "name": "host_relwithdebinfo",
       "inherits": "base",
-      "configurePreset": "relwithdebinfo"
+      "configurePreset": "host_relwithdebinfo"
     },
     {
-      "name": "release",
+      "name": "host_release",
       "inherits": "base",
-      "configurePreset": "release"
+      "configurePreset": "host_release"
     },
     {
-      "name": "tsan",
+      "name": "host_tsan",
       "inherits": "base",
-      "configurePreset": "tsan",
+      "configurePreset": "host_tsan",
       "environment": {
         "TSAN_OPTIONS": "halt_on_error=1 second_deadlock_stack=1"
       }
     },
     {
-      "name": "dev",
+      "name": "cuda_relwithdebinfo",
       "inherits": "base",
-      "configurePreset": "dev"
+      "configurePreset": "cuda_relwithdebinfo"
     },
     {
-      "name": "wasm32_emscripten",
+      "name": "wasm32_emscripten_release",
       "inherits": "base",
-      "configurePreset": "wasm32_emscripten",
+      "configurePreset": "wasm32_emscripten_release",
       "filter": {
         "include": {
           "name": "^usearch_test_c$"
@@ -457,9 +478,9 @@
       }
     },
     {
-      "name": "wasm64_emscripten",
+      "name": "wasm64_emscripten_release",
       "inherits": "base",
-      "configurePreset": "wasm64_emscripten",
+      "configurePreset": "wasm64_emscripten_release",
       "filter": {
         "include": {
           "name": "^usearch_test_c$"
@@ -467,9 +488,9 @@
       }
     },
     {
-      "name": "wasm32_wasi",
+      "name": "wasm32_wasi_release",
       "inherits": "base",
-      "configurePreset": "wasm32_wasi",
+      "configurePreset": "wasm32_wasi_release",
       "filter": {
         "include": {
           "name": "^usearch_test_c$"
@@ -477,129 +498,129 @@
       }
     },
     {
-      "name": "msvc_x64",
+      "name": "windows_x64_release",
       "inherits": "base",
-      "configurePreset": "msvc_x64",
+      "configurePreset": "windows_x64_release",
       "configuration": "Release"
     }
   ],
   "workflowPresets": [
     {
-      "name": "debug",
+      "name": "host_debug",
       "steps": [
         {
           "type": "configure",
-          "name": "debug"
+          "name": "host_debug"
         },
         {
           "type": "build",
-          "name": "debug"
+          "name": "host_debug"
         },
         {
           "type": "test",
-          "name": "debug"
+          "name": "host_debug"
         }
       ]
     },
     {
-      "name": "release",
+      "name": "host_release",
       "steps": [
         {
           "type": "configure",
-          "name": "release"
+          "name": "host_release"
         },
         {
           "type": "build",
-          "name": "release"
+          "name": "host_release"
         },
         {
           "type": "test",
-          "name": "release"
+          "name": "host_release"
         }
       ]
     },
     {
-      "name": "tsan",
+      "name": "host_tsan",
       "steps": [
         {
           "type": "configure",
-          "name": "tsan"
+          "name": "host_tsan"
         },
         {
           "type": "build",
-          "name": "tsan"
+          "name": "host_tsan"
         },
         {
           "type": "test",
-          "name": "tsan"
+          "name": "host_tsan"
         }
       ]
     },
     {
-      "name": "dev",
+      "name": "cuda_relwithdebinfo",
       "steps": [
         {
           "type": "configure",
-          "name": "dev"
+          "name": "cuda_relwithdebinfo"
         },
         {
           "type": "build",
-          "name": "dev"
+          "name": "cuda_relwithdebinfo"
         },
         {
           "type": "test",
-          "name": "dev"
+          "name": "cuda_relwithdebinfo"
         }
       ]
     },
     {
-      "name": "wasm32_emscripten",
+      "name": "wasm32_emscripten_release",
       "steps": [
         {
           "type": "configure",
-          "name": "wasm32_emscripten"
+          "name": "wasm32_emscripten_release"
         },
         {
           "type": "build",
-          "name": "wasm32_emscripten"
+          "name": "wasm32_emscripten_release"
         },
         {
           "type": "test",
-          "name": "wasm32_emscripten"
+          "name": "wasm32_emscripten_release"
         }
       ]
     },
     {
-      "name": "wasm64_emscripten",
+      "name": "wasm64_emscripten_release",
       "steps": [
         {
           "type": "configure",
-          "name": "wasm64_emscripten"
+          "name": "wasm64_emscripten_release"
         },
         {
           "type": "build",
-          "name": "wasm64_emscripten"
+          "name": "wasm64_emscripten_release"
         },
         {
           "type": "test",
-          "name": "wasm64_emscripten"
+          "name": "wasm64_emscripten_release"
         }
       ]
     },
     {
-      "name": "wasm32_wasi",
+      "name": "wasm32_wasi_release",
       "steps": [
         {
           "type": "configure",
-          "name": "wasm32_wasi"
+          "name": "wasm32_wasi_release"
         },
         {
           "type": "build",
-          "name": "wasm32_wasi"
+          "name": "wasm32_wasi_release"
         },
         {
           "type": "test",
-          "name": "wasm32_wasi"
+          "name": "wasm32_wasi_release"
         }
       ]
     }

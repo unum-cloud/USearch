@@ -76,17 +76,17 @@ Without one it prints `- CUDA: no device` and exits 0, skipping every GPU test.
 Those three configurations, and the benchmarking one from [bench/README.md](bench/README.md), are also packaged as CMake presets, so the flag soup below is optional:
 
 ```sh
-cmake --list-presets              # the ones this host can build, from `debug` to `wasm32_wasi` and `msvc_x64`
-cmake --preset release            # configures into `build_release`
-cmake --build --preset release    # builds it
-ctest --preset release            # runs the suites
+cmake --list-presets                   # the ones this host can build, from `host_debug` to `wasm32_wasi_release` and `windows_x64_release`
+cmake --preset host_release            # configures into `build_host_release`
+cmake --build --preset host_release    # builds it
+ctest --preset host_release            # runs the suites
 ```
 
 Every preset writes into `build_<preset name>` and exports a `compile_commands.json` for the language server.
-The development ones build with LLVM through Ninja and link with `lld`; `tsan` uses GCC, and CI rows override the compiler with `-D CMAKE_CXX_COMPILER`.
-The rest match CI: `release_lib` for the C library alone, `linux_aarch64`, `android_arm64`, `android_armv7`, the three WASM toolchains, and `msvc_x64` / `msvc_arm64`.
-Two of them are about GPUs: `dev` compiles the CUDA suites for the host GPU alone, which is the fastest way to iterate and the tree the repo's `.clangd` reads, while `release_cuda` emits a fat binary spanning every architecture from the Ampere floor through both Blackwell lines.
-`trace` adds `-ftime-trace`, dropping a profile beside every object for when a translation unit starts dominating the build.
+The development ones build with LLVM through Ninja and link with `lld`; `host_tsan` uses GCC, and CI rows override the compiler with `-D CMAKE_CXX_COMPILER`.
+The rest match CI: `host_library` for the C library alone, `linux_arm64_library`, `android_arm64_library`, `android_armv7_library`, the three WASM toolchains, and `windows_x64_release` / `windows_arm64_library`.
+Two of them are about GPUs: `cuda_relwithdebinfo` compiles the CUDA suites for the host GPU alone, which is the fastest way to iterate and the tree the repo's `.clangd` reads, while `cuda_release` emits a fat binary spanning every architecture from the Ampere floor through both Blackwell lines.
+`cuda_trace` adds `-ftime-trace`, dropping a profile beside every object for when a translation unit starts dominating the build.
 Machine-specific overrides - a different compiler, `ccache`, a CUDA toolkit outside the default prefix - belong in an untracked `CMakeUserPresets.json` beside it:
 
 ```json
@@ -94,9 +94,9 @@ Machine-specific overrides - a different compiler, `ccache`, a CUDA toolkit outs
     "version": 6,
     "configurePresets": [
         {
-            "name": "dev-local",
-            "inherits": "dev",
-            "binaryDir": "${sourceDir}/build_dev",
+            "name": "cuda_relwithdebinfo_local",
+            "inherits": "cuda_relwithdebinfo",
+            "binaryDir": "${sourceDir}/build_cuda_relwithdebinfo",
             "cacheVariables": {
                 "CMAKE_CUDA_HOST_COMPILER": "/usr/bin/g++-14",
                 "CMAKE_CXX_COMPILER_LAUNCHER": "ccache"
@@ -119,9 +119,10 @@ The CMakeLists.txt file has a number of options you can pass:
     It carries the same library names in a `stub/` subdirectory, so pointing a binding at it is a search path rather than a different link line.
   - `USEARCH_BUILD_CUDA` - build the CUDA test & benchmark suites
 - Which GPUs to target:
-  - `USEARCH_CUDA_ARCHITECTURES` - the architectures the CUDA tests, benchmarks and the C interface's dispatch unit compile for, `80;90a;100f;120f` by default: the Ampere floor, then Hopper, architecture-specific, and both Blackwell lines, family-specific so they carry the fp6 and fp4 conversions.
+  - `USEARCH_CUDA_ARCHITECTURES` - the architectures the CUDA tests, benchmarks and the C interface's dispatch unit compile for, `80-real;90a-real;100f-real;120f-real` by default: the Ampere floor, then Hopper, architecture-specific, and both Blackwell lines, family-specific so they carry the fp6 and fp4 conversions.
+    The `-real` suffix skips the PTX, which triples the test objects; the `cuda_release` preset keeps it.
     The library itself ignores the list and compiles one unit per GPU class, each for its own code alone - `80` with its PTX for every GPU outside the other classes, `89`, `90a`, `100f`, which B300 runs as well, and `120f` - and picks the unit by the device's generation at runtime.
-    A NumKong GPU tier turns on in those targets only when every listed architecture runs it, so the default list exercises the Ampere kits alone; iterate on one GPU with its family code, like `100f`, to test that generation's kits.
+    A NumKong GPU tier turns on in those targets only when every listed architecture runs it, so the default list exercises the Ampere kits alone; iterate on one GPU with its family code, like `100f-real`, to test that generation's kits.
 - Which other dependencies to use:
   - `USEARCH_USE_JEMALLOC` - use Jemalloc for memory management
 
@@ -366,9 +367,9 @@ There is no WebAssembly target of its own — the C library is what crosses, and
 - `cmake/toolchain-wasm32-wasi.cmake` builds `wasm32_v128_k` against the WASI SDK, for Wasmtime, Wasmer and the Rust crate.
 
 ```sh
-emcmake cmake -B build_wasm32_emscripten -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=1
-cmake --build build_wasm32_emscripten --target usearch_static usearch_test_c
-ctest --test-dir build_wasm32_emscripten -R '^usearch_test_c$'
+emcmake cmake -B build_wasm32_emscripten_release -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-emscripten.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=1
+cmake --build build_wasm32_emscripten_release --target usearch_static usearch_test_c
+ctest --test-dir build_wasm32_emscripten_release -R '^usearch_test_c$'
 ```
 
 The toolchain file must be passed as the single argument `-DCMAKE_TOOLCHAIN_FILE=…`; written with a space, `emcmake` appends its own file, which then wins.
@@ -632,9 +633,9 @@ Unpack a [WASI SDK release](https://github.com/WebAssembly/wasi-sdk/releases) an
 
 ```sh
 export WASI_SDK_PATH=/opt/wasi-sdk-34.0-x86_64-linux
-cmake -B build_wasm32_wasi -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=1
-cmake --build build_wasm32_wasi --target usearch_static usearch_test_c
-ctest --test-dir build_wasm32_wasi -R '^usearch_test_c$'
+cmake -B build_wasm32_wasi_release -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-wasm32-wasi.cmake -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=1
+cmake --build build_wasm32_wasi_release --target usearch_static usearch_test_c
+ctest --test-dir build_wasm32_wasi_release -R '^usearch_test_c$'
 ```
 
 `ctest` runs the module under Wasmtime when it is on the path.

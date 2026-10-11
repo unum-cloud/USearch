@@ -140,7 +140,7 @@
     "Yuga"
   ],
   "files.associations": {
-    "*.cu": "cpp",
+    "*.cu": "cuda-cpp",
     "*.cuh": "cuda-cpp",
     "*.metal": "cpp",
     "*.tcc": "cpp",

@@ -126,7 +126,7 @@ jobs:
       - name: Build C/C++
         run: |
           # Configure and build the project
-          cmake --preset release_lib -B build_release \
+          cmake --preset host_library -B build_release \
             -D CMAKE_C_COMPILER_TARGET=${{ matrix.target }} \
             -D CMAKE_CXX_COMPILER_TARGET=${{ matrix.target }} \
             -D CMAKE_SYSTEM_NAME=Linux \
@@ -216,7 +216,7 @@ jobs:
       - name: Build library with MSVC for Arm64
         if: matrix.arch == 'arm64'
         run: |
-          cmake --preset msvc_arm64 -B ./build_release
+          cmake --preset windows_arm64_library -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_shared.dll pkg\
@@ -268,7 +268,7 @@ jobs:
 
       - name: Build library
         run: |
-          cmake --preset release_lib -B ./build_release -D CMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
+          cmake --preset host_library -B ./build_release -D CMAKE_OSX_ARCHITECTURES=${{ matrix.arch }}
           cmake --build ./build_release
           mkdir pkg
           cp build_release/libusearch_shared.dylib pkg/
@@ -310,12 +310,12 @@ jobs:
             abi: armeabi-v7a
             target: armv7-linux-androideabi
             arch: arm32
-            preset: android_armv7
+            preset: android_armv7_library
           - processor: aarch64
             abi: arm64-v8a
             target: aarch64-linux-android
             arch: arm64
-            preset: android_arm64
+            preset: android_arm64_library
 
     steps:
       - name: Check out refreshed version
@@ -622,10 +622,10 @@ jobs:
 
       - name: Build and test WASM with CMake
         run: |
-          # The archive name is also the preset name
-          cmake --workflow --preset ${{ matrix.archive }}
+          # The archive is named after the target, the preset after the target and its flavor
+          cmake --workflow --preset ${{ matrix.archive }}_release
 
-          cd build_${{ matrix.archive }}
+          cd build_${{ matrix.archive }}_release
           cp -r ../include/usearch .
           tar -czf ../usearch_${{ matrix.archive }}_${{ steps.set_version.outputs.version }}.tar.gz libusearch_static.a usearch
           zip -r ../usearch_${{ matrix.archive }}_${{ steps.set_version.outputs.version }}.zip libusearch_static.a usearch
@@ -1020,10 +1020,10 @@ jobs:
         run: git submodule update --init --recursive
       - name: Build C Library
         run: |
-          cmake --preset release_lib
-          cmake --build --preset release_lib --target usearch_static
+          cmake --preset host_library
+          cmake --build --preset host_library --target usearch_static
       - name: Test Swift
-        run: swift test -Xlinker -L${{ github.workspace }}/build_release_lib
+        run: swift test -Xlinker -L${{ github.workspace }}/build_host_library
 
   # Publishes to both Docker Hub and GitHub Container Registry
   # https://docs.github.com/en/actions/publishing-packages/publishing-docker-images#publishing-images-to-docker-hub-and-github-packages
@@ -1094,7 +1094,7 @@ jobs:
         run: |
           sudo apt update
           sudo apt install -y build-essential libjemalloc-dev libomp-dev
-          cmake --preset release_lib -B build_artifacts -D USEARCH_USE_JEMALLOC=1
+          cmake --preset host_library -B build_artifacts -D USEARCH_USE_JEMALLOC=1
           cmake --build build_artifacts
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_shared.so" "${{ github.workspace }}/csharp/lib/runtimes/linux-x64/native"
@@ -1104,7 +1104,7 @@ jobs:
         run: |
           brew update
           brew reinstall cmake
-          cmake --preset release_lib -B build_artifacts -D USEARCH_USE_JEMALLOC=0
+          cmake --preset host_library -B build_artifacts -D USEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts
           mkdir -p "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
           cp "${{ github.workspace }}/build_artifacts/libusearch_shared.dylib" "${{ github.workspace }}/csharp/lib/runtimes/osx-arm64/native"
@@ -1113,7 +1113,7 @@ jobs:
         if: matrix.os == 'windows-2022'
         run: |
           choco install cmake
-          cmake --preset msvc_x64 -B build_artifacts -D USEARCH_BUILD_TEST=0 -D USEARCH_USE_JEMALLOC=0
+          cmake --preset windows_x64_release -B build_artifacts -D USEARCH_BUILD_TEST=0 -D USEARCH_USE_JEMALLOC=0
           cmake --build build_artifacts --config Release
           mkdir -p "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
           cp "${{ github.workspace }}\build_artifacts\libusearch_shared.dll" "${{ github.workspace }}\csharp\lib\runtimes\win-x64\native"
