@@ -2,7 +2,6 @@ package cloud.unum.usearch;
 
 import java.lang.foreign.MemoryLayout;
 import java.lang.foreign.MemorySegment;
-import java.lang.foreign.ValueLayout;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -14,14 +13,14 @@ import cloud.unum.usearch.DenseIndex.DenseIndexDescription;
 import cloud.unum.usearch.DenseIndex.DenseInsertConfig;
 import cloud.unum.usearch.DenseIndex.DenseMaxsimConfig;
 import cloud.unum.usearch.DenseIndex.DenseMultiplyConfig;
+import cloud.unum.usearch.DenseIndex.DenseProducts;
 import cloud.unum.usearch.DenseIndex.DenseReachability;
 import cloud.unum.usearch.DenseIndex.DenseRefineConfig;
 import cloud.unum.usearch.DenseIndex.DenseSearchConfig;
 import cloud.unum.usearch.DenseIndex.DenseSearchStream;
 import cloud.unum.usearch.DenseIndex.DenseSoftmaxState;
-import cloud.unum.usearch.DenseIndex.Products;
+import cloud.unum.usearch.DenseIndex.DenseVectors;
 import cloud.unum.usearch.DenseIndex.ValueLookup;
-import cloud.unum.usearch.DenseIndex.Vectors;
 import cloud.unum.usearch.Types.Arena;
 import cloud.unum.usearch.Types.Call;
 import cloud.unum.usearch.Types.Executor;
@@ -43,7 +42,9 @@ import cloud.unum.usearch.Types.Verb;
  *
  * <p>
  * Every verb that takes knobs beyond its inputs has a bare form and one taking its
- * {@code Dense*Config}, named after the C structure it fills.
+ * {@code Dense*Config}, named after the C structure it fills. Every verb whose output scales with
+ * the call takes an {@link Arena} last, borrows it until it returns, and answers a view over it that
+ * the arena's next call invalidates.
  *
  * <p>
  * Binding-only; every verb names the C symbol it calls.
@@ -99,29 +100,16 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     }
 
     /**
-     * Retrieves every vector stored under a key into a fresh arena the result owns.
-     *
-     * @throws USearchException the statuses {@link #get(Key, Scalar, Arena)} names.
-     */
-    public Vectors get(Key key, Scalar scalar) {
-        return block(getting(key, scalar, null));
-    }
-
-    /**
-     * Retrieves every vector stored under a key, one row per entry sharing it, in insertion order,
-     * packed at the natural width of the kind asked for.
-     *
-     * <p>
-     * Only the call knows how many entries share the key, so the rows land in an arena: the one
-     * passed, which the result stays valid until that arena is used again, or a fresh one the result
-     * owns. Calls {@code usearch_dense_get}.
+     * Retrieves every vector stored under a key into {@code arena}, one row per entry sharing it, in
+     * insertion order, packed at the natural width of the kind asked for - one call, however many
+     * there turn out to be. Calls {@code usearch_dense_get}.
      *
      * @return the rows read in place, none when the key holds nothing.
      * @throws USearchException UNKNOWN_KIND on a scalar the engine cannot convert into, and
-     *     CONTENDED when the arena is serving another call.
+     *     CONTENDED when the arena serves another call.
      */
-    public Vectors get(Key key, Scalar scalar, @Nullable Arena arena) {
-        return block(getting(key, scalar, arena));
+    public DenseVectors get(Key key, Scalar outputsScalar, Arena arena) {
+        return block(getting(key, outputsScalar, arena));
     }
 
     /**
@@ -189,37 +177,37 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     }
 
     /**
-     * Resolves a matrix of queries into up to {@code wanted} nearest matches apiece, in outputs the
-     * call allocates.
+     * Resolves a matrix of queries into up to {@code wanted} nearest matches apiece, with every other
+     * knob derived.
      *
-     * @throws USearchException the statuses {@link #search(RowsView, DenseSearchConfig)} names.
+     * @throws USearchException the statuses {@link #search(RowsView, DenseSearchConfig, Arena)} names.
      */
-    public Matches search(RowsView queries, long wanted) {
-        return block(searching(queries, new DenseSearchConfig(wanted)));
+    public Matches search(RowsView queries, long wanted, Arena arena) {
+        return block(searching(queries, new DenseSearchConfig(wanted), arena));
     }
 
     /**
-     * Resolves a matrix of queries into the outputs the config names - the allocation-free batch
-     * path when it lends {@link Matches}, parallelized internally. Never writes to the graph, so any
-     * number of these may overlap with concurrent insertions. Calls {@code usearch_dense_search}.
+     * Resolves a matrix of queries into {@code arena} - the native batch operation, parallelized
+     * internally. Never writes to the graph, so any number of these may overlap with concurrent
+     * insertions. Calls {@code usearch_dense_search}.
      *
-     * @return the matches, landed where the config says.
-     * @throws USearchException SHAPE_MISMATCH when the rows are not as wide as the frozen geometry or
-     *     the outputs hold fewer rows than there are queries, and UNKNOWN_KIND on a scalar the
-     *     engine cannot convert.
+     * @throws USearchException SHAPE_MISMATCH when the rows are not as wide as the frozen geometry,
+     *     UNKNOWN_KIND on a scalar the engine cannot convert, and CONTENDED when the arena serves
+     *     another call.
      */
-    public Matches search(RowsView queries, DenseSearchConfig config) {
-        return block(searching(queries, config));
+    public Matches search(RowsView queries, DenseSearchConfig config, Arena arena) {
+        return block(searching(queries, config, arena));
     }
 
     /**
-     * Late-interaction scoring keeping up to {@code wanted} keys per query, in outputs the call
-     * allocates.
+     * Late-interaction scoring keeping up to {@code wanted} keys per query, with every other knob
+     * derived.
      *
-     * @throws USearchException the statuses {@link #maxsim(RowsView, long, DenseMaxsimConfig)} names.
+     * @throws USearchException the statuses {@link #maxsim(RowsView, long, DenseMaxsimConfig, Arena)}
+     *     names.
      */
-    public Matches maxsim(RowsView queries, long rowsPerQuery, long wanted) {
-        return block(scoring(queries, rowsPerQuery, new DenseMaxsimConfig(wanted)));
+    public Matches maxsim(RowsView queries, long rowsPerQuery, long wanted, Arena arena) {
+        return block(scoring(queries, rowsPerQuery, new DenseMaxsimConfig(wanted), arena));
     }
 
     /**
@@ -233,21 +221,22 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * can score below its exact value but never above it. Runs on the inner-product kinds alone.
      * Calls {@code usearch_dense_maxsim}.
      *
-     * @throws USearchException CONFIG_MISMATCH on a graph frozen under a distance kind, and
-     *     SHAPE_MISMATCH when the token rows do not divide into whole queries, the rows are not as
-     *     wide as the frozen geometry, or the outputs hold fewer rows than there are queries.
+     * @throws USearchException CONFIG_MISMATCH on a graph frozen under a distance kind,
+     *     SHAPE_MISMATCH when the token rows do not divide into whole queries or the rows are not as
+     *     wide as the frozen geometry, and CONTENDED when the arena serves another call.
      */
-    public Matches maxsim(RowsView queries, long rowsPerQuery, DenseMaxsimConfig config) {
-        return block(scoring(queries, rowsPerQuery, config));
+    public Matches maxsim(RowsView queries, long rowsPerQuery, DenseMaxsimConfig config, Arena arena) {
+        return block(scoring(queries, rowsPerQuery, config, arena));
     }
 
     /**
-     * Approximate sparse product keeping every pair, into a fresh arena the result owns.
+     * Approximate sparse product keeping every pair, with every other knob derived.
      *
-     * @throws USearchException the statuses {@link #multiply(RowsView, DenseMultiplyConfig)} names.
+     * @throws USearchException the statuses {@link #multiply(RowsView, DenseMultiplyConfig, Arena)}
+     *     names.
      */
-    public Products multiply(RowsView left) {
-        return block(multiplying(left, new DenseMultiplyConfig()));
+    public DenseProducts multiply(RowsView left, Arena arena) {
+        return block(multiplying(left, new DenseMultiplyConfig(), arena));
     }
 
     /**
@@ -257,45 +246,44 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * products. Runs on the inner-product kinds alone.
      *
      * <p>
-     * Only the call knows how many pairs it scores, so they land in an arena: the one the config
-     * passes, which the result stays valid until that arena is used again, or a fresh one the result
-     * owns. Calls {@code usearch_dense_multiply}.
+     * Only the call knows how many pairs it scores, so the keys, the products and their offsets land
+     * in {@code arena} as one ragged output. Calls {@code usearch_dense_multiply}.
      *
      * @throws USearchException CONFIG_MISMATCH on a graph frozen under a distance kind,
      *     SHAPE_MISMATCH when the rows are not as wide as the frozen geometry, and CONTENDED when the
-     *     arena is serving another call.
+     *     arena serves another call.
      */
-    public Products multiply(RowsView left, DenseMultiplyConfig config) {
-        return block(multiplying(left, config));
+    public DenseProducts multiply(RowsView left, DenseMultiplyConfig config, Arena arena) {
+        return block(multiplying(left, config, arena));
     }
 
     /**
-     * Softmax attention landing in {@code outputs}, with every other knob derived.
+     * Softmax attention with every knob derived.
      *
-     * @throws USearchException the statuses {@link #attend(RowsView, ValueLookup, DenseAttendConfig)}
-     *     names.
+     * @throws USearchException the statuses
+     *     {@link #attend(RowsView, ValueLookup, DenseAttendConfig, Arena)} names.
      */
-    public RowsView attend(RowsView queries, ValueLookup valueLookup, RowsView outputs) {
-        return block(attending(queries, valueLookup, new DenseAttendConfig(outputs)));
+    public DenseVectors attend(RowsView queries, ValueLookup valueLookup, Arena arena) {
+        return block(attending(queries, valueLookup, new DenseAttendConfig(), arena));
     }
 
     /**
      * Softmax attention of every query row over every indexed key its walk scores, folded as Flash
-     * Attention folds key tiles, with no top-k cut, landing in the config's outputs already divided
-     * by the partition. Runs on the inner-product kinds alone, since a softmax needs logits.
+     * Attention folds key tiles, with no top-k cut, landing one row per query in {@code arena}
+     * already divided by the partition. Runs on the inner-product kinds alone, since a softmax needs
+     * logits.
      *
      * <p>
      * The index holds one layer's keys for one key-value head and no values, so the lookup resolves
      * every scored key to its value row. Calls {@code usearch_dense_attend}.
      *
-     * @return the outputs the config names.
-     * @throws USearchException SHAPE_MISMATCH when a scored key resolves to no row, the head count
-     *     does not divide the rows, or the outputs are too few or of another width than the keys;
-     *     CONFIG_MISMATCH on a graph frozen under a distance kind; and whatever the lookup raised,
-     *     which outranks the status it turned into.
+     * @throws USearchException SHAPE_MISMATCH when a scored key resolves to no row or the head count
+     *     does not divide the rows; CONFIG_MISMATCH on a graph frozen under a distance kind; CONTENDED
+     *     when the arena serves another call; and whatever the lookup raised, which outranks the
+     *     status it turned into.
      */
-    public RowsView attend(RowsView queries, ValueLookup valueLookup, DenseAttendConfig config) {
-        return block(attending(queries, valueLookup, config));
+    public DenseVectors attend(RowsView queries, ValueLookup valueLookup, DenseAttendConfig config, Arena arena) {
+        return block(attending(queries, valueLookup, config, arena));
     }
 
     /**
@@ -304,7 +292,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      * succeeds, and closed from the call on. Calls {@code usearch_dense_merge}.
      *
      * @throws USearchException UNSUPPORTED where no residency absorbs donors yet, and INVALID_ARGUMENT
-     *     when the index is among its own donors.
+     *     when the index is among its own donors or a donor is named twice, which consumes none.
      */
     public void merge(DenseIndex... donors) {
         block(merging(donors));
@@ -323,23 +311,13 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
     }
 
     /**
-     * Writes the index as one monolith into a fresh arena the result owns.
-     *
-     * @throws USearchException the statuses {@link #saveBuffer(Arena)} names.
-     */
-    public Monolith saveBuffer() {
-        return block(serializing(null));
-    }
-
-    /**
      * Writes the index as one monolith - every shard, rows in placement order - the same bytes
-     * {@link #save} writes to a {@code .safegraphs} path, into the arena passed, which the result
-     * stays valid until that arena is used again, or into a fresh one the result owns. Calls
+     * {@link #save} writes to a {@code .safegraphs} path, into {@code arena}. Calls
      * {@code usearch_dense_save_buffer}.
      *
-     * @throws USearchException CONTENDED when the arena is serving another call.
+     * @throws USearchException CONTENDED when the arena serves another call.
      */
-    public Monolith saveBuffer(@Nullable Arena arena) {
+    public Monolith saveBuffer(Arena arena) {
         return block(serializing(arena));
     }
 
@@ -418,27 +396,14 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
         });
     }
 
-    static Request<Vectors> getting(Key key, Scalar scalar, @Nullable Arena borrowed) {
+    static Request<DenseVectors> getting(Key key, Scalar outputsScalar, Arena arena) {
         return new Request<>(DenseIndex.GET, call -> {
-            Arena arena = borrowed != null ? borrowed : new Arena();
             call.key("key", key);
-            call.enumeration("scalar", scalar.code());
-            MemorySegment vectors = call.output("vectors", Library.POINTER);
+            call.enumeration("outputs_scalar", outputsScalar.code());
+            MemorySegment vectors = call.output("vectors", Library.ROWS_VIEW);
             MemorySegment written = call.output("written", Library.SIZE);
-            MemorySegment stride = call.output("stride", Library.SIZE);
-            MemorySegment columns = call.output("columns", Library.SIZE);
-            java.lang.foreign.Arena scope = call.arena("arena", arena);
-            return () -> {
-                long rows = written.get(Library.SIZE, 0);
-                long pitch = stride.get(Library.SIZE, 0);
-                return new Vectors(
-                        borrowed != null ? null : arena,
-                        arena.reach(scope, vectors.get(Library.POINTER, 0), rows * pitch),
-                        rows,
-                        columns.get(Library.SIZE, 0),
-                        pitch,
-                        scalar);
-            };
+            call.arena("arena", arena);
+            return () -> DenseVectors.lift(call, vectors, written.get(Library.SIZE, 0));
         });
     }
 
@@ -473,19 +438,20 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
         });
     }
 
-    static Request<Matches> searching(RowsView queries, DenseSearchConfig config) {
-        Matches matches = config.landing(queries.rows());
+    static Request<Matches> searching(RowsView queries, DenseSearchConfig config, Arena arena) {
         return new Request<>(DenseIndex.SEARCH, call -> {
             call.size("count", queries.rows());
             call.rows("queries", queries);
-            matches.land(call, "matches");
+            MemorySegment matches = call.output("matches", Library.MATCHES_VIEW);
+            call.arena("arena", arena);
+            call.size("wanted", config.wanted);
             call.size("expansion_factor", config.expansionFactor);
             call.stats("stats", config.stats);
-            return () -> matches;
+            return () -> Matches.lift(call, matches, queries.rows());
         });
     }
 
-    static Request<Matches> scoring(RowsView queries, long rowsPerQuery, DenseMaxsimConfig config) {
+    static Request<Matches> scoring(RowsView queries, long rowsPerQuery, DenseMaxsimConfig config, Arena arena) {
         if (rowsPerQuery <= 0) {
             throw new USearchException(Status.SHAPE_MISMATCH, "a query cannot carry zero rows");
         }
@@ -493,47 +459,38 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
             throw new USearchException(Status.SHAPE_MISMATCH, "the token rows do not divide into whole queries");
         }
         long count = queries.rows() / rowsPerQuery;
-        Matches matches = config.landing(count);
         return new Request<>(DenseIndex.MAXSIM, call -> {
             call.size("count", count);
             call.rows("queries", queries);
             call.size("rows_per_query", rowsPerQuery);
-            matches.land(call, "matches");
-            call.size("expansion_factor", config.expansionFactor);
-            call.stats("stats", config.stats);
-            return () -> matches;
-        });
-    }
-
-    static Request<Products> multiplying(RowsView left, DenseMultiplyConfig config) {
-        int rows = Types.Extents.toArrayLength(left.rows(), "the left rows");
-        return new Request<>(DenseIndex.MULTIPLY, call -> {
-            Arena arena = config.arena != null ? config.arena : new Arena();
-            call.size("count", rows);
-            call.rows("left", left);
-            MemorySegment offsets = call.memory.allocate(Library.SIZE, rows + 1L);
-            call.pointer("offsets", offsets);
-            MemorySegment keys = call.output("keys", Library.POINTER);
-            MemorySegment scores = call.output("scores", Library.POINTER);
-            java.lang.foreign.Arena scope = call.arena("arena", arena);
-            MemorySegment written = call.output("written", Library.SIZE);
-            MemorySegment required = call.output("required", Library.SIZE);
+            MemorySegment matches = call.output("matches", Library.MATCHES_VIEW);
+            call.arena("arena", arena);
             call.size("wanted", config.wanted);
             call.size("expansion_factor", config.expansionFactor);
             call.stats("stats", config.stats);
-            return () -> {
-                long pairs = written.get(Library.SIZE, 0);
-                return new Products(
-                        config.arena != null ? null : arena,
-                        offsets.toArray(ValueLayout.JAVA_LONG),
-                        arena.reach(scope, keys.get(Library.POINTER, 0), pairs * Key.BYTES),
-                        arena.reach(scope, scores.get(Library.POINTER, 0), pairs * Double.BYTES),
-                        required.get(Library.SIZE, 0));
-            };
+            return () -> Matches.lift(call, matches, count);
         });
     }
 
-    static Request<RowsView> attending(RowsView queries, ValueLookup valueLookup, DenseAttendConfig config) {
+    static Request<DenseProducts> multiplying(RowsView left, DenseMultiplyConfig config, Arena arena) {
+        int rows = Types.Extents.toIndex(left.rows(), "the left rows");
+        return new Request<>(DenseIndex.MULTIPLY, call -> {
+            call.size("count", rows);
+            call.rows("left", left);
+            MemorySegment products = call.output("products", Library.MATCHES_TAPE_VIEW);
+            MemorySegment written = call.output("written", Library.SIZE);
+            MemorySegment required = call.output("required", Library.SIZE);
+            call.arena("arena", arena);
+            call.size("wanted", config.wanted);
+            call.size("expansion_factor", config.expansionFactor);
+            call.stats("stats", config.stats);
+            return () -> DenseProducts.lift(
+                    call, products, rows, written.get(Library.SIZE, 0), required.get(Library.SIZE, 0));
+        });
+    }
+
+    static Request<DenseVectors> attending(
+            RowsView queries, ValueLookup valueLookup, DenseAttendConfig config, Arena arena) {
         // The carry lands one state per query row, so a shorter array would be written past.
         if (config.carry != null && config.carry.length != queries.rows()) {
             throw new USearchException(Status.SHAPE_MISMATCH, "the carry holds one state per query row");
@@ -542,14 +499,16 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
             call.size("count", queries.rows());
             call.rows("queries", queries);
             call.size("head_count", config.headCount);
-            call.pointer("value_lookup", valueLookup.upcall(call));
-            call.rowsOut("outputs", config.outputs);
+            valueLookup.lend(call);
+            call.enumeration("outputs_scalar", config.outputsScalar.code());
+            MemorySegment outputs = call.output("outputs", Library.ROWS_VIEW);
+            call.arena("arena", arena);
             call.size("expansion_factor", config.expansionFactor);
             call.real("score_scale", config.scoreScale);
             call.stats("stats", config.stats);
             DenseSoftmaxState[] carry = config.carry;
             if (carry == null) {
-                return () -> config.outputs;
+                return () -> DenseVectors.lift(call, outputs, queries.rows());
             }
             MemorySegment states =
                     call.output("carry", MemoryLayout.sequenceLayout(carry.length, DenseIndex.SOFTMAX_STATE));
@@ -557,7 +516,7 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
                 for (int row = 0; row != carry.length; ++row) {
                     carry[row] = DenseSoftmaxState.lift(states.asSlice(row * DenseIndex.SOFTMAX_STATE.byteSize()));
                 }
-                return config.outputs;
+                return DenseVectors.lift(call, outputs, queries.rows());
             };
         });
     }
@@ -567,9 +526,15 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
             long index = call.arguments
                     .get(Library.POINTER, DenseIndex.MERGE.at("index"))
                     .address();
-            for (DenseIndex donor : donors) {
-                if (donor.handle.address().address() == index) {
+            // Every donor is checked before any is surrendered, so a refused merge consumes none of them.
+            for (int order = 0; order != donors.length; ++order) {
+                if (donors[order].handle.address().address() == index) {
                     throw new USearchException(Status.INVALID_ARGUMENT, "an index cannot absorb itself");
+                }
+                for (int earlier = 0; earlier != order; ++earlier) {
+                    if (donors[earlier] == donors[order]) {
+                        throw new USearchException(Status.INVALID_ARGUMENT, "a donor is named twice");
+                    }
                 }
             }
             MemorySegment slots = call.memory.allocate(Library.POINTER, donors.length);
@@ -595,15 +560,11 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
         });
     }
 
-    static Request<Monolith> serializing(@Nullable Arena borrowed) {
+    static Request<Monolith> serializing(Arena arena) {
         return new Request<>(DenseIndex.SAVE_BUFFER, call -> {
-            Arena arena = borrowed != null ? borrowed : new Arena();
-            MemorySegment bytes = call.output("bytes", Library.POINTER);
-            MemorySegment length = call.output("length", Library.SIZE);
-            java.lang.foreign.Arena scope = call.arena("arena", arena);
-            return () -> new Monolith(
-                    borrowed != null ? null : arena,
-                    arena.reach(scope, bytes.get(Library.POINTER, 0), length.get(Library.SIZE, 0)));
+            MemorySegment monolith = call.output("monolith", Library.BYTES_VIEW);
+            call.arena("arena", arena);
+            return () -> Monolith.lift(call, monolith);
         });
     }
 

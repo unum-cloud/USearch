@@ -7,15 +7,16 @@ import java.lang.foreign.MemorySegment;
 import java.lang.foreign.StructLayout;
 import java.lang.foreign.ValueLayout;
 import java.lang.invoke.MethodHandle;
-import java.lang.invoke.VarHandle;
 import java.lang.ref.Cleaner;
 import java.lang.ref.Reference;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -252,7 +253,7 @@ public final class Types {
         DEFERRED(1),
         /** An allocation or reservation could not be satisfied. */
         OUT_OF_MEMORY(2),
-        /** Dimensionality, row counts, or output capacity disagree. */
+        /** Dimensionality or row counts disagree. */
         SHAPE_MISMATCH(3),
         /** A stride or packing the engine cannot traverse. */
         UNSUPPORTED_LAYOUT(4),
@@ -369,6 +370,8 @@ public final class Types {
         I8(10, 1, 1),
         /** Two 4-bit signed integers per byte. */
         I4X2(11, 1, 2),
+        /** A 32-bit signed integer, the coordinates of geospatial points. */
+        I32(12, 4, 1),
         /** An 8-bit unsigned integer. */
         U8(20, 1, 1),
         /** Two 4-bit unsigned integers per byte. */
@@ -455,6 +458,37 @@ public final class Types {
     }
 
     /**
+     * Where an executor computes, and so where the arenas it makes keep their memory: host pages for
+     * RAM and NVMe, device memory for VRAM.
+     */
+    public enum Residency {
+
+        /** Host memory, walked by host threads. */
+        RAM(0),
+        /** Device memory, walked by device streams. */
+        VRAM(1),
+        /** NVMe drives, read through host submission rings into host memory. */
+        NVME(2);
+
+        private final int code;
+
+        Residency(int code) {
+            this.code = code;
+        }
+
+        /** The C enumerator's numeric value. */
+        public int code() {
+            return code;
+        }
+
+        /** Renders the residency as its C enumerator's stem. Calls {@code usearch_residency_name}. */
+        @Override
+        public String toString() {
+            return Library.text(RESIDENCY_NAME, code);
+        }
+    }
+
+    /**
      * The workers every fanned-out verb runs on, shared across indexes: an executor owns host threads
      * or device streams and their scratch, an index owns rows.
      *
@@ -481,8 +515,12 @@ public final class Types {
 
         private final Handle handle;
 
-        private Executor(MemorySegment spawned) {
-            handle = new Handle(this, spawned, EXECUTOR_FREE);
+        /** Where the executor computes, which every arena it makes inherits. */
+        final Residency residency;
+
+        private Executor(MemorySegment spawned, Residency residency) {
+            this.handle = new Handle(spawned, EXECUTOR_FREE);
+            this.residency = residency;
         }
 
         /**
@@ -501,7 +539,7 @@ public final class Types {
          *     scratch cannot be claimed.
          */
         public static Executor forRam(int[] memoryDomains, long threads, long deferredLimit) {
-            return spawn(FOR_RAM, call -> {
+            return spawn(FOR_RAM, Residency.RAM, call -> {
                 call.ordinals("ram", memoryDomains);
                 call.size("threads", unsigned(threads));
                 call.size("deferred_limit", unsigned(deferredLimit));
@@ -521,7 +559,7 @@ public final class Types {
          * @param deferredLimit Deferred calls tracked at once; zero takes a default.
          */
         public static Executor onPool(MemorySegment pool, int[] memoryDomains, long deferredLimit) {
-            return spawn(ON_POOL, call -> {
+            return spawn(ON_POOL, Residency.RAM, call -> {
                 call.ordinals("ram", memoryDomains);
                 call.pointer("pool", pool);
                 call.size("deferred_limit", unsigned(deferredLimit));
@@ -550,7 +588,7 @@ public final class Types {
             if (streams.length != 0 && streams.length != devices.length) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "pass no streams or one per device");
             }
-            return spawn(FOR_VRAM, call -> {
+            return spawn(FOR_VRAM, Residency.VRAM, call -> {
                 call.ordinals("vram", devices);
                 if (streams.length != 0) {
                     MemorySegment borrowed = call.memory.allocate(Library.POINTER, streams.length);
@@ -584,7 +622,7 @@ public final class Types {
          *     scratch cannot be claimed.
          */
         public static Executor forNvme(String[] paths, long threads, long deferredLimit) {
-            return spawn(FOR_NVME, call -> {
+            return spawn(FOR_NVME, Residency.NVME, call -> {
                 call.paths("nvme", paths);
                 call.size("threads", unsigned(threads));
                 call.size("deferred_limit", unsigned(deferredLimit));
@@ -630,11 +668,11 @@ public final class Types {
         }
 
         /** Runs one executor factory and adopts what it spawned. */
-        private static Executor spawn(Verb verb, java.util.function.Consumer<Call> fill) {
+        private static Executor spawn(Verb verb, Residency residency, java.util.function.Consumer<Call> fill) {
             return Call.block(verb, null, null, call -> {
                 MemorySegment spawned = call.output("executor", Library.POINTER);
                 fill.accept(call);
-                return () -> new Executor(spawned.get(Library.POINTER, 0));
+                return () -> new Executor(spawned.get(Library.POINTER, 0), residency);
             });
         }
 
@@ -655,117 +693,173 @@ public final class Types {
     }
 
     /**
-     * Memory the library allocates for the outputs only a call can size - the rows of
-     * {@link DenseVerbs#get}, the products of {@link DenseVerbs#multiply}, the monolith of
-     * {@link DenseVerbs#saveBuffer} - reused across calls.
+     * Memory the library writes every output whose length scales with a call into - the matches of
+     * {@link DenseVerbs#search}, the rows of {@link DenseVerbs#get}, the products of
+     * {@link DenseVerbs#multiply}, the monolith of {@link DenseVerbs#saveBuffer} - reused across calls.
      *
      * <p>
-     * A fresh arena holds nothing; the first call handed it creates the memory where that call's
-     * executor computes, and every later call rewinds and refills it, so a steady loop allocates once.
-     * A result read out of an arena is valid until the arena is handed to another call or closed;
-     * reading it after that raises {@link IllegalStateException} rather than touching freed memory.
-     * To keep one call's result alive past the next, pass the next call another arena, or none, in
-     * which case the result owns a fresh arena of its own and frees it when closed.
+     * An executor places it where it computes, decided once, and nothing is allocated until a call
+     * writes into it. Every output verb requires one and answers a view over it; each call rewinds it,
+     * so a steady loop allocates once, and the previous call's views raise {@link IllegalStateException}
+     * rather than read stale memory. To keep one call's views alive past the next, pass the next call
+     * another arena.
      *
      * <p>
-     * An arena serves one call at a time and takes no lock: a second call submitted while the first
-     * runs fails with CONTENDED. One the program drops without closing is freed once neither it nor
-     * any result read out of it is reachable.
+     * An arena serves one call at a time and takes no lock: a second call naming it while the first
+     * holds it fails with CONTENDED and leaves the first call's views readable. A blocking call holds
+     * it until it returns, and a deferred one until it is joined, closed or collected. A VRAM arena
+     * holds device memory, so the views over it refuse host reads with DEVICE. One the program drops
+     * without closing is freed once neither it nor any view over it is reachable.
+     *
+     * <pre>{@code
+     * try (Arena arena = new Arena(pool)) {
+     *     for (Key key : keys) {
+     *         DenseVectors rows = index.on(pool).get(key, Scalar.F32, arena); // valid until the next call given `arena`
+     *     }
+     * }
+     * }</pre>
      */
     public static final class Arena implements AutoCloseable {
 
-        /** The {@code usearch_arena_t} slot every call creates or rewinds the arena through. */
-        private final MemorySegment handle = java.lang.foreign.Arena.ofAuto().allocate(Library.POINTER);
+        private final Handle handle;
+        private final Residency residency;
 
-        /** The scope the previous call's results were read through, closed once they go stale. */
+        /** The scope the latest call's views read through, closed while a call holds the arena. */
         private volatile java.lang.foreign.Arena outputs = java.lang.foreign.Arena.ofShared();
 
-        /** Frees the library's memory once, on close or once nothing reaches the arena. */
-        private final Cleaner.Cleanable release;
-
-        /** An empty arena, which the first call handed it creates. */
+        /** Host pages for calls on the calling thread. Calls {@code usearch_arena_init}. */
         public Arena() {
-            MemorySegment slot = handle;
-            release = CLEANER.register(this, () -> {
-                MemorySegment created = slot.get(Library.POINTER, 0);
-                slot.set(Library.POINTER, 0, MemorySegment.NULL);
-                Library.invoke(ARENA_FREE, created);
+            this(null, Residency.RAM);
+        }
+
+        /**
+         * Memory where {@code executor} computes, serving the calls of its residency. Calls
+         * {@code usearch_arena_init}.
+         */
+        public Arena(Executor executor) {
+            this(executor, executor.residency);
+        }
+
+        private Arena(@Nullable Executor executor, Residency residency) {
+            this.residency = residency;
+            this.handle = Call.block(ARENA_INIT, null, executor, call -> {
+                MemorySegment made = call.output("arena", Library.POINTER);
+                return () -> new Handle(made.get(Library.POINTER, 0), ARENA_FREE);
             });
         }
 
+        /** Where the memory lives: the residency of the executor that made it. */
+        public Residency residency() {
+            return residency;
+        }
+
         /**
-         * Invalidates the previous call's results and opens the scope the next call's results are
-         * read through, which the call after it closes in turn.
+         * Holds the arena for one call until {@link #release}, retiring the previous call's views.
+         * Closing a scope is atomic, so the close is the claim.
+         *
+         * @throws USearchException CONTENDED while another call holds it, whose views stay readable.
+         */
+        void claim() {
+            try {
+                outputs.close();
+            } catch (IllegalStateException held) {
+                throw new USearchException(Status.CONTENDED, "the arena serves another call");
+            }
+        }
+
+        /** Opens the scope the holder's views read through once it is final, letting the next call claim. */
+        void release() {
+            outputs = java.lang.foreign.Arena.ofShared();
+        }
+
+        /**
+         * The {@code usearch_arena_t} calls name.
          *
          * @throws IllegalStateException on a closed arena.
          */
-        java.lang.foreign.Arena rewind() {
-            outputs.close();
-            outputs = java.lang.foreign.Arena.ofShared();
-            return outputs;
-        }
-
-        /** The {@code usearch_arena_t} slot calls create or rewind the arena through. */
-        MemorySegment slot() {
-            return handle;
+        MemorySegment address() {
+            return handle.address();
         }
 
         /**
-         * Widens a pointer one call wrote to the {@code length} bytes it addresses, valid while the
-         * scope that call's rewind opened stays open. The view keeps this arena reachable, so the
-         * library's memory outlives it.
+         * Refuses a host read of device memory.
+         *
+         * @throws USearchException DEVICE on a VRAM arena.
+         */
+        void host() {
+            if (residency == Residency.VRAM) {
+                throw new USearchException(Status.DEVICE, "the outputs are device memory");
+            }
+        }
+
+        /**
+         * Widens a pointer the released call wrote to the {@code length} bytes it addresses, valid
+         * until the next call claims the arena. The view keeps this arena reachable, so the library's
+         * memory outlives it; device memory is never widened, since no host read may reach it.
          *
          * @throws IllegalStateException once a later call rewound the arena, or it was closed.
          */
         @SuppressWarnings("restricted")
-        MemorySegment reach(java.lang.foreign.Arena scope, MemorySegment pointer, long length) {
-            return length == 0
+        MemorySegment reach(MemorySegment pointer, long length) {
+            // A call joined after close() released a fresh scope over freed memory, so the handle refuses.
+            handle.address();
+            return length == 0 || residency == Residency.VRAM
                     ? MemorySegment.NULL
-                    : pointer.reinterpret(length, scope, ignored -> Reference.reachabilityFence(this));
+                    : pointer.reinterpret(length, outputs, ignored -> Reference.reachabilityFence(this));
         }
 
         /**
-         * Frees the memory and every result read out of it. It is idempotent.
+         * Frees the memory and invalidates every view over it, once every deferred call naming it is
+         * final; joining such a call afterwards raises {@link IllegalStateException}. It is idempotent.
          *
          * <p>
          * Calls {@code usearch_arena_free}.
          */
         @Override
         public void close() {
-            java.lang.foreign.Arena stale = outputs;
-            if (stale.scope().isAlive()) {
-                stale.close();
+            try {
+                outputs.close();
+            } catch (IllegalStateException held) {
+                // Already closed, or held by a deferred call, whose release then meets the closed handle.
             }
-            release.clean();
+            handle.close();
+        }
+
+        /** Renders the arena as its residency and the handle it wraps. */
+        @Override
+        public String toString() {
+            return "Arena(" + residency + ", " + handle + ")";
         }
     }
 
     /**
      * The monolith a {@code saveBuffer} of any modality wrote into an arena, as
-     * {@link DenseVerbs#saveBuffer} does. Valid until the arena is handed to another call or closed;
-     * closing this frees the arena only when the call created it.
+     * {@link DenseVerbs#saveBuffer} does. Valid until the arena's next call or its close.
      */
-    public static final class Monolith implements AutoCloseable {
+    public static final class Monolith {
 
-        private final @Nullable Arena owned;
+        private final Arena arena;
         private final MemorySegment bytes;
 
-        Monolith(@Nullable Arena owned, MemorySegment bytes) {
-            this.owned = owned;
+        private Monolith(Arena arena, MemorySegment bytes) {
+            this.arena = arena;
             this.bytes = bytes;
         }
 
-        /** The bytes in place, which {@link DenseIndex#loadRamBuffer} reads back with no copy. */
-        public MemorySegment segment() {
-            return bytes;
+        /** Lifts the {@code usearch_bytes_view_t} a call wrote into its arena. */
+        static Monolith lift(Call call, MemorySegment view) {
+            MemorySegment data = view.get(Library.POINTER, 0);
+            return new Monolith(call.arena(), call.reach(data, view.get(Library.SIZE, Library.POINTER.byteSize())));
         }
 
-        /** Frees the arena the call created; a borrowed one stays the caller's. */
-        @Override
-        public void close() {
-            if (owned != null) {
-                owned.close();
-            }
+        /**
+         * The bytes in place, which {@link DenseIndex#loadRamBuffer} reads back with no copy.
+         *
+         * @throws USearchException DEVICE when the arena holds device memory.
+         */
+        public MemorySegment segment() {
+            arena.host();
+            return bytes;
         }
     }
 
@@ -873,20 +967,6 @@ public final class Types {
             return new RowsView(slab, rows, columns, strideBytes, scalar);
         }
 
-        /**
-         * Allocates a packed, zeroed native slab the garbage collector frees, which calls write into
-         * in place.
-         *
-         * @throws USearchException SHAPE_MISMATCH on a zero width, UNKNOWN_KIND on an unnamed kind,
-         *     and OVERFLOW when the slab would not fit in sixty-four bits.
-         */
-        public static RowsView allocate(long rows, long columns, Scalar scalar) {
-            long rowBytes = rowBytesOf(columns, scalar);
-            MemorySegment slab =
-                    java.lang.foreign.Arena.ofAuto().allocate(Extents.product(rows, rowBytes, "the matrix"), 8);
-            return new RowsView(slab, rows, columns, rowBytes, scalar);
-        }
-
         private static long rowBytesOf(long columns, Scalar scalar) {
             if (columns <= 0) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "a matrix row cannot be zero columns wide");
@@ -936,96 +1016,74 @@ public final class Types {
     }
 
     /**
-     * Where a ranked run lands - three slabs holding a queries-by-wanted matrix of keys, the scores
-     * positionally paired with them, and one match count per query.
+     * A ranked run a call wrote into its arena - a queries-by-columns matrix of keys, the scores
+     * positionally paired with them, and one match count per query, all read in place.
      *
      * <p>
-     * The keys are one flat byte slab, and {@link #key(int, int)} materializes a {@link Key} only for
-     * the slots a caller reads. Slots past a query's count hold memory the engine never wrote, so
-     * every accessor here refuses them.
-     *
-     * <p>
-     * The wanted count is the "k" in kANN and the row width of both matrices, and it is read off the
-     * slab lengths rather than asked for, so the room reserved and the count asked for cannot
-     * disagree. Lending slabs the caller already owns is what lets a recall sweep allocate once and
-     * reuse them across every point.
+     * {@link #key(int, int)} materializes a {@link Key} only for the slots a caller reads. Slots past
+     * a query's count hold memory the engine never wrote, so every accessor here refuses them. Valid
+     * until the arena's next call or its close, after which every accessor raises
+     * {@link IllegalStateException}.
      */
     public static final class Matches {
 
+        private final Arena arena;
         private final MemorySegment keys;
         private final MemorySegment scores;
         private final MemorySegment counts;
-        private final int wanted;
+        private final int queries;
+        private final int columns;
 
-        private Matches(MemorySegment keys, MemorySegment scores, MemorySegment counts, int wanted) {
+        private Matches(
+                Arena arena, MemorySegment keys, MemorySegment scores, MemorySegment counts, int queries, int columns) {
+            this.arena = arena;
             this.keys = keys;
             this.scores = scores;
             this.counts = counts;
-            this.wanted = wanted;
+            this.queries = queries;
+            this.columns = columns;
         }
 
-        /**
-         * Adopts three slabs the caller already owns, deriving the wanted count from their lengths. A
-         * native slab is written in place; a heap one is staged and copied back once the call is final.
-         *
-         * @throws USearchException SHAPE_MISMATCH when the batch holds no query, the key and score
-         *     slabs are not the same shape, or the slabs do not divide into one row per query.
-         */
-        public static Matches of(MemorySegment keys, MemorySegment scores, MemorySegment counts) {
-            long queries = counts.byteSize() / Long.BYTES;
-            long slots = scores.byteSize() / Double.BYTES;
-            if (queries == 0) {
-                throw new USearchException(Status.SHAPE_MISMATCH, "a run must hold at least one query");
-            }
-            if (keys.byteSize() != slots * Key.BYTES) {
-                throw new USearchException(Status.SHAPE_MISMATCH, "the key and score slabs are not the same shape");
-            }
-            if (slots == 0 || slots % queries != 0) {
-                throw new USearchException(Status.SHAPE_MISMATCH, "the slabs do not divide into one row per query");
-            }
-            Extents.toIndex(queries, "the query count");
-            return new Matches(keys, scores, counts, Extents.toIndex(slots / queries, "the wanted count"));
+        /** Lifts the {@code usearch_matches_view_t} a call over {@code queries} rows wrote into its arena. */
+        static Matches lift(Call call, MemorySegment view, long queries) {
+            long columns = view.get(Library.SIZE, Library.offset(Library.MATCHES_VIEW, "columns"));
+            long slots = Extents.product(queries, columns, "the match matrix");
+            return new Matches(
+                    call.arena(),
+                    call.reach(
+                            view.get(Library.POINTER, Library.offset(Library.MATCHES_VIEW, "keys")), slots * Key.BYTES),
+                    call.reach(
+                            view.get(Library.POINTER, Library.offset(Library.MATCHES_VIEW, "scores")),
+                            slots * Double.BYTES),
+                    call.reach(
+                            view.get(Library.POINTER, Library.offset(Library.MATCHES_VIEW, "counts")),
+                            queries * Long.BYTES),
+                    Extents.toIndex(queries, "the query count"),
+                    Extents.toIndex(columns, "the column count"));
         }
 
-        /**
-         * Sizes three fresh native slabs for a batch of queries, each reporting up to wanted matches,
-         * which the garbage collector frees.
-         *
-         * @throws USearchException SHAPE_MISMATCH when no query or no match is asked for, and
-         *     OVERFLOW when the queries-by-wanted product would not fit in sixty-four bits.
-         */
-        public static Matches allocate(long queries, long wanted) {
-            if (wanted <= 0) {
-                throw new USearchException(Status.SHAPE_MISMATCH, "the outputs reserve no room for a single match");
-            }
-            long slots = Extents.product(queries, wanted, "the match matrix");
-            java.lang.foreign.Arena memory = java.lang.foreign.Arena.ofAuto();
-            return of(
-                    memory.allocate(Extents.product(slots, Key.BYTES, "the key matrix"), 8),
-                    memory.allocate(ValueLayout.JAVA_DOUBLE, slots),
-                    memory.allocate(ValueLayout.JAVA_LONG, queries));
+        /** Columns per row the call wrote, at most its wanted count, and the row width of both matrices. */
+        public int columns() {
+            return columns;
         }
 
-        /** The upper bound on matches per query, and the row width of both matrices. */
-        public int wanted() {
-            return wanted;
-        }
-
-        /** How many queries the slabs were sized for. */
+        /** How many queries the call resolved. */
         public int queries() {
-            return (int) (counts.byteSize() / Long.BYTES);
+            return queries;
         }
 
         /**
          * How many matches of a query the engine wrote.
          *
-         * @throws USearchException SHAPE_MISMATCH when the query is outside the batch.
+         * @throws USearchException SHAPE_MISMATCH when the query is outside the batch, and DEVICE when
+         *     the arena holds device memory.
          */
         public int count(int query) {
-            if (query < 0 || query >= queries()) {
+            arena.host();
+            if (query < 0 || query >= queries) {
                 throw new USearchException(Status.SHAPE_MISMATCH, "the query is outside the batch");
             }
-            return (int) Math.min(counts.getAtIndex(ValueLayout.JAVA_LONG, query), wanted);
+            return (int) Math.min(counts.getAtIndex(ValueLayout.JAVA_LONG, query), columns);
         }
 
         /**
@@ -1054,36 +1112,26 @@ public final class Types {
                 throw new USearchException(
                         Status.SHAPE_MISMATCH, "the query reported " + readable + " readable matches");
             }
-            return (long) query * wanted + rank;
-        }
-
-        /** Fills the {@code usearch_matches_span_t} at {@code field} for a call landing here. */
-        void land(Call call, String field) {
-            call.pointer(field + ".keys", call.output(keys));
-            call.size(field + ".keys_stride", (long) wanted * Key.BYTES);
-            call.pointer(field + ".scores", call.output(scores));
-            call.size(field + ".scores_stride", (long) wanted * Double.BYTES);
-            call.pointer(field + ".counts", call.output(counts));
-            call.size(field + ".capacity", queries());
-            call.size(field + ".wanted", wanted);
+            return (long) query * columns + rank;
         }
 
         /** Renders the batch shape, not its contents. */
         @Override
         public String toString() {
-            return "Matches(queries=" + queries() + ", wanted=" + wanted + ")";
+            return "Matches(queries=" + queries + ", columns=" + columns + ")";
         }
     }
 
     /**
-     * A submitted call, which owns its outcome, argument structure, inputs, outputs and arena until
-     * the call is final.
+     * A submitted call, which owns its outcome, argument structure and inputs, and borrows its handles
+     * and arena, until the call is final.
      *
      * <p>
      * {@link #status()} polls without blocking and {@link #join()} blocks until the call is final,
      * then answers what it produced or raises what it reported; the first join frees the outcome and
-     * every later one repeats its answer. Closing an unfinished one, or dropping it, waits for the
-     * call before freeing what it lent. It starts no thread: waiting off the caller's thread is the
+     * every later one repeats its answer. Closing an unfinished one waits for the call before freeing
+     * what it lent, and a dropped one keeps what it lent until the call is final, when the collector
+     * frees it without ever waiting. It starts no thread: waiting off the caller's thread is the
      * caller's own, as {@code withContext(Dispatchers.IO) { call.join() }} in a Kotlin coroutine or a
      * virtual thread in Java.
      *
@@ -1111,11 +1159,12 @@ public final class Types {
         Deferred(Call call, Supplier<Result> finish) {
             this.call = call;
             this.finish = finish;
-            this.release = CLEANER.register(this, call::release);
+            this.release = CLEANER.register(this, call);
         }
 
         /**
-         * DEFERRED until the call is final, then its final status, read without blocking.
+         * DEFERRED until the call is final, then its final status, read without blocking. Calls
+         * {@code usearch_outcome_status}.
          *
          * @throws IllegalStateException once closed.
          */
@@ -1128,7 +1177,7 @@ public final class Types {
                 return known;
             }
             try {
-                return Status.of((int) OUTCOME_STATUS.getAcquire(call.outcome, 0L));
+                return call.status();
             } catch (IllegalStateException freed) {
                 // A join on another thread may have kept the status and freed the outcome in between.
                 known = settled;
@@ -1155,11 +1204,12 @@ public final class Types {
                 try {
                     call.raise();
                     Library.check(call.outcome);
+                    call.settle();
                     result = finish.get();
                 } catch (RuntimeException | Error raised) {
                     failure = raised;
                 } finally {
-                    settled = Status.of((int) OUTCOME_STATUS.getAcquire(call.outcome, 0L));
+                    settled = call.status();
                     release.clean();
                 }
             }
@@ -1175,6 +1225,9 @@ public final class Types {
         /** Waits for the call if it is not final yet, then frees what it lent. It is idempotent. */
         @Override
         public synchronized void close() {
+            if (settled == null && !closed) {
+                await(call.outcome);
+            }
             closed = true;
             release.clean();
         }
@@ -1246,23 +1299,26 @@ public final class Types {
         }
     }
 
-    /** One verb taking an argument structure: the structure's layout, and the downcall that takes it. */
-    record Verb(StructLayout arguments, MethodHandle handle) {
+    /**
+     * One verb taking an argument structure: the structure's layout, the downcall that takes it, and
+     * the offset of every field, nested ones named by their dotted path, resolved once.
+     */
+    record Verb(StructLayout arguments, MethodHandle handle, Map<String, Long> offsets) {
 
         Verb(String name, StructLayout arguments) {
-            this(arguments, Library.verb(name));
+            this(arguments, Library.verb(name), Library.offsets(arguments));
         }
 
         /** The offset of a field, nested fields named by their dotted path. */
         long at(String path) {
-            return Library.offset(arguments, path.split("\\."));
+            return offsets.get(path);
         }
     }
 
     /**
-     * A native handle freed once - on close, or once its owner is unreachable. Calls lease its
-     * lifetime, so closing it while another thread's call names it raises rather than freeing memory
-     * under that call.
+     * A native handle freed once - on close, or once neither its owner nor a call naming it reaches
+     * it. Calls lease its lifetime, so closing it while another thread's call names it raises rather
+     * than freeing memory under that call.
      */
     static final class Handle {
 
@@ -1274,16 +1330,27 @@ public final class Types {
 
         private final Cleaner.Cleanable release;
 
-        Handle(Object owner, MemorySegment address, MethodHandle free) {
+        Handle(MemorySegment address, MethodHandle free) {
             cell.set(Library.POINTER, 0, address);
-            java.lang.foreign.Arena scope = lifetime;
-            MemorySegment slot = cell;
-            release = CLEANER.register(owner, () -> {
-                if (scope.scope().isAlive()) {
-                    scope.close();
+            release = CLEANER.register(this, new Release(lifetime, cell, free));
+        }
+
+        /** Frees a handle no call leases, and leaves one a call still leases to a later collection. */
+        private record Release(java.lang.foreign.Arena lifetime, MemorySegment cell, MethodHandle free)
+                implements Runnable {
+
+            @Override
+            public void run() {
+                try {
+                    if (lifetime.scope().isAlive()) {
+                        lifetime.close();
+                    }
+                } catch (IllegalStateException leased) {
+                    CLEANER.register(new Object(), this);
+                    return;
                 }
-                Library.invoke(free, slot.get(Library.POINTER, 0));
-            });
+                Library.invoke(free, cell.get(Library.POINTER, 0));
+            }
         }
 
         /**
@@ -1334,26 +1401,30 @@ public final class Types {
     /**
      * One call in flight: its argument structure, its outcome, and everything it lends the library,
      * in memory that lives until the call is final - confined to the caller when blocking, shared
-     * when deferred.
+     * when deferred. As the cleaner of a dropped {@link Deferred}, it frees nothing the library may
+     * still write and never waits: an unfinished call is left to a later collection.
      */
-    static final class Call {
+    static final class Call implements Runnable {
 
         final java.lang.foreign.Arena memory;
         final MemorySegment arguments;
         final MemorySegment outcome;
         private final Verb verb;
 
-        /** Native memory the caller lends, kept reachable until the call is final. */
+        /** Everything the call names or borrows - handles, executor, arena, slabs - kept until final. */
         private final List<Object> lent = new ArrayList<>();
 
-        /** Copies of staged heap outputs back into the caller's slabs, run once the call succeeded. */
+        /** Copies of fixed-size reports into the caller's objects, run once the call succeeded. */
         private final List<Runnable> landings = new ArrayList<>();
 
         /** Runs once the call is final, joined or not, like freeing the donors a merge left. */
-        private Runnable settle = () -> {};
+        private final List<Runnable> settles = new ArrayList<>();
 
-        /** The first exception an upcall raised, which outranks the status it turned into. */
-        final AtomicReference<@Nullable Throwable> raised = new AtomicReference<>();
+        /** The handle the downcall leases, so closing it from another thread raises instead of freeing it. */
+        private @Nullable Handle leased;
+
+        /** The arena the call claims as it reaches the library and releases once settled. */
+        private @Nullable Arena arena;
 
         private Call(Verb verb, java.lang.foreign.Arena memory) {
             this.verb = verb;
@@ -1377,16 +1448,17 @@ public final class Types {
                 Function<Call, Supplier<Result>> request) {
             try (java.lang.foreign.Arena memory = java.lang.foreign.Arena.ofConfined()) {
                 Call call = new Call(verb, memory);
+                Supplier<Result> finish;
                 try {
-                    Supplier<Result> finish = call.open(index, executor, request);
-                    call.invoke(index);
+                    finish = call.open(index, executor, request);
+                    call.invoke();
                     call.raise();
                     Library.check(call.outcome);
                     call.landings.forEach(Runnable::run);
-                    return finish.get();
                 } finally {
-                    call.settle.run();
+                    call.settle();
                 }
+                return finish.get();
             }
         }
 
@@ -1394,28 +1466,26 @@ public final class Types {
         static <Result> Deferred<Result> submit(
                 Verb verb, Handle index, Executor executor, Function<Call, Supplier<Result>> request) {
             Call call = new Call(verb, java.lang.foreign.Arena.ofShared());
+            Supplier<Result> finish;
             try {
                 call.enumeration("completion", 1);
-                Supplier<Result> finish = call.open(index, executor, request);
-                call.invoke(index);
-                return new Deferred<>(call, () -> {
-                    call.landings.forEach(Runnable::run);
-                    return finish.get();
-                });
+                finish = call.open(index, executor, request);
+                call.invoke();
             } catch (RuntimeException | Error refused) {
-                try {
-                    call.settle.run();
-                } finally {
-                    call.memory.close();
-                }
+                call.release();
                 throw refused;
             }
+            Deferred<Result> deferred = new Deferred<>(call, () -> {
+                call.landings.forEach(Runnable::run);
+                return finish.get();
+            });
+            return deferred;
         }
 
         private <Result> Supplier<Result> open(
                 @Nullable Handle index, @Nullable Executor executor, Function<Call, Supplier<Result>> request) {
             if (index != null) {
-                pointer("index", index.address());
+                lease("index", index);
             }
             if (executor != null) {
                 pointer("executor", executor.address());
@@ -1424,27 +1494,75 @@ public final class Types {
             return request.apply(this);
         }
 
-        /** Calls the verb, passing the structure in the index's lifetime so the call leases it. */
+        /**
+         * Claims the arena, held until settled, and calls the verb, passing the structure in the
+         * leased handle's lifetime.
+         *
+         * @throws USearchException CONTENDED while another call holds the arena.
+         */
         @SuppressWarnings("restricted")
-        private void invoke(@Nullable Handle index) {
+        private void invoke() {
+            Handle handle = leased;
             MemorySegment passed =
-                    index == null ? arguments : arguments.reinterpret(arguments.byteSize(), index.lifetime, null);
+                    handle == null ? arguments : arguments.reinterpret(arguments.byteSize(), handle.lifetime, null);
+            Arena held = arena;
+            if (held != null) {
+                held.claim();
+                settle(held::release);
+            }
             Library.invoke(verb.handle(), passed);
         }
 
-        /** Waits until final, then settles and frees the call; what a {@link Deferred} releases. */
-        void release() {
-            await(outcome);
+        /** The outcome's status, read without waiting. Calls {@code usearch_outcome_status}. */
+        Status status() {
             try {
-                settle.run();
+                return Status.of((int) OUTCOME_STATUS.invokeExact(outcome));
+            } catch (Throwable failure) {
+                throw Library.rethrow(failure);
+            }
+        }
+
+        /**
+         * What a dropped {@link Deferred} runs: frees a final call, and leaves an unfinished one to a
+         * later collection.
+         */
+        @Override
+        public void run() {
+            if (status() == Status.DEFERRED) {
+                CLEANER.register(new Object(), this);
+                return;
+            }
+            release();
+        }
+
+        /** Settles and frees a call that is final or never reached the library. */
+        private void release() {
+            try {
+                settle();
             } finally {
                 memory.close();
             }
         }
 
-        /** Raises the first exception an upcall swallowed. */
+        /** Runs what waits for the call to be final, then lets go of everything it named; idempotent. */
+        private void settle() {
+            try {
+                settles.forEach(Runnable::run);
+            } finally {
+                settles.clear();
+                LATCHED.remove(outcome.address());
+                lent.clear();
+            }
+        }
+
+        /** Latches the first exception an upcall raised for the call whose outcome is {@code state}. */
+        static void latch(MemorySegment state, Throwable failure) {
+            LATCHED.putIfAbsent(state.address(), failure);
+        }
+
+        /** Raises the first exception an upcall latched, which outranks the status it turned into. */
         void raise() {
-            Throwable first = raised.get();
+            Throwable first = LATCHED.remove(outcome.address());
             if (first instanceof RuntimeException failure) {
                 throw failure;
             }
@@ -1456,14 +1574,21 @@ public final class Types {
             }
         }
 
-        /** Keeps native memory reachable until the call is final. */
+        /** Keeps what the call names or borrows reachable until it is final. */
         void lend(Object borrowed) {
             lent.add(borrowed);
         }
 
         /** Runs once the call is final, whether it is joined or not. */
         void settle(Runnable action) {
-            settle = action;
+            settles.add(action);
+        }
+
+        /** Points {@code field} at a handle and leases it for the downcall, in place of the index. */
+        void lease(String field, Handle handle) {
+            pointer(field, handle.address());
+            lend(handle);
+            leased = handle;
         }
 
         void size(String field, long value) {
@@ -1500,17 +1625,6 @@ public final class Types {
                 return bytes;
             }
             return memory.allocate(bytes.byteSize(), 8).copyFrom(bytes);
-        }
-
-        /** Lends native bytes for writing in place, or stages heap ones and copies them back once final. */
-        MemorySegment output(MemorySegment bytes) {
-            if (bytes.isNative()) {
-                lend(bytes);
-                return bytes;
-            }
-            MemorySegment staged = memory.allocate(bytes.byteSize(), 8).copyFrom(bytes);
-            landings.add(() -> bytes.copyFrom(staged));
-            return staged;
         }
 
         /** Fills the {@code usearch_bytes_view_t} at {@code field}. */
@@ -1566,24 +1680,29 @@ public final class Types {
             enumeration(field + ".scalar", view.scalar().code());
         }
 
-        /** Fills a {@code usearch_rows_span_t} at {@code field} over a matrix the call writes. */
-        void rowsOut(String field, RowsView view) {
-            pointer(field + ".data", output(view.segment().asSlice(0, view.spanBytes())));
-            size(field + ".stride", view.strideBytes());
-            size(field + ".columns", view.columns());
-            size(field + ".capacity", view.rows());
-            enumeration(field + ".scalar", view.scalar().code());
+        /**
+         * Points {@code field} at the arena the call claims as it reaches the library.
+         *
+         * @throws USearchException INVALID_ARGUMENT on a null arena, as C refuses one.
+         * @throws IllegalStateException on a closed arena.
+         */
+        void arena(String field, Arena held) {
+            if (held == null) {
+                throw new USearchException(Status.INVALID_ARGUMENT, "the arena must not be null");
+            }
+            pointer(field, held.address());
+            arena = held;
+            lend(held);
         }
 
-        /**
-         * Points {@code field} at the slot of {@code arena}, rewinding it, and keeps it until final,
-         * answering the scope this call's results are read through.
-         */
-        java.lang.foreign.Arena arena(String field, Arena arena) {
-            java.lang.foreign.Arena scope = arena.rewind();
-            pointer(field, arena.slot());
-            lend(arena);
-            return scope;
+        /** The arena the call holds. */
+        Arena arena() {
+            return Objects.requireNonNull(arena);
+        }
+
+        /** Widens a pointer this call wrote into its arena to the {@code length} bytes it addresses. */
+        MemorySegment reach(MemorySegment pointer, long length) {
+            return arena().reach(pointer, length);
         }
 
         /** Points {@code field} at a fresh traversal-stats struct, copied out once the call succeeded. */
@@ -1598,6 +1717,9 @@ public final class Types {
     /** Releases every handle, arena and deferred call the program dropped without closing. */
     static final Cleaner CLEANER = Cleaner.create();
 
+    /** The first exception an upcall raised, keyed by the outcome address of the call it ran under. */
+    private static final Map<Long, Throwable> LATCHED = new ConcurrentHashMap<>();
+
     private static final MethodHandle VERSION =
             Library.downcall("usearch_version_name", FunctionDescriptor.of(Library.POINTER));
 
@@ -1610,9 +1732,12 @@ public final class Types {
     private static final MethodHandle STATUS_NAME = Library.namer("usearch_status_name");
     private static final MethodHandle SCALAR_NAME = Library.namer("usearch_scalar_name");
     private static final MethodHandle MOOD_NAME = Library.namer("usearch_mood_name");
+    private static final MethodHandle RESIDENCY_NAME = Library.namer("usearch_residency_name");
 
     private static final MethodHandle OUTCOME_WAIT =
             Library.downcall("usearch_outcome_wait", FunctionDescriptor.of(Library.ENUM, Library.POINTER));
+    private static final MethodHandle OUTCOME_STATUS =
+            Library.downcall("usearch_outcome_status", FunctionDescriptor.of(Library.ENUM, Library.POINTER));
 
     /** Blocks until an outcome is final. Calls {@code usearch_outcome_wait}. */
     private static void await(MemorySegment outcome) {
@@ -1622,9 +1747,6 @@ public final class Types {
             throw Library.rethrow(failure);
         }
     }
-
-    /** The status word of an outcome, read with acquire ordering while the library may still store it. */
-    private static final VarHandle OUTCOME_STATUS = Library.ENUM.varHandle();
 
     /** {@code usearch_executor_for_ram_t}. */
     private static final Verb FOR_RAM = new Verb(
@@ -1678,6 +1800,14 @@ public final class Types {
 
     private static final MethodHandle EXECUTOR_FREE =
             Library.downcall("usearch_executor_free", FunctionDescriptor.ofVoid(Library.POINTER));
+
+    /** {@code usearch_arena_init_t}. */
+    private static final Verb ARENA_INIT = new Verb(
+            "usearch_arena_init",
+            MemoryLayout.structLayout(
+                    Library.POINTER.withName("arena"),
+                    Library.POINTER.withName("executor"),
+                    Library.POINTER.withName("outcome")));
 
     private static final MethodHandle ARENA_FREE =
             Library.downcall("usearch_arena_free", FunctionDescriptor.ofVoid(Library.POINTER));

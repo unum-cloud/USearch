@@ -21,6 +21,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.ProviderNotFoundException;
 import java.nio.file.StandardCopyOption;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * Loads the engine's shared object once per class loader, and links the C interface through it.
@@ -106,7 +108,7 @@ final class Library {
     static final StructLayout KEYS_VIEW = MemoryLayout.structLayout(POINTER.withName("data"), SIZE.withName("stride"))
             .withName("usearch_keys_view_t");
 
-    /** @c usearch_rows_view_t - a strided run of rows the engine reads, checked against the frozen width. */
+    /** @c usearch_rows_view_t - a strided run of rows, read from the caller or written into an arena. */
     static final StructLayout ROWS_VIEW = MemoryLayout.structLayout(
                     POINTER.withName("data"),
                     SIZE.withName("stride"),
@@ -115,31 +117,18 @@ final class Library {
                     padding())
             .withName("usearch_rows_view_t");
 
-    /** @c usearch_matches_span_t - the three caller-owned outputs a ranked verb fills. */
-    static final StructLayout MATCHES_SPAN = MemoryLayout.structLayout(
+    /** @c usearch_matches_view_t - a ranked run a call wrote into its arena, @c columns packed columns per row. */
+    static final StructLayout MATCHES_VIEW = MemoryLayout.structLayout(
                     POINTER.withName("keys"),
-                    SIZE.withName("keys_stride"),
                     POINTER.withName("scores"),
-                    SIZE.withName("scores_stride"),
                     POINTER.withName("counts"),
-                    SIZE.withName("capacity"),
-                    SIZE.withName("wanted"))
-            .withName("usearch_matches_span_t");
+                    SIZE.withName("columns"))
+            .withName("usearch_matches_view_t");
 
-    /** @c usearch_rows_span_t - the writable twin of a rows view, whose capacity bounds what a verb fills. */
-    static final StructLayout ROWS_SPAN = MemoryLayout.structLayout(
-                    POINTER.withName("data"),
-                    SIZE.withName("stride"),
-                    SIZE.withName("columns"),
-                    SIZE.withName("capacity"),
-                    ENUM.withName("scalar"),
-                    padding())
-            .withName("usearch_rows_span_t");
-
-    /** @c usearch_keys_span_t - the writable twin of a keys view, whose capacity bounds what a verb fills. */
-    static final StructLayout KEYS_SPAN = MemoryLayout.structLayout(
-                    POINTER.withName("data"), SIZE.withName("stride"), SIZE.withName("capacity"))
-            .withName("usearch_keys_span_t");
+    /** @c usearch_matches_tape_view_t - a ragged run of matches a call wrote into its arena. */
+    static final StructLayout MATCHES_TAPE_VIEW = MemoryLayout.structLayout(
+                    POINTER.withName("keys"), POINTER.withName("scores"), POINTER.withName("offsets"))
+            .withName("usearch_matches_tape_view_t");
 
     /** @c usearch_ram_options_t, @c usearch_vram_options_t and @c usearch_nvme_options_t all pair
      *      a borrowed run with its count, so one layout serves the three. */
@@ -172,6 +161,27 @@ final class Library {
             elements[depth] = MemoryLayout.PathElement.groupElement(path[depth]);
         }
         return layout.byteOffset(elements);
+    }
+
+    /** The offset of every named field, nested ones under their dotted path, which a verb resolves once. */
+    static Map<String, Long> offsets(StructLayout layout) {
+        Map<String, Long> offsets = new HashMap<>();
+        gather(layout, "", 0, offsets);
+        return Map.copyOf(offsets);
+    }
+
+    private static void gather(StructLayout layout, String prefix, long base, Map<String, Long> offsets) {
+        long offset = base;
+        for (MemoryLayout member : layout.memberLayouts()) {
+            if (member.name().isPresent()) {
+                String path = prefix + member.name().get();
+                offsets.put(path, offset);
+                if (member instanceof StructLayout nested) {
+                    gather(nested, path + ".", offset, offsets);
+                }
+            }
+            offset += member.byteSize();
+        }
     }
 
     /** A verb taking one argument structure, which is every verb but the name lookups and frees. */
@@ -225,13 +235,15 @@ final class Library {
      * @throws Types.USearchException when the verb reported a failure.
      */
     static void check(MemorySegment outcome) {
-        int status = outcome.get(ENUM, offset(OUTCOME, "status"));
+        int status = outcome.get(ENUM, OUTCOME_STATUS);
         if (status == 0) {
             return;
         }
-        throw new Types.USearchException(
-                Types.Status.of(status), string(outcome.get(POINTER, offset(OUTCOME, "message"))));
+        throw new Types.USearchException(Types.Status.of(status), string(outcome.get(POINTER, OUTCOME_MESSAGE)));
     }
+
+    private static final long OUTCOME_STATUS = offset(OUTCOME, "status");
+    private static final long OUTCOME_MESSAGE = offset(OUTCOME, "message");
 
     /**
      * Carries a downcall's failure out unchanged when it is already one of ours, and wraps anything

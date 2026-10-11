@@ -21,18 +21,21 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 
 import cloud.unum.usearch.DenseIndex.DenseAttendConfig;
+import cloud.unum.usearch.DenseIndex.DenseBatch;
 import cloud.unum.usearch.DenseIndex.DenseCursor;
 import cloud.unum.usearch.DenseIndex.DenseIndexDescription;
 import cloud.unum.usearch.DenseIndex.DenseInsertConfig;
 import cloud.unum.usearch.DenseIndex.DenseMetadata;
 import cloud.unum.usearch.DenseIndex.DenseMetric;
 import cloud.unum.usearch.DenseIndex.DenseOptions;
+import cloud.unum.usearch.DenseIndex.DenseProducts;
 import cloud.unum.usearch.DenseIndex.DenseReachability;
 import cloud.unum.usearch.DenseIndex.DenseRefineConfig;
 import cloud.unum.usearch.DenseIndex.DenseSearchConfig;
 import cloud.unum.usearch.DenseIndex.DenseSearchStream;
 import cloud.unum.usearch.DenseIndex.DenseSoftmaxState;
 import cloud.unum.usearch.DenseIndex.DenseTraversalStats;
+import cloud.unum.usearch.DenseIndex.DenseVectors;
 import cloud.unum.usearch.DenseIndex.ValueLookup;
 import cloud.unum.usearch.Types.Arena;
 import cloud.unum.usearch.Types.Deferred;
@@ -42,6 +45,7 @@ import cloud.unum.usearch.Types.Key;
 import cloud.unum.usearch.Types.Matches;
 import cloud.unum.usearch.Types.Monolith;
 import cloud.unum.usearch.Types.Mood;
+import cloud.unum.usearch.Types.Residency;
 import cloud.unum.usearch.Types.RowsView;
 import cloud.unum.usearch.Types.Scalar;
 import cloud.unum.usearch.Types.Status;
@@ -74,7 +78,7 @@ public class DenseIndexTest {
         return DenseIndex.initRam(options, new int[0]);
     }
 
-    private static float[] floatsOf(DenseIndex.Vectors vectors) {
+    private static float[] floatsOf(DenseVectors vectors) {
         return vectors.segment().toArray(ValueLayout.JAVA_FLOAT);
     }
 
@@ -143,8 +147,10 @@ public class DenseIndexTest {
         assertEquals("invalid-argument", Status.INVALID_ARGUMENT.toString());
         assertEquals("deferred", Status.DEFERRED.toString());
         assertEquals("u1x8", Scalar.U1X8.toString());
+        assertEquals("i32", Scalar.I32.toString());
         assertEquals("spinning", Mood.SPINNING.toString());
         assertEquals("jaccard", DenseMetric.JACCARD.toString());
+        assertEquals("vram", Residency.VRAM.toString());
     }
 
     @Test
@@ -161,64 +167,6 @@ public class DenseIndexTest {
                 Status.SHAPE_MISMATCH,
                 assertThrows(USearchException.class, () -> Extents.product(-1, 4, "the extent"))
                         .status());
-
-        // The queries-by-wanted product feeds three slab lengths, so it is checked before they are sized.
-        assertEquals(
-                Status.OVERFLOW,
-                assertThrows(USearchException.class, () -> Matches.allocate(1L << 40, 1L << 40))
-                        .status());
-    }
-
-    @Test
-    public void matchesReadTheirShapeOffTheSlabs() {
-        Matches adopted = Matches.of(
-                MemorySegment.ofArray(new byte[6 * Key.BYTES]),
-                MemorySegment.ofArray(new double[6]),
-                MemorySegment.ofArray(new long[2]));
-        assertEquals(2, adopted.queries());
-        assertEquals(3, adopted.wanted());
-
-        assertEquals(
-                Status.SHAPE_MISMATCH,
-                assertThrows(
-                                USearchException.class,
-                                () -> Matches.of(
-                                        MemorySegment.ofArray(new byte[6 * Key.BYTES]),
-                                        MemorySegment.ofArray(new double[6]),
-                                        MemorySegment.ofArray(new long[0])))
-                        .status());
-        assertEquals(
-                Status.SHAPE_MISMATCH,
-                assertThrows(
-                                USearchException.class,
-                                () -> Matches.of(
-                                        MemorySegment.ofArray(new byte[6 * Key.BYTES]),
-                                        MemorySegment.ofArray(new double[5]),
-                                        MemorySegment.ofArray(new long[2])))
-                        .status());
-        assertEquals(
-                Status.SHAPE_MISMATCH,
-                assertThrows(
-                                USearchException.class,
-                                () -> Matches.of(
-                                        MemorySegment.ofArray(new byte[5 * Key.BYTES]),
-                                        MemorySegment.ofArray(new double[5]),
-                                        MemorySegment.ofArray(new long[2])))
-                        .status());
-    }
-
-    /** Heap slabs are staged for the call and copied back, so a caller's arrays see the matches. */
-    @Test
-    public void heapMatchesReceiveTheRun() {
-        try (DenseIndex index = populated()) {
-            long[] counts = new long[1];
-            byte[] keys = new byte[2 * Key.BYTES];
-            Matches matches = Matches.of(
-                    MemorySegment.ofArray(keys), MemorySegment.ofArray(new double[2]), MemorySegment.ofArray(counts));
-            assertSame(matches, index.search(RowsView.of(new float[] {0, 1}, 2), new DenseSearchConfig(matches)));
-            assertEquals(2, counts[0]);
-            assertEquals(Key.of(10), Key.ofBytes(keys));
-        }
     }
 
     @Test
@@ -230,6 +178,11 @@ public class DenseIndexTest {
         assertEquals(
                 Status.INVALID_ARGUMENT,
                 assertThrows(USearchException.class, () -> new DenseSearchConfig(1).expansionFactor(-1))
+                        .status());
+        // C reads a negative wanted count as a size past any machine's, so this side refuses it.
+        assertEquals(
+                Status.INVALID_ARGUMENT,
+                assertThrows(USearchException.class, () -> new DenseSearchConfig(-1))
                         .status());
     }
 
@@ -266,7 +219,8 @@ public class DenseIndexTest {
 
     @Test
     public void strideArithmeticSkipsThePadding() {
-        try (DenseIndex index = empty(twoDimensional())) {
+        try (DenseIndex index = empty(twoDimensional());
+                Arena arena = new Arena()) {
             index.reserve(2);
             // Four floats per row, of which the trailing two are padding no dimension names.
             float[] padded = {0, 1, 9, 9, 1, 0, 9, 9};
@@ -274,20 +228,20 @@ public class DenseIndexTest {
                     new Key[] {Key.of(1), Key.of(2)},
                     RowsView.strided(MemorySegment.ofArray(padded), 2, 2, 16, Scalar.F32));
 
-            try (DenseIndex.Vectors retrieved = index.get(Key.of(2), Scalar.F32)) {
-                assertArrayEquals(new float[] {1, 0}, floatsOf(retrieved), 0f);
-                // The width comes from what C reported, never from a describe call.
-                assertEquals(2, retrieved.columns());
-            }
+            DenseVectors retrieved = index.get(Key.of(2), Scalar.F32, arena);
+            assertArrayEquals(new float[] {1, 0}, floatsOf(retrieved), 0f);
+            // The width comes from what C reported, never from a describe call.
+            assertEquals(2, retrieved.columns());
         }
     }
 
     @Test
     public void searchWritesOnlyWhatTheCountsClaim() {
-        try (DenseIndex index = populated()) {
-            Matches matches = index.on(POOL).search(RowsView.of(new float[] {0, 1}, 2), 4);
+        try (DenseIndex index = populated();
+                Arena arena = new Arena(POOL)) {
+            Matches matches = index.on(POOL).search(RowsView.of(new float[] {0, 1}, 2), 4, arena);
             assertEquals(1, matches.queries());
-            assertEquals(4, matches.wanted());
+            assertEquals(4, matches.columns());
             assertEquals(2, matches.count(0));
             assertEquals(Key.of(10), matches.key(0, 0));
 
@@ -303,17 +257,27 @@ public class DenseIndexTest {
             assertEquals(
                     Status.SHAPE_MISMATCH,
                     assertThrows(USearchException.class, () -> matches.count(1)).status());
+
+            // A zero wanted count lands only the counts, which C accepts, so neither side refuses it.
+            try (Arena other = new Arena()) {
+                assertEquals(
+                        0,
+                        index.search(RowsView.of(new float[] {0, 1}, 2), 0, other)
+                                .count(0));
+            }
         }
     }
 
     @Test
     public void everyWalkReportsTraversalTelemetry() {
-        try (DenseIndex index = populated()) {
+        try (DenseIndex index = populated();
+                Arena arena = new Arena()) {
             DenseTraversalStats searched = new DenseTraversalStats();
             index.on(POOL)
                     .search(
                             RowsView.of(new float[] {0, 1}, 2),
-                            new DenseSearchConfig(2).expansionFactor(64).stats(searched));
+                            new DenseSearchConfig(2).expansionFactor(64).stats(searched),
+                            arena);
             assertTrue(searched.visitedMembers() > 0);
             assertTrue(searched.computedDistances() > 0);
 
@@ -335,10 +299,11 @@ public class DenseIndexTest {
     @Test
     public void lateInteractionDividesTokenRowsIntoQueries() {
         try (DenseIndex index = empty(new DenseOptions()
-                .dimensions(2)
-                .metric(DenseMetric.INNER)
-                .quantization(Scalar.F32)
-                .valuesPerKey(2))) {
+                        .dimensions(2)
+                        .metric(DenseMetric.INNER)
+                        .quantization(Scalar.F32)
+                        .valuesPerKey(2));
+                Arena arena = new Arena()) {
             index.on(POOL).reserve(4);
             // Two documents of two token rows apiece, so a key names a document and not a row.
             index.on(POOL)
@@ -346,7 +311,7 @@ public class DenseIndexTest {
                             new Key[] {Key.of(10), Key.of(10), Key.of(20), Key.of(20)},
                             RowsView.of(new float[] {1, 0, 0, 1, 2, 0, 0, 2}, 2));
 
-            Matches matches = index.on(POOL).maxsim(RowsView.of(new float[] {1, 0, 0, 1}, 2), 2, 2);
+            Matches matches = index.on(POOL).maxsim(RowsView.of(new float[] {1, 0, 0, 1}, 2), 2, 2, arena);
             assertEquals(1, matches.queries());
             assertEquals(2, matches.count(0));
 
@@ -355,7 +320,7 @@ public class DenseIndexTest {
                     Status.SHAPE_MISMATCH,
                     assertThrows(
                                     USearchException.class,
-                                    () -> index.on(POOL).maxsim(RowsView.of(new float[] {1, 0, 0, 1}, 2), 3, 1))
+                                    () -> index.on(POOL).maxsim(RowsView.of(new float[] {1, 0, 0, 1}, 2), 3, 1, arena))
                             .status());
         }
     }
@@ -364,9 +329,11 @@ public class DenseIndexTest {
     public void lateInteractionRefusesADistanceKind() {
         // No Java-side check produces CONFIG_MISMATCH, so this is the one failure that can only have
         // come from the boundary's exception factory, and its detail from the engine's own string.
-        try (DenseIndex index = populated()) {
+        try (DenseIndex index = populated();
+                Arena arena = new Arena()) {
             USearchException refused = assertThrows(
-                    USearchException.class, () -> index.on(POOL).maxsim(RowsView.of(new float[] {0, 1}, 2), 1, 1));
+                    USearchException.class,
+                    () -> index.on(POOL).maxsim(RowsView.of(new float[] {0, 1}, 2), 1, 1, arena));
             assertEquals(Status.CONFIG_MISMATCH, refused.status());
             assertTrue(refused.getMessage().startsWith("usearch: config-mismatch: "));
             assertFalse(refused.getMessage().endsWith(": "));
@@ -408,7 +375,7 @@ public class DenseIndexTest {
     }
 
     @Test
-    public void getWithoutAnArenaOwnsItsRows() {
+    public void getLandsEveryEntryUnderAKey() {
         try (DenseIndex index = empty(twoDimensional())) {
             index.on(POOL).reserve(3);
             // Keys need not be unique, so three entries share one and the call alone sizes the export.
@@ -419,17 +386,24 @@ public class DenseIndexTest {
             assertEquals(3, index.on(POOL).count(Key.of(5)));
             assertFalse(index.contains(Key.of(6)));
 
-            DenseIndex.Vectors every = index.get(Key.of(5), Scalar.F64);
-            DenseIndex.Vectors absent = index.on(POOL).get(Key.of(6), Scalar.F32);
-            // Each result owns its arena, so a later call cannot invalidate an earlier one.
+            Arena arena = new Arena(POOL);
+            assertEquals(Residency.RAM, arena.residency());
+            DenseVectors every = index.get(Key.of(5), Scalar.F64, arena);
             assertEquals(3, every.rows());
             assertEquals(2 * Double.BYTES, every.strideBytes());
             assertArrayEquals(new double[] {0, 1, 1, 0, 1, 1}, every.segment().toArray(ValueLayout.JAVA_DOUBLE), 0);
-            assertEquals(0, absent.rows());
             MemorySegment rows = every.segment();
-            every.close();
-            absent.close();
+            assertEquals(0, index.on(POOL).get(Key.of(6), Scalar.F32, arena).rows());
+            // The second call rewound the arena, so the first one's rows refuse to be read.
             assertThrows(IllegalStateException.class, () -> rows.get(ValueLayout.JAVA_DOUBLE, 0));
+
+            // A null arena is refused as C refuses one, and a closed one cannot be named again.
+            assertEquals(
+                    Status.INVALID_ARGUMENT,
+                    assertThrows(USearchException.class, () -> index.get(Key.of(5), Scalar.F32, null))
+                            .status());
+            arena.close();
+            assertThrows(IllegalStateException.class, () -> index.get(Key.of(5), Scalar.F32, arena));
         }
     }
 
@@ -437,11 +411,11 @@ public class DenseIndexTest {
     public void aSharedArenaInvalidatesThePreviousResult() {
         try (DenseIndex index = populated();
                 Arena arena = new Arena()) {
-            DenseIndex.Vectors first = index.on(POOL).get(Key.of(10), Scalar.F32, arena);
+            DenseVectors first = index.on(POOL).get(Key.of(10), Scalar.F32, arena);
             assertArrayEquals(new float[] {0, 1}, floatsOf(first), 0f);
-            DenseIndex.Vectors second = index.on(POOL).get(Key.of(20), Scalar.F32, arena);
-            assertArrayEquals(new float[] {1, 0}, floatsOf(second), 0f);
-            // The arena was rewound for the second call, so the first view refuses to read freed rows.
+            Matches second = index.on(POOL).search(RowsView.of(new float[] {1, 0}, 2), 1, arena);
+            assertEquals(Key.of(20), second.key(0, 0));
+            // Any verb may reuse any arena, and each rewinds it, so the first view refuses to read freed rows.
             assertThrows(IllegalStateException.class, () -> floatsOf(first));
         }
     }
@@ -454,39 +428,40 @@ public class DenseIndexTest {
                         .quantization(Scalar.F32));
                 Arena arena = new Arena()) {
             index.on(POOL).insert(new Key[] {Key.of(10), Key.of(20)}, RowsView.of(new float[] {1, 0, 0, 2}, 2));
-            try (DenseIndex.Products products = index.on(POOL)
-                    .multiply(
-                            RowsView.of(new float[] {1, 1, 0, 1}, 2),
-                            new DenseIndex.DenseMultiplyConfig().arena(arena))) {
-                assertEquals(2, products.queries());
-                assertEquals(2, products.count(0));
-                assertTrue(products.required() >= products.count(0) + products.count(1));
-                double total = 0;
-                for (int rank = 0; rank != products.count(0); ++rank) {
-                    total += products.score(0, rank);
-                }
-                assertEquals(3, total, 1e-6);
-                assertEquals(
-                        Status.SHAPE_MISMATCH,
-                        assertThrows(USearchException.class, () -> products.key(0, 2))
-                                .status());
+            DenseProducts products = index.on(POOL).multiply(RowsView.of(new float[] {1, 1, 0, 1}, 2), arena);
+            assertEquals(2, products.queries());
+            assertEquals(2, products.count(0));
+            assertEquals(2, products.count(1));
+            assertTrue(products.required() >= products.count(0) + products.count(1));
+            double total = 0;
+            for (int rank = 0; rank != products.count(0); ++rank) {
+                total += products.score(0, rank);
             }
+            assertEquals(3, total, 1e-6);
+            assertEquals(
+                    Status.SHAPE_MISMATCH,
+                    assertThrows(USearchException.class, () -> products.key(0, 2))
+                            .status());
         }
     }
 
     /** The value lookup is told the scalar and width it must answer in, and a key it misses refuses the call. */
     @Test
     public void attentionResolvesValuesThroughTheLookup() {
-        try (DenseIndex index =
-                empty(new DenseOptions().dimensions(2).metric(DenseMetric.INNER).quantization(Scalar.F32))) {
+        try (DenseIndex index = empty(new DenseOptions()
+                        .dimensions(2)
+                        .metric(DenseMetric.INNER)
+                        .quantization(Scalar.F32));
+                Arena arena = new Arena()) {
             index.insert(new Key[] {Key.of(0), Key.of(1)}, RowsView.of(new float[] {1, 0, 0, 1}, 2));
             RowsView values = RowsView.of(new float[] {5, 5, 7, 7}, 2);
             ValueLookup byKey = new ValueLookup(values, Key::toLong);
-            RowsView outputs = RowsView.allocate(1, 2, Scalar.F32);
             DenseSoftmaxState[] carry = new DenseSoftmaxState[1];
-            index.on(POOL)
-                    .attend(RowsView.of(new float[] {1, 0}, 2), byKey, new DenseAttendConfig(outputs).carry(carry));
-            float[] attended = outputs.segment().toArray(ValueLayout.JAVA_FLOAT);
+            DenseVectors outputs = index.on(POOL)
+                    .attend(RowsView.of(new float[] {1, 0}, 2), byKey, new DenseAttendConfig().carry(carry), arena);
+            assertEquals(1, outputs.rows());
+            assertEquals(Scalar.F32, outputs.scalar());
+            float[] attended = floatsOf(outputs);
             // A convex mix of the two value rows, weighted toward the first key.
             assertTrue(attended[0] > 5 && attended[0] < 6);
             assertTrue(carry[0].partition() > 1);
@@ -497,7 +472,7 @@ public class DenseIndexTest {
                     Status.SHAPE_MISMATCH,
                     assertThrows(
                                     USearchException.class,
-                                    () -> index.attend(RowsView.of(new float[] {1, 0}, 2), mistyped, outputs))
+                                    () -> index.attend(RowsView.of(new float[] {1, 0}, 2), mistyped, arena))
                             .status());
 
             // An exception the lookup raises outranks the status it turned into.
@@ -505,8 +480,7 @@ public class DenseIndexTest {
                 throw new ArithmeticException("no value for " + key);
             });
             assertThrows(
-                    ArithmeticException.class,
-                    () -> index.attend(RowsView.of(new float[] {1, 0}, 2), throwing, outputs));
+                    ArithmeticException.class, () -> index.attend(RowsView.of(new float[] {1, 0}, 2), throwing, arena));
         }
     }
 
@@ -525,7 +499,9 @@ public class DenseIndexTest {
             }
             return 0;
         });
-        index.attend(RowsView.of(new float[] {1, 0}, 2), closing, RowsView.allocate(1, 2, Scalar.F32));
+        try (Arena arena = new Arena()) {
+            index.attend(RowsView.of(new float[] {1, 0}, 2), closing, arena);
+        }
         assertInstanceOf(IllegalStateException.class, refused.get());
         assertEquals(1, index.describe().size());
         index.close();
@@ -544,10 +520,11 @@ public class DenseIndexTest {
     public void checkpointsRoundTripThroughAPathAndABuffer() throws Exception {
         File checkpoint = File.createTempFile("usearch", ".safegraphs");
         checkpoint.deleteOnExit();
+        Arena arena = new Arena(POOL);
         Monolith monolith;
         try (DenseIndex index = populated()) {
             index.on(POOL).save(checkpoint.getAbsolutePath());
-            monolith = index.on(POOL).saveBuffer();
+            monolith = index.on(POOL).saveBuffer(arena);
         }
 
         DenseMetadata described = DenseIndex.metadataRead(checkpoint.getAbsolutePath(), POOL);
@@ -563,8 +540,8 @@ public class DenseIndexTest {
             assertEquals(2, reopened.describe().metadata().dimensions());
         }
 
-        // The monolith outlives the index that wrote it, since it owns its arena.
-        try (monolith;
+        // The monolith lives in the arena, so it outlives the index that wrote it.
+        try (arena;
                 DenseIndex reopened = DenseIndex.loadRamBuffer(monolith.segment(), POOL, new int[0], 0)) {
             assertEquals(2, reopened.describe().size());
         }
@@ -588,7 +565,8 @@ public class DenseIndexTest {
      */
     @Test
     public void heapArraysAreCopiedRatherThanAliased() {
-        try (DenseIndex index = empty(twoDimensional())) {
+        try (DenseIndex index = empty(twoDimensional());
+                Arena arena = new Arena()) {
             index.reserve(1);
             float[] row = new float[] {0, 1};
             index.insert(new Key[] {Key.of(1)}, RowsView.of(row, 2));
@@ -597,15 +575,14 @@ public class DenseIndexTest {
             row[0] = 9;
             row[1] = 9;
 
-            try (DenseIndex.Vectors exported = index.get(Key.of(1), Scalar.F32)) {
-                assertArrayEquals(new float[] {0, 1}, floatsOf(exported), 0);
-            }
+            assertArrayEquals(new float[] {0, 1}, floatsOf(index.get(Key.of(1), Scalar.F32, arena)), 0);
         }
     }
 
     @Test
     public void directBuffersCrossWithoutACopy() {
-        try (DenseIndex index = empty(twoDimensional())) {
+        try (DenseIndex index = empty(twoDimensional());
+                Arena arena = new Arena()) {
             index.reserve(2);
             ByteBuffer rows = ByteBuffer.allocateDirect(4 * Float.BYTES).order(ByteOrder.nativeOrder());
             rows.asFloatBuffer().put(new float[] {0, 1, 1, 0});
@@ -620,23 +597,22 @@ public class DenseIndexTest {
             RowsView query = RowsView.strided(MemorySegment.ofBuffer(queries), 1, 2, 2L * Float.BYTES, Scalar.F32);
             // Moving the buffer afterwards cannot widen what the matrix captured.
             queries.position(0);
-            assertEquals(Key.of(2), index.on(POOL).search(query, 1).key(0, 0));
+            assertEquals(Key.of(2), index.on(POOL).search(query, 1, arena).key(0, 0));
         }
     }
 
-    /** The stand-in holds a deferred call until the executor drains, so the status is observable before the join. */
+    /** The stand-in holds a deferred call until its wait, so the status is observable before the join. */
     @Test
     public void deferredCallsCompleteOnTheirExecutor() {
         try (Executor pool = Executor.forRam(new int[0], 2, 4);
+                Arena arena = new Arena(pool);
                 DenseIndex index = empty(twoDimensional())) {
             DenseIndex.DeferredOn deferred = index.deferred(pool);
             try (Deferred<Void> inserted =
                     deferred.insert(new Key[] {Key.of(10), Key.of(20)}, RowsView.of(new float[] {0, 1, 1, 0}, 2))) {
-                Deferred<Matches> searched = deferred.search(RowsView.of(new float[] {1, 0}, 2), 1);
+                Deferred<Matches> searched = deferred.search(RowsView.of(new float[] {1, 0}, 2), 1, arena);
                 assertEquals(Status.DEFERRED, inserted.status());
                 assertEquals(Status.DEFERRED, searched.status());
-                pool.drain(Mood.PARKED);
-                assertEquals(Status.SUCCESS, searched.status());
                 Matches joined = searched.join();
                 assertEquals(Key.of(20), joined.key(0, 0));
                 // The first join freed the outcome, so later ones repeat what it kept, until closed.
@@ -649,63 +625,80 @@ public class DenseIndexTest {
 
             // A failure travels to every join, and a call closed unjoined waits rather than leaking.
             Deferred<Long> counted = deferred.count(Key.of(20));
-            Deferred<Matches> refused = deferred.maxsim(RowsView.of(new float[] {1, 0}, 2), 1, 1);
-            pool.drain(Mood.SPINNING);
+            Deferred<Matches> refused = deferred.maxsim(RowsView.of(new float[] {1, 0}, 2), 1, 1, arena);
             USearchException reported = assertThrows(USearchException.class, refused::join);
             assertEquals(Status.CONFIG_MISMATCH, reported.status());
             assertSame(reported, assertThrows(USearchException.class, refused::join));
             assertEquals(Status.CONFIG_MISMATCH, refused.status());
+            // The failed call released its arena, so the next one may claim it.
+            assertEquals(
+                    Key.of(20),
+                    index.on(pool)
+                            .search(RowsView.of(new float[] {1, 0}, 2), 1, arena)
+                            .key(0, 0));
             counted.close();
             assertEquals(2, index.on(pool).describe().size());
         }
     }
 
-    /** A deferred call holds what it reads, so a fresh arena outlives the submission and lands with the join. */
+    /** A deferred call borrows its arena, so closing the arena first waits for the call and voids its view. */
     @Test
-    public void deferredCallsOwnTheirArena() {
+    public void closingAnArenaWaitsForTheDeferredCallsNamingIt() {
         try (DenseIndex index = populated()) {
-            Deferred<DenseIndex.Vectors> fetched = index.deferred(POOL).get(Key.of(20), Scalar.F32);
-            System.gc();
-            POOL.drain(Mood.PARKED);
-            try (DenseIndex.Vectors rows = fetched.join()) {
-                assertArrayEquals(new float[] {1, 0}, floatsOf(rows), 0f);
+            Arena arena = new Arena(POOL);
+            try (Deferred<DenseVectors> fetched = index.deferred(POOL).get(Key.of(20), Scalar.F32, arena)) {
+                arena.close();
+                assertEquals(Status.SUCCESS, fetched.status());
+                assertThrows(IllegalStateException.class, fetched::join);
             }
         }
     }
 
-    /** A deferred call's rows are read through the scope its own rewind opened, which a later call closes. */
+    /** A call refused because a deferred one holds the arena leaves the held call's rows readable. */
     @Test
-    public void aLateJoinCannotReadARewoundArena() {
+    public void aContendedArenaKeepsTheHeldResult() {
         try (DenseIndex index = populated();
-                Arena arena = new Arena()) {
-            Deferred<DenseIndex.Vectors> early = index.deferred(POOL).get(Key.of(10), Scalar.F32, arena);
-            POOL.drain(Mood.PARKED);
-            DenseIndex.Vectors later = index.on(POOL).get(Key.of(20), Scalar.F32, arena);
-            assertThrows(IllegalStateException.class, early::join);
+                Arena arena = new Arena();
+                Deferred<DenseVectors> held = index.deferred(POOL).get(Key.of(10), Scalar.F32, arena)) {
+            assertEquals(Status.DEFERRED, held.status());
+            assertEquals(
+                    Status.CONTENDED,
+                    assertThrows(USearchException.class, () -> index.on(POOL).get(Key.of(20), Scalar.F32, arena))
+                            .status());
+            DenseVectors early = held.join();
+            assertArrayEquals(new float[] {0, 1}, floatsOf(early), 0f);
+
+            // Once joined, the arena serves the next call, whose claim retires the earlier rows.
+            DenseVectors later = index.on(POOL).get(Key.of(20), Scalar.F32, arena);
             assertArrayEquals(new float[] {1, 0}, floatsOf(later), 0f);
+            assertThrows(IllegalStateException.class, () -> floatsOf(early));
         }
     }
 
     @Test
-    public void cursorsTakeTheirWidthsFromTheCaller() {
+    public void cursorsWriteBatchesIntoTheirArena() {
         try (DenseIndex index = populated();
+                Arena arena = new Arena(POOL);
                 DenseCursor cursor = index.on(POOL).cursor()) {
-            Key[] keys = new Key[4];
-            float[] rows = new float[8];
-            assertEquals(2, cursor.next(keys, RowsView.of(rows, 2)));
-            assertEquals(Key.of(10), keys[0]);
-            assertArrayEquals(new float[] {0, 1, 1, 0, 0, 0, 0, 0}, rows, 0f);
-            assertEquals(0, cursor.next(keys));
+            DenseBatch batch = cursor.next(4, Scalar.F32, arena);
+            assertEquals(2, batch.written());
+            assertEquals(Key.of(10), batch.key(0));
+            assertArrayEquals(new float[] {0, 1, 1, 0}, floatsOf(batch.vectors()), 0f);
+            DenseBatch drained = cursor.next(4, arena);
+            assertEquals(0, drained.written());
+            assertEquals(null, drained.vectors());
+            assertThrows(IllegalStateException.class, () -> batch.key(0));
         }
     }
 
     @Test
     public void searchStreamsPullUntilDrained() {
         try (DenseIndex index = populated();
+                Arena arena = new Arena();
                 DenseSearchStream stream = index.on(POOL).searchStream(RowsView.of(new float[] {0, 1}, 2))) {
-            assertEquals(Key.of(10), stream.next(1).key(0, 0));
-            assertEquals(Key.of(20), stream.next(1).key(0, 0));
-            assertEquals(0, stream.next(1).count(0));
+            assertEquals(Key.of(10), stream.next(1, arena).key(0, 0));
+            assertEquals(Key.of(20), stream.next(1, arena).key(0, 0));
+            assertEquals(0, stream.next(1, arena).count(0));
         }
     }
 
@@ -713,6 +706,12 @@ public class DenseIndexTest {
     public void mergeConsumesItsDonors() {
         try (DenseIndex index = populated()) {
             DenseIndex donor = populated();
+            // A donor named twice is refused before anything is surrendered, so it stays usable.
+            assertEquals(
+                    Status.INVALID_ARGUMENT,
+                    assertThrows(USearchException.class, () -> index.merge(donor, donor))
+                            .status());
+            assertEquals(2, donor.describe().size());
             index.on(POOL).merge(donor);
             assertEquals(4, index.describe().size());
             assertThrows(IllegalStateException.class, donor::describe);
@@ -726,11 +725,12 @@ public class DenseIndexTest {
 
     @Test
     public void theCallingThreadNeedsNoExecutor() {
-        try (DenseIndex index = empty(twoDimensional())) {
+        try (DenseIndex index = empty(twoDimensional());
+                Arena arena = new Arena()) {
             index.insert(new Key[] {Key.of(10), Key.of(20)}, RowsView.of(new float[] {0, 1, 1, 0}, 2));
             assertEquals(
                     Key.of(20),
-                    index.search(RowsView.of(new float[] {1, 0}, 2), 1).key(0, 0));
+                    index.search(RowsView.of(new float[] {1, 0}, 2), 1, arena).key(0, 0));
         }
     }
 
