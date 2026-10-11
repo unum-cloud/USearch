@@ -12,82 +12,155 @@ npm install usearch
 
 ## Quickstart
 
-Create an index, add vectors, reserve the run the matches land in, and search.
-Every batch verb fans out over an `Executor`, which owns the workers and can be shared by several indexes:
+Create an index, insert vectors, and search.
+The index runs every verb on the calling thread, and `index.on(executor)` runs the same verbs on an `Executor`, which owns the workers and can be shared by several indexes.
+Every output whose length scales with the call lands in an `Arena` the caller lends:
 
 ```js
 const assert = require('node:assert');
 const usearch = require('usearch');
 
-const executor = usearch.Executor.forRam(0); // Zero derives the worker count from the hardware
-const index = usearch.DenseIndex.forRam({ metric: 'euclidean', connectivity: 16, dimensions: 3 });
-index.add(42n, new Float32Array([0.2, 0.6, 0.4]), executor);
+const index = usearch.DenseIndex.initRam({ metric: usearch.DenseMetric.Euclidean, connectivity: 16, dimensions: 3 });
+index.insert(42n, new Float32Array([0.2, 0.6, 0.4]));
 
-const matches = usearch.MatchesSpan.reserve(1, 10); // One query, up to ten matches apiece
-index.search(new Float32Array([0.2, 0.6, 0.4]), matches, executor);
+const executor = usearch.Executor.forRam(); // Absent counts derive the worker count from the hardware
+const arena = new usearch.Arena(executor); // Memory where the executor computes, reused by every call
+const matches = index.on(executor).search(new Float32Array([0.2, 0.6, 0.4]), 10, arena); // One query, up to ten matches
 const found = matches.get(0);
 
-assert(index.size() === 1);
+assert(index.describe().size === 1);
 assert.deepEqual(found.keys, usearch.keyFromInteger(42n));
-assert(found.distances[0] === 0);
+assert(found.scores[0] === 0);
 ```
 
-An executor is required rather than derived.
-A pool spawned behind the caller's back claims most of the machine's cores invisibly, and nothing could ever free it again.
+A call that names no executor runs on the calling thread - single-threaded on RAM, on the handle's device and default stream on VRAM - and spawns nothing behind the caller's back.
+A blocking call returns with its outputs written.
+
+Failures throw an `Error` whose `code` is a `usearch.Status`, one per status of the C interface.
+The engine checks every row's width against the geometry it froze, so a narrow row surfaces as its `ShapeMismatch`:
+
+```js
+try {
+  index.insert(43n, new Float32Array([0.2, 0.6]));
+} catch (error) {
+  assert(error.code === usearch.Status.ShapeMismatch);
+}
+```
+
+## Receivers
+
+The receiver chooses where a verb runs and how it completes, and the verb stays the same.
+The index runs it on the calling thread, `index.on(executor)` blocks on an executor, and `index.deferred(executor)` submits it there and answers a `usearch.Deferred`:
+
+```js
+const matches = index.search(queries, 10, arena);                 // the calling thread
+const onPool = index.on(executor).search(queries, 10, arena);     // blocking, after every earlier submission
+const call = index.deferred(executor).search(queries, 10, arena); // Deferred<Matches>
+```
+
+`DenseIndexOn` and `DenseIndexDeferredOn` offer the same verbs with the same arguments; only the blocking receivers add `contains`, `cursor` and `searchStream`, whose every pull blocks, and only the index itself adds `attend`, whose `rowOf` runs on the calling thread.
+Constructors address no index yet, so no receiver offers them; the ones the C interface lets fan out take an `executor` in their config.
+
+## Deferred Calls
+
+A `Deferred` keeps everything the library reads or writes alive until its call is final: the outcome, the inputs, the outputs and every handle it names.
+
+```js
+const call = index.deferred(executor).search(queries, 10, arena);
+if (call.status === usearch.Status.Deferred) {
+  // other work
+}
+const matches = await call; // or: call.wait()
+```
+
+`await` waits on the libuv pool, so the event loop keeps turning, while `wait()` blocks the calling thread.
+Both answer the same cached result, or throw the same failure, however often they are asked, and `status` reads the outcome without blocking.
+`using call = ...` waits for the call before its block ends, and one dropped unfinished is handed back to the collector until it is final, so nothing it borrowed is freed under the library.
+Refusals this binding catches before the call crosses, like keys that do not match the rows, throw at submission.
+
+A submission finding the executor's deferred table full, sized by `deferredLimit`, finishes at once with `Status.Contended`.
+Calls depending on each other are ordered by waiting on the first before submitting the second.
+The arrays a deferred verb is handed must not change until it is final, since the library reads them until then.
+A deferred call borrows its arena as a blocking one does, and its result is the same view.
+Another call naming the arena before the first is final finishes with `Status.Contended`, `free()` waits for it, and a result read after the arena was rewound or freed throws `Status.Uninitialized`.
+
+## Arenas
+
+Every output whose length only the call knows, such as matches, rows, products, monoliths and cursor or stream batches, lands in an `Arena` you pass, and the verb answers a view over it without copying.
+`new Arena(executor)` places it where that executor computes, decided once, and `new Arena()` makes host pages for the calling thread.
+Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
+To keep a result past the next call, or to read one while making the next, pass that call another arena.
+An arena serves one call at a time, so each deferred call needs its own.
+A rewind detaches every buffer over the previous outputs, so a stale view throws `Status.Uninitialized` and typed arrays taken from it read as empty.
+An arena from a VRAM executor holds device memory, which host accessors refuse with `Status.Device`.
+
+```js
+const { Arena, keyAt } = usearch;
+using arena = new Arena(executor); // new Arena() is host pages for the calling thread
+for (const batch of batches) {
+  const matches = index.on(executor).search(batch, 10, arena); // rewinds: last batch's matches are gone
+  total += matches.scores.reduce((sum, score) => sum + score, 0);
+}
+
+using found = new Arena(), rows = new Arena(); // two live results, two arenas
+const nearest = index.search(query, 10, found).get(0);
+for (let position = 0; position < nearest.count; position++)
+  rerank(keyAt(nearest.keys, position), index.get(keyAt(nearest.keys, position), rows));
+
+const calls = shards.map((shard, position) => shard.deferred(executor).search(queries, 10, arenas[position]));
+const results = [];
+for (const call of calls) results.push(await call); // or: call.wait()
+```
+
+Only fixed-size reports, like `describe` and the telemetry readings, come back as plain objects.
 
 ## The Three Residencies
 
-An executor and an index are each built through the residency they drive, so a direct `new usearch.Executor()` or `new usearch.DenseIndex()` throws and names the three factories instead.
+An executor and an index are each built through the residency they drive, so a direct `new usearch.Executor()` or `new usearch.DenseIndex()` throws and names the factories instead.
 
 ```js
-const hostPool = usearch.Executor.forRam(2, { memoryDomains: [0, 1] });
-const hostIndex = usearch.DenseIndex.forRam({ dimensions: 128, memoryDomains: [0, 1] });
+const hostPool = usearch.Executor.forRam({ threads: 2, memoryDomains: [0, 1] });
+const hostIndex = usearch.DenseIndex.initRam({ dimensions: 128 }, [0, 1]);
 
-const devicePool = usearch.Executor.forVram({ devices: [0, 1] });
-const deviceIndex = usearch.DenseIndex.forVram({ dimensions: 128, devices: [0, 1] });
+const devicePool = usearch.Executor.forVram({ devices: [0, 1], scratchLimit: 1 << 30 });
+const deviceIndex = usearch.DenseIndex.initVram({ dimensions: 128 }, [0, 1]);
 
-const diskPool = usearch.Executor.forNvme(4, { paths: ['/mnt/nvme0', '/mnt/nvme1'] });
-const diskIndex = usearch.DenseIndex.forNvme({ dimensions: 128, paths: ['/mnt/nvme0', '/mnt/nvme1'] });
+const diskPool = usearch.Executor.forNvme({ threads: 4, paths: ['/mnt/nvme0', '/mnt/nvme1'] });
+const diskIndex = usearch.DenseIndex.viewNvme('index.safegraphs.json', { executor: diskPool, paths: ['/mnt/nvme0', '/mnt/nvme1'] });
 ```
 
 `forRam` spawns host worker threads and spreads them over the named NUMA nodes, absent naming none and spreading them over every node.
-`forVram` opens one CUDA stream per named ordinal, absent taking every visible device.
+`onPool` borrows an existing ForkUnion pool by its `BigInt` address instead of spawning one.
+`forVram` opens one CUDA stream per named ordinal, absent taking one free device, or borrows the `streams` given as `BigInt` addresses, one per device.
 `forNvme` opens one submission ring per worker over the named device or directory paths, absent deriving them.
+Every factory takes a `deferredLimit` for the deferred calls it tracks, absent taking a default.
+The collector frees an executor eventually, and `free()` runs what it holds and joins its workers now; a freed executor is refused by every later call.
+An NVMe index is never initialized, only served in place from a checkpoint, read-only, and until NVMe checkpoints carry keys `viewNvme` answers `Status.Unsupported`.
 
 `forVram` takes no thread count because one host thread drives one stream per device, so the device list is what sizes the work rather than a number of workers.
-Each arm belongs to one residency alone — `forRam` reads `memoryDomains`, `forVram` reads `devices`, `forNvme` reads `paths` — and naming another residency's arm is refused rather than ignored.
+Each factory's config holds only what its own C structure takes - `memoryDomains` for RAM, `devices` for VRAM, `paths` for NVMe.
 
 ## Ranked Results
 
-`search`, `multiply` and `maxsim` write into a `MatchesSpan` the caller lends, and answer with nothing at all.
-A run is three buffers — the identities, the distances, and how many matches every query actually found — and `reserve` allocates all three at once:
+`search` and `maxsim` land their matches in the arena as `Matches`, three views — the identities, the scores, and how many matches every query actually found:
 
 ```js
-const matches = usearch.MatchesSpan.reserve(queryRows, 10);
-index.search(queries, matches, executor);
+const matches = index.search(queries, 10, arena);
 
 matches.queries;   // Rows in the run, one per query
-matches.wanted;    // Columns per row, the 'k' in 'kANN'
+matches.columns;   // Columns per row the call wrote, at most its 'k'
 matches.counts;    // BigUint64Array, the matches every query found
 matches.keys;      // Uint8Array, sixteen bytes per cell, rows laid end to end
-matches.distances; // Float64Array, one score per cell
+matches.scores;    // Float64Array, one distance per cell
 
 const found = matches.get(0); // A MatchesRow, borrowed out of the run rather than copied
 found.count;                  // Matches this query found, never above `wanted`
 found.keys;                   // Sixteen bytes per match found
-found.distances;              // One score per match found
+found.scores;                 // One distance per match found
 ```
 
-No ranked verb takes a `k`.
-The matches wanted per query is derived from the buffer lengths rather than asked for, which is what keeps the space reserved and the width asked for from disagreeing.
-Three buffers a caller already holds make a run directly, and lengths that read as no single shape are refused there and then:
-
-```js
-const matches = new usearch.MatchesSpan(keys, distances, counts);
-```
-
-`get` views the run's own storage rather than copying it, so reading a row costs nothing, and the next call over the same run overwrites what an earlier row still views.
-Reusing one run is the point of lending it: a recall sweep allocates once, searches at every breadth, and reads its counters between the points.
+Every view reads the arena's own memory rather than a copy, so reading a row costs nothing.
+Reusing one arena is the point of lending it: a recall sweep allocates once, searches at every breadth, and reads its counters between the points.
 
 ## Identities
 
@@ -109,45 +182,65 @@ An integer identity parks in the trailing eight bytes with the leading eight zer
 Keys are accepted in every one of those spellings, plus a `BigUint64Array` of integer identities, which stays the convenient path for services that number their rows:
 
 ```js
-index.add(42n, vector, executor);                                     // a BigInt
-index.add(new BigUint64Array([15n, 16n]), vectors, executor);         // a run of integers
-index.add('f81d4fae-7dec-11d0-a765-00a0c91e6bf6', vector, executor);  // a dashed UUID
-index.add(usearch.parseKey('f81d4fae-7dec-11d0-a765-00a0c91e6bf6'), vector, executor); // bytes
+index.insert(42n, vector);                                     // a BigInt
+index.insert(new BigUint64Array([15n, 16n]), vectors);         // a run of integers
+index.insert('f81d4fae-7dec-11d0-a765-00a0c91e6bf6', vector);  // a dashed UUID
+index.insert(usearch.parseKey('f81d4fae-7dec-11d0-a765-00a0c91e6bf6'), vector); // bytes
 ```
 
-## Scalar Kinds
+A single key broadcasts across every row of a batch, and a `Uint8Array` of keys crosses without a copy.
 
-The engine converts rows on ingest, so what a caller holds is independent of what the index stores.
-A `Float64Array`, `Float32Array`, `Int8Array` or `Uint8Array` names its own scalar kind; every other kind travels as bytes with `scalarKind` naming what they mean:
+## Rows and Scalar Kinds
+
+A bare `TypedArray` is one row, and a `RowsView` is a run of them borrowed in place - the array, the row count, the columns, the bytes between rows, and the scalar kind - so a memory-mapped dataset reaches the index with no reshape and no copy.
+`RowsView.of` reads a packed array as rows of the width it is given:
 
 ```js
-const index = usearch.DenseIndex.forRam({ metric: 'hamming', dimensions: 64, quantization: 'u1x8' });
-const packed = new Uint8Array([0b10101010, 0, 0, 0, 0, 0, 0, 0]);
-index.add(1n, packed, executor, { scalarKind: usearch.ScalarKind.U1x8 });
+const keys = new BigUint64Array([15n, 16n]);
+const vectors = usearch.RowsView.of(new Float32Array([10, 20, 10, 25]), 2); // two rows of two
+index.insert(keys, vectors);
 
-const matches = usearch.MatchesSpan.reserve(1, 2);
-index.search(packed, matches, executor, { scalarKind: usearch.ScalarKind.U1x8 });
+const padded = new usearch.RowsView(mapped, rows, 768, 1024 * 4, usearch.Scalar.F32); // a pitch of 1024 floats
+const matches = index.search(vectors, 2, arena);
 ```
 
-Distances come back as a `Float64Array`, which is the width the ABI writes.
+The engine converts rows on ingest, so what a caller holds is independent of what the index stores.
+A `Float64Array`, `Float32Array`, `Float16Array`, `Int8Array` or `Uint8Array` names its own scalar kind; every other kind travels as bytes in a `RowsView` naming what they mean:
+
+```js
+const bits = usearch.DenseIndex.initRam({ metric: usearch.DenseMetric.Hamming, dimensions: 64, quantization: usearch.Scalar.U1x8 });
+const packed = usearch.RowsView.of(new Uint8Array([0b10101010, 0, 0, 0, 0, 0, 0, 0]), 64, usearch.Scalar.U1x8);
+bits.insert(1n, packed);
+bits.search(packed, 2, arena);
+
+const halves = usearch.RowsView.of(new Uint16Array([0x3f80, 0x3f80, 0x3f80, 0x3f80]), 4, usearch.Scalar.BF16);
+```
+
+Scores come back as a `Float64Array`, which is the width the ABI writes.
+A row run claiming more bytes than its array holds is refused before it crosses.
 
 ## Serialization
 
-Persist and restore an index through the filesystem, or through memory when checkpoints live in an object store:
+Persist and restore an index through the filesystem, or through memory when checkpoints live in an object store.
+Loading creates a new index, its geometry read from the checkpoint, so the verb names where it lands:
 
 ```js
-index.save('index.safegraphs', executor);
-index.load('index.safegraphs', executor);
+index.on(executor).save('index.safegraphs');
+const loaded = usearch.DenseIndex.loadRam('index.safegraphs', { executor, memoryDomains: [0, 1] });
+const onDevice = usearch.DenseIndex.loadVram('index.safegraphs', { executor: devicePool, devices: [0] });
+const viewed = usearch.DenseIndex.viewRam('index.safegraphs'); // Read-only, served from a memory mapping
 
-const monolith = index.saveBuffer(executor); // Uint8Array of `index.storageRequirements()` bytes
-restored.loadBuffer(monolith, executor);
+const monolith = index.on(executor).saveBuffer(arena); // A Monolith viewing the arena
+const restored = usearch.DenseIndex.loadRamBuffer(monolith, { executor });
 ```
+
+`valuesPerKey` bounds a live handle rather than the file, so a load takes it among its config.
 
 Read a checkpoint's geometry before deciding how to open it:
 
 ```js
-const metadata = usearch.DenseIndex.metadata('index.safegraphs');
-const fromMemory = usearch.DenseIndex.metadataBuffer(monolith);
+const metadata = usearch.DenseIndex.metadataRead('index.safegraphs', { executor });
+const fromMemory = usearch.DenseIndex.metadataReadBuffer(monolith, { executor });
 ```
 
 ## Advanced Index Configuration
@@ -155,183 +248,206 @@ const fromMemory = usearch.DenseIndex.metadataBuffer(monolith);
 Only `dimensions` is required, and every other field derives from the geometry when it is left out:
 
 ```js
-const index = usearch.DenseIndex.forRam({
-  dimensions: 128,
-  metric: 'inner', // or 'angular', 'euclidean', 'hamming', 'jaccard'
-  quantization: 'f32', // or 'f64', 'bf16', 'f16', 'e5m2', 'e4m3', 'e3m2', 'e2m3', 'i8', 'i4x2', 'u8', 'u4x2', 'u1x8'
-  connectivity: 10, // 0 derives it from the geometry
-  valuesPerKey: 2, // 0 derives it to unique keys
-  memoryDomains: [0, 1] // absent spreads the shards over every NUMA node
-});
+const index = usearch.DenseIndex.initRam(
+  {
+    dimensions: 128,
+    metric: usearch.DenseMetric.Inner, // or Angular, the default, Euclidean, Hamming, Jaccard
+    quantization: usearch.Scalar.F32, // the default, or F64, BF16, F16, E5M2, E4M3, E3M2, E2M3, I8, I4x2, U8, U4x2, U1x8
+    connectivity: 10, // absent derives it from the geometry
+    valuesPerKey: 2, // absent derives it to unique keys
+  },
+  [0, 1], // absent spreads the shards over every NUMA node
+);
 ```
 
 The candidate-pool breadth rides every call rather than the construction, so a recall sweep runs against one immutable index with no mutation between points:
 
 ```js
-index.add(keys, vectors, executor, { expansionFactor: 128 });
-index.search(queries, matches, executor, { expansionFactor: 64 });
+index.on(executor).insert(keys, vectors, { expansionFactor: 128 });
+index.on(executor).search(queries, 10, arena, { expansionFactor: 64 });
 ```
 
-## Batch Operations
-
-Process multiple vectors at once.
-A flattened `TypedArray` is preferred over an array of arrays, which is laid end to end before it crosses:
-
-```js
-const keys = new BigUint64Array([15n, 16n]);
-const vectors = new Float32Array([10, 20, 10, 25]);
-index.add(keys, vectors, executor);
-
-const matches = usearch.MatchesSpan.reserve(2, 2);
-index.search(vectors, matches, executor);
-const firstRow = matches.get(0);
-executor.drain();
-```
-
-## Refinement
+## Refinement and Merging
 
 A cheap insertion pass followed by one refinement reaches a better graph, in less total time, than a single expensive insertion pass:
 
 ```js
-index.add(keys, vectors, executor, { expansionFactor: 32 });
-while (index.refine(executor, { expansionFactor: 128 }) > vectors.length / 100) {}
+const pool = index.on(executor);
+pool.insert(keys, vectors, { expansionFactor: 32 });
+while (pool.refine({ expansionFactor: 128 }) > vectors.rows / 100) {}
 ```
 
 Refinement is a build step rather than a repair.
 It adds and removes nothing, and searches may run throughout.
 
-## Traversal Telemetry
-
-`add`, `refine`, `search`, `maxsim`, `multiply` and `attend` each report how much graph they walked, into a `Stats` reading passed through the options:
+Bigger indexes come from merging, never mutating: `merge` absorbs every donor, and a donor the library consumed refuses every later verb with `Status.Uninitialized`.
+No residency absorbs donors yet, so the engine answers `Status.Unsupported` and leaves every donor live.
+A deferred merge holds its donors until it is final, so meanwhile they refuse every verb and no other merge can name them.
 
 ```js
-const stats = new usearch.Stats();
-index.search(queries, matches, executor, { stats });
+index.on(executor).merge([shard]);
+```
+
+## Traversal Telemetry
+
+`insert`, `refine`, `search`, `maxsim`, `multiply` and `attend` each report how much graph they walked, into a `DenseTraversalStats` reading passed through the config:
+
+```js
+const stats = new usearch.DenseTraversalStats();
+index.on(executor).search(queries, 10, arena, { stats });
 
 stats.visitedMembers;     // entries whose neighborhoods the walk expanded
 stats.computedDistances;  // distance evaluations the walk paid for
 stats.restarts;           // times the walk fell back to a fresh entry point
 
-const total = new usearch.Stats();  // sweeping, and reading the whole sweep's cost
+const total = new usearch.DenseTraversalStats();  // sweeping, and reading the whole sweep's cost
 for (const expansionFactor of [16, 32, 64, 128]) {
-  index.search(queries, matches, executor, { expansionFactor, stats });
+  index.on(executor).search(queries, 10, arena, { expansionFactor, stats });
   total.accumulate(stats);
 }
 ```
 
-Telemetry travels through the reading rather than the return value, so `add` still answers with the rows it published and a ranked verb still answers with nothing, and passing none costs nothing.
-A reading is a pure output that each call fully overwrites, so one `Stats` handed to several calls holds the last of them.
+Telemetry travels through the reading rather than the return value, so `refine` still answers with the nodes it changed and a ranked verb with its matches, and passing none costs nothing.
+A reading is a pure output that each call fully overwrites, so one `DenseTraversalStats` handed to several calls holds the last of them, and a deferred call writes it once it settles.
 Use `accumulate` to fold readings together, which is what makes a recall sweep's cost readable in distance computations rather than in wall-clock.
 
 Telemetry is what a breadth sweep is read against: `expansionFactor` buys recall in distance computations, and only the counters say how many.
-A stream opened by `find` reports none, since the ABI gives a resumable walk no telemetry.
+A stream opened by `searchStream` reports none, since the ABI gives a resumable walk no telemetry.
 
 ## Late Interaction
 
 An index whose `valuesPerKey` is above one holds several token rows per document, and `maxsim` scores documents rather than rows:
 
 ```js
-const index = usearch.DenseIndex.forRam({ metric: 'inner', dimensions: 128, valuesPerKey: 64 });
-index.add(documentKeys, tokenRows, executor);
+const index = usearch.DenseIndex.initRam({ metric: usearch.DenseMetric.Inner, dimensions: 128, valuesPerKey: 64 });
+index.on(executor).insert(documentKeys, tokenRows);
 
-const documents = usearch.MatchesSpan.reserve(queryCount, 10); // One row per query, not per token row
-index.maxsim(queryTokens, 32, documents, executor); // 32 padded token rows per query
+const documents = index.on(executor).maxsim(queryTokens, 32, 10, arena); // 32 padded token rows per query, one run row per query
 ```
 
 ## Linear Algebra
 
-`multiply` is the sparse sibling of `search`: every left row emits one pair per column the walk scored rather than one ranked match, so the scores are unnormalized logits and the index must hold the `inner` kind.
+`multiply` is the sparse sibling of `search`: every left row emits one pair per column the walk scored rather than one ranked match, so the scores are unnormalized logits and the index must hold the `Inner` kind.
+How many pairs a walk scores is known only once it ends, so the call answers with a `DenseProducts` run viewing its arena, laid out with Apache Arrow offsets:
 
 ```js
-const index = usearch.DenseIndex.forRam({ metric: 'inner', dimensions: 128 });
-const products = usearch.MatchesSpan.reserve(leftRows, 64); // Up to 64 pairs per left row
-index.multiply(left, products, executor);
-for (let row = 0; row < products.queries; row++) {
-  const emitted = Math.min(Number(products.counts[row]), products.wanted);
-  for (let pair = 0; pair < emitted; pair++)
-    accumulate(row, usearch.keyAt(products.keys, row * products.wanted + pair), products.distances[row * products.wanted + pair]);
+const index = usearch.DenseIndex.initRam({ metric: usearch.DenseMetric.Inner, dimensions: 128 });
+const products = index.on(executor).multiply(left, arena, { wanted: 64 }); // Up to 64 pairs per left row
+for (let row = 0; row < products.rows; row++) {
+  const pairs = products.get(row); // A MatchesRow over `offsets[row]` up to `offsets[row + 1]`
+  for (let pair = 0; pair < pairs.count; pair++) accumulate(row, usearch.keyAt(pairs.keys, pair), pairs.scores[pair]);
 }
+products.required; // Pairs scored across every row, before `wanted` cut any
 ```
 
-Pairs arrive in traversal order rather than sorted, and each count reports the true number of pairs scored rather than the number written — a count above `wanted` means that row was truncated, so reserve a wider run and call again.
+Pairs arrive in traversal order rather than sorted, and a `wanted` bound keeps the first ones each walk scored; leaving it out keeps every pair.
+The Arrow `offsets`, one entry longer than the left rows, land in the arena beside the pairs.
 
-`attend` folds Flash Attention's online softmax into the same walk, writing into the `outputs` the caller lends and answering with nothing, so a sweep allocates once.
-An entry's key is its row offset into the value table, and the value rows carry their own width, which need not be the index's.
+`attend` is softmax attention over every key a query's graph walk scores, folded as Flash Attention folds key tiles, with no top-k cut: the long tail the walk scores is what brings it toward exact dense attention.
+It lands one key-wide row per query in the arena, in the queries' own kind unless `scalar` names another.
+The index stores no values: every key a walk scores, 16 bytes apiece, resolves through `rowOf` to a row of `values`, borrowed for the call rather than copied, as wide as the keys and stored in the index's own scalar kind.
+Answering with no row of `values`, or lending values of another width or kind, refuses the call with `ShapeMismatch`, since a missing row is a wrong softmax rather than a smaller one.
 
 ```js
-const outputs = new Float32Array(queryRows * valueDimensions);
-const carry = new Float32Array(queryRows * 2); // A running maximum and a partition per query row
-index.attend(queries, values, valueDimensions, outputs, executor, { carry, scoreScale, massTolerance });
+const values = usearch.RowsView.of(valueMatrix, dimensions); // One value row per indexed key, stored like the keys
+const rowOf = (key) => tokenRows.get(usearch.integerFromKey(key)); // The row of `values` a 16-byte key resolves to
+const carry = new Float32Array(queries.rows * 2); // A largest logit and a partition per query row, lent and updated in place
+const outputs = index.attend(queries, values, rowOf, arena, { headCount: 8, carry, scoreScale }); // Row `t * 8 + h` is head `h` of token `t`
+outputs.data; // One key-wide row per query, `outputs.stride` bytes apart
 ```
 
-The carry is what folds one branch into another over the same queries — a dense recent window, or a second shard of one context — by the usual partial-softmax rescaling.
+One index holds one layer's one key-value head, so the `headCount` query heads of grouped-query attention share its keys and one walk per token.
+`rowOf` is JavaScript, so `attend` runs on the calling thread alone and no executor receiver offers it.
+The first exception `rowOf` throws stops every later lookup and surfaces as itself.
+The carry is what folds one branch into another over the same queries — attention sinks, a dense recent window, or a second index of one context — by the usual partial-softmax rescaling.
 Its two floats travel in one row because a maximum without its partition is a number nothing can rescale, and omitting it altogether starts the softmax fresh.
-`scoreScale` divides every logit before it is exponentiated and `massTolerance` ends a walk once the residual probability mass falls below it; both derive from the geometry when left out.
+`scoreScale` multiplies every logit and derives from the geometry when left out, and a wider `expansionFactor` walks further, folding more of the tail.
 
 ## Streaming and Filtering
 
-A finder pulls the next-nearest matches on the caller's own thread, which is how a JavaScript predicate filters without reserving a run wide enough to survive it:
+A search stream pulls the next-nearest matches on the caller's own thread, which is how a JavaScript predicate filters without reserving a run wide enough to survive it:
 
 ```js
-const finder = index.find(query, executor);
+using stream = index.on(executor).searchStream(query);
 const admitted = [];
-while (admitted.length < 10) {
-  const pulled = finder.next(16);
-  if (!pulled) break;
-  for (let position = 0; position < pulled.count; position++) {
-    const key = usearch.keyAt(pulled.keys, position);
+for (let pulled = stream.next(16, arena); pulled.counts[0] && admitted.length < 10; pulled = stream.next(16, arena)) {
+  const { keys, count } = pulled.get(0);
+  for (let position = 0; position < count; position++) {
+    const key = usearch.keyAt(keys, position).slice(); // A copy outlives the next pull, a view does not
     if (isVisibleToTenant(key)) admitted.push(key);
   }
 }
-finder.free();
 ```
 
-A live finder pins one of the executor's threads, so free it the moment pulling stops.
+A stream keeps its walk state rather than a thread, every pull is an ordinary call on the executor of the receiver that opened it, and it keeps its index alive until freed.
+No residency implements the stream yet, so the engine answers `Status.Unsupported`.
 
-A cursor walks the whole index instead, over a snapshot taken when it was opened, so entries inserted afterwards never appear mid-iteration:
+A cursor walks the whole index instead, in storage order; each shard's watermark is read as the walk enters it, so a row once passed is never revisited.
+It lands each batch of up to `wanted` entries in the arena, the keys always and the rows beside them in the kind `vectors` names:
 
 ```js
-const cursor = index.cursor();
-for (let batch = cursor.next(1024); batch; batch = cursor.next(1024)) {
-  writeOut(batch.keys, batch.vectors);
+using cursor = index.on(executor).cursor();
+for (let batch = cursor.next(1024, arena, { vectors: usearch.Scalar.F32 }); batch.rows; batch = cursor.next(1024, arena, { vectors: usearch.Scalar.F32 })) {
+  writeOut(batch.keys, batch.vectors.data, batch.rows);
 }
-cursor.free();
 ```
 
 ## Index Introspection
 
 ```js
-const dimensions = index.dimensions();  // The number of dimensions
-const containsKey = index.contains(42n); // Whether a key is in the index
-const count = index.count(42n);          // The number of vectors under a key
-const stored = index.get(42n);           // Those vectors, as f32
-const bytes = index.memoryUsage();       // What the index occupies in memory
-const kernels = index.capabilities();    // The kernel chain this machine dispatched to
+const { metadata, size, capacity, memoryUsage, capabilities } = index.describe();
+metadata.dimensions;                                   // The frozen geometry, as a checkpoint reports it
+const containsKey = index.contains(42n);               // Whether a key is in the index
+const count = index.count(42n);                        // The number of vectors under a key
+const stored = index.get(42n, arena);                  // Those vectors, as f32 DenseVectors
+using bitsArena = new usearch.Arena();
+const packed = index.get(42n, bitsArena, { scalar: usearch.Scalar.U1x8 }); // Or as packed bits, in another arena
+const { audited, reachable } = index.health();        // How much of the graph a search reaches
 
 usearch.version();
 usearch.capabilitiesCompiled();
 usearch.capabilitiesAvailable();
 ```
 
-A key spelled on its own answers with a scalar; a run of keys answers with one entry apiece, in the order they were given.
+`get` shapes its rows from the width and stride the call reports: `stored.data` holds `stored.rows` rows of `stored.columns` values, `stored.stride` bytes apart.
+`health` audits from the search landmarks, and entries it misses stay unfound until a `refine` re-links them.
 
 ## What This Binding Does Not Expose
 
-`searchIf` takes a per-candidate predicate the engine calls from the threads it fanned out over, while the thread owning the JavaScript context sits blocked inside the verb.
-A thread-safe function would queue onto that same blocked loop, so the predicate can never run.
-Pull through `find` instead and filter in JavaScript.
+A JavaScript callback runs only on the thread owning the JavaScript context, and an executor's threads never are.
+A thread-safe function would queue onto a loop that sits blocked inside the verb, so the callback could never run.
+That is why `attend` and its `rowOf` stay on the calling thread, and why a search `predicate`, a per-candidate callback the engine calls from the threads it fanned out over, is not exposed at all.
+Pull through `searchStream` instead and filter in JavaScript.
 The same reasoning excludes the progress handlers every long verb takes.
 
-`merge` stays unexposed while its consumption semantics are still moving.
+## Design
+
+The binding is a thin layer over the C ABI in `include/usearch/`, and every rule below follows from that.
+
+- __Names follow the header.__
+  Every type is its C name without `usearch_` and `_t` - `DenseMetric`, `DenseTraversalStats`, `RowsView`, `Arena` - every constructor is a C lifecycle verb such as `initRam` or `forRam`, a verb's argument structure becomes its `Dense*Config`, and every wrapper's documentation names the C symbol it calls or says it is binding-only.
+- __Blocking calls stay simple.__
+  `index.search(queries, 10, arena)` takes no executor, completion or call value and returns its result, so nothing about asynchrony reaches a caller who never asks for it.
+- __Deferred calls are symmetric, through the language's own idioms.__
+  The receiver's type alone chooses the completion, so the index, `DenseIndexOn` and `DenseIndexDeferredOn` offer the same verbs with the same arguments, and a `Deferred` is a thenable, waited for with `await`, `wait()` or `using`.
+- __Nothing costs anything until it is used.__
+  A blocking call keeps its scratch on the stack and lands its outputs in the caller's arena; a deferred one allocates one block for its outcome and scratch, holds its inputs until final, and borrows its arena alike.
+- __A `Deferred` has no life of its own.__
+  `status` reads the outcome word, `wait()` blocks the calling thread in `usearch_outcome_wait`, and `await` hands that same wait to the libuv pool through `napi_async_work`, since the library has no wake-up to register.
+  The binding starts no thread, counts no calls and schedules nothing.
+  One dropped unfinished is handed back to the collector until it is final rather than freeing memory the library still writes.
+- __Statuses and modes are enums.__
+  `Status`, `Mood`, `DenseMetric` and `Scalar` are spelled as the C name tables spell them, and every name is mapped through those tables, the scalar kinds once at load, so a misspelling is refused rather than read as a default.
+- __Arenas are lent, never conjured.__
+  Every output verb requires an `Arena` and answers a view into it, one verb per operation; each call rewinds the arena and so retires the previous call's views, deferred and blocking calls borrow it alike, and no index owns an arena or a lock.
 
 ## Building From Source
 
-The addon links against `libusearch_static`, which CMake drops in the build tree, so `usearch.node` carries the engine inside it rather than beside it:
+The addon links against the C interface as a static archive, so `usearch.node` carries the engine inside it rather than beside it.
+`cmake-js` compiles it, and `prebuild` stages it where `node-gyp-build` looks:
 
 ```sh
-npm_config_usearch_library_dir=build_release npx node-gyp rebuild
+npm run prebuild
 npm run build-js
 npm test
 ```
-
-`npm_config_usearch_library_dir` points the build at a library that is already compiled, so a change to the TypeScript needs no CMake pass of its own.

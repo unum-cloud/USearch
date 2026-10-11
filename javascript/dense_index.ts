@@ -1,39 +1,66 @@
 /**
- * Vector search over equidimensional dense embeddings, and the snapshot cursor and resumable
- * finder one index opens.
+ * Vector search over equidimensional dense embeddings, the receivers its verbs run through, and
+ * the cursor and resumable search stream one index opens.
  */
-import { CompiledCursor, CompiledFinder, CompiledIndex, CompiledPlacement, compiled } from "./library";
 import {
+  Completion,
+  CompiledBatch,
+  CompiledCursor,
+  CompiledDeferred,
+  CompiledIndex,
+  CompiledMatches,
+  CompiledMetadata,
+  CompiledProducts,
+  CompiledSearchStream,
+  CompiledVectors,
+  compiled,
+} from "./library";
+import {
+  Arena,
+  ArenaView,
+  Deferred,
   Executor,
+  Key,
   KeyLike,
   KeysLike,
+  Matches,
   MatchesRow,
-  MatchesSpan,
-  Matrix,
-  MetricKind,
-  Residency,
-  ScalarKind,
+  Monolith,
+  RowsView,
+  Scalar,
+  Status,
   Vector,
-  VectorOrMatrix,
-  isNonNegativeInteger,
-  isOneKey,
+  crossing,
+  fail,
   isPositiveInteger,
   keyBytes,
   normalizeKey,
   normalizeKeys,
-  normalizeVectors,
-  refuseForeignArms,
-  rowBytes,
-  scalarOf,
+  rowsOf,
+  scalarCodes,
 } from "./types";
 
 /**
- * Traversal telemetry from one call, a pure output the call fully overwrites.
+ * Enumeration representing the metric kinds used to score the dissimilarity of two vectors.
+ * @enum {string}
+ * @readonly
+ */
+export enum DenseMetric {
+  Inner = "inner",
+  Angular = "angular",
+  Euclidean = "euclidean",
+  Hamming = "hamming",
+  Jaccard = "jaccard",
+}
+
+/**
+ * Traversal telemetry from one call, a pure output the call fully overwrites. Mirrors
+ * `usearch_dense_traversal_stats_t`.
  *
  * One reading handed to several calls holds the last of them, so a sweep that wants totals folds
  * them with `accumulate` rather than expecting the calls to sum themselves.
  */
-export class Stats {
+export class DenseTraversalStats {
   /** Entries whose neighborhoods the walk expanded. */
   visitedMembers = 0;
   /** Distance evaluations the walk paid for, diversity re-selections included. */
@@ -41,54 +68,80 @@ export class Stats {
   /** Times the walk fell back to a fresh entry point after the frontier drained early. */
   restarts = 0;
 
-  /** Folds another reading into this one, which is how a sweep gathers totals. */
-  accumulate(other: Stats): void {
+  /** Folds another reading into this one, which is how a sweep gathers totals. Binding-only. */
+  accumulate(other: DenseTraversalStats): void {
     this.visitedMembers += other.visitedMembers;
     this.computedDistances += other.computedDistances;
     this.restarts += other.restarts;
   }
 }
 
-/** Optional per-call settings of an insertion, and of the refinement pass that follows it. */
-export interface InsertionOptions {
+/** Optional per-call settings of an insertion. Mirrors `usearch_dense_insert_t`. */
+export interface DenseInsertConfig {
   /** Candidate-pool breadth the build walk explores; absent lets the engine derive it. */
   expansionFactor?: number;
-  /** The scalar kind the rows hold, for the packed and mini-float kinds no TypedArray spells. */
-  scalarKind?: ScalarKind;
   /** The reading this call overwrites with its own telemetry; absent skips reporting. */
-  stats?: Stats;
+  stats?: DenseTraversalStats;
 }
 
-/** Optional per-call settings of a read-only walk. */
-export interface SearchOptions {
-  /** Candidate-pool breadth the walk explores; absent lets the engine derive it. */
+/** Optional per-call settings of the refinement pass that follows an insertion. Mirrors `usearch_dense_refine_t`. */
+export interface DenseRefineConfig {
+  /** Candidate-pool breadth the re-selection walk explores; absent lets the engine derive it. */
   expansionFactor?: number;
-  /** The scalar kind the rows hold, for the packed and mini-float kinds no TypedArray spells. */
-  scalarKind?: ScalarKind;
   /** The reading this call overwrites with its own telemetry; absent skips reporting. */
-  stats?: Stats;
+  stats?: DenseTraversalStats;
 }
 
-/**
- * Optional per-call settings of attention.
- *
- * The two floating knobs shape the softmax rather than the walk: `scoreScale` divides the
- * logits before they are exponentiated, and `massTolerance` stops a walk once the residual
- * probability mass falls below it.
- */
-export interface AttentionOptions {
+/** Optional per-call settings of a search. Mirrors `usearch_dense_search_t`. */
+export interface DenseSearchConfig {
   /** Candidate-pool breadth the walk explores; absent lets the engine derive it. */
   expansionFactor?: number;
-  /** Divisor applied to every logit before the softmax; absent derives it from the geometry. */
+  /** The reading this call overwrites with its own telemetry; absent skips reporting. */
+  stats?: DenseTraversalStats;
+}
+
+/** Optional per-call settings of late-interaction scoring. Mirrors `usearch_dense_maxsim_t`. */
+export interface DenseMaxsimConfig {
+  /** Candidate-pool breadth the walk explores; absent lets the engine derive it. */
+  expansionFactor?: number;
+  /** The reading this call overwrites with its own telemetry; absent skips reporting. */
+  stats?: DenseTraversalStats;
+}
+
+/** Optional settings of a retrieval. Mirrors `usearch_dense_get_t`. */
+export interface DenseGetConfig {
+  /** The scalar kind to export as, converted from storage; defaults to `f32`. */
+  scalar?: Scalar;
+}
+
+/** Optional per-call settings of a sparse product. Mirrors `usearch_dense_multiply_t`. */
+export interface DenseMultiplyConfig {
+  /** Pairs kept per row, the first ones its walk scored; absent keeps every pair. */
+  wanted?: number;
+  /** Candidate-pool breadth, which widens the emitted pattern; absent lets the engine derive it. */
+  expansionFactor?: number;
+  /** The reading this call overwrites with its own telemetry; absent skips reporting. */
+  stats?: DenseTraversalStats;
+}
+
+/** Optional settings of one cursor pull. Mirrors `usearch_dense_cursor_next_t`. */
+export interface DenseCursorNextConfig {
+  /** The scalar kind to export every row as, converted from storage; absent pulls the keys alone. */
+  vectors?: Scalar;
+}
+
+/** Optional per-call settings of attention. Mirrors `usearch_dense_attend_t`. */
+export interface DenseAttendConfig {
+  /** Query heads sharing the index's key-value head, and with it one walk per token; absent is one. */
+  headCount?: number;
+  /** The scalar kind the attended rows land as; absent takes the queries' own. */
+  scalar?: Scalar;
+  /** Candidate-pool breadth the walk explores; absent lets the engine derive it. A wider pool folds more of the tail. */
+  expansionFactor?: number;
+  /** The logit scale, conventionally the inverse square root of the head dimensionality; absent derives it. */
   scoreScale?: number;
-  /** Residual-mass threshold that ends a walk early; absent derives it. */
-  massTolerance?: number;
-  /** The scalar kind the query rows hold, for the kinds no TypedArray spells. */
-  scalarKind?: ScalarKind;
-  /** The scalar kind the value rows hold; absent reads it off the array. */
-  valuesScalarKind?: ScalarKind;
   /**
-   * Two floats per query row - the running maximum and the partition taken against it.
+   * Two floats per query row - the largest logit and the partition taken against it.
    *
    * Supplying one folds this branch into another over the same queries by partial-softmax
    * rescaling; a maximum without its partition is a number nothing can rescale, which is why
@@ -96,685 +149,933 @@ export interface AttentionOptions {
    */
   carry?: Float32Array;
   /** The reading this call overwrites with its own telemetry; absent skips reporting. */
-  stats?: Stats;
+  stats?: DenseTraversalStats;
+}
+
+/** Optional settings of a resumable search stream. Mirrors `usearch_dense_search_stream_init_t`. */
+export interface DenseSearchStreamInitConfig {
+  /** Candidate-pool breadth the walk explores; absent lets the engine derive it. */
+  expansionFactor?: number;
+}
+
+/** Where a checkpoint loaded into host memory lands. Mirrors `usearch_dense_load_ram_t`. */
+export interface DenseLoadRamConfig {
+  /** The workers the read fans out over, one shard per thread; absent reads on the calling thread. */
+  executor?: Executor;
+  /** NUMA node IDs to place the parts on; absent spreads them over every node. */
+  memoryDomains?: number[];
+  /** Entries one key may carry, which no checkpoint records; absent derives to unique keys. */
+  valuesPerKey?: number;
+}
+
+/** Where a checkpoint loaded into device memory lands. Mirrors `usearch_dense_load_vram_t`. */
+export interface DenseLoadVramConfig {
+  /** The executor the upload runs on, one stream per device; absent uploads on the default stream. */
+  executor?: Executor;
+  /** CUDA ordinals to place the parts on; absent takes one free device. */
+  devices?: number[];
+  /** Entries one key may carry, which no checkpoint records; absent derives to unique keys. */
+  valuesPerKey?: number;
+}
+
+/** Where a monolith held in memory lands in host memory. Mirrors `usearch_dense_load_ram_buffer_t`. */
+export interface DenseLoadRamBufferConfig {
+  /** The workers the copy fans out over; absent copies on the calling thread. */
+  executor?: Executor;
+  /** NUMA node IDs to place the shards on; the monolith lands whole on the first. */
+  memoryDomains?: number[];
+  /** Entries one key may carry, which no checkpoint records; absent derives to unique keys. */
+  valuesPerKey?: number;
+}
+
+/** Where a monolith held in memory lands in device memory. Mirrors `usearch_dense_load_vram_buffer_t`. */
+export interface DenseLoadVramBufferConfig {
+  /** The executor the upload runs on, one stream per device; absent uploads on the default stream. */
+  executor?: Executor;
+  /** CUDA ordinals to place the shards on; the monolith lands whole on the first. */
+  devices?: number[];
+  /** Entries one key may carry, which no checkpoint records; absent derives to unique keys. */
+  valuesPerKey?: number;
+}
+
+/** Where a checkpoint served from NVMe drives is read from. Mirrors `usearch_dense_view_nvme_t`. */
+export interface DenseViewNvmeConfig {
+  /** The NVMe executor whose rings read the checkpoint's headers. */
+  executor?: Executor;
+  /** Devices or directories to serve the parts from; absent leaves each where its manifest points. */
+  paths?: string[];
+}
+
+/** The workers a checkpoint's metadata is read on. Mirrors `usearch_dense_metadata_read_t`. */
+export interface DenseMetadataReadConfig {
+  /** The executor the read runs on; absent reads on the calling thread. */
+  executor?: Executor;
+}
+
+/** The workers a monolith's metadata is read on. Mirrors `usearch_dense_metadata_read_buffer_t`. */
+export interface DenseMetadataReadBufferConfig {
+  /** The executor the read runs on; absent reads on the calling thread. */
+  executor?: Executor;
 }
 
 /**
- * Optional per-call settings of a resumable stream.
- *
- * A finder widens as it is pulled, so it takes no breadth, and the ABI reports no telemetry
- * for one either.
- */
-export interface FinderOptions {
-  /** The scalar kind the rows hold, for the packed and mini-float kinds no TypedArray spells. */
-  scalarKind?: ScalarKind;
-}
-
-/**
- * The geometry and metric a checkpoint froze.
+ * The geometry and metric a checkpoint froze. Mirrors `usearch_dense_metadata_t`.
  *
  * Where it was written is never recorded, and neither is `valuesPerKey`, which bounds a live
- * handle rather than the file - both stay the caller's to choose at construction.
+ * handle rather than the file - both stay the caller's to choose when loading.
  */
-export interface Metadata {
+export interface DenseMetadata {
+  /** The metric the graph was built for. */
+  metric: DenseMetric;
+  /** The scalar type its rows are stored as. */
+  quantization: Scalar;
   /** Scalars per stored row. */
   dimensions: number;
-  /** The metric the graph was built for. */
-  metric: MetricKind;
-  /** The scalar type its rows are stored as. */
-  quantization: ScalarKind;
   /** Connections per node the graph was built with. */
   connectivity: number;
 }
 
-/** The geometry every dense index freezes at construction, whatever its residency. */
-export interface DenseIndexOptions {
+/** A live index's frozen metadata and current counters, each read once. Mirrors `usearch_dense_index_description_t`. */
+export interface DenseIndexDescription {
+  /** The frozen metric, quantization, dimensions and connectivity, as a checkpoint reports them. */
+  metadata: DenseMetadata;
+  /** Stored entries. */
+  size: number;
+  /** Entries hosted without growing again. */
+  capacity: number;
+  /** Bytes the handle holds; traversal scratch is the executor's. */
+  memoryUsage: number;
+  /** The capability codename the index dispatched to on this machine. */
+  capabilities: string;
+}
+
+/** One reachability audit: the population it judged, and how much of it a search reaches. Mirrors `usearch_dense_reachability_t`. */
+export interface DenseReachability {
+  /** Entries published when the audit started; compare `reachable` against this, never a later size. */
+  audited: number;
+  /** Of those, the entries a search reaches from the landmarks; the rest stay unfound until a `refine`. */
+  reachable: number;
+  /** Levels the sweep took to converge - a diameter proxy. */
+  sweeps: number;
+}
+
+/** The geometry every dense index freezes at initialization, whatever its residency. */
+export interface DenseOptions {
   /** Scalars per row, fixed for the life of the index. */
   dimensions: number;
   /** How dissimilarity is scored; defaults to `angular`. */
-  metric?: MetricKind;
+  metric?: DenseMetric;
   /** The scalar kind rows are stored in; defaults to `f32`. */
-  quantization?: ScalarKind;
-  /** Neighbors per node; defaults to 0, which derives from the geometry. */
+  quantization?: Scalar;
+  /** Neighbors per node; absent derives it from the geometry. */
   connectivity?: number;
-  /** Entries one key may carry; defaults to 0, which derives to unique keys. */
+  /** Entries one key may carry; absent derives to unique keys. */
   valuesPerKey?: number;
 }
 
-/** A dense index kept in host memory. */
-export interface RamIndexOptions extends DenseIndexOptions {
-  /** NUMA node ids to shard over; absent spreads the shards over every node. */
-  memoryDomains?: number[];
-}
+/**
+ * Resolves one scored key to its row of the values `attend` borrows, on the calling thread. Backs
+ * `usearch_value_lookup_t`.
+ *
+ * Anything but the index of a row the values hold refuses the call with {@link Status.ShapeMismatch}.
+ */
+export type ValueRowOf = (key: Key) => number;
 
-/** A dense index kept in device memory. */
-export interface VramIndexOptions extends DenseIndexOptions {
-  /** CUDA ordinals to shard over; absent takes every visible device. */
-  devices?: number[];
-}
-
-/** A dense index kept on disk. */
-export interface NvmeIndexOptions extends DenseIndexOptions {
-  /** Device or directory paths to shard over; absent derives them. */
-  paths?: string[];
-}
-
-/** One batch of a snapshot walk: identities and the rows they name. */
-export interface CursorBatch {
-  keys: Uint8Array;
-  vectors: Float32Array;
+/** Lifts the canonical spellings the addon reports into the binding's enumerations. */
+function metadataOf(read: CompiledMetadata): DenseMetadata {
+  return {
+    metric: read.metric as DenseMetric,
+    quantization: read.quantization as Scalar,
+    dimensions: read.dimensions,
+    connectivity: read.connectivity,
+  };
 }
 
 /**
- * A consistent snapshot walk over an index, taken at the moment it was opened, so entries
- * inserted afterwards never appear mid-iteration.
+ * Rows a call landed in its arena: the entries `get` exported, a cursor pull's rows, or the rows
+ * `attend` attended. Mirrors a `usearch_rows_view_t` output.
  *
- * Holds engine state until `free` is called; a walk left to the garbage collector releases it
- * whenever the collector gets to it.
+ * `data` is a `Float64Array`, `Float32Array`, `Float16Array` or `Int8Array` for the kinds
+ * JavaScript spells, a `Uint16Array` for `bf16` and for `f16` on a runtime without `Float16Array`,
+ * and the raw bytes in a `Uint8Array` for the rest.
  */
-export class Cursor {
-  /** Wraps the native cursor; opened by {@link DenseIndex.cursor} rather than constructed. */
-  constructor(private readonly compiled: CompiledCursor) {}
+export class DenseVectors extends ArenaView {
+  /** Rows written; zero when `get` found no entry under the key. */
+  readonly rows: number;
+  /** Values in each row, as the call reported them. */
+  readonly columns: number;
+  /** Bytes between consecutive rows. */
+  readonly stride: number;
+  /** The scalar kind the rows were exported as. */
+  readonly scalar: Scalar;
+  readonly #data: Vector | null;
+
+  /** Made by a verb, never directly. */
+  constructor(landed: CompiledVectors, scalar: Scalar) {
+    super();
+    this.#data = landed.data as Vector | null;
+    this.rows = landed.rows;
+    this.columns = landed.columns;
+    this.stride = landed.stride;
+    this.scalar = scalar;
+  }
+
+  /** Every row, laid `stride` bytes apart. */
+  get data(): Vector {
+    return this.live(this.#data);
+  }
+}
+
+/**
+ * Every pair a sparse product scored, as a ragged run with Apache Arrow offsets: row `i` spans
+ * pairs `offsets[i]` up to `offsets[i + 1]`, in traversal order rather than sorted. Mirrors
+ * `usearch_matches_tape_view_t`.
+ */
+export class DenseProducts extends ArenaView {
+  /** Left rows the product covers. */
+  readonly rows: number;
+  /** Pairs scored across every row, before `wanted` cut any. */
+  readonly required: number;
+  readonly #landed: CompiledProducts;
+
+  /** Made by `multiply`, never directly. */
+  constructor(landed: CompiledProducts, rows: number) {
+    super();
+    this.#landed = landed;
+    this.rows = rows;
+    this.required = landed.required;
+  }
+
+  /** One more entry than there are left rows, non-decreasing. */
+  get offsets(): BigUint64Array {
+    return this.live(this.#landed.offsets);
+  }
+
+  /** Sixteen bytes per pair, naming each pair's indexed row. */
+  get keys(): Uint8Array {
+    return this.live(this.#landed.keys);
+  }
+
+  /** One product per pair, positionally paired with `keys`. */
+  get scores(): Float64Array {
+    return this.live(this.#landed.scores);
+  }
 
   /**
-   * Pulls the next rows of the snapshot.
+   * Borrows the pairs of one left row, without copying. Binding-only.
    *
-   * @param {number} batch - Rows to pull at most.
-   * @return {CursorBatch|null} The rows pulled, or null once the snapshot is exhausted.
+   * @param {number} row - Which left row to read.
+   * @returns {MatchesRow} - The keys and products that row's walk scored.
    */
-  next(batch: number): CursorBatch | null {
-    const pulled = this.compiled.next(batch);
-    if (!pulled) return null;
-    return { keys: pulled[0], vectors: pulled[1] };
+  get(row: number): MatchesRow {
+    if (!Number.isInteger(row) || row < 0 || row >= this.rows)
+      throw fail(Status.InvalidArgument, `No row ${row} in a product of ${this.rows}.`);
+    const begin = Number(this.offsets[row]);
+    const end = Number(this.offsets[row + 1]);
+    return new MatchesRow(this.keys.subarray(begin * keyBytes, end * keyBytes), this.scores.subarray(begin, end));
+  }
+}
+
+/** One cursor pull, viewed inside its arena: the keys, and the rows beside them when they were asked for. */
+export class DenseCursorBatch extends ArenaView {
+  /** Entries pulled; zero once the scan is exhausted. */
+  readonly rows: number;
+  /** The rows beside the keys, in the kind asked for; absent when the pull asked for keys alone. */
+  readonly vectors: DenseVectors | undefined;
+  readonly #keys: Uint8Array | null;
+
+  /** Made by `DenseCursor.next`, never directly. */
+  constructor(landed: CompiledBatch, scalar: Scalar | undefined) {
+    super();
+    this.#keys = landed.keys;
+    this.rows = landed.rows;
+    this.vectors = landed.vectors && scalar ? new DenseVectors(landed.vectors, scalar) : undefined;
   }
 
-  /** Releases the snapshot; a second call does nothing. */
-  free(): void {
-    this.compiled.free();
+  /** Sixteen bytes per entry pulled. */
+  get keys(): Uint8Array {
+    return this.live(this.#keys);
   }
 }
 
 /**
- * A resumable nearest-neighbor stream over one query, pulled from the caller's own thread.
+ * A row scan over an index. Each shard's publication watermark is read as the walk enters it, so
+ * a row once passed is never revisited. Mirrors `usearch_dense_cursor_t`.
+ *
+ * Holds engine state until `free` is called; a walk left to the garbage collector releases it
+ * whenever the collector gets to it. It keeps its index alive, and pulls on the executor of the
+ * receiver that opened it.
+ */
+export class DenseCursor implements Disposable {
+  readonly #compiled: CompiledCursor;
+
+  /** Made by `cursor`, never directly. */
+  constructor(compiled: CompiledCursor) {
+    this.#compiled = compiled;
+  }
+
+  /**
+   * Pulls the next entries of the scan into `arena`. Calls `usearch_dense_cursor_next`.
+   *
+   * @param {number} wanted - The upper bound on entries this pull lands.
+   * @param {Arena} arena - The memory the batch lands in, rewound by the pull.
+   * @param {DenseCursorNextConfig} [config] - The kind to export the rows in; absent pulls keys alone.
+   * @return {DenseCursorBatch} The batch; zero rows once the scan is exhausted.
+   */
+  next(wanted: number, arena: Arena, config: DenseCursorNextConfig = {}): DenseCursorBatch {
+    const scalar = config.vectors;
+    return new DenseCursorBatch(
+      this.#compiled.next(wanted, arena, scalar === undefined ? undefined : scalarCodes[scalar]),
+      scalar,
+    );
+  }
+
+  /** Releases the scan; a second call does nothing. Calls `usearch_dense_cursor_free`. */
+  free(): void {
+    this.#compiled.free();
+  }
+
+  [Symbol.dispose](): void {
+    this.free();
+  }
+}
+
+/**
+ * A resumable nearest-neighbor walk over one query, pulled from the caller's own thread. Mirrors
+ * `usearch_dense_search_stream_t`.
  *
  * This is the filtered path: pull matches, drop the ones a JavaScript predicate rejects, and
  * pull again until satisfied - rather than guessing a `k` wide enough to survive the filter.
- * A live finder pins one of the executor's threads, so free it the moment pulling stops.
+ * The stream keeps walk state rather than a thread, and every pull is an ordinary call on the
+ * executor of the receiver that opened it.
  */
-export class Finder {
-  /** Wraps the native finder; opened by {@link DenseIndex.find} rather than constructed. */
-  constructor(private readonly compiled: CompiledFinder) {}
+export class DenseSearchStream implements Disposable {
+  readonly #compiled: CompiledSearchStream;
 
-  /**
-   * Pulls the next-nearest matches from the stream.
-   *
-   * @param {number} wanted - Matches to pull at most.
-   * @return {MatchesRow|null} The matches pulled, or null once the traversal is drained.
-   */
-  next(wanted: number): MatchesRow | null {
-    const pulled = this.compiled.next(wanted);
-    if (!pulled) return null;
-    return new MatchesRow(pulled[0], pulled[1]);
+  /** Made by `searchStream`, never directly. */
+  constructor(compiled: CompiledSearchStream) {
+    this.#compiled = compiled;
   }
 
-  /** Releases the stream and the executor thread it pinned; a second call does nothing. */
+  /**
+   * Pulls the next-nearest matches from the stream into `arena`. Calls `usearch_dense_search_stream_next`.
+   *
+   * @param {number} wanted - The upper bound on matches this pull lands.
+   * @param {Arena} arena - The memory the matches land in, rewound by the pull.
+   * @return {Matches} One ranked row, whose count is zero once the walk is drained.
+   */
+  next(wanted: number, arena: Arena): Matches {
+    return new Matches(this.#compiled.next(wanted, arena), 1);
+  }
+
+  /** Releases the walk state; a second call does nothing. Calls `usearch_dense_search_stream_free`. */
+  free(): void {
+    this.#compiled.free();
+  }
+
+  [Symbol.dispose](): void {
+    this.free();
+  }
+}
+
+/** How a receiver hands back what its verbs answer: as is, or as a {@link Deferred} of it. */
+type Answer<Receiving, Answered> = Receiving extends "deferred" ? Deferred<Answered> : Answered;
+
+/**
+ * The verbs every receiver of a dense index shares, written once.
+ *
+ * The receiver chooses where a verb runs and how it completes, and the verb stays the same: a
+ * {@link DenseIndex} runs it on the calling thread, `index.on(executor)` blocks on an executor, and
+ * `index.deferred(executor)` submits it there and answers a {@link Deferred}.
+ */
+export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
+  /** The native handle every verb is called on; shared by every receiver of one index. */
+  protected readonly compiled: CompiledIndex;
+  /** The executor the verbs run on; absent runs them on the calling thread. */
+  readonly executor: Executor | undefined;
+
+  protected constructor(compiled: CompiledIndex, executor: Executor | undefined) {
+    this.compiled = compiled;
+    this.executor = executor;
+  }
+
+  /** Submits one native call with this receiver's completion, and hands its answer back as this receiver does. */
+  protected abstract submit<Raw, Answered>(
+    call: (completion: Completion) => unknown,
+    answer: (raw: Raw) => Answered,
+  ): Answer<Receiving, Answered>;
+
+  /**
+   * Claims room for a total entry count ahead of insertion. Calls `usearch_dense_reserve`.
+   * @param {number} capacity - The desired total capacity, the current size included.
+   */
+  reserve(capacity: number): Answer<Receiving, void> {
+    return this.submit(
+      (completion) => this.compiled.reserve(this.executor, completion, capacity),
+      () => undefined,
+    );
+  }
+
+  /** Erases every entry, keeping the reserved capacity and the frozen geometry. Calls `usearch_dense_clear`. */
+  clear(): Answer<Receiving, void> {
+    return this.submit(
+      (completion) => this.compiled.clear(this.executor, completion),
+      () => undefined,
+    );
+  }
+
+  /**
+   * Reports the frozen metadata and the current counters in one call. Calls `usearch_dense_describe`.
+   * @return {DenseIndexDescription} The geometry, the size, the capacity, the memory and the kernels in use.
+   */
+  describe(): Answer<Receiving, DenseIndexDescription> {
+    return this.submit(
+      (completion) => this.compiled.describe(this.executor, completion),
+      (described: { metadata: CompiledMetadata } & Omit<DenseIndexDescription, "metadata">) => ({
+        ...described,
+        metadata: metadataOf(described.metadata),
+      }),
+    );
+  }
+
+  /**
+   * Audits how much of the graph a search reaches from its landmarks. Calls `usearch_dense_health`.
+   * @return {DenseReachability} The population audited, and how much of it is reachable.
+   */
+  health(): Answer<Receiving, DenseReachability> {
+    return this.submit(
+      (completion) => this.compiled.health(this.executor, completion),
+      (reachability: DenseReachability) => reachability,
+    );
+  }
+
+  /**
+   * Counts the entries stored under one key. Calls `usearch_dense_count`.
+   *
+   * @param {KeyLike} key - The identifier to be enumerated.
+   * @return {number} - How many entries the key holds.
+   * @throws Will throw an error if the key is spelled in none of the accepted forms.
+   */
+  count(key: KeyLike): Answer<Receiving, number> {
+    const normalized = normalizeKey(key);
+    return this.submit(
+      (completion) => this.compiled.count(this.executor, completion, normalized),
+      (entries: number) => entries,
+    );
+  }
+
+  /**
+   * Add vectors to the index. Calls `usearch_dense_insert`.
+   *
+   * A typed array is one row, and a {@link RowsView} is a batch borrowed in place. A single key
+   * broadcasts across every row. A batch is all-or-nothing: a rejected one leaves the index
+   * untouched.
+   *
+   * Rows keep whatever type they arrived in and the engine converts them into the index's own
+   * quantization, so the two are independent - a packed `u1x8` or a `bf16` row travels as
+   * bytes with its `RowsView` naming what they mean.
+   *
+   * @param {KeysLike} keys - Input identifiers for every vector.
+   * @param {RowsView|Vector} vectors - One row, or a run of rows of the index width.
+   * @param {DenseInsertConfig} [config] - Per-call breadth and telemetry sink.
+   * @throws Will throw an error if the length of keys doesn't match the number of vectors
+   *         or if it's not a single key.
+   */
+  insert(keys: KeysLike, vectors: RowsView | Vector, config: DenseInsertConfig = {}): Answer<Receiving, void> {
+    const normalized = normalizeKeys(keys);
+    const rows = crossing(vectors);
+    return this.submit(
+      (completion) =>
+        this.compiled.insert(this.executor, completion, normalized, ...rows, config.expansionFactor, config.stats),
+      () => undefined,
+    );
+  }
+
+  /**
+   * Re-selects the neighbors of every stored entry against the finished graph. Calls `usearch_dense_refine`.
+   *
+   * A cheap insertion pass followed by one refinement reaches a better graph, in less total
+   * time, than a single expensive insertion pass - so a wide breadth belongs here.
+   *
+   * @param {DenseRefineConfig} [config] - Per-call breadth and telemetry sink.
+   * @return {number} Nodes whose edges changed; zero means the graph has settled.
+   */
+  refine(config: DenseRefineConfig = {}): Answer<Receiving, number> {
+    return this.submit(
+      (completion) => this.compiled.refine(this.executor, completion, config.expansionFactor, config.stats),
+      (changed: number) => changed,
+    );
+  }
+
+  /**
+   * Searches the index for the nearest neighbours of every query row. Calls `usearch_dense_search`.
+   *
+   * The matches land in `arena` and come back as a view into it, so a recall sweep reusing one
+   * arena allocates once.
+   *
+   * @param {RowsView|Vector} queries - One query row, or a run of them, at the index's own width.
+   * @param {number} wanted - Matches per query, the "k" in "kANN".
+   * @param {Arena} arena - The memory the matches land in, rewound by the call.
+   * @param {DenseSearchConfig} [config] - Per-call breadth and telemetry sink.
+   * @return {Matches} The matches, viewed inside `arena`.
+   * @throws Will throw when the queries do not split into whole rows of the index geometry.
+   */
+  search(
+    queries: RowsView | Vector,
+    wanted: number,
+    arena: Arena,
+    config: DenseSearchConfig = {},
+  ): Answer<Receiving, Matches> {
+    const rows = crossing(queries);
+    return this.submit(
+      (completion) =>
+        this.compiled.search(this.executor, completion, ...rows, arena, wanted, config.expansionFactor, config.stats),
+      (landed: CompiledMatches) => new Matches(landed, rows[1]),
+    );
+  }
+
+  /**
+   * Late-interaction scoring of multi-row queries: every query row takes its best match within
+   * a key, and those maxima sum to that key's score. Calls `usearch_dense_maxsim`.
+   *
+   * The run is over keys rather than rows, which is what an index built with `valuesPerKey`
+   * above one exists for. Runs on the inner-product kinds alone.
+   *
+   * @param {RowsView|Vector} queries - The token rows of every query, end to end.
+   * @param {number} rowsPerQuery - Rows in every query; uniform, so padded queries apply as is.
+   * @param {number} wanted - Documents per query; one row per query, not per token row.
+   * @param {Arena} arena - The memory the scored keys land in, rewound by the call.
+   * @param {DenseMaxsimConfig} [config] - Per-call breadth and telemetry sink.
+   * @return {Matches} The scored keys, largest first, viewed inside `arena`.
+   * @throws Will throw when the token rows do not split into whole queries.
+   */
+  maxsim(
+    queries: RowsView | Vector,
+    rowsPerQuery: number,
+    wanted: number,
+    arena: Arena,
+    config: DenseMaxsimConfig = {},
+  ): Answer<Receiving, Matches> {
+    const rows = crossing(queries);
+    const queriesCount = rows[1] / rowsPerQuery;
+    if (!isPositiveInteger(queriesCount)) throw fail(Status.ShapeMismatch, "The rows do not split into whole queries.");
+    return this.submit(
+      (completion) =>
+        this.compiled.maxsim(
+          this.executor,
+          completion,
+          ...rows,
+          rowsPerQuery,
+          arena,
+          wanted,
+          config.expansionFactor,
+          config.stats,
+        ),
+      (landed: CompiledMatches) => new Matches(landed, queriesCount),
+    );
+  }
+
+  /**
+   * Retrieves the vectors stored under one key, one row per entry, in insertion order. Calls `usearch_dense_get`.
+   *
+   * Rows land in `arena` and come back as a view into it, converted into `scalar`, shaped by the
+   * width and stride the call reports.
+   *
+   * @param {KeyLike} key - The identifier whose entries are exported.
+   * @param {Arena} arena - The memory the rows land in, rewound by the call.
+   * @param {DenseGetConfig} [config] - The kind to export as.
+   * @return {DenseVectors} - The rows, laid end to end; empty when the key is absent.
+   */
+  get(key: KeyLike, arena: Arena, config: DenseGetConfig = {}): Answer<Receiving, DenseVectors> {
+    const normalized = normalizeKey(key);
+    const scalar = config.scalar ?? Scalar.F32;
+    return this.submit(
+      (completion) => this.compiled.get(this.executor, completion, normalized, scalarCodes[scalar], arena),
+      (landed: CompiledVectors) => new DenseVectors(landed, scalar),
+    );
+  }
+
+  /**
+   * Multiplies a matrix against the index, sparsely - every pair the walk scored, not only the
+   * nearest. Calls `usearch_dense_multiply`.
+   *
+   * How many pairs a walk scores is known only once it ends, so the products land in `arena` and
+   * come back as views into it. The scores are unnormalized logits, so the handle must hold the
+   * inner-product kind.
+   *
+   * @param {RowsView|Vector} left - One row, or a run of rows, at the index's own width.
+   * @param {Arena} arena - The memory the pairs and their offsets land in, rewound by the call.
+   * @param {DenseMultiplyConfig} [config] - Per-call pair bound, breadth and telemetry sink.
+   * @return {DenseProducts} - The pairs every left row's walk scored.
+   */
+  multiply(left: RowsView | Vector, arena: Arena, config: DenseMultiplyConfig = {}): Answer<Receiving, DenseProducts> {
+    const rows = crossing(left);
+    return this.submit(
+      (completion) =>
+        this.compiled.multiply(
+          this.executor,
+          completion,
+          ...rows,
+          arena,
+          config.wanted,
+          config.expansionFactor,
+          config.stats,
+        ),
+      (landed: CompiledProducts) => new DenseProducts(landed, rows[1]),
+    );
+  }
+
+  /**
+   * Absorbs every donor into this index, cheaper than re-inserting their vectors. Calls `usearch_dense_merge`.
+   *
+   * A donor the library consumed refuses every later verb with {@link Status.Uninitialized}; one a
+   * stopped merge left behind stays a live index the caller still owns. Until a deferred merge is
+   * final, every donor it names refuses every verb, and no other merge can name it.
+   *
+   * @param {DenseIndex[]} donors - The indexes to absorb.
+   */
+  merge(donors: DenseIndex[]): Answer<Receiving, void> {
+    const handles = donors.map((donor) => donor.compiled);
+    return this.submit(
+      (completion) => this.compiled.merge(this.executor, completion, handles),
+      () => undefined,
+    );
+  }
+
+  /**
+   * Saves the index in the layout the path extension picks - one `.safegraphs` monolith, or a
+   * `.safegraphs.json` manifest beside its shards. Calls `usearch_dense_save`.
+   *
+   * @param {string} path File path to write.
+   * @throws Will throw an error if `path` is not a string.
+   */
+  save(path: string): Answer<Receiving, void> {
+    return this.submit(
+      (completion) => this.compiled.save(this.executor, completion, path),
+      () => undefined,
+    );
+  }
+
+  /**
+   * Writes the index into memory as one monolith. Calls `usearch_dense_save_buffer`.
+   *
+   * The bytes are what a checkpoint holds, so a service that keeps its indexes in an object
+   * store never touches the filesystem. They land in `arena` and come back as a view into it.
+   *
+   * @param {Arena} arena - The memory the monolith lands in, rewound by the call.
+   * @return {Monolith} - One serialized monolith.
+   */
+  saveBuffer(arena: Arena): Answer<Receiving, Monolith> {
+    return this.submit(
+      (completion) => this.compiled.saveBuffer(this.executor, completion, arena),
+      (bytes: Uint8Array | null) => new Monolith(bytes),
+    );
+  }
+}
+
+/**
+ * The verbs of one index, blocking on one executor: `index.on(executor)`. Every call starts after
+ * every earlier submission to that executor, and returns with its outputs written.
+ */
+export class DenseIndexOn extends DenseVerbs<"blocking"> {
+  /** Made by `index.on(executor)`, never directly. */
+  constructor(compiled: CompiledIndex, executor: Executor | undefined) {
+    super(compiled, executor);
+  }
+
+  protected submit<Raw, Answered>(call: (completion: Completion) => unknown, answer: (raw: Raw) => Answered): Answered {
+    return answer(call(0) as Raw);
+  }
+
+  /**
+   * Verifies the presence of one key in the index. Binding-only sugar over `count`.
+   *
+   * @param {KeyLike} key - The identifier to be checked for presence in the index.
+   * @return {boolean} - Whether the key is present.
+   */
+  contains(key: KeyLike): boolean {
+    return this.count(key) !== 0;
+  }
+
+  /**
+   * Opens a row scan over the current contents, every pull on this receiver's executor.
+   * Calls `usearch_dense_cursor_init`.
+   * @return {DenseCursor} - The scan, which should be freed once pulling stops.
+   */
+  cursor(): DenseCursor {
+    return new DenseCursor(this.compiled.cursor(this.executor));
+  }
+
+  /**
+   * Opens a resumable nearest-neighbor walk over one query row, every pull on this receiver's
+   * executor. Calls `usearch_dense_search_stream_init`.
+   *
+   * @param {RowsView|Vector} query - A single query row of the index geometry.
+   * @param {DenseSearchStreamInitConfig} [config] - The breadth.
+   * @return {DenseSearchStream} - The stream, whose walk state lives until it is freed.
+   */
+  searchStream(query: RowsView | Vector, config: DenseSearchStreamInitConfig = {}): DenseSearchStream {
+    return new DenseSearchStream(this.compiled.searchStream(this.executor, ...crossing(query), config.expansionFactor));
+  }
+}
+
+/**
+ * The verbs of one index, submitted to one executor and answered as {@link Deferred} calls:
+ * `index.deferred(executor)`. Cursors, streams and `contains` stay blocking, so this receiver
+ * offers none of them.
+ *
+ * A verb with outputs borrows its arena as the blocking verb does, and waits into the same view.
+ */
+export class DenseIndexDeferredOn extends DenseVerbs<"deferred"> {
+  /** Made by `index.deferred(executor)`, never directly. */
+  constructor(compiled: CompiledIndex, executor: Executor) {
+    super(compiled, executor);
+  }
+
+  protected submit<Raw, Answered>(
+    call: (completion: Completion) => unknown,
+    answer: (raw: Raw) => Answered,
+  ): Deferred<Answered> {
+    return new Deferred(call(1) as CompiledDeferred, answer);
+  }
+}
+
+/** The token the lifecycle verbs hold, which is what a direct `new DenseIndex` cannot produce. */
+const indexSeal = Symbol("DenseIndex");
+
+/**
+ * A dense vector index, running every verb on the calling thread. `on(executor)` and
+ * `deferred(executor)` reach the same verbs on an executor, all but `attend`, whose `rowOf` runs here.
+ */
+export class DenseIndex extends DenseIndexOn implements Disposable {
+  /** Reached through the `init*`, `load*` and `view*` lifecycle verbs. */
+  private constructor(seal: symbol, compiledIndex: CompiledIndex) {
+    if (seal !== indexSeal)
+      throw fail(
+        Status.InvalidArgument,
+        "A DenseIndex is opened by DenseIndex.initRam, DenseIndex.initVram, or a DenseIndex.load or view verb.",
+      );
+    super(compiledIndex, undefined);
+  }
+
+  /**
+   * The same verbs, each blocking on `executor`, after every earlier submission to it. Binding-only.
+   * @param {Executor} executor - The workers to run on; its residency must match the index's.
+   */
+  on(executor: Executor): DenseIndexOn {
+    return new DenseIndexOn(this.compiled, executor);
+  }
+
+  /**
+   * The same verbs, each submitted to `executor` and answered as a {@link Deferred}. Binding-only.
+   * @param {Executor} executor - The workers to run on; its residency must match the index's.
+   */
+  deferred(executor: Executor): DenseIndexDeferredOn {
+    return new DenseIndexDeferredOn(this.compiled, executor);
+  }
+
+  /**
+   * Softmax attention of every query row over every key its graph walk scores, folded as Flash
+   * Attention folds key tiles, landing one attended row per query in `arena`. Calls `usearch_dense_attend`.
+   *
+   * The index stores no values: every key a walk scores resolves through `rowOf` to a row of
+   * `values`, borrowed for the call, so only the keys a walk scores are ever resolved. The values
+   * must be as wide as the keys and stored in the index's own scalar kind, and a key resolving
+   * outside them refuses the call with `ShapeMismatch`, since a missing row is a wrong softmax
+   * rather than a smaller one. Row `t * headCount + h` of the queries, outputs and carry is head
+   * `h` of token `t`, every head of a token sharing one walk.
+   *
+   * `rowOf` runs on the calling thread, which no executor's thread is, so only the index itself
+   * offers `attend`. The first exception it throws stops every later lookup and is rethrown once
+   * the call returns.
+   *
+   * @param {RowsView|Vector} queries - One query row, or a run of them, at the index's own width.
+   * @param {RowsView|Vector} values - The value rows the scored keys resolve into, never copied.
+   * @param {ValueRowOf} rowOf - Answers one 16-byte key with the index of its row of `values`.
+   * @param {Arena} arena - The memory the attended rows land in, rewound by the call.
+   * @param {DenseAttendConfig} [config] - Head count, output kind, softmax shape, the carry, and the telemetry sink.
+   * @return {DenseVectors} One key-width row per query, viewed inside `arena`.
+   */
+  attend(
+    queries: RowsView | Vector,
+    values: RowsView | Vector,
+    rowOf: ValueRowOf,
+    arena: Arena,
+    config: DenseAttendConfig = {},
+  ): DenseVectors {
+    const landed = this.compiled.attend(
+      ...crossing(queries),
+      ...crossing(values),
+      rowOf,
+      arena,
+      config.scalar === undefined ? undefined : scalarCodes[config.scalar],
+      config.carry,
+      config.headCount,
+      config.expansionFactor,
+      config.scoreScale,
+      config.stats,
+    );
+    return new DenseVectors(landed, config.scalar ?? rowsOf(queries).scalar);
+  }
+
+  /** Releases the handle now, waiting for every deferred call naming it; a freed index refuses every later call, and a second `free` does nothing. Calls `usearch_dense_free`. */
   free(): void {
     this.compiled.free();
   }
-}
 
-/** Repeats one identity across `rows` entries, which is how a single key broadcasts. */
-function repeatKeys(keys: Uint8Array | BigUint64Array, rows: number): Uint8Array | BigUint64Array {
-  if (keys instanceof BigUint64Array) return BigUint64Array.from({ length: rows }, () => keys[0]);
-  const repeated = new Uint8Array(rows * keyBytes);
-  for (let position = 0; position < rows; position++) repeated.set(keys, position * keyBytes);
-  return repeated;
-}
-
-/** The identities a normalized run carries. */
-function countKeys(keys: Uint8Array | BigUint64Array): number {
-  return keys instanceof BigUint64Array ? keys.length : keys.length / keyBytes;
-}
-
-/** The slots the addon overwrites with one call's telemetry, in the order `Stats` reads them. */
-const statsSlots = 3;
-
-/** The sink one call reports into, allocated only when a caller asked for a reading. */
-function statsSink(stats: Stats | undefined): Float64Array | undefined {
-  return stats ? new Float64Array(statsSlots) : undefined;
-}
-
-/** Adopts a filled sink, overwriting whatever the reading held; summing is `accumulate`'s job. */
-function reportStats(stats: Stats | undefined, sink: Float64Array | undefined): void {
-  if (!stats || !sink) return;
-  stats.visitedMembers = sink[0];
-  stats.computedDistances = sink[1];
-  stats.restarts = sink[2];
-}
-
-/** The token the three factories hold, which is what a direct `new DenseIndex` cannot produce. */
-const indexSeal = Symbol("DenseIndex");
-
-export class DenseIndex {
-  #compiledIndex: CompiledIndex;
-
-  /** Reached through {@link DenseIndex.forRam}, {@link DenseIndex.forVram} or {@link DenseIndex.forNvme}. */
-  private constructor(seal: symbol, compiledIndex: CompiledIndex) {
-    if (seal !== indexSeal)
-      throw new Error("A DenseIndex is opened by DenseIndex.forRam, DenseIndex.forVram or DenseIndex.forNvme.");
-    this.#compiledIndex = compiledIndex;
+  [Symbol.dispose](): void {
+    this.free();
   }
 
-  /** Checks the shared geometry and opens the native index of one residency. */
-  static #opened(options: DenseIndexOptions, residency: Residency, placement: CompiledPlacement): DenseIndex {
-    const metric = options.metric ?? MetricKind.Angular;
-    const quantization = options.quantization ?? ScalarKind.F32;
-    const connectivity = options.connectivity ?? 0;
-    const valuesPerKey = options.valuesPerKey ?? 0;
-
-    if (!isPositiveInteger(options.dimensions)) throw new Error("`dimensions` must be a positive integer.");
-    if (!isNonNegativeInteger(connectivity) || !isNonNegativeInteger(valuesPerKey))
-      throw new Error("`connectivity` and `valuesPerKey` must be non-negative integers, 0 deriving each.");
-    if (!Object.values(MetricKind).includes(metric))
-      throw new Error(`Invalid metric: ${metric}. It must be one of: ${Object.values(MetricKind).join(", ")}`);
-    if (!Object.values(ScalarKind).includes(quantization))
-      throw new Error(
-        `Invalid quantization: ${quantization}. It must be one of: ${Object.values(ScalarKind).join(", ")}`,
-      );
-
+  /**
+   * Creates an empty, mutable index in host memory, one shard per named NUMA node. Calls `usearch_dense_init_ram`.
+   *
+   * @param {DenseOptions} options - The geometry.
+   * @param {number[]} [memoryDomains] - NUMA node IDs to shard over; absent spreads the shards over every node.
+   * @return {DenseIndex} An index a RAM executor's verbs run on.
+   * @throws Will throw an error if any option is of incorrect type or invalid value.
+   */
+  static initRam(options: DenseOptions, memoryDomains?: number[]): DenseIndex {
     return new DenseIndex(
       indexSeal,
-      new compiled.CompiledIndex(
+      compiled.CompiledIndex.initRam(
         options.dimensions,
-        metric,
-        quantization,
-        connectivity,
-        valuesPerKey,
-        residency,
-        placement,
+        options.metric ?? DenseMetric.Angular,
+        scalarCodes[options.quantization ?? Scalar.F32],
+        options.connectivity,
+        options.valuesPerKey,
+        memoryDomains,
       ),
     );
   }
 
   /**
-   * Places the graph in host memory, one shard per named NUMA node.
+   * Creates an empty, mutable index in device memory, one shard per named CUDA ordinal. Calls `usearch_dense_init_vram`.
    *
-   * @param {RamIndexOptions} options - The geometry, and the memory domains to shard over.
-   * @return {DenseIndex} An index a RAM executor's verbs run on.
-   * @throws Will throw an error if any option is of incorrect type or invalid value.
-   */
-  static forRam(options: RamIndexOptions): DenseIndex {
-    refuseForeignArms(options, "memoryDomains", "DenseIndex.forRam");
-    return DenseIndex.#opened(options, Residency.Ram, options.memoryDomains);
-  }
-
-  /**
-   * Places the graph on CUDA devices, one shard per named ordinal.
-   *
-   * @param {VramIndexOptions} options - The geometry, and the devices to shard over.
+   * @param {DenseOptions} options - The geometry.
+   * @param {number[]} [devices] - CUDA ordinals to shard over; absent takes one free device.
    * @return {DenseIndex} An index a VRAM executor's verbs run on.
    * @throws Will throw an error if any option is of incorrect type or invalid value.
    */
-  static forVram(options: VramIndexOptions): DenseIndex {
-    refuseForeignArms(options, "devices", "DenseIndex.forVram");
-    return DenseIndex.#opened(options, Residency.Vram, options.devices);
+  static initVram(options: DenseOptions, devices?: number[]): DenseIndex {
+    return new DenseIndex(
+      indexSeal,
+      compiled.CompiledIndex.initVram(
+        options.dimensions,
+        options.metric ?? DenseMetric.Angular,
+        scalarCodes[options.quantization ?? Scalar.F32],
+        options.connectivity,
+        options.valuesPerKey,
+        devices,
+      ),
+    );
   }
 
   /**
-   * Places the graph on disk, one shard per named path.
-   *
-   * @param {NvmeIndexOptions} options - The geometry, and the paths to shard over.
-   * @return {DenseIndex} An index an NVMe executor's verbs run on.
-   * @throws Will throw an error if any option is of incorrect type or invalid value.
-   */
-  static forNvme(options: NvmeIndexOptions): DenseIndex {
-    refuseForeignArms(options, "paths", "DenseIndex.forNvme");
-    return DenseIndex.#opened(options, Residency.Nvme, options.paths);
-  }
-
-  /**
-   * Reads a checkpoint's geometry and metric without loading it.
+   * Copies a checkpoint into a new, mutable index in host memory, part `p` landing on shard `p`
+   * modulo the shard count. The geometry and metric come from the checkpoint itself.
+   * Calls `usearch_dense_load_ram`.
    *
    * @param {string} path - The manifest of a sharded checkpoint, or a single monolith.
-   * @return {Metadata} The geometry and metric the checkpoint froze.
+   * @param {DenseLoadRamConfig} [config] - The executor, the memory domains, and `valuesPerKey`.
+   * @return {DenseIndex} The loaded index.
    */
-  static metadata(path: string): Metadata {
-    const read = compiled.CompiledIndex.metadata(path);
-    return {
-      dimensions: read.dimensions,
-      metric: read.metric as MetricKind,
-      quantization: read.quantization as ScalarKind,
-      connectivity: read.connectivity,
-    };
-  }
-
-  /**
-   * Reads the geometry and metric of a monolith held in memory.
-   *
-   * @param {Uint8Array} buffer - The bytes {@link DenseIndex.saveBuffer} produced.
-   * @return {Metadata} The geometry and metric the monolith froze.
-   */
-  static metadataBuffer(buffer: Uint8Array): Metadata {
-    const read = compiled.CompiledIndex.metadataBuffer(buffer);
-    return {
-      dimensions: read.dimensions,
-      metric: read.metric as MetricKind,
-      quantization: read.quantization as ScalarKind,
-      connectivity: read.connectivity,
-    };
-  }
-
-  /**
-   * Unwraps the executor a fanned-out verb runs on. Required rather than derived: a pool
-   * spawned behind the caller's back claims most of the machine's cores invisibly, and
-   * nothing here could ever free it again.
-   */
-  #executorOf(executor: Executor): Executor {
-    if (!(executor instanceof Executor)) throw new Error("`executor` must be an Executor.");
-    return executor;
-  }
-
-  /** Rows a flattened batch splits into, at the index's frozen width and the named kind. */
-  #rowsOf(vectors: Vector, kind: ScalarKind): number {
-    const width = rowBytes(this.#compiledIndex.dimensions(), kind);
-    if (!width || vectors.byteLength % width !== 0)
-      throw new Error("The size of the flattened vectors must be a whole multiple of one row.");
-    return vectors.byteLength / width;
-  }
-
-  /**
-   * Add vectors to the index.
-   *
-   * Vectors arrive as a flat typed array of `n * d` scalars, one row per key, or as an array
-   * of rows this method lays end to end. A single key broadcasts across every row.
-   *
-   * Rows keep whatever type they arrived in and the engine converts them into the index's own
-   * quantization, so the two are independent - a packed `u1x8` or a `bf16` row travels as
-   * bytes with `scalarKind` naming what they mean.
-   *
-   * @param {KeysLike} keys - Input identifiers for every vector.
-   * @param {VectorOrMatrix} vectors - Input matrix of size n * d.
-   * @param {Executor} executor - The workers to fan the batch out over.
-   * @param {InsertionOptions} [options] - Per-call breadth, scalar kind and telemetry sink.
-   * @return {number} The rows published, which is every row unless the batch was stopped.
-   * @throws Will throw an error if the length of keys doesn't match the number of vectors
-   *         or if it's not a single key.
-   */
-  add(
-    keys: KeysLike,
-    vectors: VectorOrMatrix | number[][],
-    executor: Executor,
-    options: InsertionOptions = {},
-  ): number {
-    const normalizedVectors = normalizeVectors(vectors);
-    const scalarKind = options.scalarKind ?? scalarOf(normalizedVectors);
-    const countVectors = this.#rowsOf(normalizedVectors, scalarKind);
-
-    let normalizedKeys = normalizeKeys(keys);
-    if (countKeys(normalizedKeys) === 1 && countVectors > 1) normalizedKeys = repeatKeys(normalizedKeys, countVectors);
-    else if (countKeys(normalizedKeys) !== countVectors)
-      throw new Error(
-        `The length of keys (${countKeys(
-          normalizedKeys,
-        )}) must match the number of vectors (${countVectors}) or be a single key.`,
-      );
-
-    const sink = statsSink(options.stats);
-    const published = this.#compiledIndex.add(
-      normalizedKeys,
-      normalizedVectors,
-      this.#executorOf(executor).compiled,
-      options.expansionFactor ?? 0,
-      options.scalarKind,
-      sink,
+  static loadRam(path: string, config: DenseLoadRamConfig = {}): DenseIndex {
+    return new DenseIndex(
+      indexSeal,
+      compiled.CompiledIndex.loadRam(path, config.executor, config.memoryDomains, config.valuesPerKey),
     );
-    reportStats(options.stats, sink);
-    return published;
   }
 
   /**
-   * Re-selects the neighbors of every stored entry against the finished graph.
+   * Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
+   * {@link DenseIndex.loadRam}. Calls `usearch_dense_load_vram`.
    *
-   * A cheap insertion pass followed by one refinement reaches a better graph, in less total
-   * time, than a single expensive insertion pass - so a wide breadth belongs here.
-   *
-   * @param {Executor} executor - The workers to fan the sweep out over.
-   * @param {InsertionOptions} [options] - Per-call breadth and telemetry sink.
-   * @return {number} Nodes whose edges changed; zero means the graph has settled.
+   * @param {string} path - The manifest of a sharded checkpoint, or a single monolith.
+   * @param {DenseLoadVramConfig} [config] - The executor, the devices, and `valuesPerKey`.
+   * @return {DenseIndex} The loaded index.
    */
-  refine(executor: Executor, options: InsertionOptions = {}): number {
-    const sink = statsSink(options.stats);
-    const changed = this.#compiledIndex.refine(this.#executorOf(executor).compiled, options.expansionFactor ?? 0, sink);
-    reportStats(options.stats, sink);
-    return changed;
-  }
-
-  /**
-   * Searches the index for the nearest neighbours of every query row.
-   *
-   * Writes into the run the caller lends and answers with nothing, so a recall sweep allocates
-   * once and reuses one run at every point. The matches wanted per query follow from the run's
-   * own shape rather than being passed alongside it.
-   *
-   * @param {VectorOrMatrix} vectors - One row per query, at the index's own width.
-   * @param {MatchesSpan} matches - The run to fill; its `wanted` fixes the width.
-   * @param {Executor} executor - The workers to fan the batch out over.
-   * @param {SearchOptions} [options] - Per-call breadth, scalar kind and telemetry sink.
-   * @throws Will throw when the queries do not split into whole rows of the index geometry.
-   */
-  search(
-    vectors: VectorOrMatrix | number[][],
-    matches: MatchesSpan,
-    executor: Executor,
-    options: SearchOptions = {},
-  ): void {
-    const normalizedVectors = normalizeVectors(vectors);
-    const sink = statsSink(options.stats);
-    this.#compiledIndex.search(
-      normalizedVectors,
-      matches.keys,
-      matches.distances,
-      matches.counts,
-      this.#executorOf(executor).compiled,
-      options.expansionFactor ?? 0,
-      options.scalarKind,
-      sink,
+  static loadVram(path: string, config: DenseLoadVramConfig = {}): DenseIndex {
+    return new DenseIndex(
+      indexSeal,
+      compiled.CompiledIndex.loadVram(path, config.executor, config.devices, config.valuesPerKey),
     );
-    reportStats(options.stats, sink);
   }
 
   /**
-   * Multiplies a matrix against the index, sparsely.
+   * Copies a monolith held in memory into a new, mutable index in host memory. Calls `usearch_dense_load_ram_buffer`.
    *
-   * Every left row emits up to `wanted` pairs rather than one ranked match, and the scores are
-   * unnormalized logits, so the handle must hold the inner-product kind.
-   *
-   * @param {VectorOrMatrix} left - The rows to multiply, at the index's own width.
-   * @param {MatchesSpan} products - The run to fill; its keys name each pair's indexed row.
-   * @param {Executor} executor - The workers to fan the batch out over.
-   * @param {SearchOptions} [options] - Per-call breadth, scalar kind and telemetry sink.
-   * @throws Will throw when the left rows do not span whole rows of the index width.
+   * @param {Uint8Array|Monolith} buffer - The bytes {@link DenseVerbs.saveBuffer} produced.
+   * @param {DenseLoadRamBufferConfig} [config] - The executor, the memory domains, and `valuesPerKey`.
+   * @return {DenseIndex} The loaded index.
    */
-  multiply(
-    left: VectorOrMatrix | number[][],
-    products: MatchesSpan,
-    executor: Executor,
-    options: SearchOptions = {},
-  ): void {
-    const normalizedLeft = normalizeVectors(left);
-    const sink = statsSink(options.stats);
-    this.#compiledIndex.multiply(
-      normalizedLeft,
-      products.keys,
-      products.distances,
-      products.counts,
-      this.#executorOf(executor).compiled,
-      options.expansionFactor ?? 0,
-      options.scalarKind,
-      sink,
+  static loadRamBuffer(buffer: Uint8Array | Monolith, config: DenseLoadRamBufferConfig = {}): DenseIndex {
+    const bytes = buffer instanceof Monolith ? buffer.bytes : buffer;
+    return new DenseIndex(
+      indexSeal,
+      compiled.CompiledIndex.loadRamBuffer(bytes, config.executor, config.memoryDomains, config.valuesPerKey),
     );
-    reportStats(options.stats, sink);
   }
 
   /**
-   * Attends over the index, writing into the buffer the caller lends.
+   * Copies a monolith held in memory into a new, mutable index in device memory. Calls `usearch_dense_load_vram_buffer`.
    *
-   * Answers with nothing: the outputs are the caller's array, which is what lets a sweep
-   * allocate once. The value rows carry their own width, which need not be the index's.
-   *
-   * @param {VectorOrMatrix} queries - One row per query, at the index's own width.
-   * @param {VectorOrMatrix} values - The value table, at `valueDimensions` scalars per row.
-   * @param {number} valueDimensions - Scalars per value row.
-   * @param {ArrayBufferView} outputs - One row of `valueDimensions` per query, written in place.
-   * @param {Executor} executor - The workers to fan the batch out over.
-   * @param {AttentionOptions} [options] - Softmax shape, the carry, and the telemetry sink.
+   * @param {Uint8Array|Monolith} buffer - The bytes {@link DenseVerbs.saveBuffer} produced.
+   * @param {DenseLoadVramBufferConfig} [config] - The executor, the devices, and `valuesPerKey`.
+   * @return {DenseIndex} The loaded index.
    */
-  attend(
-    queries: VectorOrMatrix | number[][],
-    values: VectorOrMatrix | number[][],
-    valueDimensions: number,
-    outputs: ArrayBufferView,
-    executor: Executor,
-    options: AttentionOptions = {},
-  ): void {
-    if (!isPositiveInteger(valueDimensions)) throw new Error("`valueDimensions` must be a positive integer.");
-
-    const normalizedQueries = normalizeVectors(queries);
-    const normalizedValues = normalizeVectors(values);
-    const sink = statsSink(options.stats);
-    this.#compiledIndex.attend(
-      normalizedQueries,
-      normalizedValues,
-      valueDimensions,
-      outputs,
-      options.carry,
-      this.#executorOf(executor).compiled,
-      options.expansionFactor ?? 0,
-      options.scoreScale ?? 0,
-      options.massTolerance ?? 0,
-      options.scalarKind,
-      options.valuesScalarKind,
-      sink,
+  static loadVramBuffer(buffer: Uint8Array | Monolith, config: DenseLoadVramBufferConfig = {}): DenseIndex {
+    const bytes = buffer instanceof Monolith ? buffer.bytes : buffer;
+    return new DenseIndex(
+      indexSeal,
+      compiled.CompiledIndex.loadVramBuffer(bytes, config.executor, config.devices, config.valuesPerKey),
     );
-    reportStats(options.stats, sink);
   }
 
   /**
-   * Late-interaction scoring of multi-row queries: every query row takes its best match within
-   * a key, and those maxima sum to that key's score.
+   * Serves a checkpoint in place through a memory mapping, as a read-only index whose mutating
+   * verbs throw with {@link Status.ReadOnly}; the files must stay unmodified while it lives.
+   * Calls `usearch_dense_view_ram`.
    *
-   * The run is over keys rather than rows, which is what an index built with `valuesPerKey`
-   * above one exists for. Runs on the inner-product kinds alone.
+   * @param {string} path - The manifest of a sharded checkpoint, or a single monolith.
+   * @return {DenseIndex} The read-only index.
+   */
+  static viewRam(path: string): DenseIndex {
+    return new DenseIndex(indexSeal, compiled.CompiledIndex.viewRam(path));
+  }
+
+  /**
+   * Serves a checkpoint in place from NVMe drives, read through the executor's submission rings,
+   * as a read-only index. Calls `usearch_dense_view_nvme`.
    *
-   * @param {VectorOrMatrix} vectors - The token rows of every query, laid end to end.
-   * @param {number} rowsPerQuery - Rows in every query; uniform, so padded queries apply as is.
-   * @param {MatchesSpan} matches - The run to fill; one row per query, not per token row.
-   * @param {Executor} executor - The workers to fan the batch out over.
-   * @param {SearchOptions} [options] - Per-call breadth, scalar kind and telemetry sink.
-   * @throws Will throw when the token rows do not split into whole queries.
+   * @param {string} path - The manifest of a sharded checkpoint, or a single monolith.
+   * @param {DenseViewNvmeConfig} [config] - The NVMe executor, and the paths to serve the parts from.
+   * @return {DenseIndex} The read-only index.
    */
-  maxsim(
-    vectors: VectorOrMatrix | number[][],
-    rowsPerQuery: number,
-    matches: MatchesSpan,
-    executor: Executor,
-    options: SearchOptions = {},
-  ): void {
-    if (!isPositiveInteger(rowsPerQuery)) throw new Error("`rowsPerQuery` must be a positive integer.");
-
-    const normalizedVectors = normalizeVectors(vectors);
-    const sink = statsSink(options.stats);
-    this.#compiledIndex.maxsim(
-      normalizedVectors,
-      rowsPerQuery,
-      matches.keys,
-      matches.distances,
-      matches.counts,
-      this.#executorOf(executor).compiled,
-      options.expansionFactor ?? 0,
-      options.scalarKind,
-      sink,
-    );
-    reportStats(options.stats, sink);
+  static viewNvme(path: string, config: DenseViewNvmeConfig = {}): DenseIndex {
+    return new DenseIndex(indexSeal, compiled.CompiledIndex.viewNvme(path, config.executor, config.paths));
   }
 
   /**
-   * Verifies the presence of one or more keys in the index.
+   * Reads a checkpoint's geometry and metric without loading it. Calls `usearch_dense_metadata_read`.
    *
-   * A key spelled on its own answers with a boolean; a run of keys answers with one boolean
-   * apiece, in the order they were given.
+   * @param {string} path - The manifest of a sharded checkpoint, or a single monolith.
+   * @param {DenseMetadataReadConfig} [config] - The workers the read runs on.
+   * @return {DenseMetadata} The geometry and metric the checkpoint froze.
+   */
+  static metadataRead(path: string, config: DenseMetadataReadConfig = {}): DenseMetadata {
+    return metadataOf(compiled.CompiledIndex.metadataRead(path, config.executor));
+  }
+
+  /**
+   * Reads the geometry and metric of a monolith held in memory. Calls `usearch_dense_metadata_read_buffer`.
    *
-   * @param {KeysLike} keys - The identifier(s) to be checked for presence in the index.
-   * @return {boolean|boolean[]} - Whether each key is present.
-   * @throws Will throw an error if a key is spelled in none of the accepted forms.
+   * @param {Uint8Array|Monolith} buffer - The bytes {@link DenseVerbs.saveBuffer} produced.
+   * @param {DenseMetadataReadBufferConfig} [config] - The workers the read runs on.
+   * @return {DenseMetadata} The geometry and metric the monolith froze.
    */
-  contains(key: bigint | number | string): boolean;
-  contains(keys: Uint8Array | BigUint64Array | Array<bigint | number | string | Uint8Array>): boolean[];
-  contains(keys: KeysLike): boolean | boolean[] {
-    const found = this.#compiledIndex.contains(normalizeKeys(keys));
-    return isOneKey(keys) ? found[0] : found;
-  }
-
-  /**
-   * Counts the entries stored under one or more keys.
-   *
-   * A key spelled on its own answers with a number; a run of keys answers with one number
-   * apiece, in the order they were given.
-   *
-   * @param {KeysLike} keys - The identifier(s) to be enumerated.
-   * @return {number|number[]} - How many entries each key holds.
-   * @throws Will throw an error if a key is spelled in none of the accepted forms.
-   */
-  count(key: bigint | number | string): number;
-  count(keys: Uint8Array | BigUint64Array | Array<bigint | number | string | Uint8Array>): number[];
-  count(keys: KeysLike): number | number[] {
-    const counted = this.#compiledIndex.count(normalizeKeys(keys));
-    return isOneKey(keys) ? counted[0] : counted;
-  }
-
-  /**
-   * Retrieves the vectors stored under one key, one row per entry, in insertion order.
-   *
-   * Rows come back as `f32` whatever the index quantized them into.
-   *
-   * @param {KeyLike} key - The identifier whose entries are exported.
-   * @return {Float32Array} - The rows, laid end to end; empty when the key is absent.
-   */
-  get(key: KeyLike): Float32Array {
-    return this.#compiledIndex.get(normalizeKey(key));
-  }
-
-  /**
-   * Opens a consistent snapshot walk over the entries published so far.
-   * @return {Cursor} - The walk, which must be freed once pulling stops.
-   */
-  cursor(): Cursor {
-    return new Cursor(this.#compiledIndex.cursor());
-  }
-
-  /**
-   * Opens a resumable nearest-neighbor stream over one query row.
-   *
-   * @param {Vector} query - A single query row of the index geometry.
-   * @param {Executor} executor - The pool one thread is pinned from until the finder is freed.
-   * @param {FinderOptions} [options] - The scalar kind, when the TypedArray spells none.
-   * @return {Finder} - The stream, which must be freed the moment pulling stops.
-   */
-  find(query: Vector, executor: Executor, options: FinderOptions = {}): Finder {
-    return new Finder(this.#compiledIndex.find(query, this.#executorOf(executor).compiled, options.scalarKind));
-  }
-
-  /**
-   * Claims room for a total entry count ahead of insertion.
-   * @param {number} capacity - The desired total capacity, the current size included.
-   */
-  reserve(capacity: number): void {
-    this.#compiledIndex.reserve(capacity);
-  }
-
-  /** Erases every entry, keeping the reserved capacity and the frozen geometry. */
-  clear(): void {
-    this.#compiledIndex.clear();
-  }
-
-  /**
-   * Returns the dimensionality of vectors.
-   * @return {number} The dimensionality of vectors.
-   */
-  dimensions(): number {
-    return this.#compiledIndex.dimensions();
-  }
-
-  /**
-   * Returns connectivity.
-   * @return {number} The connectivity of index.
-   */
-  connectivity(): number {
-    return this.#compiledIndex.connectivity();
-  }
-
-  /**
-   * Returns the number of vectors currently indexed.
-   * @return {number} The number of vectors currently indexed.
-   */
-  size(): number {
-    return this.#compiledIndex.size();
-  }
-
-  /**
-   * Returns index capacity.
-   * @return {number} The capacity of index.
-   */
-  capacity(): number {
-    return this.#compiledIndex.capacity();
-  }
-
-  /**
-   * Returns the memory the index occupies.
-   * @return {number} The memory usage of the index, in bytes.
-   */
-  memoryUsage(): number {
-    return this.#compiledIndex.memoryUsage();
-  }
-
-  /**
-   * Returns the bytes one monolith of this index takes, which is what {@link saveBuffer} needs.
-   * @return {number} The size of a serialized monolith, in bytes.
-   */
-  storageRequirements(): number {
-    return this.#compiledIndex.storageRequirements();
-  }
-
-  /**
-   * Returns the capability codename this index dispatched to on this machine.
-   * @return {string} The codename of the kernel chain in use.
-   */
-  capabilities(): string {
-    return this.#compiledIndex.capabilities();
-  }
-
-  /**
-   * Write index to a file.
-   * @param {string} path File path to write.
-   * @param {Executor} executor - The workers the write fans out over.
-   * @throws Will throw an error if `path` is not a string.
-   */
-  save(path: string, executor: Executor): void {
-    if (typeof path !== "string") throw new Error("`path` must be a string representing the file path to write.");
-    this.#compiledIndex.save(path, this.#executorOf(executor).compiled);
-  }
-
-  /**
-   * Load index from a file.
-   * @param {string} path File path to read.
-   * @param {Executor} executor - The workers the read fans out over.
-   * @throws Will throw an error if `path` is not a string.
-   */
-  load(path: string, executor: Executor): void {
-    if (typeof path !== "string") throw new Error("`path` must be a string representing the file path to read.");
-    this.#compiledIndex.load(path, this.#executorOf(executor).compiled);
-  }
-
-  /**
-   * Writes the index into memory as one monolith, sized for the caller.
-   *
-   * The bytes are what a checkpoint holds, so a service that keeps its indexes in an object
-   * store never touches the filesystem.
-   *
-   * @param {Executor} executor - The workers the write fans out over.
-   * @return {Uint8Array} - One serialized monolith.
-   */
-  saveBuffer(executor: Executor): Uint8Array {
-    return this.#compiledIndex.saveBuffer(this.#executorOf(executor).compiled);
-  }
-
-  /**
-   * Materializes a monolith held in memory into this handle.
-   *
-   * @param {Uint8Array} buffer - The bytes {@link saveBuffer} produced.
-   * @param {Executor} executor - The workers the read fans out over.
-   */
-  loadBuffer(buffer: Uint8Array, executor: Executor): void {
-    this.#compiledIndex.loadBuffer(buffer, this.#executorOf(executor).compiled);
+  static metadataReadBuffer(buffer: Uint8Array | Monolith, config: DenseMetadataReadBufferConfig = {}): DenseMetadata {
+    const bytes = buffer instanceof Monolith ? buffer.bytes : buffer;
+    return metadataOf(compiled.CompiledIndex.metadataReadBuffer(bytes, config.executor));
   }
 }

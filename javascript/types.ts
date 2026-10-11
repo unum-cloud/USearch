@@ -1,21 +1,73 @@
 /**
  * The vocabulary every modality shares: closed-set names, identities, vector rows, the
- * executor whose threads a fanned-out verb runs on, and where a ranked run lands.
+ * executor whose threads a fanned-out verb runs on, the arena every scaling output lands in,
+ * the ranked run viewed inside it, and the deferred call a deferred receiver answers.
  */
-import { CompiledExecutor, compiled } from "./library";
+import { CompiledDeferred, CompiledMatches, CompiledRows, compiled } from "./library";
 
 /**
- * Enumeration representing the metric kinds used to score the dissimilarity of two vectors.
+ * What went wrong, one member per `usearch_status_*_k` of the C interface and spelled as its
+ * canonical name. Every error the library or this binding throws carries one as its `code`, so a
+ * caller branches on the identity of the fault rather than on which side of the boundary saw it.
+ * A {@link Deferred} also reports `Success`, and `Deferred` until its call is final.
  * @enum {string}
  * @readonly
  */
-export enum MetricKind {
-  Unknown = "unknown",
-  Inner = "inner",
-  Angular = "angular",
-  Euclidean = "euclidean",
-  Hamming = "hamming",
-  Jaccard = "jaccard",
+export enum Status {
+  Success = "success",
+  Deferred = "deferred",
+  OutOfMemory = "out-of-memory",
+  ShapeMismatch = "shape-mismatch",
+  UnsupportedLayout = "unsupported-layout",
+  UnknownKind = "unknown-kind",
+  ReadOnly = "read-only",
+  Io = "io",
+  Device = "device",
+  Malformed = "malformed",
+  Internal = "internal",
+  Overflow = "overflow",
+  Uninitialized = "uninitialized",
+  ConfigMismatch = "config-mismatch",
+  Contended = "contended",
+  Cancelled = "cancelled",
+  Unsupported = "unsupported",
+  InvalidArgument = "invalid-argument",
+}
+
+/** An error thrown by the library or this binding, its `code` naming the failure. */
+export interface USearchError extends Error {
+  code: Status;
+}
+
+/** Builds the error this binding throws when it refuses a call before it crosses into the addon. */
+export function fail(status: Status, message: string): USearchError {
+  return Object.assign(new Error(message), { code: status });
+}
+
+/**
+ * What an executor does with its threads or streams once it goes idle.
+ * @enum {string}
+ * @readonly
+ */
+export enum Mood {
+  /** Idle threads sleep; the next call pays a wake-up. */
+  Parked = "parked",
+  /** Idle threads stay hot, trading power for the next call's latency. */
+  Spinning = "spinning",
+}
+
+/**
+ * Where an executor computes, and so where the arenas it makes keep their memory.
+ * @enum {string}
+ * @readonly
+ */
+export enum Residency {
+  /** Host memory traversed by CPU threads. */
+  Ram = "ram",
+  /** Accelerator memory traversed by GPU streams, which no host view reads. */
+  Vram = "vram",
+  /** Persisted memory read through submission rings; its arenas are host pages. */
+  Nvme = "nvme",
 }
 
 /**
@@ -23,8 +75,7 @@ export enum MetricKind {
  * @enum {string}
  * @readonly
  */
-export enum ScalarKind {
-  Unknown = "unknown",
+export enum Scalar {
   F64 = "f64",
   F32 = "f32",
   BF16 = "bf16",
@@ -35,46 +86,22 @@ export enum ScalarKind {
   E2M3 = "e2m3",
   I8 = "i8",
   I4x2 = "i4x2",
+  /** The coordinates of geospatial points, which vectors refuse. */
+  I32 = "i32",
   U8 = "u8",
   U4x2 = "u4x2",
   U1x8 = "u1x8",
 }
 
 /**
- * Enumeration representing where an index keeps its payload, and which engine traverses it.
- * @enum {string}
- * @readonly
- */
-export enum Residency {
-  Ram = "ram",
-  Vram = "vram",
-  Nvme = "nvme",
-}
-
-/**
- * A row of scalars, in whatever numeric TypedArray the caller already holds.
+ * One row of scalars, in whatever numeric TypedArray the caller already holds.
  *
  * The engine converts on ingest, so this is independent of the index's own quantization: an
  * `Int8Array` reaches an `f16` index unchanged. The kinds no TypedArray spells on its own -
- * `bf16`, `f16`, the mini-floats, the packed nibbles and bits - travel as bytes with a
- * `ScalarKind` named beside them.
+ * `bf16`, the mini-floats, the packed nibbles and bits - travel as bytes in a `Uint8Array` or
+ * `Uint16Array`, inside a {@link RowsView} naming their `Scalar`.
  */
-export type Vector =
-  | Float64Array
-  | Float32Array
-  | Int32Array
-  | Int16Array
-  | Int8Array
-  | Uint32Array
-  | Uint16Array
-  | Uint8Array
-  | Uint8ClampedArray;
-
-/** Several rows, each its own array, laid end to end before they cross. */
-export type Matrix = Vector[];
-
-/** Either shape a batch of rows arrives in. */
-export type VectorOrMatrix = Vector | Matrix;
+export type Vector = Float64Array | Float32Array | Float16Array | Int8Array | Uint8Array | Uint16Array;
 
 /** Bytes one identity occupies, on the wire and in the engine alike. */
 export const keyBytes = 16;
@@ -94,7 +121,7 @@ export type KeyLike = bigint | number | string | Uint8Array;
 export type KeysLike = KeyLike | BigUint64Array | Array<bigint | number | string | Uint8Array>;
 
 /**
- * Parks an integer identity in the trailing eight bytes, most significant first.
+ * Parks an integer identity in the trailing eight bytes, most significant first. Binding-only.
  *
  * @param {bigint|number} value - A non-negative integer below 2^64.
  * @return {Key} The sixteen identity bytes, the leading eight zeroed.
@@ -102,7 +129,7 @@ export type KeysLike = KeyLike | BigUint64Array | Array<bigint | number | string
 export function keyFromInteger(value: bigint | number): Key {
   const integer = BigInt(value);
   if (integer < 0n || integer > 0xffffffffffffffffn)
-    throw new Error("An integer identity must be a non-negative integer below 2^64.");
+    throw fail(Status.InvalidArgument, "An integer identity must be a non-negative integer below 2^64.");
   const key = new Uint8Array(keyBytes);
   for (let position = 0; position < 8; position++)
     key[15 - position] = Number((integer >> BigInt(position * 8)) & 0xffn);
@@ -110,7 +137,7 @@ export function keyFromInteger(value: bigint | number): Key {
 }
 
 /**
- * Reports the integer identity in the trailing eight bytes.
+ * Reports the integer identity in the trailing eight bytes. Binding-only.
  *
  * @param {Uint8Array} key - Sixteen identity bytes.
  * @return {bigint} The integer the trailing eight bytes spell.
@@ -118,22 +145,22 @@ export function keyFromInteger(value: bigint | number): Key {
  *         spells that identity.
  */
 export function integerFromKey(key: Uint8Array): bigint {
-  if (key.length !== keyBytes) throw new Error("A key is sixteen bytes, most significant first.");
+  if (key.length !== keyBytes) throw fail(Status.Malformed, "A key is sixteen bytes, most significant first.");
   for (let position = 0; position < 8; position++)
-    if (key[position] !== 0) throw new Error(`The key ${formatKey(key)} carries no integer identity.`);
+    if (key[position] !== 0) throw fail(Status.Malformed, `The key ${formatKey(key)} carries no integer identity.`);
   let integer = 0n;
   for (let position = 8; position < keyBytes; position++) integer = (integer << 8n) | BigInt(key[position]);
   return integer;
 }
 
 /**
- * Renders one identity as a lowercase dashed UUID, which is how every SDK prints it.
+ * Renders one identity as a lowercase dashed UUID, which is how every SDK prints it. Binding-only.
  *
  * @param {Uint8Array} key - Sixteen identity bytes.
  * @return {string} Thirty-six characters, dashed after the 4th, 6th, 8th and 10th byte.
  */
 export function formatKey(key: Uint8Array): string {
-  if (key.length !== keyBytes) throw new Error("A key is sixteen bytes, most significant first.");
+  if (key.length !== keyBytes) throw fail(Status.Malformed, "A key is sixteen bytes, most significant first.");
   let rendered = "";
   for (let position = 0; position < keyBytes; position++) {
     if (position === 4 || position === 6 || position === 8 || position === 10) rendered += "-";
@@ -143,7 +170,7 @@ export function formatKey(key: Uint8Array): string {
 }
 
 /**
- * Reads the rendering {@link formatKey} produces. Dashes may sit anywhere, or nowhere.
+ * Reads the rendering {@link formatKey} produces. Dashes may sit anywhere, or nowhere. Binding-only.
  *
  * @param {string} text - Thirty-two hexadecimal digits, dashes ignored.
  * @return {Key} The sixteen identity bytes.
@@ -151,14 +178,14 @@ export function formatKey(key: Uint8Array): string {
 export function parseKey(text: string): Key {
   const malformed = "The key is not thirty-two hexadecimal digits.";
   const digits = text.replace(/-/g, "");
-  if (digits.length !== 32 || !/^[0-9a-fA-F]{32}$/.test(digits)) throw new Error(malformed);
+  if (digits.length !== 32 || !/^[0-9a-fA-F]{32}$/.test(digits)) throw fail(Status.Malformed, malformed);
   const key = new Uint8Array(keyBytes);
   for (let position = 0; position < keyBytes; position++) key[position] = parseInt(digits.substr(position * 2, 2), 16);
   return key;
 }
 
 /**
- * Borrows the identity at `position` of a run, as a view rather than a copy.
+ * Borrows the identity at `position` of a run, as a view rather than a copy. Binding-only.
  *
  * @param {Uint8Array} keys - A run of sixteen-byte identities.
  * @param {number} position - Which identity to borrow.
@@ -168,45 +195,24 @@ export function keyAt(keys: Uint8Array, position: number): Key {
   return keys.subarray(position * keyBytes, (position + 1) * keyBytes);
 }
 
-/**
- * Refuses a residency arm that belongs to another factory.
- *
- * TypeScript catches this at compile time, but a JavaScript caller reaches the factory with no
- * such check, and a silently ignored `devices` reads as a placement that was honoured.
- */
-export function refuseForeignArms(options: object, own: string, subject: string): void {
-  const named = options as Record<string, unknown>;
-  for (const arm of ["memoryDomains", "devices", "paths"]) {
-    if (arm !== own && named[arm] !== undefined)
-      throw new Error(`\`${arm}\` belongs to another residency; ${subject} places with \`${own}\`.`);
-  }
-}
-
 /** Whether the value is a number above zero and free of a fractional part. */
 export function isPositiveInteger(value: unknown): value is number {
   return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
 
-/** Whether the value is a number at or above zero and free of a fractional part. */
-export function isNonNegativeInteger(value: unknown): value is number {
-  return typeof value === "number" && Number.isInteger(value) && value >= 0;
-}
-
-/** Whether the argument names one identity rather than a run of them. */
-export function isOneKey(keys: KeysLike): boolean {
-  return typeof keys === "bigint" || typeof keys === "string" || (typeof keys === "number" && !Number.isNaN(keys));
-}
-
 /** Reads one identity out of any spelling it is accepted in. */
 export function normalizeKey(key: KeyLike): Key {
   if (key instanceof Uint8Array) {
-    if (key.length !== keyBytes) throw new Error("A key is sixteen bytes, most significant first.");
+    if (key.length !== keyBytes) throw fail(Status.Malformed, "A key is sixteen bytes, most significant first.");
     return key;
   }
   if (typeof key === "string") return parseKey(key);
   if (typeof key === "bigint") return keyFromInteger(key);
   if (typeof key === "number" && Number.isInteger(key) && key >= 0) return keyFromInteger(key);
-  throw new Error("A key must be a non-negative integer, a bigint, a dashed UUID, or sixteen bytes.");
+  throw fail(
+    Status.InvalidArgument,
+    "A key must be a non-negative integer, a bigint, a dashed UUID, or sixteen bytes.",
+  );
 }
 
 /**
@@ -218,7 +224,8 @@ export function normalizeKey(key: KeyLike): Key {
 export function normalizeKeys(keys: KeysLike): Uint8Array | BigUint64Array {
   if (keys instanceof BigUint64Array) return keys;
   if (keys instanceof Uint8Array) {
-    if (keys.length % keyBytes !== 0) throw new Error("A run of keys is a whole number of sixteen-byte identities.");
+    if (keys.length % keyBytes !== 0)
+      throw fail(Status.ShapeMismatch, "A run of keys is a whole number of sixteen-byte identities.");
     return keys;
   }
   if (Array.isArray(keys)) {
@@ -230,107 +237,128 @@ export function normalizeKeys(keys: KeysLike): Uint8Array | BigUint64Array {
   return normalizeKey(keys);
 }
 
-/** Bytes one row of `dimensions` scalars occupies in `kind`; zero when the kind is unknown. */
-export function rowBytes(dimensions: number, kind: ScalarKind): number {
-  switch (kind) {
-    case ScalarKind.F64:
-      return dimensions * 8;
-    case ScalarKind.F32:
-      return dimensions * 4;
-    case ScalarKind.BF16:
-    case ScalarKind.F16:
-      return dimensions * 2;
-    case ScalarKind.E5M2:
-    case ScalarKind.E4M3:
-    case ScalarKind.E3M2:
-    case ScalarKind.E2M3:
-    case ScalarKind.I8:
-    case ScalarKind.U8:
-      return dimensions;
-    case ScalarKind.I4x2:
-    case ScalarKind.U4x2:
-      return Math.ceil(dimensions / 2);
-    case ScalarKind.U1x8:
-      return Math.ceil(dimensions / 8);
-    default:
-      return 0;
-  }
-}
+/** The code each scalar kind crosses the addon as, mapped once from the C name tables. */
+export const scalarCodes = compiled.scalars as Readonly<Record<Scalar, number>>;
 
-/** The scalar kind a TypedArray spells on its own; unknown when its elements name none. */
-export function scalarOf(vectors: Vector): ScalarKind {
-  if (vectors instanceof Float64Array) return ScalarKind.F64;
-  if (vectors instanceof Float32Array) return ScalarKind.F32;
-  if (vectors instanceof Int8Array) return ScalarKind.I8;
-  if (vectors instanceof Uint8Array || vectors instanceof Uint8ClampedArray) return ScalarKind.U8;
-  return ScalarKind.Unknown;
-}
+/** Bits one value of each kind occupies, which is how a row's bytes become its columns. */
+const scalarBits: Record<Scalar, number> = {
+  [Scalar.F64]: 64,
+  [Scalar.F32]: 32,
+  [Scalar.I32]: 32,
+  [Scalar.BF16]: 16,
+  [Scalar.F16]: 16,
+  [Scalar.E5M2]: 8,
+  [Scalar.E4M3]: 8,
+  [Scalar.E3M2]: 8,
+  [Scalar.E2M3]: 8,
+  [Scalar.I8]: 8,
+  [Scalar.U8]: 8,
+  [Scalar.I4x2]: 4,
+  [Scalar.U4x2]: 4,
+  [Scalar.U1x8]: 1,
+};
 
-/** Whether the argument is one of the TypedArrays a row may arrive in. */
-export function isVector(vectors: unknown): vectors is Vector {
-  return (
-    vectors instanceof Float64Array ||
-    vectors instanceof Float32Array ||
-    vectors instanceof Int32Array ||
-    vectors instanceof Int16Array ||
-    vectors instanceof Int8Array ||
-    vectors instanceof Uint32Array ||
-    vectors instanceof Uint16Array ||
-    vectors instanceof Uint8Array ||
-    vectors instanceof Uint8ClampedArray
-  );
+/** The scalar kind a TypedArray spells on its own; a `Uint16Array` spells none and is refused. */
+export function scalarOf(data: Vector): Scalar {
+  if (data instanceof Float64Array) return Scalar.F64;
+  if (data instanceof Float32Array) return Scalar.F32;
+  if (typeof Float16Array !== "undefined" && data instanceof Float16Array) return Scalar.F16;
+  if (data instanceof Int8Array) return Scalar.I8;
+  if (data instanceof Uint8Array) return Scalar.U8;
+  throw fail(Status.UnknownKind, "The rows spell no scalar kind on their own; name one in a RowsView.");
 }
 
 /**
- * Lays several rows end to end, leaving a TypedArray the caller already flattened untouched.
- *
- * Rows keep the type they arrived in, since the engine converts on ingest and a copy through
- * `Float32Array` would only discard what a packed or wider row carries. Plain number arrays
- * have no type of their own, so those land in a `Float32Array`.
+ * A borrowed run of rows of one width - what every batch argument is, and what a single row is
+ * when it travels as a bare TypedArray. Mirrors `usearch_rows_view_t`, with the row count the
+ * call's `count` takes beside it.
  */
-export function normalizeVectors(vectors: VectorOrMatrix | number[][]): Vector {
-  if (isVector(vectors)) return vectors;
-  if (!Array.isArray(vectors)) throw new Error("Vectors must be a TypedArray or an array of arrays.");
+export class RowsView {
+  /**
+   * Borrows `rows` rows of `columns` values of `scalar`, `stride` bytes apart; a zero stride repeats the first row.
+   *
+   * @param {Vector} data - The array holding every row; never copied.
+   * @param {number} rows - Rows the run holds, which the call reads as its batch.
+   * @param {number} columns - Values per row, as the index counts its dimensions.
+   * @param {number} stride - Bytes between the starts of consecutive rows.
+   * @param {Scalar} scalar - What the bytes hold, converted by the engine where it differs from storage.
+   */
+  constructor(
+    readonly data: Vector,
+    readonly rows: number,
+    readonly columns: number,
+    readonly stride: number,
+    readonly scalar: Scalar,
+  ) {}
 
-  const first = vectors[0];
-  const target = isVector(first) ? (first.constructor as Float32ArrayConstructor) : Float32Array;
-  let totalLength = 0;
-  for (const row of vectors) totalLength += row.length;
-  const flattened = new target(totalLength);
-  let offset = 0;
-  for (const row of vectors) {
-    flattened.set(row as ArrayLike<number>, offset);
-    offset += row.length;
+  /**
+   * Borrows a packed run, every row `columns` values wide and laid end to end. Binding-only sugar.
+   *
+   * @param {Vector} data - The rows, end to end.
+   * @param {number} columns - Values per row.
+   * @param {Scalar} [scalar] - What the bytes hold; defaults to the kind the array spells.
+   * @return {RowsView} As many rows as `data` holds.
+   * @throws Will throw when the array does not split into whole rows.
+   */
+  static of(data: Vector, columns: number, scalar: Scalar = scalarOf(data)): RowsView {
+    const rowBytes = Math.ceil((columns * scalarBits[scalar]) / 8);
+    if (!isPositiveInteger(columns) || data.byteLength % rowBytes !== 0)
+      throw fail(Status.ShapeMismatch, `The array does not split into rows of ${columns} ${scalar} values.`);
+    return new RowsView(data, data.byteLength / rowBytes, columns, rowBytes, scalar);
   }
-  return flattened;
 }
 
-/** Where the host threads of a RAM executor are placed. */
-export interface RamExecutorOptions {
-  /** NUMA node ids the workers are spread over; absent spreads them over every node. */
+/** Reads a bare TypedArray as one row of the kind it spells, and a {@link RowsView} as itself. */
+export function rowsOf(rows: RowsView | Vector): RowsView {
+  if (rows instanceof RowsView) return rows;
+  const scalar = scalarOf(rows);
+  return new RowsView(rows, 1, (rows.byteLength * 8) / scalarBits[scalar], rows.byteLength, scalar);
+}
+
+/** The five values a run of rows crosses the boundary as. */
+export function crossing(rows: RowsView | Vector): CompiledRows {
+  const view = rowsOf(rows);
+  return [view.data, view.rows, view.columns, view.stride, scalarCodes[view.scalar]];
+}
+
+/** Where the host threads of a RAM executor are placed, how many there are, and how many deferred calls it tracks. */
+export interface ExecutorForRamConfig {
+  /** NUMA node IDs the workers are spread over; absent spreads them over every node. */
   memoryDomains?: number[];
+  /** Workers to spawn; absent takes 7/8 of the cores the domains carry. */
+  threads?: number;
+  /** Deferred calls tracked at once; absent takes a default. */
+  deferredLimit?: number;
 }
 
-/** Which devices a VRAM executor drives. */
-export interface VramExecutorOptions {
-  /** CUDA ordinals to open one stream apiece on; absent takes every visible device. */
+/** Where the borrowed pool of a RAM executor is placed, and how many deferred calls it tracks. */
+export interface ExecutorOnPoolConfig {
+  /** NUMA node IDs of the indexes it will drive; absent derives every node. */
+  memoryDomains?: number[];
+  /** Deferred calls tracked at once; absent takes a default. */
+  deferredLimit?: number;
+}
+
+/** Which devices a VRAM executor drives, and on which streams. */
+export interface ExecutorForVramConfig {
+  /** CUDA ordinals to drive; absent takes one free device. */
   devices?: number[];
+  /** Borrowed CUDA stream addresses, one per device in `devices` order; absent creates its own. */
+  streams?: bigint[];
+  /** Ceiling on scratch bytes per device; absent lets scratch grow as geometry asks. */
+  scratchLimit?: number;
+  /** Deferred calls tracked at once; absent takes a default. */
+  deferredLimit?: number;
 }
 
 /** Where an NVMe executor submits its reads. */
-export interface NvmeExecutorOptions {
-  /** Device or directory paths, one submission ring apiece; absent derives them. */
+export interface ExecutorForNvmeConfig {
+  /** Device or directory paths; absent derives them. */
   paths?: string[];
-}
-
-/** The token the three factories hold, which is what a direct `new Executor` cannot produce. */
-const executorSeal = Symbol("Executor");
-
-/** Returns a worker count that is a non-negative integer, and throws on anything else. */
-function checkedThreads(threads: number): number {
-  if (!isNonNegativeInteger(threads))
-    throw new Error("`threads` must be a non-negative integer; 0 derives it from the hardware.");
-  return threads;
+  /** Workers to spawn, one submission ring apiece; absent derives from the devices' queue capabilities. */
+  threads?: number;
+  /** Deferred calls tracked at once; absent takes a default. */
+  deferredLimit?: number;
 }
 
 /**
@@ -338,60 +366,104 @@ function checkedThreads(threads: number): number {
  *
  * An executor owns host threads or device streams; an index owns rows. Keeping them apart is
  * what lets one pool serve several indexes, and what makes the cost of spawning visible at the
- * line that spawns it.
+ * line that spawns it. The collector frees it eventually; `free` joins the workers now.
  */
-export class Executor {
-  /** The native executor the verbs are handed; not part of the public contract. */
-  readonly compiled: CompiledExecutor;
+export interface Executor extends Disposable {
+  /**
+   * Waits for every call submitted to this executor so far, then idles in `mood`. Calls `usearch_executor_drain`.
+   *
+   * @param {Mood} [mood=Mood.Parked] - What the threads or streams do once they go idle.
+   */
+  drain(mood?: Mood): void;
 
-  /** Reached through {@link Executor.forRam}, {@link Executor.forVram} or {@link Executor.forNvme}. */
-  private constructor(seal: symbol, compiledExecutor: CompiledExecutor) {
-    if (seal !== executorSeal)
-      throw new Error("An Executor is spawned by Executor.forRam, Executor.forVram or Executor.forNvme.");
-    this.compiled = compiledExecutor;
-  }
+  /** Runs every deferred call and joins the workers now; a freed executor refuses every later call, and a second `free` does nothing. Calls `usearch_executor_free`. */
+  free(): void;
+}
+
+/** The four factories an {@link Executor} is spawned by; a direct `new Executor()` is refused. */
+export interface ExecutorConstructor {
+  /**
+   * Spawns host worker threads for a RAM-resident index. Calls `usearch_executor_for_ram`.
+   *
+   * @param {ExecutorForRamConfig} [config] - The NUMA nodes, the thread count and the deferred limit.
+   * @return {Executor} The pool, which must outlive every call it runs.
+   */
+  forRam(config?: ExecutorForRamConfig): Executor;
 
   /**
-   * Spawns host worker threads for a RAM-resident index.
+   * Borrows a ForkUnion `fu_pool_t` for a RAM-resident index, keeping its lender's mood. Calls `usearch_executor_on_pool`.
    *
-   * @param {number} [threads=0] - Workers to spawn; 0 derives from the hardware.
-   * @param {RamExecutorOptions} [options] - The NUMA nodes the workers are spread over.
-   * @return {Executor} The pool, which must outlive every index it drives.
+   * @param {bigint} pool - The pool's address; it must outlive the executor.
+   * @param {ExecutorOnPoolConfig} [config] - The NUMA nodes and the deferred limit.
+   * @return {Executor} The executor over the borrowed pool.
    */
-  static forRam(threads: number = 0, options: RamExecutorOptions = {}): Executor {
-    refuseForeignArms(options, "memoryDomains", "Executor.forRam");
-    return new Executor(
-      executorSeal,
-      new compiled.Executor(Residency.Ram, checkedThreads(threads), options.memoryDomains),
-    );
-  }
+  onPool(pool: bigint, config?: ExecutorOnPoolConfig): Executor;
 
   /**
-   * Opens one stream per device for a VRAM-resident index, driven from a single host thread.
+   * Opens one stream per device for a VRAM-resident index, driven from a single host thread. Calls `usearch_executor_for_vram`.
    *
-   * @param {VramExecutorOptions} [options] - The CUDA ordinals to drive.
-   * @return {Executor} The streams, which must outlive every index they drive.
+   * @param {ExecutorForVramConfig} [config] - The devices, borrowed streams, scratch ceiling and deferred limit.
+   * @return {Executor} The streams, which must outlive every call they run.
    */
-  static forVram(options: VramExecutorOptions = {}): Executor {
-    refuseForeignArms(options, "devices", "Executor.forVram");
-    return new Executor(executorSeal, new compiled.Executor(Residency.Vram, 0, options.devices));
-  }
+  forVram(config?: ExecutorForVramConfig): Executor;
 
   /**
-   * Opens one submission ring per worker for an NVMe-resident index.
+   * Opens one submission ring per worker for an NVMe-resident index. Calls `usearch_executor_for_nvme`.
    *
-   * @param {number} [threads=0] - Workers to spawn; 0 derives from the hardware.
-   * @param {NvmeExecutorOptions} [options] - The device or directory paths to submit to.
-   * @return {Executor} The pool, which must outlive every index it drives.
+   * @param {ExecutorForNvmeConfig} [config] - The device or directory paths, the thread count and the deferred limit.
+   * @return {Executor} The pool, which must outlive every call it runs.
    */
-  static forNvme(threads: number = 0, options: NvmeExecutorOptions = {}): Executor {
-    refuseForeignArms(options, "paths", "Executor.forNvme");
-    return new Executor(executorSeal, new compiled.Executor(Residency.Nvme, checkedThreads(threads), options.paths));
-  }
+  forNvme(config?: ExecutorForNvmeConfig): Executor;
 
-  /** Waits for every deferred call on this executor to finish. */
-  drain(): void {
-    this.compiled.drain();
+  readonly prototype: Executor;
+}
+
+/** The native executor class itself, so `instanceof Executor` holds for every one the factories spawn. */
+export const Executor = compiled.Executor as ExecutorConstructor;
+
+/**
+ * Memory the library writes every output whose length scales with a call into, reused across calls.
+ *
+ * Every verb with such an output takes one and answers a view into it rather than a copy, so a
+ * steady loop allocates once. Each call rewinds the arena it is handed and detaches every buffer
+ * over the previous call's outputs: a view refuses its reads with {@link Status.Uninitialized} from
+ * then on, and every array already taken out of one reads empty rather than another call's memory.
+ * To keep one result past the next call, give that call another arena. A deferred call borrows it
+ * as a blocking one does: another call naming it before the first is final finishes
+ * {@link Status.Contended} and leaves the first call's outputs alone, and `free` waits for it. The
+ * collector frees the arena once nothing views it; `free` releases it now.
+ */
+export interface Arena extends Disposable {
+  /** The residency of the executor that made it; a `Vram` arena's views refuse host reads with {@link Status.Device}. */
+  readonly residency: Residency;
+
+  /** Releases the memory now, once every deferred call writing it is final, detaching every view into it; a second call does nothing. Calls `usearch_arena_free`. */
+  free(): void;
+}
+
+/** Makes an arena where `executor` computes, or host pages for calls on the calling thread when absent. Calls `usearch_arena_init`. */
+export interface ArenaConstructor {
+  new (executor?: Executor): Arena;
+  readonly prototype: Arena;
+}
+
+/** The native arena class: `new Arena()` or `new Arena(executor)`. */
+export const Arena = compiled.Arena as unknown as ArenaConstructor;
+
+/**
+ * Outputs a call wrote into an arena, readable until the arena's next call rewinds it.
+ *
+ * The rewind detaches the buffer under every array, so each accessor refuses once the arena moved
+ * on, with {@link Status.Uninitialized}, and refuses device memory with {@link Status.Device}, so a
+ * view never reads memory its call did not write.
+ */
+export abstract class ArenaView {
+  /** Answers `view` while its buffer still holds this call's outputs in host memory, and refuses otherwise. */
+  protected live<View extends ArrayBufferView>(view: View | null): View {
+    if (view === null) throw fail(Status.Device, "The outputs are device memory, which no host view reads.");
+    if ((view.buffer as ArrayBuffer).detached)
+      throw fail(Status.Uninitialized, "The arena was rewound or freed since this view was written.");
+    return view;
   }
 }
 
@@ -404,85 +476,172 @@ export class MatchesRow {
   constructor(
     /** Sixteen bytes per match found for this query. */
     public readonly keys: Uint8Array,
-    /** The distance of every match found, positionally paired with `keys`. */
-    public readonly distances: Float64Array,
+    /** The score of every match found, positionally paired with `keys`. */
+    public readonly scores: Float64Array,
   ) {}
 
   /** Matches this query found, which may be fewer than the run asked for. */
   get count(): number {
-    return this.distances.length;
+    return this.scores.length;
   }
 }
 
 /**
- * Three caller-owned buffers a ranked verb fills, and the row width their lengths fix.
- *
- * Every ranked verb writes into one of these and answers with telemetry alone, so a sweep
- * allocates once and reuses the same run at every point. The matches wanted per query is derived
- * from the lengths rather than asked for, which is what keeps the space reserved and the width
- * asked for from disagreeing.
+ * The ranked rows a search, a `maxsim` or a stream pull wrote into its arena: `queries` rows of
+ * `columns` cells, row `i` holding `counts[i]` matches. Mirrors `usearch_matches_view_t`.
  */
-export class MatchesSpan {
-  /** The `queries × wanted` identity matrix, rows contiguous, sixteen bytes per key. */
-  public readonly keys: Uint8Array;
-  /** The `queries × wanted` distance matrix, rows contiguous. */
-  public readonly distances: Float64Array;
+export class Matches extends ArenaView {
+  /** Rows the call resolved, one per query. */
+  readonly queries: number;
+  /** Columns per row the call wrote, at most its `wanted` - the "k" in "kANN". */
+  readonly columns: number;
+  readonly #landed: CompiledMatches;
+
+  /** Made by a ranked verb, never directly. */
+  constructor(landed: CompiledMatches, queries: number) {
+    super();
+    this.#landed = landed;
+    this.queries = queries;
+    this.columns = landed.columns;
+  }
+
+  /** The `queries × columns` identity matrix, rows contiguous, sixteen bytes per key. */
+  get keys(): Uint8Array {
+    return this.live(this.#landed.keys);
+  }
+
+  /** The `queries × columns` score matrix, rows contiguous: distances for a search, summed maxima for `maxsim`. */
+  get scores(): Float64Array {
+    return this.live(this.#landed.scores);
+  }
+
   /** Matches written per query, one entry per query. */
-  public readonly counts: BigUint64Array;
-  /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
-  public readonly wanted: number;
-
-  /**
-   * Lends three buffers already sized to `counts.length` rows.
-   *
-   * @param {Uint8Array} keys - Sixteen bytes per match, `counts.length × wanted` of them.
-   * @param {Float64Array} distances - One score per match, the same shape as `keys`.
-   * @param {BigUint64Array} counts - One entry per query.
-   * @throws Will throw when the three lengths cannot be read as one shape.
-   */
-  constructor(keys: Uint8Array, distances: Float64Array, counts: BigUint64Array) {
-    if (counts.length === 0) throw new Error("A run must hold at least one query.");
-    if (keys.length % keyBytes !== 0) throw new Error("A run of keys is a whole number of sixteen-byte identities.");
-    const cells = keys.length / keyBytes;
-    if (cells !== distances.length) throw new Error("The key and distance buffers are not the same shape.");
-    if (cells === 0 || cells % counts.length !== 0)
-      throw new Error("The buffers do not divide into one row per query.");
-    this.keys = keys;
-    this.distances = distances;
-    this.counts = counts;
-    this.wanted = cells / counts.length;
-  }
-
-  /** Queries the run covers. */
-  get queries(): number {
-    return this.counts.length;
+  get counts(): BigUint64Array {
+    return this.live(this.#landed.counts);
   }
 
   /**
-   * Borrows the matches of one query, without copying.
+   * Borrows the matches of one query, without copying. Binding-only.
    *
    * @param {number} queryIndex - Which query of the run to read.
-   * @returns {MatchesRow} - The keys and distances that query found.
+   * @returns {MatchesRow} - The keys and scores that query found.
    */
   get(queryIndex: number): MatchesRow {
-    if (!Number.isInteger(queryIndex) || queryIndex < 0 || queryIndex >= this.counts.length)
-      throw new Error(`No query ${queryIndex} in a run of ${this.counts.length}.`);
-    const offset = queryIndex * this.wanted;
+    if (!Number.isInteger(queryIndex) || queryIndex < 0 || queryIndex >= this.queries)
+      throw fail(Status.InvalidArgument, `No query ${queryIndex} in a run of ${this.queries}.`);
+    const offset = queryIndex * this.columns;
     const count = Number(this.counts[queryIndex]);
     return new MatchesRow(
       this.keys.subarray(offset * keyBytes, (offset + count) * keyBytes),
-      this.distances.subarray(offset, offset + count),
+      this.scores.subarray(offset, offset + count),
     );
   }
+}
 
-  /** Allocates a run wide enough for `queries` rows of `wanted` matches apiece. */
-  static reserve(queries: number, wanted: number): MatchesSpan {
-    if (!isPositiveInteger(queries)) throw new Error("`queries` must be a positive integer.");
-    if (!isPositiveInteger(wanted)) throw new Error("`wanted` must be a positive integer.");
-    return new MatchesSpan(
-      new Uint8Array(queries * wanted * keyBytes),
-      new Float64Array(queries * wanted),
-      new BigUint64Array(queries),
-    );
+/**
+ * One serialized monolith, viewed inside the arena `saveBuffer` landed it in.
+ *
+ * The bytes are what a checkpoint holds, so a service that keeps its indexes in an object store
+ * never touches the filesystem; `loadRamBuffer` and `metadataReadBuffer` read them back.
+ */
+export class Monolith extends ArenaView {
+  readonly #bytes: Uint8Array | null;
+
+  /** Made by `saveBuffer`, never directly. */
+  constructor(bytes: Uint8Array | null) {
+    super();
+    this.#bytes = bytes;
+  }
+
+  /** The monolith, valid until the arena's next call. */
+  get bytes(): Uint8Array {
+    return this.live(this.#bytes);
+  }
+}
+
+/** Deferred calls dropped before they are final, each handed back to the collector until it is, so none is freed while the library still writes into it. */
+const unfinished = new FinalizationRegistry<CompiledDeferred>((call) => {
+  if (call.status() === Status.Deferred) unfinished.register({}, call);
+});
+
+/**
+ * A call submitted by a deferred receiver, final once its executor finishes it.
+ *
+ * It keeps everything the library reads or writes alive until then - the outcome, the inputs,
+ * the outputs and every handle it names - so none of them is collected under the call, and it
+ * borrows its arena as a blocking call does. A result read after the arena was rewound or freed
+ * throws {@link Status.Uninitialized}. `status` polls without
+ * blocking, `wait` blocks and answers, and `await` runs that wait on the libuv pool; both answer
+ * the same cached result, or throw the same failure, however often they are asked.
+ *
+ * ```js
+ * const matches = await call; // or: call.wait()
+ * ```
+ */
+export class Deferred<T> implements PromiseLike<T>, Disposable {
+  readonly #call: CompiledDeferred;
+  readonly #answer: (raw: never) => T;
+  #outcome: { value: T } | { error: unknown } | undefined;
+  #settling: Promise<T> | undefined;
+
+  /** Made by a verb of a deferred receiver, never directly. */
+  constructor(call: CompiledDeferred, answer: (raw: never) => T) {
+    this.#call = call;
+    this.#answer = answer;
+    unfinished.register(this, call, this);
+  }
+
+  /** `Status.Deferred` until the call is final, then `Status.Success` or its failure. Reads the outcome without blocking. */
+  get status(): Status {
+    return this.#call.status() as Status;
+  }
+
+  /**
+   * Blocks the calling thread until the call is final, then answers its result or throws its failure.
+   * Calls `usearch_outcome_wait`.
+   */
+  wait(): T {
+    if (!this.#outcome) {
+      this.#call.wait();
+      this.#settle();
+    }
+    return this.#unwrap();
+  }
+
+  /** Waits on the libuv pool rather than the calling thread, which is what `await` reaches for. Calls `usearch_outcome_wait` there. */
+  then<Fulfilled = T, Rejected = never>(
+    onFulfilled?: ((value: T) => Fulfilled | PromiseLike<Fulfilled>) | null,
+    onRejected?: ((reason: unknown) => Rejected | PromiseLike<Rejected>) | null,
+  ): Promise<Fulfilled | Rejected> {
+    this.#settling ??= this.#outcome
+      ? Promise.resolve().then(() => this.#unwrap())
+      : this.#call.settled().then(() => {
+          this.#settle();
+          return this.#unwrap();
+        });
+    return this.#settling.then(onFulfilled, onRejected);
+  }
+
+  /** Waits until the call is final, so `using` never leaves one running past its block. */
+  [Symbol.dispose](): void {
+    if (this.#outcome) return;
+    this.#call.wait();
+    this.#settle();
+  }
+
+  #settle(): void {
+    if (this.#outcome) return;
+    try {
+      this.#outcome = { value: this.#answer(this.#call.result() as never) };
+    } catch (error) {
+      this.#outcome = { error };
+    }
+    unfinished.unregister(this);
+  }
+
+  #unwrap(): T {
+    const outcome = this.#outcome as { value: T } | { error: unknown };
+    if ("error" in outcome) throw outcome.error;
+    return outcome.value;
   }
 }

@@ -5,11 +5,18 @@
  * imports `usearch` and nothing deeper.
  */
 export {
+  Arena,
+  ArenaView,
+  Deferred,
   Executor,
+  Matches,
   MatchesRow,
-  MatchesSpan,
-  MetricKind,
-  ScalarKind,
+  Monolith,
+  Mood,
+  Residency,
+  RowsView,
+  Scalar,
+  Status,
   formatKey,
   integerFromKey,
   keyAt,
@@ -18,38 +25,70 @@ export {
   parseKey,
 } from "./types";
 export type {
+  ArenaConstructor,
+  ExecutorConstructor,
+  ExecutorForNvmeConfig,
+  ExecutorForRamConfig,
+  ExecutorForVramConfig,
+  ExecutorOnPoolConfig,
   Key,
   KeyLike,
   KeysLike,
-  Matrix,
-  NvmeExecutorOptions,
-  RamExecutorOptions,
+  USearchError,
   Vector,
-  VectorOrMatrix,
-  VramExecutorOptions,
 } from "./types";
 
-export { Cursor, DenseIndex, Finder, Stats } from "./dense_index";
+export {
+  DenseCursor,
+  DenseCursorBatch,
+  DenseIndex,
+  DenseIndexDeferredOn,
+  DenseIndexOn,
+  DenseMetric,
+  DenseProducts,
+  DenseSearchStream,
+  DenseTraversalStats,
+  DenseVectors,
+  DenseVerbs,
+} from "./dense_index";
 export type {
-  AttentionOptions,
-  CursorBatch,
-  DenseIndexOptions,
-  FinderOptions,
-  InsertionOptions,
-  Metadata,
-  NvmeIndexOptions,
-  RamIndexOptions,
-  SearchOptions,
-  VramIndexOptions,
+  DenseAttendConfig,
+  DenseCursorNextConfig,
+  DenseGetConfig,
+  DenseIndexDescription,
+  DenseInsertConfig,
+  DenseLoadRamBufferConfig,
+  DenseLoadRamConfig,
+  DenseLoadVramBufferConfig,
+  DenseLoadVramConfig,
+  DenseMaxsimConfig,
+  DenseMetadata,
+  DenseMetadataReadBufferConfig,
+  DenseMetadataReadConfig,
+  DenseMultiplyConfig,
+  DenseOptions,
+  DenseReachability,
+  DenseRefineConfig,
+  DenseSearchConfig,
+  DenseSearchStreamInitConfig,
+  DenseViewNvmeConfig,
+  ValueRowOf,
 } from "./dense_index";
 
 import { compiled } from "./library";
 import {
+  Arena,
+  ArenaView,
+  Deferred,
   Executor,
+  Matches,
   MatchesRow,
-  MatchesSpan,
-  MetricKind,
-  ScalarKind,
+  Monolith,
+  Mood,
+  Residency,
+  RowsView,
+  Scalar,
+  Status,
   formatKey,
   integerFromKey,
   keyAt,
@@ -57,36 +96,62 @@ import {
   keyFromInteger,
   parseKey,
 } from "./types";
-import { Cursor, DenseIndex, Finder, Stats } from "./dense_index";
+import {
+  DenseCursor,
+  DenseCursorBatch,
+  DenseIndex,
+  DenseIndexDeferredOn,
+  DenseIndexOn,
+  DenseMetric,
+  DenseProducts,
+  DenseSearchStream,
+  DenseTraversalStats,
+  DenseVectors,
+  DenseVerbs,
+} from "./dense_index";
 
-/** The library's version, as the release tooling stamped it. */
+/** The library's version, as the release tooling stamped it. Calls `usearch_version_name`. */
 export function version(): string {
   return compiled.version();
 }
 
-/** The hardware capabilities this binary was compiled with, comma-separated. */
+/** The hardware capabilities this binary was compiled with, comma-separated. Calls `usearch_capabilities_compiled`. */
 export function capabilitiesCompiled(): string {
   return compiled.capabilitiesCompiled();
 }
 
-/** The hardware capabilities the current machine offers at runtime, comma-separated. */
+/** The hardware capabilities the current machine offers at runtime, comma-separated. Calls `usearch_capabilities_available`. */
 export function capabilitiesAvailable(): string {
   return compiled.capabilitiesAvailable();
 }
 
 const usearch = {
-  Cursor,
+  Arena,
+  ArenaView,
+  Deferred,
+  DenseCursor,
+  DenseCursorBatch,
   DenseIndex,
+  DenseIndexDeferredOn,
+  DenseIndexOn,
+  DenseMetric,
+  DenseProducts,
+  DenseSearchStream,
+  DenseTraversalStats,
+  DenseVectors,
+  DenseVerbs,
   Executor,
-  Finder,
+  Matches,
   MatchesRow,
-  MatchesSpan,
-  MetricKind,
-  ScalarKind,
-  Stats,
-  formatKey,
+  Monolith,
+  Mood,
+  Residency,
+  RowsView,
+  Scalar,
+  Status,
   capabilitiesAvailable,
   capabilitiesCompiled,
+  formatKey,
   integerFromKey,
   keyAt,
   keyBytes,
