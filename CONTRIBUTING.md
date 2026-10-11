@@ -26,14 +26,15 @@ The repository carries its own hooks, gating each staged file against the format
 git config core.hooksPath .githooks
 ```
 
-## C++ 11 and C 99
+## C++ 20 & C 99
 
 Our primary C++ implementation uses CMake for builds.
+The headers need C++20, the C interface in `include/usearch/*.h` stays C99, and the Python and JavaScript glue around it compiles as C11.
 If this is your first experience with CMake, use the following commands to get started:
 
 ```sh
 sudo apt-get update && sudo apt-get install cmake build-essential libjemalloc-dev # Ubuntu
-brew install libomp llvm # macOS
+brew install llvm cmake # macOS
 ```
 
 Using modern syntax, this is how you build and run the test suite:
@@ -145,7 +146,7 @@ build_release/usearch_test_c
 Similarly, to use the most recent Clang compiler version from Homebrew on macOS:
 
 ```sh
-brew install clang++ clang cmake
+brew install llvm cmake
 cmake \
     -D CMAKE_BUILD_TYPE=Release \
     -D CMAKE_C_COMPILER="$(brew --prefix llvm)/bin/clang" \
@@ -177,7 +178,6 @@ I'd recommend putting the following breakpoints when debugging the code in GDB:
 - `__ubsan::ScopedReport::~ScopedReport` - to catch undefined behavior.
 - `__GI_exit` - to stop at exit points - the end of running any executable.
 - `__builtin_unreachable` - to catch all the places where the code is expected to be unreachable.
-- `usearch_raise_runtime_error` - for USearch-specific assertions.
 
 ### Cross Compilation
 
@@ -254,7 +254,7 @@ Python bindings are a CPython extension available on [PyPI](https://pypi.org/pro
 To install USearch locally using `uv`:
 
 ```sh
-uv venv --python 3.11                   # or your preferred Python version
+uv venv --python 3.12                   # the oldest version `pyproject.toml` admits
 source .venv/bin/activate               # to activate the virtual environment
 uv pip install -e . --force-reinstall   # to build locally from source
 ```
@@ -289,7 +289,7 @@ Linting:
 
 ```sh
 uv pip install -e . --group lint
-ruff --format=github python
+ruff check --output-format=github python
 ```
 
 Before merging your changes you may want to test your changes against the entire matrix of Python versions USearch supports.
@@ -326,38 +326,26 @@ If you don't have NPM installed, first the Node Version Manager:
 
 ```sh
 wget -qO- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
-nvm install 20
+nvm install 22
 ```
 
 Testing:
 
 ```sh
-npm install -g typescript   # Install TypeScript globally
-npm install                 # Compile `javascript/lib.cpp`
+npm install --ignore-scripts    # the dependencies alone
+npm run prebuild                # `build-native` compiles `javascript/lib.c` and the engine, then stages them under `prebuilds/`
 npm run build-js            # Generate JS from TS
 npm test                    # Run the test suite
 ```
 
 To compile for AWS Lambda you'd need to recompile the binding.
-You can test the setup locally, overriding some of the compilation variables in Docker image:
+You can test the setup locally in a Docker image:
 
 ```Dockerfile
-FROM public.ecr.aws/lambda/nodejs:18-x86_64
+FROM public.ecr.aws/lambda/nodejs:22-x86_64
 RUN npm init -y
-RUN yum install tar git python3 cmake gcc-c++ -y && yum groupinstall "Development Tools" -y
-
-# Assuming AWS Linux 2 uses old compilers:
-ENV NUMKONG_TARGET_HASWELL 1
-ENV NUMKONG_TARGET_SKYLAKE 0
-ENV NUMKONG_TARGET_ICELAKE 0
-ENV NUMKONG_TARGET_SAPPHIRE 0
-ENV NUMKONG_TARGET_NEON 1
-ENV NUMKONG_TARGET_SVE 0
-
-# For specific PR:
-# RUN npm install --build-from-source unum-cloud/USearch#pull/302/head
-# For specific version:
-# RUN npm install --build-from-source usearch@2.8.8
+# Amazon Linux 2023 packages CMake 3.22, older than the 3.28 floor, so pip brings a newer one.
+RUN microdnf install -y tar git gcc-c++ make python3-pip && pip3 install "cmake>=3.28"
 RUN npm install --build-from-source usearch
 ```
 
@@ -391,7 +379,7 @@ Each feature is a whole implementation of the C interface rather than a knob on 
 
 ```sh
 cargo test -- --nocapture --test-threads=1
-cargo clippy --all-targets
+cargo clippy --all-targets -- -D warnings   # how the CI lints
 cargo fmt --check
 ```
 
@@ -455,7 +443,7 @@ Mojo 1.0 has no test discovery, so every check is registered in `main` by hand a
 
 USearch provides Swift bindings through the [Swift Package Manager](https://swiftpackageindex.com/unum-cloud/USearch).
 `Package.swift` controls the compilation settings and is independent of the CMake used for C and C++ builds.
-Swift 6.3 or newer is required: the streaming and checkpoint verbs take `MutableSpan` and `RawSpan`, and `Key` stores its bytes in an `InlineArray`.
+Swift 6.4 or newer is required: the streaming and checkpoint verbs take `MutableSpan` and `RawSpan`, and `Key` stores its bytes in an `InlineArray`.
 
 The package links a library CMake built, so the engine is compiled first and the linker is pointed at it:
 
@@ -489,8 +477,7 @@ So one should first compile the C library, link it with Go, and only then run te
 cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_DENSE_DTYPES=11
 cmake --build build_release --config Release -j
 
-cp build_release/libusearch_static.a golang/         # the archive the cgo directives link
-cp build_release/numkong/libnumkong_static.a golang/ # the punned kernels it calls
+cp build_release/libusearch_static.a golang/  # the archive `golang/types.go` links, NumKong and ForkUnion included
 cp -r include/usearch golang/                        # to make the headers available to Go
 
 cd golang && go test -race -v ./... ; cd ..
@@ -511,7 +498,7 @@ staticcheck ./...   # if installed
 golangci-lint run   # if installed
 ```
 
-## Java, Kotlin and Scala
+## Java, Kotlin & Scala
 
 The Java SDK reaches the C interface through the FFM API, so it compiles no native boundary of its own — there is no JNI shim and no `usearch_java` target.
 Java 25 is the floor, and the runtime needs `--enable-native-access`, which `build.gradle` already passes to every test task.
@@ -642,6 +629,18 @@ ctest --test-dir build_wasm32_wasi_release -R '^usearch_test_c$'
 
 `ctest` runs the module under Wasmtime when it is on the path.
 The Rust crate hands CMake the same toolchain file on its own, so `cargo build --target wasm32-wasip1` needs only `WASI_SDK_PATH`.
+
+## Documentation
+
+Sphinx builds the site under `docs/`.
+Doxygen feeds the C, C++ and Java references through Breathe, and the Python reference imports the compiled `usearch` package:
+
+```sh
+pip install -r docs/requirements.txt
+pip install -e .                    # the package the Python reference documents
+cd docs && doxygen conf.dox         # writes the XML into `build/xml`
+make html                           # writes the site into `build/docs/html`
+```
 
 ## Working on Sub-Modules
 

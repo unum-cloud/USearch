@@ -18,16 +18,16 @@ The search family searches the built index, by plain rows or by a lightning inde
 
 - `usearch_bench_dense_ram_index_search` builds one `dense_ram_index` on one memory domain and isolates kernel kits, wait instructions, connectivity and expansion, per-thread staging and latency percentiles.
 - `usearch_bench_dense_ram_indexes_search` builds one `dense_ram_indexes` over every memory domain and isolates what the C interface drives: admission, rotation across shards, batched verbs and SafeGraphs checkpoints.
-- `usearch_bench_dense_vram_index_search` builds one `dense_vram_index` on one device and isolates batch-per-launch build and search, the kit generation ceiling and managed-memory planes.
-- `usearch_bench_dense_vram_indexes_search` builds one `dense_vram_indexes` with a shard per `--devices` ordinal and isolates what the C interface drives across GPUs: rotation across devices, scatter-gather search merged on the host, and SafeGraphs checkpoints.
+- `usearch_bench_dense_vram_index_search` builds one `dense_vram_nvidia_index` on one device and isolates batch-per-launch build and search, the kit generation ceiling and managed-memory planes.
+- `usearch_bench_dense_vram_indexes_search` builds one `dense_vram_nvidia_indexes` with a shard per `USEARCH_DEVICES` ordinal and isolates what the C interface drives across GPUs: rotation across devices, scatter-gather search merged on the host, and SafeGraphs checkpoints.
 - `usearch_bench_dense_nvme_indexes_search` views the parts a sharded RAM or VRAM binary saved as one `dense_nvme_indexes`, building nothing in RAM, and isolates what storage adds to the batched search: the I/O transport, the queue depth, and the reads and bytes each query costs.
 
 The algebra family measures the graph products `multiply` and the graph attention `attend` over the built index instead of searching it.
 
 - `usearch_bench_dense_ram_index_algebra` builds one `dense_ram_index` on one memory domain and isolates graph products and grouped-query graph attention over every key a walk scores, pair dumps and an exact softmax oracle.
 - `usearch_bench_dense_ram_indexes_algebra` builds one `dense_ram_indexes` over every memory domain and isolates the same verbs batched through the executor, every token's walks crossing every shard.
-- `usearch_bench_dense_vram_index_algebra` builds one `dense_vram_index` on one device and isolates the same graph products and graph attention on the device, judged against the same oracle.
-- `usearch_bench_dense_vram_indexes_algebra` builds one `dense_vram_indexes` with a shard per `--devices` ordinal and isolates the same verbs across GPUs, the shards' attention merged on the first device.
+- `usearch_bench_dense_vram_index_algebra` builds one `dense_vram_nvidia_index` on one device and isolates the same graph products and graph attention on the device, judged against the same oracle.
+- `usearch_bench_dense_vram_indexes_algebra` builds one `dense_vram_nvidia_indexes` with a shard per `USEARCH_DEVICES` ordinal and isolates the same verbs across GPUs, the shards' attention merged on the first device.
 - `usearch_bench_dense_nvme_indexes_algebra` views the same saved parts as one `dense_nvme_indexes` and isolates the same verbs answered from storage, with the reads and bytes each row costs.
 
 Each search binary prints a `Machine` block, an `Insertions` block and a `Queries` block to standard output and nothing else, so a run is its transcript; the `nvme` one prints a `Storage` block in place of `Insertions`.
@@ -89,9 +89,8 @@ build_host_release/usearch_bench_dense_ram_indexes_search \
 - `--batch-per-core` defaults to `4`: staging rows per thread for a file cast on ingest; CPU only.
 - `--first-vector` defaults to `0`: first dataset row viewed, to slice one file across runs; CPU only.
 - `--huge-pages` defaults to `0`: huge pages provisioned before launch; the run fails rather than measuring base pages; CPU only.
-- `--device` defaults to `0`: CUDA device ordinal; GPU only.
-- `--devices` defaults to `--device` alone: one shard per ordinal, like `0,1`; `usearch_bench_dense_vram_indexes_search` and `usearch_bench_dense_vram_indexes_algebra` only.
-- `--merge` and `--expansion-merge` are reserved for stitching the device shards into one graph, and `usearch_bench_dense_vram_indexes_search` refuses them until `dense_vram_indexes` has a merge verb.
+- `USEARCH_DEVICES` - an environment variable, not a flag - names USearch device ordinals, positions in `usearch_gpu_devices`, like `0` or `0,1`; the single-device binaries take the first, the sharded ones place one shard per ordinal, and unset takes the first NVIDIA device; GPU only.
+- `--merge` and `--expansion-merge` are reserved for stitching the device shards into one graph, and `usearch_bench_dense_vram_indexes_search` refuses them until `dense_vram_nvidia_indexes` has a merge verb.
 - `--managed-memory` defaults to off: managed-memory planes oversubscribing VRAM; GPU only, refused by both `vram_indexes` binaries.
 - `--batch` defaults to `65536`: rows and queries per launch; GPU only.
 
@@ -136,10 +135,10 @@ The `Storage` block names the parts and the transport the engines opened, then e
 The algebra binary views only parts built for `dot`, looks the `--values` rows up by key, and runs its oracle over `--vectors`, the base file the keys index, which it needs only without a `--reference`.
 
 ```sh
-cmake --build --preset release --target usearch_bench_dense_ram_indexes_search usearch_bench_dense_nvme_indexes_search usearch_bench_dense_nvme_indexes_algebra
-build_release/usearch_bench_dense_ram_indexes_search --vectors data/sift-10m/base.10M.u8bin --metric euclidean \
+cmake --preset host_release && cmake --build --preset host_release --target usearch_bench_dense_ram_indexes_search usearch_bench_dense_nvme_indexes_search usearch_bench_dense_nvme_indexes_algebra
+build_host_release/usearch_bench_dense_ram_indexes_search --vectors data/sift-10m/base.10M.u8bin --metric euclidean \
     --save sift10m --checkpoints-dir /mnt/nvme0
-build_release/usearch_bench_dense_nvme_indexes_search --view /mnt/nvme0/sift10m-u8-euclidean-c32.safegraphs.json \
+build_host_release/usearch_bench_dense_nvme_indexes_search --view /mnt/nvme0/sift10m-u8-euclidean-c32.safegraphs.json \
     --queries data/sift-10m/query.public.10K.u8bin --neighbors data/sift-10m/groundtruth.public.10K.ibin \
     --transport linux-uring --queue-depth 512
 ```
@@ -249,10 +248,13 @@ Unless a row says otherwise the configuration is the default: connectivity 32, e
 
 SIFT, `u8`, euclidean, 10,000,000 rows of 128 dimensions.
 
-| Machine                                      | Class     |  Insertions |     Queries | Recall@10 | Date       |
-| :------------------------------------------- | :-------- | ----------: | ----------: | --------: | :--------- |
-| i9-13950HX, 8P+16E cores, 1 domain, 4K pages | `haswell` |  12.8 k IPS |  46.9 k QPS |     98.5% | 2026-09-02 |
-| RTX 4060 Laptop, 24 SMs, 8 GB                | `ada`     | 114.5 k IPS | 210.9 k QPS |     98.6% | 2026-09-02 |
+| Machine                                            | Class      |  Insertions |     Queries | Recall@10 | Date       |
+| :------------------------------------------------- | :--------- | ----------: | ----------: | --------: | :--------- |
+| Intel i9-13950HX, 8P+16E cores, 1 domain, 4K pages | `haswell`  |  12.8 k IPS |  46.9 k QPS |     98.5% | 2026-09-02 |
+| NVIDIA RTX 4060 Laptop, 24 SMs, 8 GB               | `ada`      | 114.5 k IPS | 210.9 k QPS |     98.6% | 2026-09-02 |
+| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages  | `neonsdot` | 23.05 k IPS | 75.15 k QPS |   98.800% | 2026-10-11 |
+
+The Apple M5 Pro run recovered 96.703% of the true top-10 entries; three checkpoint reloads measured 71.62–76.97 k QPS at 98.800% Recall@10.
 
 ### 100M
 
@@ -261,6 +263,7 @@ A 100M build needs about 50 GB resident at connectivity 32, so it belongs on a d
 
 | Machine | Class | Dataset | Insertions | Queries | Recall@10 | Date |
 | :------ | :---- | :------ | ---------: | ------: | --------: | :--- |
+| - | - | - | - | - | - | - |
 
 ### 1B
 
@@ -268,6 +271,7 @@ SIFT, `u8`, euclidean, 1,000,000,000 rows of 128 dimensions, the goal being one 
 
 | Machine | Class | Dataset | Insertions | Queries | Recall@10 | Date |
 | :------ | :---- | :------ | ---------: | ------: | --------: | :--- |
+| - | - | - | - | - | - | - |
 
 ## Hyper-Parameters
 

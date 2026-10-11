@@ -1,11 +1,12 @@
-==========
-Overview
-==========
+========
+USearch
+========
 .. mdinclude:: ../README.md
+   :start-line: 1
 
-.. toctree:: 
+.. toctree::
    :hidden:
-   :caption: �
+   :caption: Languages
 
    cpp/index
    c/index
@@ -14,14 +15,15 @@ Overview
    javascript/index
    java/index
    swift/index
-   objc/index
    csharp/index
    golang/index
+   zig/index
+   mojo/index
    wolfram/index
 
-.. toctree:: 
+.. toctree::
    :hidden:
-   :caption: �
+   :caption: Project
 
    contributing
    benchmarks
@@ -29,6 +31,6 @@ Overview
 
 .. toctree::
    :hidden:
-   :caption: �
+   :caption: Index
 
    genindex

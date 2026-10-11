@@ -8,7 +8,7 @@ Model checking for the index protocols: the gates, the watermarks, the capacity 
 - `check.sh` is the runner, and `genmc.hpp` the threads and the assertion a client takes from GenMC.
 - `watermark_turn.pml` and `basic_gate.pml` are protocols several components include.
 
-## Writing a model
+## Writing a Model
 
 A component is one mechanism of the code under test: a flat `<name>.pml` while it has one scenario, and a directory `<name>/` once it has a second, holding a `protocol.pml` with its words, values, knobs and inlines, one file per scenario, and a `client.cpp` when GenMC checks the same words.
 A scenario defines its shape, `thread_count`, `location_count` and `history_depth`, includes its protocol, and starts its roles from one `init { atomic { run <role>(<thread>); … } }`; the depth is the exact minimum every `rc11` and `far` line of the scenario accepts.
@@ -18,7 +18,7 @@ A client spells the same knobs as fields of a `knobs_t`, one `constexpr knobs_t 
 
 Every expected verdict is a `@verify` line in the docblock of the file it checks:
 
-```
+```text
 @verify <pass|fail|stuck> <memory>[,<memory>...] [<knob>=<value> ...][: <finding>]   in a scenario
 @verify <pass|fail|stuck> <memory>[,<memory>...] <entry>[: <finding>]                in a client
 ```
@@ -26,7 +26,7 @@ Every expected verdict is a `@verify` line in the docblock of the file it checks
 `pass` is a search that completed with no error, `fail` a violated assertion, and `stuck` an invalid end state in Spin or a liveness violation in GenMC; a search cut short, a knob defined twice, or a write past the scenario's shape is `broken`.
 Every scenario has a `pass` line, every knob appears on some line, and adding a scenario, a knob or a finding never edits `check.sh`.
 
-## What the models found
+## What the Models Found
 
 Each finding is the `@verify` line that replays it, where the full counterexample is written out.
 
@@ -57,7 +57,7 @@ Each finding is the `@verify` line that replays it, where the full counterexampl
 - The sharded CUDA index gates its load as well as its batches, writes keys before the turn and the load's `finish`, and commits its turns behind the sequence word: [`dense_vram_indexes/`](dense_vram_indexes/).
 - The NVMe rings' tails release and acquire exactly as the io_uring documentation asks, and `abandon_` waits out every read the kernel consumed before it drops their completions, or a read of the abandoned batch is still in flight when `submit` returns: [`nvme_ring.pml`](nvme_ring.pml).
 
-## What is not covered
+## What Is Not Covered
 
 The dense index header compiles and starts under GenMC, but its first chunk is a thousand rows of sentinel stores, more events than GenMC's execution graph holds, so the dense clients spell the counters' lines rather than driving the header.
 The far-memory results are Spin's alone: GenMC has no posted add.

@@ -4,4 +4,5 @@ sphinxcontrib-jquery==4.1
 furo==2024.1.29
 breathe==4.35.0
 m2r2==0.3.3.post2
-sphinx-js==3.2.2
+# m2r2 imports `pkg_resources`, which setuptools dropped in 81.
+setuptools==80.10.2

@@ -5,10 +5,6 @@ p.caption {
     border-bottom: 1px solid #8b7f8b12;
 }
 
-article>section>h1:nth-child(1) {
-    display: none;
-}
-
 .sidebar-brand-text {
     cursor: initial;
 }

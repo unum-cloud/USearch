@@ -1,9 +1,8 @@
 # USearch for Mojo
 
-The Mojo SDK reaches the engine through its stable C headers, opened with `dlopen` rather than linked, so a consumer builds with no linker flags of its own.
-It exposes the dense modality, Vector Search over equidimensional embeddings, and the three linear-algebra verbs that read products, attention and late-interaction scores off the same walk.
-
-Every verb is a batch over strided rows, so a memory-mapped dataset reaches the index with no reshape and no copy, and a single vector is a one-row view.
+The Mojo package binds the C ABI in `include/usearch/`, opening the engine's shared library with `dlopen` rather than linking it, so a consumer builds with no linker flags of its own.
+It needs Mojo 1.1 or a later 1.x release through pixi, on Linux x86-64, Linux AArch64 or macOS on Apple silicon.
+It exposes dense indexes, Vector Search over equidimensional embeddings; sequence, matrix and geospatial indexes follow as the C library ships them.
 
 ## Installation
 
@@ -13,6 +12,9 @@ Name the package by `path` or `git` in a Pixi manifest; the engine arrives as it
 [dependencies]
 usearch_mojo = { path = "path/to/USearch/mojo" }
 ```
+
+From a checkout, `pixi run test` builds the engine through the tree's own CMake and runs `mojo/test.mojo` against it.
+On Linux the environment pins a glibc 2.34 sysroot, which the MAX runtime `mojo build` links against needs.
 
 ## Quickstart
 
@@ -39,7 +41,7 @@ def main() raises:
 An index owns rows; an `Executor` owns the threads or streams a call runs on; an `Arena` owns the outputs a call writes.
 `Library()` opens the engine once, and every handle created through it keeps it mapped.
 
-## Receivers
+## Receivers & Deferred Calls
 
 The receiver chooses where a verb runs and how it completes, and the verb stays the same.
 The index runs it on the calling thread, `index.on(executor)` blocks on an executor, and `index.deferred(executor)` submits it there and answers a `Deferred`:
@@ -50,11 +52,9 @@ index.on(executor).search(queries, 10, arena)                  # blocking, after
 var call = index.deferred(executor).search(queries, 10, arena)  # Deferred[...], final once waited
 ```
 
-`DenseIndexOn` and `DenseIndexDeferredOn` offer the same verbs with the same arguments; only the blocking receivers add `cursor` and `search_stream`, whose every pull blocks.
+`DenseIndexOn` and `DenseIndexDeferredOn` offer the same verbs with the same arguments.
 The blocking verbs are written once, in the `DenseVerbs` trait both the index and `DenseIndexOn` conform to.
 Constructors address no index yet, so no receiver offers them; the ones whose C structure names an executor take one.
-
-## Deferred Calls
 
 A `Deferred` owns its outcome and outputs until the call is final, and borrows the index, the executor, the arena and every input it was handed, which Mojo keeps alive for as long as the `Deferred` is.
 
@@ -68,11 +68,26 @@ print(call.wait().row_keys(0)[0])  # the matches, read in place from your arena
 Mojo has no runtime of its own to await on, so `wait` is the whole interface: it blocks in `usearch_outcome_wait` until the call is final, then answers the result or raises the failure, as many times as it is asked.
 The result is the very `Matches` a blocking search answers, borrowing the same arena, and `status` reads the outcome without blocking.
 A failure this binding catches before the call crosses is final at once, and arrives through the same `status` and `wait`.
-
-An executor without threads of its own holds a deferred call until its `wait`, the executor's next `drain` or blocking call, or the free of a handle it names.
 Mojo destroys a value at its last use, and destroying an unfinished `Deferred` waits for it.
-A submission finding the executor's deferred table full, sized by `deferred_limit`, finishes at once with `Status.CONTENDED`.
 Calls depending on each other are ordered by waiting on the first before submitting the second.
+
+## Executors
+
+One executor serves any number of indexes, and its residency must match the one their handles were built for.
+`Executor(library)` owns nothing and runs every call handed it on the calling thread, whatever the handle's residency.
+There is a constructor per C one, each taking every argument its own hardware has and ending with the `deferred_limit` sizing its table of deferred calls, where zero takes a default:
+
+```mojo
+var threads = Executor.for_ram(library, RamOptions.on(domains), threads=8)  # zero takes 7/8 of the cores
+var shared = Executor.on_pool(library, fork_union_pool)                       # borrows a fu_pool_t
+var streams = Executor.for_vram(library, VramOptions.on(devices))             # one host thread, a stream per device
+var rings = Executor.for_nvme(library, threads=4)                             # one submission ring per thread
+threads.drain(Mood.SPINNING)                                                # waits for every call, then keeps spinning
+```
+
+Calls on one executor start in submission order, while index handles stay freely concurrent, so threads that genuinely overlap take one executor apiece.
+A submission finding the executor's deferred table full finishes at once with `Status.CONTENDED`.
+An executor without threads of its own holds a deferred call until its `wait`, the executor's next `drain` or blocking call, or the free of a handle it names.
 
 ## Arenas
 
@@ -97,61 +112,15 @@ for key in hits.row_keys(0):
     rerank(key, index.on(executor).get[DType.float32](key, rows))
 
 var east_arena = Arena(executor)
-var west_arena = Arena(executor)  # one arena per call in flight
+var west_arena = Arena(executor)  # one arena per submitted call
 var east = east_shard.deferred(executor).search(queries, 10, east_arena)
 var west = west_shard.deferred(executor).search(queries, 10, west_arena)
 print(east.wait().row_keys(0)[0], west.wait().row_keys(0)[0])
 ```
 
 The arena is the verb's last required argument, before the optional config, on every receiver.
-A call that finds its arena busy finishes with `Status.CONTENDED` and rewinds nothing, so the holder's views stay readable.
+A call that finds its arena serving another call finishes with `Status.CONTENDED` and rewinds nothing, so the holder's views stay readable.
 A call that fails for any other reason still rewinds it.
-A drained cursor or stream answers an empty view rather than raising.
-
-## Rows
-
-A `RowsView` borrows a caller-owned run as rows of equal width, and it is the shape every batch argument takes.
-`RowsView.of` derives the row count and the byte pitch from a packed run, and the scalar kind from its element type.
-
-```mojo
-var vectors = RowsView.of(embeddings, 768)  # Float32 elements, so ScalarKind.F32
-```
-
-The library converts on ingest and on export, so the scalar kind of the input is independent of the index's own quantization, and a `Float32` query searches an `I8` index without a conversion pass of your own.
-Sub-byte kinds count logical dimensions rather than bytes and name their kind explicitly, so 128 dimensions of `U1X8` occupy sixteen bytes per row:
-
-```mojo
-var packed = List[UInt8](unsafe_uninit_length=rows * 16)  # filled before the call
-var bits = RowsView.of(packed, 128, ScalarKind.U1X8)
-```
-
-A dataset whose rows are padded to a wider pitch builds the view field by field, with its own `stride` in bytes.
-
-## Configs and Outputs
-
-Every verb with optional knobs takes a config named after its C argument structure, such as `DenseInsertConfig`, `DenseSearchConfig` or `DenseMultiplyConfig`, where every field left out derives what the C interface derives.
-So the bare call takes none, and naming a field reaches a knob:
-
-```mojo
-var stats = DenseTraversalStats()
-_ = index.on(executor).search(queries, 10, arena, DenseSearchConfig(expansion_factor=128, stats=Pointer(to=stats)))
-print(stats.computed_distances, "distances computed")
-```
-
-A search answers `Matches`: a queries-by-`wanted` grid of keys, the distances paired with them, and one match count per query, all written into the arena.
-`row_keys` and `row_distances` borrow one query's results, trimmed to the count that query reported:
-
-```mojo
-var matches = index.search(queries, 10, arena)
-for query in range(len(matches)):
-    for rank in range(len(matches.row_keys(query))):
-        print(query, matches.row_keys(query)[rank], matches.row_distances(query)[rank])
-```
-
-A `get` or `attend` answers `DenseVectors`, whose every row is exactly `columns()` values wide, as the engine reported them, however far apart the engine laid the rows.
-
-The candidate-pool breadth rides each call as `expansion_factor` rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
-`DenseSearchConfig(traversal=Traversal.SCAN)` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth.
 
 ## Keys
 
@@ -179,6 +148,27 @@ except error:
 ```
 
 An `Error` keeps the engine mapped while it lives, since its name and message are the engine's own static text.
+`library.status_name` and `status_from_name` spell and parse a `Status` through the engine's own name table, as their twins do for scalars, residencies, traversals, moods and dense metrics:
+
+```mojo
+print(library.status_name(Status.READ_ONLY), library.scalar_name(ScalarKind.BF16))  # read-only bf16
+```
+
+## Residency
+
+Where the payload lives is the constructor's name, as in the C lifecycle verbs, so a residency an index lacks has no constructor to call.
+Each takes only the placement its own hardware has, one shard per entry, and leaving it out derives one.
+
+```mojo
+var domains = [Int32(0), Int32(1)]
+var in_ram = DenseIndex.init_ram(library, options, RamOptions.on(domains))  # one graph per socket
+var devices = [Int32(0), Int32(1), Int32(2), Int32(3)]
+var in_vram = DenseIndex.init_vram(library, options, VramOptions.on(devices))  # sharded, never replicated
+var on_nvme = DenseIndex.view_nvme(Executor.for_nvme(library), "index.safegraphs")
+```
+
+An NVMe index is only ever viewed: external-memory graphs are never modified in place.
+Until NVMe checkpoints carry keys, `view_nvme` answers `Status.UNSUPPORTED`.
 
 ## Serialization
 
@@ -198,71 +188,127 @@ var copied = DenseIndex.load_ram_buffer(executor, monolith.bytes())
 
 Loading creates the index, freezing its geometry from the checkpoint's own headers.
 The metadata carries only the four fields a checkpoint froze, so `values_per_key` and the placement stay yours to pass to the load.
-`Executor(library)` owns nothing and runs a load on the calling thread.
 
-## Residency
+## Dense Indexes
 
-Where the payload lives is the constructor's name, as in the C lifecycle verbs, so a residency an index lacks has no constructor to call.
-Each takes only the placement its own hardware has, one shard per entry, and leaving it out derives one.
+`DenseOptions` freezes an index's geometry: its dimensions, metric, quantization, connectivity and `values_per_key`, angular over `BF16` rows unless told otherwise, with every zeroed optional field derived.
+`DenseMetric` names `INNER`, `ANGULAR`, `EUCLIDEAN`, `HAMMING` and `JACCARD`; the last two read rows as `ScalarKind.U1X8` bit sets and refuse any other quantization.
+Insertions and searches overlap freely on one handle: a search never writes to the graph, and an insertion publishes a row only once it is reachable.
+`multiply`, `maxsim` and `attend` treat the index as a sparse operand, folding their arithmetic into the walk instead of materializing a match list, and need logits rather than distances, so they run on `DenseMetric.INNER` alone and refuse other metrics with `Status.CONFIG_MISMATCH`.
 
-```mojo
-var domains = [Int32(0), Int32(1)]
-var in_ram = DenseIndex.init_ram(library, options, RamOptions.on(domains))  # one graph per socket
-var devices = [Int32(0), Int32(1), Int32(2), Int32(3)]
-var in_vram = DenseIndex.init_vram(library, options, VramOptions.on(devices))  # sharded, never replicated
-var on_nvme = DenseIndex.view_nvme(Executor.for_nvme(library), "index.safegraphs")
-```
+### Rows & Scalars
 
-An NVMe index is only ever viewed: external-memory graphs are never modified in place.
-Until NVMe checkpoints carry keys, `view_nvme` answers `Status.UNSUPPORTED`.
-
-## Executors
-
-One executor serves any number of indexes, and its residency must match the one their handles were built for.
-There is a constructor per C one, each taking every argument its own hardware has and ending with the `deferred_limit` sizing its table of deferred calls, where zero takes a default:
+Every verb is a batch over strided rows, so a memory-mapped dataset reaches the index with no reshape and no copy, and a single vector is a one-row view.
+A `RowsView` borrows a caller-owned run as rows of equal width, and it is the shape every batch argument takes.
+`RowsView.of` derives the row count and the byte pitch from a packed run, and the scalar kind from its element type.
 
 ```mojo
-var threads = Executor.for_ram(library, RamOptions.on(domains), threads=8)  # zero takes 7/8 of the cores
-var shared = Executor.on_pool(library, fork_union_pool)                       # borrows a fu_pool_t
-var streams = Executor.for_vram(library, VramOptions.on(devices))             # one host thread, a stream per device
-var rings = Executor.for_nvme(library, threads=4)                             # one submission ring per thread
-threads.drain(Mood.SPINNING)                                                  # awaits every call, then keeps spinning
+var vectors = RowsView.of(embeddings, 768)  # Float32 elements, so ScalarKind.F32
 ```
 
-Calls on one executor start in submission order, while index handles stay freely concurrent, so threads that genuinely overlap take one executor apiece.
-
-## Introspection
+The library converts on ingest and on export, so the scalar kind of the input is independent of the index's own quantization, and a `Float32` query searches an `I8` index without a conversion pass of your own.
+Sub-byte kinds count logical dimensions rather than bytes and name their kind explicitly, so 128 dimensions of `U1X8` occupy sixteen bytes per row:
 
 ```mojo
-var description = index.describe()
-print(description.size, description.memory_usage, description.capabilities)  # the kernels dispatch picked
-print(index.count(Key(integer=42)))  # entries sharing one key
-
-var reachability = index.health()
-print(reachability.reachable, "of", reachability.audited, "entries reachable")
-
-print(library.version_name(), library.capabilities_available())
-print(library.status_name(Status.READ_ONLY), library.scalar_name(ScalarKind.BF16))  # read-only bf16
+var packed = List[UInt8](unsafe_uninit_length=rows * 16)  # filled before the call
+var bits = RowsView.of(packed, 128, ScalarKind.U1X8)
 ```
 
-`health` audits how much of the graph a search reaches from its landmarks; entries it misses stay unfound until a `refine` re-links them.
-Every enum spells and parses through the engine's own name tables: `status_name` and `status_from_name`, and their twins for scalars, residencies, moods and dense metrics.
+A dataset whose rows are padded to a wider pitch builds the view field by field, with its own `stride` in bytes.
 
-## Filtering
+### Search
+
+Every verb with optional knobs takes a config named after its C argument structure, such as `DenseInsertConfig`, `DenseSearchConfig` or `DenseMultiplyConfig`, where every field left out derives what the C interface derives.
+So the bare call takes none, and naming a field reaches a knob:
+
+```mojo
+var stats = DenseTraversalStats()
+_ = index.on(executor).search(queries, 10, arena, DenseSearchConfig(expansion_factor=128, stats=Pointer(to=stats)))
+print(stats.computed_distances, "distances computed")
+```
+
+A `stats` slot is overwritten whole by every call it is lent to, so a reused one reads the last call's figures rather than a running total.
+
+A search answers `Matches`: a queries-by-`wanted` grid of keys, the distances paired with them, and one match count per query, all written into the arena.
+`row_keys` and `row_distances` borrow one query's results, nearest first, trimmed to the count that query reported:
+
+```mojo
+var matches = index.search(queries, 10, arena)
+for query in range(len(matches)):
+    for rank in range(len(matches.row_keys(query))):
+        print(query, matches.row_keys(query)[rank], matches.row_distances(query)[rank])
+```
+
+The candidate-pool breadth rides each call as `expansion_factor` rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
+`DenseSearchConfig(traversal=Traversal.SCAN)` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth.
+
+### Filtering & Progress
 
 A `predicate` in the `DenseSearchConfig` admits only the keys it approves, while non-matching entries still route the traversal, so recall does not collapse at low selectivity.
-It is the address of a `usearch_predicate_t` compiled in C, since a Mojo function returning a value does not lower to the C calling convention in Mojo 1.1; its state crosses beside it as an address.
+It is the address of a `usearch_predicate_t` compiled in C, and its state crosses beside it as an address.
 
 ```mojo
 var admitted = index.search(queries, 10, arena, DenseSearchConfig(predicate=admits_even, predicate_state=tenant))
 ```
 
 The predicate runs on the executor's threads together, so it must be safe for concurrent use.
+This binding installs no progress handler, so an `insert` batch is all-or-nothing: every fallible step runs before the first entry is claimed, and a rejected batch publishes no row.
 
-## Linear Algebra Over The Graph
+### Retrieval: Get, Cursors & Streams
 
-Three verbs treat the index as a sparse operand rather than as a kNN store, and each folds its arithmetic into the graph walk instead of materializing a match list.
-All three need logits rather than distances, so they run on an inner-product index alone.
+`get` exports every entry stored under one key, one row per entry in insertion order, as `DenseVectors`, whose every row is exactly `columns()` values wide, as the engine reported them, however far apart the engine laid the rows.
+
+```mojo
+var stored = index.get[DType.float32](Key(integer=42), arena)  # empty when the key is absent
+```
+
+A cursor walks the contents as a sequential row scan, landing each batch in the arena, its rows converted to the kind you name; `next_keys` walks the key column alone.
+
+```mojo
+var cursor = index.on(executor).cursor()
+while True:
+    var batch = cursor.next_batch(1024, ScalarKind.F32, arena)  # empty once exhausted
+    if len(batch) == 0:
+        break
+    print(batch.keys()[0], batch.row[DType.float32](0)[0])
+```
+
+A search stream is a resumable best-first traversal, so callers that post-filter aggressively pull until satisfied instead of guessing "k" upfront.
+No residency of the engine implements the stream yet, so it answers `Status.UNSUPPORTED`.
+
+```mojo
+var stream = index.on(executor).search_stream(RowsView.of(query, 768))
+while True:
+    var pulled = stream.next(16, arena)  # one row of Matches, empty once drained
+    if len(pulled.row_keys(0)) == 0:
+        break
+```
+
+Cursors and streams open on the blocking receivers alone, the index and `index.on(executor)`, and every pull blocks.
+Both borrow the index and the executor, so neither can be released while a cursor or a stream lives, and a drained one answers an empty view rather than raising.
+
+### Refinement
+
+`refine` re-runs the neighbor selection over entries already in the graph, returning how many nodes had their neighbors changed.
+A batch built at a low expansion factor reaches the quality of a slower build afterwards, and the count reaching zero is what settled looks like:
+
+```mojo
+while index.on(executor).refine(DenseRefineConfig(expansion_factor=128)) != 0:
+    pass
+```
+
+### Merging & Splitting
+
+Bigger indexes come from merging, never mutating: `merge` takes its donors by value, and the engine frees each one it absorbs.
+No residency of the engine absorbs donors yet, so it answers `Status.UNSUPPORTED`, and splitting is not in the C library yet.
+
+```mojo
+var donors = List[DenseIndex]()
+donors.append(shard^)
+index.on(executor).merge(donors^)
+```
+
+### Sparse Multiplication
 
 `multiply` is a sparse matrix product: every pair the walk scored for each left row, in traversal order, lands in an arena as one ragged run, with one more offset than left rows, as Apache Arrow lays a ragged batch out.
 
@@ -273,12 +319,16 @@ for row in range(left_rows):
     print(row, Int(offsets[row + 1] - offsets[row]), "pairs")
 ```
 
+### Late Interaction
+
 `maxsim` is late interaction: every query row takes its best match within a key, and those maxima sum to that key's score.
 A document is one key holding its token rows, which is what a `values_per_key` above one exists for, and the wanted count is over documents rather than rows.
 
 ```mojo
 var documents = index.on(executor).maxsim(tokens, tokens_per_query, 10, arena)  # Matches, as search answers
 ```
+
+### Attention
 
 `attend` is Flash Attention folded into the walk: every key it scores folds into each head's running maximum, partition and weighted value sum, with no top-k cut, and the attended rows land in the arena already divided by the partition.
 The index stores no values, so a `ValueLookup` resolves every scored batch of keys to value rows, `columns` values of `scalar` apiece, the index's own width and kind, which it checks before answering any row.
@@ -300,71 +350,44 @@ var context = index.on(executor).attend[DType.float32](
 With `head_count=8`, row `t * 8 + h` of the queries is head `h` of token `t`, and the heads of one token share its walk.
 A `carry` of one `DenseSoftmaxState` per query row, lent by you, folds this branch into another over the same queries, such as a recent window kept out of the index; a shorter one is refused, since the C structure carries no count for it.
 
-## Streaming and Iteration
-
-A search stream is a resumable best-first traversal, so callers that post-filter aggressively pull until satisfied instead of guessing "k" upfront.
-No residency of the engine implements the stream yet, so it answers `Status.UNSUPPORTED`.
+### Introspection
 
 ```mojo
-var stream = index.on(executor).search_stream(RowsView.of(query, 768))
-while True:
-    var pulled = stream.next(16, arena)  # one row of Matches, empty once drained
-    if len(pulled.row_keys(0)) == 0:
-        break
+var description = index.describe()
+print(description.size, description.memory_usage, description.capabilities)  # the kernels dispatch picked
+print(index.count(Key(integer=42)))  # entries sharing one key
+
+var reachability = index.health()
+print(reachability.reachable, "of", reachability.audited, "entries reachable")
+print(library.version_name(), library.capabilities_available())
 ```
 
-A cursor walks the contents as a sequential row scan, landing each batch in the arena, its rows converted to the kind you name; `next_keys` walks the key column alone.
+`health` audits how much of the graph a search reaches from its landmarks; entries it misses stay unfound until a `refine` re-links them.
 
-```mojo
-var cursor = index.on(executor).cursor()
-while True:
-    var batch = cursor.next_batch(1024, ScalarKind.F32, arena)  # empty once exhausted
-    if len(batch) == 0:
-        break
-    print(batch.keys()[0], batch.row[DType.float32](0)[0])
-```
+## What This Binding Does Not Expose
 
-Both borrow the index and the executor, so neither can be released while a cursor or a stream lives.
-
-## Refinement and Merging
-
-`refine` re-runs the neighbor selection over entries already in the graph, returning how many nodes had their neighbors changed.
-A batch built at a low expansion factor reaches the quality of a slower build afterwards, and the count reaching zero is what settled looks like:
-
-```mojo
-while index.on(executor).refine(DenseRefineConfig(expansion_factor=128)) != 0:
-    pass
-```
-
-Bigger indexes come from merging, never mutating: `merge` takes its donors by value, and the engine frees each one it absorbs.
-No residency of the engine absorbs donors yet, so it answers `Status.UNSUPPORTED`.
-
-```mojo
-var donors = List[DenseIndex]()
-donors.append(shard^)
-index.on(executor).merge(donors^)
-```
+- __Progress handlers and cancellation.__
+  A handler returns a verdict, and a Mojo 1.1 `def ... abi("C")` that returns a value does not lower to the C calling convention, so every `progress` slot crosses as `NULL_ADDRESS`.
+- __Predicates written in Mojo.__
+  A predicate returns a verdict too, for the same reason, so `predicate` takes the address of one compiled in C.
+- __Deferred cursors and streams.__
+  `DenseIndexDeferredOn` offers neither, since their pulls block.
 
 ## Design
 
-The package is a thin layer over the C ABI in `include/usearch/`, and every rule below follows from that.
-
-- __Names follow the header.__
-  Every type is its C name without `usearch_` and `_t`, such as `DenseMetric`, `DenseTraversalStats` and `DenseIndexDescription`; every constructor is a C lifecycle verb such as `init_ram` or `for_ram`, a verb's argument structure becomes its `Dense*Config`, and every wrapper's documentation names the C symbol it calls or says it is binding-only.
-  The one exception is `ScalarKind`, which keeps clear of Mojo's built-in `Scalar`.
-- __Blocking calls stay simple.__
-  `index.search(queries, 10, arena)` takes no executor, completion or receiver argument and writes its outputs before returning, so nothing about asynchrony reaches a caller who never asks for it.
-- __Outputs land in arenas.__
-  Every output whose length scales with the call lands in the `Arena` the verb requires, one verb per operation; only fixed-size reports like stats and descriptions, and state you carry like attention's `carry`, stay yours.
-- __Deferred calls are symmetric, through Mojo's own idioms.__
-  The receiver's type alone chooses the completion, so the index, `DenseIndexOn` and `DenseIndexDeferredOn` offer the same verbs with the same arguments, each one a single crossing all three route.
-  A `Deferred` carries the origins of everything it borrows, so the compiler keeps the index, the executor and the inputs alive until it is gone.
+- __A thin layer over the C ABI.__
+  Every name follows `include/usearch/`: a C verb `usearch_dense_<verb>` is a `<verb>` here, and enums mirror C enums, never strings.
+- __The receiver chooses, the verb stays.__
+  The index runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
+- __Deferred calls use the language's own idioms.__
+  `status` polls through `usearch_outcome_status`, `wait` blocks through `usearch_outcome_wait`, and the origins a `Deferred` carries keep everything it borrows alive until it is gone.
+- __No life of its own.__
+  The binding starts no threads and keeps no queues; releasing a `Deferred` rides Mojo's destruction at last use, which waits for the call first.
+- __Arenas are lent and reused, never shared.__
+  Every output whose length scales with the call lands in an arena the caller passes; the binding stamps each arena with a counter that every view checks before reading, and keeps no call counts.
 - __Nothing costs anything until it is used.__
+  Blocking calls take no deferred-table slot, and an arena allocates only when a call writes into it.
+- __Blocking calls live on the stack.__
   A blocking call keeps its outcome and outputs in stack slots and allocates nothing of its own; a deferred one moves those slots to one heap allocation it frees once final.
-- __A `Deferred` has no life of its own.__
-  `status` polls through `usearch_outcome_status`, `wait` blocks in `usearch_outcome_wait`, and destroying an unfinished one waits the same way; the binding starts no thread, counts no calls and schedules nothing.
-- __Statuses and modes are enums.__
-  `Status`, `Mood`, `Residency`, `ScalarKind` and `DenseMetric` carry the C enumerators' values, and the `Library` spells and parses them through the C name tables, so nothing is compared as a string.
-- __Arenas are reused, never shared.__
-  Every call borrows its arena and reuses it, every result refuses to read an arena a later call rewound, and no index owns an arena or a lock.
-  Contention is the engine's to refuse, so the binding claims nothing and only counts the calls the engine took.
+- __`ScalarKind`, not `Scalar`.__
+  Types drop `usearch_` and `_t` from their C names, except `ScalarKind`, which keeps clear of Mojo's built-in `Scalar`.

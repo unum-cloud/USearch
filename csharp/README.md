@@ -1,5 +1,9 @@
 # USearch for C#
 
+The C# binding calls the flat C interface in `include/usearch/` through source-generated `[LibraryImport]` stubs over `libusearch_shared`, so it compiles no native shim of its own.
+It requires .NET 10, and the package carries the native library for Linux x64 and macOS Arm64.
+It exposes dense indexes; sequence, matrix and geospatial indexes follow as the C library ships them.
+
 ## Installation
 
 ```sh
@@ -7,6 +11,15 @@ dotnet add package Cloud.Unum.USearch
 ```
 
 The package targets `net10.0`, the long-term-support release supported through November 2028.
+Building from source compiles the C library first, then places it where the package looks for its native assets:
+
+```sh
+cmake --preset host_relwithdebinfo -D USEARCH_BUILD_LIB_C=1
+cmake --build --preset host_relwithdebinfo
+mkdir -p csharp/lib/runtimes/osx-arm64/native                   # Or linux-x64 with the .so
+cp build_host_relwithdebinfo/libusearch_shared.dylib csharp/lib/runtimes/osx-arm64/native
+cd csharp && dotnet test
+```
 
 ## Quickstart
 
@@ -36,26 +49,21 @@ Key nearest = found[0].Keys[0];                                                 
 double distance = found[0].Distances[0];
 ```
 
-`DenseOptions` is immutable, so a variant comes from `DenseOptions.Default with { ... }` rather than from mutating a value another handle may already have been built from.
-
-Keys are 128 bits wide and render as lowercase dashed UUIDs, with integer identities parked in the low eight bytes, so `42UL` converts implicitly, and a full identity comes from `Key.Parse("0123abcd-4567-89ef-fedc-ba9876543210")`.
-Parsing reads the dashes as separators rather than positions, so they may sit anywhere or nowhere, and what they leave behind must be thirty-two hexadecimal digits of either case.
-`Key.FromGuid` and `Key.ToGuid` carry an identity across to `System.Guid`, which is where a time-ordered `Guid.CreateVersion7()` key comes from.
-
-## Receivers and Deferred Calls
+## Receivers & Deferred Calls
 
 The receiver chooses where a verb runs, and the verb stays the same.
-Called on the index, a verb runs on the caller's own thread; on `index.On(executor)` it blocks on that executor, after every call submitted there before it; on `index.Deferred(executor)` it submits there and answers a `Deferred<TResult>` at once.
+Called on the index, a verb runs on the caller's own thread, single-threaded on RAM and on the handle's device and default stream on VRAM.
+On `index.On(executor)` it blocks on that executor, after every call submitted there before it.
+On `index.Deferred(executor)` it submits there and answers a `Deferred<TResult>` at once.
 
 ```csharp
 Matches local = index.Search(queries, wanted: 10, arena);                 // The caller's thread
 Matches pooled = index.On(pool).Search(queries, wanted: 10, arena);       // Blocking, on the pool
-Matches awaited = await index.Deferred(pool).Search(queries, 10, arena);  // Or: index.Deferred(pool).Search(queries, 10, arena).Wait()
+Matches awaited = await index.Deferred(pool).Search(queries, 10, arena);  // Or: .Wait() in place of await
 ```
 
 A `Deferred<TResult>` owns its outcome and the pins on every input it lends the library until the call is final, and borrows its index and arena exactly as a blocking call does, so `Wait()` answers the same view a blocking call would, over the same arena.
 `Status` reads `Status.Deferred` until then, `Wait()` blocks and answers the result or raises the failure, and `await` runs that wait on the thread pool.
-Disposing an index or an arena that a deferred call names waits for that call first.
 Verbs that produce nothing answer a plain `Deferred`, as `Task` stands beside `Task<TResult>`.
 
 ```csharp
@@ -67,42 +75,12 @@ if (call.Status == Status.Deferred)
 Matches matches = await call;                                       // Or: call.Wait()
 ```
 
-Waiting again answers the same result or raises the same failure, and disposing a call nobody waited for waits for it, discards what it produced, and lets its arena serve the next call.
-A submission finding the executor's deferred table full, sized by `deferredLimit`, finishes at once with `Status.Contended`.
+Waiting again answers the same result or raises the same failure.
+Disposing a call nobody waited for waits for it, discards what it produced, and lets its arena serve the next call.
+One left unfinished and unreachable keeps its landing and pins alive until a collection finds it final, rather than freeing memory the library still writes.
+Disposing an index or an arena that a deferred call names waits for that call first.
+A submission finding the executor's deferred table full finishes at once with `Status.Contended`.
 Calls depending on each other are ordered by waiting on the first before submitting the second.
-`Cursor` and `SearchStream` pull blocking, so a `DenseIndexDeferredOn` lacks them, and the constructors address no index yet, so no receiver offers them; the ones the C interface lets fan out take an `executor` argument and run on the caller's thread without one.
-
-## Arenas
-
-Every output whose length only the call knows, such as matches, rows, products, monoliths and cursor or stream batches, lands in an `Arena` you pass, and the verb answers a view over it without copying.
-`new Arena(executor)` places it where that executor computes, decided once, and `new Arena()` makes host pages for the calling thread.
-Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
-To keep a result past the next call, or to read one while making the next, pass that call another arena.
-An arena serves one call at a time, so each deferred call needs its own.
-A stale view throws `USearchException` with `Status.Uninitialized`; a `ReadOnlySpan` an accessor already returned cannot outlive its stack frame, so read it before the next call.
-An arena from a VRAM executor holds device memory, which host accessors refuse with `Status.Device`.
-
-```csharp
-using Arena arena = new(pool);                                     // new Arena() is host pages for the calling thread
-foreach (RowsView batch in batches)
-{
-    Matches matches = index.On(pool).Search(batch, 10, arena);   // Rewinds: the last batch's matches are gone
-    foreach (double distance in matches[0].Distances) total += distance;
-}
-
-using Arena found = new(), rows = new();                           // Two live results, two arenas
-foreach (Key key in index.Search(query, 10, found)[0].Keys)
-{
-    Rerank(key, index.Get(key, rows));
-}
-
-Arena[] arenas = [.. shards.Select(_ => new Arena(pool))];       // One arena per call in flight
-Deferred<Matches>[] calls = [.. shards.Select((shard, at) => shard.Deferred(pool).Search(queries, 10, arenas[at]))];
-foreach (Deferred<Matches> call in calls) Consume(await call);   // Or: call.Wait()
-```
-
-A call that finds its arena busy finishes with `Status.Contended` and rewinds nothing, so the holder's views stay readable.
-An arena's `Residency` says where it lives, and a null arena is refused with `Status.InvalidArgument`.
 
 ## Executors
 
@@ -129,10 +107,97 @@ using Executor striped = Executor.ForNvme(paths: ["/mnt/nvme0", "/mnt/nvme1"]);
 ```
 
 Every factory also takes a `deferredLimit`, the deferred calls it tracks at once, where zero takes a default.
-A verb called on the index itself runs on the caller's own thread: single-threaded on RAM, on the handle's device and default stream on VRAM.
 Calls on one executor run in submission order, while handles stay freely concurrent, so a caller wanting genuine concurrency gives each thread its own executor.
 
-## Rows
+## Arenas
+
+Every output whose length only the call knows, such as matches, rows, products, monoliths and cursor or stream batches, lands in an `Arena` you pass, and the verb answers a view over it without copying.
+`new Arena(executor)` places it where that executor computes, decided once, and `new Arena()` makes host pages for the calling thread.
+Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
+To keep a result past the next call, or to read one while making the next, pass that call another arena.
+An arena serves one call at a time, so each deferred call needs its own, and a call naming an arena that serves another call finishes with `Status.Contended` and rewinds nothing, so the holder's views stay readable.
+A stale view throws `USearchException` with `Status.Uninitialized`; a `ReadOnlySpan` an accessor already returned cannot outlive its stack frame, so read it before the next call.
+An arena's `Residency` says where it lives, and one from a VRAM executor holds device memory, which host accessors refuse with `Status.Device`.
+
+```csharp
+using Arena arena = new(pool);                                     // new Arena() is host pages for the calling thread
+foreach (RowsView batch in batches)
+{
+    Matches matches = index.On(pool).Search(batch, 10, arena);   // Rewinds: the last batch's matches are gone
+    foreach (double distance in matches[0].Distances) total += distance;
+}
+
+using Arena found = new(), rows = new();                           // Two live results, two arenas
+foreach (Key key in index.Search(query, 10, found)[0].Keys)
+{
+    Rerank(key, index.Get(key, rows));
+}
+
+Arena[] arenas = [.. shards.Select(_ => new Arena(pool))];       // One arena per submitted call
+Deferred<Matches>[] calls = [.. shards.Select((shard, at) => shard.Deferred(pool).Search(queries, 10, arenas[at]))];
+foreach (Deferred<Matches> call in calls) Consume(await call);   // Or: call.Wait()
+```
+
+## Keys
+
+Keys are 128 bits wide and render as lowercase dashed UUIDs, with integer identities parked in the low eight bytes, so `42UL` converts implicitly and `TryGetUInt64` reads one back.
+A full identity comes from `Key.Parse("0123abcd-4567-89ef-fedc-ba9876543210")`, or `Key.TryParse` when the text may be malformed.
+Parsing reads the dashes as separators rather than positions, so they may sit anywhere or nowhere, and what they leave behind must be thirty-two hexadecimal digits of either case.
+`Key.FromGuid` and `Key.ToGuid` carry an identity across to `System.Guid`, which is where a time-ordered `Guid.CreateVersion7()` key comes from.
+
+## Errors
+
+Every failure arrives as a `USearchException` carrying a `Status`, one enumerator per `usearch_status_*_k`, such as `ShapeMismatch`, `Io`, `Unsupported`, or `InvalidArgument`.
+Width and geometry checks belong to the library, which sees every row view's `columns`; the binding checks only what the C interface cannot see, like a key count against the rows it accompanies, a softmax carry against the queries, or a negative `wanted`.
+
+The closed sets spell themselves through the library's own name tables, so a message reads `usearch: shape-mismatch: ...` and parsing user text never restates a table:
+
+```csharp
+string spelled = Status.ShapeMismatch.Name();          // "shape-mismatch"
+bool known = Names.TryParse("bf16", out Scalar scalar);
+```
+
+## Residency
+
+Where the payload lives is the constructor's name, as in the C lifecycle verbs, so a residency an index lacks has no constructor to call.
+Each takes only the placement its own hardware has, one shard per memory domain, device or path, and an empty list derives the placement.
+
+```csharp
+using DenseIndex inRam = DenseIndex.InitRam(options, memoryDomains: [0, 1]);      // One graph per socket
+using DenseIndex inVram = DenseIndex.InitVram(options, devices: [0, 1, 2, 3]);    // Sharded, never replicated
+using DenseIndex uploaded = DenseIndex.LoadVram("index.safegraphs", devices: [0, 1]);
+using DenseIndex onDisk = DenseIndex.ViewNvme("index.safegraphs.json", paths: ["/mnt/nvme0"]);
+```
+
+An NVMe handle serves a checkpoint in place, and every mutating verb fails on it with `Status.ReadOnly`, as on a `DenseIndex.ViewRam`.
+Until NVMe checkpoints carry keys, `ViewNvme` answers `Status.Unsupported`.
+
+## Serialization
+
+Checkpoints ride the SafeGraphs interchange format, and the path extension picks the layout: a `.safegraphs` path is one monolith, a `.safegraphs.json` path is a manifest cataloging many.
+Checkpoints are residency-portable: one file materializes into RAM, uploads to the devices, or opens in place on disk, decided by the constructor that opens it.
+
+```csharp
+await index.Deferred(pool).Save("index.safegraphs");                        // Or: index.On(pool).Save(path)
+
+DenseMetadata metadata = DenseIndex.MetadataRead("index.safegraphs", pool);  // Geometry without loading
+
+using DenseIndex restored = DenseIndex.LoadRam("index.safegraphs", executor: pool); // Checkpoint freezes the geometry
+using DenseIndex served = DenseIndex.ViewRam("index.safegraphs");                    // Mapped in place, read-only
+
+Monolith buffer = index.On(pool).SaveBuffer(arena);                         // Or one monolith in memory
+using DenseIndex copied = DenseIndex.LoadRamBuffer(buffer.Bytes, executor: pool);
+```
+
+`DenseMetadata` carries the four fields a checkpoint froze: dimensions, metric, quantization and connectivity.
+Residency is absent because a checkpoint records where it was written rather than where a reader must keep it, and `ValuesPerKey` is absent because it bounds a live handle's mutable state rather than the serialized form.
+A monolith reports its `Length` as a `long`, and one past 2 GiB refuses to lend its `Bytes` as one run of memory with `Status.Overflow`.
+
+## Dense Indexes
+
+`DenseOptions` is immutable, so a variant comes from `DenseOptions.Default with { ... }` rather than from mutating a value another handle may already have been built from.
+
+### Rows & Scalars
 
 Every batch argument is a `RowsView`: a caller-owned slab viewed as rows of equal width, carrying its row count, its logical width, its byte pitch, and the scalar kind its values hold.
 A single vector is a one-row matrix, and the input scalar type is independent of the stored quantization, since the library converts on ingest.
@@ -153,7 +218,7 @@ The kind travels with the slab rather than being derived from its element type, 
 
 A `RowsView` borrows and never owns: it holds the `Memory<T>` it was built from, so the slab stays reachable for as long as the view is, and a deferred call pins it until final.
 
-## Batch Operations
+### Search
 
 ```csharp
 Key[] keys = [1UL, 2UL, 3UL];
@@ -169,8 +234,8 @@ for (int query = 0; query < found.Queries; query++)
 ```
 
 The candidate-pool breadth rides each call rather than the handle, so a recall sweep runs against one immutable index with no mutation between points.
-`traversal: Traversal.Scan` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth.
-`DenseTraversalStats` is a pure output, overwritten by every call it is passed to.
+`traversal: Traversal.Scan` scores every row instead of walking, on RAM and NVMe handles, which gives that sweep its exact ground truth; a VRAM handle refuses a scan with `Status.Unsupported`.
+`DenseTraversalStats` is a pure output, overwritten by every call it is passed to, and `Accumulate` folds one call's counters into another's to total a run of batches.
 
 A sweep reuses one arena across every point, which keeps its high-water mark, so nothing is allocated between them:
 
@@ -182,20 +247,7 @@ foreach (int breadth in new[] { 16, 32, 64, 128 })
 }
 ```
 
-## Refinement
-
-```csharp
-ulong changed = index.On(pool).Refine(expansionFactor: 256);
-DenseReachability reachability = index.On(pool).Health();   // Audited, Reachable, Sweeps
-```
-
-Refinement re-selects the neighbors of every stored entry against the finished graph, improving edges that were chosen when the graph around them was still incomplete.
-It is a build step rather than a repair: a cheap insertion pass followed by one refinement reaches a better graph, in less total time, than a single expensive insertion pass, so a wide expansion factor belongs here rather than in `Insert`.
-The return is the number of nodes whose edges changed, and zero means the graph has settled, so a caller under a time budget loops until the return falls below whatever rate it considers settled.
-Searches may run throughout.
-`Health` audits how much of the graph a search reaches from its landmarks; entries it misses stay unfound until a refinement re-links them.
-
-## Filtered Search
+### Filtering
 
 ```csharp
 Matches admitted = index.On(pool).Search(
@@ -203,10 +255,61 @@ Matches admitted = index.On(pool).Search(
     predicate: key => key.TryGetUInt64(out ulong identity) && identity % 2 == 0);
 ```
 
+Rejected entries still route the traversal, so recall does not collapse at low selectivity.
 The predicate runs on the executor's worker threads, so it must be safe for concurrent use, and it is called once per scored candidate rather than once per reported match.
 An exception it throws is captured, every later candidate is rejected, and the exception is rethrown with its own type once the call is final, never unwound through the native frames.
 
-## Late Interaction
+### Retrieval: Get, Cursors & Streams
+
+```csharp
+DenseVectors rows = index.On(pool).Get(key, arena, Scalar.F32);  // Every entry under the key, zero-copy
+ReadOnlySpan<float> first = rows.Row<float>(0);                  // As wide as rows.Columns
+
+using DenseCursor cursor = index.On(pool).Cursor();    // Each row once, in storage order
+for (DenseBatch batch = cursor.Next(128, arena); batch.Count != 0; batch = cursor.Next(128, arena))
+{
+    ReadOnlySpan<Key> page = batch.Keys;               // Pass `vectors: Scalar.F32` for the rows beside them
+}
+
+using DenseSearchStream stream = index.On(pool).SearchStream(RowsView.RowsOf<float>(vector, dimensions: 3));
+MatchesRow nearer = stream.Next(8, arena);             // Resumable nearest-neighbor stream
+```
+
+A cursor or stream keeps walk state rather than a thread, pulls on the executor of the receiver that opened it, and keeps its index alive until disposed.
+Every pull takes its arena, so one arena serves a scan and any other verb between pulls, and a drained pull answers an empty view.
+
+### Refinement
+
+```csharp
+ulong changed = index.On(pool).Refine(expansionFactor: 256);
+```
+
+Refinement re-selects the neighbors of every stored entry against the finished graph, improving edges that were chosen when the graph around them was still incomplete.
+It is a build step rather than a repair: a cheap insertion pass followed by one refinement reaches a better graph, in less total time, than a single expensive insertion pass, so a wide expansion factor belongs here rather than in `Insert`.
+The return is the number of nodes whose edges changed, and zero means the graph has settled, so a caller under a time budget loops until the return falls below whatever rate it considers settled.
+Searches may run throughout.
+
+### Merging
+
+```csharp
+index.On(pool).Merge(donor);
+```
+
+Bigger indexes come from merging, never mutating: `Merge` consumes every donor it absorbs, which then refuses every verb with `Status.Uninitialized`, while a donor a refused merge never reached stays the caller's.
+No residency absorbs donors yet, so today the call answers `Status.Unsupported`.
+
+### Sparse Multiplication
+
+```csharp
+DenseProducts products = index.On(pool).Multiply(RowsView.RowsOf<float>(left, dimensions: 3), arena, wanted: 64);
+ReadOnlySpan<Key> reached = products.Keys(0);         // Every indexed row the first walk scored
+ReadOnlySpan<double> dots = products.Scores(0);       // Paired with those keys, in traversal order
+```
+
+Every pair a traversal scored is an exact product the caller would otherwise recompute, so `Multiply` hands them all back, ragged per left row, with their offsets in the arena beside them.
+It runs on the inner-product kinds alone, and the pairs a walk never reaches are the low and negative products.
+
+### Late Interaction
 
 ```csharp
 DenseOptions colbert = DenseOptions.Default with
@@ -223,18 +326,7 @@ Matches scored = index.On(pool).Maxsim(RowsView.RowsOf<float>(queryTokens, dimen
 Every query row takes its best match within a key, and those maxima sum to that key's score, so the wanted count is the "k" over documents rather than over rows.
 That is what a values-per-key bound above one exists for, and a graph frozen under a distance kind refuses with `Status.ConfigMismatch`.
 
-## Sparse Products
-
-```csharp
-DenseProducts products = index.On(pool).Multiply(RowsView.RowsOf<float>(left, dimensions: 3), arena, wanted: 64);
-ReadOnlySpan<Key> reached = products.Keys(0);         // Every indexed row the first walk scored
-ReadOnlySpan<double> dots = products.Scores(0);       // Paired with those keys, in traversal order
-```
-
-Every pair a traversal scored is an exact product the caller would otherwise recompute, so `Multiply` hands them all back, ragged per left row, with their offsets in the arena beside them.
-It runs on the inner-product kinds alone, and the pairs a walk never reaches are the low and negative products.
-
-## Attention
+### Attention
 
 `Attend` is Flash Attention folded into the walk: every key it scores folds into each head's running maximum, partition and weighted value sum, with no top-k cut, and the outputs come back already divided by the partition.
 The index stores no values, so every scored key resolves to a row of a values `RowsView` the caller lends, as wide as the keys and stored in the index's own quantization.
@@ -253,96 +345,49 @@ A key resolving outside the values, or values of another kind or width than the 
 The `carry` holds one `DenseSoftmaxState` per query row, which folds this branch into another over the same queries, such as a recent window kept out of the index; it is state the caller carries between calls, so it stays lent rather than landing in the arena.
 An `outputsScalar` argument lands the attended rows as another kind than the queries' own.
 
-## Retrieval, Cursors, and Streams
+### Introspection
 
 ```csharp
-ulong stored = index.On(pool).Count(key);
-DenseVectors rows = index.On(pool).Get(key, arena, Scalar.F32);  // Every entry under the key, zero-copy
-ReadOnlySpan<float> first = rows.Row<float>(0);                  // As wide as rows.Columns
-
-using DenseCursor cursor = index.On(pool).Cursor();    // Each row once, in storage order
-for (DenseBatch batch = cursor.Next(128, arena); batch.Count != 0; batch = cursor.Next(128, arena))
-{
-    ReadOnlySpan<Key> page = batch.Keys;               // Pass `vectors: Scalar.F32` for the rows beside them
-}
-
-using DenseSearchStream stream = index.On(pool).SearchStream(RowsView.RowsOf<float>(vector, dimensions: 3));
-MatchesRow nearer = stream.Next(8, arena);             // Resumable nearest-neighbor stream
+DenseIndexDescription description = index.Describe();    // Metadata, size, capacity, memory, capabilities
+DenseReachability reachability = index.On(pool).Health();   // Audited, Reachable, Sweeps
+ulong stored = index.On(pool).Count(key);                 // Entries under the key; Contains(key) tests for any
+string kernels = USearchCapabilities.CapabilitiesAvailable();
 ```
 
-A cursor or stream keeps walk state rather than a thread, pulls on the executor of the receiver that opened it, and keeps its index alive until disposed.
-Every pull takes its arena, so one arena serves a scan and any other verb between pulls, and a drained pull answers an empty view.
-
-## Serialization
-
-Checkpoints ride the SafeGraphs interchange format, and the path extension picks the layout: a `.safegraphs` path is one monolith, a `.safegraphs.json` path is a manifest cataloging many.
-Checkpoints are residency-portable: one file materializes into RAM, uploads to the devices, or opens in place on disk, decided by the constructor that opens it.
-
-```csharp
-await index.Deferred(pool).Save("index.safegraphs");                        // Or: index.On(pool).Save(path)
-
-DenseMetadata metadata = DenseIndex.MetadataRead("index.safegraphs", pool);  // Geometry without loading
-
-using DenseIndex restored = DenseIndex.LoadRam("index.safegraphs", executor: pool);  // The checkpoint freezes the geometry
-using DenseIndex served = DenseIndex.ViewRam("index.safegraphs");                    // Mapped in place, read-only
-
-Monolith buffer = index.On(pool).SaveBuffer(arena);                         // Or one monolith in memory
-using DenseIndex copied = DenseIndex.LoadRamBuffer(buffer.Bytes, executor: pool);
-
-DenseIndexDescription description = restored.Describe();   // Metadata, size, capacity, memory, capabilities
-```
-
-`DenseMetadata` carries the four fields a checkpoint froze: dimensions, metric, quantization and connectivity.
-Residency is absent because a checkpoint records where it was written rather than where a reader must keep it, and `ValuesPerKey` is absent because it bounds a live handle's mutable state rather than the serialized form.
-A monolith reports its `Length` as a `long`, and one past 2 GiB refuses to lend its `Bytes` as one run of memory with `Status.Overflow`.
-
-## Residency
-
-Where the payload lives is the constructor's name, as in the C lifecycle verbs, so a residency an index lacks has no constructor to call.
-Each takes only the placement its own hardware has, one shard per memory domain, device or path, and an empty list derives the placement.
-
-```csharp
-using DenseIndex inRam = DenseIndex.InitRam(options, memoryDomains: [0, 1]);      // One graph per socket
-using DenseIndex inVram = DenseIndex.InitVram(options, devices: [0, 1, 2, 3]);    // Sharded, never replicated
-using DenseIndex uploaded = DenseIndex.LoadVram("index.safegraphs", devices: [0, 1]);
-using DenseIndex onDisk = DenseIndex.ViewNvme("index.safegraphs.json", paths: ["/mnt/nvme0"]);
-```
-
-An NVMe handle serves a checkpoint in place, and every mutating verb fails on it with `Status.ReadOnly`, as on a `DenseIndex.ViewRam`.
-Until NVMe checkpoints carry keys, `ViewNvme` answers `Status.Unsupported`.
-Bigger indexes come from merging, never mutating: `index.On(pool).Merge(donor)` consumes every donor it absorbs, which then refuses every verb with `Status.Uninitialized`.
-
-## Failures and Names
-
-Every failure arrives as a `USearchException` carrying a `Status`, one enumerator per `usearch_status_*_k`, such as `ShapeMismatch`, `Io`, `Unsupported`, or `InvalidArgument`.
-Width and geometry checks belong to the library, which sees every row view's `columns`; the binding checks only what the C interface cannot see, like a key count against the rows it accompanies, a softmax carry against the queries, or a negative `wanted`.
-
-The closed sets spell themselves through the library's own name tables, so a message reads `usearch: shape-mismatch: ...` and parsing user text never restates a table:
-
-```csharp
-string spelled = Status.ShapeMismatch.Name();          // "shape-mismatch"
-bool known = Names.TryParse("bf16", out Scalar scalar);
-```
+`Health` audits how much of the graph a search reaches from its landmarks; entries it misses stay unfound until a refinement re-links them.
+`USearchCapabilities` also reports the linked library's `Version()` and the `CapabilitiesCompiled()` into it, tied to no index.
 
 ## Interop
 
 Every entry point is declared with `[LibraryImport]`, so the marshalling stubs are source-generated and compiled in rather than reflected at runtime, and the assembly stays trimmable and ahead-of-time compilable.
 Every verb takes one argument struct, as the C interface does, and holds a reference on each `SafeHandle` the struct names for the length of the C call, so a finalizer can never free a handle out from under a running verb, and the free of one a deferred call still names waits for that call.
 
+## What This Binding Does Not Expose
+
+- __Progress handlers.__
+  Every verb passes the C `progress` callback as null, so a long `Insert`, `Refine`, `Merge` or `Save` runs to its end, and `Status.Cancelled` never arises.
+- __Deferred cursors and streams.__
+  `Cursor` and `SearchStream` pull blocking, so a `DenseIndexDeferredOn` lacks them.
+- __Constructors on receivers.__
+  The constructors address no index yet, so no receiver offers them; the ones the C interface lets fan out take an `executor` argument and run on the caller's thread without one.
+- __Version numbers and class names.__
+  `usearch_version` and the CPU and GPU class spellings stay unbound; `USearchCapabilities.Version()` answers the version as text.
+
 ## Design
 
-The binding is a thin layer over the C ABI in `include/usearch/`, and every rule below follows from that.
-
-- __Blocking calls stay simple.__
-  `index.Search(queries, 10, arena)` takes no executor, completion or receiver argument and returns its result, so nothing about asynchrony reaches a caller who never asks for it.
-- __Deferred calls are symmetric, through the language's own idioms.__
-  The receiver's type alone chooses the completion, so the index, `DenseIndexOn` and `DenseIndexDeferredOn` offer the same verbs with the same arguments, and a `Deferred<TResult>` is waited for with `await`, `Wait()` or `using`.
+- __A thin layer over the C ABI.__
+  Every name follows `include/usearch/`: a C verb `usearch_dense_<verb>` is a `<Verb>` method here, and enums mirror C enums, never strings.
+- __The receiver chooses, the verb stays.__
+  The index runs a verb on the calling thread, `On(executor)` blocks on an executor, and `Deferred(executor)` submits it, all with the same arguments.
+- __Deferred calls use the language's own idioms.__
+  `Status` polls through `usearch_outcome_status`, `Wait()` blocks through `usearch_outcome_wait`, and `await` hands that wait to the thread pool.
+- __No life of its own.__
+  The binding starts no threads and keeps no queues; releasing a `Deferred` rides `Dispose` and `using`, which waits for the call first.
+- __Arenas are lent and reused, never shared.__
+  Every output whose length scales with the call lands in an arena the caller passes; a view the arena's next call outdated throws rather than reading rewound memory.
 - __Nothing costs anything until it is used.__
-  A blocking call keeps its landing on the stack, fixes its buffers in place without a pinning handle, and answers a view by value over the arena it borrowed; a deferred one allocates its handle and one pinned landing, and pins its inputs until final.
-- __Callers lend memory, never allocators.__
-  One verb per operation, each requiring the arena its outputs land in, so there is no allocating twin, no caller-sized output buffer, and no arena a result owns behind the caller's back.
-- __A `Deferred` has no life of its own.__
-  `Status` polls through `usearch_outcome_status`, `Wait()` blocks in `usearch_outcome_wait`, and `await` hands that wait to the thread pool, since the library has no wake-up to register; the binding starts no thread and counts no calls.
-  One left unfinished and unreachable keeps its landing and pins alive rather than freeing memory the library still writes.
-- __Statuses and modes are enums.__
-  `Status`, `Mood`, `Residency`, `Scalar` and `DenseMetric` carry the C enumerators' values, so nothing is compared as a string, and their `Name()` and `Names.TryParse` spell the names the C tables own.
+  Blocking calls take no deferred-table slot, and an arena allocates only when a call writes into it.
+- __Blocking calls stay on the stack.__
+  A blocking call keeps its landing on the stack, fixes its buffers in place without a pinning handle, and answers a view by value; a deferred one allocates its handle and one pinned landing.
+- __Exceptions never cross the native boundary.__
+  A predicate or `rowOf` delegate that throws is captured on the worker thread and rethrown with its own type once the call is final.

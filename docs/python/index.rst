@@ -1,8 +1,3 @@
-==============
-Python SDK
-==============
-
-
 .. mdinclude:: ../../python/README.md
 
 .. toctree::

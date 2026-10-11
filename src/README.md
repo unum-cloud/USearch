@@ -1,200 +1,115 @@
-# USearch for C++
+# The C Interface Implementation
 
-## Installation
+`include/usearch/*.h` declares the C ABI every binding consumes, and this directory implements it over the header-only engine in `include/usearch/`.
+None of it is a public header: the C libraries, the C test and every binding link the objects these files compile into.
 
-To use in a C++ project, copy the `include/usearch/*` headers into your project.
-Alternatively, fetch it with CMake:
+## Files
 
-```cmake
-FetchContent_Declare(usearch GIT_REPOSITORY https://github.com/unum-cloud/USearch.git)
-FetchContent_MakeAvailable(usearch)
-```
+- `types.cpp` answers the library-wide probes of `types.h`: the version, the capability levels compiled and available, an outcome's status, and the spelling of every closed set in both directions.
+- `dense_index.cuh` implements `dense_index.h`: the variant grid over every compiled arm, the handle owning the chosen one, and every exported verb as one visit apiece.
+- `dense_index.cpp` and `dense_index.cu` compile that header twice, for the portable library and for the CUDA one, where the VRAM arms join the variant.
+- `dense_specializations.cuh` spells one arm: the scalar and capability tables, the CPU and GPU classes with the ForkUnion primitives they pair, and the `specialized_index` view every class unit instantiates.
+- `dense/ram_variants_<class>.cpp`, `dense/nvme_variants_<class>.cpp` and `dense/vram_variants_<class>.cu` are the class units, each instantiating `specialized_index` over its class's arms, one per storage dtype the class advances.
+- `sequence.cpp` instantiates the sequence checkpoint verbs over the default index, so they keep compiling until the sequence modality's entry points land.
+  So far `sequence_index.h`, `matrix_index.h` and `geospatial_index.h` are answered only by the brute-force stand-in in `src_stub/`.
 
-The headers instantiate whichever storage type you name.
-Only the precompiled layer behind the C interface follows `USEARCH_DENSE_DTYPES`, compiling the first four of `bf16`, `u1x8`, `i8`, `e4m3`, `f16`, `u8`, `e5m2`, `i4x2`, `u4x2`, `e3m2` and `e2m3` unless you set it before fetching:
+## From a Verb to an Engine Template
 
-```cmake
-set(USEARCH_DENSE_DTYPES 11)
-FetchContent_MakeAvailable(usearch)
-```
-
-## Quickstart
-
-Once included, the high-level C++11 interface is as simple as it gets: `reserve()`, `add()`, `search()`, `size()`, `capacity()`, `save()`, `load()`, `view()`.
-This covers 90% of use cases.
+Every exported verb takes one argument structure and runs the same three steps:
 
 ```cpp
-#include <usearch/dense/ram_index.hpp>
-
-using namespace unum::usearch;
-
-int main(int argc, char **argv) {
-    metric_punned_t metric(3, metric_kind_t::l2sq_k, scalar_kind_t::f32_k);
-    
-    // If you plan to store more than 4 Billion entries - use `index_dense_big_t`.
-    // Or directly instantiate the template variant you need - `index_dense_gt<vector_key_t, internal_id_t>`.
-    index_dense_t index = index_dense_t::make(metric);
-    float vec[3] = {0.1, 0.3, 0.2};
-    
-    index.reserve(10); // Pre-allocate memory for 10 vectors
-    index.add(42, &vec[0]); // Pass a key and a vector
-    auto results = index.search(&vec[0], 5); // Pass a query and limit number of results
-    
-    for (std::size_t i = 0; i != results.size(); ++i)
-        // You can access the following properties of every match:
-        // results[i].element.key, results[i].element.vector, results[i].distance;
-        std::printf("Found matching key: %zu", results[i].member.key);
-    return 0;
+USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
+    if (submitted<usearch_dense_search>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    // ... validate the shapes, claim the arena, carve the outputs
+    std::visit([&]<typename variant_type_>(variant_type_& variant) noexcept { /* specialized_index {variant} */ },
+               arguments->index->variants);
 }
 ```
 
-Here we:
+- `submitted<verb>` decides whether the call runs now or waits in the executor's deferred table, as described under [Deferred Calls](#deferred-calls).
+- `call_outcome_t` marks the outcome pending, collects every step's status privately, and on unwinding releases the arena before the one final store.
+  A path that forgot to report finishes `usearch_status_internal_k` rather than hanging its waiters.
+- `std::visit` over `usearch_dense_index_handle_t::variants` reaches the arm, and `specialized_index {variant}` forwards to the engine's multi-shard templates from `include/usearch/dense/`.
 
-- define a metric of kind [`metric_kind_t::l2sq_k`](https://unum-cloud.github.io/USearch/cpp/reference.html#_CPPv413metric_kind_t),
-- to be applied to [`scalar_kind_t::f32_k`](https://unum-cloud.github.io/USearch/cpp/reference.html#_CPPv413scalar_kind_t) floating-point vectors,
-- instantiate an [`index_dense_t`](https://unum-cloud.github.io/USearch/cpp/reference.html#_CPPv4I00EN4unum7usearch14index_dense_gtE) index.
+The arms are aliases over those templates, keyed by the storage dtype and the class:
 
-The `add` is thread-safe for concurrent index construction.
-It also has an overload for different vector types, casting them under the hood.
-The same applies to the `search`, `get`, `cluster`, and `distance_between` functions.
+- `ram_index<dtype, cpu_class>` → `dense_ram_indexes<uuid_t, dtype, numkong_capabilities_of(cpu_class), waiter_of<cpu_class>, ...>`, with the class's atomic reference and cache hints last.
+- `nvme_index<dtype, cpu_class>` → `dense_nvme_indexes<uuid_t, dtype, numkong_capabilities_of(cpu_class)>`.
+- `vram_index<dtype, gpu_class>` → the class vendor's `dense_vram_<vendor>_indexes<uuid_t, dtype, numkong_capabilities_of(gpu_class)>`.
 
-```cpp
-double vec_double[3] = {0.1, 0.3, 0.2};
-_Float16 vec_half[3] = {0.1, 0.3, 0.2};
-index.add(43, {&vec_double[0], 3});
-index.add(44, {&vec_half[0], 3});
-```
+An arm's executor type is its residency, so `is_ram_index`, `is_nvme_index` and `is_vram_index` read it rather than a second tag that could disagree.
+The core verbs land on `specialized_index` members of the same names, `count`, `get`, `reserve`, `clear`, `refine`, `health`, `search`, `multiply`, `maxsim`, `attend`, `save` and `load`.
+`insert` becomes `add`, one plan with a step per chunk that publishes every row at once.
+Rows whose scalar differs from the stored one cast through NumKong into a staged plane, 4096 rows at a time, while matching rows reach the arm in place.
+Progress callbacks tick once per such chunk, and scores staged at the engine's width widen to the ABI's `double` as they land in the arena.
 
-## Serialization
+## Dispatch over Capability Kits
 
-```cpp
-index.save("index.usearch");
-index.load("index.usearch"); // Copying from disk
-index.view("index.usearch"); // Memory-mapping from disk
-```
+`init_ram`, `init_vram`, `load_*` and `view_nvme` lower the runtime geometry onto one arm:
 
-## Multi-Threading
+1. `with_cell` maps the quantization onto a NumKong dtype.
+   A dtype the build's `USEARCH_DENSE_DTYPES` left out answers `usearch_status_unsupported_k`.
+2. `with_metric` maps the metric onto a kernel kind: the numeric dtypes speak inner, angular and euclidean, while the bit-packed `u1x8` speaks inner, hamming and jaccard.
+3. `make_index` picks the class for the residency:
+   - RAM descends a ladder of CPU classes newest first, taking the first rung whose NumKong and ForkUnion capabilities the machine reports and ending on the unconditional serial floor.
+     On x86 it reads `intel_diamond` → `intel_granite` → `intel_sapphire` → `amd_genoa` → `intel_icelake` → `intel_skylake` → `intel_sierra` → `intel_haswell`, on Arm `nvidia_vera` → `apple_m4` → `aws_g5` → `apple_m2` → `aws_g2`, then `alibaba_c930` on RISC-V and `wasm64_extended` → `wasm32_v128` on WebAssembly.
+   - NVMe walks the same classes, WebAssembly aside, and compares only kits, since a storage walk carries no waiter or atomic reference.
+   - VRAM reads the named USearch ordinals off the process device listing and takes the class every device shares, `nvidia-ampere` through `apple-metal10`; mixed vendors refuse with `config_mismatch_k`, mixed generations with `device_k`.
 
-Most AI, HPC, or Big Data packages use some form of a thread pool.
-Instead of spawning additional threads within USearch, we focus on the thread safety of `add()` function, simplifying resource management.
+A CPU class is its parent plus a delta.
+`numkong_capabilities_of` lowers it onto NumKong's cumulative compute mask, `parent_class_of` names the rung it degrades to, and `waiter_for_cpu_class`, `atomic_ref_for_cpu_class` and `cache_hints_for_cpu_class` pick its ForkUnion primitives.
+A rung exists only where it advances past its parent: `rung_advances` compares the picked 4-way and tiles kits and the ForkUnion masks at compile time, and a `static_assert` fails the build while the variant still lists an arm that stopped advancing.
+The handle's capability string names the picked kit once, at construction, which is what `usearch_dense_describe` reports.
 
-```cpp
-#pragma omp parallel for
-    for (std::size_t i = 0; i < n; ++i)
-        native.add(key, span_t{vector, dims});
-```
+## Compilation Units
 
-During initialization, we allocate enough temporary memory for all the cores on the machine.
-On the call, the user can supply the identifier of the current thread, making this library easy to integrate with OpenMP and similar tools.
-Here is how parallel indexing may look like, when dealing with the low-level engine:
+The dispatch unit visits every arm yet compiles at the baseline instruction set.
+`extern template struct specialized_index<...>` declarations keep every arm's body out of it, and each class unit compiles its arms with the class's own flags.
 
-```cpp
-std::size_t executor_threads = std::thread::hardware_concurrency() * 4;
-executor_default_t executor(executor_threads);
+- `usearch_dense_ram_variants` collects the CPU class units.
+  `src/CMakeLists.txt` restates the lineage row for row: `usearch_dense_ram_variant(<class> OVER <parent> <kits>...)` unions the parent's flags with those of every delta kit that compiled, and the unit exists only when its parent does and some delta compiled.
+- `usearch_dense_nvme_variants` reuses those flags for the classes whose kits a storage walk tells apart, so `aws_g5`, `alibaba_c930` and the WebAssembly classes take none.
+- `usearch_dense_vram_variants_<class>` compiles one GPU class for its own architecture alone: `sm_80` with its PTX, `sm_89`, `sm_90a`, `sm_100f` and `sm_120f`.
+- `usearch_dense_vram_variants_apple_metal<N>` compiles one Metal family as plain C++, its kernels compiled from embedded source at first use.
+- `usearch_punned` - `types.cpp`, `sequence.cpp` & the dense dispatch unit, `dense_index.cpp`, or `dense_index.cu` under `USEARCH_BUILD_CUDA`.
 
-index.reserve(index_limits_t {vectors.size(), executor.size()});
-executor.fixed(vectors.size(), [&](std::size_t thread, std::size_t task) {
-    index.add(task, vectors[task + 3].data(), index_update_config_t { .thread = thread });
-});
-```
+`USEARCH_PUNNED_LIBRARIES` and `USEARCH_PUNNED_OBJECTS` hand all of them to `usearch_shared`, `usearch_static` and `usearch_test_c`, and the static archive carries the yyjson, NumKong and ForkUnion objects too, so a binding links one library.
+`USEARCH_DENSE_DTYPES` trims every unit's arms from the front of `bf16`, `u1`, `i8`, `e4m3`, `f16`, `u8`, `e5m2`, `i4`, `u4`, `e3m2` and `e2m3`, keeping four by default.
 
-Aside from the `executor_default_t`, you can take advantage of one of the provided "executors" to parallelize the search:
+## Executors & Arenas
 
-- `executor_openmp_t`, that would use OpenMP under the hood.
-- `executor_stl_t`, that will spawn `std::thread` instances.
-- `dummy_executor_t`, that will run everything sequentially.
+`usearch_executor_handle_t` holds the topology a RAM or NVMe executor was spawned over, its deferred table, and one residency's executor.
+The executor is a `std::variant` of `forkunion_executor_t`, `nvme_executor_t` and, per GPU vendor built, `cuda_executor_t`, `hip_executor_t` or `metal_executor_t`, whose alternative is the kind tag.
+A verb whose executor kind does not match the handle's residency answers `usearch_status_device_k`.
+A null executor builds one for that call alone: the calling thread on RAM, one thread of blocking reads on NVMe, and the default streams of the index's devices on VRAM.
 
-## Error Handling
+`usearch_arena_handle_t` owns a growing arena of host pages and, under CUDA, one of device memory on the first device of the VRAM executor it was created with.
+`claim_arena` holds it for one call and rewinds it, freeing the previous call's outputs, after refusing:
 
-Unlike most open-source C++ libraries USearch doesn't use exceptions, as they often lead to corrupted states in concurrent data-structures.
-They are also not suited for systems that always operate on the edge of available memory, and would end up raising `std::bad_alloc` exceptions all the time.
-For that reason, most operations return a "result" object, that can be checked for success or failure.
+- a null arena, with `usearch_status_invalid_argument_k`;
+- an arena on another device than the call computes on, with `usearch_status_device_k`;
+- an arena another call holds, with `usearch_status_contended_k`;
+- an input that lies inside the arena, with `usearch_status_invalid_argument_k`.
 
-```cpp
-bool success;
-success = (bool)index.try_reserve(10); // Recommended over `reserve()`
-success = (bool)index.add(42, &vec[0]); // Explicitly convert `add_result_t`
-success = (bool)index.search(&vec[0], 5); // Explicitly convert `search_result_t`
-```
+`carve` then hands out the call's outputs, and `call_outcome_t` lets go of the arena just before the final store, so a waiter that sees the status may reuse it at once.
 
-## Clustering
+## Deferred Calls
 
-Aside from basic Create-Read-Update-Delete (CRUD) operations and search, USearch also supports clustering.
-Once the index is constructed, you can either:
+A call naming an executor and `usearch_completion_deferred_k` runs nothing at submission:
 
-- Identify a cluster to which any external vector belongs, once mapped onto the index.
-- Split the entire index into a set of clusters, each with its own centroid.
+- `submitted<verb>` copies its argument structure by value into a free slot of the executor's table, tickets it, holds its arena, and returns with the outcome pending.
+- The table is sized when the executor is created, 64 slots unless `deferred_limit` names another count, so a submission never allocates and a full table finishes the call `usearch_status_contended_k`.
+- A held call runs on whichever thread first needs it, oldest ticket first: `usearch_outcome_wait` on its outcome, `usearch_executor_drain`, a blocking call on the same executor, or freeing any handle it names.
+  Every call held before it on that executor runs first, so the executor keeps its submission order.
+- `deferred_registry` lists every executor under one mutex and condition variable, which is how a wait or a free finds the calls naming its handle without asking each executor.
+- The runner passes the copied arguments back into their verb through the thread-local `resuming_call`, which runs them in place rather than holding them again.
 
-For the first, the interface accepts a vector and a "clustering level", which is essentially the index of the HNSW graph layer, in which to search.
-If you pass zero, the traversal will happen in every level except the bottom one.
-Otherwise, the search will be limited to the specified level.
+## NVMe
 
-```cpp
-some_scalar_t vector[3] = {0.1, 0.3, 0.2};
-cluster_result_t result = index.cluster(&vector, index.max_level() / 2);
-match_t cluster = result.cluster;
-member_cref_t member = cluster.member;
-distance_t distance = cluster.distance;
-```
-
-If you wish to split the whole structure into clusters, you must provide an iterator over a range of vectors, that will be processed in parallel using the previously described function.
-Unlike the previous function, you don't have to manually specify the level, as the algorithm will pick the best one for you, depending on the number of clusters you want to highlight.
-Aside from that auto-tuning, this function will regroup some of the clusters, if they are too small, and return the final number of clusters.
-
-```cpp
-std::size_t queries_count = queries_end - queries_begin;
-index_dense_clustering_config_t config;
-config.min_clusters = 1000;
-config.max_clusters = 2000;
-config.mode = index_dense_clustering_config_t::merge_smallest_k;
-
-// Outputs:
-vector_key_t cluster_centroids_keys[queries_count];
-distance_t distances_to_cluster_centroids[queries_count];
-executor_default_t thread_pool;
-dummy_progress_t progress_bar;
-
-clustering_result_t result = cluster(
-        queries_begin, queries_end,
-        config,
-        &cluster_centroids_keys, &distances_to_cluster_centroids,
-        thread_pool, progress_bar);
-```
-
-This approach requires basic understanding of templates meta-programming to implement the `queries_begin` and `queries_end` smart-iterators.
-On the bright side, it allows iteratively deepening into a specific cluster.
-
-As in many other bulk-processing APIs, the `executor` and `progress` are optional.
-
-## User-Defined Metrics
-
-In its high-level interface, USearch supports a variety of metrics, including the most popular ones:
-
-- `metric_cos_gt<scalar_t>` for "Cosine" or "Angular" distance.
-- `metric_ip_gt<scalar_t>` for "Inner Product" or "Dot Product" distance with normalized vectors.
-- `metric_l2sq_gt<scalar_t>` for the squared "L2" or "Euclidean" distance.
-- `metric_jaccard_gt<scalar_t>` for "Jaccard" distance between two ordered sets of unique elements.
-- `metric_hamming_gt<scalar_t>` for "Hamming" distance, as the number of shared bits in hashes.
-- `metric_tanimoto_gt<scalar_t>` for "Tanimoto" coefficient for bit-strings.
-- `metric_sorensen_gt<scalar_t>` for "Dice-Sorensen" coefficient for bit-strings.
-- `metric_pearson_gt<scalar_t>` for "Pearson" correlation between probability distributions.
-- `metric_haversine_gt<scalar_t>` for "Haversine" or "Great Circle" distance between coordinates used in GIS applications.
-- `metric_divergence_gt<scalar_t>` for the "Jensen Shannon" similarity between probability distributions.
-
-In reality, for most common types, one of the [NumKong](https://github.com/ashvardanian/numkong) backends will be triggered, providing hardware-acceleration for most common CPUs.
-
-If you need a different metric, you can implement it yourself and wrap it into a `metric_punned_t`, which is our alternative to the `std::function`.
-Unlike the `std::function`, it is a trivial type, which is important for performance.
-
-## Advanced Interface
-
-If you are proficient in C++ and ready to get your hands dirty, you can use the low-level interface.
-
-```cpp
-template <typename distance_at = default_distance_t,              // `float`
-          typename key_at = default_key_t,                        // `int64_t`, `uuid_t`
-          typename compressed_slot_at = default_slot_t,           // `uint32_t`, `uint40_t`
-          typename dynamic_allocator_at = std::allocator<byte_t>, //
-          typename tape_allocator_at = dynamic_allocator_at>      //
-class index_gt;
-```
+`usearch_dense_view_nvme` reads the checkpoint's header, adopts its geometry and metric, and opens every part in place, optionally on one device or directory per part.
+The result is a read-only `dense_nvme_indexes` view, so every mutating verb answers `usearch_status_read_only_k`.
+`usearch_executor_for_nvme` spawns threads that each open an I/O engine keeping 64 reads in flight.
+Kernel paths take the first engine the host admits, from `io_uring` through Linux AIO to blocking reads.
+Transport identifiers such as `trtype:PCIe` need an SPDK build, `USEARCH_WITH_LINUX_SPDK`, with hugepages for PCIe controllers alone, and one executor never mixes them with kernel paths.
+The NVMe class units score with the same kits as the RAM ones, since the transport is the executor's runtime choice rather than a template parameter.

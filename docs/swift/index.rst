@@ -1,6 +1,6 @@
-==============
-Swift SDK
-==============
-
-
 .. mdinclude:: ../../swift/README.md
+
+.. toctree::
+   :hidden:
+
+   reference

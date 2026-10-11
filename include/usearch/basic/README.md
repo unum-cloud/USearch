@@ -46,7 +46,7 @@ struct manhattan_metric_t {
 };
 ```
 
-## Construction and Search
+## Construction & Search
 
 An index is a template over the payload, the key, the node ID width and the distance type, and it allocates nothing until `reserve` freezes its capacity.
 Each thread brings its own metric instance and its own traversal context, which holds the walk's scratch and receives the matches:
