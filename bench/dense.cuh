@@ -18,10 +18,6 @@
 #include <cstdlib> // `std::exit`
 #include <cstring> // `std::memcpy` - the checkpoint runs
 
-#if !defined(_WIN32)
-#include <unistd.h> // `isatty`
-#endif
-
 #include <algorithm>   // `std::ranges::find`, `std::copy_n`, `std::max`
 #include <charconv>    // `std::from_chars` - the `--memory-domain` ordinal
 #include <ranges>      // `std::views::iota`, `std::views::filter`, `std::views::transform`
@@ -41,6 +37,10 @@
 #include <stringzilla/stringzilla.hpp>
 
 #include "usearch/utilities/safegraphs_format.hpp"
+
+#if !USEARCH_OS_WINDOWS_
+#include <unistd.h> // `isatty`
+#endif
 
 #include "arguments.hpp" // `flag_t`, `count_t`, `counts_t`, `switch_t`, `parse_or_exit`
 #include "bench.hpp"
@@ -355,19 +355,6 @@ struct settings_t {
     /** Queries the exact oracle judges: an indexer search without `--neighbors`, and attention. */
     count_t oracle_queries {.value = 16};
 
-    /** The file or block device the NVMe binary writes the graph to and searches from; absent lands it in the
-     *  checkpoints directory. */
-    std::string_view payload_path;
-
-    /** The NVMe binary's I/O engine as named: `posix`, or on Linux `aio`, `uring`, `uring-fixed` or `uring-polled`. */
-    std::string_view engine_name;
-
-    /** Whether the NVMe binary reads around the page cache: `O_DIRECT` on Linux, `F_NOCACHE` on macOS. */
-    switch_t direct = switch_t::absent_k;
-
-    /** Traversals every NVMe searching thread keeps in flight. */
-    count_t slots {.value = 64};
-
     /** Whether stdout is a terminal, probed once, so progress redraws one line instead of printing deciles. */
     bool terminal = false;
 };
@@ -470,7 +457,7 @@ inline void resolve_common_names(settings_t& settings) {
         if (named == metric_names.end()) exit_unnamed("--metric", settings.metric_name, metric_names);
         settings.kernel = metrics_k[named - metric_names.begin()];
     }
-#if defined(_WIN32)
+#if USEARCH_OS_WINDOWS_
     settings.terminal = false;
 #else
     settings.terminal = isatty(fileno(stdout)) != 0;
@@ -558,12 +545,6 @@ inline void print(settings_t const& settings) {
         fmt::println("- Heads: {}", settings.heads_path);
         fmt::println("- Weights: {}", settings.weights_path);
         fmt::println("- Oracle queries: {}", settings.oracle_queries.value);
-    }
-    if (!settings.payload_path.empty() || !settings.engine_name.empty()) {
-        fmt::println("- Payload: {}", settings.payload_path.empty() ? "the checkpoints dir" : settings.payload_path);
-        fmt::println("- Engine: {}", settings.engine_name.empty() ? "posix" : settings.engine_name);
-        fmt::println("- Direct: {}", settings.direct == switch_t::present_k);
-        fmt::println("- Slots: {}", settings.slots.value);
     }
 }
 

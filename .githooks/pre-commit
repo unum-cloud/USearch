@@ -1074,6 +1074,57 @@ check_include_groups() {
         "            then \"$project_include_prefix/...\", each group separated by a blank line:"
 }
 
+# Preprocessor conditionals a reader can match by eye: two levels at most, not counting the include guard,
+# no `#elif` chain inside another chain, and an `#endif` that closes a pair names its condition, as in
+# `#endif // !defined(USEARCH_DEFAULT_ALIGNMENT)`. A conditional is judged when any of its directives, or
+# those of a conditional inside it, is an added line.
+check_preprocessor_nesting() {
+    local tangled
+    tangled=$(awk '
+        NR == FNR { added[$1 + 0]; next }
+        pending != "" && NF {
+            if ($1 == "#define" && $2 == pending) guarded = 1
+            pending = ""
+        }
+        !/^[[:space:]]*#/ { next }
+        {
+            directive = $0
+            sub(/^[[:space:]]*#[[:space:]]*/, "", directive)
+            keyword = directive; sub(/[^a-z].*$/, "", keyword)
+        }
+        keyword ~ /^if(def|ndef)?$/ {
+            ++level
+            chain[level] = holds[level] = inner_chain[level] = 0
+            touched[level] = (FNR in added)
+            if (level == 1 && keyword == "ifndef" && !opened_any) { pending = directive; sub(/^ifndef[[:space:]]+/, "", pending); sub(/[[:space:]].*$/, "", pending) }
+            opened_any = 1
+            if (level > 1) holds[level - 1] = 1
+            if (level - guarded > 2 && touched[level])
+                printf "line %d: opens a third conditional level - fold two conditions into one line\n", FNR
+            next
+        }
+        keyword == "elif" && level { chain[level] = 1; if (FNR in added) touched[level] = 1; next }
+        keyword == "else" && level { if (FNR in added) touched[level] = 1; next }
+        keyword == "endif" && level {
+            if (FNR in added) touched[level] = 1
+            is_guard = (level == 1 && guarded)
+            if (!is_guard && touched[level] && chain[level] && inner_chain[level])
+                printf "line %d: closes an #elif chain that holds another #elif chain\n", FNR
+            if (!is_guard && touched[level] && holds[level] && $0 !~ /\/\/[[:space:]]*[^[:space:]]/)
+                printf "line %d: closes a conditional that holds another - name it: #endif // <condition>\n", FNR
+            if (level > 1) {
+                if (chain[level]) inner_chain[level - 1] = 1
+                if (touched[level]) touched[level - 1] = 1
+            }
+            if (is_guard) guarded = 0
+            --level
+            next
+        }' "$staged_lines_path" "$staged_blob")
+    [ -z "$tangled" ] || fail "$tangled" \
+        "$file tangles its preprocessor conditionals - two levels at most, no #elif chain inside another," \
+        "            and an #endif closing a nested pair names its condition:"
+}
+
 # endregion C++ Surface and Containers
 
 # region Concurrency and Atomics
@@ -1379,6 +1430,7 @@ judge_path() {
         check_docblock_brackets
         check_bare_member_docs
         check_include_groups
+        check_preprocessor_nesting
         check_hand_ceils
         check_trailing_returns
         check_iterator_laundering

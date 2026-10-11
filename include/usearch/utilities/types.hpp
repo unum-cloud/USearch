@@ -21,17 +21,73 @@
 
 #include "usearch/types.h" // `usearch_status_t`, so the C++ mirror cannot drift from the ABI
 
+/* Inferring target OS: Windows, macOS, Linux, FreeBSD, or WASI */
+#if defined(WIN32) || defined(_WIN32) || defined(__WIN32__) || defined(__NT__)
+#define USEARCH_OS_WINDOWS_ 1
+#else
+#define USEARCH_OS_WINDOWS_ 0
+#endif
+#if defined(__APPLE__) && defined(__MACH__)
+#define USEARCH_OS_APPLE_ 1
+#else
+#define USEARCH_OS_APPLE_ 0
+#endif
+#if defined(__linux__)
+#define USEARCH_OS_LINUX_ 1
+#else
+#define USEARCH_OS_LINUX_ 0
+#endif
+#if defined(__FreeBSD__)
+#define USEARCH_OS_FREEBSD_ 1
+#else
+#define USEARCH_OS_FREEBSD_ 0
+#endif
+#if defined(__wasi__)
+#define USEARCH_OS_WASI_ 1
+#else
+#define USEARCH_OS_WASI_ 0
+#endif
+#define USEARCH_OS_POSIX_ (USEARCH_OS_LINUX_ || USEARCH_OS_APPLE_ || USEARCH_OS_FREEBSD_)
+
+/*  Compiling for x86: USEARCH_ARCH_X8664_
+ *  @see Intel predefined macros: https://www.intel.com/content/www/us/en/docs/dpcpp-cpp-compiler/developer-guide-reference/2024-2/additional-predefined-macros.html */
+#if !defined(USEARCH_ARCH_X8664_)
+#if defined(__x86_64__) || defined(_M_X64)
+#define USEARCH_ARCH_X8664_ 1
+#else
+#define USEARCH_ARCH_X8664_ 0
+#endif // defined(__x86_64__) || defined(_M_X64)
+#endif // !defined(USEARCH_ARCH_X8664_)
+
+/* Compiling for IBM Z: USEARCH_ARCH_S390X_ */
+#if !defined(USEARCH_ARCH_S390X_)
+#if defined(__s390x__)
+#define USEARCH_ARCH_S390X_ 1
+#else
+#define USEARCH_ARCH_S390X_ 0
+#endif // defined(__s390x__)
+#endif // !defined(USEARCH_ARCH_S390X_)
+
+/* Compiling for WASM: USEARCH_ARCH_WASM_ */
+#if !defined(USEARCH_ARCH_WASM_)
+#if defined(__wasm__) || defined(__EMSCRIPTEN__)
+#define USEARCH_ARCH_WASM_ 1
+#else
+#define USEARCH_ARCH_WASM_ 0
+#endif // defined(__wasm__) || defined(__EMSCRIPTEN__)
+#endif // !defined(USEARCH_ARCH_WASM_)
+
 /*  The `alignas` width that keeps two threads' words off one cache line, picked from the target as
  *  ForkUnion picks `FORKUNION_DEFAULT_ALIGNMENT`; `ram_device.hpp` asserts the two agree. */
 #if !defined(USEARCH_DEFAULT_ALIGNMENT)
-#if defined(__s390x__)
+#if USEARCH_ARCH_S390X_
 #define USEARCH_DEFAULT_ALIGNMENT 256
-#elif defined(__wasm__) || defined(__EMSCRIPTEN__)
+#elif USEARCH_ARCH_WASM_
 #define USEARCH_DEFAULT_ALIGNMENT 64
 #else
 #define USEARCH_DEFAULT_ALIGNMENT 128
 #endif
-#endif
+#endif // !defined(USEARCH_DEFAULT_ALIGNMENT)
 
 /** Pre-announced sister-library namespaces, so the project-wide shortcuts below are
  *  legal before any of their headers is included. */

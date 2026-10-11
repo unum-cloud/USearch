@@ -32,7 +32,7 @@
 #if __has_feature(thread_sanitizer)
 #define USEARCH_SANITIZE_THREAD 1
 #endif
-#endif
+#endif // defined(__SANITIZE_THREAD__) || defined(__has_feature)
 #if !defined(USEARCH_SANITIZE_THREAD)
 #define USEARCH_SANITIZE_THREAD 0
 #endif
@@ -43,7 +43,7 @@
 #if __has_feature(address_sanitizer)
 #define USEARCH_SANITIZE_ADDRESS 1
 #endif
-#endif
+#endif // defined(__SANITIZE_ADDRESS__) || defined(__has_feature)
 #if !defined(USEARCH_SANITIZE_ADDRESS)
 #define USEARCH_SANITIZE_ADDRESS 0
 #endif

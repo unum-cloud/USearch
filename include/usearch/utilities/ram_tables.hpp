@@ -25,12 +25,12 @@
 #include <type_traits> // `std::is_integral`, `std::is_trivially_copyable_v`
 #include <utility>     // `std::swap`, `std::move`
 
-#if defined(__x86_64__) || defined(_M_X64)
+#include "usearch/utilities/ram_buffers.hpp" // `exchange`, `ceil2`
+#include "usearch/utilities/types.hpp"       // `status_t`, `expected`, `USEARCH_ARCH_X8664_`
+
+#if USEARCH_ARCH_X8664_
 #include <immintrin.h> // `_mm512_cmpeq_epi32_mask` - the sixteen-slot group scan
 #endif
-
-#include "usearch/utilities/ram_buffers.hpp" // `exchange`, `ceil2`
-#include "usearch/utilities/types.hpp"       // `status_t`, `expected`
 
 namespace unum {
 namespace usearch {
@@ -79,7 +79,7 @@ struct serial_visits_hash_set_kit_t {
  *  alone decides whether a class takes it - an unselected layer never needs a body. */
 struct u32_skylake_visits_hash_set_kit_t;
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if USEARCH_ARCH_X8664_
 #if defined(__clang__)
 #pragma clang attribute push(__attribute__((target("avx512f"))), apply_to = function)
 #elif defined(__GNUC__)
@@ -122,7 +122,7 @@ struct u32_skylake_visits_hash_set_kit_t {
 #elif defined(__GNUC__)
 #pragma GCC pop_options
 #endif
-#endif // defined(__x86_64__) || defined(_M_X64)
+#endif // USEARCH_ARCH_X8664_
 
 /**
  *  @brief Minimalistic open-addressing hash-set, used to track visited nodes during graph

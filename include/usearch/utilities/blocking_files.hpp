@@ -28,21 +28,21 @@
 #include <string_view> // `std::string_view`
 #include <utility>     // `std::exchange`
 
-#if defined(_WIN32)
-#if !defined(NOMINMAX)
+#include "usearch/utilities/types.hpp"
+
+#if USEARCH_OS_WINDOWS_ && !defined(NOMINMAX)
 #define NOMINMAX
 #endif
+#if USEARCH_OS_WINDOWS_
 #include <windows.h> // `CreateFileA`, `CreateFileMappingA`, `MapViewOfFile`
 #else
 #include <fcntl.h>    // `open`
 #include <sys/stat.h> // `fstat`
 #include <unistd.h>   // `pread`, `pwrite`, `ftruncate`, `close`
-#if !defined(__wasi__)
+#endif
+#if !USEARCH_OS_WINDOWS_ && !USEARCH_OS_WASI_
 #include <sys/mman.h> // `mmap`, `munmap`, `msync`
 #endif
-#endif
-
-#include "usearch/utilities/types.hpp"
 
 namespace unum {
 namespace usearch {
@@ -55,7 +55,7 @@ enum class file_mode_t { read_k, write_k };
 /** An owned file descriptor with positional verbs only - no cursor, so any thread reads or
  *  writes any offset; every verb answers @c status_t. */
 struct seekable_file_t {
-#if defined(_WIN32)
+#if USEARCH_OS_WINDOWS_
 
     /** What the platform calls an open file. */
     using descriptor_t = HANDLE;
@@ -128,7 +128,7 @@ struct seekable_file_t {
     descriptor_t descriptor_ = closed_k;
 };
 
-#if defined(_WIN32)
+#if USEARCH_OS_WINDOWS_
 
 inline seekable_file_t::descriptor_t seekable_file_t::open_(char const* path, file_mode_t mode) noexcept {
     if (mode == file_mode_t::read_k)
@@ -319,10 +319,10 @@ class mapped_file_t {
         std::swap(data_, other.data_);
         std::swap(bytes_, other.bytes_);
         std::swap(mode_, other.mode_);
-#if defined(_WIN32)
+#if USEARCH_OS_WINDOWS_
         std::swap(file_handle_, other.file_handle_);
         std::swap(mapping_handle_, other.mapping_handle_);
-#elif defined(__wasi__)
+#elif USEARCH_OS_WASI_
         std::swap(file_, other.file_);
 #else
         std::swap(descriptor_, other.descriptor_);
@@ -358,17 +358,17 @@ class mapped_file_t {
     byte_t* data_ = nullptr;
     std::size_t bytes_ = 0;
     file_mode_t mode_ = file_mode_t::read_k;
-#if defined(_WIN32)
+#if USEARCH_OS_WINDOWS_
     HANDLE file_handle_ = INVALID_HANDLE_VALUE;
     HANDLE mapping_handle_ = nullptr;
-#elif defined(__wasi__)
+#elif USEARCH_OS_WASI_
     seekable_file_t file_;
 #else
     int descriptor_ = -1;
 #endif
 };
 
-#if defined(_WIN32)
+#if USEARCH_OS_WINDOWS_
 
 inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexcept {
     mapped_file_t mapping;
@@ -419,7 +419,7 @@ inline void mapped_file_t::unmap_() noexcept {
     file_handle_ = INVALID_HANDLE_VALUE;
 }
 
-#elif defined(__wasi__)
+#elif USEARCH_OS_WASI_
 
 inline expected<mapped_file_t> mapped_file_t::read(std::string_view path) noexcept {
     mapped_file_t mapping;

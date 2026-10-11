@@ -111,18 +111,16 @@ extern "C" {
 /** Marks exported functions: exported while building the shared library, imported when consuming
  *  it on Windows, and of default visibility on ELF and Mach-O. Define it to override. */
 #ifndef USEARCH_EXPORT
-#if defined(_WIN32) || defined(__CYGWIN__)
-#if defined(USEARCH_EXPORTING)
+#if (defined(_WIN32) || defined(__CYGWIN__)) && defined(USEARCH_EXPORTING)
 #define USEARCH_EXPORT __declspec(dllexport)
-#else
+#elif defined(_WIN32) || defined(__CYGWIN__)
 #define USEARCH_EXPORT __declspec(dllimport)
-#endif
 #elif defined(__GNUC__) || defined(__clang__)
 #define USEARCH_EXPORT __attribute__((visibility("default")))
 #else
 #define USEARCH_EXPORT
 #endif
-#endif
+#endif // !defined(USEARCH_EXPORT)
 
 /** The library's version, which the release tooling rewrites in place. */
 #define USEARCH_VERSION_MAJOR 3
