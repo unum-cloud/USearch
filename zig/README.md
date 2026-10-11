@@ -1,8 +1,9 @@
 # USearch for Zig
 
-The Zig SDK binds the stable C interface with hand-written `extern fn` declarations rather than `@cImport`, so a dependent needs no include path of its own - only the library.
+The Zig SDK binds the stable C interface with hand-written `extern fn` declarations rather than `@cImport`, so a dependent needs no include path of its own, only the library.
 It exposes the dense modality alone, and every verb it binds is one verb of the C interface, named the same way.
-A `comptime` table checks every descriptor's size and field offsets against the layout the ABI fixes, so writing the interface out by hand is checked rather than trusted.
+Every C verb takes one argument structure; this module declares each of them by hand, and a `comptime` table checks their sizes and field offsets against the layout the ABI fixes, so writing the interface out is checked rather than trusted.
+The receiver chooses whether a call blocks on the calling thread, blocks on an executor, or is submitted there and waited on later.
 
 ## Installation
 
@@ -21,63 +22,158 @@ No C or C++ is compiled here: the engine is CMake's to build, and this module co
 
 ## Quickstart
 
-Every batch input and output is a strided matrix - a base pointer, a row count, a column count, and a byte stride - so a memory-mapped dataset feeds the index with no reshape and no copy.
-An index owns rows; an `Executor` owns the threads or streams a fanned-out verb runs on, and every batch verb takes one.
+Every batch input is a run of rows given by a base pointer, a row count, a column count, and a byte stride, so a memory-mapped dataset feeds the index with no reshape and no copy.
+An index owns rows; an `Executor` owns the threads or streams a verb runs on; an `Arena` holds every output whose length scales with the call.
 
 ```zig
 const usearch = @import("usearch");
 
-const index = try usearch.DenseIndex.init(&.{
+var index = try usearch.DenseIndex.initRam(.{
     .dimensions = 4,
     .metric = .angular,
     .quantization = .i8,
-});
+}, &.{}); // one shard per NUMA node, or the memory domains you name
 defer index.deinit();
 try index.reserve(1_000);
 
-const executor = try usearch.Executor.forRam(&.{}, 0);
-defer executor.deinit();
-
 const keys = [_]usearch.Key{ .fromInteger(42), .fromInteger(43) };
 const slab = [_]f32{ 0.2, 0.1, 0.2, 0.1, 0.1, 0.2, 0.1, 0.2 };
-_ = try index.add(executor, &keys, try .of(f32, &slab, 4), .{}, null);
+try index.insert(&keys, try .of(f32, &slab, 4), .{});
 
 const query = [_]f32{ 0.2, 0.1, 0.2, 0.1 };
-var found: [10]usearch.Key = undefined;
-var scores: [10]usearch.Distance = undefined;
-var counts: [1]usize = undefined;
-try index.search(executor, try .of(f32, &query, 4), try .of(&found, &scores, &counts), .{}, null);
+var arena = try usearch.Arena.init(null); // host pages, for calls on the calling thread
+defer arena.deinit();
+const matches = try index.search(try .of(f32, &query, 4), 10, &arena, .{}); // up to 10 matches per query
+for ((try matches.row(0)).keys) |key| std.debug.print("{f}\n", .{key});
+
+var executor = try usearch.Executor.forRam(.{});
+defer executor.deinit();
+_ = try index.on(executor).search(try .of(f32, &query, 4), 10, &arena, .{}); // the same verb, on an executor
 ```
 
 One executor serves any number of indexes, and its kind must match the residency their handles were built for.
-Zero threads takes 7/8 of the cores, since full occupancy starves the ordered publication path; `forVram` takes no thread count at all, driving one stream per device from the calling thread.
-
-The scalar type of the input is independent of the stored quantization - the `f32` slab above lands in an `i8` index - so nothing needs converting before insertion.
-`MatrixView.of` reads a packed slab; a dataset whose rows are padded to a wider pitch fills the struct directly, setting `stride_bytes` to the pitch.
-Lengths that cannot be read as a whole number of rows are refused with `Error.ShapeMismatch` rather than asserted, so the check survives `ReleaseFast`.
-
-## Search Allocates Nothing
-
-There is one search verb per form and both write into buffers you own, so a benchmark loop allocates once and never again.
-`MatchesSpan.of` derives the strides and the "k" from the slab lengths, so the space reserved and the count asked for cannot disagree.
+There is a constructor per C one, each taking a config of exactly what its C structure takes, and each ending with a `deferred_limit` sizing its table of deferred calls, where zero takes the default:
 
 ```zig
-var keys = try allocator.alloc(usearch.Key, queries_count * 10);
-var scores = try allocator.alloc(usearch.Distance, queries_count * 10);
-var counts = try allocator.alloc(usize, queries_count);
-var stats: usearch.TraversalStats = .{};
+var sockets = try usearch.Executor.forRam(.{ .memory_domains = &.{ 0, 1 }, .threads = 0, .deferred_limit = 0 });
+var shared = try usearch.Executor.onPool(fork_union_pool, .{ .memory_domains = &.{0} }); // borrows a `fu_pool_t`
+var gpus = try usearch.Executor.forVram(.{ .devices = &.{ 0, 1 }, .streams = null, .scratch_limit = 0 });
+var drives = try usearch.Executor.forNvme(.{ .paths = &.{.of("/mnt/nvme0")}, .threads = 0 });
+```
 
-try index.search(executor, try .of(f32, queries, 768), try .of(keys, scores, counts),
-    .{ .expansion_factor = 128 }, &stats);
+Zero threads takes 7/8 of the cores, since full occupancy starves the ordered publication path; `forVram` takes no thread count at all, driving one stream per device from the calling thread, either its own or one of the CUDA streams you lend.
+`drain(mood)` waits for everything submitted before it, then lets the threads go `.parked` or stay `.spinning` once idle.
+
+The scalar type of the input is independent of the stored quantization, so the `f32` slab above lands in an `i8` index and nothing needs converting before insertion.
+`RowsView.of` reads a packed slab; a dataset whose rows are padded to a wider pitch fills the struct directly, setting `stride` to the pitch; a zero `stride` repeats the first row for every one of them.
+The encodings Zig has no primitive for, `usearch.Scalar.BF16`, `E5M2`, `E4M3`, `E3M2`, `E2M3`, and the packed `I4x2`, `U4x2` and `U1x8`, travel as their raw bits, and a packed kind counts columns in dimensions, so 128 dimensions of `Scalar.U1x8` take sixteen values a row.
+Lengths that cannot be read as a whole number of rows are refused with `Error.ShapeMismatch` rather than asserted, so the check survives `ReleaseFast`.
+The column count travels with the rows, and the engine refuses one that differs from the frozen geometry with the same error.
+
+## Receivers
+
+The receiver chooses where a verb runs and how it completes, and the verb stays the same.
+The index runs it on the calling thread, `index.on(executor)` blocks on an executor after every call submitted there before it, and `index.deferred(executor, &call)` submits it there into a `usearch.Deferred` you hold:
+
+```zig
+const here = try index.search(queries, 10, &arena, .{});               // the calling thread
+const there = try index.on(executor).search(queries, 10, &other, .{}); // blocking, on the executor
+var call: usearch.Deferred(usearch.DenseSearch) = undefined;
+try index.deferred(executor, &call).search(queries, 10, &spare, .{});  // submitted, into `call`
+defer call.deinit();
+```
+
+`DenseIndex.On` and `DenseIndex.DeferredOn(Call)` offer every verb the index does, with the same arguments, the `*Arena` included, because one generic writes each verb once for both; a deferred receiver compiles only the verb its storage holds.
+Constructors address no index yet, so no receiver offers them; the ones the C interface lets fan out take an `executor` in their config, and run on the calling thread without one.
+
+## Deferred Calls
+
+A `Deferred` owns what the library reports into until its call is final, the outcome and any fixed-size result, and borrows the rest, as a blocking call does.
+The handles it names, such as the index, the executor, the arena, a cursor or a stream, need nothing more: freeing one waits for every deferred call naming it.
+The plain memory it reads, such as the rows, the keys, the path, the carry and the handlers' contexts, stays yours, and must outlive the call.
+
+```zig
+var call: usearch.Deferred(usearch.DenseGet) = undefined;
+try index.deferred(executor, &call).get(key, .f32, &arena);
+defer call.deinit();
+if (call.status() == .deferred) {
+    // other work
+}
+const vectors = try call.wait(); // the view a blocking `get` answers, valid until the next call given `arena`
+```
+
+The storage is yours to place, so submitting allocates nothing: a stack slot, a field, or an array of them for a batch of calls in flight.
+The library reports into the storage, so a submitted `Deferred` stays put until `deinit`; a heap slot comes from `allocator.create` and is destroyed after `deinit`.
+Zig has no async keyword left to lean on, so a deferred call is waited on and nothing else: `status` reads the outcome with acquire ordering and never blocks, and `wait` blocks in the library until the call is final and answers its result or error, the same one however often it is asked.
+`deinit` waits the same way, and the slot can then hold another call.
+A `Deferred` has one owner: `wait` and `deinit` never run on two threads at once, while `status` reads from any.
+`message` answers the static detail of the final status, empty until the call is final and on success.
+A submission finding the executor's deferred table full finishes at once with `Error.Contended`.
+Calls depending on each other are ordered by waiting on the first before submitting the second.
+A shape only the binding can check, like a key run longer than its rows, is refused before anything is submitted, so the submitting call itself fails and the slot holds nothing to `deinit`.
+
+## Arenas
+
+Every output whose length only the call knows, such as matches, rows, products, monoliths and cursor or stream batches, lands in an `Arena` you pass, and the verb answers a view over it without copying.
+`Arena.init(executor)` places it where that executor computes, decided once, and `Arena.init(null)` makes host pages for the calling thread.
+Each call rewinds its arena, so the previous call's views die and a steady loop allocates once.
+To keep a result past the next call, or to read one while making the next, pass that call another arena.
+An arena serves one call at a time, so each deferred call needs its own.
+Views find their arena by address, so it must not move while they live, and a stale view answers `Error.Uninitialized`; slices an accessor already returned are not checked again.
+An arena from a VRAM executor holds device memory, which host accessors refuse with `Error.Device`.
+
+```zig
+var arena = try usearch.Arena.init(executor); // `Arena.init(null)` is host pages for the calling thread
+defer arena.deinit();
+for (batches) |batch| {
+    const matches = try index.on(executor).search(batch, 10, &arena, .{}); // rewinds: the last batch's matches are gone
+    total += (try matches.row(0)).scores[0];
+}
+
+var found = try usearch.Arena.init(null); // two live results, two arenas
+defer found.deinit();
+var rows = try usearch.Arena.init(null);
+defer rows.deinit();
+const nearest = try index.search(query, 10, &found, .{});
+for ((try nearest.row(0)).keys) |key| rerank(key, try index.get(key, .f32, &rows));
+
+var calls: [shards.len]usearch.Deferred(usearch.DenseSearch) = undefined;
+for (&calls, shards, &arenas) |*call, shard, *own| try shard.deferred(executor, call).search(queries, 10, own, .{}); // one arena per call in flight
+defer for (&calls) |*call| call.deinit();
+for (&calls) |*call| consume(try call.wait());
+```
+
+A call that finds its arena busy finishes with `Error.Contended` and rewinds nothing, so the holder's views stay readable.
+A call that fails for any other reason still rewinds it.
+Only fixed-size reports like `DenseTraversalStats` stay your fields, so every verb has one entry point and no allocating twin.
+`DenseVectors.stride` is the byte pitch of each row and `columns` its dimensions, as the call reported them, which is how a sub-byte kind like `.u1x8` is read without arithmetic on its packing.
+`row` refuses an element type other than the kind the rows were written as with `Error.InvalidArgument`, rather than reinterpreting them.
+
+## Search Allocates Once
+
+Every verb has one entry point, its optional knobs riding one config struct named after its C argument structure, such as `DenseSearchConfig`, `DenseInsertConfig` or `DenseMultiplyConfig`, and a search writes into an arena that keeps its high-water mark, so a benchmark loop allocates once and never again.
+
+```zig
+var arena = try usearch.Arena.init(executor);
+defer arena.deinit();
+var stats: usearch.DenseTraversalStats = .{};
+
+const matches = try index.on(executor).search(try .of(f32, queries, 768), 10, &arena, .{
+    .expansion_factor = 128,
+    .stats = &stats,
+});
+for (0..matches.queries) |query| consume(try matches.row(query));
 std.debug.print("{d} distances computed\n", .{stats.computed_distances});
 ```
+
+`Matches.row` answers one query's keys and distances, nearest first, as many as the walk found up to the "k" asked for.
 
 The candidate-pool breadth rides the call rather than the handle, so a recall sweep is a loop over expansion factors against one immutable index, with no mutation and no synchronization between points.
 
 ## Filtering With Predicates
 
-`searchIf` admits only the keys a predicate approves, and non-matching entries still route the traversal, so recall does not collapse at low selectivity.
-The predicate is a `comptime` function rather than a closure, so the trampoline that crosses the boundary is generated per call site and nothing is boxed.
+A `Predicate` in the search config admits only the keys it approves, and non-matching entries still route the traversal, so recall does not collapse at low selectivity.
+`Predicate.of` takes a `comptime` function rather than a closure, so the trampoline that crosses the boundary is generated per call site and nothing is boxed.
 Its context travels as one pointer: pass `{}` for a predicate needing none, and a single-item pointer otherwise.
 
 ```zig
@@ -88,172 +184,191 @@ const admits = struct {
     }
 }.call;
 
-try index.searchIf(executor, try .of(f32, queries, 768), try .of(keys, scores, counts), .{}, null, {}, admits);
+const even = try index.on(executor).search(try .of(f32, queries, 768), 10, &arena, .{
+    .predicate = .of({}, admits),
+});
 ```
 
-It runs once per scored candidate, far more often than the "k" asked for, and concurrently from the executor's threads - so it belongs on your fast path and must tolerate that.
+It runs once per scored candidate, far more often than the "k" asked for, and concurrently from the executor's threads, so it belongs on your fast path and must tolerate that.
+A VRAM index refuses a predicate with `Error.Device`, since a host callback cannot narrow a device walk.
 
 ## Progress and Cancellation
 
-Every long verb has a reporting sibling - `addReporting`, `refineReporting`, `searchReporting`, `saveReporting` and `loadReporting` - taking a handler called with the units finished so far and the units the call finishes if it runs to the end.
-Answering `.cancel` stops the call at the next increment boundary.
+Every long verb, namely `insert`, `refine`, `search`, `merge`, `multiply`, `attend`, `maxsim`, `save`, `saveBuffer` and every load, takes a `ProgressCallback` in its config, called with the units finished so far and the units the call finishes if it runs to the end.
+Answering `.cancel` stops the call at the next increment boundary, except an `insert`, which ignores it.
 
 ```zig
 const Deadline = struct {
+    io: std.Io,
     stop_at: i64,
     fn reached(self: *const @This(), _: usize, _: usize) usearch.Continuation {
-        return if (std.time.milliTimestamp() < self.stop_at) .@"continue" else .cancel;
+        const now = std.Io.Clock.awake.now(self.io).toMilliseconds();
+        return if (now < self.stop_at) .@"continue" else .cancel;
     }
 };
 
-const deadline: Deadline = .{ .stop_at = std.time.milliTimestamp() + 30_000 };
-_ = try index.refineReporting(executor, .{ .expansion_factor = 128 }, null, &deadline, Deadline.reached);
+const deadline: Deadline = .{ .io = io, .stop_at = std.Io.Clock.awake.now(io).toMilliseconds() + 30_000 };
+_ = try index.on(executor).refine(.{
+    .expansion_factor = 128,
+    .progress = .of(&deadline, Deadline.reached),
+});
 ```
 
-Like a predicate, the handler is a `comptime` function whose trampoline is generated per call site, and its context travels as one pointer - `{}` where none is needed.
+Like a predicate, the handler is a `comptime` function whose trampoline is generated per call site, and its context travels as one pointer, `{}` where none is needed.
 It arrives on whichever thread advanced the work and never on two at once, so a counter or a deadline needs no synchronization of its own.
-Reports are denominated in whatever the verb consumes - rows for an insertion, queries for a search, shards for a checkpoint - and how often they arrive is the increment's size rather than a promise, so read the counts and never the number of calls.
+Reports are denominated in whatever the verb consumes, such as rows for an insertion, queries for a search, donors for a merge and shards for a checkpoint, and how often they arrive is the increment's size rather than a promise, so read the counts and never the number of calls.
 
-Two verbs mean something different once a handler is present.
-An `add` batch stops being all-or-nothing: it advances in increments, a stop keeps the rows already published and reports `Error.Cancelled`, and the count the handler last saw is what the index kept.
-A stopped `refine` is not a failure but the time budget a whole-graph sweep is meant to run under - re-selection claims no identity, so the graph stays correct and merely less improved, and the next call resumes where this one stopped.
+An `insert` cannot be stopped: it claims every row before its first report and publishes the whole batch at once, so a batch is all-or-nothing with or without a handler.
+A stopped `refine` is not a failure but the time budget a whole-graph sweep is meant to run under: re-selection claims no identity, so the graph stays correct and merely less improved, and the next call sweeps again, so calling under a time budget still converges.
 
 ## Residency
 
-Where the payload lives is a tagged union, not a flag, and it decides what loading a checkpoint means: materialize into RAM, upload to a device, or open in place on disk.
-It also names the hardware its shards are placed across - one shard per memory domain, device, or path - and an empty slice derives one from the machine.
+Where the payload lives is the constructor's name, as in the C lifecycle verbs, so a residency an index lacks has no constructor to call.
+Each names the hardware its shards are placed across, one shard per memory domain, device or path, and an empty slice derives one from the machine.
 
 ```zig
-const geometry = usearch.Options{ .dimensions = 768 };
-
 // One graph per socket.
-const in_memory = geometry.placed(.{ .ram = &.{ 0, 1 } });
+var in_memory = try usearch.DenseIndex.initRam(.{ .dimensions = 768 }, &.{ 0, 1 });
 // Sharded across the devices, never replicated.
-const on_device = geometry.placed(.{ .vram = &.{ 0, 1 } });
-// Opened in place, read-only, and sized past RAM.
-const on_disk = geometry.placed(.{ .nvme = &.{.of("/mnt/nvme0")} });
+var on_device = try usearch.DenseIndex.initVram(.{ .dimensions = 768 }, &.{ 0, 1 });
+// Served in place, read-only, and sized past RAM.
+var on_disk = try usearch.DenseIndex.viewNvme("index.safegraphs.json", .{
+    .executor = nvme_executor,
+    .paths = &.{.of("/mnt/nvme0")},
+});
 ```
 
-`placed` sets the tag and the union arm together, so the two cannot disagree.
-An NVMe handle opens a checkpoint in place and is read-only, so every mutating verb on it fails with `Error.ReadOnly`.
-Bigger indexes come from merging, never mutating: shards build in RAM, serialize, and join a manifest.
+An NVMe index is never initialized, only viewed in place, and it is read-only, so every mutating verb on it fails with `Error.ReadOnly`.
+Until NVMe checkpoints carry keys, `viewNvme` answers `Error.Unsupported`.
+Bigger indexes come from merging, never mutating: shards build in RAM, serialize, and join a manifest, and `merge` absorbs donor handles, nulling each one it consumed so that freeing every donor afterwards is safe.
 
 ## Serialization
 
-The path extension picks the layout - a `.safegraphs` path is one monolith, a `.safegraphs.json` path is a manifest cataloging many.
+The path extension picks the layout: a `.safegraphs` path is one monolith, and a `.safegraphs.json` path is a manifest cataloging many.
 
 ```zig
-try index.save(executor, "index.safegraphs");
-try index.load(executor, "index.safegraphs");
+try index.on(executor).save("index.safegraphs", .{});
+var copy = try usearch.DenseIndex.loadRam("index.safegraphs", .{ .executor = executor, .values_per_key = 1 });
+var uploaded = try usearch.DenseIndex.loadVram("index.safegraphs", .{ .executor = gpu, .devices = &.{0} });
+var mapped = try usearch.DenseIndex.viewRam("index.safegraphs"); // read-only, served in place
 
-const metadata = try usearch.metadata("index.safegraphs"); // without loading a shard
+const metadata = try usearch.DenseIndex.metadataRead("index.safegraphs", .{}); // without loading a shard
 ```
 
-The result carries only the four fields a checkpoint froze, so `values_per_key` and the placement stay yours to set in `Options` before constructing a handle.
+The result carries only the four fields a checkpoint froze, so `values_per_key` and the placement stay yours to set in the load config.
 
-Checkpoints are residency-portable: one file materializes into RAM, uploads to a device, or opens in place on disk, decided by the handle that loads it.
-In-memory buffers hold single monoliths only, through `saveBuffer` and `loadBuffer`.
+Checkpoints are residency-portable: one file copies into RAM, uploads to a device, or is served in place on disk, decided by the constructor that reads it.
+In-memory buffers hold single monoliths only.
+`saveBuffer` lands one in an `Arena`, since only the call knows its length, and `loadRamBuffer` or `loadVramBuffer` reads it back.
+
+```zig
+const monolith = try index.saveBuffer(&arena, .{});
+var restored = try usearch.DenseIndex.loadRamBuffer(try monolith.bytes(), .{});
+```
 
 ## Metrics
 
 Every metric derives from a single inner-product kernel with pre-computed magnitudes.
 
-- `.inner` - inner product, and the only kind the linear-algebra verbs accept.
-- `.angular` - cosine distance, over pre-computed magnitudes.
-- `.euclidean` - L2 distance.
-- `.hamming` - bit-level, over the packed sub-byte kinds.
-- `.jaccard` - bit-level, over the packed sub-byte kinds.
+- `.inner`: inner product, and the only kind the linear-algebra verbs accept.
+- `.angular`: cosine distance, over pre-computed magnitudes.
+- `.euclidean`: L2 distance.
+- `.hamming`: bit-level, over `.u1x8` rows alone.
+- `.jaccard`: bit-level, over `.u1x8` rows alone.
 
-`scoredBy` points the options at a metric of your own, setting the kind, the quantization, and the callback together so the four cannot disagree.
-Its trampoline is generated per call site like `searchIf`'s, so the scoring function reads two typed slices rather than two `anyopaque` pointers, and its context travels as one pointer.
-
-```zig
-const score = struct {
-    fn call(_: void, left: []const f32, right: []const f32) usearch.Distance {
-        var total: f32 = 0;
-        for (left, right) |first, second| total += (first - second) * (first - second);
-        return total;
-    }
-}.call;
-
-const options = (usearch.Options{ .dimensions = 768 }).scoredBy(f32, {}, score);
-```
-
-It is called concurrently from the executor's threads, and forfeits the SIMD kernel chains and the magnitude cache both, so reach for a built-in kind wherever one fits.
+Arbitrary metrics belong to the C++ baseline tier; the C interface, and so this module, takes the built-in kinds alone.
 
 ## Linear Algebra Over The Graph
 
 Three verbs treat the index as a sparse operand rather than as a kNN store, each folding its arithmetic into the graph walk instead of materializing a match list.
 All three read logits rather than distances, so they refuse anything but an inner-product index with `Error.ConfigMismatch`.
 
-`multiply` is a sparse matrix product: every left row is walked against the index, and the products land in the same `MatchesSpan` a search writes, `keys` naming each pair's indexed row.
+`multiply` is a sparse matrix product: every left row is walked against the index, and how many pairs it scores is known only once the walk ends, so the products come back as a ragged `DenseProducts`: keys, scores and their Apache Arrow offsets, all in the arena.
 
 ```zig
-try index.multiply(executor, try .of(f32, left, 768), try .of(keys, scores, counts), .{}, null);
+const products = try index.on(executor).multiply(try .of(f32, left, 768), &arena, .{ .wanted = 64 });
+for (0..products.rows) |row| {
+    const pairs = try products.row(row);
+    accumulate(row, pairs.keys, pairs.scores);
+}
 ```
 
-`maxsim` is late interaction - every query row takes its best match within a key, and those maxima sum to that key's score.
+`offsets`, `keys` and `scores` answer the whole tape at once, for a consumer that takes Arrow buffers as they are.
+
+`maxsim` is late interaction: every query row takes its best match within a key, and those maxima sum to that key's score.
 A document is one key holding its token rows, which is what a `values_per_key` above one exists for, and the outputs are sized over documents rather than rows.
 
 ```zig
-try index.maxsim(executor, try .of(f32, tokens, 768), tokens_per_query, try .of(keys, scores, counts), .{}, null);
+const documents = try index.on(executor).maxsim(try .of(f32, tokens, 768), tokens_per_query, 10, &arena, .{});
 ```
 
-`attend` is softmax-weighted attention, gathering each value row exactly once and returning outputs already divided by their partition.
-An entry's key is its row offset into the value table, so a context inserted in position order needs no mapping, and a carry of one `SoftmaxState` per query row folds this branch into another over the same queries.
+`attend` is Flash Attention folded into the walk: every key it scores enters an online softmax, with no top-k cut, and the outputs come back as wide as the keys and divided by the partition.
+The index stores no values, so a `ValueLookup` resolves each scored key to its row, as wide as the keys and stored in the index's quantization.
+Its trampoline checks the kind and width every batch states, so a missing row, or one of another kind or width, refuses the call with `Error.ShapeMismatch`.
+It runs on the executor's threads, so it must tolerate concurrent calls.
+The `head_count` query heads of grouped-query attention share one walk per token, row `t · head_count + h` being head `h` of token `t`, and a carry of one `DenseSoftmaxState` per query row, lent rather than landed, folds this branch into another over the same queries.
+The attended rows land in the arena as the queries' own scalar type, or as the config's `outputs_scalar`.
 
 ```zig
-try index.attend(executor, try .of(f32, queries, 768), try .of(f32, values, 768),
-    try .of(f32, context, 768), carry, .{}, null);
+const Cache = struct {
+    rows: []const f32,
+    fn resolve(self: *const @This(), key: usearch.Key) ?[]const f32 {
+        const entry: usize = @intCast(key.asInteger() orelse return null);
+        return self.rows[entry * 128 ..][0..128];
+    }
+};
+const attended = try index.on(executor).attend(try .of(f32, queries, 128), .of(f32, &cache, Cache.resolve), &arena, .{
+    .head_count = 8,
+    .carry = carry,
+});
+const first_head = try attended.row(f32, 0);
 ```
 
 ## Refinement
 
 `refine` re-selects the neighbors of every stored entry against the finished graph and returns how many nodes changed edges, so a cheap insertion pass followed by one refinement reaches a better graph in less total time than one expensive insertion pass.
-Zero means the graph has settled, and searches may run throughout.
+Zero means the graph has settled, and on a RAM index searches may run throughout.
 
 ```zig
-while (true) {
-    const changed = try index.refine(executor, .{ .expansion_factor = 128 }, null);
-    if (changed == 0) break;
-}
+while (try index.on(executor).refine(.{ .expansion_factor = 128 }) != 0) {}
 ```
 
 ## Streaming and Iteration
 
-A finder is a resumable best-first traversal, so callers that post-filter aggressively pull until satisfied instead of guessing the "k" upfront.
+A search stream is a resumable best-first traversal, so callers that post-filter aggressively pull until satisfied instead of guessing the "k" upfront.
+It keeps walk state rather than a thread, so any number may stay open on one executor, and every pull is an ordinary verb naming the index again, so it runs on whichever receiver pulls.
 
 ```zig
-const finder = try index.find(executor, try .ofRow(f32, &query));
-defer finder.deinit();
+var stream = try usearch.DenseSearchStream.init(index, try .ofRow(f32, &query), .{});
+defer stream.deinit();
 
-var keys: [16]usearch.Key = undefined;
-var distances: [16]usearch.Distance = undefined;
 while (true) {
-    const pulled = try finder.next(&keys, &distances);
-    if (pulled == 0) break;
-    for (keys[0..pulled], distances[0..pulled]) |key, distance| std.debug.print("{any} at {d}\n", .{ key, distance });
+    const row = try (try index.on(executor).searchStreamNext(stream, 16, &arena)).row(0);
+    if (row.keys.len == 0) break; // drained
+    for (row.keys, row.scores) |key, distance| std.debug.print("{f} at {d}\n", .{ key, distance });
 }
 ```
 
-A cursor walks the index contents as a sequential row scan behind a publication watermark, so concurrent inserts never appear mid-iteration.
+A drained walk answers an empty row, as the C interface does, so a loop ends on the first pull that lands nothing.
+
+A cursor walks the index contents as a sequential row scan, reading each shard's publication watermark as it enters that shard, so a row once passed is never revisited.
+Each pull lands up to `wanted` keys in the arena, and their rows beside them as the scalar you name, or the keys alone for `null`.
 
 ```zig
-const cursor = try index.cursor();
+var cursor = try usearch.DenseCursor.init(index);
 defer cursor.deinit();
 
-var keys: [1024]usearch.Key = undefined;
-var vectors: [1024 * 768]f32 = undefined;
 while (true) {
-    const written = try cursor.next(&keys, try .of(f32, &vectors, 768));
-    if (written == 0) break;
+    const batch = try index.on(executor).cursorNext(cursor, 1024, .f32, &arena);
+    if (batch.written == 0) break; // exhausted
+    consume(try batch.keys(), try batch.vectors.?.bytes());
 }
 ```
 
 ## Keys
 
 A key is 128 bits of opaque identity, and integer identities park in the low eight bytes, so a UUID rendering and an integer identity sort alike.
-Keys need not be unique: several entries may share one, and `count` reports how many.
+Keys need not be unique: several entries may share one, `count` reports how many, `contains` whether any, and `get` returns their rows.
 
 ```zig
 const key: usearch.Key = .fromInteger(42);
@@ -264,19 +379,62 @@ const parsed = try usearch.Key.parse("00000000-0000-0000-0000-00000000002a");
 ```
 
 `format` renders the canonical lowercase dashed UUID, so a key prints through `{f}` and through any writer.
-`parse` reads that rendering back, taking dashes anywhere or nowhere and either case of digit, and refusing anything else with `Error.MalformedInput`.
+`parse` reads that rendering back, taking dashes anywhere or nowhere and either case of digit, and refusing anything else with `Error.Malformed`.
 
 ## Errors
 
-Every verb answers `Error!T`, and a shape this binding refuses before the boundary reports the status the engine would have reported for the same fault - so a locally-rejected call is indistinguishable from an engine-rejected one.
-The engine's static detail message rides `Outcome`, which stays internal to the boundary.
+Every verb answers `Error!T`, one error per final status of the C interface.
+The engine checks every shape it can see; the binding checks only what never crosses the boundary, like a key run longer than its rows, and reports the status the engine would have.
+The engine's static detail message rides an `Outcome` you lend: `diagnosed(&outcome)` on the index or a blocking receiver copies every call's final outcome into it, a constructor's config takes one as `diagnostics`, and a `Deferred` answers its own through `message`.
+The binding's own refusals land there too, with a message of their own.
 One set covers every verb rather than a narrower one per verb, since nothing in the ABI bounds which status a given call may report.
+
+```zig
+var outcome: usearch.Outcome = .{};
+_ = index.on(executor).diagnosed(&outcome).search(queries, 10, &arena, .{}) catch |failure| {
+    std.log.err("{s}: {s}", .{ @errorName(failure), outcome.text() });
+    return failure;
+};
+var copy = try usearch.DenseIndex.loadRam("index.safegraphs", .{ .diagnostics = &outcome });
+```
+
+`Status`, `Scalar`, `Mood`, `Residency` and `DenseMetric` carry the C enumerators' values, and their `name` and `fromName` spell them through the C name tables, `fromName` answering null for text no table spells.
+
+```zig
+std.debug.print("{s}\n", .{usearch.Status.contended.name()}); // contended
+const metric = usearch.DenseMetric.fromName("inner") orelse return error.UnknownMetric;
+```
 
 ## Introspection
 
 ```zig
-std.debug.print("{d} entries in {d} bytes\n", .{ try index.size(), try index.memoryUsage() });
-std.debug.print("dispatched to {s}\n", .{try index.capabilities()});
+const description = try index.describe();
+std.debug.print("{d} entries in {d} bytes\n", .{ description.size, description.memory_usage });
+std.debug.print("dispatched to {s}\n", .{description.capabilities});
 std.debug.print("compiled for {s}\n", .{usearch.capabilitiesCompiled()});
 std.debug.print("available here {s}\n", .{usearch.capabilitiesAvailable()});
+
+const reachability = try index.on(executor).health();
+std.debug.print("{d} of {d} entries reachable\n", .{ reachability.reachable, reachability.audited });
 ```
+
+`health` audits how much of the graph a search reaches from its landmarks; entries it misses stay unfound until a `refine` re-links them.
+
+## Design
+
+The module is a thin layer over the C ABI in `include/usearch/`, and every rule below follows from that.
+
+- __Names follow the header.__
+  Every type is its C name without `usearch_` and `_t`, such as `DenseMetric`, `DenseTraversalStats` and `DenseIndexDescription`; every constructor is a C lifecycle verb such as `DenseIndex.initRam` or `Executor.forRam`, a verb's argument structure becomes its `Dense*Config`, and every wrapper's documentation names the C symbol it calls or says it is binding-only.
+- __Blocking calls stay simple.__
+  `index.search(queries, 10, &arena, .{})` takes no executor, completion or allocator, and an empty config derives every knob; nothing about asynchrony reaches a caller who never asks for it.
+- __Deferred calls are symmetric, through Zig's own idioms.__
+  The receiver's type alone chooses the completion, so `DenseIndex.On` and `DenseIndex.DeferredOn(Call)` offer the same verbs with the same arguments, and a `Deferred` is released with `defer call.deinit()` like any other resource.
+- __Nothing costs anything until it is used.__
+  A blocking call keeps its argument structure on the stack and its outputs in the arena it borrows; a deferred one lives in the `Deferred` you place, holding its outcome until the call is final and its outputs in the same borrowed arena, and the binding allocates nothing either way.
+- __A `Deferred` has no life of its own.__
+  `status` polls through `usearch_outcome_status`, and `wait` and `deinit` block in `usearch_outcome_wait`; the binding starts no thread, counts no calls and schedules nothing.
+- __Statuses and modes are enums.__
+  `Status`, `Mood`, `DenseMetric` and `Scalar` carry the C enumerators' values, and their `name` methods spell the names the C tables own, so nothing is compared as a string.
+- __Arenas are reused, never shared.__
+  Callers lend memory, never allocators: every call borrows the `Arena`, blocking or deferred, and no index owns an arena or a lock.
