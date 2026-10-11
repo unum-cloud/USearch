@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Buffer, Callable, Generator, Sequence
 from enum import IntEnum
 from types import GenericAlias, TracebackType
-from typing import Any, Final, NoReturn, Self, final, overload, type_check_only
+from typing import Any, Final, NoReturn, Self, final, type_check_only
 
 from _typeshed import structseq
 
@@ -84,6 +84,7 @@ class Scalar(IntEnum):
     E2M3 = 8
     I8 = 10
     I4X2 = 11
+    I32 = 12
     U8 = 20
     U4X2 = 21
     U1X8 = 22
@@ -104,7 +105,7 @@ class OutOfMemoryError(Error, MemoryError):
     """An allocation or reservation could not be satisfied."""
 
 class ShapeMismatchError(Error, ValueError):
-    """Dimensionality, row counts, or output capacity disagree."""
+    """Dimensionality or row counts disagree."""
 
 class UnsupportedLayoutError(Error, ValueError):
     """A stride or packing the engine cannot traverse."""
@@ -218,17 +219,28 @@ class Executor:
 
 @final
 class Arena:
-    """The memory a verb lands the outputs only it can size in, reused by the next call handed it."""
+    """The memory every output whose length scales with a call lands in, rewound by each call handed it."""
 
-    def __init__(self) -> None: ...
+    def __new__(cls, executor: Executor | None = None, /) -> Self:
+        """Makes one where `executor` computes, or host pages for the calling thread. Calls `usearch_arena_init`."""
+        ...
+
+    @property
+    def residency(self) -> Residency:
+        """The `Residency` its outputs live in. Python-only."""
+        ...
 
 # The C base of every result over an arena, which the module does not export by name.
 @type_check_only
 class _ArenaBuffer:
-    """One output a call left in an `Arena`, keeping it alive and blocking it from reuse."""
+    """One output a call left in an `Arena`, readable until a later call rewinds it."""
 
     def __buffer__(self, flags: int, /) -> memoryview:
-        """Host memory only; device memory raises `BufferError`. Python-only."""
+        """Host memory only; device memory raises `DeviceError`, a rewound arena `UninitializedError`. Python-only."""
+        ...
+
+    def __len__(self) -> int:
+        """Rows, or bytes of a `Monolith`. Python-only."""
         ...
 
     @property
@@ -238,18 +250,18 @@ class _ArenaBuffer:
 
 @final
 class DenseVectors(_ArenaBuffer):
-    """The rows `get` exported into an `Arena`: a (count, dimensions) matrix, or (count, row_bytes) of 'B'."""
+    """The rows `get`, `attend` or a cursor wrote into an `Arena`: (count, dimensions), or (count, row_bytes) of 'B'."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
 
 @final
 class DenseProducts:
-    """The ragged sparse product `multiply` exported: per left row, every pair its walk scored."""
+    """The ragged sparse product `multiply` wrote into an `Arena`: per left row, every pair its walk scored."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     @property
-    def offsets(self) -> memoryview:
-        """(rows + 1,) Apache Arrow offsets, in host memory."""
+    def offsets(self) -> _ArenaBuffer:
+        """(rows + 1,) Apache Arrow offsets."""
         ...
 
     @property
@@ -276,7 +288,7 @@ class DenseProducts:
 
 @final
 class Monolith(_ArenaBuffer):
-    """The bytes `save_buffer` exported into an `Arena`, one (length,) run of 'B'."""
+    """The bytes `save_buffer` wrote into an `Arena`, one (length,) run of 'B'."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
 
@@ -298,21 +310,21 @@ class Match(structseq[Any], tuple[Key, float]):
 
 @final
 class Matches:
-    """A ranked run, as `search` and `maxsim` return it, reading through to three buffers."""
+    """A ranked run `search` or `maxsim` wrote into an `Arena`, reading through to three outputs."""
 
-    def __new__(cls, keys: Buffer, distances: Buffer, counts: Buffer, /) -> Self: ...
+    def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
     @property
-    def keys(self) -> memoryview:
-        """(queries, wanted, 16) identities, most significant byte first."""
+    def keys(self) -> _ArenaBuffer:
+        """(queries, columns, 16) identities, most significant byte first."""
         ...
 
     @property
-    def distances(self) -> memoryview:
-        """(queries, wanted) distances in the index's own metric."""
+    def distances(self) -> _ArenaBuffer:
+        """(queries, columns) distances in the index's own metric, columns at most the call's wanted."""
         ...
 
     @property
-    def counts(self) -> memoryview:
+    def counts(self) -> _ArenaBuffer:
         """(queries,) match counts, each bounding its own row."""
         ...
 
@@ -331,7 +343,7 @@ class Deferred[AnswerT]:
 
     @property
     def status(self) -> Status:
-        """`Status.DEFERRED` until the call is final, then the final one. Python-only."""
+        """`Status.DEFERRED` until the call is final, then the final one. Calls `usearch_outcome_status`."""
         ...
 
     def wait(self) -> AnswerT:
@@ -379,6 +391,7 @@ class On[IndexT]:
         self: On[DenseIndex],
         queries: _Tensor,
         wanted: int,
+        arena: Arena,
         /,
         *,
         expansion_factor: int = 0,
@@ -386,69 +399,56 @@ class On[IndexT]:
         predicate: Callable[[Key], bool] | None = None,
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
-        out: Matches | None = None,
     ) -> Matches: ...
     def count(self: On[DenseIndex], key: _KeyLike, /) -> int: ...
-    def get(
-        self: On[DenseIndex], key: _KeyLike, /, *, outputs_dtype: Scalar = ..., arena: Arena | None = None
-    ) -> DenseVectors | None: ...
+    def get(self: On[DenseIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...) -> DenseVectors: ...
     def multiply(
         self: On[DenseIndex],
         rows: _Tensor,
         wanted: int,
+        arena: Arena,
         /,
         *,
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
-        arena: Arena | None = None,
     ) -> DenseProducts: ...
-    def attend[OutputT: _Tensor](
+    def attend(
         self: On[DenseIndex],
         queries: _Tensor,
-        value_lookup: Callable[[memoryview], _Tensor | None],
+        values: _Tensor,
+        row_of: Callable[[Key], int | None],
+        arena: Arena,
         /,
         *,
         head_count: int = 1,
         expansion_factor: int = 0,
         score_scale: float = 0.0,
         dtype: Scalar | None = None,
+        values_dtype: Scalar | None = None,
         outputs_dtype: Scalar | None = None,
         carry: _Tensor | None = None,
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
-        out: OutputT | None = None,
-    ) -> memoryview | OutputT: ...
+    ) -> DenseVectors: ...
     def maxsim(
         self: On[DenseIndex],
         queries: _Tensor,
         rows_per_query: int,
         wanted: int,
+        arena: Arena,
         /,
         *,
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
-        out: Matches | None = None,
     ) -> Matches: ...
-    def merge(self: On[DenseIndex], donor: DenseIndex, /, *, progress: _Progress | None = None) -> None: ...
+    def merge(self: On[DenseIndex], *donors: DenseIndex, progress: _Progress | None = None) -> None: ...
     def save(self: On[DenseIndex], path: _PathLike, /, *, progress: _Progress | None = None) -> None: ...
-    def save_buffer(
-        self: On[DenseIndex], *, progress: _Progress | None = None, arena: Arena | None = None
-    ) -> Monolith: ...
-    @overload
-    def cursor(
-        self: On[DenseIndex], size: int = 1024, *, outputs_dtype: None = None, columns: None = None
-    ) -> DenseCursor[memoryview]:
-        """Calls `usearch_dense_cursor_init`."""
-        ...
-
-    @overload
-    def cursor(
-        self: On[DenseIndex], size: int = 1024, *, outputs_dtype: Scalar, columns: int
-    ) -> DenseCursor[tuple[memoryview, memoryview]]:
+    def save_buffer(self: On[DenseIndex], arena: Arena, /, *, progress: _Progress | None = None) -> Monolith: ...
+    def cursor(self: On[DenseIndex]) -> DenseCursor:
         """Calls `usearch_dense_cursor_init`."""
         ...
 
@@ -492,6 +492,7 @@ class DeferredOn[IndexT]:
         self: DeferredOn[DenseIndex],
         queries: _Tensor,
         wanted: int,
+        arena: Arena,
         /,
         *,
         expansion_factor: int = 0,
@@ -499,61 +500,62 @@ class DeferredOn[IndexT]:
         predicate: Callable[[Key], bool] | None = None,
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
-        out: Matches | None = None,
     ) -> Deferred[Matches]: ...
     def count(self: DeferredOn[DenseIndex], key: _KeyLike, /) -> Deferred[int]: ...
     def get(
-        self: DeferredOn[DenseIndex], key: _KeyLike, /, *, outputs_dtype: Scalar = ..., arena: Arena | None = None
-    ) -> Deferred[DenseVectors | None]: ...
+        self: DeferredOn[DenseIndex], key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...
+    ) -> Deferred[DenseVectors]: ...
     def multiply(
         self: DeferredOn[DenseIndex],
         rows: _Tensor,
         wanted: int,
+        arena: Arena,
         /,
         *,
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
-        arena: Arena | None = None,
     ) -> Deferred[DenseProducts]: ...
-    def attend[OutputT: _Tensor](
+    def attend(
         self: DeferredOn[DenseIndex],
         queries: _Tensor,
-        value_lookup: Callable[[memoryview], _Tensor | None],
+        values: _Tensor,
+        row_of: Callable[[Key], int | None],
+        arena: Arena,
         /,
         *,
         head_count: int = 1,
         expansion_factor: int = 0,
         score_scale: float = 0.0,
         dtype: Scalar | None = None,
+        values_dtype: Scalar | None = None,
         outputs_dtype: Scalar | None = None,
         carry: _Tensor | None = None,
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
-        out: OutputT | None = None,
-    ) -> Deferred[memoryview | OutputT]: ...
+    ) -> Deferred[DenseVectors]: ...
     def maxsim(
         self: DeferredOn[DenseIndex],
         queries: _Tensor,
         rows_per_query: int,
         wanted: int,
+        arena: Arena,
         /,
         *,
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
-        out: Matches | None = None,
     ) -> Deferred[Matches]: ...
     def merge(
-        self: DeferredOn[DenseIndex], donor: DenseIndex, /, *, progress: _Progress | None = None
+        self: DeferredOn[DenseIndex], *donors: DenseIndex, progress: _Progress | None = None
     ) -> Deferred[None]: ...
     def save(
         self: DeferredOn[DenseIndex], path: _PathLike, /, *, progress: _Progress | None = None
     ) -> Deferred[None]: ...
     def save_buffer(
-        self: DeferredOn[DenseIndex], *, progress: _Progress | None = None, arena: Arena | None = None
+        self: DeferredOn[DenseIndex], arena: Arena, /, *, progress: _Progress | None = None
     ) -> Deferred[Monolith]: ...
     def __repr__(self) -> str: ...
 
@@ -666,13 +668,29 @@ class DenseTraversalStats:
     def __repr__(self) -> str: ...
 
 @final
-class DenseCursor[StepT]:
-    """A sequential row scan over the entries an index holds, in batches."""
+class DenseBatch:
+    """The rows one cursor step wrote into an `Arena`; empty, so falsy, once the scan is drained."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
-    def __iter__(self) -> Self: ...
-    def __next__(self) -> StepT:
-        """Each step calls `usearch_dense_cursor_next`."""
+    @property
+    def keys(self) -> _ArenaBuffer:
+        """(count, 16) identities, most significant byte first."""
+        ...
+
+    @property
+    def vectors(self) -> DenseVectors | None:
+        """(count, dimensions) rows, or None when the step named no `outputs_dtype`."""
+        ...
+
+    def __len__(self) -> int: ...
+
+@final
+class DenseCursor:
+    """A sequential row scan over the entries an index holds, pulled in batches by `next`."""
+
+    def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
+    def next(self, wanted: int, arena: Arena, /, *, outputs_dtype: Scalar | None = None) -> DenseBatch:
+        """The next batch of at most `wanted` rows, in `arena`. Calls `usearch_dense_cursor_next`."""
         ...
 
     def close(self) -> None:
@@ -686,12 +704,11 @@ class DenseCursor[StepT]:
 
 @final
 class DenseSearchStream:
-    """A resumable best-first stream of matches for one query."""
+    """A resumable best-first stream of matches for one query, pulled by `next`."""
 
     def __new__(cls, *args: object, **keywords: object) -> NoReturn: ...
-    def __iter__(self) -> Self: ...
-    def __next__(self) -> Match:
-        """Each refill calls `usearch_dense_search_stream_next`."""
+    def next(self, wanted: int, arena: Arena, /) -> Matches:
+        """The next at most `wanted` matches, as one row in `arena`. Calls `usearch_dense_search_stream_next`."""
         ...
 
     def close(self) -> None:
@@ -862,6 +879,7 @@ class DenseIndex:
         self,
         queries: _Tensor,
         wanted: int,
+        arena: Arena,
         /,
         *,
         expansion_factor: int = 0,
@@ -869,7 +887,6 @@ class DenseIndex:
         predicate: Callable[[Key], bool] | None = None,
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
-        out: Matches | None = None,
     ) -> Matches:
         """Finds the `wanted` nearest entries for every query row. Calls `usearch_dense_search`."""
         ...
@@ -878,41 +895,43 @@ class DenseIndex:
         """How many entries share `key`. Calls `usearch_dense_count`."""
         ...
 
-    def get(self, key: _KeyLike, /, *, outputs_dtype: Scalar = ..., arena: Arena | None = None) -> DenseVectors | None:
-        """Every vector stored under `key`, or None. Calls `usearch_dense_get`."""
+    def get(self, key: _KeyLike, arena: Arena, /, *, outputs_dtype: Scalar = ...) -> DenseVectors:
+        """Every vector stored under `key`, empty when it is absent. Calls `usearch_dense_get`."""
         ...
 
     def multiply(
         self,
         rows: _Tensor,
         wanted: int,
+        arena: Arena,
         /,
         *,
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
-        arena: Arena | None = None,
     ) -> DenseProducts:
         """Every pair the walk scored, an approximate sparse product. Calls `usearch_dense_multiply`."""
         ...
 
-    def attend[OutputT: _Tensor](
+    def attend(
         self,
         queries: _Tensor,
-        value_lookup: Callable[[memoryview], _Tensor | None],
+        values: _Tensor,
+        row_of: Callable[[Key], int | None],
+        arena: Arena,
         /,
         *,
         head_count: int = 1,
         expansion_factor: int = 0,
         score_scale: float = 0.0,
         dtype: Scalar | None = None,
+        values_dtype: Scalar | None = None,
         outputs_dtype: Scalar | None = None,
         carry: _Tensor | None = None,
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
-        out: OutputT | None = None,
-    ) -> memoryview | OutputT:
+    ) -> DenseVectors:
         """Softmax attention folded into the walk. Calls `usearch_dense_attend`."""
         ...
 
@@ -921,39 +940,31 @@ class DenseIndex:
         queries: _Tensor,
         rows_per_query: int,
         wanted: int,
+        arena: Arena,
         /,
         *,
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
         stats: DenseTraversalStats | None = None,
-        out: Matches | None = None,
     ) -> Matches:
         """Late-interaction scoring of multi-row queries. Calls `usearch_dense_maxsim`."""
         ...
 
-    def merge(self, donor: DenseIndex, /, *, progress: _Progress | None = None) -> None:
-        """Absorbs and consumes `donor`. Calls `usearch_dense_merge`."""
+    def merge(self, *donors: DenseIndex, progress: _Progress | None = None) -> None:
+        """Absorbs and consumes every donor. Calls `usearch_dense_merge`."""
         ...
 
     def save(self, path: _PathLike, /, *, progress: _Progress | None = None) -> None:
         """Writes a checkpoint in the layout the extension picks. Calls `usearch_dense_save`."""
         ...
 
-    def save_buffer(self, *, progress: _Progress | None = None, arena: Arena | None = None) -> Monolith:
+    def save_buffer(self, arena: Arena, /, *, progress: _Progress | None = None) -> Monolith:
         """Serializes one monolith into an arena. Calls `usearch_dense_save_buffer`."""
         ...
 
-    @overload
-    def cursor(self, size: int = 1024, *, outputs_dtype: None = None, columns: None = None) -> DenseCursor[memoryview]:
-        """Calls `usearch_dense_cursor_init`."""
-        ...
-
-    @overload
-    def cursor(
-        self, size: int = 1024, *, outputs_dtype: Scalar, columns: int
-    ) -> DenseCursor[tuple[memoryview, memoryview]]:
-        """Calls `usearch_dense_cursor_init`."""
+    def cursor(self) -> DenseCursor:
+        """A scan `DenseCursor.next` pulls in batches. Calls `usearch_dense_cursor_init`."""
         ...
 
     def search_stream(
@@ -993,10 +1004,6 @@ class DenseIndex:
 
     def __contains__(self, key: _KeyLike, /) -> bool:
         """Whether any entry holds `key`. Python-only; calls `usearch_dense_count`."""
-        ...
-
-    def __getitem__(self, key: _KeyLike, /) -> DenseVectors:
-        """`get` that raises `KeyError` for an absent key. Python-only; calls `usearch_dense_get`."""
         ...
 
     def __repr__(self) -> str: ...

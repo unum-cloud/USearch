@@ -17,7 +17,7 @@ import numpy as np
 import pytest
 
 import usearch
-from usearch import DenseIndex, DenseMetric, Executor, Scalar
+from usearch import Arena, DenseIndex, DenseMetric, Executor, Scalar
 from usearch.eval import exact_matches, random_vectors
 from usearch.keys import integers_to_keys, keys_to_integers
 
@@ -218,21 +218,12 @@ def build_index(
     return index, vectors
 
 
-def matches_outputs(queries: int, wanted: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Three zeroed caller-owned buffers a `Matches` reads through, for *queries* rows of *wanted* columns."""
-    return (
-        np.zeros((queries, wanted, 16), dtype=np.uint8),
-        np.zeros((queries, wanted), dtype=np.float64),
-        np.zeros(queries, dtype=np.uint64),
-    )
-
-
 def measured_recall(
     index: DenseIndex, vectors, queries, wanted: int, executor: Executor, *, metric: DenseMetric
 ) -> float:
     """The share of true nearest neighbors the index returned, against the NumKong oracle."""
     truth = exact_matches(vectors, queries, wanted, metric=metric)
-    found = keys_to_integers(index.on(executor).search(queries, wanted).keys)
+    found = keys_to_integers(index.on(executor).search(queries, wanted, Arena(executor)).keys)
     hits = sum(len(set(found[row]) & set(truth[row])) for row in range(len(truth)))
     return hits / (len(truth) * wanted)
 

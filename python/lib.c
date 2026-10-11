@@ -45,6 +45,7 @@ static struct {
     {"DenseReachability", &DenseReachabilityType, &usearch_py_dense_reachability_desc},
     {"DenseTraversalStats", &DenseTraversalStatsType, NULL},
     {"DenseCursor", &DenseCursorType, NULL},
+    {"DenseBatch", &DenseBatchType, NULL},
     {"DenseSearchStream", &DenseSearchStreamType, NULL},
 
     {"SequenceIndex", &SequenceIndexType, NULL},

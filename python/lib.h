@@ -19,20 +19,22 @@
  *  @section python_receivers Receivers and Deferred Calls
  *
  *  The type of the object a verb is called on chooses where its call runs and how it completes: an
- *  index runs it on the calling thread, an @c On blocks on its executor, and a @c DeferredOn submits
- *  it there and answers a @c Deferred. A verb fills one call structure, kept on the stack while
- *  it blocks and inside its @c Deferred once submitted, so one body serves every receiver and
- *  nothing the library borrows ever moves. The binding keeps no counts and starts no threads:
- *  dropping a @c Deferred waits on its outcome, and every other wait belongs to the C library.
+ *  index runs it on the calling thread, an @c On blocks on its executor, and a @c DeferredOn
+ *  submits it there and answers a @c Deferred. A verb fills one call structure, kept on the stack
+ *  while it blocks and inside its @c Deferred once submitted, so one body serves every receiver and
+ *  nothing the library borrows ever moves. The binding starts no threads and keeps one count, an
+ *  arena's @c exports, since a buffer it exported cannot be revoked before C rewinds the memory
+ *  under it; a call adds one until it is waited on or dropped. Dropping a @c Deferred waits on its
+ *  outcome, and every other wait belongs to the C library.
  *
  *  @section python_buffers Buffer Protocol and NumPy Compatibility
  *
- *  Batch inputs arrive through PEP 3118 first and @c __array_interface__ second, so a
- *  PyTorch or TensorFlow tensor reaches the index without a NumPy round-trip and NumPy
- *  itself is never a build-time dependency. A verb returns its outputs rather than filling the
- *  caller's: what only the call can size stays in an @c Arena and leaves as zero-copy results that
- *  keep it alive, and what the inputs bound lands in fresh buffers, or in the caller's own
- *  through @c out= when a sweep must not allocate.
+ *  Batch inputs arrive through PEP 3118 first and @c __array_interface__ second, so a PyTorch or
+ *  TensorFlow tensor reaches the index without a NumPy round-trip and NumPy itself is never a
+ *  build-time dependency. Every output whose length scales with the call lands in the @c Arena the
+ *  caller passes and leaves as zero-copy results over it. An arena exporting a buffer refuses to
+ *  rewind, as a @c bytearray refuses to resize, and a result whose arena a later call rewound
+ *  raises @c UninitializedError when read.
  *
  *  @section python_naming Naming
  *
@@ -144,9 +146,9 @@ typedef struct usearch_py_buffer_backing_t {
 /**
  *  @brief Identities gathered for one batch, and whatever storage that gathering needed.
  *
- *  A caller passing an @c (N,16) buffer of identities hands us the array outright and
- *  @c owned stays @c NULL; a caller passing a list of integers gets one allocation, freed by
- *  @c usearch_py_keys_release.
+ *  A caller passing an @c (N,16) buffer of identities hands us the array outright and @c owned
+ *  stays @c NULL; a caller passing integers, as a list or a vector gathered in C, gets one
+ *  allocation, freed by @c usearch_py_keys_release.
  */
 typedef struct usearch_py_keys_t {
 
@@ -156,7 +158,7 @@ typedef struct usearch_py_keys_t {
     /** The allocation backing @c keys, or NULL when they live in the caller's buffer. */
     usearch_key_t* owned;
 
-    /** The exported buffer backing @c keys, zeroed when they were gathered one by one. */
+    /** The exported buffer backing @c keys, zeroed when they were gathered. */
     usearch_py_buffer_backing_t backing;
 } usearch_py_keys_t;
 
@@ -199,6 +201,7 @@ extern PyTypeObject DenseIndexDescriptionType;
 extern PyTypeObject DenseReachabilityType;
 extern PyTypeObject DenseTraversalStatsType;
 extern PyTypeObject DenseCursorType;
+extern PyTypeObject DenseBatchType;
 extern PyTypeObject DenseSearchStreamType;
 
 extern PyTypeObject SequenceIndexType;
@@ -226,46 +229,25 @@ typedef struct Executor {
 } Executor;
 
 /**
- *  @brief The memory a verb lands the outputs only it can size in, reused by the next call handed it.
+ *  @brief The memory every output whose length scales with a call lands in, rewound by the next
+ *      call handed it.
  *
- *  The library creates the handle on first use. Reuse rewinds it, so a call is refused while any
- *  view over its previous outputs is still exported.
+ *  A call is refused while a buffer over the previous outputs is still exported, and every result
+ *  over them refuses to be read once a later call rewound it.
  */
 typedef struct Arena {
     PyObject ob_base;
     usearch_arena_t handle;
 
-    /** Results over the arena still alive, plus one while a call fills it. */
+    /** Buffers exported over its outputs, plus one while a call holds it. */
     Py_ssize_t exports;
 
-    /** Where the outputs of the call that last claimed it live, which decides how its results export them. */
+    /** Calls that claimed it so far, which a result compares against the one it was written by. */
+    size_t generation;
+
+    /** Where its executor computes, which decides how its results export their outputs. */
     usearch_residency_t residency;
 } Arena;
-
-/**
- *  @brief A ranked run read back off the three buffers a verb filled.
- *
- *  Every field borrows: the exported buffers keep their owners alive for the view's whole
- *  life, and the row width follows from their lengths rather than travelling beside them.
- */
-typedef struct Matches {
-    PyObject ob_base;
-
-    /** The `queries * wanted` identities, sixteen bytes each. */
-    usearch_py_buffer_backing_t keys;
-
-    /** The `queries * wanted` distances, positionally paired with the identities. */
-    usearch_py_buffer_backing_t distances;
-
-    /** The `queries` match counts, one per query. */
-    usearch_py_buffer_backing_t counts;
-
-    /** Rows in each buffer - one per query. */
-    size_t queries;
-
-    /** Columns in the key and distance buffers - the "k" in "kANN". */
-    size_t wanted;
-} Matches;
 
 /** A C enum mirrored as an `enum.IntEnum`, its members spelled by the C name table. */
 typedef struct usearch_py_enum_t {
@@ -318,9 +300,6 @@ typedef struct usearch_py_receiver_t {
     /** The workers the call runs on; NULL runs it on the calling thread. */
     usearch_executor_t executor;
 
-    /** The residency of @c executor, or RAM on the calling thread. */
-    usearch_residency_t residency;
-
     /** Blocking for an index or an @c On, deferred for a @c DeferredOn. */
     usearch_completion_t completion;
 } usearch_py_receiver_t;
@@ -328,8 +307,8 @@ typedef struct usearch_py_receiver_t {
 /** The verbs an @c On offers, each blocking on its executor. */
 extern PyMethodDef usearch_py_on_methods[];
 
-/** The verbs a @c DeferredOn offers, each answering a @c Deferred; iterators block on every step,
- *  so they are absent. */
+/** The verbs a @c DeferredOn offers, each answering a @c Deferred; cursors and streams block on
+ *  every pull, so they are absent. */
 extern PyMethodDef usearch_py_deferred_on_methods[];
 
 /**
@@ -352,10 +331,7 @@ typedef struct usearch_py_call_t {
     /** The first exception a callback raised, which outranks the outcome it turned into; NULL while none has. */
     PyObject* raised;
 
-    /** The result allocated before the call for the call to write into, held, or NULL. */
-    PyObject* result;
-
-    /** The claimed @c Arena of the outputs only the call can size, or NULL. */
+    /** The claimed @c Arena the call's outputs land in, or NULL for a verb with none. */
     PyObject* arena;
 } usearch_py_call_t;
 
@@ -378,11 +354,15 @@ typedef struct usearch_py_verb_t {
     /** Hands the call to the library, with the thread state detached around it. */
     void (*submit)(void* call);
 
-    /** Builds the answer of a call whose outcome succeeded, taking its result and arena. */
+    /** Builds the answer of a call whose outcome succeeded, over the arena it claimed. */
     PyObject* (*answer)(void* call);
 
     /** Lets go of whatever the fill gathered and the answer did not take. */
     void (*release)(void* call);
+
+    /** Visits the callables and reports the call holds beyond its header, for the collector; NULL
+     *  when none. */
+    int (*traverse)(void* call, visitproc visit, void* arg);
 } usearch_py_verb_t;
 
 /** A deferred call owning everything the library touches until it is final, the object being the allocation, so
@@ -421,14 +401,11 @@ PyObject* usearch_py_call_run(usearch_py_receiver_t const* receiver, usearch_py_
 /** Lets go of a call whose fill failed, keeping the exception set; always returns NULL. */
 PyObject* usearch_py_call_discard(usearch_py_receiver_t const* receiver, usearch_py_verb_t const* verb, void* call);
 
-/** Lets go of the result, the arena claim and the latched exception every call header holds. */
+/** Lets go of the arena claim and the latched exception every call header holds. */
 void usearch_py_call_release(void* call);
 
 /** The answer of a verb with nothing to report. */
 PyObject* usearch_py_call_answer_none(void* call);
-
-/** The answer of a verb whose result was allocated before the call, handed over. */
-PyObject* usearch_py_call_answer_result(void* call);
 
 /**
  *  @brief Reads an optional callable into @p callback, latching its failures into @p call.
@@ -511,26 +488,9 @@ size_t usearch_py_scalar_row_bytes(usearch_scalar_t kind, size_t columns);
 char const* usearch_py_scalar_buffer_format(usearch_scalar_t kind);
 
 /**
- *  @brief A @p rank -dimensional @c memoryview over the whole of @p exporter, cast to @p format.
- *
- *  A @c memoryview refuses a zero extent in a cast shape, so an empty export leaves flat in
- *  @p format instead. Returns a new reference, or @c NULL with an exception set.
- */
-PyObject* usearch_py_shaped_view(PyObject* exporter, char const* format, Py_ssize_t const* shape, Py_ssize_t rank);
-
-/**
- *  @brief A @c (rows,columns) view over the first rows of @p storage in @p kind 's own format.
- *
- *  Kinds a @c memoryview cannot format - the sub-byte and mini-float ones - leave as a
- *  @c (rows,row_bytes) run of @c 'B' instead, since a cast to their format would report the
- *  wrong extent. Returns a new reference, or @c NULL with an exception set.
- */
-PyObject* usearch_py_matrix_view(PyObject* storage, size_t rows, size_t columns, usearch_scalar_t kind);
-
-/**
  *  @brief Bytes a @p rows × @p columns matrix of @p unit -byte cells occupies.
  *
- *  Every output extent goes through here: @c wanted is an arbitrary caller-supplied count, and
+ *  Every ranked output goes through here: @c wanted is an arbitrary caller-supplied count, and
  *  the product silently wraps at a size that would then under-allocate the arena the engine
  *  writes into.
  *
@@ -564,10 +524,11 @@ int usearch_py_matrix_from_object(PyObject* object, usearch_scalar_t scalar_hint
                                   usearch_py_buffer_backing_t* backing);
 
 /**
- *  @brief Borrows a writable contiguous byte run of exactly @p bytes for a verb to land outputs in.
+ *  @brief Borrows a writable contiguous byte run of exactly @p bytes for state the caller lends a
+ *      verb, such as attention's carry.
  *
- *  Outputs are byte runs rather than matrices - a key output is rank three - so this validates
- *  the total extent instead of the shape.
+ *  The state is a byte run rather than a matrix, so this validates the total extent instead of the
+ *  shape.
  *
  *  @return 0 on success, -1 with an exception set otherwise.
  */
@@ -631,42 +592,37 @@ int usearch_py_size_from_object(PyObject* object, char const* field, size_t* val
 int usearch_py_executor_from_object(PyObject* object, usearch_executor_t* executor);
 
 /**
- *  @brief Takes the @c arena argument of a verb whose outputs only the call can size, for one call.
- *
- *  @c NULL or @c None claims a fresh arena that the call's outputs alone will keep alive.
- *
- *  @param[in] residency The residency of the executor the call runs on, where its outputs will live.
+ *  @brief Claims the @c Arena @p object for one call, rewinding it: every result over its previous
+ *      outputs goes stale.
  *  @param[out] arena A new reference to the claimed @c Arena; hand it to @c usearch_py_arena_unclaim.
- *  @return 0 on success, -1 with an exception set when @p object is neither, or still exports.
+ *  @return 0 on success, -1 with an exception set when @p object is no @c Arena, serves a call, or
+ *      still exports.
  */
-int usearch_py_arena_claim(PyObject* object, usearch_residency_t residency, PyObject** arena);
+int usearch_py_arena_claim(PyObject* object, PyObject** arena);
 
 /** Ends the claim @c usearch_py_arena_claim took, and drops its reference. */
 void usearch_py_arena_unclaim(PyObject* arena);
 
 /**
- *  @brief A result of @p type - @c ArenaBufferType or a subtype - over the C-contiguous @p data inside @p arena,
- *      which it keeps alive and blocks from reuse until collected.
+ *  @brief A result of @p type - @c ArenaBufferType or a subtype - over the C-contiguous @p data the
+ *      claiming call wrote inside @p arena, which it keeps alive and reads only until a later call
+ *      rewinds it.
  *
  *  Host memory exports the writable buffer protocol, and device memory @c __cuda_array_interface__ alone.
  *
  *  @return A new reference, or @c NULL with an exception set.
  */
-PyObject* usearch_py_arena_buffer(PyTypeObject* type, PyObject* arena, void* data, char const* format,
+PyObject* usearch_py_arena_buffer(PyTypeObject* type, PyObject* arena, void const* data, char const* format,
                                   Py_ssize_t item_bytes, Py_ssize_t const* shape, int rank);
 
-/** A new @c DenseProducts taking every one of its fields, or NULL dropping them all when any is NULL. */
-PyObject* usearch_py_products_steal(PyObject* offsets, PyObject* keys, PyObject* scores, size_t required);
+/** A new @c Matches over the @p queries rows a ranked verb wrote into @p arena; NULL with an
+ *  exception set. */
+PyObject* usearch_py_matches_new(PyObject* arena, usearch_matches_view_t const* matches, size_t queries);
 
-/**
- *  @brief The @c Matches a ranked verb lands @p queries rows of @p wanted in, and the span over it.
- *
- *  A fresh one owns three zeroed buffers; @p out, when neither @c NULL nor @c None, must be a
- *  writable @c Matches of exactly that shape, and is reused so a sweep allocates nothing.
- *
- *  @return A new reference, or @c NULL with an exception set.
- */
-PyObject* usearch_py_matches_prepare(PyObject* out, size_t queries, size_t wanted, usearch_matches_span_t* span);
+/** A new @c DenseProducts over the @p pairs across @p rows rows @c multiply wrote into @p arena,
+ *  and the pairs it @p required; NULL with an exception set. */
+PyObject* usearch_py_products_new(PyObject* arena, usearch_matches_tape_view_t const* products, size_t rows,
+                                  size_t pairs, size_t required);
 
 extern char const doc_version[];
 extern char const doc_capabilities_compiled[];

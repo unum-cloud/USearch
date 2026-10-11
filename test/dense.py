@@ -10,10 +10,12 @@ Run:
 from __future__ import annotations
 
 import asyncio
+import gc
 import os
+import weakref
 from itertools import pairwise
 from operator import attrgetter
-from threading import Thread, Timer
+from threading import Thread
 
 import numpy as np
 import pytest
@@ -23,7 +25,6 @@ from base import (
     build_index,
     distance_tolerances,
     input_dtypes,
-    matches_outputs,
     measured_recall,
     quantizations,
     recall_floor,
@@ -178,10 +179,10 @@ def test_executor_closes_with_its_block():
 _CALLER_THREAD_VERBS = [
     ("insert", lambda index, rows: index.insert([9], rows[:1])),
     ("refine", lambda index, rows: index.refine()),
-    ("search", lambda index, rows: index.search(rows[:1], 1)),
-    ("search_stream", lambda index, rows: next(index.search_stream(rows[0]))),
-    ("save_buffer", lambda index, rows: index.save_buffer()),
-    ("get", lambda index, rows: index.get(0)),
+    ("search", lambda index, rows: index.search(rows[:1], 1, Arena())),
+    ("search_stream", lambda index, rows: index.search_stream(rows[0]).next(1, Arena())),
+    ("save_buffer", lambda index, rows: index.save_buffer(Arena())),
+    ("get", lambda index, rows: index.get(0, Arena())),
     ("count", lambda index, rows: index.count(0)),
 ]
 
@@ -207,7 +208,7 @@ def test_executor_is_borrowed_for_the_call(executor):
     """A verb borrows the workers for its call and never retains them, so a temporary one serves."""
     index, vectors = build_index(16, 8, Executor.for_ram())
     assert len(index) == 16
-    assert len(index.on(executor).search(vectors[:1], 1)) == 1
+    assert len(index.on(executor).search(vectors[:1], 1, Arena(executor))) == 1
 
 
 def test_one_executor_serves_several_indexes(executor):
@@ -215,7 +216,7 @@ def test_one_executor_serves_several_indexes(executor):
     first, vectors = build_index(16, 8, executor)
     second, _ = build_index(16, 8, executor, seed=1)
     assert len(first) == len(second) == 16
-    assert len(first.on(executor).search(vectors[:2], 1)) == 2
+    assert len(first.on(executor).search(vectors[:2], 1, Arena(executor))) == 2
 
 
 def test_concurrent_searches_take_one_executor_apiece(executor, spawn_executor):
@@ -225,7 +226,8 @@ def test_concurrent_searches_take_one_executor_apiece(executor, spawn_executor):
     answers: dict[int, Matches] = {}
 
     def resolve(thread_index: int):
-        answers[thread_index] = index.on(pools[thread_index]).search(vectors[:8], 4)
+        pool = pools[thread_index]
+        answers[thread_index] = index.on(pool).search(vectors[:8], 4, Arena(pool))
 
     threads = [Thread(target=resolve, args=(thread_index,)) for thread_index in range(len(pools))]
     for thread in threads:
@@ -238,6 +240,28 @@ def test_concurrent_searches_take_one_executor_apiece(executor, spawn_executor):
         assert np.asarray(matches.counts).shape == (8,)
 
 
+def test_arena_is_made_by_an_executor_or_none():
+    """An executor makes an arena where it computes, none makes one for the calling thread, and nothing else does."""
+    with Executor.for_ram(threads=1) as pool:
+        assert isinstance(Arena(pool), Arena) and isinstance(Arena(), Arena)
+    with pytest.raises(UninitializedError):
+        Arena(pool)
+    with pytest.raises(TypeError):
+        Arena(2)
+
+
+@pytest.mark.parametrize("arena", [None, 0])
+def test_output_verbs_require_an_arena(executor, arena):
+    """No output verb allocates on its own, so one handed no arena, or anything else, is refused."""
+    index, vectors = build_index(8, 8, executor)
+    with pytest.raises(TypeError):
+        index.search(vectors[:1], 1)
+    with pytest.raises(TypeError):
+        index.search(vectors[:1], 1, arena)
+    with pytest.raises(TypeError):
+        index.cursor().next(1, arena)
+
+
 # endregion Executors
 
 # region Receivers
@@ -246,27 +270,25 @@ def test_concurrent_searches_take_one_executor_apiece(executor, spawn_executor):
 def test_receivers_answer_alike(executor):
     """The receiver chooses where the call runs and the verb stays, so all three answer the same matches."""
     index, vectors = build_index(64, 16, executor)
-    on_caller = keys_to_integers(index.search(vectors[:4], 5).keys)
-    on_executor = keys_to_integers(index.on(executor).search(vectors[:4], 5).keys)
-    call = index.deferred(executor).search(vectors[:4], 5)
+    on_caller = keys_to_integers(index.search(vectors[:4], 5, Arena()).keys)
+    on_executor = keys_to_integers(index.on(executor).search(vectors[:4], 5, Arena(executor)).keys)
+    call = index.deferred(executor).search(vectors[:4], 5, Arena(executor))
     assert isinstance(call, Deferred)
     assert call.status == Status.DEFERRED
-    executor.drain()
     deferred = keys_to_integers(call.wait().keys)
     assert np.array_equal(on_caller, on_executor)
     assert np.array_equal(on_caller, deferred)
 
 
-def test_deferred_call_is_deferred_until_drained(executor):
-    """A submitted call reads `DEFERRED` until the executor runs it, then answers what a blocking one would."""
+def test_deferred_call_is_deferred_until_waited(executor):
+    """A submitted call reads `DEFERRED` until it is final, then answers what a blocking one would."""
     index = DenseIndex.init_ram(16, DenseMetric.ANGULAR, Scalar.F32)
     index.reserve(8)
     call = index.deferred(executor).insert(np.arange(8), random_vectors(8, 16))
     assert call.status is Status.DEFERRED
     assert repr(call) == "Deferred(status=deferred)"
-    executor.drain()
-    assert call.status is Status.SUCCESS
     assert call.wait() is None
+    assert call.status is Status.SUCCESS
     assert call.wait() is None, "a final call answers as many times as it is asked"
     assert len(index) == 8
 
@@ -278,9 +300,8 @@ def test_deferred_call_owns_its_inputs(executor):
     rows = random_vectors(4, 16)
     call = index.deferred(executor).insert(list(range(4)), rows.copy())
     assert call.status == Status.DEFERRED
-    executor.drain()
     call.wait()
-    assert np.allclose(np.asarray(index.get(2)), rows[2:3], atol=1e-6)
+    assert np.allclose(np.asarray(index.get(2, Arena())), rows[2:3], atol=1e-6)
 
 
 def test_deferred_call_raises_at_wait(executor):
@@ -288,14 +309,13 @@ def test_deferred_call_raises_at_wait(executor):
     index, vectors = build_index(16, 8, executor)
     with pytest.raises(ShapeMismatchError):
         index.deferred(executor).insert([1, 2, 3], vectors[:2])
-    call = index.deferred(executor).search(vectors[:1, :4], 1)
+    call = index.deferred(executor).search(vectors[:1, :4], 1, Arena(executor))
     assert call.status == Status.DEFERRED
-    executor.drain()
-    assert call.status is Status.SHAPE_MISMATCH
     for _ in range(2):
         with pytest.raises(ShapeMismatchError) as raised:
             call.wait()
         assert raised.value.status is Status.SHAPE_MISMATCH
+    assert call.status is Status.SHAPE_MISMATCH
 
 
 def test_deferred_call_awaits(executor):
@@ -303,9 +323,8 @@ def test_deferred_call_awaits(executor):
     index, vectors = build_index(32, 8, executor)
 
     async def search() -> Matches:
-        call = index.deferred(executor).search(vectors[:2], 3)
+        call = index.deferred(executor).search(vectors[:2], 3, Arena(executor))
         assert call.status == Status.DEFERRED
-        executor.drain()
         return await call
 
     matches = asyncio.run(search())
@@ -330,7 +349,6 @@ def test_full_deferred_table_answers_contended():
     assert second.status is Status.CONTENDED
     with pytest.raises(ContendedError):
         second.wait()
-    pool.drain()
     assert first.wait() == 1
 
 
@@ -339,30 +357,41 @@ def test_dropping_an_unfinished_deferred_waits(executor):
     index = DenseIndex.init_ram(8, DenseMetric.ANGULAR, Scalar.F32)
     index.reserve(4)
     call = index.deferred(executor).insert([1, 2], random_vectors(2, 8))
-    drainer = Timer(0.05, executor.drain)
-    drainer.start()
+    assert call.status is Status.DEFERRED
     del call
-    drainer.join()
     assert len(index) == 2
 
 
-def test_deferred_call_holds_its_arena(executor):
-    """A deferred call claims its arena until it is final, so a second call naming it is refused meanwhile."""
+def test_dropped_deferred_in_a_cycle_is_collected_once_final(executor):
+    """A predicate holding its own `Deferred` forms a cycle the collector breaks once the call is final."""
     index, vectors = build_index(4, 8, executor)
-    arena = Arena()
-    call = index.deferred(executor).get(1, arena=arena)
+    witness = type("Witness", (), {})()
+    alive = weakref.ref(witness)
+    cycle: list = [witness]
+    call = index.deferred(executor).search(vectors[:1], 1, Arena(executor), predicate=lambda key, cycle=cycle: True)
+    cycle.append(call)
+    del witness, cycle, call
+    executor.drain()
+    gc.collect()
+    assert alive() is None
+
+
+def test_deferred_call_borrows_its_arena(executor):
+    """A deferred call borrows its arena as a blocking one does, refusing a second call until it is final."""
+    index, vectors = build_index(4, 8, executor)
+    arena = Arena(executor)
+    call = index.deferred(executor).get(1, arena)
     assert call.status == Status.DEFERRED
     with pytest.raises(ContendedError):
-        index.get(2, arena=arena)
-    executor.drain()
+        index.get(2, arena)
     rows = call.wait()
     assert np.allclose(np.asarray(rows), vectors[1:2], atol=1e-6)
-    del rows, call  # The deferred call answers its result again on every wait, so it holds it too
-    assert np.asarray(index.get(2, arena=arena)).shape == (1, 8)
+    assert np.asarray(index.get(2, arena)).shape == (1, 8)
 
 
 def test_deferred_receiver_lacks_what_cannot_defer(executor):
-    """Iterators block on every step and factories address no index, so the receivers that cannot run them lack them."""
+    """Cursors and streams block on every pull and factories address no index, so the receivers that cannot run them
+    lack them."""
     index, _ = build_index(4, 8, executor)
     assert not hasattr(index.deferred(executor), "cursor")
     assert not hasattr(index.deferred(executor), "search_stream")
@@ -449,6 +478,24 @@ def test_insert_accepts_every_key_spelling(executor, keys):
     assert len(index) == 2
 
 
+def test_insert_gathers_integer_vectors_as_keys(executor):
+    """An integer vector of any width or stride reads as the identities its integers spell, negatives refused."""
+    index = DenseIndex.init_ram(dimensions=4, quantization=Scalar.F32)
+    index.reserve(8)
+    for keys in (
+        np.array([7, 200], np.uint8),
+        np.array([7, 300], np.int16),
+        np.array([2**64 - 1, 5], np.uint64),
+        np.arange(10, 14, dtype=np.int64)[::2],
+    ):
+        index.on(executor).insert(keys, random_vectors(2, 4))
+    spelled = (7, 200, 300, 2**64 - 1, 5, 10, 12, 11)
+    assert [index.count(key) for key in spelled] == [2, 1, 1, 1, 1, 1, 1, 0]
+    with pytest.raises(OverflowError):
+        index.on(executor).insert(np.array([3, -1], np.int32), random_vectors(2, 4))
+    assert len(index) == 8
+
+
 def test_insert_rejects_mismatched_key_count(executor):
     """A key per row, or the batch is refused before anything is published."""
     index = DenseIndex.init_ram(dimensions=4, quantization=Scalar.F32)
@@ -519,7 +566,7 @@ def test_search_shapes(executor, dimensions: int):
     """The three outputs are shaped by the batch and the "k" that was asked for."""
     index, vectors = build_index(64, dimensions, executor)
     stats = DenseTraversalStats()
-    matches: Matches = index.on(executor).search(vectors[:3], 5, stats=stats)
+    matches: Matches = index.on(executor).search(vectors[:3], 5, Arena(executor), stats=stats)
 
     assert np.asarray(matches.keys).shape == (3, 5, 16)
     assert np.asarray(matches.distances).shape == (3, 5)
@@ -531,7 +578,7 @@ def test_search_shapes(executor, dimensions: int):
 def test_search_rows_are_matches(executor):
     """A result row is a tuple of scored entries, nearest first."""
     index, vectors = build_index(64, 32, executor)
-    row = index.on(executor).search(vectors[:1], 4)[0]
+    row = index.on(executor).search(vectors[:1], 4, Arena(executor))[0]
     assert all(isinstance(match, Match) for match in row)
     assert isinstance(row[0].key, Key)
     assert row[0].distance <= row[-1].distance
@@ -540,36 +587,27 @@ def test_search_rows_are_matches(executor):
 def test_search_reports_fewer_matches_than_asked(executor):
     """A count bounds its own row, so an index holding less than `wanted` still answers."""
     index, vectors = build_index(3, 8, executor)
-    matches = index.on(executor).search(vectors[:1], 10)
+    matches = index.on(executor).search(vectors[:1], 10, Arena(executor))
     count = int(np.asarray(matches.counts)[0])
     assert count <= 3
     assert len(matches[0]) == count
 
 
-def test_search_reuses_the_returned_matches(executor):
-    """One sizing serves a whole sweep, so a second call lands in what the first returned."""
+def test_search_reuses_one_arena(executor):
+    """One arena serves a whole sweep, each call rewinding what the one before it wrote."""
     index, vectors = build_index(64, 16, executor)
-    matches = index.on(executor).search(vectors[:2], 4)
-    first = keys_to_integers(matches.keys).copy()
-    assert index.on(executor).search(vectors[4:6], 4, out=matches) is matches
-    assert not np.array_equal(first, keys_to_integers(matches.keys))
-    assert int(np.asarray(matches.counts)[0]) == 4
-
-
-def test_search_lands_in_the_caller_buffers(executor):
-    """A `Matches` over buffers the caller owns is a zero-allocation target that writes through."""
-    index, vectors = build_index(64, 16, executor)
-    keys, distances, counts = matches_outputs(2, 4)
-    index.on(executor).search(vectors[:2], 4, out=Matches(keys, distances, counts))
-    assert counts.tolist() == [4, 4]
-    assert keys_to_integers(keys)[0, 0] == 0
+    arena = Arena(executor)
+    first = keys_to_integers(index.on(executor).search(vectors[:2], 4, arena).keys)
+    second = index.on(executor).search(vectors[4:6], 4, arena)
+    assert not np.array_equal(first, keys_to_integers(second.keys))
+    assert int(np.asarray(second.counts)[0]) == 4
 
 
 def test_search_rejects_an_overflowing_request(executor):
     """An output matrix that cannot fit memory is refused rather than silently wrapped."""
     index, vectors = build_index(4, 8, executor)
     with pytest.raises(CapacityOverflowError) as raised:
-        index.on(executor).search(vectors[:2], 2**62)
+        index.on(executor).search(vectors[:2], 2**62, Arena(executor))
     assert raised.value.status is Status.OVERFLOW
 
 
@@ -586,7 +624,7 @@ def test_recall_against_the_oracle(executor, dimensions: int, metric: DenseMetri
 def test_recall_survives_quantization(executor, quantization: Scalar):
     """Every stored scalar type still finds what it should, at its own floor."""
     index, _ = build_index(512, 96, executor, quantization=quantization)
-    recall = self_recall(index.on(executor)).mean_recall
+    recall = self_recall(index.on(executor), Arena(executor)).mean_recall
     assert recall >= recall_floor(quantization), f"{quantization} recall collapsed to {recall}"
 
 
@@ -597,7 +635,7 @@ def test_distances_agree_with_the_oracle(executor, quantization: Scalar):
     """A reported distance matches what NumKong computes for the same pair, within tolerance."""
     index, vectors = build_index(128, 64, executor, quantization=quantization)
     queries = vectors[:8]
-    matches = index.on(executor).search(queries, 1)
+    matches = index.on(executor).search(queries, 1, Arena(executor))
     found = keys_to_integers(matches.keys)[:, 0]
     reported = np.asarray(matches.distances)[:, 0]
     truth = np.asarray(nk.cdist(queries, vectors, "angular", out_dtype="float64"))
@@ -611,8 +649,9 @@ def test_expansion_rides_the_call(executor):
     index, vectors = build_index(512, 64, executor)
     queries = vectors[:32]
     narrow, wide = DenseTraversalStats(), DenseTraversalStats()
-    index.on(executor).search(queries, 10, expansion_factor=16, stats=narrow)
-    index.on(executor).search(queries, 10, expansion_factor=256, stats=wide)
+    arena = Arena(executor)
+    index.on(executor).search(queries, 10, arena, expansion_factor=16, stats=narrow)
+    index.on(executor).search(queries, 10, arena, expansion_factor=256, stats=wide)
     assert wide.computed_distances > narrow.computed_distances
 
 
@@ -621,38 +660,23 @@ def test_telemetry_is_a_per_call_reading(executor):
     index, vectors = build_index(128, 16, executor)
     queries = vectors[:8]
     stats, total = DenseTraversalStats(), DenseTraversalStats()
+    arena = Arena(executor)
 
-    index.on(executor).search(queries, 5, stats=stats)
+    index.on(executor).search(queries, 5, arena, stats=stats)
     first = stats.computed_distances
     assert first > 0
     total += stats
 
-    index.on(executor).search(queries, 5, stats=stats)
+    index.on(executor).search(queries, 5, arena, stats=stats)
     assert stats.computed_distances == first, "a repeat replaces the reading rather than adding to it"
     total += stats
     assert total.computed_distances == 2 * first
 
 
-@pytest.mark.parametrize(("queries", "wanted"), [(4, 3), (3, 10), (5, 10)])
-def test_search_rejects_a_mismatched_out(executor, queries: int, wanted: int):
-    """A reused run must be exactly the shape the call writes, no more and no less."""
-    index, vectors = build_index(32, 16, executor)
-    with pytest.raises(ShapeMismatchError):
-        index.on(executor).search(vectors[:4], 10, out=Matches(*matches_outputs(queries, wanted)))
-
-
-def test_search_rejects_read_only_outputs(executor):
-    """A read-only output is refused before anything is written into it."""
-    index, vectors = build_index(32, 16, executor)
-    read_only = Matches(bytes(2 * 2 * 16), np.zeros((2, 2)), np.zeros(2, np.uint64))
-    with pytest.raises(ValueError):
-        index.on(executor).search(vectors[:2], 2, out=read_only)
-
-
 def test_filtered_search_admits_only_approved_keys(executor):
     """A predicate narrows the answer without collapsing the walk that produced it."""
     index, vectors = build_index(128, 32, executor)
-    matches = index.on(executor).search(vectors[:4], 8, predicate=lambda key: int(key) % 2 == 0)
+    matches = index.on(executor).search(vectors[:4], 8, Arena(executor), predicate=lambda key: int(key) % 2 == 0)
     found = keys_to_integers(matches.keys)
     counts = np.asarray(matches.counts)
     for query_index in range(len(counts)):
@@ -669,7 +693,7 @@ def test_filtered_search_propagates_a_raising_predicate(executor):
         raise failure
 
     with pytest.raises(ValueError) as raised:
-        index.on(executor).search(vectors[:2], 4, predicate=broken)
+        index.on(executor).search(vectors[:2], 4, Arena(executor), predicate=broken)
     assert raised.value is failure
 
 
@@ -694,19 +718,20 @@ def test_get_returns_the_stored_rows(executor):
     vectors = random_vectors(2, 8)
     index.on(executor).insert([1, 2], vectors)
 
-    rows = index.get(1, outputs_dtype=Scalar.F32)
+    rows = index.get(1, Arena(), outputs_dtype=Scalar.F32)
     assert isinstance(rows, DenseVectors) and not hasattr(rows, "__cuda_array_interface__")
     retrieved = np.asarray(rows)
     assert retrieved.shape == (1, 8)
     assert np.allclose(retrieved[0], vectors[0], atol=1e-6)
 
 
-def test_get_answers_none_and_subscript_raises(executor):
-    """`get` is a `get`; subscription is a lookup, so the two answer absence differently."""
+def test_get_answers_empty_and_takes_no_subscript(executor):
+    """`get` answers absence with no rows, and a subscript, having no arena to land in, is no verb at all."""
     index, _ = build_index(4, 8, executor)
-    assert index.get(10_000) is None
-    with pytest.raises(KeyError):
-        index[10_000]
+    absent = index.get(10_000, Arena())
+    assert isinstance(absent, DenseVectors) and len(absent) == 0 and not absent
+    with pytest.raises(TypeError):
+        index[0]
 
 
 def test_get_leaves_unformattable_kinds_as_bytes(executor):
@@ -714,20 +739,38 @@ def test_get_leaves_unformattable_kinds_as_bytes(executor):
     index = DenseIndex.init_ram(dimensions=8, quantization=Scalar.BF16)
     index.reserve(1)
     index.on(executor).insert([1], random_vectors(1, 8))
-    view = memoryview(index.get(1, outputs_dtype=Scalar.BF16))
+    view = memoryview(index.get(1, Arena(), outputs_dtype=Scalar.BF16))
     assert view.format == "B"
     assert view.shape == (1, 16)
 
 
-def test_arena_refuses_reuse_while_a_view_lives(executor):
-    """Reuse rewinds the arena, so it waits until every result over the last outputs is dropped."""
-    index, _ = build_index(4, 8, executor, quantization=Scalar.F32)
-    arena = Arena()
-    first = index.on(executor).get(1, arena=arena)
+def test_arena_refuses_to_rewind_while_a_buffer_is_exported(executor):
+    """Like a `bytearray`, an arena exporting a buffer over its outputs refuses the call that would rewind it,
+    and the refused call leaves the holder's views readable."""
+    index, vectors = build_index(4, 8, executor, quantization=Scalar.F32)
+    arena = Arena(executor)
+    rows = index.on(executor).get(1, arena)
+    exported = memoryview(rows)
     with pytest.raises(ContendedError):
-        index.on(executor).get(2, arena=arena)
-    del first
-    assert np.asarray(index.on(executor).get(2, arena=arena)).shape == (1, 8)
+        index.on(executor).get(2, arena)
+    assert np.allclose(np.asarray(rows), vectors[1:2], atol=1e-6)
+    exported.release()
+    assert np.asarray(index.on(executor).get(2, arena)).shape == (1, 8)
+
+
+def test_results_refuse_reads_once_their_arena_rewinds(executor):
+    """A result kept past the next call over its arena is stale, so every read of it is refused."""
+    index, vectors = build_index(16, 8, executor, metric=DenseMetric.INNER)
+    arena = Arena(executor)
+    matches = index.on(executor).search(vectors[:2], 4, arena)
+    products = index.on(executor).multiply(vectors[:2], 4, arena)
+    for read in (lambda: matches[0], lambda: memoryview(matches.keys), lambda: memoryview(matches.counts)):
+        with pytest.raises(UninitializedError):
+            read()
+    rows = index.on(executor).get(1, arena)
+    with pytest.raises(UninitializedError):
+        products.row(0)
+    assert np.asarray(rows).shape == (1, 8)
 
 
 def test_duplicate_keys_stack(executor):
@@ -736,7 +779,7 @@ def test_duplicate_keys_stack(executor):
     index.reserve(3)
     index.on(executor).insert([5, 5, 5], random_vectors(3, 8))
     assert index.count(5) == 3
-    assert np.asarray(index[5]).shape == (3, 8)
+    assert np.asarray(index.get(5, Arena())).shape == (3, 8)
 
 
 # endregion Retrieval
@@ -747,45 +790,50 @@ def test_duplicate_keys_stack(executor):
 def test_iteration_walks_every_key(executor):
     """A snapshot walk visits each published entry exactly once."""
     index, _ = build_index(300, 16, executor)
-    walked = np.concatenate([np.asarray(batch) for batch in index.cursor(64)], axis=0)
-    assert sorted(keys_to_integers(walked).tolist()) == list(range(300))
+    cursor, arena, walked = index.cursor(), Arena(), []
+    while batch := cursor.next(64, arena):
+        walked.append(np.array(batch.keys))
+    assert sorted(keys_to_integers(np.concatenate(walked)).tolist()) == list(range(300))
 
 
 def test_iteration_carries_typed_vectors(executor):
-    """A walk asked for a scalar type yields that type, not the bytes underneath it."""
-    index, vectors = build_index(40, 12, executor, quantization=Scalar.F32)
-    keys, rows = next(iter(index.cursor(16, outputs_dtype=Scalar.F32, columns=12)))
-    assert rows.format == "f"
-    assert rows.shape == (16, 12)
-    assert np.asarray(keys).shape == (16, 16)
-    # The binding never asks the index for its width, so the caller names both or neither.
-    with pytest.raises(TypeError):
-        index.cursor(16, outputs_dtype=Scalar.F32)
-    with pytest.raises(TypeError):
-        index.cursor(16, columns=12)
+    """A pull asked for a scalar type carries that type, one asked for none carries keys alone, and each pull
+    rewinds the batch before it."""
+    index, _ = build_index(40, 12, executor, quantization=Scalar.F32)
+    cursor, arena = index.cursor(), Arena()
+    batch = cursor.next(16, arena, outputs_dtype=Scalar.F32)
+    view = memoryview(batch.vectors)
+    assert view.format == "f" and view.shape == (16, 12)
+    assert len(batch) == 16 and np.asarray(batch.keys).shape == (16, 16)
+    with pytest.raises(ContendedError):
+        cursor.next(16, arena)
+    view.release()
+    assert cursor.next(16, arena).vectors is None
+    with pytest.raises(UninitializedError):
+        memoryview(batch.vectors)
 
 
 def test_search_stream_yields_nearest_first(executor):
     """A search stream is resumable, ordered by what the walk has reached."""
     index, vectors = build_index(128, 24, executor)
-    stream = index.on(executor).search_stream(vectors[0])
-    streamed = [match.distance for _, match in zip(range(16), stream, strict=False)]
-    assert streamed == sorted(streamed)
+    stream, arena = index.on(executor).search_stream(vectors[0]), Arena(executor)
+    streamed = [match.distance for match in stream.next(8, arena)[0]]
+    streamed += [match.distance for match in stream.next(8, arena)[0]]
+    assert len(streamed) == 16 and streamed == sorted(streamed)
 
 
 def test_walks_close_before_they_are_collected(executor):
-    """`close()` and a `with` block release a cursor's snapshot or a stream's walk, after which iteration ends."""
+    """`close()` and a `with` block release a cursor's snapshot or a stream's walk, after which a pull is refused."""
     index, vectors = build_index(32, 8, executor)
-    with index.cursor(4) as cursor:
-        assert len(np.asarray(next(cursor))) == 4
-    assert next(cursor, None) is None
+    arena = Arena()
+    with index.cursor() as cursor:
+        assert len(cursor.next(4, arena)) == 4
+    with pytest.raises(UninitializedError):
+        cursor.next(4, arena)
     with index.search_stream(vectors[0]) as stream:
-        key, distance = next(stream)
-        assert int(key) == 0
-    assert next(stream, None) is None
-    stream = index.search_stream(vectors[1])
-    stream.close()
-    assert list(stream) == []
+        assert int(stream.next(1, arena)[0][0].key) == 0
+    with pytest.raises(UninitializedError):
+        stream.next(1, arena)
 
 
 # endregion Iteration
@@ -793,20 +841,35 @@ def test_walks_close_before_they_are_collected(executor):
 # region Composition
 
 
-def test_merge_absorbs_and_consumes_the_donor(executor):
-    """The donor's entries arrive and its handle stops answering, both at once."""
+def test_merge_absorbs_and_consumes_every_donor(executor):
+    """Every donor's entries arrive and its handle stops answering, all at once."""
     first = DenseIndex.init_ram(dimensions=16, quantization=Scalar.F32)
-    first.reserve(64)
+    first.reserve(96)
     first.on(executor).insert(np.arange(0, 32), random_vectors(32, 16))
+    donors = []
+    for seed in (1, 2):
+        donor = DenseIndex.init_ram(dimensions=16, quantization=Scalar.F32)
+        donor.reserve(32)
+        donor.on(executor).insert(np.arange(32 * seed, 32 * seed + 32), random_vectors(32, 16, seed=seed))
+        donors.append(donor)
 
-    second = DenseIndex.init_ram(dimensions=16, quantization=Scalar.F32)
-    second.reserve(32)
-    second.on(executor).insert(np.arange(32, 64), random_vectors(32, 16, seed=1))
+    first.on(executor).merge(*donors)
+    assert len(first) == 96
+    assert [40 in first, 80 in first] == [True, True]
+    for donor in donors:
+        with pytest.raises(UninitializedError):
+            len(donor)
 
-    first.on(executor).merge(second)
-    assert len(first) == 64
-    assert 40 in first
 
+def test_merge_stopped_between_donors_leaves_the_rest_live(executor):
+    """A donor the merge never reached is handed back to its wrapper, still usable."""
+    first, _ = build_index(8, 8, executor)
+    second, _ = build_index(8, 8, executor, seed=1)
+    third, _ = build_index(8, 8, executor, seed=2)
+    with pytest.raises(CancelledError):
+        first.on(executor).merge(second, third, progress=lambda completed, total: completed < 1)
+    assert len(first) == 16
+    assert len(third) == 8
     with pytest.raises(UninitializedError):
         len(second)
 
@@ -816,11 +879,11 @@ def test_merge_consumes_a_donor_still_walked(executor):
     pull, naming a handle that is gone, is refused."""
     first, _ = build_index(16, 8, executor)
     second, _ = build_index(16, 8, executor, seed=1)
-    cursor = second.cursor(4)
+    cursor = second.cursor()
     first.on(executor).merge(second)
     assert len(first) == 32
     with pytest.raises(UninitializedError):
-        next(cursor)
+        cursor.next(4, Arena())
 
 
 def test_merge_refuses_itself(executor):
@@ -866,7 +929,7 @@ def test_save_load_roundtrip(executor, tmp_path):
 def test_save_load_through_buffers(executor):
     """`save_buffer` returns the monolith a `load_ram_buffer` reads back."""
     index, _ = build_index(64, 16, executor, quantization=Scalar.F32)
-    buffer = index.on(executor).save_buffer()
+    buffer = index.on(executor).save_buffer(Arena(executor))
     assert isinstance(buffer, Monolith) and memoryview(buffer).nbytes > 0
     assert DenseIndex.metadata_read_buffer(buffer).dimensions == 16
 
@@ -891,7 +954,7 @@ def test_view_serves_in_place_and_refuses_mutation(executor, tmp_path):
 
     viewed = DenseIndex.view_ram(path)
     assert len(viewed) == 32
-    assert len(viewed.on(executor).search(vectors[:2], 3)) == 2
+    assert len(viewed.on(executor).search(vectors[:2], 3, Arena(executor))) == 2
     with pytest.raises(ReadOnlyError) as raised:
         viewed.on(executor).insert([99], vectors[:1])
     assert raised.value.status is Status.READ_ONLY
@@ -933,7 +996,7 @@ def test_refine_reports_a_sweep_and_leaves_the_index_standing(executor):
     assert isinstance(changed, int)
     assert changed <= len(index), "a sweep cannot change more nodes than the graph holds"
     assert len(index) == 64
-    assert len(index.on(executor).search(vectors[:4], 5)) == 4
+    assert len(index.on(executor).search(vectors[:4], 5, Arena(executor))) == 4
 
 
 def test_refine_reports_telemetry(executor):
@@ -1005,7 +1068,7 @@ def late_interaction_index(executor, dimensions: int = 16) -> tuple[DenseIndex, 
 def scored_documents(index, tokens, queries: int, wanted: int, executor, **kwargs) -> Matches:
     """Runs `maxsim` over *queries* whole queries."""
     return index.on(executor).maxsim(
-        tokens[: queries * _LATE_INTERACTION_TOKENS], _LATE_INTERACTION_TOKENS, wanted, **kwargs
+        tokens[: queries * _LATE_INTERACTION_TOKENS], _LATE_INTERACTION_TOKENS, wanted, Arena(executor), **kwargs
     )
 
 
@@ -1046,7 +1109,7 @@ def test_maxsim_refuses_ragged_queries(executor):
     """The query rows must divide into whole queries, or the grouping is a guess."""
     index, tokens = late_interaction_index(executor)
     with pytest.raises(ShapeMismatchError):
-        index.on(executor).maxsim(tokens[: _LATE_INTERACTION_TOKENS + 1], _LATE_INTERACTION_TOKENS, 4)
+        index.on(executor).maxsim(tokens[: _LATE_INTERACTION_TOKENS + 1], _LATE_INTERACTION_TOKENS, 4, Arena())
 
 
 def test_maxsim_refuses_a_predicate(executor):
@@ -1057,6 +1120,7 @@ def test_maxsim_refuses_a_predicate(executor):
             tokens[:_LATE_INTERACTION_TOKENS],
             _LATE_INTERACTION_TOKENS,
             4,
+            Arena(),
             predicate=lambda key: True,
         )
 
@@ -1065,7 +1129,7 @@ def test_maxsim_refuses_a_distance_kind(executor):
     """Late interaction sums maxima over logits, which only the inner-product kinds score."""
     index, vectors = build_index(16, 8, executor, metric=DenseMetric.ANGULAR)
     with pytest.raises(ConfigMismatchError):
-        index.on(executor).maxsim(vectors[:2], 2, 4)
+        index.on(executor).maxsim(vectors[:2], 2, 4, Arena())
 
 
 def test_maxsim_reports_telemetry(executor):
@@ -1085,7 +1149,7 @@ def test_multiply_reports_every_scored_pair(executor):
     """A walk scores many more pairs than a search reports, and this verb hands them all back."""
     index, vectors = build_index(64, 32, executor, metric=DenseMetric.INNER)
     rows = vectors[:4]
-    products = index.on(executor).multiply(rows, 0)
+    products = index.on(executor).multiply(rows, 0, Arena(executor))
     offsets = np.asarray(products.offsets)
     named = keys_to_integers(products.keys)
     scores = np.asarray(products.scores)
@@ -1109,7 +1173,7 @@ def test_multiply_reports_every_scored_pair(executor):
 def test_multiply_reports_what_wanted_cut(executor):
     """A bound keeps the first pairs per row, and `required` still counts every pair scored."""
     index, vectors = build_index(64, 16, executor, metric=DenseMetric.INNER)
-    products = index.on(executor).multiply(vectors[:2], 4)
+    products = index.on(executor).multiply(vectors[:2], 4, Arena(executor))
     assert np.diff(np.asarray(products.offsets)).tolist() == [4, 4]
     assert products.required > 8, "both rows scored more pairs than were kept"
 
@@ -1118,12 +1182,7 @@ def test_multiply_refuses_a_predicate(executor):
     """`multiply` has no filtered sibling, so the keyword is refused rather than ignored."""
     index, vectors = build_index(16, 8, executor, metric=DenseMetric.INNER)
     with pytest.raises(TypeError):
-        index.on(executor).multiply(vectors[:1], 4, predicate=lambda key: True)
-
-
-def value_lookup(values: np.ndarray):
-    """A value lookup resolving integer keys to their rows of *values*."""
-    return lambda keys: values[keys_to_integers(keys)]
+        index.on(executor).multiply(vectors[:1], 4, Arena(), predicate=lambda key: True)
 
 
 @pytest.mark.parametrize("head_count", [1, 2])
@@ -1136,7 +1195,9 @@ def test_attend_over_every_key_is_full_attention(executor, head_count: int):
     carry = np.zeros((len(queries), 2), dtype=np.float32)
     outputs = index.on(executor).attend(
         queries,
-        value_lookup(values),
+        values,
+        int,
+        Arena(executor),
         head_count=head_count,
         expansion_factor=2 * context,
         outputs_dtype=Scalar.F32,
@@ -1152,38 +1213,40 @@ def test_attend_over_every_key_is_full_attention(executor, head_count: int):
     np.testing.assert_allclose(carry[:, 1], weights.sum(axis=1), rtol=1e-5)
 
 
-def test_attend_lands_in_the_caller_buffer(executor):
-    """`out` is written through and handed back, so a decode loop allocates nothing."""
+def test_attend_lands_in_the_arena(executor):
+    """The attended rows view the arena they were handed, so a decode loop reusing one allocates once."""
     index, keys_matrix = build_index(16, 8, executor, metric=DenseMetric.INNER)
-    outputs = np.zeros((2, 8), dtype=np.float32)
-    landed = index.on(executor).attend(
-        keys_matrix[:2], value_lookup(keys_matrix), outputs_dtype=Scalar.F32, out=outputs
-    )
-    assert landed is outputs
-    assert np.any(outputs != 0)
+    arena = Arena(executor)
+    landed = index.on(executor).attend(keys_matrix[:2], keys_matrix, int, arena, outputs_dtype=Scalar.F32)
+    assert isinstance(landed, DenseVectors)
+    assert np.any(np.asarray(landed) != 0)
 
 
 def test_attend_refuses_a_missing_value_row(executor):
     """A missing row is a wrong softmax rather than a smaller one, and a lookup's own failure outranks it."""
     index, keys_matrix = build_index(8, 8, executor, metric=DenseMetric.INNER)
     with pytest.raises(ShapeMismatchError):
-        index.on(executor).attend(keys_matrix[:1], lambda keys: None)
+        index.on(executor).attend(keys_matrix[:1], keys_matrix, lambda key: None, Arena())
+    with pytest.raises(ShapeMismatchError):
+        index.on(executor).attend(keys_matrix[:1], keys_matrix[:4], int, Arena())
+    with pytest.raises(ShapeMismatchError):
+        index.on(executor).attend(keys_matrix[:1], keys_matrix.astype(np.float64), int, Arena())
     with pytest.raises(ZeroDivisionError):
-        index.on(executor).attend(keys_matrix[:1], lambda keys: 1 / 0)
+        index.on(executor).attend(keys_matrix[:1], keys_matrix, lambda key: 1 / 0, Arena())
 
 
 def test_attend_refuses_a_half_width_carry(executor):
     """A maximum alone is a number nothing can rescale, so the pair is sized exactly."""
     index, keys_matrix = build_index(8, 8, executor, metric=DenseMetric.INNER)
     with pytest.raises(ValueError):
-        index.on(executor).attend(keys_matrix[:1], value_lookup(keys_matrix), carry=np.zeros(1, np.float32))
+        index.on(executor).attend(keys_matrix[:1], keys_matrix, int, Arena(), carry=np.zeros(1, np.float32))
 
 
 def test_attend_refuses_a_distance_kind(executor):
     """A softmax weighs logits, which only the inner-product kinds score."""
     index, keys_matrix = build_index(8, 8, executor, metric=DenseMetric.ANGULAR)
     with pytest.raises(ConfigMismatchError):
-        index.on(executor).attend(keys_matrix[:1], value_lookup(keys_matrix))
+        index.on(executor).attend(keys_matrix[:1], keys_matrix, int, Arena())
 
 
 # endregion Linear Algebra
