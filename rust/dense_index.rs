@@ -1543,7 +1543,8 @@ type Answer<'index, Receiver, Verb> =
 /// converts into its `Dense*Config`, so the bare value is the whole call and
 /// `..DenseSearchConfig::from(10)` reaches every knob.
 /// Every verb whose output scales with the call borrows an [`Arena`] last as `&mut Arena`, blocking
-/// or deferring alike, and its result borrows the arena in turn.
+/// or deferring alike, except `save_buffer`, whose config holds it, and its result borrows the arena
+/// in turn.
 ///
 /// Rust-only.
 pub trait DenseVerbs<'index>: Copy {

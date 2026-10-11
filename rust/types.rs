@@ -21,7 +21,6 @@ use core::ops::ControlFlow;
 use core::pin::Pin;
 use core::ptr::{self, NonNull};
 use core::str::FromStr;
-use core::sync::atomic::{AtomicI32, Ordering};
 use core::task::{Context, Poll};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
@@ -304,7 +303,8 @@ pub struct usearch_executor_drain_t {
 }
 
 extern "C" {
-    pub fn usearch_outcome_wait(outcome: *const usearch_outcome_t) -> usearch_status_t;
+    pub fn usearch_outcome_wait(outcome: *mut usearch_outcome_t) -> usearch_status_t;
+    pub fn usearch_outcome_status(outcome: *mut usearch_outcome_t) -> usearch_status_t;
 
     pub fn usearch_executor_for_ram(arguments: *mut usearch_executor_for_ram_t);
     pub fn usearch_executor_on_pool(arguments: *mut usearch_executor_on_pool_t);
@@ -1587,11 +1587,11 @@ pub struct Deferred<'index, Verb: Calling> {
 
 impl<Verb: Calling> Deferred<'_, Verb> {
     /// `Err(Status::Deferred)` until the call is final, then its final status, read without blocking.
+    ///
+    /// Calls `usearch_outcome_status`.
     pub fn status(&self) -> core::result::Result<(), Status> {
-        // Safety: the status is an aligned `c_int` in the box this `Deferred` owns, which the library
-        // stores atomically.
-        let word = unsafe { AtomicI32::from_ptr(ptr::addr_of_mut!((*self.lent.as_ptr()).outcome.status)) };
-        Status::from_raw(word.load(Ordering::Acquire))
+        // Safety: the outcome lives in the box this `Deferred` owns until it is final.
+        Status::from_raw(unsafe { usearch_outcome_status(ptr::addr_of_mut!((*self.lent.as_ptr()).outcome)) })
     }
 
     /// Blocks until the call is final, then hands back what it produced.
@@ -1606,7 +1606,7 @@ impl<Verb: Calling> Deferred<'_, Verb> {
             verb,
             ..
         } = unsafe {
-            usearch_outcome_wait(ptr::addr_of!((*lent).outcome));
+            usearch_outcome_wait(ptr::addr_of_mut!((*lent).outcome));
             *Box::from_raw(lent)
         };
         callbacks.raise();
@@ -1620,7 +1620,7 @@ impl<Verb: Calling> Drop for Deferred<'_, Verb> {
         let lent = self.lent.as_ptr();
         // Safety: once the outcome is final the library touches the box no more, and this owned it.
         let Lent { callbacks, .. } = unsafe {
-            usearch_outcome_wait(ptr::addr_of!((*lent).outcome));
+            usearch_outcome_wait(ptr::addr_of_mut!((*lent).outcome));
             *Box::from_raw(lent)
         };
         // A second panic while unwinding would abort, so only a drop outside one re-raises.

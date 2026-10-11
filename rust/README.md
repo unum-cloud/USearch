@@ -379,7 +379,7 @@ The crate is a thin layer over the C ABI in `include/usearch/`, and every rule b
   Beyond that box the binding allocates nothing: an arena growing past its high-water mark is the only allocation a steady loop sees.
   The deferred box is the crate's rather than yours, since a `Deferred` leaked without a wait would leave the library writing into storage you had reused.
 - __A `Deferred` has no life of its own.__
-  `status` is an acquire load of the outcome word, `wait` blocks in `usearch_outcome_wait`, and dropping an unfinished one waits the same way before freeing its box.
+  `status` polls through `usearch_outcome_status`, `wait` blocks in `usearch_outcome_wait`, and dropping an unfinished one waits the same way before freeing its box.
   The crate starts no thread: `.await` polls the status word, since the library has no wake-up, and a `Deferred` borrows its index, so waiting off-thread goes through a scoped thread, as `std::thread::scope(|scope| scope.spawn(move || call.wait()).join())` does.
 - __Statuses and modes are enums.__
   `Status`, `Mood`, `DenseMetric` and `Scalar` carry the C enumerators' values, leaving success and the unknown kinds to `Result` and `Option`, so nothing is compared as a string.
