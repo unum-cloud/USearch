@@ -2927,11 +2927,10 @@ mod tests {
 
     /// The one place the Rust enum values are checked against the C ones: a renumbered
     /// constant reaches the library as a different kind, and is caught here and nowhere else.
+    /// A storage kind the build's `USEARCH_DENSE_DTYPES` left out is refused as unsupported.
     #[test]
     fn constructs_every_metric_and_quantization() -> Result<()> {
         for quantization in [
-            Scalar::F64,
-            Scalar::F32,
             Scalar::BF16,
             Scalar::F16,
             Scalar::E5M2,
@@ -2944,7 +2943,11 @@ mod tests {
             Scalar::U4x2,
             Scalar::U1x8,
         ] {
-            let described = empty_index(64, DenseMetric::Angular, quantization)?.describe()?;
+            let index = match empty_index(64, DenseMetric::Inner, quantization) {
+                Err(error) if error.status == Status::Unsupported => continue,
+                built => built?,
+            };
+            let described = index.describe()?;
             assert_eq!(described.metadata.dimensions, 64, "{quantization:?}");
             assert_eq!(described.metadata.quantization, quantization);
             assert_eq!(described.size, 0, "{quantization:?}");
@@ -2953,9 +2956,9 @@ mod tests {
 
         // The bit-level metrics take packed rows, so each metric meets a kind it accepts.
         for (metric, quantization) in [
-            (DenseMetric::Inner, Scalar::F32),
-            (DenseMetric::Angular, Scalar::F32),
-            (DenseMetric::Euclidean, Scalar::F32),
+            (DenseMetric::Inner, Scalar::BF16),
+            (DenseMetric::Angular, Scalar::BF16),
+            (DenseMetric::Euclidean, Scalar::BF16),
             (DenseMetric::Hamming, Scalar::U1x8),
             (DenseMetric::Jaccard, Scalar::U1x8),
         ] {

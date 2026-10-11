@@ -31,6 +31,15 @@
 #include "usearch/dense/vram_indexes.cuh"
 #endif
 
+/** How many storage dtypes the arms cover, from the front of the ladder bf16, u1, i8, e4m3, f16, u8, e5m2, i4, u4,
+ *  e3m2, e2m3. CMake passes it, so only builds that bypass CMake take this default. */
+#if !defined(USEARCH_DENSE_DTYPES)
+#define USEARCH_DENSE_DTYPES 4
+#endif
+#if USEARCH_DENSE_DTYPES < 1 || USEARCH_DENSE_DTYPES > 11
+#error "USEARCH_DENSE_DTYPES must be an integer from 1 to 11"
+#endif
+
 using namespace unum::usearch;
 namespace us = unum::usearch;
 namespace nk = ashvardanian::numkong;

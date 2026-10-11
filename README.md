@@ -265,6 +265,7 @@ Training a quantization model and dimension-reduction is a common approach to ac
 Those, however, are only sometimes reliable, can significantly affect the statistical properties of your data, and require regular adjustments if your distribution shifts.
 Instead, we have focused on high-precision arithmetic over low-precision downcasted vectors.
 The same index, and `add` and `search` operations will automatically down-cast or up-cast between `f64_t`, `f32_t`, `bf16_t`, `f16_t`, `e5m2_t`, `e4m3_t`, `e3m2_t`, `e2m3_t`, `i8_t`, `u8_t`, the packed nibbles `i4x2_t` and `u4x2_t`, and single-bit `u1x8_t` representations.
+The prebuilt packages store all eleven of those below `f32_t`, while a build from source stores `bf16_t`, `u1x8_t`, `i8_t` and `e4m3_t` unless `USEARCH_DENSE_DTYPES` asks for more, as [`CONTRIBUTING.md`](CONTRIBUTING.md) details.
 You can use the following command to check, if hardware acceleration is enabled:
 
 ```sh

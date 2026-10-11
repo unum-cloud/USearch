@@ -37,6 +37,7 @@ The `Queries` block reports the throughput in QPS, the latency, the distances an
 Every number below comes from a Release build: the `host_release` preset for the CPU binaries, and `cuda_release` for the CUDA ones, narrowed to the host GPU's family code, like `-DUSEARCH_CUDA_ARCHITECTURES=100f` on a B200 or B300.
 The CUDA bench compiles a generation's kits only when every listed architecture runs them, so the preset's own list measures the Ampere kits alone, whatever the GPU.
 The `host_profile` preset keeps the same optimization and adds the symbols `perf` needs; `cuda_relwithdebinfo` is the `-O2` iteration tree and measures nothing.
+The per-dtype benchmark units follow `USEARCH_DENSE_DTYPES`, so these presets measure `bf16`, `u1`, `i8` and `e4m3` alone; add `-DUSEARCH_DENSE_DTYPES=11` to measure the rest.
 
 ```sh
 cmake --preset host_release && cmake --build --preset host_release --target usearch_bench_dense_ram_index_search usearch_bench_dense_ram_indexes_search usearch_bench_dense_ram_index_algebra usearch_bench_dense_ram_indexes_algebra usearch_bench_dense_ram_metric

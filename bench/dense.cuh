@@ -178,14 +178,58 @@ int dispatch_value(decltype(value_) runtime, auto on_value, auto on_unknown) {
     else return dispatch_value<rest_...>(runtime, on_value, on_unknown);
 }
 
+/** Whether the build compiles @p dtype as storage: the first `USEARCH_DENSE_DTYPES` rungs of the library's ladder, and
+ *  the f32 reference only the benchmarks store. */
+constexpr bool stored_dtype_compiled(nk_dtype_t dtype) noexcept {
+    switch (dtype) {
+    case nk_f32_k:
+    case nk_bf16_k: return true;
+#if USEARCH_DENSE_DTYPES >= 2
+    case nk_u1_k: return true;
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+    case nk_i8_k: return true;
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+    case nk_e4m3_k: return true;
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+    case nk_f16_k: return true;
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+    case nk_u8_k: return true;
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+    case nk_e5m2_k: return true;
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+    case nk_i4_k: return true;
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+    case nk_u4_k: return true;
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+    case nk_e3m2_k: return true;
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+    case nk_e2m3_k: return true;
+#endif
+    default: return false;
+    }
+}
+
 /** Packed bits cast into no other storage: a bit file reaches the u1 shard when @p stored_dtypes_ lists one, and
- *  every other file dispatches over @p stored_dtypes_ in full. */
+ *  every other file dispatches over @p stored_dtypes_ in full; a dtype the build leaves out takes @p on_unknown. */
 template <typename dataset_scalar_type_, nk_dtype_t... stored_dtypes_>
 int dispatch_stored_value(nk_dtype_t dtype, auto on_dtype, auto on_unknown) {
+    auto on_compiled = [&](auto stored) {
+        if constexpr (stored_dtype_compiled(decltype(stored)::value)) return on_dtype(stored);
+        else return on_unknown(decltype(stored)::value);
+    };
     if constexpr (!std::is_same_v<dataset_scalar_type_, nk::u1x8_t>)
-        return dispatch_value<stored_dtypes_...>(dtype, on_dtype, on_unknown);
+        return dispatch_value<stored_dtypes_...>(dtype, on_compiled, on_unknown);
     else if constexpr (((stored_dtypes_ == nk_u1_k) || ...))
-        return dispatch_value<nk_u1_k>(dtype, on_dtype, on_unknown);
+        return dispatch_value<nk_u1_k>(dtype, on_compiled, on_unknown);
     else return on_unknown(dtype);
 }
 

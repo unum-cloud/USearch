@@ -5,6 +5,8 @@
 USearch vector-search engine can be integrated into your project using CMake.
 Alternatively, you can download one of the precompiled binaries from the [releases page](https://github.com/unum-cloud/USearch/releases).
 One header, `usearch/usearch.h`, pulls in every modality: `dense_index.h`, `sequence_index.h`, `matrix_index.h` and `geospatial_index.h`.
+The library compiles the first `USEARCH_DENSE_DTYPES` dense storage types of `bf16`, `u1x8`, `i8`, `e4m3`, `f16`, `u8`, `e5m2`, `i4x2`, `u4x2`, `e3m2` and `e2m3`, and refuses the rest with `usearch_status_unsupported_k`.
+The precompiled binaries carry all eleven, while a CMake build takes the first four unless configured with `-D USEARCH_DENSE_DTYPES=11`.
 
 ## Quickstart
 
@@ -30,7 +32,7 @@ int main(void) {
     if (outcome.status != usearch_status_success_k) goto cleanup;
     usearch_dense_init_ram(&(usearch_dense_init_ram_t){
         .index = &index, .outcome = &outcome,
-        .metric = usearch_dense_metric_angular_k, .quantization = usearch_scalar_f16_k, .dimensions = 128});
+        .metric = usearch_dense_metric_angular_k, .quantization = usearch_scalar_bf16_k, .dimensions = 128});
     if (outcome.status != usearch_status_success_k) goto cleanup;
 
     // Populate:

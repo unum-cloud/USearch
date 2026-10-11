@@ -9,6 +9,7 @@ cargo add usearch
 ```
 
 CMake builds the engine and the crate links it through its stable C headers, so no index template is instantiated in your build.
+That build compiles the four most common dense storage types, `bf16`, `u1x8`, `i8` and `e4m3`, and an index over any other is refused as `Unsupported`.
 [NumKong](https://github.com/ashvardanian/NumKong) is a hard dependency rather than a feature: its matrices, scalar types, and traits _are_ this crate's vocabulary, and it supplies the SIMD kernels.
 
 ## Quickstart

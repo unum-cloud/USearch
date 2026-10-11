@@ -335,3 +335,4 @@ npm test
 ```
 
 `npm_config_usearch_library_dir` points the build at a library that is already compiled, so a change to the TypeScript needs no CMake pass of its own.
+That library carries the dense storage types its CMake configure compiled: `npm run build-native` and the prebuilt addons pass `USEARCH_DENSE_DTYPES=11`, while a plain configure compiles `bf16`, `u1x8`, `i8` and `e4m3` alone, and the suite's `e5m2`, `e3m2` and `e2m3` cases then refuse.

@@ -59,6 +59,34 @@ set(USEARCH_CUDA_ARCHITECTURES
     CACHE STRING "GPU architectures the CUDA tests, benchmarks & dispatch unit compile for"
 )
 
+# The library, its tests and benchmarks compile the first N storage dtypes of the ladder bf16, u1, i8, e4m3, f16, u8,
+# e5m2, i4, u4, e3m2, e2m3, and the C interface refuses the rest with `usearch_status_unsupported_k`. The default four
+# cover the common embeddings at a fraction of the build; the prebuilt packages compile all eleven.
+set(USEARCH_DENSE_DTYPES
+    "4"
+    CACHE STRING "How many dense storage dtypes to compile, from 1 to 11"
+)
+if (NOT USEARCH_DENSE_DTYPES MATCHES "^([1-9]|1[01])$")
+    message(FATAL_ERROR "USEARCH_DENSE_DTYPES must be an integer from 1 to 11, found \"${USEARCH_DENSE_DTYPES}\"")
+endif ()
+set(usearch_dense_dtypes_ladder_ bf16 u1 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3)
+
+# Drops from @p target the per-dtype units, named by their `_<dtype>` suffix, of the dtypes the ladder leaves out; the
+# f32 and f64 units are the suites' own references and always stay.
+function (usearch_keep_dense_dtypes target)
+    list(SUBLIST usearch_dense_dtypes_ladder_ 0 ${USEARCH_DENSE_DTYPES} compiled_)
+    get_target_property(sources_ ${target} SOURCES)
+    set(kept_)
+    foreach (source_ IN LISTS sources_)
+        get_filename_component(stem_ ${source_} NAME_WE)
+        string(REGEX MATCH "[^_]+$" dtype_ ${stem_})
+        if (dtype_ IN_LIST compiled_ OR NOT dtype_ IN_LIST usearch_dense_dtypes_ladder_)
+            list(APPEND kept_ ${source_})
+        endif ()
+    endforeach ()
+    set_target_properties(${target} PROPERTIES SOURCES "${kept_}")
+endfunction ()
+
 # Sets @p output to `capability_macro=1` where every one of the architectures, without CMake's "-real" or "-virtual", is
 # one of NumKong's cached `nk_target_<capability>_architectures`, and to `capability_macro=0` otherwise. NumKong's
 # one-code units need any of them; a unit here compiles every listed code, and a kit compiled into one pass is compiled
@@ -487,6 +515,9 @@ endif ()
 if (USEARCH_IS_MAIN_PROJECT)
     enable_testing()
 endif ()
+
+# The arms, their dispatch and the suites below all read one ladder length.
+add_compile_definitions(USEARCH_DENSE_DTYPES=${USEARCH_DENSE_DTYPES})
 
 # Every consumer of the pre-instantiated library needs this, the C interface included - its implementation is
 # `src/dense_index.cpp` and the per-dtype shards beside it.

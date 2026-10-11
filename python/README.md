@@ -9,6 +9,13 @@ Every verb is a batch, and one vector is a one-row matrix, so a memory-mapped da
 pip install usearch
 ```
 
+The wheels carry every dense storage type.
+A build from source takes its count from `USEARCH_DENSE_DTYPES` in `pyproject.toml`, eleven, and a leaner one can override it:
+
+```sh
+pip install . -C cmake.define.USEARCH_DENSE_DTYPES=4  # `bf16`, `u1x8`, `i8` & `e4m3` alone
+```
+
 ## Quickstart
 
 ```python

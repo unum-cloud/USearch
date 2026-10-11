@@ -9,7 +9,7 @@ This directory is a subdirectory of the root project rather than a project of it
 Set `WOLFRAM_PATH` to your Mathematica installation if it is not detected automatically.
 
 ```sh
-cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_LIB_WOLFRAM=1 \
+cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_BUILD_LIB_WOLFRAM=1 -D USEARCH_DENSE_DTYPES=11 \
     -D WOLFRAM_PATH=/usr/local/Wolfram/Mathematica
 cmake --build build_release --config Release --target usearch_wolfram
 
@@ -18,6 +18,8 @@ cmake --build build_release --config Release --target usearch_wolfram
 #   build_release/usearch_wolfram.dylib  on macOS
 #   build_release/usearch_wolfram.dll    on Windows
 ```
+
+`USEARCH_DENSE_DTYPES=11` compiles every dense storage type; the default four, `bf16`, `u1x8`, `i8` and `e4m3`, build faster but refuse the `f16` index `test.wls` creates.
 
 It is the one library here without a `lib` prefix, because Wolfram finds a library dropped into `LibraryResources/$SystemID` by its bare name.
 

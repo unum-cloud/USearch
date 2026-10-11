@@ -229,7 +229,10 @@ typedef struct usearch_dense_init_ram_t {
     /** The metric kind used for distance calculations between vectors. */
     usearch_dense_metric_t metric;
 
-    /** The scalar type vectors are stored & quantized into. */
+    /** The scalar type vectors are stored & quantized into. A build compiles the first
+     *  `USEARCH_DENSE_DTYPES` of bf16, u1x8, i8, e4m3, f16, u8, e5m2, i4x2, u4x2, e3m2 and e2m3,
+     *  four by default and all eleven in the prebuilt packages, and refuses the rest with
+     *  @c usearch_status_unsupported_k. */
     usearch_scalar_t quantization;
 
     /** The number of dimensions in the indexed vectors. */

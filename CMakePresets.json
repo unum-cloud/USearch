@@ -53,7 +53,8 @@
         "CMAKE_BUILD_TYPE": "Release",
         "USEARCH_BUILD_TEST": "OFF",
         "USEARCH_BUILD_BENCH": "OFF",
-        "USEARCH_BUILD_LIB_C": "ON"
+        "USEARCH_BUILD_LIB_C": "ON",
+        "USEARCH_DENSE_DTYPES": "11"
       }
     },
     {
@@ -65,7 +66,8 @@
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_BENCH": "OFF",
         "USEARCH_BUILD_LIB_C": "ON",
-        "USEARCH_USE_JEMALLOC": "OFF"
+        "USEARCH_USE_JEMALLOC": "OFF",
+        "USEARCH_DENSE_DTYPES": "11"
       }
     },
     {
@@ -303,7 +305,8 @@
       "cacheVariables": {
         "USEARCH_BUILD_TEST": "ON",
         "USEARCH_BUILD_BENCH": "OFF",
-        "USEARCH_BUILD_LIB_C": "ON"
+        "USEARCH_BUILD_LIB_C": "ON",
+        "USEARCH_DENSE_DTYPES": "11"
       }
     },
     {

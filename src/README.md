@@ -10,6 +10,14 @@ FetchContent_Declare(usearch GIT_REPOSITORY https://github.com/unum-cloud/USearc
 FetchContent_MakeAvailable(usearch)
 ```
 
+The headers instantiate whichever storage type you name.
+Only the precompiled layer behind the C interface follows `USEARCH_DENSE_DTYPES`, compiling the first four of `bf16`, `u1x8`, `i8`, `e4m3`, `f16`, `u8`, `e5m2`, `i4x2`, `u4x2`, `e3m2` and `e2m3` unless you set it before fetching:
+
+```cmake
+set(USEARCH_DENSE_DTYPES 11)
+FetchContent_MakeAvailable(usearch)
+```
+
 ## Quickstart
 
 Once included, the high-level C++11 interface is as simple as it gets: `reserve()`, `add()`, `search()`, `size()`, `capacity()`, `save()`, `load()`, `view()`.

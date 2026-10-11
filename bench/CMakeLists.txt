@@ -65,6 +65,7 @@ add_executable(
 foreach (bench_target_ IN ITEMS usearch_bench_dense_ram_index_search usearch_bench_dense_ram_indexes_search
                                 usearch_bench_dense_ram_index_algebra usearch_bench_dense_ram_indexes_algebra
 )
+    usearch_keep_dense_dtypes(${bench_target_})
     usearch_setup_target(${bench_target_} HOST)
     target_include_directories(${bench_target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(${bench_target_} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::static)
@@ -145,6 +146,7 @@ if (USEARCH_BUILD_CUDA)
     foreach (bench_target_ IN ITEMS usearch_bench_dense_vram_index_search usearch_bench_dense_vram_indexes_search
                                     usearch_bench_dense_vram_index_algebra usearch_bench_dense_vram_indexes_algebra
     )
+        usearch_keep_dense_dtypes(${bench_target_})
         target_include_directories(
             ${bench_target_} PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
                                      ${CMAKE_CURRENT_SOURCE_DIR}

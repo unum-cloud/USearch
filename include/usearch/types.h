@@ -263,8 +263,9 @@ typedef enum usearch_status_t {
      *  published nothing, so the handle carries whatever it did before the call. */
     usearch_status_cancelled_k = 15,
 
-    /** The verb is declared for every residency but this one does not implement it; no retry,
-     *  option, or smaller request can help, so a caller picks another residency. */
+    /** The verb is declared for every residency but this one does not implement it, or the build
+     *  left the requested quantization out; no retry, option, or smaller request can help, so a
+     *  caller picks another residency or build. */
     usearch_status_unsupported_k = 16,
 
     /** An argument breaks the verb's contract - a required pointer left @c NULL, inputs inside

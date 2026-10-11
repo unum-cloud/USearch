@@ -118,6 +118,8 @@ The CMakeLists.txt file has a number of options you can pass:
   - `USEARCH_BUILD_LIB_C_STUB` - a brute-force stand-in answering the same verbs over the standard library alone, for isolating a binding from the engine while bisecting one.
     It carries the same library names in a `stub/` subdirectory, so pointing a binding at it is a search path rather than a different link line.
   - `USEARCH_BUILD_CUDA` - build the CUDA test & benchmark suites
+  - `USEARCH_DENSE_DTYPES` - how many dense storage dtypes the library, tests and benchmarks compile, from the front of bf16, u1, i8, e4m3, f16, u8, e5m2, i4, u4, e3m2, e2m3, `4` by default and `11` wherever a prebuilt package comes from: the `library`, `wasm` and `windows_x64_release` presets, `pyproject.toml` and the npm scripts.
+    The C interface refuses a dtype the build left out with `usearch_status_unsupported_k`; the Rust crate builds from source and keeps the default four.
 - Which GPUs to target:
   - `USEARCH_CUDA_ARCHITECTURES` - the architectures the CUDA tests, benchmarks and the C interface's dispatch unit compile for, `80-real;90a-real;100f-real;120f-real` by default: the Ampere floor, then Hopper, architecture-specific, and both Blackwell lines, family-specific so they carry the fp6 and fp4 conversions.
     The `-real` suffix skips the PTX, which triples the test objects; the `cuda_release` preset keeps it.

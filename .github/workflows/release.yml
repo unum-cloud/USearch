@@ -206,7 +206,7 @@ jobs:
       - name: Build library with MinGW
         if: matrix.arch != 'arm64'
         run: |
-          cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=0 -DUSEARCH_BUILD_BENCH=0 -B ./build_release
+          cmake -DCMAKE_BUILD_TYPE=Release -DUSEARCH_BUILD_LIB_C=1 -DUSEARCH_BUILD_TEST=0 -DUSEARCH_BUILD_BENCH=0 -DUSEARCH_DENSE_DTYPES=11 -B ./build_release
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_shared.dll pkg\
@@ -418,7 +418,8 @@ jobs:
             -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_processor }} \
             -DUSEARCH_BUILD_TEST=0 \
             -DUSEARCH_BUILD_BENCH=0 \
-            -DUSEARCH_BUILD_LIB_C=1
+            -DUSEARCH_BUILD_LIB_C=1 \
+            -DUSEARCH_DENSE_DTYPES=11
 
           cmake --build build_artifacts --config Release -j
 
@@ -469,7 +470,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release `
             -DUSEARCH_BUILD_TEST=0 `
             -DUSEARCH_BUILD_BENCH=0 `
-            -DUSEARCH_BUILD_LIB_C=1
+            -DUSEARCH_BUILD_LIB_C=1 `
+            -DUSEARCH_DENSE_DTYPES=11
 
           cmake --build build_artifacts --config Release
 
@@ -516,7 +518,8 @@ jobs:
             -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_arch }} \
             -DUSEARCH_BUILD_TEST=0 \
             -DUSEARCH_BUILD_BENCH=0 \
-            -DUSEARCH_BUILD_LIB_C=1
+            -DUSEARCH_BUILD_LIB_C=1 \
+            -DUSEARCH_DENSE_DTYPES=11
 
           cmake --build build_artifacts --config Release
 
@@ -574,7 +577,8 @@ jobs:
             -DANDROID_ABI=${{ matrix.abi }} \
             -DUSEARCH_BUILD_TEST=0 \
             -DUSEARCH_BUILD_BENCH=0 \
-            -DUSEARCH_BUILD_LIB_C=1
+            -DUSEARCH_BUILD_LIB_C=1 \
+            -DUSEARCH_DENSE_DTYPES=11
 
           cmake --build build_artifacts --config Release
 

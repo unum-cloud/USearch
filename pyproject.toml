@@ -80,6 +80,7 @@ USEARCH_BUILD_BENCH = "OFF"
 USEARCH_BUILD_LIB_C = "ON"
 USEARCH_BUILD_LIB_PYTHON = "ON"
 USEARCH_BUILD_TEST = "OFF"
+USEARCH_DENSE_DTYPES = "11"
 
 # `VERSION` is what every other SDK reads, so the wheel takes its version from the same file rather
 # than from a second copy that drifts.
