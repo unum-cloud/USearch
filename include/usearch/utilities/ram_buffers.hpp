@@ -19,7 +19,6 @@
 #include <cstdint> // `SIZE_MAX`, `std::uint8_t`
 #include <cstring> // `std::memcpy`, `std::memset` - a fresh chunk starts zeroed
 
-#include <algorithm>   // `std::lower_bound`, `std::sort_heap`, `std::min`, `std::max`
 #include <array>       // `std::array` - batch-of-four overloads, the chunk directories
 #include <atomic>      // `std::memory_order` - publishing a chunk to its readers
 #include <bit>         // `std::bit_width`, `std::bit_floor` - the closed-form chunk location
@@ -210,7 +209,7 @@ class max_heap {
     inline element_t* data() noexcept { return elements_; }
     inline element_t const* data() const noexcept { return elements_; }
     inline void clear() noexcept { size_ = 0; }
-    inline void shrink(std::size_t n) noexcept { size_ = (std::min<std::size_t>)(n, size_); }
+    inline void shrink(std::size_t n) noexcept { size_ = min_of(n, size_); }
 
     /**
      *  @brief Selects the largest element in the heap.
@@ -218,8 +217,16 @@ class max_heap {
      */
     inline element_t const& top() const noexcept { return elements_[0]; }
 
-    /** Invalidates the "max-heap" property, transforming into ascending range. */
-    inline void sort_ascending() noexcept { std::sort_heap(elements_, elements_ + size_, &less); }
+    /** Invalidates the "max-heap" property, transforming into ascending range: each step parks the
+     *  maximum behind the shrinking heap. */
+    inline void sort_ascending() noexcept {
+        std::size_t const size = size_;
+        while (size_ > 1) {
+            std::swap(elements_[0], elements_[--size_]);
+            shift_down(0);
+        }
+        size_ = size;
+    }
 
     /**
      *  @brief Ensures the heap has enough capacity for @p new_capacity elements.
@@ -370,9 +377,6 @@ class max_heap {
  *  HNSW frontier inserts dominate pops (~M·2 pushes per pop), so the insert-side win
  *  carries the workload. Sweet spot is an @p arity_ of 4, 8, or 16 - d=2 falls back to
  *  binary (and serves as a parity-check oracle), d=64+ blows up the pop sweep.
- *
- *  @note @c sort_ascending uses @c std::sort here (not @c std::sort_heap) because the
- *      latter assumes a binary heap layout.
  */
 template <std::size_t arity_,                          //
           typename element_type_,                      //
@@ -447,12 +451,19 @@ class max_heap_dary {
     inline element_t* data() noexcept { return elements_; }
     inline element_t const* data() const noexcept { return elements_; }
     inline void clear() noexcept { size_ = 0; }
-    inline void shrink(std::size_t n) noexcept { size_ = (std::min<std::size_t>)(n, size_); }
+    inline void shrink(std::size_t n) noexcept { size_ = min_of(n, size_); }
     inline element_t const& top() const noexcept { return elements_[0]; }
 
-    /** Sorts the underlying array ascending. Uses @c std::sort because @c std::sort_heap
-     *  assumes binary-heap layout. */
-    inline void sort_ascending() noexcept { std::sort(elements_, elements_ + size_, &less); }
+    /** Invalidates the "max-heap" property, transforming into ascending range: each step parks the
+     *  maximum behind the shrinking heap, whatever its arity. */
+    inline void sort_ascending() noexcept {
+        std::size_t const size = size_;
+        while (size_ > 1) {
+            std::swap(elements_[0], elements_[--size_]);
+            shift_down(0);
+        }
+        size_ = size;
+    }
 
     /** @return @c success_k, @c overflow_k when the rounded capacity wraps, @c bad_alloc_k otherwise. */
     status_t reserve(std::size_t new_capacity) noexcept {
@@ -505,9 +516,9 @@ class max_heap_dary {
     /** Drops every entry the comparator orders below @p bar and re-heapifies what remains in
      *  one pass - a frontier keyed further-first sheds everything further than @p bar. */
     std::size_t erase_below(element_t const& bar) noexcept {
-        auto below = [&bar](element_t const& entry) noexcept { return less(entry, bar); };
-        std::size_t const kept = static_cast<std::size_t>(std::remove_if(elements_, elements_ + size_, below) -
-                                                          elements_);
+        std::size_t kept = 0;
+        for (std::size_t index = 0; index != size_; ++index)
+            if (!less(elements_[index], bar)) elements_[kept++] = elements_[index];
         std::size_t const erased = size_ - kept;
         size_ = kept;
         rebuild_();
@@ -662,7 +673,7 @@ class sorted_buffer {
     }
 
     inline void insert_reserved(element_t&& element) noexcept {
-        std::size_t slot = size_ ? std::lower_bound(elements_, elements_ + size_, element, &less) - elements_ : 0;
+        std::size_t const slot = lower_bound(std::span(elements_, size_), element, comparator_t {}) - elements_;
         shift_right(slot, size_);
         elements_[slot] = element;
         size_++;
@@ -673,12 +684,12 @@ class sorted_buffer {
      *  @return @c true if the entry was added, @c false if it wasn't relevant enough.
      *
      *  The fast-reject path - a full buffer whose top beats @p element - returns without
-     *  the @c std::lower_bound walk: O(1) rather than O(log limit). That's the common case
+     *  the @c lower_bound walk: O(1) rather than O(log limit). That's the common case
      *  on the HNSW hot path once the top-k buffer warms up and most successors lose.
      */
     inline bool insert(element_t&& element, std::size_t limit) noexcept {
         if (size_ == limit && !less(element, elements_[size_ - 1])) return false;
-        std::size_t slot = size_ ? std::lower_bound(elements_, elements_ + size_, element, &less) - elements_ : 0;
+        std::size_t const slot = lower_bound(std::span(elements_, size_), element, comparator_t {}) - elements_;
         shift_right(slot, size_ - (size_ == limit));
         elements_[slot] = element;
         size_ += size_ != limit;
@@ -735,7 +746,7 @@ class sorted_buffer {
 
     /** No-op for API parity with the heaps: the buffer is always sorted ascending. */
     void sort_ascending() noexcept {}
-    inline void shrink(std::size_t n) noexcept { size_ = (std::min<std::size_t>)(n, size_); }
+    inline void shrink(std::size_t n) noexcept { size_ = min_of(n, size_); }
 
     inline element_t* data() noexcept { return elements_; }
     inline element_t const* data() const noexcept { return elements_; }

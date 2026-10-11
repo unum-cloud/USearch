@@ -864,6 +864,18 @@ check_stl_dynamic_containers() {
         "$file uses an STL dynamic container - use growing_buffer, nk::tensor, or the ram_tables structures:"
 }
 
+# The `std::ranges` algorithms and views are deep concept-checked templates that every unit including the
+# library pays to instantiate, and since C++20 libstdc++'s `<algorithm>` drags all of them in. Library code
+# copies with `std::memcpy`, fills with a loop or `std::memset`, and searches through the house `lower_bound`.
+check_ranges_templates() {
+    local hits
+    hits=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*(//|/\*|\*( |/|$))' |
+        grep -E '\bstd::(ranges|views)::|#[[:space:]]*include[[:space:]]*<(ranges|algorithm)>' || true)
+    [ -z "$hits" ] || fail "$hits" \
+        "$file pulls the std::ranges templates into the library - copy with std::memcpy, fill with a loop" \
+        "            or std::memset, and include neither <algorithm> nor <ranges>:"
+}
+
 # `std::deque` - a chunked indirection-heavy container with unpredictable locality. Address
 # stability comes from reserved vectors of `unique_ptr`, arenas, or ForkUnion's containers.
 check_deque() {
@@ -1377,6 +1389,7 @@ judge_path() {
     # The shipped library: public headers under include/ and the ABI sources under src/.
     include/*.h | include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh)
         check_stl_dynamic_containers
+        check_ranges_templates
         check_boolean_parameters
         check_chevron_launches
         ;;&

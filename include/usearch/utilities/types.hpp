@@ -13,7 +13,7 @@
 #include <atomic>      // `std::atomic`
 #include <bit>         // `std::bit_cast` - hashing `uuid_t` as two words
 #include <concepts>    // `std::convertible_to` - the string-view conversion's constraint
-#include <functional>  // `std::hash` - specialized for `uuid_t` below
+#include <functional>  // `std::hash` - specialized for `uuid_t` below, `std::less`
 #include <span>        // `std::span`
 #include <string_view> // `std::string_view`
 #include <type_traits> // `std::type_identity_t`, `std::conditional_t` - the kit cascades
@@ -658,20 +658,20 @@ constexpr value_type_ max_of(value_type_ first, value_type_ second) noexcept {
 inline constexpr std::size_t tile_span_k = 16;
 
 /**
- *  @brief The first position in the ascending @p values not ordered before @p value -
- *      @c std::lower_bound re-spelled in ten lines, so headers don't drag in
+ *  @brief The first position in the @p values, ascending under @p comparator, not ordered before
+ *      @p value - @c std::lower_bound re-spelled in ten lines, so headers don't drag in
  *      @c <algorithm>, one of the heaviest includes on the compile-health charts.
  *  @see https://artificial-mind.net/projects/compile-health/
  */
-template <typename value_type_>
-constexpr value_type_* lower_bound(std::span<value_type_> values,
-                                   std::type_identity_t<value_type_> const& value) noexcept {
+template <typename value_type_, typename comparator_type_ = std::less<void>>
+constexpr value_type_* lower_bound(std::span<value_type_> values, std::type_identity_t<value_type_> const& value,
+                                   comparator_type_ comparator = {}) noexcept {
     value_type_* first = values.data();
     std::size_t count = values.size();
     while (count) {
         std::size_t const half = count / 2;
         value_type_* const middle = first + half;
-        bool const is_before = *middle < value;
+        bool const is_before = comparator(*middle, value);
         first = is_before ? middle + 1 : first;
         count = is_before ? count - half - 1 : half;
     }

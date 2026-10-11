@@ -8,15 +8,14 @@
 
 #include <cstring> // `std::memcmp` - keys compare by their bytes, whatever their type
 
-#include <algorithm> // `std::make_heap`, `std::sort_heap`, `std::push_heap`, `std::pop_heap` - the MaxSim selection
-#include <limits>    // `std::numeric_limits` - the reducer's hit ceiling & unscored rows
-#include <span>      // `std::span` - the reducer's rankings & outputs
+#include <limits> // `std::numeric_limits` - the reducer's hit ceiling & unscored rows
+#include <span>   // `std::span` - the reducer's rankings & outputs
 
 #include <numkong/tensor.hpp> // `nk::matrix_view` - the indexer heads
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the reducer's staging
-#include "usearch/utilities/ram_sorts.hpp"   // `radix_group` - the reducer's grouping
+#include "usearch/utilities/ram_sorts.hpp"   // `radix_group`, `partial_sort` - the reducer's grouping & selection
 
 namespace unum {
 namespace usearch {
@@ -275,16 +274,8 @@ class dense_maxsim_reducer {
                 staged[unique++] = {staged[run].key, 0, sum};
             }
 
-            // A heap topped by the worst kept key selects the best `wanted` in place.
             std::size_t const kept = min_of(keys.extent(1), unique);
-            std::make_heap(staged, staged + kept, better_);
-            for (std::size_t candidate = kept; kept && candidate != unique; ++candidate) {
-                if (!better_(staged[candidate], staged[0])) continue;
-                std::pop_heap(staged, staged + kept, better_);
-                staged[kept - 1] = staged[candidate];
-                std::push_heap(staged, staged + kept, better_);
-            }
-            std::sort_heap(staged, staged + kept, better_);
+            partial_sort(to_writable_span(staged_).first(unique), kept, better_);
             for (std::size_t rank = 0; rank != kept; ++rank)
                 keys(query, rank) = staged[rank].key, scores(query, rank) = staged[rank].score;
             counts[query] = kept;
