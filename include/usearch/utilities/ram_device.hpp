@@ -43,6 +43,9 @@ template <typename value_type_ = byte_t>
 struct forkunion_allocator {
     using value_type = value_type_;
 
+    /** A moved container keeps freeing on the domain its storage came from, rather than the target's default heap. */
+    using propagate_on_container_move_assignment = std::true_type;
+
     /** The OS memory-domain ID storage is claimed on. */
     fu_memory_domain_id_t memory_domain = no_memory_domain_k;
 
@@ -173,15 +176,22 @@ struct forkunion_executor_t {
     /** Spawns @p threads over @p topology and takes the pool; zero means @ref default_threads. One
      *  thread, or a build without OS threads, is the caller itself. */
     static expected<forkunion_executor_t> spawn(fu_topology_t topology, std::size_t threads) noexcept {
+        auto const [count, status] = threads ? expected<std::size_t> {threads, status_t::success_k}
+                                             : default_threads(topology);
+        if (failed(status)) return {{}, status};
+        bool const os_threads = fu_comptime_capabilities() & fu_capability_os_threads_k;
+        return spawn(topology, count, count != 1 && os_threads ? fu_caller_exclusive_k : fu_caller_inclusive_k);
+    }
+
+    /** Spawns @p threads over @p topology with the caller inside the pool or outside it, as @p exclusivity says;
+     *  zero means @ref default_threads. */
+    static expected<forkunion_executor_t> spawn(fu_topology_t topology, std::size_t threads,
+                                                fu_caller_exclusivity_t exclusivity) noexcept {
         if (!threads) {
             auto const [count, status] = default_threads(topology);
             if (failed(status)) return {{}, status};
             threads = count;
         }
-        fu_caller_exclusivity_t const exclusivity = (threads != 1 &&
-                                                     (fu_comptime_capabilities() & fu_capability_os_threads_k))
-                                                        ? fu_caller_exclusive_k
-                                                        : fu_caller_inclusive_k;
         // A flat pool, unlike a distributed one, never pins the caller's own thread.
         fu_capabilities_t const capabilities =
             exclusivity == fu_caller_inclusive_k
