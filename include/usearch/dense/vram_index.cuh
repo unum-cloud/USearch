@@ -2993,7 +2993,7 @@ struct dense_vram_index {
         };
         dense_node_id_t const bound = static_cast<dense_node_id_t>(min_of<std::size_t>(nodes.bound, rows));
         if (nodes.first < bound) {
-            auto const [walked, status] = refine_pass_(context, config, {nodes.first, bound}, nullptr);
+            auto const [walked, status] = refine_pass_(context, config, {nodes.first, bound}, {});
             if (failed(status)) return {result, status};
             add_walks(walked);
         }
@@ -3012,7 +3012,8 @@ struct dense_vram_index {
         result.islands_found = islands;
         for (u32_t islands_before = islands; islands;) {
             // The island IDs replace the range: offsets below their count index them.
-            auto const [healed, healed_status] = refine_pass_(context, config, {0, islands}, audit.island_ids);
+            auto const [healed, healed_status] = refine_pass_(context, config, {0, islands},
+                                                              {audit.island_ids, islands});
             if (failed(healed_status)) return {result, healed_status};
             add_walks(healed);
             if (status_t const audited = survey(); failed(audited)) return {result, audited};
@@ -3197,19 +3198,18 @@ struct dense_vram_index {
                 bytes_of(bounce.data(), step.vectors_bytes));
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
 
-            byte_t* const bounce_neighbors = bounce.data() + batch_rows * scalar_row_bytes;
+            bytes_span_t const bounce_neighbors = to_writable_span(bounce).subspan(batch_rows * scalar_row_bytes);
             if (cudaMemcpyAsync(
-                    bounce_neighbors,
+                    bounce_neighbors.data(),
                     index_->neighbors_plane_.base() + static_cast<std::size_t>(rows.first) * neighbors_row_bytes,
                     rows.size() * neighbors_row_bytes, cudaMemcpyDeviceToHost, stream) != cudaSuccess)
                 return status_t::device_error_k;
             if (cudaStreamSynchronize(stream) != cudaSuccess) return status_t::device_error_k;
-            node_id_t* const landed = reinterpret_cast<node_id_t*>(bounce_neighbors);
-            for (std::size_t word = 0; word != step_slots; ++word)
-                landed[word] = landed[word] < visible ? static_cast<node_id_t>(landed[word] + id_shift)
-                                                      : dense_node_id_unknown_k;
+            std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(bounce_neighbors.data()), step_slots};
+            for (node_id_t& neighbor : landed)
+                neighbor = neighbor < visible ? static_cast<node_id_t>(neighbor + id_shift) : dense_node_id_unknown_k;
             [[maybe_unused]] status_t const copied_neighbors = copy_bytes(
-                columns.neighbors.subspan(neighbors_first, step.neighbors_bytes), bytes_of(landed, step_slots));
+                columns.neighbors.subspan(neighbors_first, step.neighbors_bytes), std::as_bytes(landed));
             standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(rows.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
@@ -3425,17 +3425,16 @@ struct dense_vram_index {
             if (cudaStreamSynchronize(stream) != cudaSuccess) return index_->fail_(status_t::device_error_k);
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
 
-            byte_t* const bounce_neighbors = bounce.data() + batch_rows * scalar_row_bytes;
+            bytes_span_t const bounce_neighbors = to_writable_span(bounce).subspan(batch_rows * scalar_row_bytes);
             [[maybe_unused]] status_t const staged_neighbors = copy_bytes(
-                bytes_of(bounce_neighbors, step.neighbors_bytes),
+                bounce_neighbors.first(step.neighbors_bytes),
                 columns.neighbors.subspan(neighbors_first, step.neighbors_bytes));
-            node_id_t* const landed = reinterpret_cast<node_id_t*>(bounce_neighbors);
-            rebase_neighbors(std::span<node_id_t> {landed, step_slots}, source_range, shift, dense_node_id_unknown_k);
-            compact_neighbors(std::span<node_id_t> {landed, step_slots}, connectivity, range.first,
-                              dense_node_id_unknown_k);
+            std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(bounce_neighbors.data()), step_slots};
+            rebase_neighbors(landed, source_range, shift, dense_node_id_unknown_k);
+            compact_neighbors(landed, connectivity, range.first, dense_node_id_unknown_k);
             if (cudaMemcpyAsync(
                     index_->neighbors_plane_.base() + static_cast<std::size_t>(range.first) * neighbors_row_bytes,
-                    bounce_neighbors, range.size() * neighbors_row_bytes, cudaMemcpyHostToDevice,
+                    bounce_neighbors.data(), range.size() * neighbors_row_bytes, cudaMemcpyHostToDevice,
                     stream) != cudaSuccess)
                 return index_->fail_(status_t::device_error_k);
             if (cudaStreamSynchronize(stream) != cudaSuccess) return index_->fail_(status_t::device_error_k);
@@ -3973,7 +3972,7 @@ struct dense_vram_index {
      *  @p node_ids the listed IDs with @p nodes spanning the array's offsets; the reverse passes re-select the walked
      *  rows and the rows they pick, and leave every other row as it was. */
     expected<refine_result_t> refine_pass_(dense_traversal_context_t& context, refine_config_t config,
-                                           iota_view<dense_node_id_t> nodes, u32_t const* node_ids) noexcept {
+                                           iota_view<dense_node_id_t> nodes, std::span<u32_t const> node_ids) noexcept {
         std::size_t const nodes_count = size();
         if (!nodes_count) return {{}, status_t::success_k};
         if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
@@ -3981,7 +3980,7 @@ struct dense_vram_index {
         if (!build_scratch_fits()) return {{}, status_t::config_mismatch_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         // IDs at or past the published count are unwalkable; an ID array is bounded by its own length.
-        if (!node_ids) nodes.bound = static_cast<dense_node_id_t>(min_of<std::size_t>(nodes.bound, nodes_count));
+        if (node_ids.empty()) nodes.bound = static_cast<dense_node_id_t>(min_of<std::size_t>(nodes.bound, nodes_count));
         if (nodes.first >= nodes.bound) return {{}, status_t::success_k};
         std::size_t const walk_count = nodes.size();
         cudaStream_t const stream = context.stream();
@@ -3993,11 +3992,15 @@ struct dense_vram_index {
         u32_t const bucket_width = static_cast<u32_t>(connectivity());
         auto shadow = cuda_make_unique(context.allocator_, shadow_bytes * 2 + counters_bytes);
         if (!shadow) return {{}, status_t::bad_alloc_k};
-        u32_t* const shadow_neighbors = reinterpret_cast<u32_t*>(shadow.get());
-        u32_t* const bucket_ids = reinterpret_cast<u32_t*>(shadow.get() + shadow_bytes);
-        u32_t* const bucket_counts = reinterpret_cast<u32_t*>(shadow.get() + shadow_bytes * 2);
-        dense_cuda_bitset_t const touched {bucket_counts + nodes_count};
-        if (cudaMemsetAsync(bucket_counts, 0, counters_bytes, stream) != cudaSuccess)
+        nk::matrix_span<u32_t> const shadow_neighbors {reinterpret_cast<u32_t*>(shadow.get()), nodes_count,
+                                                       connectivity()};
+        nk::matrix_span<u32_t> const buckets {reinterpret_cast<u32_t*>(shadow.get() + shadow_bytes), nodes_count,
+                                              bucket_width};
+        std::span<u32_t> const counters {reinterpret_cast<u32_t*>(shadow.get() + shadow_bytes * 2),
+                                         counters_bytes / sizeof(u32_t)};
+        std::span<u32_t> const bucket_counts = counters.first(nodes_count);
+        dense_cuda_bitset_t const touched {counters.subspan(nodes_count).data()};
+        if (cudaMemsetAsync(counters.data(), 0, counters.size_bytes(), stream) != cudaSuccess)
             return {{}, status_t::device_error_k};
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the pool sizes the kernel carries.
@@ -4020,7 +4023,7 @@ struct dense_vram_index {
         cudaMemsetAsync(context.telemetry_.get(), 0, sizeof(dense_cuda_telemetry_block_t), stream);
 
         dense_cuda_refine_view<quads_kit_t> view {planes(), //
-                                                  shadow_neighbors,
+                                                  shadow_neighbors.data(),
                                                   static_cast<u32_t>(nodes.bound),
                                                   insert_scratch_bytes_per_warp(),
                                                   static_cast<dense_node_id_t>(nodes.first),
@@ -4029,13 +4032,13 @@ struct dense_vram_index {
                                                   epoch_base,
                                                   context.telemetry_.get(),
                                                   context.assigned_rows_.get(),
-                                                  node_ids,
+                                                  node_ids.data(),
                                                   static_cast<u32_t>(nodes_count)};
         // A walk short of the whole graph starts from the live neighbors copied into the shadow verbatim, so a row
         // it never rewrites but one of its picks lands in merges its own neighbors with the new reverse links.
-        if (node_ids || walk_count != nodes_count)
-            if (cudaMemcpyAsync(shadow_neighbors, neighbors_plane_.base(), shadow_bytes, cudaMemcpyDeviceToDevice,
-                                stream) != cudaSuccess)
+        if (!node_ids.empty() || walk_count != nodes_count)
+            if (cudaMemcpyAsync(shadow_neighbors.data(), neighbors_plane_.base(), shadow_bytes,
+                                cudaMemcpyDeviceToDevice, stream) != cudaSuccess)
                 return {{}, status_t::device_error_k};
         if (status_t const launched = launch_refine_(view, pool_slots, stream); failed(launched)) return {{}, launched};
         if (cudaStreamSynchronize(stream) != cudaSuccess) return {{}, status_t::device_error_k};
@@ -4051,9 +4054,10 @@ struct dense_vram_index {
         cudaMemsetAsync(context.assigned_rows_.get(), 0, sizeof(u32_t), stream);
         if (status_t const launched = cuda_launch(
                 dense_cuda_scatter_links_kernel, device_.multiprocessor_count * insert_blocks_per_multiprocessor_k,
-                block_threads_k, 0, stream, static_cast<u32_t const*>(shadow_neighbors),
+                block_threads_k, 0, stream, static_cast<u32_t const*>(shadow_neighbors.data()),
                 static_cast<u32_t>(nodes_count), static_cast<u32_t>(nodes.first), static_cast<u32_t>(walk_count),
-                node_ids, static_cast<u32_t>(connectivity()), bucket_width, bucket_ids, bucket_counts, touched);
+                node_ids.data(), static_cast<u32_t>(connectivity()), bucket_width, buckets.data(), bucket_counts.data(),
+                touched);
             failed(launched))
             return {{}, launched};
         dense_cuda_refine_view<quads_kit_t> merge_view = view;
@@ -4062,8 +4066,7 @@ struct dense_vram_index {
         merge_view.node_ids = nullptr;
         merge_view.first_id = 0;
         merge_view.end_id = static_cast<u32_t>(nodes_count);
-        if (status_t const launched = launch_merge_(merge_view, bucket_ids, bucket_counts, bucket_width, touched,
-                                                    stream);
+        if (status_t const launched = launch_merge_(merge_view, buckets, bucket_counts, touched, stream);
             failed(launched))
             return {{}, launched};
         if (cudaStreamSynchronize(stream) != cudaSuccess) return {{}, status_t::device_error_k};
@@ -4265,12 +4268,12 @@ struct dense_vram_index {
         });
         return launched;
     }
-    status_t launch_merge_(dense_cuda_refine_view<quads_kit_t> view, u32_t const* bucket_ids,
-                           u32_t const* bucket_counts, u32_t bucket_width, dense_cuda_bitset_t touched,
+    status_t launch_merge_(dense_cuda_refine_view<quads_kit_t> view, nk::matrix_view<u32_t> buckets,
+                           std::span<u32_t const> bucket_counts, dense_cuda_bitset_t touched,
                            cudaStream_t stream) noexcept {
         return dense_cuda_launch<dense_cuda_merge_links_kernel<quads_kit_t>>( //
-            view, device_.multiprocessor_count * insert_blocks_per_multiprocessor_k, stream, bucket_ids, bucket_counts,
-            bucket_width, touched);
+            view, device_.multiprocessor_count * insert_blocks_per_multiprocessor_k, stream, buckets.data(),
+            bucket_counts.data(), static_cast<u32_t>(buckets.extent(1)), touched);
     }
 
     /** Launches one walk per query of @p launch, each written out through @p sink, and reports the

@@ -798,25 +798,30 @@ struct dense_vram_indexes {
         nk::matrix_span<dense_node_id_t> const ids_wide {ids_landing.data(), rows_count, shards * wanted};
         nk::matrix_span<dot_result_t> const products_wide {products_landing.data(), rows_count, shards * wanted};
 
+        auto shard_columns = [&](std::size_t shard) noexcept {
+            return nk::range(shard * wanted, (shard + 1) * wanted);
+        };
         auto multiply_shard = [&](std::size_t shard, traversal_t& traversal, std::size_t visible) noexcept {
-            nk::matrix_span<dense_node_id_t> const shard_ids = ids_wide(
-                nk::all, nk::range(shard * wanted, (shard + 1) * wanted), nk::slice);
-            nk::matrix_span<dot_result_t> const shard_products = products_wide(
-                nk::all, nk::range(shard * wanted, (shard + 1) * wanted), nk::slice);
-            std::span<u32_t> const shard_counts {counts_landing.data() + shard * rows_count, rows_count};
+            nk::matrix_span<dense_node_id_t> const shard_ids = ids_wide(nk::all, shard_columns(shard), nk::slice);
+            nk::matrix_span<dot_result_t> const shard_products = products_wide(nk::all, shard_columns(shard),
+                                                                               nk::slice);
+            std::span<u32_t> const shard_counts =
+                to_writable_span(counts_landing).subspan(shard * rows_count, rows_count);
             expected<search_result_t> const multiplied = shards_[shard].index->submit_multiply_(
                 left, shard_ids, shard_products, shard_counts, traversal, config, visible);
             return multiplied.status;
         };
         // Shards append in placement order until a row fills, so rows truncate exactly as on the host.
         auto merge_shard = [&](std::size_t shard, traversal_t const&) noexcept {
+            nk::matrix_view<dense_node_id_t> const shard_ids = ids_wide(nk::all, shard_columns(shard), nk::slice);
+            nk::matrix_view<dot_result_t> const shard_products = products_wide(nk::all, shard_columns(shard),
+                                                                               nk::slice);
             for (std::size_t row = 0; row != rows_count; ++row) {
-                std::size_t const landed_offset = (row * shards + shard) * wanted;
                 std::size_t const kept = min_of(counts[row], wanted);
                 std::size_t const scored = counts_landing[shard * rows_count + row];
                 for (std::size_t pair = 0; pair != min_of(scored, wanted - kept); ++pair) {
-                    keys[row * wanted + kept + pair] = shards_[shard].keys[ids_landing[landed_offset + pair]];
-                    products[row * wanted + kept + pair] = products_landing[landed_offset + pair];
+                    keys[row * wanted + kept + pair] = shards_[shard].keys[shard_ids(row, pair)];
+                    products[row * wanted + kept + pair] = shard_products(row, pair);
                 }
                 counts[row] += scored;
             }
@@ -1651,11 +1656,11 @@ struct dense_vram_indexes {
     /** Zips one (query, shard) pair of parallel landing rows into the scored shape
      *  @c merge_search_results consumes, stopping at the first sentinel ID - an absent
      *  match must never index a key column. @return The live matches repacked. */
-    static std::size_t repack_landed_matches_(dense_node_id_t const* landed_ids,
-                                              dense_distance_t const* landed_distances, std::size_t count,
-                                              dense_scored_node_t* frame) noexcept {
+    static std::size_t repack_landed_matches_(nk::vector_view<dense_node_id_t> landed_ids,
+                                              nk::vector_view<dense_distance_t> landed_distances,
+                                              std::span<dense_scored_node_t> frame) noexcept {
         std::size_t live = 0;
-        for (; live != count && landed_ids[live] != dense_node_id_unknown_k; ++live)
+        for (; live != landed_ids.size() && landed_ids[live] != dense_node_id_unknown_k; ++live)
             frame[live] = dense_scored_node_t {landed_ids[live], landed_distances[live]};
         return live;
     }
@@ -1689,24 +1694,28 @@ struct dense_vram_indexes {
         nk::matrix_span<dense_distance_t> const distances_wide {distances_landing.data(), queries_count,
                                                                 shards * config.count};
 
+        auto shard_columns = [&](std::size_t shard) noexcept {
+            return nk::range(shard * config.count, (shard + 1) * config.count);
+        };
         auto search_shard = [&](std::size_t shard, traversal_t& traversal, std::size_t visible) noexcept {
-            nk::matrix_span<dense_node_id_t> const shard_ids = ids_wide(
-                nk::all, nk::range(shard * config.count, (shard + 1) * config.count), nk::slice);
-            nk::matrix_span<dense_distance_t> const shard_distances = distances_wide(
-                nk::all, nk::range(shard * config.count, (shard + 1) * config.count), nk::slice);
+            nk::matrix_span<dense_node_id_t> const shard_ids = ids_wide(nk::all, shard_columns(shard), nk::slice);
+            nk::matrix_span<dense_distance_t> const shard_distances = distances_wide(nk::all, shard_columns(shard),
+                                                                                     nk::slice);
             expected<search_result_t> const found = shards_[shard].index->submit_search_(
                 queries, shard_ids, shard_distances, traversal, config, visible, heads...);
             return found.status;
         };
         auto merge_shard = [&](std::size_t shard, traversal_t const&) noexcept {
+            nk::matrix_view<dense_node_id_t> const shard_ids = ids_wide(nk::all, shard_columns(shard), nk::slice);
+            nk::matrix_view<dense_distance_t> const shard_distances = distances_wide(nk::all, shard_columns(shard),
+                                                                                     nk::slice);
             dense_scored_node_t frame[dense_cuda_sorted_pool<16>::capacity_k];
             for (std::size_t query = 0; query != queries_count; ++query) {
-                std::size_t const landed_offset = (query * shards + shard) * config.count;
-                std::size_t const live = repack_landed_matches_(
-                    ids_landing.data() + landed_offset, distances_landing.data() + landed_offset, config.count, frame);
-                std::span<key_t> const keys_row {keys.data() + query * wanted, wanted};
-                std::span<distance_t> const distances_row {distances.data() + query * wanted, wanted};
-                counts[query] = merge_search_results(std::span<dense_scored_node_t const> {frame, live},
+                std::size_t const live = repack_landed_matches_(shard_ids.row(query).as_vector(),
+                                                                shard_distances.row(query).as_vector(), frame);
+                std::span<key_t> const keys_row = keys.subspan(query * wanted, wanted);
+                std::span<distance_t> const distances_row = distances.subspan(query * wanted, wanted);
+                counts[query] = merge_search_results(std::span<dense_scored_node_t const> {frame}.first(live),
                                                      shards_[shard].keys, keys_row, distances_row, counts[query]);
             }
         };
@@ -1999,7 +2008,7 @@ struct dense_vram_indexes {
         growing_buffer<char, forkunion_allocator_t> part_path {allocator_};
         for (part_t& part : parts) {
             auto const [sibling, sibling_status] = safegraphs_sibling_path(
-                part_path, path, std::string_view {paths_arena.data() + part.path.first, part.path.size()});
+                part_path, path, to_string_view(paths_arena).substr(part.path.first, part.path.size()));
             if (failed(sibling_status)) return sibling_status;
             auto [part_mapping, part_mapping_status] = mapped_file_t::read(sibling);
             if (failed(part_mapping_status)) return part_mapping_status;

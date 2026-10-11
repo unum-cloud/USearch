@@ -1692,13 +1692,15 @@ static bool rejects_matches(usearch_matches_span_t const& matches, std::size_t c
  *  widening the scores to the ABI's double. */
 template <typename key_type_, typename score_type_>
 static void land_matches(usearch_matches_span_t const& matches, std::size_t first, std::size_t matched,
-                         key_type_ const* keys, score_type_ const* scores, nk_dtype_t score_dtype) noexcept {
+                         std::span<key_type_ const> keys, std::span<score_type_ const> scores,
+                         nk_dtype_t score_dtype) noexcept {
     std::size_t const wanted = matches.wanted;
     for (std::size_t match = 0; wanted && match != matched; ++match) {
-        std::memcpy(reinterpret_cast<char*>(matches.keys) + (first + match) * matches.keys_stride,
-                    keys + match * wanted, wanted * sizeof(key_type_));
+        std::span<key_type_ const> const keys_row = keys.subspan(match * wanted, wanted);
+        std::memcpy(reinterpret_cast<char*>(matches.keys) + (first + match) * matches.keys_stride, keys_row.data(),
+                    keys_row.size_bytes());
         [[maybe_unused]] nk_status_t const cast = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
-            scores + match * wanted, score_dtype,
+            scores.subspan(match * wanted, wanted).data(), score_dtype,
             reinterpret_cast<char*>(matches.scores) + (first + match) * matches.scores_stride, nk_f64_k, wanted,
             nullptr);
         assert(cast == nk_success_k && "The serial tier casts every dtype pair");
@@ -1731,12 +1733,13 @@ static void match_dense_rows(variant_type_& variant, usearch_executor_t executor
                    typename variant_type_::executor_t& executor, typename variant_type_::search_config_t config,
                    std::size_t resolved, std::size_t taking) mutable noexcept {
             std::size_t const first = resolved / rows_per_query, matched = taking / rows_per_query;
+            std::span<key_t> const keys {staged_keys.data(), matched * wanted};
+            std::span<score_type_> const scores {staged_scores.data(), matched * wanted};
             expected<typename variant_type_::search_result_t> const found = verb(
-                view, chunk_rows, executor, config, std::span<key_t> {staged_keys.data(), matched * wanted},
-                std::span<score_type_> {staged_scores.data(), matched * wanted},
+                view, chunk_rows, executor, config, keys, scores,
                 std::span<std::size_t> {matches.counts + first, matched});
             if (!found) return found;
-            land_matches(matches, first, matched, staged_keys.data(), staged_scores.data(), score_dtype);
+            land_matches<key_t, score_type_>(matches, first, matched, keys, scores, score_dtype);
             return found;
         };
     };
@@ -2288,10 +2291,11 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                                    typename variant_type_::executor_t& executor,
                                    typename variant_type_::search_config_t config, std::size_t resolved,
                                    std::size_t taking) noexcept {
-                            return view.multiply(chunk_rows, executor, config, width,
-                                                 {staged_keys.data() + resolved * width, taking * width},
-                                                 {staged_products.data() + resolved * width, taking * width},
-                                                 {scored.data() + resolved, taking});
+                            return view.multiply(
+                                chunk_rows, executor, config, width,
+                                to_writable_span(staged_keys).subspan(resolved * width, taking * width),
+                                to_writable_span(staged_products).subspan(resolved * width, taking * width),
+                                to_writable_span(scored).subspan(resolved, taking));
                         };
                     };
                     return for_each_dense_chunk(variant, arguments->executor, count, arguments->left, 1,

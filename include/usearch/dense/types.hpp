@@ -252,7 +252,7 @@ class dense_maxsim_reducer {
             }
 
             // Grouped by key in place, each key's run adds every row's best dot once, restoring the row slots.
-            radix_group(std::span<entry_t> {staged, ranked}, &entry_t::key);
+            radix_group(to_writable_span(staged_).first(ranked), &entry_t::key);
             std::size_t unique = 0;
             for (std::size_t run = 0, end = 0; run != ranked; run = end) {
                 while (end != ranked && same_key_(staged[end].key, staged[run].key)) ++end;

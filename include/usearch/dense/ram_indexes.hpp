@@ -840,8 +840,7 @@ struct dense_ram_indexes {
         auto multiply_row = [&](std::size_t row, std::size_t, traversal_t& traversal,
                                 std::span<dense_node_id_t const> watermarks) noexcept {
             dense_multiply_fold<key_t, dot_result_t, dense_keyed_ids<keys_column_t>> fold {
-                {keys.data() + row * wanted, wanted},
-                {products.data() + row * wanted, wanted}};
+                keys.subspan(row * wanted, wanted), products.subspan(row * wanted, wanted)};
             status_t refusal = status_t::success_k;
             for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
                 fold.resolve.keys = &shards_[shard].keys;
@@ -1669,8 +1668,8 @@ struct dense_ram_indexes {
 
         auto search_row = [&](std::size_t query, std::size_t, traversal_t& traversal,
                               std::span<dense_node_id_t const> watermarks) noexcept {
-            std::span<key_t> const keys_row {keys.data() + query * wanted, wanted};
-            std::span<distance_t> const distances_row {distances.data() + query * wanted, wanted};
+            std::span<key_t> const keys_row = keys.subspan(query * wanted, wanted);
+            std::span<distance_t> const distances_row = distances.subspan(query * wanted, wanted);
             vector_view_t const query_vector = queries.row(query).as_vector();
             std::size_t found_count = 0;
             status_t refusal = status_t::success_k;
@@ -2058,7 +2057,7 @@ struct dense_ram_indexes {
         growing_buffer<char, forkunion_allocator_t> part_path {allocator_};
         for (part_t& part : parts) {
             auto const [sibling, sibling_status] = safegraphs_sibling_path(
-                part_path, path, std::string_view {paths_arena.data() + part.path.first, part.path.size()});
+                part_path, path, to_string_view(paths_arena).substr(part.path.first, part.path.size()));
             if (failed(sibling_status)) return sibling_status;
             auto [part_mapping, part_status] = mapped_file_t::read(sibling);
             if (failed(part_status)) return part_status;
