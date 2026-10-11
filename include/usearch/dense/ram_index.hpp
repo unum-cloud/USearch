@@ -2210,7 +2210,7 @@ struct dense_ram_index {
     /** Scores @p query against four consecutive entries of the cached @p vectors & @p norms
      *  arrays starting at @p start; the gather cursor sticks at @p count - 1, so short tails
      *  repeat the last entry and the kernel always streams four valid lanes. */
-    inline std::array<distance_t, 4> distances_quad_of(            //
+    inline std::array<distance_t, 4> distances_via_quads(          //
         vector_view_t query, vector_norms_t query_norms,           //
         vector_view_t const* vectors, vector_norms_t const* norms, //
         small_size_t start, small_size_t count) const noexcept {
@@ -2547,7 +2547,7 @@ struct dense_ram_index {
             // one. A batch may score past the first violation, still cheaper than four serial.
             small_size_t kept = 0;
             while (kept != kept_count) {
-                std::array<distance_t, 4> const kept_distances = distances_quad_of( //
+                std::array<distance_t, 4> const kept_distances = distances_via_quads( //
                     candidate_vector, candidate_norms, kept_vectors, kept_norms, kept, kept_count);
                 small_size_t const lanes_count = min_of<small_size_t>(kept_count - kept, 4u);
                 computed_distances += lanes_count;
@@ -2651,7 +2651,7 @@ struct dense_ram_index {
                 // Neighbors accepted after the rectangle froze score on the 4-way path.
                 small_size_t fringe = static_cast<small_size_t>(frozen_links);
                 while (!losses && fringe != kept_count) {
-                    std::array<distance_t, 4> const fringe_distances = distances_quad_of( //
+                    std::array<distance_t, 4> const fringe_distances = distances_via_quads( //
                         span_vectors[row], span_norms[row], kept_vectors, kept_norms, fringe, kept_count);
                     small_size_t const lanes_count = min_of<small_size_t>(kept_count - fringe, 4u);
                     computed_distances += lanes_count;
@@ -2812,7 +2812,7 @@ struct dense_ram_index {
         refining_candidates.insert(dense_scored_node_t(new_node_id, newcomer_score), pool_limit);
         std::size_t computed = 0;
         for (small_size_t scored = 0; scored != count;) {
-            std::array<distance_t, 4> const staged_distances = distances_quad_of( //
+            std::array<distance_t, 4> const staged_distances = distances_via_quads( //
                 neighbor_vector, neighbor_norms, context.staged_vectors.data(), context.staged_norms.data(), scored,
                 count);
             small_size_t const lanes_count = min_of<small_size_t>(count - scored, 4u);
@@ -2847,7 +2847,7 @@ struct dense_ram_index {
 
         // The neighbor's scores - the pool's ordering - through the vector engine.
         for (small_size_t scored = 0; scored != count;) {
-            std::array<distance_t, 4> const scores = distances_quad_of( //
+            std::array<distance_t, 4> const scores = distances_via_quads( //
                 neighbor_vector, neighbor_norms, staged_vectors, staged_norms, scored, count);
             small_size_t const lanes_count = min_of<small_size_t>(count - scored, 4u);
             for (small_size_t lane = 0; lane != lanes_count; ++lane)
@@ -2860,7 +2860,7 @@ struct dense_ram_index {
         // its own score is the reused symmetric one, never recomputed.
         distance_t* pairs = context.pair_distances.data();
         for (small_size_t scored = 0; scored != count;) {
-            std::array<distance_t, 4> const row = distances_quad_of( //
+            std::array<distance_t, 4> const row = distances_via_quads( //
                 new_vector, new_norms, staged_vectors, staged_norms, scored, count);
             small_size_t const lanes_count = min_of<small_size_t>(count - scored, 4u);
             for (small_size_t lane = 0; lane != lanes_count; ++lane) {

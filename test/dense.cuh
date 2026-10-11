@@ -87,6 +87,11 @@ constexpr std::size_t dense_reader_minimal_searches_k = 16;
 
 #pragma region Shared Helpers
 
+/** Every NVIDIA capability, so a device test cell runs each kit its build compiled. */
+inline constexpr nk_capability_t dense_nvidia_capabilities_k = nk_cap_cuda_k | nk_cap_ampere_k | nk_cap_ada_k |
+                                                               nk_cap_hopper_k | nk_cap_blackwell_k |
+                                                               nk_cap_blackwellrtx_k | nk_cap_blackwellultra_k;
+
 /** Gate: a cell's kit is compiled once its requested ceiling is a bit some chain actually
  *  picked - a build without the kit must not pass its serial floor under a SIMD name. */
 template <nk_dtype_t dtype_, nk_capability_t caps_>

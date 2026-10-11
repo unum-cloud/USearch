@@ -102,11 +102,11 @@ static __global__ void dense_cuda_merge_attention_kernel(byte_t* blocks, u32_t r
  *  are engaged rather than being declared whole. The shard's configs, views and results are
  *  re-exported verbatim, so a batched call and a single one read the same.
  */
-template <                                         //
-    typename key_type_ = uuid_t,                   //
-    nk_dtype_t vector_dtype_ = nk_i8_k,            //
-    cuda_arch_t capability_ = cuda_arch_ampere_k,  //
-    typename key_hash_type_ = std::hash<key_type_> //
+template <                                                         //
+    typename key_type_ = uuid_t,                                   //
+    nk_dtype_t vector_dtype_ = nk_i8_k,                            //
+    nk_capability_t capability_ = nk_cap_cuda_k | nk_cap_ampere_k, //
+    typename key_hash_type_ = std::hash<key_type_>                 //
     >
 struct dense_vram_indexes {
 
@@ -174,8 +174,8 @@ struct dense_vram_indexes {
     /** The stored scalar vocabulary, re-exported for dispatchers gating crossing rows. */
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
 
-    /** The compute-capability ceiling the kernels compiled under. */
-    inline static constexpr cuda_arch_t capability_k = capability_;
+    /** The NVIDIA capabilities the kernels compiled under. */
+    inline static constexpr nk_capability_t capability_k = capability_;
 
 #pragma region Placement
 

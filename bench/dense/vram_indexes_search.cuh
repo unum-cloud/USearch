@@ -191,7 +191,7 @@ bool run_indexes_insertion(streamed_dataset_type_& streamed) {
     fmt::println("  shape: {} × {}d", inserted_rows, streamed.vectors.extent(1));
     if (bench.settings.skip_vectors.value) fmt::println("  topping: {} loaded rows", bench.settings.skip_vectors.value);
     fmt::println("  kit: {} · {} · {} kit · devices {}", scalar_t::dtype_name(), nk_kernel_name(bench.indexes.kernel()),
-                 bit_name(cuda_compute_choices_k, index_t::picked_capability_k, "ampere"),
+                 bit_name(cuda_compute_choices_k, index_t::picked_quads_capability_k, "ampere"),
                  fmt::join(bench.devices, ","));
     fmt::println("  shards: {}, one per device, filled {}", bench.indexes.shards_count(), fmt::join(shard_sizes, " "));
     fmt::println("  batch: {} rows per call", batch_rows);
@@ -364,7 +364,7 @@ struct indexes_search_workload_t {
 
 /** The innermost hop: binds the concrete sharded-index instantiation over every engaged device, builds it under
  *  @p kernel in checkpoint order, then runs @p workload. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, cuda_arch_t capability_, typename workload_type_>
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
 int stage_indexes_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                           std::span<int const> devices, nk_kernel_kind_t kernel, workload_type_ const& workload) {
     cuda_indexes_context<dense_vram_indexes<u32_t, stored_dtype_, capability_>> bench {settings, devices, kernel};
@@ -376,7 +376,7 @@ int stage_indexes_and_run(utilities::persisted_dataset<dataset_scalar_type_> con
 
 /** Kernel axis: admits the runtime metric the stored dtype scores by, the terminal hop into
  *  @ref stage_indexes_and_run; a dot-only workload pins the dot kernel instead. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, cuda_arch_t capability_, typename workload_type_>
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
 int run_indexes_with_metric(utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
                             settings_t const& settings, std::span<int const> devices, workload_type_ const& workload) {
     if constexpr (workload_type_::dot_only_k)
@@ -399,18 +399,19 @@ int run_indexes_with_metric(utilities::persisted_dataset<dataset_scalar_type_> c
  *  every GPU runs. Every shard keeps its planes in VRAM. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename workload_type_>
 int run_indexes_with_compute(utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
-                             settings_t const& settings, std::span<int const> devices, cuda_arch_t max_compute,
+                             settings_t const& settings, std::span<int const> devices, nk_capability_t max_compute,
                              workload_type_ const& workload) {
-    auto const named = std::ranges::find(cuda_compute_choices_k, max_compute, &capability_choice<cuda_arch_t>::bit);
+    auto const named = std::ranges::find(cuda_compute_choices_k, max_compute, &capability_choice<nk_capability_t>::bit);
     return dispatch_index<std::size(cuda_compute_choices_k)>(
         static_cast<std::size_t>(named - std::begin(cuda_compute_choices_k)),
         [&](auto row) {
-            return run_indexes_with_metric<dataset_scalar_type_, stored_dtype_, cuda_compute_choices_k[row.value].bit>(
-                dataset, settings, devices, workload);
+            return run_indexes_with_metric<dataset_scalar_type_, stored_dtype_,
+                                           cuda_ceiling_of(cuda_compute_choices_k[row.value].bit)>(dataset, settings,
+                                                                                                   devices, workload);
         },
         [&] {
-            return run_indexes_with_metric<dataset_scalar_type_, stored_dtype_, cuda_arch_ampere_k>(dataset, settings,
-                                                                                                    devices, workload);
+            return run_indexes_with_metric<dataset_scalar_type_, stored_dtype_, cuda_ceiling_of(nk_cap_ampere_k)>(
+                dataset, settings, devices, workload);
         });
 }
 
@@ -418,7 +419,8 @@ int run_indexes_with_compute(utilities::persisted_dataset<dataset_scalar_type_> 
  *  units carry the whole device instantiation grid of their dtype. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_indexes_with_stored_dtype(utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
-                                  settings_t const& settings, std::span<int const> devices, cuda_arch_t max_compute) {
+                                  settings_t const& settings, std::span<int const> devices,
+                                  nk_capability_t max_compute) {
     return run_indexes_with_compute<dataset_scalar_type_, stored_dtype_>(dataset, settings, devices, max_compute,
                                                                          indexes_search_workload_t {});
 }

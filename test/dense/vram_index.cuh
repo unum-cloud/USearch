@@ -340,7 +340,7 @@ template <nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>
 std::size_t test_cuda_configuration(char const* name, u64_t seed) {
     using allocator_t = counting_cuda_allocator_t;
     using index_t =
-        dense_vram_index<dtype_, cuda_arch_blackwellrtx_k, allocator_t, allocator_t, cuda_device_allocator_t>;
+        dense_vram_index<dtype_, dense_nvidia_capabilities_k, allocator_t, allocator_t, cuda_device_allocator_t>;
     auto make_index = [](allocation_ledger_t& ledger) {
         return index_t {kernel_, allocator_t {counting_allocator_t(ledger)},
                         allocator_t {counting_allocator_t(ledger)}};

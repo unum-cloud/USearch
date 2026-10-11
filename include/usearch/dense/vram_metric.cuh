@@ -5,14 +5,14 @@
  *  @brief Device metric kits for the dense VRAM indexes - the GPU twin of @c ram_metric.hpp.
  *
  *  A kit binds one storage dtype to one GPU generation, named like the CPU kits -
- *  @b dtype_generation_kit_t. The generation slot names the oldest tier whose instructions the kit
+ *  @b dtype_generation_quads_kit_t. The generation slot names the oldest tier whose instructions the kit
  *  needs: @c ampere for the sm_80 floor, @c ada for the fp8 conversions, @c blackwell for the
  *  mixed-precision multiply-adds and the fp6 conversions. Each tier's kits sit behind its
  *  @c NUMKONG_TARGET_* gate and a chain picks among them under the caller's ceiling, exactly like the
  *  CPU chains, so a unit compiled for one architecture compiles the kits that architecture runs. The
  *  arithmetic lives in named device primitives; a kit binds them.
  *
- *  Fragments are 16-byte register tiles, and metrics with precomputable norms finalize "through the
+ *  Fragments are 16 bytes of scalars held in registers, and metrics with precomputable norms finalize "through the
  *  dot". Row geometry - how many fragments span one vector, how many lanes cooperate on a row - and
  *  the metric are runtime state of the planes view, not the kit: dimensions are frozen by the first
  *  @c reserve, never by a type, and the metric only steers the scalar epilogue, so one kernel serves
@@ -45,12 +45,12 @@ namespace unum {
 namespace usearch {
 
 template <typename kit_>
-concept dense_cuda_kit = requires(typename kit_::fragment_t fragment, typename kit_::dot_t dot,
-                                  typename kit_::weighted_t weighted,
-                                  typename kit_::norms_accumulator_t norms_accumulator, typename kit_::norms_t norms,
-                                  dense_distance_t ranked, nk_kernel_kind_t kernel) {
+concept dense_cuda_quads_kit = requires(
+    typename kit_::fragment_t fragment, typename kit_::dot_t dot, typename kit_::weighted_t weighted,
+    typename kit_::norms_accumulator_t norms_accumulator, typename kit_::norms_t norms, dense_distance_t ranked,
+    nk_kernel_kind_t kernel) {
     typename kit_::scalar_t;
-    { kit_::arch_k } -> std::convertible_to<cuda_arch_t>;
+    { kit_::capability_k } -> std::convertible_to<nk_capability_t>;
     { kit_::accumulate_dot(fragment, fragment, dot) } -> std::same_as<typename kit_::dot_t>;
     { kit_::accumulate_weighted(fragment, f32_t {}, weighted) } -> std::same_as<typename kit_::weighted_t>;
     { kit_::accumulate_norms(fragment, norms_accumulator) } -> std::same_as<typename kit_::norms_accumulator_t>;
@@ -153,25 +153,25 @@ __device__ __forceinline__ dense_distance_t dense_cuda_convert_to_distance(nk_ke
 #pragma endregion Metrics
 
 /** The kits every chain names, declared whether or not their tier is compiled in. */
-struct f16_ampere_kit_t;
-struct f16_blackwell_kit_t;
-struct bf16_ampere_kit_t;
-struct bf16_blackwell_kit_t;
-struct i8_ampere_kit_t;
-struct u8_ampere_kit_t;
-struct e5m2_ampere_kit_t;
-struct e5m2_ada_kit_t;
-struct e5m2_blackwell_kit_t;
-struct e4m3_ampere_kit_t;
-struct e4m3_ada_kit_t;
-struct e4m3_blackwell_kit_t;
-struct e3m2_ampere_kit_t;
-struct e3m2_blackwell_kit_t;
-struct e2m3_ampere_kit_t;
-struct e2m3_blackwell_kit_t;
-struct i4x2_ampere_kit_t;
-struct u4x2_ampere_kit_t;
-struct u1x8_ampere_kit_t;
+struct f16_ampere_quads_kit_t;
+struct f16_blackwell_quads_kit_t;
+struct bf16_ampere_quads_kit_t;
+struct bf16_blackwell_quads_kit_t;
+struct i8_ampere_quads_kit_t;
+struct u8_ampere_quads_kit_t;
+struct e5m2_ampere_quads_kit_t;
+struct e5m2_ada_quads_kit_t;
+struct e5m2_blackwell_quads_kit_t;
+struct e4m3_ampere_quads_kit_t;
+struct e4m3_ada_quads_kit_t;
+struct e4m3_blackwell_quads_kit_t;
+struct e3m2_ampere_quads_kit_t;
+struct e3m2_blackwell_quads_kit_t;
+struct e2m3_ampere_quads_kit_t;
+struct e2m3_blackwell_quads_kit_t;
+struct i4x2_ampere_quads_kit_t;
+struct u4x2_ampere_quads_kit_t;
+struct u1x8_ampere_quads_kit_t;
 
 #pragma region Half Precision Floats
 
@@ -252,8 +252,8 @@ __device__ __forceinline__ std::array<f32_t, 8> dense_cuda_weighted_bf16x8_amper
 }
 
 /** f16 kit - the sm_80 floor. */
-struct f16_ampere_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct f16_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -285,8 +285,8 @@ struct f16_ampere_kit_t {
 };
 
 /** bf16 kit - the sm_80 floor. */
-struct bf16_ampere_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct bf16_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -363,8 +363,8 @@ __device__ __forceinline__ f32_t dense_cuda_dot_bf16x8_blackwell(uint4 a, uint4 
 }
 
 /** f16 kit - Blackwell, @c fma.rn.f32.f16. */
-struct f16_blackwell_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+struct f16_blackwell_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -396,8 +396,8 @@ struct f16_blackwell_kit_t {
 };
 
 /** bf16 kit - Blackwell, @c fma.rn.f32.bf16. */
-struct bf16_blackwell_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+struct bf16_blackwell_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -498,8 +498,8 @@ __device__ __forceinline__ std::array<f32_t, 16> dense_cuda_weighted_u8x16_amper
 }
 
 /** i8 kit - the sm_80 floor. */
-struct i8_ampere_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct i8_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -531,8 +531,8 @@ struct i8_ampere_kit_t {
 };
 
 /** u8 kit - the sm_80 floor. */
-struct u8_ampere_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct u8_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::u8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -670,8 +670,8 @@ struct e2m3_ampere_widening_t {
 };
 
 /** e5m2 kit - the sm_80 floor, widening by shifts. */
-struct e5m2_ampere_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct e5m2_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -703,8 +703,8 @@ struct e5m2_ampere_kit_t {
 };
 
 /** e4m3 kit - the sm_80 floor, widening by hand. */
-struct e4m3_ampere_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct e4m3_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -736,8 +736,8 @@ struct e4m3_ampere_kit_t {
 };
 
 /** e3m2 kit - the sm_80 floor, widening by hand. */
-struct e3m2_ampere_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct e3m2_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::e3m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -769,8 +769,8 @@ struct e3m2_ampere_kit_t {
 };
 
 /** e2m3 kit - the sm_80 floor, widening by hand. */
-struct e2m3_ampere_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct e2m3_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::e2m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -830,8 +830,8 @@ struct e5m2_ada_widening_t {
 };
 
 /** e5m2 kit - Ada, widening through the conversion. */
-struct e5m2_ada_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ada_k;
+struct e5m2_ada_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ada_k;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -863,8 +863,8 @@ struct e5m2_ada_kit_t {
 };
 
 /** e4m3 kit - Ada, widening through the conversion. */
-struct e4m3_ada_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ada_k;
+struct e4m3_ada_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ada_k;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -940,8 +940,8 @@ struct e2m3_blackwell_widening_t {
 };
 
 /** e5m2 kit - Blackwell, converted halves through @c fma.rn.f32.f16. */
-struct e5m2_blackwell_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+struct e5m2_blackwell_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -973,8 +973,8 @@ struct e5m2_blackwell_kit_t {
 };
 
 /** e4m3 kit - Blackwell, converted halves through @c fma.rn.f32.f16. */
-struct e4m3_blackwell_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+struct e4m3_blackwell_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1006,8 +1006,8 @@ struct e4m3_blackwell_kit_t {
 };
 
 /** e3m2 kit - Blackwell, the one-instruction conversion into @c fma.rn.f32.f16. */
-struct e3m2_blackwell_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+struct e3m2_blackwell_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
     using scalar_t = nk::e3m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1039,8 +1039,8 @@ struct e3m2_blackwell_kit_t {
 };
 
 /** e2m3 kit - Blackwell, the one-instruction conversion into @c fma.rn.f32.f16. */
-struct e2m3_blackwell_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_blackwell_k;
+struct e2m3_blackwell_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
     using scalar_t = nk::e2m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1178,8 +1178,8 @@ __device__ __forceinline__ std::array<f32_t, 32> dense_cuda_weighted_u4x32_amper
 }
 
 /** i4x2 kit - the sm_80 floor, the byte engine over unpacked nibbles. */
-struct i4x2_ampere_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct i4x2_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::i4x2_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -1211,8 +1211,8 @@ struct i4x2_ampere_kit_t {
 };
 
 /** u4x2 kit - the sm_80 floor, the byte engine over unpacked nibbles. */
-struct u4x2_ampere_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct u4x2_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::u4x2_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -1268,8 +1268,8 @@ __device__ __forceinline__ std::array<f32_t, 128> dense_cuda_weighted_u1x128_amp
 
 /** u1x8 kit - the sm_80 floor: the "dot" is the intersection popcount, and the norms store each row's
  *  set-bit count, the currency of Jaccard's union, mirrored into both fields. */
-struct u1x8_ampere_kit_t {
-    inline static constexpr cuda_arch_t arch_k = cuda_arch_ampere_k;
+struct u1x8_ampere_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
     using scalar_t = nk::u1x8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -1315,102 +1315,107 @@ struct u1x8_ampere_kit_t {
 
 #pragma region Chains
 
-/** The dispatch entry every index instantiation resolves through - the CPU chains' twin: one row per
- *  generation, newest first, each gated on its tier being compiled in and admitted by the caller's
- *  @p caps_, over the Ampere floor. Two ceilings in one binary run different rows on one device. */
-template <nk_dtype_t vector_dtype_, cuda_arch_t caps_>
-struct dense_cuda_kit_chain;
-
-template <cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_f16_k, caps_> {
-    using kit_t = typename first_available_kit<                                                             //
-        f16_ampere_kit_t,                                                                                   //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k, f16_blackwell_kit_t>, //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, f16_blackwell_kit_t>        //
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::f16_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                      //
+        f16_ampere_quads_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, f16_blackwell_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, f16_blackwell_quads_kit_t>        //
         >::type;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_bf16_k, caps_> {
-    using kit_t = typename first_available_kit<                                                              //
-        bf16_ampere_kit_t,                                                                                   //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k, bf16_blackwell_kit_t>, //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, bf16_blackwell_kit_t>        //
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::bf16_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                       //
+        bf16_ampere_quads_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, bf16_blackwell_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, bf16_blackwell_quads_kit_t>        //
         >::type;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_i8_k, caps_> {
-    using kit_t = i8_ampere_kit_t;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::i8_t, caps_> {
+    using kit_t = i8_ampere_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_u8_k, caps_> {
-    using kit_t = u8_ampere_kit_t;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::u8_t, caps_> {
+    using kit_t = u8_ampere_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_e5m2_k, caps_> {
-    using kit_t = typename first_available_kit<                                                              //
-        e5m2_ampere_kit_t,                                                                                   //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k, e5m2_blackwell_kit_t>, //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, e5m2_blackwell_kit_t>,       //
-        chain_layer<NUMKONG_TARGET_ADA && caps_ >= cuda_arch_ada_k, e5m2_ada_kit_t>                          //
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::e5m2_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                       //
+        e5m2_ampere_quads_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, e5m2_blackwell_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, e5m2_blackwell_quads_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_ADA && (caps_ & nk_cap_ada_k) != 0, e5m2_ada_quads_kit_t>                          //
         >::type;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_e4m3_k, caps_> {
-    using kit_t = typename first_available_kit<                                                              //
-        e4m3_ampere_kit_t,                                                                                   //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k, e4m3_blackwell_kit_t>, //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, e4m3_blackwell_kit_t>,       //
-        chain_layer<NUMKONG_TARGET_ADA && caps_ >= cuda_arch_ada_k, e4m3_ada_kit_t>                          //
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::e4m3_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                       //
+        e4m3_ampere_quads_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, e4m3_blackwell_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, e4m3_blackwell_quads_kit_t>,       //
+        chain_layer<NUMKONG_TARGET_ADA && (caps_ & nk_cap_ada_k) != 0, e4m3_ada_quads_kit_t>                          //
         >::type;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_e3m2_k, caps_> {
-    using kit_t = typename first_available_kit<                                                              //
-        e3m2_ampere_kit_t,                                                                                   //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k, e3m2_blackwell_kit_t>, //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, e3m2_blackwell_kit_t>        //
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::e3m2_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                       //
+        e3m2_ampere_quads_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, e3m2_blackwell_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, e3m2_blackwell_quads_kit_t>        //
         >::type;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_e2m3_k, caps_> {
-    using kit_t = typename first_available_kit<                                                              //
-        e2m3_ampere_kit_t,                                                                                   //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && caps_ >= cuda_arch_blackwellrtx_k, e2m3_blackwell_kit_t>, //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && caps_ >= cuda_arch_blackwell_k, e2m3_blackwell_kit_t>        //
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::e2m3_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                       //
+        e2m3_ampere_quads_kit_t,                                                                                      //
+        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, e2m3_blackwell_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, e2m3_blackwell_quads_kit_t>        //
         >::type;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_i4_k, caps_> {
-    using kit_t = i4x2_ampere_kit_t;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::i4x2_t, caps_> {
+    using kit_t = i4x2_ampere_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_u4_k, caps_> {
-    using kit_t = u4x2_ampere_kit_t;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::u4x2_t, caps_> {
+    using kit_t = u4x2_ampere_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
-template <cuda_arch_t caps_>
-struct dense_cuda_kit_chain<nk_u1_k, caps_> {
-    using kit_t = u1x8_ampere_kit_t;
-    static constexpr cuda_arch_t picked_k = kit_t::arch_k;
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cuda_k) != 0)
+struct dense_quads_chain<nk::u1x8_t, caps_> {
+    using kit_t = u1x8_ampere_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
 
 #pragma endregion Chains

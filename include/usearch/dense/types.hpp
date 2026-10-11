@@ -21,6 +21,12 @@
 namespace unum {
 namespace usearch {
 
+/** Capability cascade for every scalar, shared by all its metrics: each capability group - the CPU's in
+ *  @c ram_metric.hpp, NVIDIA's in @c vram_metric.cuh - specializes it under a constraint on @p caps_. Reading
+ *  order is the priority order; the first row whose @c available flag is true wins, else the fallback does. */
+template <nk::numeric_dtype scalar_, nk_capability_t caps_>
+struct dense_quads_chain;
+
 /** Dense node identifier within one sub-index - 32 bits, matching the 4-billion ceiling. */
 using dense_node_id_t = u32_t;
 

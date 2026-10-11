@@ -386,16 +386,18 @@ inline constexpr gpu_class_name_t gpu_class_names_k[] = {
 
 #if USEARCH_BUILD_CUDA
 
-/** Lowers one GPU class onto the CUDA architecture ceiling its kits compile up to; Rubin rides the
- *  Blackwell ceiling until its own kits land. */
-constexpr cuda_arch_t cuda_arch_of(gpu_class_t gpu_class) noexcept {
+/** Lowers one GPU class onto NumKong's NVIDIA capabilities, as @c nk_cuda_capabilities_detected reports them:
+ *  the Ampere & Ada bits accumulate, while Hopper, Blackwell & RTX Blackwell each run only their own kits.
+ *  Rubin rides the Blackwell kits until its own land. */
+constexpr nk_capability_t numkong_capabilities_of(gpu_class_t gpu_class) noexcept {
+    nk_capability_t const ampere = nk_cap_cuda_k | nk_cap_ampere_k, ada = ampere | nk_cap_ada_k;
     switch (gpu_class) {
-    case gpu_class_t::nvidia_ada_k: return cuda_arch_ada_k;
-    case gpu_class_t::nvidia_hopper_k: return cuda_arch_hopper_k;
+    case gpu_class_t::nvidia_ada_k: return ada;
+    case gpu_class_t::nvidia_hopper_k: return ada | nk_cap_hopper_k;
     case gpu_class_t::nvidia_blackwell_k:
-    case gpu_class_t::nvidia_rubin_k: return cuda_arch_blackwell_k;
-    case gpu_class_t::nvidia_blackwellrtx_k: return cuda_arch_blackwellrtx_k;
-    default: return cuda_arch_ampere_k;
+    case gpu_class_t::nvidia_rubin_k: return ada | nk_cap_blackwell_k;
+    case gpu_class_t::nvidia_blackwellrtx_k: return ada | nk_cap_blackwellrtx_k;
+    default: return ampere;
     }
 }
 
@@ -525,7 +527,7 @@ using ram_index = dense_ram_indexes<us::uuid_t, dtype_, numkong_capabilities_of(
 /** One VRAM alternative: the GPU class alone names the rung, lowering onto its architecture ceiling;
  *  its kernels come from that class's unit, compiled for its architecture alone. */
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
-using vram_index = dense_vram_indexes<us::uuid_t, dtype_, cuda_arch_of(gpu_class_)>;
+using vram_index = dense_vram_indexes<us::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
 #endif
 
 /** The C predicate lifted onto the index's key vocabulary. */

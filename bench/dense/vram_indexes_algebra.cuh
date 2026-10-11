@@ -137,16 +137,12 @@ struct indexes_algebra_workload_t {
     }
 };
 
-#pragma endregion
-
-#pragma region Dispatch Cascade
-
 /** The algebra shard hop: the compute ceiling below one stored dtype under the dot kernel, so the per-dtype shards
  *  carry the whole device instantiation grid of their dtype. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_indexes_algebra_with_stored_dtype(utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
                                           settings_t const& settings, algebra_settings_t const& algebra,
-                                          std::span<int const> devices, cuda_arch_t max_compute) {
+                                          std::span<int const> devices, nk_capability_t max_compute) {
     return run_indexes_with_compute<dataset_scalar_type_, stored_dtype_>(dataset, settings, devices, max_compute,
                                                                          indexes_algebra_workload_t {algebra});
 }
