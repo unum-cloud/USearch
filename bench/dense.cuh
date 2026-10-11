@@ -464,6 +464,24 @@ inline void resolve_common_names(settings_t& settings) {
 #endif
 }
 
+/** Resolves `--max-compute` into an allow-mask over NumKong kernel capabilities. Exits with status
+ *  1 on a name that matches nothing. */
+inline void resolve_max_compute(settings_t& settings) {
+    // Ceiling names resolve into allow-masks - the native capability currency on both sides. A
+    // named compute ceiling keeps its table prefix plus serial; "serial" alone keeps just the
+    // fallback bit. Capping above the detection is harmless: the dispatch intersects with the
+    // runtime bits anyway.
+    auto compute_names = named_choices("serial", compute_choices_k,
+                                       prefix_mask(compute_choices_k, std::size(compute_choices_k)));
+    if (settings.max_compute_name == "serial") settings.max_compute = nk_cap_serial_k;
+    else if (!settings.max_compute_name.empty()) {
+        std::size_t const named = index_of_name(compute_choices_k, settings.max_compute_name);
+        if (named == std::size(compute_choices_k))
+            exit_unnamed("--max-compute", settings.max_compute_name, compute_names);
+        settings.max_compute = nk_cap_serial_k | prefix_mask(compute_choices_k, named);
+    }
+}
+
 /** Parses the CPU binaries' flags, and the ones each of @p binary_flags adds, into one @ref settings_t, resolving
  *  every name that needs no machine. On `--help` prints the usage and exits with status 0; on a bad flag prints one
  *  line and exits with status 1. */
@@ -479,19 +497,7 @@ settings_t read_settings(int argc, char const* const* argv, std::string_view bin
     (append(binary_flags(settings)), ...);
     parse_or_exit(argc, argv, fmt::format("{} --vectors <path> [flags]", binary_name), flags);
     resolve_common_names(settings);
-
-    // Ceiling names resolve into allow-masks - the native capability currency on both sides. A named compute ceiling
-    // keeps its table prefix plus serial; "serial" alone keeps just the fallback bit. Capping above the detection is
-    // harmless: the dispatch intersects with the runtime bits anyway.
-    auto compute_names = named_choices("serial", compute_choices_k,
-                                       prefix_mask(compute_choices_k, std::size(compute_choices_k)));
-    if (settings.max_compute_name == "serial") settings.max_compute = nk_cap_serial_k;
-    else if (!settings.max_compute_name.empty()) {
-        std::size_t const named = index_of_name(compute_choices_k, settings.max_compute_name);
-        if (named == std::size(compute_choices_k))
-            exit_unnamed("--max-compute", settings.max_compute_name, compute_names);
-        settings.max_compute = nk_cap_serial_k | prefix_mask(compute_choices_k, named);
-    }
+    resolve_max_compute(settings);
 
     // A schedule ceiling caps only the waiter bits; the pool-management bits - topology, placement, huge pages -
     // stay allowed, so `fu_pool_new` keeps its full toolbox. The floor keyword is "standard", after

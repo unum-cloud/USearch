@@ -48,6 +48,13 @@ option(USEARCH_BUILD_LIB_WOLFRAM "Compile a native library for the Wolfram Langu
 option(USEARCH_BUILD_LIB_PYTHON "Compile the CPython extension; `scikit-build-core` switches it on" OFF)
 option(USEARCH_BUILD_LIB_NODE "Compile the Node addon; `cmake-js` switches it on" OFF)
 option(USEARCH_BUILD_CUDA "Compile CUDA index tests & benchmarks" ${USEARCH_CAN_BUILD_CUDA})
+option(USEARCH_BUILD_SPDK "Compile the SPDK engine into every target, finding SPDK through pkg-config" OFF)
+
+if (USEARCH_BUILD_SPDK)
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(USEARCH_SPDK REQUIRED spdk_nvme spdk_env_dpdk)
+    pkg_check_modules(USEARCH_SPDK_SYSTEM REQUIRED spdk_syslibs)
+endif ()
 
 # The library compiles one unit per GPU class, each for its own architecture alone - "80" with its PTX for every GPU
 # without a class, "89", "90a", "100f" and "120f" - and ignores this list. The CUDA tests, benchmarks and the dispatch
@@ -353,6 +360,16 @@ function (usearch_setup_target TARGET_NAME)
     # Header-only NumKong: each unit inlines the kernels its CPU class runs, and USearch dispatches by CPU class, so no
     # artifact needs NumKong's library or its dispatch points.
     target_link_libraries(${TARGET_NAME} PRIVATE numkong::header)
+
+    # SPDK's transports, socket layers and DPDK drivers register from static constructors, so their archives link whole.
+    if (USEARCH_BUILD_SPDK)
+        target_compile_definitions(${TARGET_NAME} PRIVATE USEARCH_BUILD_SPDK=1)
+        target_include_directories(${TARGET_NAME} SYSTEM PRIVATE ${USEARCH_SPDK_INCLUDE_DIRS})
+        target_link_libraries(
+            ${TARGET_NAME} PRIVATE "-Wl,--whole-archive" "-Wl,-Bstatic" ${USEARCH_SPDK_LDFLAGS} "-Wl,-Bdynamic"
+                                   "-Wl,--no-whole-archive" ${USEARCH_SPDK_SYSTEM_STATIC_LDFLAGS}
+        )
+    endif ()
 
 endfunction ()
 

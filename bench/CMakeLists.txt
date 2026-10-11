@@ -62,8 +62,41 @@ add_executable(
     dense/ram_indexes_algebra_u8.cpp
     dense/ram_indexes_algebra_u4.cpp
 )
-foreach (bench_target_ IN ITEMS usearch_bench_dense_ram_index_search usearch_bench_dense_ram_indexes_search
-                                usearch_bench_dense_ram_index_algebra usearch_bench_dense_ram_indexes_algebra
+# The NVMe benches carry no f32 shard, since f32 is never a stored dtype.
+add_executable(
+    usearch_bench_dense_nvme_indexes_search
+    dense_nvme_indexes_search.cpp
+    dense/nvme_indexes_search_bf16.cpp
+    dense/nvme_indexes_search_f16.cpp
+    dense/nvme_indexes_search_e5m2.cpp
+    dense/nvme_indexes_search_e4m3.cpp
+    dense/nvme_indexes_search_e3m2.cpp
+    dense/nvme_indexes_search_e2m3.cpp
+    dense/nvme_indexes_search_i8.cpp
+    dense/nvme_indexes_search_i4.cpp
+    dense/nvme_indexes_search_u8.cpp
+    dense/nvme_indexes_search_u4.cpp
+    dense/nvme_indexes_search_u1.cpp
+)
+add_executable(
+    usearch_bench_dense_nvme_indexes_algebra
+    dense_nvme_indexes_algebra.cpp
+    dense/nvme_indexes_algebra_bf16.cpp
+    dense/nvme_indexes_algebra_f16.cpp
+    dense/nvme_indexes_algebra_e5m2.cpp
+    dense/nvme_indexes_algebra_e4m3.cpp
+    dense/nvme_indexes_algebra_e3m2.cpp
+    dense/nvme_indexes_algebra_e2m3.cpp
+    dense/nvme_indexes_algebra_i8.cpp
+    dense/nvme_indexes_algebra_i4.cpp
+    dense/nvme_indexes_algebra_u8.cpp
+    dense/nvme_indexes_algebra_u4.cpp
+)
+foreach (
+    bench_target_ IN
+    ITEMS usearch_bench_dense_ram_index_search usearch_bench_dense_ram_indexes_search
+          usearch_bench_dense_ram_index_algebra usearch_bench_dense_ram_indexes_algebra
+          usearch_bench_dense_nvme_indexes_search usearch_bench_dense_nvme_indexes_algebra
 )
     usearch_setup_target(${bench_target_} HOST)
     target_include_directories(${bench_target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

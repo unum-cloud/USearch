@@ -55,7 +55,7 @@ Each finding is the `@verify` line that replays it, where the full counterexampl
 - The CUDA index's host side claims under its mutex, reads `plan_load`'s base under the claim, turns the watermark after the drain, filters the walk on it, unclaims a rejected launch, and `publish_` returns a failure an earlier batch kept, or the next batch waits forever: [`dense_vram_index_claims.pml`](dense_vram_index_claims.pml).
 - The CUDA rows need a `__syncwarp()` after each shuffle, acquire loads on the tail slots, one release fence per lock hold, and the slot-zero release that carries a newcomer's payload to a peer drawing it as a landmark: [`dense_vram_index_locks.pml`](dense_vram_index_locks.pml).
 - The sharded CUDA index gates its load as well as its batches, writes keys before the turn and the load's `finish`, and commits its turns behind the sequence word: [`dense_vram_indexes/`](dense_vram_indexes/).
-- The NVMe rings' tails release and acquire exactly as the io_uring documentation asks: [`nvme_ring.pml`](nvme_ring.pml).
+- The NVMe rings' tails release and acquire exactly as the io_uring documentation asks, and `abandon_` waits out every read the kernel consumed before it drops their completions, or a read of the abandoned batch is still in flight when `submit` returns: [`nvme_ring.pml`](nvme_ring.pml).
 
 ## What is not covered
 

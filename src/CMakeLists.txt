@@ -148,6 +148,34 @@ endif ()
 usearch_dense_ram_variant(wasm32_v128 OVER serial v128)
 usearch_dense_ram_variant(wasm64_extended OVER wasm32_v128 v128relaxed)
 
+# The NVMe arms compile per CPU class with the RAM unit's flags, for the classes whose kits a storage walk tells apart:
+# it carries no waiter or atomic reference, so aws_g5 and alibaba_c930, which advance only by those, take none, and a
+# WebAssembly module reads no storage directly.
+add_library(usearch_dense_nvme_variants OBJECT dense/nvme_variants_serial.cpp)
+usearch_setup_target(usearch_dense_nvme_variants)
+target_include_directories(usearch_dense_nvme_variants PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(usearch_dense_nvme_variants PRIVATE "USEARCH_BUILD_CUDA=0")
+target_link_libraries(usearch_dense_nvme_variants PRIVATE yyjson forkunion::static)
+foreach (
+    class_
+    intel_haswell
+    intel_sierra
+    intel_skylake
+    intel_icelake
+    amd_genoa
+    intel_diamond
+    aws_g2
+    apple_m2
+    nvidia_vera
+)
+    if (usearch_variant_${class_}_exists_)
+        target_sources(usearch_dense_nvme_variants PRIVATE dense/nvme_variants_${class_}.cpp)
+        set_source_files_properties(
+            dense/nvme_variants_${class_}.cpp PROPERTIES COMPILE_OPTIONS "${usearch_variant_${class_}_flags_}"
+        )
+    endif ()
+endforeach ()
+
 # The type-erased implementations behind the C interface: the dispatch unit visits the arms through their explicitly
 # instantiated views and compiles at the baseline, since it inlines no kernel. Under CUDA the dispatch unit is the `.cu`
 # twin and the device arms join, so the C libraries carry them too.
@@ -155,7 +183,7 @@ add_library(usearch_punned OBJECT types.cpp sequence.cpp)
 usearch_setup_target(usearch_punned)
 target_include_directories(usearch_punned PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_punned PRIVATE yyjson forkunion::static stringzilla::header)
-set(USEARCH_PUNNED_LIBRARIES usearch_punned usearch_dense_ram_variants)
+set(USEARCH_PUNNED_LIBRARIES usearch_punned usearch_dense_ram_variants usearch_dense_nvme_variants)
 
 if (USEARCH_BUILD_CUDA)
     enable_language(CUDA)

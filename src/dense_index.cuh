@@ -18,15 +18,17 @@
 #include <cstdio>  // `std::snprintf` - composing the capability string
 #include <cstring> // `std::memcpy`, `std::strlen` - scattering staged rows & the capability string
 
-#include <atomic>      // `std::atomic` - serializing the progress ticks
-#include <bit>         // `std::bit_cast` - the softmax carry crossing the ABI
-#include <mutex>       // `std::lock_guard` over the ticks' lock
-#include <memory>      // `std::unique_ptr` - the executor's topology
-#include <new>         // `std::nothrow`
-#include <span>        // `std::span` - key batches crossing the ABI
-#include <string_view> // `std::string_view` - checkpoint paths
-#include <type_traits> // `std::is_same_v` - the variant-membership audit
-#include <variant>     // `std::variant`, `std::visit`
+#include <atomic>             // `std::atomic` - serializing the progress ticks
+#include <bit>                // `std::bit_cast` - the softmax carry crossing the ABI
+#include <condition_variable> // `std::condition_variable` - waiting out deferred calls other threads run
+#include <initializer_list>   // `std::initializer_list` - the inputs a call checks against its arena
+#include <mutex>              // `std::lock_guard` over the ticks' lock and the deferred tables
+#include <memory>             // `std::unique_ptr` - the executor's topology
+#include <new>                // `std::nothrow`
+#include <span>               // `std::span` - key batches crossing the ABI
+#include <string_view>        // `std::string_view` - checkpoint paths
+#include <type_traits>        // `std::is_same_v` - the variant-membership audit
+#include <variant>            // `std::variant`, `std::visit`
 
 #include <forkunion.h>            // `fu_topology_new` - the executor factories' discovery
 #include <forkunion/types.hpp>    // `fu::spin_mutex` - the ticks' lock
@@ -46,8 +48,8 @@
  *  Arms exist per wired @c (dtype,kernel,capability) cell - those whose NumKong kernel
  *  kits are adapted - never the full cross product: an unwired cell would not compile, and
  *  advertising it would only move the failure from the build to the caller. The VRAM
- *  siblings join under the CUDA build; the NVMe siblings join with the block-storage
- *  executor, and until then their residency refuses at construction.
+ *  siblings join under the CUDA build, and the read-only NVMe siblings wherever a CPU
+ *  class picks a kit of its own.
  */
 struct usearch_dense_index_handle_t {
 
@@ -416,7 +418,7 @@ struct usearch_dense_index_handle_t {
         ram_index<nk_u4_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>,     //
         ram_index<nk_u4_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>,   //
 #endif
-#endif
+#endif // NUMKONG_ARCH_*_
 #if USEARCH_BUILD_CUDA
         // nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 33 arms
         vram_index<nk_bf16_k, nk_kernel_dot_k, gpu_class_t::nvidia_blackwellrtx_k>,       //
@@ -589,6 +591,217 @@ struct usearch_dense_index_handle_t {
         vram_index<nk_u1_k, nk_kernel_hamming_k, gpu_class_t::nvidia_ampere_k>,     //
         vram_index<nk_u1_k, nk_kernel_jaccard_k, gpu_class_t::nvidia_ampere_k>,     //
 #endif
+#if NUMKONG_ARCH_X8664_
+#if NUMKONG_TARGET_HASWELL
+        // NVMe intel_haswell over serial by haswell: every dtype, 33 arms
+        nvme_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>,       //
+        nvme_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>,   //
+        nvme_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>, //
+        nvme_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>,        //
+        nvme_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>,    //
+        nvme_index<nk_f16_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>,  //
+        nvme_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>,       //
+        nvme_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>,   //
+        nvme_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>, //
+        nvme_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>,       //
+        nvme_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>,   //
+        nvme_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>, //
+        nvme_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>,       //
+        nvme_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>,   //
+        nvme_index<nk_e3m2_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>, //
+        nvme_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>,       //
+        nvme_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>,   //
+        nvme_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>, //
+        nvme_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>,         //
+        nvme_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>,     //
+        nvme_index<nk_i8_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>,   //
+        nvme_index<nk_i4_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>,         //
+        nvme_index<nk_i4_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>,     //
+        nvme_index<nk_i4_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>,   //
+        nvme_index<nk_u8_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>,         //
+        nvme_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>,     //
+        nvme_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>,   //
+        nvme_index<nk_u4_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>,         //
+        nvme_index<nk_u4_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>,     //
+        nvme_index<nk_u4_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>,   //
+        nvme_index<nk_u1_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>,         //
+        nvme_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::intel_haswell_k>,     //
+        nvme_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::intel_haswell_k>,     //
+#endif
+#if NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
+        // NVMe intel_sierra over intel_haswell by alder, sierra: e2m3 i8 u8, 9 arms
+        nvme_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::intel_sierra_k>,       //
+        nvme_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::intel_sierra_k>,   //
+        nvme_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_sierra_k>, //
+        nvme_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::intel_sierra_k>,         //
+        nvme_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::intel_sierra_k>,     //
+        nvme_index<nk_i8_k, nk_kernel_euclidean_k, cpu_class_t::intel_sierra_k>,   //
+        nvme_index<nk_u8_k, nk_kernel_dot_k, cpu_class_t::intel_sierra_k>,         //
+        nvme_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::intel_sierra_k>,     //
+        nvme_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::intel_sierra_k>,   //
+#endif
+#if NUMKONG_TARGET_SKYLAKE
+        // NVMe intel_skylake over intel_haswell by skylake: bf16 f16 e5m2 e4m3 e3m2 e2m3, 18 arms
+        nvme_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>,       //
+        nvme_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>,   //
+        nvme_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>, //
+        nvme_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>,        //
+        nvme_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>,    //
+        nvme_index<nk_f16_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>,  //
+        nvme_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>,       //
+        nvme_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>,   //
+        nvme_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>, //
+        nvme_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>,       //
+        nvme_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>,   //
+        nvme_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>, //
+        nvme_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>,       //
+        nvme_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>,   //
+        nvme_index<nk_e3m2_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>, //
+        nvme_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>,       //
+        nvme_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>,   //
+        nvme_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>, //
+#endif
+#if NUMKONG_TARGET_ICELAKE
+        // NVMe intel_icelake over intel_skylake by icelake: i8 i4 u8 u4 u1, 15 arms
+        nvme_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::intel_icelake_k>,       //
+        nvme_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::intel_icelake_k>,   //
+        nvme_index<nk_i8_k, nk_kernel_euclidean_k, cpu_class_t::intel_icelake_k>, //
+        nvme_index<nk_i4_k, nk_kernel_dot_k, cpu_class_t::intel_icelake_k>,       //
+        nvme_index<nk_i4_k, nk_kernel_angular_k, cpu_class_t::intel_icelake_k>,   //
+        nvme_index<nk_i4_k, nk_kernel_euclidean_k, cpu_class_t::intel_icelake_k>, //
+        nvme_index<nk_u8_k, nk_kernel_dot_k, cpu_class_t::intel_icelake_k>,       //
+        nvme_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::intel_icelake_k>,   //
+        nvme_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::intel_icelake_k>, //
+        nvme_index<nk_u4_k, nk_kernel_dot_k, cpu_class_t::intel_icelake_k>,       //
+        nvme_index<nk_u4_k, nk_kernel_angular_k, cpu_class_t::intel_icelake_k>,   //
+        nvme_index<nk_u4_k, nk_kernel_euclidean_k, cpu_class_t::intel_icelake_k>, //
+        nvme_index<nk_u1_k, nk_kernel_dot_k, cpu_class_t::intel_icelake_k>,       //
+        nvme_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::intel_icelake_k>,   //
+        nvme_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::intel_icelake_k>,   //
+#endif
+#if NUMKONG_TARGET_GENOA
+        // NVMe amd_genoa over intel_icelake by genoa: bf16 e5m2 e4m3, 9 arms
+        nvme_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::amd_genoa_k>,       //
+        nvme_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::amd_genoa_k>,   //
+        nvme_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::amd_genoa_k>, //
+        nvme_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::amd_genoa_k>,       //
+        nvme_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::amd_genoa_k>,   //
+        nvme_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::amd_genoa_k>, //
+        nvme_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::amd_genoa_k>,       //
+        nvme_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::amd_genoa_k>,   //
+        nvme_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::amd_genoa_k>, //
+#endif
+#if NUMKONG_TARGET_DIAMOND
+        // NVMe intel_diamond over amd_genoa by diamond: e5m2 e4m3, 6 arms
+        nvme_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::intel_diamond_k>,       //
+        nvme_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::intel_diamond_k>,   //
+        nvme_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::intel_diamond_k>, //
+        nvme_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::intel_diamond_k>,       //
+        nvme_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::intel_diamond_k>,   //
+        nvme_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_diamond_k>, //
+#endif
+#elif NUMKONG_ARCH_ARM64_
+#if NUMKONG_TARGET_NEON
+        // NVMe aws_g2 over serial by neon: bf16 f16 u1, 9 arms
+        nvme_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::aws_g2_k>,       //
+        nvme_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::aws_g2_k>,   //
+        nvme_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::aws_g2_k>, //
+        nvme_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::aws_g2_k>,        //
+        nvme_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::aws_g2_k>,    //
+        nvme_index<nk_f16_k, nk_kernel_euclidean_k, cpu_class_t::aws_g2_k>,  //
+        nvme_index<nk_u1_k, nk_kernel_dot_k, cpu_class_t::aws_g2_k>,         //
+        nvme_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::aws_g2_k>,     //
+        nvme_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::aws_g2_k>,     //
+#endif
+#if NUMKONG_TARGET_NEONBFDOT
+        // NVMe apple_m2 over aws_g2 by neonbfdot: bf16, 3 arms
+        nvme_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,       //
+        nvme_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,   //
+        nvme_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>, //
+#endif
+#if NUMKONG_TARGET_NEONFHM
+        // NVMe apple_m2 over aws_g2 by neonfhm: f16 e5m2 e4m3, 9 arms
+        nvme_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,        //
+        nvme_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,    //
+        nvme_index<nk_f16_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>,  //
+        nvme_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,       //
+        nvme_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,   //
+        nvme_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>, //
+        nvme_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,       //
+        nvme_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,   //
+        nvme_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>, //
+#endif
+#if NUMKONG_TARGET_NEONSDOT
+        // NVMe apple_m2 over aws_g2 by neonsdot: e3m2 e2m3 i8 i4 u8 u4, 18 arms
+        nvme_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,       //
+        nvme_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,   //
+        nvme_index<nk_e3m2_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>, //
+        nvme_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,       //
+        nvme_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,   //
+        nvme_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>, //
+        nvme_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,         //
+        nvme_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,     //
+        nvme_index<nk_i8_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>,   //
+        nvme_index<nk_i4_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,         //
+        nvme_index<nk_i4_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,     //
+        nvme_index<nk_i4_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>,   //
+        nvme_index<nk_u8_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,         //
+        nvme_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,     //
+        nvme_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>,   //
+        nvme_index<nk_u4_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>,         //
+        nvme_index<nk_u4_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>,     //
+        nvme_index<nk_u4_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>,   //
+#endif
+#if NUMKONG_TARGET_NEONFP8
+        // NVMe nvidia_vera over aws_g5 by neonfp8: e5m2 e4m3 e3m2 e2m3, 12 arms
+        nvme_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::nvidia_vera_k>,       //
+        nvme_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::nvidia_vera_k>,   //
+        nvme_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::nvidia_vera_k>, //
+        nvme_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::nvidia_vera_k>,       //
+        nvme_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::nvidia_vera_k>,   //
+        nvme_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::nvidia_vera_k>, //
+        nvme_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::nvidia_vera_k>,       //
+        nvme_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::nvidia_vera_k>,   //
+        nvme_index<nk_e3m2_k, nk_kernel_euclidean_k, cpu_class_t::nvidia_vera_k>, //
+        nvme_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::nvidia_vera_k>,       //
+        nvme_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::nvidia_vera_k>,   //
+        nvme_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::nvidia_vera_k>, //
+#endif
+#endif // NUMKONG_ARCH_*_
+       // The NVMe serial floor: every wired cell, every platform.
+        nvme_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::serial_k>,       //
+        nvme_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::serial_k>,   //
+        nvme_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>, //
+        nvme_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::serial_k>,        //
+        nvme_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::serial_k>,    //
+        nvme_index<nk_f16_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>,  //
+        nvme_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::serial_k>,       //
+        nvme_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::serial_k>,   //
+        nvme_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>, //
+        nvme_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::serial_k>,       //
+        nvme_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::serial_k>,   //
+        nvme_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>, //
+        nvme_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::serial_k>,       //
+        nvme_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::serial_k>,   //
+        nvme_index<nk_e3m2_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>, //
+        nvme_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::serial_k>,       //
+        nvme_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::serial_k>,   //
+        nvme_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>, //
+        nvme_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::serial_k>,         //
+        nvme_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::serial_k>,     //
+        nvme_index<nk_i8_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>,   //
+        nvme_index<nk_i4_k, nk_kernel_dot_k, cpu_class_t::serial_k>,         //
+        nvme_index<nk_i4_k, nk_kernel_angular_k, cpu_class_t::serial_k>,     //
+        nvme_index<nk_i4_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>,   //
+        nvme_index<nk_u8_k, nk_kernel_dot_k, cpu_class_t::serial_k>,         //
+        nvme_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::serial_k>,     //
+        nvme_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>,   //
+        nvme_index<nk_u4_k, nk_kernel_dot_k, cpu_class_t::serial_k>,         //
+        nvme_index<nk_u4_k, nk_kernel_angular_k, cpu_class_t::serial_k>,     //
+        nvme_index<nk_u4_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>,   //
+        nvme_index<nk_u1_k, nk_kernel_dot_k, cpu_class_t::serial_k>,         //
+        nvme_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::serial_k>,     //
+        nvme_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::serial_k>,     //
         // The serial floor: every wired cell, every platform, the standard yield.
         ram_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::serial_k>,       //
         ram_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::serial_k>,   //
@@ -1011,7 +1224,7 @@ extern template struct specialized_index<ram_index<nk_u4_k, nk_kernel_dot_k, cpu
 extern template struct specialized_index<ram_index<nk_u4_k, nk_kernel_angular_k, cpu_class_t::wasm64_extended_k>>;
 extern template struct specialized_index<ram_index<nk_u4_k, nk_kernel_euclidean_k, cpu_class_t::wasm64_extended_k>>;
 #endif
-#endif
+#endif // NUMKONG_ARCH_*_
 #if USEARCH_BUILD_CUDA
 /* nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 33 arms */
 extern template struct specialized_index<vram_index<nk_bf16_k, nk_kernel_dot_k, gpu_class_t::nvidia_blackwellrtx_k>>;
@@ -1233,6 +1446,217 @@ extern template struct specialized_index<ram_index<nk_u4_k, nk_kernel_euclidean_
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_dot_k, cpu_class_t::serial_k>>;
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::serial_k>>;
 extern template struct specialized_index<ram_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::serial_k>>;
+#if NUMKONG_ARCH_X8664_
+#if NUMKONG_TARGET_HASWELL
+/* NVMe intel_haswell over serial by haswell: every dtype, 33 arms */
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_i4_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_i4_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_i4_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_u4_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_u4_k, nk_kernel_angular_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_u4_k, nk_kernel_euclidean_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_u1_k, nk_kernel_dot_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::intel_haswell_k>>;
+#endif
+#if NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
+/* NVMe intel_sierra over intel_haswell by alder, sierra: e2m3 i8 u8, 9 arms */
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_euclidean_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_dot_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::intel_sierra_k>>;
+#endif
+#if NUMKONG_TARGET_SKYLAKE
+/* NVMe intel_skylake over intel_haswell by skylake: bf16 f16 e5m2 e4m3 e3m2 e2m3, 18 arms */
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_skylake_k>>;
+#endif
+#if NUMKONG_TARGET_ICELAKE
+/* NVMe intel_icelake over intel_skylake by icelake: i8 i4 u8 u4 u1, 15 arms */
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_euclidean_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_index<nk_i4_k, nk_kernel_dot_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_index<nk_i4_k, nk_kernel_angular_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_index<nk_i4_k, nk_kernel_euclidean_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_dot_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_index<nk_u4_k, nk_kernel_dot_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_index<nk_u4_k, nk_kernel_angular_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_index<nk_u4_k, nk_kernel_euclidean_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_index<nk_u1_k, nk_kernel_dot_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::intel_icelake_k>>;
+#endif
+#if NUMKONG_TARGET_GENOA
+/* NVMe amd_genoa over intel_icelake by genoa: bf16 e5m2 e4m3, 9 arms */
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::amd_genoa_k>>;
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::amd_genoa_k>>;
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::amd_genoa_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::amd_genoa_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::amd_genoa_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::amd_genoa_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::amd_genoa_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::amd_genoa_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::amd_genoa_k>>;
+#endif
+#if NUMKONG_TARGET_DIAMOND
+/* NVMe intel_diamond over amd_genoa by diamond: e5m2 e4m3, 6 arms */
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::intel_diamond_k>>;
+#endif
+#elif NUMKONG_ARCH_ARM64_
+#if NUMKONG_TARGET_NEON
+/* NVMe aws_g2 over serial by neon: bf16 f16 u1, 9 arms */
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::aws_g2_k>>;
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::aws_g2_k>>;
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::aws_g2_k>>;
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::aws_g2_k>>;
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::aws_g2_k>>;
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_euclidean_k, cpu_class_t::aws_g2_k>>;
+extern template struct specialized_index<nvme_index<nk_u1_k, nk_kernel_dot_k, cpu_class_t::aws_g2_k>>;
+extern template struct specialized_index<nvme_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::aws_g2_k>>;
+extern template struct specialized_index<nvme_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::aws_g2_k>>;
+#endif
+#if NUMKONG_TARGET_NEONBFDOT
+/* NVMe apple_m2 over aws_g2 by neonbfdot: bf16, 3 arms */
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>>;
+#endif
+#if NUMKONG_TARGET_NEONFHM
+/* NVMe apple_m2 over aws_g2 by neonfhm: f16 e5m2 e4m3, 9 arms */
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>>;
+#endif
+#if NUMKONG_TARGET_NEONSDOT
+/* NVMe apple_m2 over aws_g2 by neonsdot: e3m2 e2m3 i8 i4 u8 u4, 18 arms */
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_i4_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_i4_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_i4_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_u4_k, nk_kernel_dot_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_u4_k, nk_kernel_angular_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_index<nk_u4_k, nk_kernel_euclidean_k, cpu_class_t::apple_m2_k>>;
+#endif
+#if NUMKONG_TARGET_NEONFP8
+/* NVMe nvidia_vera over aws_g5 by neonfp8: e5m2 e4m3 e3m2 e2m3, 12 arms */
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_euclidean_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::nvidia_vera_k>>;
+#endif
+#endif // NUMKONG_ARCH_*_
+/* The NVMe serial floor: every wired cell, every platform. */
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_dot_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_angular_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_bf16_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_dot_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_angular_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_f16_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_dot_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_angular_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_e5m2_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_dot_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_angular_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_e4m3_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_dot_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_angular_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_e3m2_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_dot_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_angular_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_e2m3_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_dot_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_angular_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_i8_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_i4_k, nk_kernel_dot_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_i4_k, nk_kernel_angular_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_i4_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_dot_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_angular_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_u8_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_u4_k, nk_kernel_dot_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_u4_k, nk_kernel_angular_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_u4_k, nk_kernel_euclidean_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_u1_k, nk_kernel_dot_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_u1_k, nk_kernel_hamming_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_index<nk_u1_k, nk_kernel_jaccard_k, cpu_class_t::serial_k>>;
 
 /** Whether @p alternative_type_ is listed in @p variant_type_ - the membership fact the ladder
  *  asserts against the explicit list. */
@@ -1275,6 +1699,20 @@ static status_t place_shards(multi_type_& variant, usearch_ram_options_t const& 
     return placed;
 }
 
+/** Where an NVMe view's parts come from: the checkpoint, and one device or directory per part when
+ *  any is named. */
+struct nvme_placement_t {
+    std::string_view path;
+    std::span<std::string_view const> paths;
+};
+
+/** Opens every part of the checkpoint @p nvme names, served in place. */
+template <typename multi_type_>
+    requires is_nvme_index<multi_type_>
+static status_t place_shards(multi_type_& variant, nvme_placement_t const& nvme) noexcept {
+    return specialized_index {variant}.view(nvme.path, nvme.paths);
+}
+
 /** Appends one comma-separated codename to the handle's capability string. */
 static void append_capability(usearch_dense_index_handle_t& handle, char const* name) noexcept {
     std::size_t const used = std::strlen(handle.capabilities_string);
@@ -1284,7 +1722,7 @@ static void append_capability(usearch_dense_index_handle_t& handle, char const* 
 
 /** Fills the handle's capability string once, from the picked NumKong kit. */
 template <typename multi_type_>
-    requires is_ram_index<multi_type_>
+    requires is_ram_index<multi_type_> || is_nvme_index<multi_type_>
 static void compose_capabilities(usearch_dense_index_handle_t& handle, multi_type_ const&) noexcept {
     constexpr nk_capability_t picked = dense_quads_chain<multi_type_::kernel_kind_k, typename multi_type_::scalar_t,
                                                          multi_type_::capability_k>::picked_k;
@@ -1370,25 +1808,21 @@ static usearch_dense_index_t descend_ram_ladder(usearch_dense_metadata_t const& 
     return make_punned_dense_index<ram_index<dtype_, kernel_, cpu_class_t::serial_k>>(geometry, ram, outcome);
 }
 
-/** One distinct rung: taken when the machine reports the class, else falls through. */
+/** One rung: taken when the machine reports the class, else falls through; a class that picks
+ *  nothing new is skipped without instantiating its index. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_, cpu_class_t... lower_classes_>
-    requires(rung_advances<dtype_, kernel_, cpu_class_>())
 static usearch_dense_index_t descend_ram_ladder(usearch_dense_metadata_t const& geometry,
                                                 usearch_ram_options_t const& ram, nk_capability_t available,
                                                 usearch_outcome_t* outcome) noexcept {
-    if (numkong_admits(available, cpu_class_) && forkunion_admits<cpu_class_>())
-        return make_punned_dense_index<ram_index<dtype_, kernel_, cpu_class_>>(geometry, ram, outcome);
-    return descend_ram_ladder<dtype_, kernel_, lower_classes_...>(geometry, ram, available, outcome);
-}
-
-/** A rung whose class picks nothing new: skipped without instantiating its index. */
-template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_, cpu_class_t... lower_classes_>
-    requires(!rung_advances<dtype_, kernel_, cpu_class_>())
-static usearch_dense_index_t descend_ram_ladder(usearch_dense_metadata_t const& geometry,
-                                                usearch_ram_options_t const& ram, nk_capability_t available,
-                                                usearch_outcome_t* outcome) noexcept {
-    static_assert(!variant_carries<ram_index<dtype_, kernel_, cpu_class_>, usearch_dense_index_handle_t::variants_t>,
-                  "This rung no longer advances past the one below - drop its arm from the variant list");
+    if constexpr (rung_advances<dtype_, kernel_, cpu_class_>()) {
+        if (numkong_admits(available, cpu_class_) && forkunion_admits<cpu_class_>())
+            return make_punned_dense_index<ram_index<dtype_, kernel_, cpu_class_>>(geometry, ram, outcome);
+    }
+    else {
+        static_assert(
+            !variant_carries<ram_index<dtype_, kernel_, cpu_class_>, usearch_dense_index_handle_t::variants_t>,
+            "This rung no longer advances past the one below - drop its arm from the variant list");
+    }
     return descend_ram_ladder<dtype_, kernel_, lower_classes_...>(geometry, ram, available, outcome);
 }
 
@@ -1416,6 +1850,65 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
         geometry, ram, available, outcome);
 #else
     return descend_ram_ladder<dtype_, kernel_>(geometry, ram, available, outcome);
+#endif
+}
+
+/** Whether one NVMe rung picks a different kit than the class it degrades to: a storage walk
+ *  carries no waiter or atomic reference, so only the kit tells two classes apart. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_>
+consteval bool nvme_rung_advances() noexcept {
+    using scalar_t = typename nk::type_for<dtype_>::type;
+    return dense_quads_chain<kernel_, scalar_t, numkong_capabilities_of(cpu_class_)>::picked_k !=
+           dense_quads_chain<kernel_, scalar_t, numkong_capabilities_of(parent_class_of(cpu_class_))>::picked_k;
+}
+
+/** The unconditional serial floor of every NVMe ladder. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
+static usearch_dense_index_t descend_nvme_ladder(usearch_dense_metadata_t const& geometry, nvme_placement_t const& nvme,
+                                                 nk_capability_t, usearch_outcome_t* outcome) noexcept {
+    return make_punned_dense_index<nvme_index<dtype_, kernel_, cpu_class_t::serial_k>>(geometry, nvme, outcome);
+}
+
+/** One NVMe rung: taken when the machine reports the class's kits, else falls through; a class that
+ *  picks no kit of its own is skipped without instantiating its index. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_, cpu_class_t... lower_classes_>
+static usearch_dense_index_t descend_nvme_ladder(usearch_dense_metadata_t const& geometry, nvme_placement_t const& nvme,
+                                                 nk_capability_t available, usearch_outcome_t* outcome) noexcept {
+    if constexpr (nvme_rung_advances<dtype_, kernel_, cpu_class_>()) {
+        if (numkong_admits(available, cpu_class_))
+            return make_punned_dense_index<nvme_index<dtype_, kernel_, cpu_class_>>(geometry, nvme, outcome);
+    }
+    else {
+        // A class sharing its parent's mask names the parent's very arm, which the variant rightly
+        // carries.
+        static_assert(
+            numkong_capabilities_of(cpu_class_) == numkong_capabilities_of(parent_class_of(cpu_class_)) ||
+                !variant_carries<nvme_index<dtype_, kernel_, cpu_class_>, usearch_dense_index_handle_t::variants_t>,
+            "This NVMe rung no longer advances past the one below - drop its arm from the variant list");
+    }
+    return descend_nvme_ladder<dtype_, kernel_, lower_classes_...>(geometry, nvme, available, outcome);
+}
+
+/** Picks the NVMe variant for one @c (dtype,kernel) cell on the RAM ladder's classes, the
+ *  WebAssembly ones aside, since a module reads no storage directly. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
+static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry, nvme_placement_t const& nvme,
+                                        usearch_outcome_t* outcome) noexcept {
+    nk_capability_t available = 0;
+    if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
+#if NUMKONG_ARCH_X8664_
+    return descend_nvme_ladder<dtype_, kernel_, cpu_class_t::intel_diamond_k, cpu_class_t::amd_genoa_k,
+                               cpu_class_t::intel_icelake_k, cpu_class_t::intel_skylake_k, cpu_class_t::intel_sierra_k,
+                               cpu_class_t::intel_haswell_k>( //
+        geometry, nvme, available, outcome);
+#elif NUMKONG_ARCH_ARM64_
+    return descend_nvme_ladder<dtype_, kernel_, cpu_class_t::nvidia_vera_k, cpu_class_t::aws_g5_k,
+                               cpu_class_t::apple_m2_k, cpu_class_t::aws_g2_k>( //
+        geometry, nvme, available, outcome);
+#elif NUMKONG_ARCH_RISCV64_
+    return descend_nvme_ladder<dtype_, kernel_, cpu_class_t::alibaba_c930_k>(geometry, nvme, available, outcome);
+#else
+    return descend_nvme_ladder<dtype_, kernel_>(geometry, nvme, available, outcome);
 #endif
 }
 
@@ -1557,12 +2050,62 @@ static usearch_dense_index_t with_cell(usearch_dense_metadata_t const& geometry,
 
 #pragma region Multi Verbs
 
-/** The state behind @c usearch_executor_t: the discovered topology a RAM executor was spawned over,
- *  and one residency's executor - the variant is the kind tag, so no second word can disagree. The
- *  executor is declared last, so its pool dies before the topology. */
+/** Every argument structure that names an executor, so a deferred submission keeps its call by
+ *  value; whatever the copy points to stays the caller's until final. */
+using deferred_arguments_t =
+    std::variant<usearch_dense_load_ram_t, usearch_dense_load_vram_t, usearch_dense_load_ram_buffer_t,
+                 usearch_dense_load_vram_buffer_t, usearch_dense_view_nvme_t, usearch_dense_reserve_t,
+                 usearch_dense_clear_t, usearch_dense_insert_t, usearch_dense_refine_t, usearch_dense_health_t,
+                 usearch_dense_search_t, usearch_dense_count_t, usearch_dense_get_t, usearch_dense_merge_t,
+                 usearch_dense_cursor_next_t, usearch_dense_search_stream_next_t, usearch_dense_save_t,
+                 usearch_dense_save_buffer_t, usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t,
+                 usearch_dense_describe_t, usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t>;
+
+/** Where one slot of a deferred table stands. */
+enum class deferred_stage_t : unsigned char {
+
+    /** Nothing in it; a submission may take it. */
+    free_k,
+
+    /** A submitted call waits in it for its wait, a drain, a blocking call or a free. */
+    held_k,
+
+    /** Some thread took the call and runs it. */
+    running_k,
+};
+
+/** One slot of an executor's deferred table: the copied call, the verb that runs it, and its place
+ *  in line. */
+struct deferred_call_t {
+    deferred_arguments_t arguments;
+    void (*verb)(void*) = nullptr;
+
+    /** Submission order, counted from one across every executor. */
+    std::size_t ticket = 0;
+    deferred_stage_t stage = deferred_stage_t::free_k;
+};
+
+/** Slots a deferred table holds when its constructor names no limit. */
+inline constexpr std::size_t deferred_limit_default_k = 64;
+
+/** Reads every NVMe engine keeps in flight: deep enough to cover a device's latency, which the C
+ *  interface leaves to the library. */
+inline constexpr std::size_t nvme_queue_depth_k = 64;
+
+/** The state behind @c usearch_executor_t: the discovered topology a RAM or NVMe executor was
+ *  spawned over, its deferred table, and one residency's executor; the variant is the kind tag, so
+ *  no second word can disagree. The executor is declared last, so its pool dies before the
+ *  topology. */
 struct usearch_executor_handle_t {
     std::unique_ptr<void, decltype(&fu_topology_delete)> topology {nullptr, &fu_topology_delete};
-    std::variant<forkunion_executor_t
+
+    /** One slot per call it tracks at once, sized at creation, so a submission never allocates. */
+    growing_buffer<deferred_call_t> deferred {global_allocator};
+
+    /** The next listed executor, so a wait or a free finds the calls naming its handle. */
+    usearch_executor_handle_t* next_listed = nullptr;
+
+    std::variant<forkunion_executor_t, nvme_executor_t
 #if USEARCH_BUILD_CUDA
                  ,
                  cuda_executor_t
@@ -1585,6 +2128,21 @@ static usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, 
     return &handle;
 }
 
+/** Discovers the topology and spawns @p threads into @p handle, each opening the engine @p config
+ *  names, answering @p handle, or null once the outcome records why not. */
+static usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle, std::size_t threads,
+                                              io_engine_config_t const& config, usearch_outcome_t* outcome) noexcept {
+    fu_topology_t topology = nullptr;
+    if (fu_topology_new(&topology) != fu_success_k)
+        return propagate_error(usearch_status_device_k, outcome, "Topology discovery failed"), nullptr;
+    handle.topology.reset(topology);
+    auto [spawned, status] = nvme_executor_t::spawn(topology, threads, config);
+    if (failed(status))
+        return propagate_error(status, outcome, "No I/O engine opened on the executor's threads"), nullptr;
+    handle.executor = std::move(spawned);
+    return &handle;
+}
+
 /** The executor a null handle runs RAM work on: the calling thread, built into @p call_executor. */
 template <typename multi_type_>
     requires is_ram_index<multi_type_>
@@ -1593,11 +2151,22 @@ static usearch_executor_t call_executor_for(multi_type_&, usearch_executor_handl
     return spawn_ram_executor(call_executor, 1, outcome);
 }
 
+/** The executor a null handle runs NVMe work on: one thread of synchronous reads. */
+template <typename multi_type_>
+    requires is_nvme_index<multi_type_>
+static usearch_executor_t call_executor_for(multi_type_&, usearch_executor_handle_t& call_executor,
+                                            usearch_outcome_t* outcome) noexcept {
+    io_engine_config_t config;
+    config.queue_depth = nvme_queue_depth_k;
+    config.transport = io_transport_t::blocking_k;
+    return spawn_nvme_executor(call_executor, 1, config, outcome);
+}
+
 #if USEARCH_BUILD_CUDA
 
 /** The executor a null handle runs VRAM work on: the default streams of the index's devices. */
 template <typename multi_type_>
-    requires(!is_ram_index<multi_type_>)
+    requires is_vram_index<multi_type_>
 static usearch_executor_t call_executor_for(multi_type_& variant, usearch_executor_handle_t& call_executor,
                                             usearch_outcome_t* outcome) noexcept {
     specialized_index const shards {variant};
@@ -1626,66 +2195,304 @@ static typename multi_type_::executor_t* executor_of(multi_type_& variant, usear
     return typed;
 }
 
-/** What @c usearch_arena_t owns: host memory that one call at a time rewinds and refills. */
+/** The device an arena of host pages names, which no GPU ordinal does. */
+inline constexpr int host_device_k = -1;
+
+/** What @c usearch_arena_t owns: memory that one call at a time rewinds and refills, as host pages
+ *  or on one device, and the call holding it. */
 struct usearch_arena_handle_t {
     growing_arena<forkunion_allocator_t> memory {forkunion_allocator_t {no_memory_domain_k}};
-    fu::spin_mutex_t busy;
+#if USEARCH_BUILD_CUDA
+    growing_arena<cuda_device_allocator_t> device_memory {cuda_device_allocator_t {}};
+#endif
+
+    /** The GPU ordinal the memory lives on, or @c host_device_k. */
+    int device = host_device_k;
+
+    /** The outcome of the call holding the arena, from its claim or deferred submission until just
+     *  before its final store; atomic, since a held call finishes on whichever thread runs it. */
+    std::atomic<usearch_outcome_t const*> holder {nullptr};
 };
 
-/** Claims the caller's arena for one call: creates it behind a null pointee, else rewinds it, which
- *  frees the previous call's outputs, so an @p input still inside it is refused. The caller unlocks
- *  @c busy before its final store. */
-static usearch_arena_handle_t* claim_arena(usearch_arena_t* arena, void const* input,
+/** Holds @p arena for the call whose outcome is @p call, answering whether it was free or already
+ *  that call's; a null arena holds nothing, left for the verb to refuse. */
+static bool hold_arena(usearch_arena_t arena, usearch_outcome_t const* call) noexcept {
+    if (!arena) return true;
+    usearch_outcome_t const* holder = nullptr;
+    return arena->holder.compare_exchange_strong(holder, call, std::memory_order_acquire) || holder == call;
+}
+
+/** Lets go of @p arena when the call whose outcome is @p call holds it. */
+static void release_arena(usearch_arena_t arena, usearch_outcome_t const* call) noexcept {
+    if (arena) arena->holder.compare_exchange_strong(call, nullptr, std::memory_order_release);
+}
+
+/** Whether @p address lies in memory @p arena handed out, which its next rewind reuses or frees. */
+static bool arena_contains(usearch_arena_handle_t const& arena, void const* address) noexcept {
+#if USEARCH_BUILD_CUDA
+    if (arena.device != host_device_k) return arena.device_memory.contains(address);
+#endif
+    return arena.memory.contains(address);
+}
+
+/** Holds @p arena for the call whose outcome is @p call and rewinds it, freeing the previous call's
+ *  outputs, so an input of @p inputs still inside it is refused, as is an arena on another device
+ *  than @p device. The call's @c call_outcome_t lets go of it before the final store. */
+static usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcome_t const* call, int device,
+                                           std::initializer_list<void const*> inputs,
                                            usearch_outcome_t* outcome) noexcept {
     if (!arena)
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "The arena pointer must not be null"),
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The arena must not be null"), nullptr;
+    if (arena->device != device)
+        return propagate_error(usearch_status_device_k, outcome, "The arena lives where the call does not compute"),
                nullptr;
-    if (!*arena) *arena = new (std::nothrow) usearch_arena_handle_t {};
-    if (!*arena)
-        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the arena"), nullptr;
-    if (!(*arena)->busy.lock_if_free())
+    if (!hold_arena(arena, call))
         return propagate_error(usearch_status_contended_k, outcome, "The arena serves another call"), nullptr;
-    if (input && (*arena)->memory.contains(input))
-        return (*arena)->busy.unlock(),
-               propagate_error(usearch_status_invalid_argument_k, outcome, "An input lies inside the arena it rewinds"),
-               nullptr;
-    (*arena)->memory.clear();
-    return *arena;
+    for (void const* input : inputs)
+        if (input && arena_contains(*arena, input))
+            return propagate_error(usearch_status_invalid_argument_k, outcome,
+                                   "An input lies inside the arena it rewinds"),
+                   nullptr;
+#if USEARCH_BUILD_CUDA
+    arena->device_memory.clear();
+#endif
+    arena->memory.clear();
+    return arena;
 }
+
+/** Carves @p count values of @p value_type_ out of a claimed @p arena, as host pages or on its
+ *  device; null when the arena cannot grow. */
+template <typename value_type_>
+static value_type_* carve(usearch_arena_handle_t& arena, std::size_t count) noexcept {
+#if USEARCH_BUILD_CUDA
+    if (arena.device != host_device_k)
+        return cudaSetDevice(arena.device) == cudaSuccess ? reinterpret_cast<value_type_*>(arena.device_memory.allocate(
+                                                                count * sizeof(value_type_), default_alignment_k))
+                                                          : nullptr;
+#endif
+    return reinterpret_cast<value_type_*>(arena.memory.allocate(count * sizeof(value_type_), default_alignment_k));
+}
+
+/**
+ *  @brief A verb's outcome while it runs: the caller's reads deferred from the start, every step
+ *      records into a private one, and the end lets go of the arena before the one final store.
+ *
+ *  Declared first in a verb, it unwinds last, so a waiter that sees the final status may reuse the
+ *  arena at once. A path that forgot to report finishes @c usearch_status_internal_k rather than
+ *  hanging its waiters.
+ */
+class call_outcome_t {
+  public:
+    explicit call_outcome_t(usearch_outcome_t* published, usearch_arena_t arena = nullptr) noexcept
+        : published_(published), arena_(arena) {
+        propagate_pending(published_);
+    }
+    ~call_outcome_t() noexcept {
+        release_arena(arena_, published_);
+        propagate_error(recorded_.status, published_, recorded_.message);
+    }
+    call_outcome_t(call_outcome_t const&) = delete;
+    call_outcome_t& operator=(call_outcome_t const&) = delete;
+
+    /** The private record every step reports into. */
+    operator usearch_outcome_t*() noexcept { return &recorded_; }
+
+  private:
+    usearch_outcome_t* published_;
+    usearch_arena_t arena_;
+    usearch_outcome_t recorded_ {usearch_status_internal_k, "The call finished without reporting a status"};
+};
+
+#pragma region Deferred Calls
+
+/** Every listed executor and the lock every deferred table is read under, so a wait or a free finds
+ *  the calls naming its handle without asking each executor. */
+struct deferred_registry_t {
+    std::mutex guard;
+
+    /** Signalled whenever a taken call becomes final. */
+    std::condition_variable finished;
+
+    /** The last ticket handed out. */
+    std::size_t tickets = 0;
+
+    /** The newest listed executor. */
+    usearch_executor_handle_t* executors = nullptr;
+};
+
+static deferred_registry_t deferred_registry;
+
+/** The held call whose arguments this thread passes back into their verb, which then runs them in
+ *  place rather than holding them again. */
+static thread_local void const* resuming_call = nullptr;
+
+/** Sizes @p executor 's deferred table at @p limit slots, zero taking the default, and lists it. */
+static status_t list_executor(usearch_executor_handle_t& executor, std::size_t limit) noexcept {
+    if (failed(executor.deferred.resize(limit ? limit : deferred_limit_default_k))) return status_t::bad_alloc_k;
+    std::lock_guard<std::mutex> lock(deferred_registry.guard);
+    executor.next_listed = deferred_registry.executors;
+    deferred_registry.executors = &executor;
+    return status_t::success_k;
+}
+
+/** Takes @p executor off the list; the caller already finished every call it held. */
+static void delist_executor(usearch_executor_handle_t& executor) noexcept {
+    std::lock_guard<std::mutex> lock(deferred_registry.guard);
+    for (usearch_executor_handle_t** link = &deferred_registry.executors; *link; link = &(*link)->next_listed)
+        if (*link == &executor) {
+            *link = executor.next_listed;
+            return;
+        }
+}
+
+/** Whether the call in @p slot reads or writes @p handle: its outcome, its executor, or an index,
+ *  cursor, stream or arena it names. An output slot for a handle the call creates holds nothing
+ *  yet. */
+static bool deferred_uses(deferred_call_t const& slot, void const* handle) noexcept {
+    return std::visit(
+        [&](auto const& arguments) noexcept {
+            auto const names = [&](auto named) noexcept {
+                if constexpr (std::is_pointer_v<std::remove_pointer_t<decltype(named)>>) return false;
+                else return static_cast<void const*>(named) == handle;
+            };
+            bool used = static_cast<void const*>(arguments.outcome) == handle ||
+                        static_cast<void const*>(arguments.executor) == handle;
+            if constexpr (requires { arguments.index; }) used = used || names(arguments.index);
+            if constexpr (requires { arguments.cursor; }) used = used || names(arguments.cursor);
+            if constexpr (requires { arguments.stream; }) used = used || names(arguments.stream);
+            if constexpr (requires { arguments.arena; }) used = used || names(arguments.arena);
+            return used;
+        },
+        slot.arguments);
+}
+
+/** Runs every call @p executor holds with a ticket up to @p last on this thread, oldest first. */
+static void run_held(usearch_executor_handle_t& executor, std::size_t last) noexcept {
+    for (;;) {
+        deferred_call_t* oldest = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(deferred_registry.guard);
+            for (deferred_call_t& slot : executor.deferred)
+                if (slot.stage == deferred_stage_t::held_k && slot.ticket <= last &&
+                    (!oldest || slot.ticket < oldest->ticket))
+                    oldest = &slot;
+            if (!oldest) return;
+            oldest->stage = deferred_stage_t::running_k;
+        }
+        std::visit(
+            [&](auto& arguments) noexcept {
+                resuming_call = &arguments;
+                oldest->verb(&arguments);
+            },
+            oldest->arguments);
+        std::lock_guard<std::mutex> lock(deferred_registry.guard);
+        oldest->stage = deferred_stage_t::free_k;
+        deferred_registry.finished.notify_all();
+    }
+}
+
+/** Waits until no call @p executor took with a ticket up to @p last still runs on another
+ *  thread. */
+static void wait_running(usearch_executor_handle_t& executor, std::size_t last) noexcept {
+    std::unique_lock<std::mutex> lock(deferred_registry.guard);
+    deferred_registry.finished.wait(lock, [&]() noexcept {
+        for (deferred_call_t const& slot : executor.deferred)
+            if (slot.stage == deferred_stage_t::running_k && slot.ticket <= last) return false;
+        return true;
+    });
+}
+
+/** Returns once no deferred call reads or writes @p handle, running the held ones on this thread
+ *  together with every call held before them on the same executor - what every wait and every free
+ *  does first. */
+static void finish_calls_using(void const* handle) noexcept {
+    if (!handle) return;
+    std::unique_lock<std::mutex> lock(deferred_registry.guard);
+    for (;;) {
+        usearch_executor_handle_t* holding = nullptr;
+        std::size_t last = 0, running = 0;
+        for (usearch_executor_handle_t* executor = deferred_registry.executors; executor && !holding;
+             executor = executor->next_listed)
+            for (deferred_call_t const& slot : executor->deferred)
+                if (slot.stage == deferred_stage_t::held_k && deferred_uses(slot, handle))
+                    holding = executor, last = max_of(last, slot.ticket);
+                else if (slot.stage == deferred_stage_t::running_k && deferred_uses(slot, handle)) ++running;
+        if (holding) {
+            // Running a held call takes this lock itself, so it runs outside it.
+            lock.unlock();
+            run_held(*holding, last);
+            lock.lock();
+        }
+        else if (running) deferred_registry.finished.wait(lock);
+        else return;
+    }
+}
+
+/**
+ *  @brief Every verb's entry. A deferred call on an executor is copied into the executor's table,
+ *      holding its arena, and answers true; a blocking one first runs the calls the executor holds
+ *      and answers false.
+ *
+ *  A call the runner of a held call passes back answers false at once, so the verb runs it in
+ *  place, and so does a call with no executor, which is final when it returns whatever its
+ *  completion says.
+ */
+template <auto verb_, typename arguments_type_>
+static bool submitted(arguments_type_* arguments) noexcept {
+    if (resuming_call == arguments) return resuming_call = nullptr, false;
+    usearch_executor_t const executor = arguments->executor;
+    if (!executor) return false;
+    if (arguments->completion != usearch_completion_deferred_k) return run_held(*executor, ~std::size_t {0}), false;
+    usearch_outcome_t* const outcome = arguments->outcome;
+    propagate_pending(outcome);
+    usearch_arena_t arena = nullptr;
+    if constexpr (requires { arguments->arena; }) arena = arguments->arena;
+    if (!hold_arena(arena, outcome))
+        return propagate_error(usearch_status_contended_k, outcome, "The arena serves another call"), true;
+    std::lock_guard<std::mutex> lock(deferred_registry.guard);
+    for (deferred_call_t& slot : executor->deferred)
+        if (slot.stage == deferred_stage_t::free_k) {
+            slot.arguments.template emplace<arguments_type_>(*arguments);
+            slot.verb = [](void* erased) { verb_(static_cast<arguments_type_*>(erased)); };
+            slot.ticket = ++deferred_registry.tickets;
+            slot.stage = deferred_stage_t::held_k;
+            return true;
+        }
+    // A refused submission never runs, so nothing else would let go of the arena it took.
+    release_arena(arena, outcome);
+    propagate_error(usearch_status_contended_k, outcome, "The deferred table is full");
+    return true;
+}
+
+#pragma endregion Deferred Calls
 
 /** Bytes one packed row of @p dimensions spans in @p dtype. */
 static std::size_t packed_row_bytes(nk_dtype_t dtype, std::size_t dimensions) noexcept {
     return divide_round_up<std::size_t>(nk_dtype_bits(dtype) * dimensions, 8);
 }
 
-/** The export tail every row reader shares: @p fill produces up to @c vectors.capacity rows in the
- *  stored type and reports how many, landing in the caller's own plane when the two types agree and
- *  in a staged one converted row by row otherwise. */
+/** The export tail every row reader shares: @p fill produces up to @p rows rows in the stored type
+ *  and reports how many, landing packed in @p landing when the two types agree and in a staged
+ *  plane converted row by row into @p target_dtype otherwise. */
 template <typename scalar_type_, typename fill_type_>
-static expected<std::size_t> export_rows(usearch_rows_span_t const& vectors, std::size_t dimensions,
-                                         nk_dtype_t stored_dtype, fill_type_&& fill) noexcept {
-    std::size_t const wanted = vectors.capacity;
-    nk_dtype_t const target_dtype = nk_dtype_of(vectors.scalar);
-    if (target_dtype == nk_dtype_unknown_k) return {0, status_t::unknown_kind_k};
-    if (vectors.columns != dimensions) return {0, status_t::shape_mismatch_k};
-    if (vectors.stride < packed_row_bytes(target_dtype, dimensions)) return {0, status_t::unsupported_layout_k};
-    if (target_dtype == stored_dtype) {
-        nk::matrix_span<scalar_type_> const rows {static_cast<char*>(vectors.data),
-                                                  rows_shape_of<scalar_type_>(wanted, vectors.stride, dimensions)};
-        return {fill(rows), status_t::success_k};
-    }
-    auto zeros = nk::matrix<scalar_type_>::zeros({wanted, dimensions});
+static expected<std::size_t> export_rows(std::byte* landing, std::size_t rows, nk_dtype_t target_dtype,
+                                         std::size_t dimensions, nk_dtype_t stored_dtype, fill_type_&& fill) noexcept {
+    std::size_t const row_bytes = packed_row_bytes(target_dtype, dimensions);
+    if (target_dtype == stored_dtype)
+        return fill(nk::matrix_span<scalar_type_> {reinterpret_cast<char*>(landing),
+                                                   rows_shape_of<scalar_type_>(rows, row_bytes, dimensions)});
+    auto zeros = nk::matrix<scalar_type_>::zeros({rows, dimensions});
     if (!zeros)
         return {0, zeros.status == nk::status_t::bad_alloc_k ? status_t::bad_alloc_k : status_t::shape_mismatch_k};
     nk::matrix<scalar_type_> staged = std::move(zeros.value);
-    std::size_t const exported = fill(staged.span());
-    for (std::size_t row = 0; row != min_of(exported, wanted); ++row) {
+    expected<std::size_t> const exported = fill(staged.span());
+    for (std::size_t row = 0; exported && row != min_of(exported.value, rows); ++row) {
         [[maybe_unused]] nk_status_t const cast = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
-            staged.span().row(row).as_vector().byte_data(), stored_dtype,
-            static_cast<char*>(vectors.data) + row * vectors.stride, target_dtype, dimensions, nullptr);
+            staged.span().row(row).as_vector().byte_data(), stored_dtype, landing + row * row_bytes, target_dtype,
+            dimensions, nullptr);
         assert(cast == nk_success_k && "The serial tier casts every dtype pair");
     }
-    return {exported, status_t::success_k};
+    return exported;
 }
 
 /**
@@ -1753,86 +2560,81 @@ static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t exec
     return true;
 }
 
-/** Whether @p matches cannot take @p count rows of its @c wanted matches; the refusal lands in @p outcome. */
-static bool rejects_matches(usearch_matches_span_t const& matches, std::size_t count,
-                            usearch_outcome_t* outcome) noexcept {
-    std::size_t const wanted = matches.wanted;
-    if (matches.capacity < count)
-        return !propagate_error(usearch_status_shape_mismatch_k, outcome, "The matches hold fewer rows than the call");
-    if (!matches.counts || (wanted && (!matches.keys || !matches.scores)))
-        return !propagate_error(usearch_status_invalid_argument_k, outcome, "The output planes must name storage");
-    if (wanted && (matches.keys_stride < wanted * sizeof(usearch_key_t) ||
-                   matches.scores_stride < wanted * sizeof(usearch_distance_t)))
-        return !propagate_error(usearch_status_unsupported_layout_k, outcome, "An output stride is shorter than a row");
-    return false;
-}
+/** Where a ranked run lands inside a claimed arena: @c wanted keys and scores per row, and a count
+ *  per row. */
+struct matches_landing_t {
+    usearch_key_t* keys = nullptr;
+    usearch_distance_t* scores = nullptr;
+    std::size_t* counts = nullptr;
+    std::size_t wanted = 0;
 
-/** Lands @p matched staged rows of keys and @p score_dtype scores into @p matches from row @p first,
- *  widening the scores to the ABI's double. */
-template <typename key_type_, typename score_type_>
-static void land_matches(usearch_matches_span_t const& matches, std::size_t first, std::size_t matched,
-                         key_type_ const* keys, score_type_ const* scores, nk_dtype_t score_dtype) noexcept {
-    std::size_t const wanted = matches.wanted;
-    for (std::size_t match = 0; wanted && match != matched; ++match) {
-        std::memcpy(reinterpret_cast<char*>(matches.keys) + (first + match) * matches.keys_stride,
-                    keys + match * wanted, wanted * sizeof(key_type_));
-        [[maybe_unused]] nk_status_t const cast = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
-            scores + match * wanted, score_dtype,
-            reinterpret_cast<char*>(matches.scores) + (first + match) * matches.scores_stride, nk_f64_k, wanted,
-            nullptr);
-        assert(cast == nk_success_k && "The serial tier casts every dtype pair");
+    /** The view the call publishes once every row landed. */
+    usearch_matches_view_t view() const noexcept { return {keys, scores, counts, wanted}; }
+};
+
+/** Carves @p count rows of @p wanted matches out of a claimed @p arena; a zero @p wanted carves
+ *  only the counts. False once @p outcome records why not. */
+static bool carve_matches(usearch_arena_handle_t& arena, std::size_t count, std::size_t wanted,
+                          matches_landing_t& landing, usearch_outcome_t* outcome) noexcept {
+    landing.wanted = wanted;
+    landing.counts = carve<std::size_t>(arena, count);
+    if (wanted) {
+        landing.keys = carve<usearch_key_t>(arena, count * wanted);
+        landing.scores = carve<usearch_distance_t>(arena, count * wanted);
     }
+    if (landing.counts && (!wanted || (landing.keys && landing.scores))) return true;
+    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
 }
 
-/** The matching verbs' sink on one serving arm: keys and @p score_type_ scores, tagged
- *  @p score_dtype, stage at the engine's width and widen to the ABI's double one output row at a
- *  time; @p rows_per_query input rows share one output row, and @p count output rows land. */
+/** The matching verbs' sink on one serving arm: keys land in @p landing as the walk writes them,
+ *  and @p score_type_ scores, tagged @p score_dtype, stage at the engine's width and widen to the
+ *  ABI's double; @p rows_per_query input rows share one output row, and @p count output rows
+ *  land. */
 template <typename score_type_, typename variant_type_, typename verb_type_>
-static void match_dense_rows(variant_type_& variant, usearch_executor_t executor,                //
+static bool match_dense_rows(variant_type_& variant, usearch_executor_t executor,                //
                              std::size_t count, usearch_rows_view_t const& rows,                 //
-                             std::size_t rows_per_query, usearch_matches_span_t const& matches,  //
+                             std::size_t rows_per_query, matches_landing_t const& landing,       //
                              nk_dtype_t score_dtype, std::size_t expansion_factor,               //
                              usearch_progress_callback_t progress, void* progress_state,         //
                              usearch_dense_traversal_stats_t* stats, usearch_outcome_t* outcome, //
                              verb_type_&& verb) noexcept {
     using key_t = typename variant_type_::key_t;
-    std::size_t const wanted = matches.wanted;
-    if (rejects_matches(matches, count, outcome)) return;
+    static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk writes them");
+    std::size_t const wanted = landing.wanted;
     auto make_sink = [&](std::size_t chunk, status_t& staged) noexcept {
-        std::size_t const matches_per_chunk = chunk / rows_per_query;
-        growing_buffer<key_t> staged_keys {global_allocator};
         growing_buffer<score_type_> staged_scores {global_allocator};
-        if (failed(staged_keys.resize(matches_per_chunk * wanted)) ||
-            failed(staged_scores.resize(matches_per_chunk * wanted)))
-            staged = status_t::bad_alloc_k;
-        return [&, staged_keys = std::move(staged_keys), staged_scores = std::move(staged_scores)](
+        if (failed(staged_scores.resize(chunk / rows_per_query * wanted))) staged = status_t::bad_alloc_k;
+        return [&, staged_scores = std::move(staged_scores)](
                    specialized_index<variant_type_> view, typename variant_type_::vectors_view_t chunk_rows,
                    typename variant_type_::executor_t& executor, typename variant_type_::search_config_t config,
                    std::size_t resolved, std::size_t taking) mutable noexcept {
             std::size_t const first = resolved / rows_per_query, matched = taking / rows_per_query;
             expected<typename variant_type_::search_result_t> const found = verb(
-                view, chunk_rows, executor, config, std::span<key_t> {staged_keys.data(), matched * wanted},
+                view, chunk_rows, executor, config,
+                std::span<key_t> {reinterpret_cast<key_t*>(landing.keys) + first * wanted, matched * wanted},
                 std::span<score_type_> {staged_scores.data(), matched * wanted},
-                std::span<std::size_t> {matches.counts + first, matched});
-            if (!found) return found;
-            land_matches(matches, first, matched, staged_keys.data(), staged_scores.data(), score_dtype);
+                std::span<std::size_t> {landing.counts + first, matched});
+            if (!found || !wanted) return found;
+            [[maybe_unused]] nk_status_t const cast = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
+                staged_scores.data(), score_dtype, landing.scores + first * wanted, nk_f64_k, matched * wanted,
+                nullptr);
+            assert(cast == nk_success_k && "The serial tier casts every dtype pair");
             return found;
         };
     };
-    if (for_each_dense_chunk(variant, executor, count * rows_per_query, rows, rows_per_query, expansion_factor,
-                             progress, progress_state, stats, outcome, make_sink))
-        propagate_error(usearch_status_success_k, outcome, nullptr);
+    return for_each_dense_chunk(variant, executor, count * rows_per_query, rows, rows_per_query, expansion_factor,
+                                progress, progress_state, stats, outcome, make_sink);
 }
 
 #pragma endregion Multi Verbs
 
-/** @brief The cursor of a RAM arm; a device arm reads its rows through a search and has none. */
+/** The cursor of a RAM or NVMe arm; a VRAM arm reads its rows through a search and has none. */
 template <typename variant_type_>
 struct cursor_of {
     using type = std::monostate;
 };
 template <typename variant_type_>
-    requires is_ram_index<variant_type_>
+    requires is_ram_index<variant_type_> || is_nvme_index<variant_type_>
 struct cursor_of<variant_type_> {
     using type = typename variant_type_::cursor_t;
 };
@@ -1885,7 +2687,6 @@ template <typename source_type_, typename placement_type_>
 static void load_dense_index(source_type_ source, placement_type_ const& placement, usearch_executor_t executor,
                              usearch_progress_callback_t progress, void* progress_state, usearch_dense_index_t* index,
                              usearch_outcome_t* outcome) noexcept {
-    propagate_pending(outcome);
     *index = nullptr;
     if (source.empty())
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The checkpoint must not be empty"), void();
@@ -1897,16 +2698,58 @@ static void load_dense_index(source_type_ source, placement_type_ const& placeme
     if (!loaded) return;
     bool const filled = std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            usearch_executor_handle_t call_executor;
-            typename variant_type_::executor_t* const typed = executor_of(variant, executor, call_executor, outcome);
-            if (!typed) return false;
-            shard_ticks_t ticks {progress, progress_state, specialized_index {variant}.shards_count()};
-            status_t const status = specialized_index {variant}.load(source, *typed, ticks);
-            return succeeded(status) || propagate_error(status, outcome);
+            // A load places RAM or VRAM arms alone, so a view's arm never reaches here.
+            if constexpr (is_nvme_index<variant_type_>)
+                return propagate_error(usearch_status_internal_k, outcome, "A load never builds a view");
+            else {
+                usearch_executor_handle_t call_executor;
+                typename variant_type_::executor_t* const typed = executor_of(variant, executor, call_executor,
+                                                                              outcome);
+                if (!typed) return false;
+                shard_ticks_t ticks {progress, progress_state, specialized_index {variant}.shards_count()};
+                status_t const status = specialized_index {variant}.load(source, *typed, ticks);
+                return succeeded(status) || propagate_error(status, outcome);
+            }
         },
         loaded->variants);
     if (!filled) return delete loaded, void();
     *index = loaded;
+    propagate_error(usearch_status_success_k, outcome, nullptr);
+}
+
+/** Visits the arm of @p index with @p mutate when it is writable; an NVMe view serves its
+ *  checkpoint in place, so it refuses every mutation with @c usearch_status_read_only_k. */
+template <typename mutate_type_>
+static void visit_writable(usearch_dense_index_handle_t& index, usearch_outcome_t* outcome,
+                           mutate_type_&& mutate) noexcept {
+    std::visit(
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            if constexpr (is_nvme_index<variant_type_>)
+                propagate_error(usearch_status_read_only_k, outcome, "An NVMe view never mutates");
+            else mutate(variant);
+        },
+        index.variants);
+}
+
+/** Lands one finished output row in an arena on @p device, or on the host when it names none; a
+ *  device row rides one blocking upload, since the walk that produced it staged on the host. */
+static bool land_row(std::byte* landing, void const* row, std::size_t bytes, int device) noexcept {
+#if USEARCH_BUILD_CUDA
+    if (device != host_device_k) return cudaMemcpy(landing, row, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
+#endif
+    std::memcpy(landing, row, bytes);
+    return true;
+}
+
+/** Lists a spawned @p executor with a deferred table of @p deferred_limit slots and hands it out
+ *  through @p output, or frees it once @p outcome records why not. */
+static void hand_out_executor(usearch_executor_t executor, std::size_t deferred_limit, usearch_executor_t* output,
+                              usearch_outcome_t* outcome) noexcept {
+    if (failed(list_executor(*executor, deferred_limit)))
+        return delete executor,
+               propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the deferred table"),
+               void();
+    *output = executor;
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
@@ -1915,8 +2758,7 @@ extern "C" {
 #pragma region Lifetime
 
 USEARCH_EXPORT void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    propagate_pending(outcome);
+    call_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     usearch_dense_metadata_t const geometry {arguments->metric, arguments->quantization, arguments->dimensions,
                                              arguments->connectivity};
@@ -1927,8 +2769,7 @@ USEARCH_EXPORT void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments) 
 }
 
 USEARCH_EXPORT void usearch_dense_init_vram(usearch_dense_init_vram_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    propagate_pending(outcome);
+    call_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     usearch_dense_metadata_t const geometry {arguments->metric, arguments->quantization, arguments->dimensions,
                                              arguments->connectivity};
@@ -1939,38 +2780,63 @@ USEARCH_EXPORT void usearch_dense_init_vram(usearch_dense_init_vram_t* arguments
 }
 
 USEARCH_EXPORT void usearch_dense_view_ram(usearch_dense_view_ram_t* arguments) {
-    propagate_pending(arguments->outcome);
+    call_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
-    propagate_error(usearch_status_unsupported_k, arguments->outcome,
+    propagate_error(usearch_status_unsupported_k, outcome,
                     "RAM shards copy a checkpoint in and cannot serve a mapping in place yet");
 }
 
 USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments) {
-    propagate_pending(arguments->outcome);
+    if (submitted<usearch_dense_view_nvme>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    usearch_nvme_options_t const& nvme = arguments->nvme;
     *arguments->index = nullptr;
-    propagate_error(usearch_status_unsupported_k, arguments->outcome,
-                    "NVMe checkpoints carry no keys and no shard wrapper, so no C verb answers on them yet");
+    if (arguments->executor && !std::holds_alternative<nvme_executor_t>(arguments->executor->executor))
+        return propagate_error(usearch_status_device_k, outcome,
+                               "The executor's kind must match the handle's residency"),
+               void();
+    if (!arguments->path.data || !arguments->path.length || (nvme.paths_count && !nvme.paths))
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The paths must name storage"), void();
+
+    std::size_t const paths_count = nvme.paths ? nvme.paths_count : 0;
+    growing_buffer<std::string_view> paths {global_allocator};
+    if (failed(paths.resize(paths_count)))
+        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the paths"), void();
+    for (std::size_t path = 0; path != paths_count; ++path) paths[path] = as_text(nvme.paths[path]);
+
+    // The view's own header read, so a transport ID names a checkpoint as a file path does.
+    auto const [checkpoint, read_status] = dense_nvme_read_metadata(as_text(arguments->path));
+    if (failed(read_status)) return propagate_error(read_status, outcome), void();
+    usearch_dense_metadata_t geometry {};
+    adopt_metadata(checkpoint, &geometry);
+    nvme_placement_t const placement {as_text(arguments->path), to_span(paths)};
+    usearch_dense_index_t const index = with_cell(geometry, placement, outcome);
+    if (!index) return;
+    *arguments->index = index;
+    propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
-USEARCH_EXPORT void usearch_dense_free(usearch_dense_index_t index) { delete index; }
+USEARCH_EXPORT void usearch_dense_free(usearch_dense_index_t index) {
+    finish_calls_using(index);
+    delete index;
+}
 
 USEARCH_EXPORT void usearch_dense_reserve(usearch_dense_reserve_t* arguments) {
+    if (submitted<usearch_dense_reserve>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
     usearch_dense_index_t const index = arguments->index;
-    propagate_pending(arguments->outcome);
-    std::visit(
-        [&](auto& variant) {
-            propagate_error(specialized_index {variant}.reserve(
-                                {arguments->capacity, index->requested_connectivity, index->requested_dimensions}),
-                            arguments->outcome);
-        },
-        index->variants);
+    visit_writable(*index, outcome, [&](auto& variant) noexcept {
+        propagate_error(specialized_index {variant}.reserve(
+                            {arguments->capacity, index->requested_connectivity, index->requested_dimensions}),
+                        outcome);
+    });
 }
 
 USEARCH_EXPORT void usearch_dense_clear(usearch_dense_clear_t* arguments) {
-    propagate_pending(arguments->outcome);
-    propagate_error(
-        std::visit([](auto& variant) { return specialized_index {variant}.clear(); }, arguments->index->variants),
-        arguments->outcome);
+    if (submitted<usearch_dense_clear>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    visit_writable(*arguments->index, outcome,
+                   [&](auto& variant) noexcept { propagate_error(specialized_index {variant}.clear(), outcome); });
 }
 
 #pragma endregion Lifetime
@@ -1998,10 +2864,11 @@ USEARCH_EXPORT usearch_dense_metric_t usearch_dense_metric_from_name(usearch_byt
 }
 
 USEARCH_EXPORT void usearch_dense_describe(usearch_dense_describe_t* arguments) {
+    if (submitted<usearch_dense_describe>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
     usearch_dense_index_t const index = arguments->index;
-    propagate_pending(arguments->outcome);
     std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) {
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
             specialized_index const view {variant};
             std::size_t const dimensions = view.dimensions(), connectivity = view.connectivity();
             *arguments->description = {
@@ -2014,15 +2881,25 @@ USEARCH_EXPORT void usearch_dense_describe(usearch_dense_describe_t* arguments) 
                 index->capabilities_string};
         },
         index->variants);
-    propagate_error(usearch_status_success_k, arguments->outcome, nullptr);
+    propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
 USEARCH_EXPORT void usearch_dense_count(usearch_dense_count_t* arguments) {
-    propagate_pending(arguments->outcome);
-    *arguments->entries = std::visit(
-        [&](auto& variant) { return specialized_index {variant}.count(uuid_of(arguments->key)); },
+    if (submitted<usearch_dense_count>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    us::uuid_t const key = uuid_of(arguments->key);
+    *arguments->entries = 0;
+    std::visit(
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            usearch_executor_handle_t call_executor;
+            typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
+                                                                             call_executor, outcome);
+            if (!executor) return;
+            // The single key rides the batched lookup, which an NVMe view answers with one scan of
+            // its key columns.
+            propagate_error(specialized_index {variant}.count({&key, 1}, {arguments->entries, 1}, *executor), outcome);
+        },
         arguments->index->variants);
-    propagate_error(usearch_status_success_k, arguments->outcome, nullptr);
 }
 
 #pragma endregion Introspection
@@ -2042,13 +2919,13 @@ static bool rejects_columns(usearch_dense_index_handle_t& index, std::size_t cou
 }
 
 USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
+    if (submitted<usearch_dense_insert>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
     usearch_dense_traversal_stats_t* const stats = arguments->stats;
     usearch_keys_view_t const keys = arguments->keys;
     usearch_rows_view_t const vectors = arguments->vectors;
     usearch_progress_callback_t const progress = arguments->progress;
     std::size_t const count = arguments->count;
-    propagate_pending(outcome);
     if (stats) *stats = {};
     if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
     if (!keys.data || !vectors.data)
@@ -2057,78 +2934,72 @@ USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
         return propagate_error(usearch_status_unsupported_layout_k, outcome, "The key stride is shorter than a key"),
                void();
     if (rejects_columns(*arguments->index, count, vectors.columns, outcome)) return;
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) {
-            nk_dtype_t const source_dtype = nk_dtype_of(vectors.scalar);
-            if (source_dtype == nk_dtype_unknown_k)
-                return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown scalar kind"), void();
-            usearch_executor_handle_t call_executor;
-            typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
-                                                                             call_executor, outcome);
-            if (!executor) return;
-            using key_t = typename variant_type_::key_t;
-            typename variant_type_::insert_config_t insert_config {};
-            insert_config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
+    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+        nk_dtype_t const source_dtype = nk_dtype_of(vectors.scalar);
+        if (source_dtype == nk_dtype_unknown_k)
+            return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown scalar kind"), void();
+        usearch_executor_handle_t call_executor;
+        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
+                                                                         outcome);
+        if (!executor) return;
+        using key_t = typename variant_type_::key_t;
+        typename variant_type_::insert_config_t insert_config {};
+        insert_config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
 
-            // An insertion takes one packed run of keys, so any other stride gathers into one first.
-            std::span<key_t const> uuids {reinterpret_cast<key_t const*>(keys.data), count};
-            growing_buffer<key_t> gathered_keys {global_allocator};
-            if (keys.stride != sizeof(usearch_key_t)) {
-                if (failed(gathered_keys.resize(count)))
-                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to gather the keys"),
-                           void();
-                for (std::size_t row = 0; row != count; ++row)
-                    std::memcpy(&gathered_keys[row], reinterpret_cast<char const*>(keys.data) + row * keys.stride,
-                                sizeof(key_t));
-                uuids = {gathered_keys.data(), count};
-            }
+        // An insertion takes one packed run of keys, so any other stride gathers into one first.
+        std::span<key_t const> uuids {reinterpret_cast<key_t const*>(keys.data), count};
+        growing_buffer<key_t> gathered_keys {global_allocator};
+        if (keys.stride != sizeof(usearch_key_t)) {
+            if (failed(gathered_keys.resize(count)))
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to gather the keys"), void();
+            for (std::size_t row = 0; row != count; ++row)
+                std::memcpy(&gathered_keys[row], reinterpret_cast<char const*>(keys.data) + row * keys.stride,
+                            sizeof(key_t));
+            uuids = {gathered_keys.data(), count};
+        }
 
-            std::size_t const dimensions = specialized_index {variant}.dimensions();
-            if (vectors.stride && vectors.stride < packed_row_bytes(source_dtype, dimensions))
-                return propagate_error(usearch_status_unsupported_layout_k, outcome,
-                                       "The stride is shorter than one row"),
-                       void();
-            insertion_rows_t const rows {static_cast<char const*>(vectors.data), vectors.stride, source_dtype, progress,
-                                         arguments->progress_state};
-            expected<typename variant_type_::insert_result_t> const inserted = specialized_index {variant}.add(
-                uuids, rows, *executor, insert_config);
-            if (crossed(inserted, stats, outcome)) propagate_error(usearch_status_success_k, outcome, nullptr);
-        },
-        arguments->index->variants);
+        std::size_t const dimensions = specialized_index {variant}.dimensions();
+        if (vectors.stride && vectors.stride < packed_row_bytes(source_dtype, dimensions))
+            return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row"),
+                   void();
+        insertion_rows_t const rows {static_cast<char const*>(vectors.data), vectors.stride, source_dtype, progress,
+                                     arguments->progress_state};
+        expected<typename variant_type_::insert_result_t> const inserted = specialized_index {variant}.add(
+            uuids, rows, *executor, insert_config);
+        if (crossed(inserted, stats, outcome)) propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
 }
 
 USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
+    if (submitted<usearch_dense_refine>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
     usearch_dense_traversal_stats_t* const stats = arguments->stats;
-    propagate_pending(outcome);
     if (stats) *stats = {};
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) {
-            usearch_executor_handle_t call_executor;
-            typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
-                                                                             call_executor, outcome);
-            if (!executor) return;
-            typename variant_type_::refine_config_t config {};
-            config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
-            shard_ticks_t ticks {arguments->progress, arguments->progress_state, specialized_index {variant}.size()};
-            auto const [refined, refined_status] = specialized_index {variant}.refine(*executor, config, ticks);
-            accumulate_stats(stats, refined);
-            // A stopped pass is not a failure: it still healed, the graph stands, and the next call
-            // sweeps again toward the same fixed point.
-            if (failed(refined_status) && refined_status != status_t::cancelled_k)
-                return propagate_error(refined_status, outcome), void();
-            if (arguments->changed) *arguments->changed = refined.changed_nodes;
-            propagate_error(usearch_status_success_k, outcome, nullptr);
-        },
-        arguments->index->variants);
+    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+        usearch_executor_handle_t call_executor;
+        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
+                                                                         outcome);
+        if (!executor) return;
+        typename variant_type_::refine_config_t config {};
+        config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
+        shard_ticks_t ticks {arguments->progress, arguments->progress_state, specialized_index {variant}.size()};
+        auto const [refined, refined_status] = specialized_index {variant}.refine(*executor, config, ticks);
+        accumulate_stats(stats, refined);
+        // A stopped pass is not a failure: it still healed, the graph stands, and the next call
+        // sweeps again toward the same fixed point.
+        if (failed(refined_status) && refined_status != status_t::cancelled_k)
+            return propagate_error(refined_status, outcome), void();
+        if (arguments->changed) *arguments->changed = refined.changed_nodes;
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
 }
 
 USEARCH_EXPORT void usearch_dense_health(usearch_dense_health_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    propagate_pending(outcome);
+    if (submitted<usearch_dense_health>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
     *arguments->reachability = {};
     std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) {
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
             usearch_executor_handle_t call_executor;
             typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
                                                                              call_executor, outcome);
@@ -2142,75 +3013,89 @@ USEARCH_EXPORT void usearch_dense_health(usearch_dense_health_t* arguments) {
 }
 
 USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    usearch_matches_span_t const& matches = arguments->matches;
-    propagate_pending(outcome);
-    if (rejects_columns(*arguments->index, arguments->count, arguments->queries.columns, outcome)) return;
+    if (submitted<usearch_dense_search>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    std::size_t const count = arguments->count, wanted = arguments->wanted;
+    if (arguments->stats) *arguments->stats = {};
+    *arguments->matches = {};
+    if (rejects_columns(*arguments->index, count, arguments->queries.columns, outcome)) return;
     key_predicate_t keyed {arguments->predicate, arguments->predicate_state};
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            auto search_with = [&](auto&& predicate) noexcept {
-                match_dense_rows<typename variant_type_::distance_t>(
-                    variant, arguments->executor, arguments->count, arguments->queries, 1, matches, nk_f32_k,
-                    arguments->expansion_factor, arguments->progress, arguments->progress_state, arguments->stats,
-                    outcome,
-                    [&](auto view, auto rows, auto& executor, auto config, auto keys, auto distances, auto counts) {
-                        return view.search(rows, executor, config, matches.wanted, keys, distances, counts, predicate);
-                    });
-            };
-            if (!keyed.callback) search_with(dummy_predicate_t {});
-            else if constexpr (!is_ram_index<variant_type_>)
-                propagate_error(usearch_status_device_k, outcome, "A host predicate cannot narrow a device walk");
-            else search_with(keyed);
+            if constexpr (is_vram_index<variant_type_>)
+                propagate_error(usearch_status_device_k, outcome,
+                                keyed.callback ? "A host predicate cannot narrow a device walk"
+                                               : "A VRAM search waits on device merges into a device arena");
+            else {
+                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k,
+                                                                  {arguments->queries.data}, outcome);
+                if (!arena) return;
+                if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+                matches_landing_t landing;
+                if (!carve_matches(*arena, count, wanted, landing, outcome)) return;
+                auto search_with = [&](auto&& predicate) noexcept {
+                    return match_dense_rows<typename variant_type_::distance_t>(
+                        variant, arguments->executor, count, arguments->queries, 1, landing, nk_f32_k,
+                        arguments->expansion_factor, arguments->progress, arguments->progress_state, arguments->stats,
+                        outcome,
+                        [&](auto view, auto rows, auto& executor, auto config, auto keys, auto distances, auto counts) {
+                            return view.search(rows, executor, config, wanted, keys, distances, counts, predicate);
+                        });
+                };
+                if (!(keyed.callback ? search_with(keyed) : search_with(dummy_predicate_t {}))) return;
+                *arguments->matches = landing.view();
+                propagate_error(usearch_status_success_k, outcome, nullptr);
+            }
         },
         arguments->index->variants);
 }
 
 USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    usearch_key_t const key = arguments->key;
-    propagate_pending(outcome);
-    *arguments->vectors = nullptr;
+    if (submitted<usearch_dense_get>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    us::uuid_t const key = uuid_of(arguments->key);
+    usearch_scalar_t const scalar = arguments->outputs_scalar;
+    *arguments->vectors = {};
     if (arguments->written) *arguments->written = 0;
-    if (arguments->stride) *arguments->stride = 0;
-    if (arguments->columns) *arguments->columns = 0;
     std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) {
-            if constexpr (!is_ram_index<variant_type_>)
-                propagate_error(
-                    arguments->arena && *arguments->arena ? usearch_status_device_k : usearch_status_unsupported_k,
-                    outcome, "Arenas live in host memory until device arenas land");
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            if constexpr (is_vram_index<variant_type_>)
+                propagate_error(usearch_status_unsupported_k, outcome,
+                                "VRAM rows wait on device arenas, so a search reads them back");
             else {
                 using scalar_t = typename variant_type_::scalar_t;
-                // The rows are copied on the caller's thread, so the executor is only checked, never built.
-                if (arguments->executor && !std::holds_alternative<forkunion_executor_t>(arguments->executor->executor))
-                    return propagate_error(usearch_status_device_k, outcome,
-                                           "The executor's kind must match the handle's residency"),
-                           void();
-                nk_dtype_t const target_dtype = nk_dtype_of(arguments->scalar);
+                nk_dtype_t const target_dtype = nk_dtype_of(scalar);
                 if (target_dtype == nk_dtype_unknown_k)
                     return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown scalar kind"), void();
-                std::size_t const entries = specialized_index {variant}.count(uuid_of(key));
-                if (!entries) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, nullptr, outcome);
+                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k,
+                                                                  {}, outcome);
                 if (!arena) return;
-                std::size_t const dimensions = specialized_index {variant}.dimensions();
+                usearch_executor_handle_t call_executor;
+                typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
+                                                                                 call_executor, outcome);
+                if (!executor) return;
+                // The single key rides the batched lookups, which size the landing first and fill
+                // it second.
+                specialized_index view {variant};
+                std::size_t entries = 0;
+                if (status_t const counted = view.count({&key, 1}, {&entries, 1}, *executor); failed(counted))
+                    return propagate_error(counted, outcome), void();
+                if (!entries) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+                std::size_t const dimensions = view.dimensions();
                 std::size_t const row_bytes = packed_row_bytes(target_dtype, dimensions);
-                std::byte* const rows = arena->memory.allocate(entries * row_bytes, default_alignment_k);
-                expected<std::size_t> const exported =
-                    rows ? export_rows<scalar_t>(
-                               usearch_rows_span_t {rows, row_bytes, dimensions, entries, arguments->scalar},
-                               dimensions, variant_type_::vector_dtype_k,
-                               [&](nk::matrix_span<scalar_t> span) {
-                                   return specialized_index {variant}.get(uuid_of(key), span, entries);
-                               })
-                         : expected<std::size_t> {0, status_t::bad_alloc_k};
-                arena->busy.unlock();
+                std::byte* const rows = carve<std::byte>(*arena, entries * row_bytes);
+                if (!rows)
+                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+                expected<std::size_t> const exported = export_rows<scalar_t>(
+                    rows, entries, target_dtype, dimensions, variant_type_::vector_dtype_k,
+                    [&](nk::matrix_span<scalar_t> span) noexcept {
+                        std::size_t total = 0;
+                        status_t const got = view.get({&key, 1}, span, entries, {&total, 1}, *executor);
+                        return expected<std::size_t> {min_of(total, entries), got};
+                    });
                 if (!exported) return propagate_error(exported.status, outcome, "Failed to export the rows"), void();
-                *arguments->vectors = rows;
-                if (arguments->written) *arguments->written = min_of(exported.value, entries);
-                if (arguments->stride) *arguments->stride = row_bytes;
-                if (arguments->columns) *arguments->columns = dimensions;
+                *arguments->vectors = {rows, row_bytes, dimensions, scalar};
+                if (arguments->written) *arguments->written = exported.value;
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },
@@ -2218,31 +3103,34 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
 }
 
 USEARCH_EXPORT void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* arguments) {
-    propagate_pending(arguments->outcome);
+    call_outcome_t outcome(arguments->outcome);
     *arguments->stream = nullptr;
-    propagate_error(usearch_status_unsupported_k, arguments->outcome, "No residency streams matches yet");
+    propagate_error(usearch_status_unsupported_k, outcome, "No residency streams matches yet");
 }
 
 USEARCH_EXPORT void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* arguments) {
-    propagate_pending(arguments->outcome);
-    propagate_error(usearch_status_unsupported_k, arguments->outcome, "No residency streams matches yet");
+    if (submitted<usearch_dense_search_stream_next>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    *arguments->matches = {};
+    propagate_error(usearch_status_unsupported_k, outcome, "No residency streams matches yet");
 }
 
-USEARCH_EXPORT void usearch_dense_search_stream_free(usearch_dense_search_stream_t) {}
+USEARCH_EXPORT void usearch_dense_search_stream_free(usearch_dense_search_stream_t stream) {
+    finish_calls_using(stream);
+}
 
 #pragma endregion Insertion and Search
 
 #pragma region Cursors and Merging
 
 USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    propagate_pending(outcome);
+    call_outcome_t outcome(arguments->outcome);
     *arguments->cursor = nullptr;
     std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) {
-            if constexpr (!is_ram_index<variant_type_>)
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            if constexpr (is_vram_index<variant_type_>)
                 propagate_error(usearch_status_unsupported_k, outcome,
-                                "A cursor walks host rows; device rows are read through a search");
+                                "A cursor walks host rows; VRAM rows are read back by key or search");
             else {
                 usearch_dense_cursor_t const opened = new (std::nothrow)
                     usearch_dense_cursor_handle_t {decltype(usearch_dense_cursor_handle_t::walk) {
@@ -2260,57 +3148,71 @@ USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* argum
 }
 
 USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    usearch_keys_span_t const keys = arguments->keys;
-    usearch_rows_span_t const& vectors = arguments->vectors;
-    propagate_pending(outcome);
+    if (submitted<usearch_dense_cursor_next>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    usearch_rows_view_t* const vectors = arguments->vectors;
+    std::size_t const wanted = arguments->wanted;
     *arguments->written = 0;
+    *arguments->keys = {};
+    if (vectors) *vectors = {};
     if (!arguments->cursor)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The cursor must not be null"), void();
     if (arguments->index != arguments->cursor->opened_on)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The cursor was opened on another index"),
                void();
-    if (!keys.data)
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "The keys must name storage"), void();
-    if (keys.stride < sizeof(usearch_key_t))
-        return propagate_error(usearch_status_unsupported_layout_k, outcome, "The key stride is shorter than a key"),
-               void();
-    if (vectors.data && vectors.capacity < keys.capacity)
-        return propagate_error(usearch_status_shape_mismatch_k, outcome,
-                               "The vector output holds fewer rows than the key run"),
-               void();
+    nk_dtype_t const target_dtype = vectors ? nk_dtype_of(arguments->outputs_scalar) : nk_dtype_unknown_k;
+    if (vectors && target_dtype == nk_dtype_unknown_k)
+        return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown scalar kind"), void();
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k, {}, outcome);
+    if (!arena) return;
     std::atomic_flag& busy = arguments->cursor->busy;
     if (busy.test_and_set(std::memory_order_acquire))
         return propagate_error(usearch_status_contended_k, outcome, "Another pull is still running on the cursor"),
                void();
     std::visit(
-        [&]<typename cursor_type_>(cursor_type_& walk) {
+        [&]<typename cursor_type_>(cursor_type_& walk) noexcept {
             if constexpr (std::is_same_v<cursor_type_, std::monostate>)
                 propagate_error(usearch_status_unsupported_k, outcome,
-                                "A cursor walks host rows; device rows are read through a search");
+                                "A cursor walks host rows; VRAM rows are read back by key or search");
             else {
                 using scalar_t = typename cursor_type_::scalar_t;
                 using key_t = typename cursor_type_::key_t;
-                // A cursor reads into one packed run of keys, so any other stride scatters from one.
-                bool const packed = keys.stride == sizeof(usearch_key_t);
-                growing_buffer<key_t> staged_keys {global_allocator};
-                if (!packed && failed(staged_keys.resize(keys.capacity)))
-                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to stage the keys"), void();
-                std::span<key_t> const identities {packed ? reinterpret_cast<key_t*>(keys.data) : staged_keys.data(),
-                                                   keys.capacity};
+                using indexes_t = typename cursor_type_::indexes_t;
+                static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk reads them");
+                if (!wanted) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
                 // A handle never changes its arm, so it is still the one the cursor was opened on.
-                auto const& indexes = std::get<typename cursor_type_::indexes_t>(arguments->index->variants);
-                expected<std::size_t> const read =
-                    vectors.data
-                        ? export_rows<scalar_t>(
-                              vectors, indexes.dimensions(), cursor_type_::indexes_t::vector_dtype_k,
-                              [&](nk::matrix_span<scalar_t> rows) { return walk.read(indexes, identities, rows); })
-                        : expected<std::size_t> {walk.read(indexes, identities, {}), status_t::success_k};
+                auto& indexes = std::get<indexes_t>(arguments->index->variants);
+                // An NVMe cursor reads its rows through an executor, a RAM one copies them.
+                usearch_executor_handle_t call_executor;
+                [[maybe_unused]] typename indexes_t::executor_t* executor = nullptr;
+                if constexpr (is_nvme_index<indexes_t>) {
+                    executor = executor_of(indexes, arguments->executor, call_executor, outcome);
+                    if (!executor) return;
+                }
+                std::size_t const dimensions = indexes.dimensions();
+                std::size_t const row_bytes = vectors ? packed_row_bytes(target_dtype, dimensions) : 0;
+                usearch_key_t* const keys = carve<usearch_key_t>(*arena, wanted);
+                std::byte* const rows = vectors && keys ? carve<std::byte>(*arena, wanted * row_bytes) : nullptr;
+                if (!keys || (vectors && !rows))
+                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+                std::span<key_t> const identities {reinterpret_cast<key_t*>(keys), wanted};
+                auto read_into = [&](nk::matrix_span<scalar_t> span) noexcept -> expected<std::size_t> {
+                    if constexpr (is_nvme_index<indexes_t>) {
+                        auto const [scanned, status] = walk.read(indexes, identities, span, *executor);
+                        return {scanned.count, status};
+                    }
+                    else return {walk.read(indexes, identities, span), status_t::success_k};
+                };
+                expected<std::size_t> const read = vectors
+                                                       ? export_rows<scalar_t>(rows, wanted, target_dtype, dimensions,
+                                                                               indexes_t::vector_dtype_k, read_into)
+                                                       : read_into({});
                 if (!read) return propagate_error(read.status, outcome, "Failed to export the rows"), void();
-                for (std::size_t row = 0; !packed && row != read.value; ++row)
-                    std::memcpy(reinterpret_cast<char*>(keys.data) + row * keys.stride, &identities[row],
-                                sizeof(key_t));
-                *arguments->written = read.value;
+                if (read.value) {
+                    *arguments->keys = {keys, sizeof(usearch_key_t)};
+                    if (vectors) *vectors = {rows, row_bytes, dimensions, arguments->outputs_scalar};
+                    *arguments->written = read.value;
+                }
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },
@@ -2318,11 +3220,15 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
     busy.clear(std::memory_order_release);
 }
 
-USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor) { delete cursor; }
+USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor) {
+    finish_calls_using(cursor);
+    delete cursor;
+}
 
 USEARCH_EXPORT void usearch_dense_merge(usearch_dense_merge_t* arguments) {
-    propagate_pending(arguments->outcome);
-    propagate_error(usearch_status_unsupported_k, arguments->outcome, "No residency absorbs donor handles yet");
+    if (submitted<usearch_dense_merge>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
+    propagate_error(usearch_status_unsupported_k, outcome, "No residency absorbs donor handles yet");
 }
 
 #pragma endregion Cursors and Merging
@@ -2330,25 +3236,26 @@ USEARCH_EXPORT void usearch_dense_merge(usearch_dense_merge_t* arguments) {
 #pragma region Linear Algebra
 
 USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
+    if (submitted<usearch_dense_multiply>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
     std::size_t const count = arguments->count;
-    propagate_pending(outcome);
-    *arguments->keys = nullptr, *arguments->scores = nullptr;
+    *arguments->products = {};
     if (arguments->written) *arguments->written = 0;
     if (arguments->required) *arguments->required = 0;
-    if (!arguments->offsets)
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "The offsets must name storage"), void();
+    if (arguments->stats) *arguments->stats = {};
     if (rejects_columns(*arguments->index, count, arguments->left.columns, outcome)) return;
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
             if constexpr (variant_type_::kernel_kind_k != nk_kernel_dot_k)
                 propagate_error(usearch_status_config_mismatch_k, outcome,
                                 "A product is a dot, so the kind must be inner product");
-            else if constexpr (!is_ram_index<variant_type_>)
-                propagate_error(
-                    arguments->arena && *arguments->arena ? usearch_status_device_k : usearch_status_unsupported_k,
-                    outcome, "Arenas live in host memory until device arenas land");
+            else if constexpr (is_vram_index<variant_type_>)
+                propagate_error(usearch_status_unsupported_k, outcome, "VRAM products wait on device arenas");
             else {
+                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k,
+                                                                  {arguments->left.data}, outcome);
+                if (!arena) return;
+                if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
                 using key_t = typename variant_type_::key_t;
                 using dot_result_t = typename variant_type_::dot_result_t;
                 growing_buffer<std::size_t> scored {global_allocator};
@@ -2385,23 +3292,19 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                 }
                 if (!walk(width, arguments->progress)) return;
 
-                std::size_t* const offsets = arguments->offsets;
+                std::size_t* const offsets = carve<std::size_t>(*arena, count + 1);
+                if (!offsets)
+                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
                 std::size_t required = 0;
                 offsets[0] = 0;
                 for (std::size_t row = 0; row != count; ++row)
                     offsets[row + 1] = offsets[row] + min_of(scored[row], width), required += scored[row];
                 std::size_t const written = offsets[count];
-                if (arguments->written) *arguments->written = written;
-                if (arguments->required) *arguments->required = required;
-                if (!written) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-
-                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->left.data, outcome);
-                if (!arena) return;
-                auto* const keys = reinterpret_cast<usearch_key_t*>(
-                    arena->memory.allocate(written * sizeof(usearch_key_t), alignof(usearch_key_t)));
-                auto* const scores = reinterpret_cast<usearch_distance_t*>(
-                    arena->memory.allocate(written * sizeof(usearch_distance_t), alignof(usearch_distance_t)));
-                for (std::size_t row = 0; keys && scores && row != count; ++row) {
+                usearch_key_t* const keys = written ? carve<usearch_key_t>(*arena, written) : nullptr;
+                usearch_distance_t* const scores = written ? carve<usearch_distance_t>(*arena, written) : nullptr;
+                if (written && (!keys || !scores))
+                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+                for (std::size_t row = 0; row != count; ++row) {
                     std::size_t const kept = offsets[row + 1] - offsets[row];
                     if (!kept) continue;
                     std::memcpy(keys + offsets[row], staged_keys.data() + row * width, kept * sizeof(key_t));
@@ -2410,10 +3313,9 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                         kept, nullptr);
                     assert(cast == nk_success_k && "The serial tier casts every dtype pair");
                 }
-                arena->busy.unlock();
-                if (!keys || !scores)
-                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-                *arguments->keys = keys, *arguments->scores = scores;
+                *arguments->products = {keys, scores, offsets};
+                if (arguments->written) *arguments->written = written;
+                if (arguments->required) *arguments->required = required;
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },
@@ -2423,27 +3325,24 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
 static_assert(sizeof(us::dense_softmax_state_t) == sizeof(usearch_dense_softmax_state_t));
 
 USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    usearch_rows_span_t const& outputs = arguments->outputs;
+    if (submitted<usearch_dense_attend>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
     usearch_dense_softmax_state_t* const carry = arguments->carry;
     std::size_t const count = arguments->count, head_count = max_of<std::size_t>(arguments->head_count, 1);
-    propagate_pending(outcome);
-    if (!arguments->queries.data || !outputs.data)
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "The queries and outputs must name storage"),
-               void();
-    nk_dtype_t const outputs_dtype = nk_dtype_of(outputs.scalar);
+    usearch_scalar_t const outputs_scalar = arguments->outputs_scalar ? arguments->outputs_scalar
+                                                                      : arguments->queries.scalar;
+    if (arguments->stats) *arguments->stats = {};
+    *arguments->outputs = {};
+    if (!arguments->queries.data)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The queries must name storage"), void();
+    nk_dtype_t const outputs_dtype = nk_dtype_of(outputs_scalar);
     if (outputs_dtype == nk_dtype_unknown_k)
         return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown scalar kind"), void();
     std::size_t const columns = arguments->queries.columns;
-    if (count % head_count || outputs.capacity < count || outputs.columns != columns)
-        return propagate_error(usearch_status_shape_mismatch_k, outcome,
-                               "The heads must divide the rows, and the outputs hold every row as wide as the keys"),
-               void();
+    if (count % head_count)
+        return propagate_error(usearch_status_shape_mismatch_k, outcome, "The heads must divide the rows"), void();
     if (rejects_columns(*arguments->index, count, columns, outcome)) return;
-    if (outputs.stride < packed_row_bytes(outputs_dtype, columns))
-        return propagate_error(usearch_status_unsupported_layout_k, outcome, "A stride is shorter than one row"),
-               void();
-    char* const outputs_base = static_cast<char*>(outputs.data);
+    std::size_t const row_bytes = packed_row_bytes(outputs_dtype, columns);
     f32_t const requested_scale = arguments->score_scale;
 
     std::visit(
@@ -2454,6 +3353,15 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
             else if (!arguments->value_lookup)
                 propagate_error(usearch_status_invalid_argument_k, outcome, "The value lookup must be set");
             else {
+                int device = host_device_k;
+                if constexpr (is_vram_index<variant_type_>) device = specialized_index {variant}.device(0);
+                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, device,
+                                                                  {arguments->queries.data, carry}, outcome);
+                if (!arena) return;
+                if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+                std::byte* const landing = carve<std::byte>(*arena, count * row_bytes);
+                if (!landing)
+                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
                 typename specialized_index<variant_type_>::attend_lookup_t const value_lookup {
                     arguments->value_lookup, arguments->value_lookup_state,
                     usearch_scalar_of(variant_type_::vector_dtype_k), columns};
@@ -2461,63 +3369,85 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                 auto make_sink = [&](std::size_t chunk, status_t& staged) noexcept {
                     growing_buffer<f32_t> staged_outputs {global_allocator};
                     growing_buffer<us::dense_softmax_state_t> staged_carry {global_allocator};
-                    if (failed(staged_outputs.resize(chunk * columns)) || failed(staged_carry.resize(chunk)))
+                    growing_buffer<std::byte> narrowed {global_allocator};
+                    if (failed(staged_outputs.resize(chunk * columns)) || failed(staged_carry.resize(chunk)) ||
+                        failed(narrowed.resize(row_bytes)))
                         staged = status_t::bad_alloc_k;
-                    return [&, staged_outputs = std::move(staged_outputs), staged_carry = std::move(staged_carry)](
-                               specialized_index<variant_type_> view, typename variant_type_::vectors_view_t chunk_rows,
-                               typename variant_type_::executor_t& executor,
-                               typename variant_type_::search_config_t config, std::size_t resolved,
-                               std::size_t taking) mutable noexcept {
+                    return [&, staged_outputs = std::move(staged_outputs), staged_carry = std::move(staged_carry),
+                            narrowed = std::move(narrowed)](specialized_index<variant_type_> view,
+                                                            typename variant_type_::vectors_view_t chunk_rows,
+                                                            typename variant_type_::executor_t& executor,
+                                                            typename variant_type_::search_config_t config,
+                                                            std::size_t resolved, std::size_t taking) mutable noexcept {
                         f32_t const score_scale = requested_scale > 0
                                                       ? requested_scale
                                                       : 1 / std::sqrt(static_cast<f32_t>(view.dimensions()));
-                        expected<typename variant_type_::search_result_t> const found = view.attend(
+                        expected<typename variant_type_::search_result_t> found = view.attend(
                             chunk_rows, head_count, value_lookup, score_scale,
                             {staged_outputs.data(), taking * columns}, {staged_carry.data(), taking}, executor, config);
                         if (!found) return found;
                         for (std::size_t row = 0; row != taking; ++row) {
+                            std::byte* const target = landing + (resolved + row) * row_bytes;
                             [[maybe_unused]] nk_status_t const cast =
                                 dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
                                     staged_outputs.data() + row * columns, nk_f32_k,
-                                    outputs_base + (resolved + row) * outputs.stride, outputs_dtype, columns, nullptr);
+                                    device == host_device_k ? target : narrowed.data(), outputs_dtype, columns,
+                                    nullptr);
                             assert(cast == nk_success_k && "The serial tier casts every dtype pair");
+                            if (device != host_device_k && !land_row(target, narrowed.data(), row_bytes, device))
+                                return found.status = status_t::device_error_k, found;
                             if (carry)
                                 carry[resolved + row] = std::bit_cast<usearch_dense_softmax_state_t>(staged_carry[row]);
                         }
                         return found;
                     };
                 };
-                if (for_each_dense_chunk(variant, arguments->executor, count, arguments->queries, head_count,
-                                         arguments->expansion_factor, arguments->progress, arguments->progress_state,
-                                         arguments->stats, outcome, make_sink))
-                    propagate_error(usearch_status_success_k, outcome, nullptr);
+                if (!for_each_dense_chunk(variant, arguments->executor, count, arguments->queries, head_count,
+                                          arguments->expansion_factor, arguments->progress, arguments->progress_state,
+                                          arguments->stats, outcome, make_sink))
+                    return;
+                *arguments->outputs = {landing, row_bytes, columns, outputs_scalar};
+                propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },
         arguments->index->variants);
 }
 
 USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    std::size_t const rows_per_query = arguments->rows_per_query;
-    usearch_matches_span_t const& matches = arguments->matches;
-    propagate_pending(outcome);
+    if (submitted<usearch_dense_maxsim>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    std::size_t const count = arguments->count, rows_per_query = arguments->rows_per_query;
+    std::size_t const wanted = arguments->wanted;
+    if (arguments->stats) *arguments->stats = {};
+    *arguments->matches = {};
     if (!rows_per_query)
         return propagate_error(usearch_status_shape_mismatch_k, outcome, "Every query needs at least one row"), void();
-    if (rejects_columns(*arguments->index, arguments->count, arguments->queries.columns, outcome)) return;
+    if (rejects_columns(*arguments->index, count, arguments->queries.columns, outcome)) return;
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
             if constexpr (variant_type_::kernel_kind_k != nk_kernel_dot_k)
                 propagate_error(usearch_status_config_mismatch_k, outcome,
                                 "A maximum over logits needs the inner-product kind");
-            else
-                match_dense_rows<f64_t>(
-                    variant, arguments->executor, arguments->count, arguments->queries, rows_per_query, matches,
-                    nk_f64_k, arguments->expansion_factor, arguments->progress, arguments->progress_state,
-                    arguments->stats, outcome,
-                    [&](auto view, auto rows, auto& executor, auto config, auto keys, auto scores, auto counts) {
-                        return view.maxsim(rows, rows_per_query, executor, config, matches.wanted, keys, scores,
-                                           counts);
-                    });
+            else if constexpr (is_vram_index<variant_type_>)
+                propagate_error(usearch_status_unsupported_k, outcome, "VRAM late interaction waits on device arenas");
+            else {
+                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k,
+                                                                  {arguments->queries.data}, outcome);
+                if (!arena) return;
+                if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+                matches_landing_t landing;
+                if (!carve_matches(*arena, count, wanted, landing, outcome)) return;
+                if (!match_dense_rows<f64_t>(
+                        variant, arguments->executor, count, arguments->queries, rows_per_query, landing, nk_f64_k,
+                        arguments->expansion_factor, arguments->progress, arguments->progress_state, arguments->stats,
+                        outcome,
+                        [&](auto view, auto rows, auto& executor, auto config, auto keys, auto scores, auto counts) {
+                            return view.maxsim(rows, rows_per_query, executor, config, wanted, keys, scores, counts);
+                        }))
+                    return;
+                *arguments->matches = landing.view();
+                propagate_error(usearch_status_success_k, outcome, nullptr);
+            }
         },
         arguments->index->variants);
 }
@@ -2527,74 +3457,84 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
 #pragma region Serialization
 
 USEARCH_EXPORT void usearch_dense_load_ram(usearch_dense_load_ram_t* arguments) {
+    if (submitted<usearch_dense_load_ram>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
     load_dense_index(as_text(arguments->path), arguments->ram, arguments->executor, arguments->progress,
-                     arguments->progress_state, arguments->index, arguments->outcome);
+                     arguments->progress_state, arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments) {
+    if (submitted<usearch_dense_load_vram>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
     load_dense_index(as_text(arguments->path), arguments->vram, arguments->executor, arguments->progress,
-                     arguments->progress_state, arguments->index, arguments->outcome);
+                     arguments->progress_state, arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments) {
+    if (submitted<usearch_dense_load_ram_buffer>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
     load_dense_index(as_bytes(arguments->buffer), arguments->ram, arguments->executor, arguments->progress,
-                     arguments->progress_state, arguments->index, arguments->outcome);
+                     arguments->progress_state, arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments) {
+    if (submitted<usearch_dense_load_vram_buffer>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
     load_dense_index(as_bytes(arguments->buffer), arguments->vram, arguments->executor, arguments->progress,
-                     arguments->progress_state, arguments->index, arguments->outcome);
+                     arguments->progress_state, arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    propagate_pending(outcome);
+    if (submitted<usearch_dense_save>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
     if (!arguments->path.data || !arguments->path.length)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The path must not be empty"), void();
     std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) {
-            usearch_executor_handle_t call_executor;
-            typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
-                                                                             call_executor, outcome);
-            if (!executor) return;
-            shard_ticks_t ticks {arguments->progress, arguments->progress_state,
-                                 specialized_index {variant}.shards_count()};
-            propagate_error(specialized_index {variant}.save(as_text(arguments->path), *executor, ticks), outcome);
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            if constexpr (is_nvme_index<variant_type_>)
+                propagate_error(usearch_status_unsupported_k, outcome, "An NVMe view already is its checkpoint");
+            else {
+                usearch_executor_handle_t call_executor;
+                typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
+                                                                                 call_executor, outcome);
+                if (!executor) return;
+                shard_ticks_t ticks {arguments->progress, arguments->progress_state,
+                                     specialized_index {variant}.shards_count()};
+                propagate_error(specialized_index {variant}.save(as_text(arguments->path), *executor, ticks), outcome);
+            }
         },
         arguments->index->variants);
 }
 
 USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    propagate_pending(outcome);
-    *arguments->bytes = nullptr;
-    *arguments->length = 0;
+    if (submitted<usearch_dense_save_buffer>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    *arguments->monolith = {};
     std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) {
-            if constexpr (!is_ram_index<variant_type_>)
-                propagate_error(
-                    arguments->arena && *arguments->arena ? usearch_status_device_k : usearch_status_unsupported_k,
-                    outcome, "Arenas live in host memory until device arenas land");
+        [&]<typename variant_type_>(variant_type_& variant) noexcept {
+            if constexpr (is_nvme_index<variant_type_>)
+                propagate_error(usearch_status_unsupported_k, outcome, "An NVMe view already is its checkpoint");
+            else if constexpr (is_vram_index<variant_type_>)
+                propagate_error(usearch_status_unsupported_k, outcome, "VRAM monoliths wait on device arenas");
             else {
+                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k,
+                                                                  {}, outcome);
+                if (!arena) return;
                 usearch_executor_handle_t call_executor;
                 typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
                                                                                  call_executor, outcome);
                 if (!executor) return;
                 auto const [length, status] = specialized_index {variant}.storage_requirements();
                 if (failed(status)) return propagate_error(status, outcome), void();
-                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, nullptr, outcome);
-                if (!arena) return;
-                std::byte* const monolith = arena->memory.allocate(length, default_alignment_k);
+                std::byte* const monolith = carve<std::byte>(*arena, length);
+                if (!monolith)
+                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
                 shard_ticks_t ticks {arguments->progress, arguments->progress_state,
                                      specialized_index {variant}.shards_count()};
-                status_t const saved = monolith ? specialized_index {variant}.save(
-                                                      bytes_span_t {reinterpret_cast<byte_t*>(monolith), length},
-                                                      *executor, ticks)
-                                                : status_t::bad_alloc_k;
-                arena->busy.unlock();
+                status_t const saved = specialized_index {variant}.save(
+                    bytes_span_t {reinterpret_cast<byte_t*>(monolith), length}, *executor, ticks);
                 if (failed(saved)) return propagate_error(saved, outcome), void();
-                *arguments->bytes = reinterpret_cast<uint8_t*>(monolith);
-                *arguments->length = length;
+                *arguments->monolith = {reinterpret_cast<uint8_t const*>(monolith), length};
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },
@@ -2602,8 +3542,8 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
 }
 
 USEARCH_EXPORT void usearch_dense_metadata_read(usearch_dense_metadata_read_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    propagate_pending(outcome);
+    if (submitted<usearch_dense_metadata_read>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
     if (!arguments->path.data || !arguments->path.length)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The path must not be empty"), void();
     auto const [source, status] = safegraphs_read_metadata(as_text(arguments->path));
@@ -2613,8 +3553,8 @@ USEARCH_EXPORT void usearch_dense_metadata_read(usearch_dense_metadata_read_t* a
 }
 
 USEARCH_EXPORT void usearch_dense_metadata_read_buffer(usearch_dense_metadata_read_buffer_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    propagate_pending(outcome);
+    if (submitted<usearch_dense_metadata_read_buffer>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome);
     if (!arguments->buffer.data || !arguments->buffer.length)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The buffer must not be empty"), void();
     auto const [source, status] = safegraphs_read_metadata(as_bytes(arguments->buffer));
@@ -2628,6 +3568,7 @@ USEARCH_EXPORT void usearch_dense_metadata_read_buffer(usearch_dense_metadata_re
 #pragma region Executors
 
 USEARCH_EXPORT usearch_status_t usearch_outcome_wait(usearch_outcome_t const* outcome) {
+    finish_calls_using(outcome);
     // The status word is written by the library and only read here, so the cast never races a store.
     std::atomic_ref<usearch_status_t> status {const_cast<usearch_status_t&>(outcome->status)};
     usearch_status_t seen = status.load(std::memory_order_acquire);
@@ -2636,30 +3577,48 @@ USEARCH_EXPORT usearch_status_t usearch_outcome_wait(usearch_outcome_t const* ou
     return seen;
 }
 
-USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena) { delete arena; }
+USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments) {
+    call_outcome_t outcome(arguments->outcome);
+    *arguments->arena = nullptr;
+    usearch_arena_t const arena = new (std::nothrow) usearch_arena_handle_t {};
+    if (!arena) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the arena"), void();
+#if USEARCH_BUILD_CUDA
+    // A VRAM executor lands its outputs on its first device; every other executor computes on the
+    // host.
+    if (arguments->executor)
+        if (cuda_executor_t const* const devices = std::get_if<cuda_executor_t>(&arguments->executor->executor)) {
+            arena->device = devices->device(0);
+            arena->device_memory = growing_arena<cuda_device_allocator_t> {
+                cuda_device_allocator_t {nullptr, arena->device}};
+        }
+#endif
+    *arguments->arena = arena;
+    propagate_error(usearch_status_success_k, outcome, nullptr);
+}
+
+USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena) {
+    finish_calls_using(arena);
+    delete arena;
+}
 
 USEARCH_EXPORT void usearch_executor_for_ram(usearch_executor_for_ram_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    propagate_pending(outcome);
+    call_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
     usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
     if (!spawn_ram_executor(*executor, arguments->threads, outcome)) return delete executor, void();
-    *arguments->executor = executor;
-    propagate_error(usearch_status_success_k, outcome, nullptr);
+    hand_out_executor(executor, arguments->deferred_limit, arguments->executor, outcome);
 }
 
 USEARCH_EXPORT void usearch_executor_on_pool(usearch_executor_on_pool_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    propagate_pending(outcome);
+    call_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
     propagate_error(usearch_status_unsupported_k, outcome, "Borrowed pools are not wired yet");
 }
 
 USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    propagate_pending(outcome);
+    call_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
 #if USEARCH_BUILD_CUDA
     static_assert(sizeof(int) == sizeof(int32_t));
@@ -2677,33 +3636,88 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
     executor->executor = std::move(spawned);
-    *arguments->executor = executor;
-    propagate_error(usearch_status_success_k, outcome, nullptr);
+    hand_out_executor(executor, arguments->deferred_limit, arguments->executor, outcome);
 #else
     propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA executor");
 #endif
 }
 
 USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments) {
-    propagate_pending(arguments->outcome);
+    call_outcome_t outcome(arguments->outcome);
+    usearch_nvme_options_t const& nvme = arguments->nvme;
     *arguments->executor = nullptr;
-    propagate_error(usearch_status_unsupported_k, arguments->outcome, "This build carries no NVMe residency");
+    if (nvme.paths_count && !nvme.paths)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The paths must name storage"), void();
+
+    // A transport identifier names a namespace the kernel no longer owns, which only a userspace
+    // engine reaches, so one executor serves either kernel paths or transport identifiers, never
+    // both.
+    std::size_t transport_ids = 0, pcie_ids = 0;
+    for (std::size_t path = 0; path != nvme.paths_count; ++path) {
+        std::string_view const named = as_text(nvme.paths[path]);
+        transport_ids += named.find("trtype:") != std::string_view::npos;
+        pcie_ids += named.find("trtype:PCIe") != std::string_view::npos;
+    }
+    if (transport_ids && transport_ids != nvme.paths_count)
+        return propagate_error(usearch_status_config_mismatch_k, outcome,
+                               "Kernel paths and transport identifiers need different engines"),
+               void();
+    io_engine_config_t config;
+    config.queue_depth = nvme_queue_depth_k;
+    if (transport_ids) {
+#if USEARCH_WITH_LINUX_SPDK
+        // Fabrics copy every byte through a socket, so only PCIe controllers need hugepages to DMA
+        // into.
+        linux_spdk_driver_t::config_t environment;
+        environment.memory = pcie_ids ? linux_spdk_memory_t::hugepages_k : linux_spdk_memory_t::plain_pages_k;
+        auto [driver, open_status] = linux_spdk_driver_t::open(environment);
+        if (failed(open_status))
+            return propagate_error(open_status, outcome, "The SPDK environment did not start"), void();
+        config.transport = io_transport_t::linux_spdk_k;
+        config.spdk_driver = std::move(driver);
+#else
+        (void)pcie_ids;
+        return propagate_error(usearch_status_unsupported_k, outcome, "Transport identifiers need an SPDK build"),
+               void();
+#endif
+    }
+    usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
+    if (!executor)
+        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
+    if (!spawn_nvme_executor(*executor, arguments->threads, config, outcome)) return delete executor, void();
+    hand_out_executor(executor, arguments->deferred_limit, arguments->executor, outcome);
 }
 
 USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments) {
-    usearch_outcome_t* const outcome = arguments->outcome;
-    propagate_pending(outcome);
+    call_outcome_t outcome(arguments->outcome);
     // A null executor runs every call to completion before returning, so nothing waits behind it.
     if (!arguments->executor) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-    // A drain from a callback meets the claim of the call running it, and answers contended.
-    auto const drain = [](auto& executor) noexcept {
-        auto const [claim, status] = executor.claim();
-        return failed(status) ? status : executor.drain();
+    usearch_executor_handle_t& executor = *arguments->executor;
+    // A drain from a callback meets the claim of the call running it, and answers contended rather
+    // than waiting on itself.
+    auto const claimable = [](auto& typed) noexcept { return typed.claim().status; };
+    if (status_t const claimed = std::visit(claimable, executor.executor); failed(claimed))
+        return propagate_error(claimed, outcome), void();
+    std::size_t last = 0;
+    {
+        std::lock_guard<std::mutex> lock(deferred_registry.guard);
+        last = deferred_registry.tickets;
+    }
+    run_held(executor, last);
+    wait_running(executor, last);
+    auto const drain = [](auto& typed) noexcept {
+        auto const [claim, status] = typed.claim();
+        return failed(status) ? status : typed.drain();
     };
-    propagate_error(std::visit(drain, arguments->executor->executor), outcome);
+    propagate_error(std::visit(drain, executor.executor), outcome);
 }
 
-USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor) { delete executor; }
+USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor) {
+    if (!executor) return;
+    finish_calls_using(executor);
+    delist_executor(*executor);
+    delete executor;
+}
 
 #pragma endregion Executors
 

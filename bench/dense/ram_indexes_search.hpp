@@ -121,8 +121,12 @@ bool save_indexes(streamed_dataset_type_& streamed) {
     using bench_t = typename streamed_dataset_type_::bench_t;
     auto& bench = streamed.bench;
     std::string const path = checkpoint_path_of<typename bench_t::indexes_t>(bench.settings, bench.settings.save_name);
+    // A view of the parts must stage its queries under the factor the rows were rescaled by.
+    std::string const scale = fmt::format("{}", streamed.scale);
+    safegraphs_custom_field_t const provenance[] = {{"scale", scale}};
     save_config_t config;
     config.layout = checkpoint_layout_t::distributed_k;
+    config.provenance = provenance;
     auto started = steady_clock_t::now();
     if (status_t const saved = bench.indexes.save(path, config, bench.executor); failed(saved)) {
         fmt::println("Failed to save {}: {}", path, status_to_string(saved));

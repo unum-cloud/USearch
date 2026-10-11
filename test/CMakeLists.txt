@@ -39,6 +39,7 @@ add_executable(
     dense/ram_index_i4.cpp
     dense/ram_index_u8.cpp
     dense/ram_index_u1.cpp
+    dense/nvme_indexes.cpp
 )
 usearch_setup_target(usearch_test HOST)
 # The capability names come from the C interface's own probes, compiled in rather than linking the whole library.

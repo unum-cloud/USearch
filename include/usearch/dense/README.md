@@ -7,7 +7,7 @@ The RAM residency is the portable default every platform owns; the VRAM and NVMe
 
 - `ram_metric.hpp` + `ram_index.hpp` - the CPU baseline: compile-time-dispatched NumKong kernel kits chained per capability tier, and the concurrent, watermark-published in-memory index over them.
 - `vram_metric.cuh` + `vram_index.cuh` - the CUDA sibling: per-generation device kits - `ampere` through `blackwellrtx` ceilings - under one index whose geometry is frozen at the first `reserve`.
-- `nvme_index.hpp` - the persisted sibling: a pure traversal state machine pumped by pluggable I/O engines, from the portable POSIX floor through `io_uring` rings to NVMe passthrough; its engine kits ride here until a second modality needs them.
+- `nvme_index.hpp` - the persisted sibling: one SafeGraphs part walked as a pure state machine of reads, which the engines of `utilities/nvme_device.hpp` submit, from blocking reads through Linux AIO and `io_uring` to SPDK.
 
 ## The Plural Layer
 
@@ -15,6 +15,7 @@ The plural follows the sibling idiom - `ram_indexes.hpp` reads as "many `ram_ind
 
 - `ram_indexes.hpp` - typed multi-shard views with compute-domain routing and merged cross-shard search, one shard per memory domain.
 - `vram_indexes.cuh` - typed multi-shard groups with round-robin ingestion and merged cross-shard search, one shard per device.
+- `nvme_indexes.hpp` - read-only views of the parts a RAM or VRAM group saved, every row's walks over all parts on one executor thread, and key lookups as bulk scans of the key columns; beside them, the freestanding `merge`, `split`, `refine` and `build` that write new parts from old ones in phases of steps, within a workspace the caller lends.
 
 Capability files split beside the residency pairs as they grow - `icelake.hpp`, `sapphireamx.hpp`, `hopper.cuh`, and their siblings.
 

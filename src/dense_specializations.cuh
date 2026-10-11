@@ -26,6 +26,7 @@
 #include <forkunion/types.hpp>        // `fu::spin_mutex_t` - the ticks' lock
 
 #include "usearch/dense_index.h"
+#include "usearch/dense/nvme_indexes.hpp"
 #include "usearch/dense/ram_indexes.hpp"
 #if USEARCH_BUILD_CUDA
 #include "usearch/dense/vram_indexes.cuh"
@@ -505,12 +506,20 @@ template <typename multi_type_>
 inline constexpr bool is_vram_index = false;
 #endif
 
+template <typename multi_type_>
+inline constexpr bool is_nvme_index = std::is_same_v<typename multi_type_::executor_t, nvme_executor_t>;
+
 /** One RAM alternative: the CPU class alone names the rung, lowering onto its NumKong mask, its waiter,
  *  its atomic reference and its cache hints. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_>
 using ram_index = dense_ram_indexes<us::uuid_t, dtype_, kernel_, numkong_capabilities_of(cpu_class_),
                                     waiter_of<cpu_class_>, atomic_ref_for_cpu_class<cpu_class_>::template type,
                                     typename cache_hints_for_cpu_class<cpu_class_>::type>;
+
+/** One NVMe alternative: scoring compiles per CPU class, the transport is the executor's runtime
+ *  choice. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_>
+using nvme_index = dense_nvme_indexes<us::uuid_t, dtype_, kernel_, numkong_capabilities_of(cpu_class_)>;
 #if USEARCH_BUILD_CUDA
 
 /** One VRAM alternative: the GPU class alone names the rung, lowering onto its architecture ceiling;
@@ -653,7 +662,7 @@ struct specialized_index {
     using counts_span_t = std::span<std::size_t>;
 
     /** What an attend resolves value rows through: a host callback per batch on RAM, a device call per key on GPU. */
-    using attend_lookup_t = std::conditional_t<is_ram_index<index_type_>, value_lookup_t, device_value_lookup_t>;
+    using attend_lookup_t = std::conditional_t<is_vram_index<index_type_>, device_value_lookup_t, value_lookup_t>;
 
     index_type_& index;
 
@@ -672,8 +681,9 @@ struct specialized_index {
     std::size_t capacity() const noexcept;
     std::size_t memory_usage() const noexcept;
     expected<std::size_t> storage_requirements() const noexcept;
-    std::size_t count(key_t const& key) const noexcept;
-    std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted) const noexcept;
+    status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) noexcept;
+    status_t get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
+                 std::span<std::size_t> entries, executor_t& executor) noexcept;
     status_t reserve(reserve_capacity_t config) noexcept;
     status_t clear() noexcept;
 
@@ -760,13 +770,14 @@ expected<std::size_t> specialized_index<index_type_>::storage_requirements() con
     return index.storage_requirements(save_config_of({}));
 }
 template <typename index_type_>
-std::size_t specialized_index<index_type_>::count(key_t const& key) const noexcept {
-    return index.count(key);
+status_t specialized_index<index_type_>::count(std::span<key_t const> keys, std::span<std::size_t> entries,
+                                               executor_t& executor) noexcept {
+    return index.count(keys, entries, executor);
 }
 template <typename index_type_>
-std::size_t specialized_index<index_type_>::get(key_t const& key, vectors_span_t vectors,
-                                                std::size_t wanted) const noexcept {
-    return index.get(key, vectors, wanted);
+status_t specialized_index<index_type_>::get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
+                                             std::span<std::size_t> entries, executor_t& executor) noexcept {
+    return index.get(keys, vectors, wanted, entries, executor);
 }
 template <typename index_type_>
 status_t specialized_index<index_type_>::reserve(reserve_capacity_t config) noexcept {
@@ -885,6 +896,154 @@ save_config_t specialized_index<index_type_>::save_config_of(std::string_view pa
     config.layout = path.ends_with(".json") ? checkpoint_layout_t::distributed_k : checkpoint_layout_t::monolith_k;
     if constexpr (is_vram_index<index_type_>) config.synchronization = synchronization_t::immutable_k;
     return config;
+}
+
+/** One NVMe arm's verbs: the read verbs alone, since a view of parts on storage never mutates,
+ *  defined outside the class for the same reason as the primary's. */
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+struct specialized_index<index_type_> {
+    using key_t = typename index_type_::key_t;
+    using executor_t = typename index_type_::executor_t;
+    using vectors_view_t = typename index_type_::vectors_view_t;
+    using vectors_span_t = typename index_type_::vectors_span_t;
+    using search_config_t = typename index_type_::search_config_t;
+    using search_result_t = typename index_type_::search_result_t;
+    using health_result_t = typename index_type_::health_result_t;
+    using keys_span_t = std::span<key_t>;
+    using distances_span_t = std::span<typename index_type_::distance_t>;
+    using counts_span_t = std::span<std::size_t>;
+    using attend_lookup_t = value_lookup_t;
+
+    index_type_& index;
+
+    status_t view(std::string_view path, std::span<std::string_view const> paths) noexcept;
+    std::size_t shards_count() const noexcept;
+    std::size_t dimensions() const noexcept;
+    std::size_t connectivity() const noexcept;
+    std::size_t size() const noexcept;
+    std::size_t capacity() const noexcept;
+    std::size_t memory_usage() const noexcept;
+    expected<health_result_t> health(executor_t& executor) noexcept;
+    status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) noexcept;
+    status_t get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
+                 std::span<std::size_t> entries, executor_t& executor) noexcept;
+    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
+                                     std::size_t wanted, keys_span_t keys, distances_span_t distances,
+                                     counts_span_t counts, dummy_predicate_t) noexcept;
+    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
+                                     std::size_t wanted, keys_span_t keys, distances_span_t distances,
+                                     counts_span_t counts, key_predicate_t& predicate) noexcept;
+    expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
+                                       std::size_t wanted, keys_span_t keys,
+                                       std::span<typename index_type_::dot_result_t> products,
+                                       counts_span_t counts) noexcept
+        requires(index_type_::kernel_kind_k == nk_kernel_dot_k);
+    expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
+                                     search_config_t config, std::size_t wanted, keys_span_t keys,
+                                     std::span<f64_t> scores, counts_span_t counts) noexcept
+        requires(index_type_::kernel_kind_k == nk_kernel_dot_k);
+    expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
+                                     f32_t score_scale, std::span<f32_t> outputs,
+                                     std::span<us::dense_softmax_state_t> carry, executor_t& executor,
+                                     search_config_t config) noexcept
+        requires(index_type_::kernel_kind_k == nk_kernel_dot_k);
+};
+
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+status_t specialized_index<index_type_>::view(std::string_view path, std::span<std::string_view const> paths) noexcept {
+    return index.view(path, paths);
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+std::size_t specialized_index<index_type_>::shards_count() const noexcept {
+    return index.shards_count();
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+std::size_t specialized_index<index_type_>::dimensions() const noexcept {
+    return index.dimensions();
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+std::size_t specialized_index<index_type_>::connectivity() const noexcept {
+    return index.connectivity();
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+std::size_t specialized_index<index_type_>::size() const noexcept {
+    return index.size();
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+std::size_t specialized_index<index_type_>::capacity() const noexcept {
+    return index.capacity();
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+std::size_t specialized_index<index_type_>::memory_usage() const noexcept {
+    return index.memory_usage();
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+expected<typename specialized_index<index_type_>::health_result_t> specialized_index<index_type_>::health(
+    executor_t& executor) noexcept {
+    return index.health(executor);
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+status_t specialized_index<index_type_>::count(std::span<key_t const> keys, std::span<std::size_t> entries,
+                                               executor_t& executor) noexcept {
+    return index.count(keys, entries, executor);
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+status_t specialized_index<index_type_>::get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
+                                             std::span<std::size_t> entries, executor_t& executor) noexcept {
+    return index.get(keys, vectors, wanted, entries, executor);
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
+    vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted, keys_span_t keys,
+    distances_span_t distances, counts_span_t counts, dummy_predicate_t) noexcept {
+    return index.search(queries, executor, config, wanted, keys, distances, counts);
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
+    vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted, keys_span_t keys,
+    distances_span_t distances, counts_span_t counts, key_predicate_t& predicate) noexcept {
+    return index.search_if(queries, executor, config, wanted, keys, distances, counts, predicate);
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::multiply(
+    vectors_view_t left, executor_t& executor, search_config_t config, std::size_t wanted, keys_span_t keys,
+    std::span<typename index_type_::dot_result_t> products, counts_span_t counts) noexcept
+    requires(index_type_::kernel_kind_k == nk_kernel_dot_k)
+{
+    return index.multiply(left, executor, config, wanted, keys, products, counts);
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::maxsim(
+    vectors_view_t queries, std::size_t rows_per_query, executor_t& executor, search_config_t config,
+    std::size_t wanted, keys_span_t keys, std::span<f64_t> scores, counts_span_t counts) noexcept
+    requires(index_type_::kernel_kind_k == nk_kernel_dot_k)
+{
+    return index.maxsim(queries, rows_per_query, executor, config, wanted, keys, scores, counts);
+}
+template <typename index_type_>
+    requires is_nvme_index<index_type_>
+expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
+    vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale,
+    std::span<f32_t> outputs, std::span<us::dense_softmax_state_t> carry, executor_t& executor,
+    search_config_t config) noexcept
+    requires(index_type_::kernel_kind_k == nk_kernel_dot_k)
+{
+    return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
 }
 
 template <typename index_type_>

@@ -458,6 +458,9 @@ void test_arenas(size_t const dimensions) {
     float* const data = create_vectors(2, dimensions);
     usearch_key_t const keys[2] = {key_of(7), key_of(8)};
     size_t const row_bytes = dimensions * sizeof(float);
+    usearch_dense_reserve(
+        &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = 2});
+    expect(!outcome.message, outcome.message);
     usearch_dense_insert(&(usearch_dense_insert_t) {.index = index,
                                                     .executor = executor,
                                                     .outcome = &outcome,
@@ -819,6 +822,159 @@ void test_attend(void) {
     printf("Test: Attend - PASSED\n");
 }
 
+/** A RAM index saved as one monolith serves the same keys and rows from storage: an NVMe executor
+ *  views the file, its search, count, get, health and cursor answer as the RAM index did, and every
+ *  mutation is refused. An implementation without an NVMe residency says so, and the test skips. */
+void test_nvme_view(size_t const dimensions) {
+    printf("Test: NVMe View... %zu dimensions\n", dimensions);
+
+    enum { rows_count = 64 };
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t const index = create_index(dimensions);
+    usearch_executor_t const executor = create_executor(0);
+    usearch_dense_reserve(
+        &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = rows_count});
+    expect(!outcome.message, outcome.message);
+    float* const data = create_vectors(rows_count, dimensions);
+    usearch_key_t keys[rows_count];
+    for (size_t row = 0; row != rows_count; ++row) keys[row] = key_of(row);
+    size_t const row_bytes = dimensions * sizeof(float);
+    usearch_dense_insert(&(usearch_dense_insert_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = rows_count,
+                                                    .keys = {keys, sizeof(usearch_key_t)},
+                                                    .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+    char const path[] = "usearch-test-c-nvme.safegraphs";
+    usearch_bytes_view_t const path_view = {(uint8_t const*)path, sizeof(path) - 1};
+    usearch_dense_save(
+        &(usearch_dense_save_t) {.index = index, .executor = executor, .outcome = &outcome, .path = path_view});
+    expect(!outcome.message, outcome.message);
+
+    usearch_executor_t storage = NULL;
+    usearch_dense_index_t view = NULL;
+    usearch_executor_for_nvme(&(usearch_executor_for_nvme_t) {.executor = &storage, .outcome = &outcome, .threads = 2});
+    if (outcome.status == usearch_status_success_k)
+        usearch_dense_view_nvme(
+            &(usearch_dense_view_nvme_t) {.index = &view, .executor = storage, .outcome = &outcome, .path = path_view});
+    // An implementation without an NVMe residency says so, and has no view to hold to the contract.
+    if (outcome.status == usearch_status_unsupported_k) {
+        printf("Test: NVMe View - SKIPPED: %s\n", outcome.message);
+        usearch_executor_free(storage);
+        remove(path);
+        free(data);
+        usearch_executor_free(executor);
+        usearch_dense_free(index);
+        return;
+    }
+    expect(!outcome.message, outcome.message);
+
+    usearch_dense_index_description_t description = {0};
+    usearch_dense_describe(&(usearch_dense_describe_t) {.index = view,
+                                                        .executor = storage,
+                                                        .outcome = &outcome,
+                                                        .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect_eq(description.size, rows_count, "A view must serve every saved row");
+    expect_eq(description.capacity, rows_count, "A view hosts exactly the rows it serves");
+    expect_eq(description.metadata.dimensions, dimensions, "A view must serve the saved geometry");
+
+    usearch_dense_reachability_t reachability = {0};
+    usearch_dense_health(&(usearch_dense_health_t) {.index = view,
+                                                    .executor = storage,
+                                                    .outcome = &outcome,
+                                                    .reachability = &reachability});
+    expect(!outcome.message, outcome.message);
+    expect_eq(reachability.audited, rows_count, "A view must audit every saved row");
+
+    usearch_arena_t const arena = create_arena(storage);
+    usearch_matches_view_t matches = {0};
+    usearch_dense_search(&(usearch_dense_search_t) {.index = view,
+                                                    .executor = storage,
+                                                    .outcome = &outcome,
+                                                    .count = rows_count,
+                                                    .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
+                                                    .matches = &matches,
+                                                    .arena = arena,
+                                                    .wanted = 1});
+    expect(!outcome.message, outcome.message);
+    size_t recalled = 0;
+    for (size_t row = 0; row != rows_count; ++row)
+        recalled += matches.counts[row] && memcmp(matches.keys[row].bytes, keys[row].bytes, sizeof(usearch_key_t)) == 0;
+    expect(recalled * 10 >= rows_count * 9, "A viewed graph must find its own rows as the RAM one does");
+
+    size_t entries = 0;
+    usearch_dense_count(&(usearch_dense_count_t) {.index = view,
+                                                  .executor = storage,
+                                                  .outcome = &outcome,
+                                                  .key = key_of(5),
+                                                  .entries = &entries});
+    expect(!outcome.message, outcome.message);
+    expect_eq(entries, 1, "A saved key must count once in its view");
+    usearch_dense_count(&(usearch_dense_count_t) {.index = view,
+                                                  .executor = storage,
+                                                  .outcome = &outcome,
+                                                  .key = key_of(rows_count + 7),
+                                                  .entries = &entries});
+    expect(!outcome.message, outcome.message);
+    expect_eq(entries, 0, "A key never saved must count zero");
+
+    usearch_rows_view_t vectors = {0};
+    size_t written = 0;
+    usearch_dense_get(&(usearch_dense_get_t) {.index = view,
+                                              .executor = storage,
+                                              .outcome = &outcome,
+                                              .key = key_of(5),
+                                              .vectors = &vectors,
+                                              .written = &written,
+                                              .arena = arena,
+                                              .outputs_scalar = usearch_scalar_f32_k});
+    expect(!outcome.message, outcome.message);
+    expect(written == 1 && vectors.data != NULL && vectors.columns == dimensions, "A view must read a key's row back");
+    float const* const retrieved = (float const*)vectors.data;
+    for (size_t position = 0; position != dimensions; ++position)
+        expect(fabsf(retrieved[position] - data[5 * dimensions + position]) <=
+                   fabsf(data[5 * dimensions + position]) / 128,
+               "A bf16 view must return rows within its 7-bit mantissa");
+
+    usearch_dense_cursor_t cursor = NULL;
+    usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.cursor = &cursor, .index = view, .outcome = &outcome});
+    expect(!outcome.message, outcome.message);
+    usearch_keys_view_t walked = {0};
+    usearch_dense_cursor_next(&(usearch_dense_cursor_next_t) {.index = view,
+                                                              .executor = storage,
+                                                              .outcome = &outcome,
+                                                              .cursor = cursor,
+                                                              .keys = &walked,
+                                                              .written = &written,
+                                                              .arena = arena,
+                                                              .wanted = rows_count});
+    expect(!outcome.message, outcome.message);
+    expect_eq(written, rows_count, "A view's cursor must read every saved row");
+    usearch_dense_cursor_free(cursor);
+
+    usearch_dense_insert(&(usearch_dense_insert_t) {.index = view,
+                                                    .executor = storage,
+                                                    .outcome = &outcome,
+                                                    .count = 1,
+                                                    .keys = {keys, sizeof(usearch_key_t)},
+                                                    .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
+    expect_eq(outcome.status, usearch_status_read_only_k, "A view must refuse every mutation");
+    usearch_dense_save(
+        &(usearch_dense_save_t) {.index = view, .executor = storage, .outcome = &outcome, .path = path_view});
+    expect_eq(outcome.status, usearch_status_unsupported_k, "A view already is its checkpoint");
+
+    usearch_arena_free(arena);
+    usearch_dense_free(view);
+    usearch_executor_free(storage);
+    remove(path);
+    free(data);
+    usearch_executor_free(executor);
+    usearch_dense_free(index);
+    printf("Test: NVMe View - PASSED\n");
+}
+
 /** A message is @c NULL exactly when the status is success, and the outcome a caller reuses is
  *  fully overwritten - the contract every binding branches on. Only the success half is
  *  exercised here; the failing verbs are the ones `src/` has yet to instantiate. */
@@ -905,6 +1061,11 @@ usearch_dense_index_t create_filled_index(float const* rows, usearch_executor_t 
     usearch_dense_index_t const index = create_index(deferred_dimensions);
     usearch_key_t keys[deferred_rows];
     for (size_t row = 0; row != deferred_rows; ++row) keys[row] = key_of(row);
+    usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = index,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .capacity = deferred_rows});
+    expect(!outcome.message, outcome.message);
     usearch_dense_insert(&(usearch_dense_insert_t) {
         .index = index,
         .executor = executor,
@@ -1101,6 +1262,7 @@ int main(int argc, char* argv[]) {
     test_walks_name_their_index(dimension_counts[0]);
     test_multiply_packed();
     test_attend();
+    test_nvme_view(dimension_counts[0]);
     test_deferred_search();
     test_deferred_limit();
     test_free_finishes_deferred();

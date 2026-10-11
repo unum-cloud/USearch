@@ -375,7 +375,7 @@ bool open_indexer_heads(streamed_dataset_type_ const& streamed,
     if (!read_widened_rows(settings.heads_path, heads.widened_heads) ||
         !read_widened_rows(settings.weights_path, heads.weights))
         return false;
-    std::size_t const dimensions = streamed.vectors.extent(1), queries_count = heads.weights.extent(0);
+    std::size_t const dimensions = streamed.queries.extent(1), queries_count = heads.weights.extent(0);
     if (heads.widened_heads.extent(1) != dimensions || heads.widened_heads.extent(0) != queries_count * heads.count())
         return fmt::println("--heads must hold {} rows of {}d per --weights row", heads.count(), dimensions), false;
     if (!settings.queries_path.empty() && streamed.queries.extent(0) < queries_count)

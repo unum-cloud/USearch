@@ -2114,7 +2114,7 @@ static __global__ void dense_cuda_reconnect_island_kernel(u32_t* neighbors, u32_
     u32_t const island_index = blockIdx.x * blockDim.x + threadIdx.x;
     if (island_index >= islands_count) return;
     u32_t const island = island_ids[island_index];
-    u32_t const spread = min_of(16u, connectivity / 2);
+    u32_t const spread = dense_heal_spread(connectivity);
     constexpr cuda::memory_order relaxed_k = cuda::memory_order_relaxed;
 
     // Whether the island now sits in the target's row, landing it there when a slot allows.

@@ -158,15 +158,6 @@ concept dense_fold = requires(fold_type_& fold, std::span<dense_scored_node_t co
     { fold.absorb(scored_nodes, dots) } noexcept -> std::same_as<walk_demand_t>;
 };
 
-/** A fold that reads every scored quad's keys with its lanes and dots, as filtered search over a
- *  per-key predicate does, so a walk with no key column reads each scored row's key beside its
- *  vector. */
-template <typename fold_type_, typename dot_result_type_, typename key_type_>
-concept dense_keyed_fold = requires(fold_type_& fold, std::span<dense_scored_node_t const> scored_nodes,
-                                    std::span<dot_result_type_ const> dots, std::span<key_type_ const> keys) {
-    { fold.absorb(scored_nodes, dots, keys) } noexcept -> std::same_as<walk_demand_t>;
-};
-
 /** Graph products of one left-hand row as a fold: each scored pair appends its resolved ID and native
  *  dot until the row is full, while @c scored keeps counting past it. */
 template <typename id_type_, typename dot_result_type_, typename resolve_type_ = std::identity>
@@ -1531,7 +1522,7 @@ struct dense_ram_index {
         void reconnect_(step_t const& step, dense_traversal_context_t& context) noexcept {
             std::size_t reconnected = 0;
             small_size_t const connectivity = static_cast<small_size_t>(index_->connectivity());
-            small_size_t const spread = min_of<small_size_t>(16u, connectivity / 2);
+            small_size_t const spread = dense_heal_spread(connectivity);
             for (node_id_t island = step.nodes.first; island < step.nodes.bound; ++island) {
                 if (audit.reached(island)) continue;
                 neighbors_ref_t const own_neighbors = index_->neighbors_for(chunk_schedule_t::locate(island));

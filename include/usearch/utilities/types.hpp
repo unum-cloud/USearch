@@ -1042,8 +1042,9 @@ enum class gpu_class_t : u32_t {
     nvidia_rubin_k,
 };
 
-/** Feature bits an I/O engine publishes through its @c capabilities_k constant, so
- *  callers, tests, and docs introspect variants uniformly instead of by type name. */
+/** Feature bits an I/O engine answers through @c capabilities() once open, since a refused
+ *  registration turns @c fixed_buffers_k off at run time, so callers, tests, and docs introspect
+ *  variants uniformly instead of by type name. */
 enum class io_capability_t : u32_t {
     none_k = 0,
 

@@ -108,6 +108,14 @@ struct [[nodiscard]] dense_refine_result_t {
     std::size_t saturated_walks = 0;
 };
 
+/** The tail slots of a full row a heal may give up to islands, which spread over them by ID so
+ *  islands sharing a row land apart: the farther half, keeping the nearer half that carries search
+ *  and slot 0, and nothing in a single-neighbor row. */
+template <typename size_type_>
+constexpr size_type_ dense_heal_spread(size_type_ connectivity) noexcept {
+    return connectivity / 2;
+}
+
 /** The online-softmax carry of one attended row, in natural-log units - the C++ face of
  *  @c usearch_dense_softmax_state_t. */
 struct dense_softmax_state_t {
@@ -154,8 +162,6 @@ struct dense_index_header_t {
 };
 static_assert(sizeof(dense_index_header_t) == 32 && std::is_trivially_copyable_v<dense_index_header_t>);
 
-#pragma region Indexer Heads
-
 /** A lightning indexer, as DeepSeek V4 and GLM 5 pick sparse-attention keys: a node scores `Σₕ wₕ·ReLU(qₕ·k)`
  *  against these heads, and its distance is `1 − score`, while the walk navigates by the query rows,
  *  conventionally `Σₕ wₕ·qₕ`. */
@@ -180,8 +186,6 @@ struct dense_indexer_heads {
 struct dummy_heads_t {
     dummy_heads_t row(std::size_t) const noexcept { return {}; }
 };
-
-#pragma endregion Indexer Heads
 
 /** One ranked hit while @c dense_maxsim_reducer folds a query, then one document's summed maxima. */
 template <typename key_type_>

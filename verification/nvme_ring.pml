@@ -1,21 +1,34 @@
 /**
- *  @brief The io_uring words of `dense_uring_ring_t` behind `dense_nvme_index`: the engine and the
+ *  @brief The io_uring words of `linux_uring_ring_t` behind the ring engines: the engine and the
  *      kernel over both rings, with every completion posted as soon as its entry is consumed.
  *
- *  From `include/usearch/dense/nvme_index.hpp`: the submission ring's head and tail, the completion
- *  ring's head and tail, and the entries between them, shared with the kernel through the orders
- *  the ring documentation asks for.
+ *  From `include/usearch/utilities/nvme_device.hpp`: the submission ring's head and tail, the
+ *  completion ring's head and tail, and the entries between them, shared with the kernel through
+ *  the orders the ring documentation asks for.
  *
  *  An engine and a kernel over two rings of depth two, and three requests, so each ring wraps
- *  once. The engine claims a submission slot after an acquire load of the submission head, writes
- *  the entry relaxed, and publishes the tail with a release; it reaps by waiting on the completion
- *  tail, loading it with acquire, reading each entry relaxed, and publishing the completion head
- *  with a release. The kernel is the mirror image: an acquire load of the submission tail, relaxed
- *  reads of the entries, a release store of the submission head; an acquire load of the completion
- *  head for room, relaxed writes of the entries, a release store of the completion tail. Every
- *  entry carries its request's sequence number, and every entry read carries the one expected at
- *  that index, never the initial value and never a stale one from the previous lap. Every request
- *  is consumed and reaped exactly once, and a head never passes its tail.
+ *  once. `next_submission` claims a slot after an acquire load of the submission head, and the
+ *  entry is written relaxed in place; `enter_` publishes the tail with a release and calls
+ *  `io_uring_enter`; a blocking `submit` then waits for a completion; `poll_completions` loads the
+ *  completion tail with acquire, reads each entry relaxed, and publishes the head with a release.
+ *  The kernel is the mirror image: inside the call, an acquire load of the submission tail, relaxed
+ *  reads of the entries, a release store of the submission head; at any step, an acquire load of
+ *  the completion head for room, a relaxed write of the entry, a release store of the completion
+ *  tail. Without `IORING_SETUP_SQPOLL` the kernel's side of the call runs on the engine's thread,
+ *  so the kernel reads the newest submission tail inside it and `abandon_` reads the newest
+ *  submission head after it, while the entries reach the kernel only through the tail's release,
+ *  as they would on another core.
+ *
+ *  The kernel refuses at most two calls. A refused call makes `submit` run `abandon_`: it loads
+ *  the submission head and withdraws every entry past it by storing the head as the tail; then each
+ *  round loads the completion tail, takes the completions up to it out of the outstanding count,
+ *  stores the tail as the head, dropping them, and returns once nothing is outstanding or the
+ *  kernel refuses the call that waits for the rest, whose reads stay outstanding.
+ *
+ *  Every entry the kernel reads carries the request claimed at that index, never the initial
+ *  value, a stale one from the previous lap, or a withdrawn one. Every request ends reaped,
+ *  withdrawn or dropped, each once; the outstanding count equals the requests not yet ended; an
+ *  abandon the kernel waited out leaves nothing in flight; and a head never passes its tail.
  *
  *  Under `IORING_SETUP_DEFER_TASKRUN` the kernel posts completions only while the engine is inside
  *  its blocking enter, which narrows when they land and changes nothing about what is seen, so a
@@ -28,15 +41,18 @@
  *  stay in the header, since the kernel is not a C++ thread.
  *
  *  @verify pass sc,rc11
- *  @verify fail rc11 sq_tail_order=order_relaxed: `enter` publishes the submission tail with a
+ *  @verify fail rc11 sq_tail_order=order_relaxed: `enter_` publishes the submission tail with a
  *      release that carries the entries; relaxed, the kernel consumes an entry before its payload
  *      landed
- *  @verify fail rc11 cq_tail_order=order_relaxed: `pump` acquires the completion tail, which carries
- *      the kernel's entries; relaxed, the engine reaps a completion stale
+ *  @verify fail rc11 cq_tail_order=order_relaxed: `poll_completions` acquires the completion tail,
+ *      which carries the kernel's entries; relaxed, the engine reaps a completion stale
+ *  @verify fail sc abandon_waits=false: `abandon_` waits out the reads the kernel consumed before
+ *      it drops the completions; dropping at once, a read of the abandoned batch is still in flight
+ *      when `submit` returns, and the engine polls it later
  */
 #define thread_count 2
 #define location_count 8
-#define history_depth 4
+#define history_depth 6
 #include "weak_memory.pml"
 
 // The words: the four ring words, then the entries of each ring.
@@ -46,10 +62,14 @@
 #define cq_tail 3
 #define sqe(i) (4 + (i))
 #define cqe(i) (6 + (i))
+#define heads_behind_tails \
+    (newest_value(sq_head) <= newest_value(sq_tail) && newest_value(cq_head) <= newest_value(cq_tail))
 
-// The sizes: the rings' depth, and the requests, one more than the depth so each ring wraps.
+// The sizes: the rings' depth, the requests, one more than the depth so each ring wraps, and the
+// calls the kernel refuses, so it may refuse an abandon's wait as well as the call that abandons.
 #define depth 2
 #define requests 3
+#define refusals 2
 
 // The knobs: the header's choices, each overridden by a `@verify` line that replays its counterexample.
 #ifndef sq_tail_order
@@ -58,70 +78,196 @@
 #ifndef cq_tail_order
 #define cq_tail_order order_acquire
 #endif
+#ifndef abandon_waits
+#define abandon_waits true
+#endif
 
-// `pump` and `pop`: the wait on the completion tail, then every completion up to the tail
-inline reap(t, reaped, tail, seen) {
-    (newest_value(cq_tail) != reaped);
+// The ghosts: each request's fate, numbered from one so an unwritten entry names none, the request
+// claimed at each submission index, and the requests whose fate has not ended.
+#define fate_claimed 1
+#define fate_consumed 2
+#define fate_posted 3
+#define fate_reaped 4
+#define fate_withdrawn 5
+#define fate_dropped 6
+byte fate[requests + 1];
+byte request_at[requests];
+byte unsettled;
+
+// The ring's own members, which only the engine touches: `pending_tail_` and `outstanding_`.
+byte pending_tail, outstanding;
+
+// `io_uring_enter`: the engine waits while the kernel serves or refuses the call.
+bool entering, refusal;
+byte refused_calls;
+
+// A load across `io_uring_enter`, which reads the newest write and merges the stamp it carries
+inline load_newest(t, l, order, out) {
+    do
+    :: load(t, l, order, out);
+        if
+        :: seen_write(t, l) == newest_write(l) -> break
+        :: else
+        fi
+    od
+}
+
+// `enter_`: the tail published when the claims moved past it, then the call
+inline enter(t, refused) {
+    if
+    :: pending_tail != newest_value(sq_tail) -> store(t, sq_tail, sq_tail_order, pending_tail)
+    :: else
+    fi;
+    entering = true;
+    atomic { !entering -> refused = refusal; refusal = false }
+}
+
+// `poll_completions`: the tail with acquire, every completion up to it, then the head with a
+// release, stored only when it moved, since the same head tells the kernel nothing new
+inline poll(t, head, tail, seen) {
+    head = newest_value(cq_head);
     load(t, cq_tail, cq_tail_order, tail);
     do
-    :: reaped != tail ->
-        load(t, cqe(reaped % depth), order_relaxed, seen);
-        assert(seen == reaped + 1);
-        reaped++;
-        store(t, cq_head, order_release, reaped)
+    :: head < tail ->
+        load(t, cqe(head % depth), order_relaxed, seen);
+        assert(seen == request_at[head] && fate[seen] == fate_posted);
+        atomic { fate[seen] = fate_reaped; unsettled-- };
+        head++;
+        outstanding--
     :: else -> break
-    od
+    od;
+    if
+    :: head != newest_value(cq_head) -> store(t, cq_head, order_release, head)
+    :: else
+    fi
 }
 
-// the engine: `next_submission` takes the head with acquire and writes the entry in place, `enter`
-// publishes the tail, and a full ring or the last request reaps
+// `abandon_`: the entries past the head withdrawn and the tail stored back on it, then rounds that
+// drop the completions at hand and wait for the rest, stored only when the head moved, as in `poll`
+inline abandon(t, head, tail, index, refused) {
+    load_newest(t, sq_head, order_acquire, head);
+    atomic {
+        for (index : head .. pending_tail - 1) {
+            assert(fate[request_at[index]] == fate_claimed);
+            fate[request_at[index]] = fate_withdrawn;
+            unsettled--
+        }
+    };
+    outstanding = outstanding - (pending_tail - head);
+    pending_tail = head;
+    store(t, sq_tail, order_release, head);
+    refused = false;
+    do
+    :: load(t, cq_tail, cq_tail_order, tail);
+        atomic {
+            for (index : newest_value(cq_head) .. tail - 1) {
+                assert(fate[request_at[index]] == fate_posted);
+                fate[request_at[index]] = fate_dropped;
+                unsettled--
+            }
+        };
+        outstanding = outstanding - (tail - newest_value(cq_head));
+        if
+        :: tail != newest_value(cq_head) -> store(t, cq_head, order_release, tail)
+        :: else
+        fi;
+        if
+        :: outstanding == 0 || !abandon_waits -> break
+        :: else ->
+            enter(t, refused);
+            if
+            :: refused -> break
+            :: else -> (newest_value(cq_tail) - newest_value(cq_head) >= outstanding)
+            fi
+        fi
+    od;
+    assert(outstanding == unsettled && (refused || unsettled == 0) && heads_behind_tails)
+}
+
+// `submit`: `enter_`, then under a blocking wait a completion in the ring, as `enter_(1)` or the
+// capped monitor before it waits; a refused call abandons
+inline submit(t, blocking, head, tail, index, refused) {
+    if
+    :: outstanding > 0 ->
+        enter(t, refused);
+        if
+        :: refused -> abandon(t, head, tail, index, refused)
+        :: else ->
+            if
+            :: blocking -> (newest_value(cq_tail) != newest_value(cq_head))
+            :: else
+            fi
+        fi
+    :: else
+    fi
+}
+
+// the engine: `next_submission` takes the head with acquire and the entry is written in place, a
+// nonblocking `submit` may follow any claim, and a full ring or the last request polls
 proctype engine(byte t) {
     int head, tail, seen;
-    byte posted, reaped;
+    byte request = 1, index;
+    bool refused;
     do
-    :: posted < requests ->
+    :: request <= requests ->
         load(t, sq_head, order_acquire, head);
         if
-        :: posted - head < depth ->
-            store(t, sqe(posted % depth), order_relaxed, posted + 1);
-            posted++;
-            store(t, sq_tail, sq_tail_order, posted)
-        :: else -> reap(t, reaped, tail, seen)
+        :: outstanding < depth && pending_tail - head < depth ->
+            atomic { request_at[pending_tail] = request; fate[request] = fate_claimed; unsettled++ };
+            store(t, sqe(pending_tail % depth), order_relaxed, request);
+            pending_tail++;
+            outstanding++;
+            request++
+        :: else ->
+            submit(t, true, head, tail, index, refused);
+            poll(t, head, tail, seen)
         fi
-    :: posted == requests && reaped < requests -> reap(t, reaped, tail, seen)
-    :: reaped == requests -> break
-    od
+    :: pending_tail != newest_value(sq_tail) -> submit(t, false, head, tail, index, refused)
+    :: request > requests && outstanding > 0 ->
+        submit(t, true, head, tail, index, refused);
+        poll(t, head, tail, seen)
+    :: request > requests && outstanding == 0 -> break
+    od;
+    assert(unsettled == 0 && heads_behind_tails)
 }
 
-// the kernel: the waits sit in the guards, so it never commits to one ring while it owes the other
+// the kernel: the submission ring only inside a call, the completion ring at any step
 proctype kernel(byte t) {
     int tail, head, seen;
     byte consumed, completed;
+    byte served[requests];
+end:
     do
-    :: consumed < requests && newest_value(sq_tail) != consumed ->
-        // the submission ring: the tail with acquire, the entries, the head with release
-        load(t, sq_tail, order_acquire, tail);
-        do
-        :: consumed != tail ->
-            load(t, sqe(consumed % depth), order_relaxed, seen);
-            assert(seen == consumed + 1);
-            consumed++;
-            store(t, sq_head, order_release, consumed)
-        :: else -> break
-        od
+    :: entering ->
+        if
+        :: true ->
+            // the newest tail with acquire, the entries, the head with release
+            load_newest(t, sq_tail, order_acquire, tail);
+            do
+            :: consumed < tail ->
+                load(t, sqe(consumed % depth), order_relaxed, seen);
+                assert(seen == request_at[consumed] && fate[seen] == fate_claimed);
+                fate[seen] = fate_consumed;
+                served[consumed] = seen;
+                consumed++;
+                store(t, sq_head, order_release, consumed)
+            :: else -> break
+            od
+        :: refused_calls < refusals -> refused_calls++; refusal = true
+        fi;
+        entering = false
     :: completed < consumed && completed - newest_value(cq_head) < depth ->
-        // the completion ring: room from the head with acquire, the entry, the tail with release
+        // room from the head with acquire, the entry, the tail with release
         load(t, cq_head, order_acquire, head);
         if
         :: completed - head < depth ->
-            store(t, cqe(completed % depth), order_relaxed, completed + 1);
+            store(t, cqe(completed % depth), order_relaxed, served[completed]);
+            fate[served[completed]] = fate_posted;
             completed++;
             store(t, cq_tail, order_release, completed)
         :: else
         fi
-    :: consumed == requests && completed == requests -> break
-    od;
-    assert(newest_value(sq_head) <= newest_value(sq_tail) && newest_value(cq_head) <= newest_value(cq_tail))
+    od
 }
 
 init { atomic { run engine(0); run kernel(1) } }

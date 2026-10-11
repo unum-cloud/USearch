@@ -138,12 +138,15 @@ struct algebra_inputs {
 };
 
 /** Opens everything @ref algebra_inputs holds for the searched queries of @p streamed, with value rows
- *  gathered into node order through @p id_to_row. */
+ *  gathered into node order through @p id_to_row; the table spans every viewed row and every row an
+ *  ID names. */
 template <typename scalar_type_, typename streamed_dataset_type_>
 bool open_algebra_inputs(streamed_dataset_type_ const& streamed, algebra_settings_t const& algebra,
                          std::span<u32_t const> id_to_row, algebra_inputs<scalar_type_>& inputs) {
     settings_t const& settings = streamed.bench.settings;
-    std::size_t const rows_count = streamed.vectors.extent(0), dimensions = streamed.vectors.extent(1);
+    std::size_t const dimensions = searched_rows(streamed).extent(1);
+    std::size_t rows_count = streamed.vectors.extent(0);
+    for (u32_t const row : id_to_row) rows_count = std::max<std::size_t>(rows_count, std::size_t {row} + 1);
     std::size_t const first_row = settings.first_vector.value;
     if (!settings.heads_path.empty() || !settings.weights_path.empty())
         return fmt::println("--heads ranks searches alone; attend weighs plain logits"), false;

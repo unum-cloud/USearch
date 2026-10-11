@@ -52,11 +52,11 @@
  *  hold an ID-to-key table and merge shards on the device, a VRAM search reports
  *  @c usearch_status_device_k, rather than routing device bytes through the host.
  *
- *  @section dense_index_nvme_traversals NVME Traversals & Mergers
+ *  @section dense_index_nvme_walks NVMe Walks & Mergers
  *
- *  An NVMe handle serves a checkpoint in place and traverses it through whichever I/O engine can
- *  reach the devices its paths name - a filesystem path selects a kernel engine, a transport
- *  identifier a userspace one, and a FUSE mount over a bucket reads as an ordinary path.
+ *  An NVMe handle serves a checkpoint in place and walks it through whichever I/O engine can reach
+ *  the devices its paths name - a filesystem path selects a kernel engine, a transport identifier
+ *  a userspace one, and a FUSE mount over a bucket reads as an ordinary path.
  *  External-memory graphs are never modified in place, so the handle is a view, and every mutating
  *  verb fails on it. Bigger indexes come from merging, never mutating: shards build in RAM,
  *  serialize as monoliths, and join a manifest - the compaction shape of LSM storage.
@@ -94,15 +94,17 @@
  *  @c usearch_dense_search answers on RAM and waits on device merges on VRAM. A search with a
  *  @c predicate is refused on VRAM with @c usearch_status_device_k even then, since a host predicate
  *  cannot narrow a device walk.
- *  @c usearch_dense_cursor_init answers on RAM only; VRAM rows are read back through a search.
+ *  @c usearch_dense_cursor_init answers on RAM, while VRAM rows are read back through a search.
  *  @c usearch_dense_get, @c usearch_dense_save_buffer, @c usearch_dense_multiply and
- *  @c usearch_dense_maxsim answer on RAM only, the first three waiting on device arenas.
+ *  @c usearch_dense_maxsim answer on RAM but not on VRAM, the first three waiting on device arenas.
  *  @c usearch_dense_attend answers on both, resolving value rows through @c value_lookup, a host
  *  function on RAM and a device one on VRAM.
  *  @c usearch_dense_search_stream_init and @c usearch_dense_merge are unsupported on both.
  *
- *  @c usearch_dense_view_nvme answers @c usearch_status_unsupported_k: NVMe checkpoints carry no
- *  keys and no shard wrapper yet, so no C verb can answer on such a handle.
+ *  An NVMe handle is a view that answers every read verb as a RAM handle does, the cursor and
+ *  @c usearch_dense_health included, its rows read through the executor's engines. Every mutating
+ *  verb answers @c usearch_status_read_only_k, and saving answers @c usearch_status_unsupported_k,
+ *  since a view already is its checkpoint.
  *
  *  @section dense_index_linear_algebra Approximate Products & Attention
  *
@@ -469,7 +471,7 @@ typedef struct usearch_dense_view_nvme_t {
     /** Output for the new, read-only index, written by the time the call is final. */
     usearch_dense_index_t* index;
 
-    /** The NVMe executor whose rings read the checkpoint's headers. */
+    /** The NVMe executor the call is ordered on; the headers come through blocking reads. */
     usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
@@ -486,9 +488,11 @@ typedef struct usearch_dense_view_nvme_t {
 } usearch_dense_view_nvme_t;
 
 /**
- *  @brief Serves a checkpoint in place from NVMe drives, read through the executor's submission
- *      rings, as a read-only index. @ref dense_index_nvme_traversals
- *  @retval usearch_status_unsupported_k NVMe checkpoints carry no keys and no shard wrapper yet.
+ *  @brief Serves a checkpoint in place from NVMe drives as a read-only index, every later call
+ *      reading it through its executor's engines. @ref dense_index_nvme_walks
+ *
+ *  Opening reads the headers alone. Every mutating verb on the handle reports
+ *  @c usearch_status_read_only_k, and the parts must stay unmodified until the handle is freed.
  */
 USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments);
 

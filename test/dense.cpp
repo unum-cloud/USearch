@@ -13,6 +13,7 @@
 #include "dense/ram_metric.hpp"
 #include "dense/ram_index.hpp"
 #include "dense/ram_indexes.hpp"
+#include "dense/nvme_indexes.hpp"
 
 using namespace unum::usearch;
 using namespace unum::usearch::test;
@@ -58,6 +59,9 @@ std::size_t test::check_dense(settings_t const& settings) {
     if (settings.selects("ram_index_u1")) failures_count += dense::check_ram_index_u1(settings);
 
     if (settings.selects("ram_indexes")) failures_count += dense::check_ram_indexes(settings);
+
+    if (settings.selects("nvme_indexes")) failures_count += dense::check_nvme_indexes(settings);
+    if (settings.selects("nvme_rewrites")) failures_count += dense::check_nvme_rewrites(settings);
 
     return failures_count;
 }

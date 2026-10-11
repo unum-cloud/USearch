@@ -11,8 +11,8 @@ Every result is a throughput, a latency and a recall under one explicit configur
 ## The Suite
 
 The index benchmarks of `bench/CMakeLists.txt` come in two families that never share a binary, beside the kernel microbenchmark under [Kernels](#kernels).
-Every index binary is named `usearch_bench_dense_<residency>_<arity>_<family>`: the residency is `ram` or `vram`, the arity a single `index` or sharded `indexes`, and the family `search` or `algebra`.
-Both families build the index the same way, from the same dataset, dtype, graph, refinement and checkpoint flags.
+Every index binary is named `usearch_bench_dense_<residency>_<arity>_<family>`: the residency is `ram`, `vram` or `nvme`, the arity a single `index` or sharded `indexes`, and the family `search` or `algebra`.
+The `ram` and `vram` binaries of both families build the index the same way, from the same dataset, dtype, graph, refinement and checkpoint flags, and the `nvme` binaries view the parts they saved.
 
 The search family searches the built index, by plain rows or by a lightning indexer's heads, and judges the hits.
 
@@ -20,6 +20,7 @@ The search family searches the built index, by plain rows or by a lightning inde
 - `usearch_bench_dense_ram_indexes_search` builds one `dense_ram_indexes` over every memory domain and isolates what the C interface drives: admission, rotation across shards, batched verbs and SafeGraphs checkpoints.
 - `usearch_bench_dense_vram_index_search` builds one `dense_vram_index` on one device and isolates batch-per-launch build and search, the kit generation ceiling and managed-memory planes.
 - `usearch_bench_dense_vram_indexes_search` builds one `dense_vram_indexes` with a shard per `--devices` ordinal and isolates what the C interface drives across GPUs: rotation across devices, scatter-gather search merged on the host, and SafeGraphs checkpoints.
+- `usearch_bench_dense_nvme_indexes_search` views the parts a sharded RAM or VRAM binary saved as one `dense_nvme_indexes`, building nothing in RAM, and isolates what storage adds to the batched search: the I/O transport, the queue depth, and the reads and bytes each query costs.
 
 The algebra family measures the graph products `multiply` and the graph attention `attend` over the built index instead of searching it.
 
@@ -27,8 +28,9 @@ The algebra family measures the graph products `multiply` and the graph attentio
 - `usearch_bench_dense_ram_indexes_algebra` builds one `dense_ram_indexes` over every memory domain and isolates the same verbs batched through the executor, every token's walks crossing every shard.
 - `usearch_bench_dense_vram_index_algebra` builds one `dense_vram_index` on one device and isolates the same graph products and graph attention on the device, judged against the same oracle.
 - `usearch_bench_dense_vram_indexes_algebra` builds one `dense_vram_indexes` with a shard per `--devices` ordinal and isolates the same verbs across GPUs, the shards' attention merged on the first device.
+- `usearch_bench_dense_nvme_indexes_algebra` views the same saved parts as one `dense_nvme_indexes` and isolates the same verbs answered from storage, with the reads and bytes each row costs.
 
-Each search binary prints a `Machine` block, an `Insertions` block and a `Queries` block to standard output and nothing else, so a run is its transcript.
+Each search binary prints a `Machine` block, an `Insertions` block and a `Queries` block to standard output and nothing else, so a run is its transcript; the `nvme` one prints a `Storage` block in place of `Insertions`.
 The `Insertions` block reports the wall time, the throughput in IPS, the distances computed with the shares spent in refinement, the visited members and the restarts.
 The `Queries` block reports the throughput in QPS, the latency, the distances and members per query, and the judgment.
 
@@ -39,7 +41,7 @@ The CUDA bench compiles a generation's kits only when every listed architecture 
 The `profile` preset keeps the same optimization and adds the symbols `perf` needs; `dev` is the `-O2` iteration tree and measures nothing.
 
 ```sh
-cmake --preset release && cmake --build --preset release --target usearch_bench_dense_ram_index_search usearch_bench_dense_ram_indexes_search usearch_bench_dense_ram_index_algebra usearch_bench_dense_ram_indexes_algebra usearch_bench_dense_ram_metric
+cmake --preset release && cmake --build --preset release --target usearch_bench_dense_ram_index_search usearch_bench_dense_ram_indexes_search usearch_bench_dense_ram_index_algebra usearch_bench_dense_ram_indexes_algebra usearch_bench_dense_nvme_indexes_search usearch_bench_dense_nvme_indexes_algebra usearch_bench_dense_ram_metric
 cmake --preset release_cuda -DUSEARCH_CUDA_ARCHITECTURES=100f && cmake --build build_release_cuda --target usearch_bench_dense_vram_index_search usearch_bench_dense_vram_indexes_search usearch_bench_dense_vram_index_algebra usearch_bench_dense_vram_indexes_algebra
 ```
 
@@ -112,6 +114,33 @@ An indexer's selection is judged against the exact scan's top rows, saved once a
 ```sh
 build_release/usearch_bench_dense_ram_index_search --vectors keys.bf16bin --heads queries.bf16bin --weights weights.fbin \
     --neighbors truth-global.ibin --metric dot
+```
+
+### Storage
+
+Both `nvme_indexes` binaries build nothing: they view the SafeGraphs parts a sharded RAM or VRAM binary wrote with `--save`, and take only the flags a view and its queries need.
+The first part's header names the stored dtype and the metric they dispatch on, and the factor the producer rescaled its rows by before a downcast, under which the queries are staged.
+Keys are dataset rows, so the search judges its hits against `--neighbors` directly, and refuses a ground truth that names a row past the ones the parts hold.
+Every query is answered from storage in one batched call, which arms as many rows per thread as the queue depth holds, and the verb times each query from its first armed walk to its final write.
+The `Storage` block names the parts and the transport the engines opened, then each phase reports reads and kilobytes per query by purpose, the round trips, the IOPS and bandwidth it sustained, and the latency percentiles.
+
+- `--view` is required: the manifest or the monolith of the parts.
+- `--paths` defaults to beside the manifest: one directory, file or device per part, comma-separated, to serve parts copied elsewhere.
+- `--queries` is required: query vectors in the RetriEval layout, cast to the parts' stored dtype.
+- `--neighbors` is required by the search binary: ground truth, `.ibin`, over the rows the parts hold.
+- `--transport` defaults to `auto`: `blocking`, `linux-aio` or `linux-uring`; `auto` takes io_uring, then AIO, then blocking reads, whichever the host admits first.
+- `--queue-depth` defaults to `512`: reads each thread's engine keeps outstanding, which bounds the rows and the hops it overlaps.
+- `--expansion-search`, `--top-k`, `--threads`, `--max-compute`, `--heads` and `--weights` read as in [Running](#running) and [Indexer Heads](#indexer-heads).
+
+The algebra binary views only parts built for `dot`, looks the `--values` rows up by key, and runs its oracle over `--vectors`, the base file the keys index, which it needs only without a `--reference`.
+
+```sh
+cmake --build --preset release --target usearch_bench_dense_ram_indexes_search usearch_bench_dense_nvme_indexes_search usearch_bench_dense_nvme_indexes_algebra
+build_release/usearch_bench_dense_ram_indexes_search --vectors data/sift-10m/base.10M.u8bin --metric euclidean \
+    --save sift10m --checkpoints-dir /mnt/nvme0
+build_release/usearch_bench_dense_nvme_indexes_search --view /mnt/nvme0/sift10m-u8-euclidean-c32.safegraphs.json \
+    --queries data/sift-10m/query.public.10K.u8bin --neighbors data/sift-10m/groundtruth.public.10K.ibin \
+    --transport linux-uring --queue-depth 512
 ```
 
 ### Refinement

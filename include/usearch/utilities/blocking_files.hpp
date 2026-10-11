@@ -113,6 +113,9 @@ struct seekable_file_t {
     /** Byte length of the file. */
     expected<std::size_t> length() const noexcept;
 
+    /** Flushes every write so far to the device, so a later write can be ordered after them. */
+    status_t sync() noexcept;
+
     /** Closes, surfacing the failure the destructor would swallow. */
     status_t close() noexcept;
 
@@ -178,6 +181,10 @@ inline expected<std::size_t> seekable_file_t::length() const noexcept {
     return {static_cast<std::size_t>(size.QuadPart), status_t::success_k};
 }
 
+inline status_t seekable_file_t::sync() noexcept {
+    return ::FlushFileBuffers(descriptor_) ? status_t::success_k : status_t::io_k;
+}
+
 inline status_t seekable_file_t::close() noexcept {
     if (descriptor_ == closed_k) return status_t::success_k;
     return ::CloseHandle(std::exchange(descriptor_, closed_k)) ? status_t::success_k : status_t::io_k;
@@ -220,6 +227,10 @@ inline expected<std::size_t> seekable_file_t::length() const noexcept {
     struct stat description;
     if (::fstat(descriptor_, &description) != 0) return {0, status_t::io_k};
     return {static_cast<std::size_t>(description.st_size), status_t::success_k};
+}
+
+inline status_t seekable_file_t::sync() noexcept {
+    return ::fsync(descriptor_) == 0 ? status_t::success_k : status_t::io_k;
 }
 
 inline status_t seekable_file_t::close() noexcept {

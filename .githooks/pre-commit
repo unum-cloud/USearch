@@ -81,12 +81,16 @@ check_ascii_arrows_prose() {
 }
 
 # The abbreviation reads ID and IDs in prose, never id, ids, Id or Ids. Only comment text is weighed: code spans,
-# quoted strings, URLs, Doxygen parameter names and identifiers like `node_id`, `.id` or `->id` keep their spelling.
+# `@code` and `@verbatim` bodies, quoted strings, URLs, Doxygen parameter names and identifiers like `node_id`,
+# `.id` or `->id` keep their spelling.
 ids_miscased_pattern='(^|[^[:alnum:]_.:])(id|ids|Id|Ids)([^[:alnum:]_(]|$)'
 check_ids_capitalized() {
     local miscased
     miscased=$(printf '%s\n' "$added" | awk '
         { line = substr($0, 2); gsub(/https?:\/\/[^[:space:]]*/, "", line) }
+        line ~ /@end(code|verbatim)/ { code = 0; next }
+        line ~ /@(code|verbatim)/ { code = 1; next }
+        code { next }
         line ~ /^[[:space:]]*(\/\/|\/\*|\*)/ { print line; next }
         { position = index(line, "//"); if (position) print substr(line, position) }' |
         sed -E 's/`[^`]*`//g; s/"[^"]*"//g; s/->/ _arrow_/g; s/@(p|c|a|ref|param|tparam)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*//g' |
@@ -159,6 +163,8 @@ check_prose_paragraph_filled() {
         function characters(text) { gsub(/[\200-\277]/, "", text); return length(text) }
         function first_word(text) {
             if (text ~ /^`[^`]*`/) { match(text, /^`[^`]*`[^[:space:]]*/); return substr(text, 1, RLENGTH) }
+            # An inline tag moves with its argument, so the pair is what has to fit.
+            if (match(text, /^@(c|p|ref|b|a|e|em)[[:space:]]+[^[:space:]]+/)) return substr(text, 1, RLENGTH)
             sub(/[[:space:]].*$/, "", text); return text
         }
         function hold_paragraph_line(line, body, width) { ++held; held_line[held] = line; held_body[held] = body; held_width[held] = width }
@@ -187,7 +193,8 @@ check_prose_paragraph_filled() {
             sub(/^[[:space:]]*(\/\*\*?|\*|\/\/\/?)[[:space:]]*/, "", body)
             flowing = (inside || slashed) && !in_code && body != "" && body !~ /^\||https?:\/\// &&
                 body !~ /[^[:space:]]   *[^[:space:]]/ && text !~ /@end(code|verbatim)/ && text !~ /^[[:space:]]*\/\/[[:space:]]{4,}/
-            continues = flowing && body !~ /^(@|- |[0-9]+\. |[A-Z][A-Za-z]*( [A-Za-z]+){0,2}: )/ && !opens
+            block_tag = body ~ /^@[a-z]/ && body !~ /^@(c|p|ref|b|a|e|em)[[:space:]]/
+            continues = flowing && !block_tag && body !~ /^(- |[0-9]+\. |[A-Z][A-Za-z]*( [A-Za-z]+){0,2}: )/ && !opens
             if (!(continues && previous_flowing && previous_kind == (slashed ? "slashed" : "block")))
                 report_paragraph_room()
             if (flowing) hold_paragraph_line(FNR, body, characters(text))
@@ -398,6 +405,39 @@ check_tables_aligned_not_piped() {
 # endregion Comments and Prose
 
 # region Doxygen Blocks
+
+# A tag continuation hangs exactly 4 columns past its `@`, and a bullet or numbered-item continuation
+# aligns under the item's text, since anything else reads as a new paragraph or as ragged alignment.
+# Inline tags like `@c` or `@p` opening a line continue the prose; only block tags start an entry.
+check_continuation_hanging_indent() {
+    local ragged
+    ragged=$(awk '
+        FILENAME == ARGV[1] { added[$1 + 0]; next }
+        {
+            text = $0
+            if (text ~ /^[[:space:]]*\/\*\*/) { inside = 1; anchor = 0; in_code = 0 }
+            if (!inside) next
+            if (text ~ /@(code|verbatim)/) { in_code = 1; anchor = 0 }
+            if (text ~ /@end(code|verbatim)/) { in_code = 0; next }
+            if (text ~ /\*\//) { inside = 0; anchor = 0 }
+            if (in_code) next
+            if (text ~ /^[[:space:]]*(\/\*\*|\*)[[:space:]]*@(brief|param|tparam|return|returns|retval|note|warning|sa|see|throws|pre|post)([^a-z]|$)/) {
+                anchor = index(text, "@") + 4; next
+            }
+            if (text ~ /^[[:space:]]*\*[[:space:]]+(-|[0-9]+\.) /) {
+                match(text, /^[[:space:]]*\*[[:space:]]+(-|[0-9]+\.)[[:space:]]+/); anchor = RLENGTH + 1; next
+            }
+            block_tag = text ~ /^[[:space:]]*\*[[:space:]]*@[a-z]/ && text !~ /^[[:space:]]*\*[[:space:]]*@(c|p|ref|b|a|e|em)[[:space:]]/
+            if (text ~ /^[[:space:]]*\*[[:space:]]*$/ || block_tag || text ~ /^[[:space:]]*\*\//) { anchor = 0; next }
+            if (anchor && (FNR in added)) {
+                match(text, /^[[:space:]]*\*[[:space:]]*/)
+                if (RLENGTH + 1 != anchor) printf "line %d: continuation starts at column %d, expected %d\n", FNR, RLENGTH + 1, anchor
+            }
+        }' "$staged_lines_path" "$staged_blob")
+    [ -z "$ragged" ] || fail "$ragged" \
+        "$file misaligns a continuation line - a tag continuation hangs 4 columns past its @, a bullet or" \
+        "            numbered-item continuation aligns under the item text:"
+}
 
 # @copydoc belongs to the family header, where each backend is declared once beside the verb it copies
 # from. In a backend's own file it duplicates that link at the definition, so the same sentence arrives
@@ -1519,6 +1559,7 @@ judge_path() {
         check_doxygen_trailers
         check_section_spacing
         check_docblock_spacing
+        check_continuation_hanging_indent
         check_lone_brief
         check_brief_length
         check_file_header
