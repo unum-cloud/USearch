@@ -1688,28 +1688,20 @@ static bool rejects_matches(usearch_matches_span_t const& matches, std::size_t c
     return false;
 }
 
-/** Lands @p matched staged rows of keys and @p score_dtype scores into @p matches from row @p first,
- *  widening the scores to the ABI's double. */
-template <typename key_type_, typename score_type_>
-static void land_matches(usearch_matches_span_t const& matches, std::size_t first, std::size_t matched,
-                         std::span<key_type_ const> keys, std::span<score_type_ const> scores,
-                         nk_dtype_t score_dtype) noexcept {
-    std::size_t const wanted = matches.wanted;
-    for (std::size_t match = 0; wanted && match != matched; ++match) {
-        std::span<key_type_ const> const keys_row = keys.subspan(match * wanted, wanted);
-        std::memcpy(reinterpret_cast<char*>(matches.keys) + (first + match) * matches.keys_stride, keys_row.data(),
-                    keys_row.size_bytes());
+/** Widens @p staged, the engine's scores tagged @p staged_dtype, row by row into the ABI's doubles. */
+template <typename score_type_>
+static void land_scores(nk::matrix_view<score_type_> staged, nk_dtype_t staged_dtype,
+                        nk::matrix_span<f64_t> scores) noexcept {
+    for (std::size_t row = 0; staged.extent(1) && row != staged.extent(0); ++row) {
         [[maybe_unused]] nk_status_t const cast = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
-            scores.subspan(match * wanted, wanted).data(), score_dtype,
-            reinterpret_cast<char*>(matches.scores) + (first + match) * matches.scores_stride, nk_f64_k, wanted,
-            nullptr);
+            staged.row(row).data(), staged_dtype, scores.row(row).data(), nk_f64_k, staged.extent(1), nullptr);
         assert(cast == nk_success_k && "The serial tier casts every dtype pair");
     }
 }
 
-/** The matching verbs' sink on one serving arm: keys and @p score_type_ scores, tagged
- *  @p score_dtype, stage at the engine's width and widen to the ABI's double one output row at a
- *  time; @p rows_per_query input rows share one output row, and @p count output rows land. */
+/** The matching verbs' sink on one serving arm: keys land in the caller's plane as they are, while
+ *  @p score_type_ scores, tagged @p score_dtype, stage at the engine's width and widen to the ABI's
+ *  double; @p rows_per_query input rows share one output row, and @p count output rows land. */
 template <typename score_type_, typename variant_type_, typename verb_type_>
 static void match_dense_rows(variant_type_& variant, usearch_executor_t executor,                //
                              std::size_t count, usearch_rows_view_t const& rows,                 //
@@ -1721,25 +1713,25 @@ static void match_dense_rows(variant_type_& variant, usearch_executor_t executor
     using key_t = typename variant_type_::key_t;
     std::size_t const wanted = matches.wanted;
     if (rejects_matches(matches, count, outcome)) return;
+    nk::matrix_span<key_t> const keys {reinterpret_cast<char*>(matches.keys),
+                                       rows_shape_of<key_t>(count, matches.keys_stride, wanted)};
+    nk::matrix_span<f64_t> const scores {reinterpret_cast<char*>(matches.scores),
+                                         rows_shape_of<f64_t>(count, matches.scores_stride, wanted)};
     auto make_sink = [&](std::size_t chunk, status_t& staged) noexcept {
-        std::size_t const matches_per_chunk = chunk / rows_per_query;
-        growing_buffer<key_t> staged_keys {global_allocator};
         growing_buffer<score_type_> staged_scores {global_allocator};
-        if (failed(staged_keys.resize(matches_per_chunk * wanted)) ||
-            failed(staged_scores.resize(matches_per_chunk * wanted)))
-            staged = status_t::bad_alloc_k;
-        return [&, staged_keys = std::move(staged_keys), staged_scores = std::move(staged_scores)](
+        if (failed(staged_scores.resize(chunk / rows_per_query * wanted))) staged = status_t::bad_alloc_k;
+        return [&, staged_scores = std::move(staged_scores)](
                    specialized_index<variant_type_> view, typename variant_type_::vectors_view_t chunk_rows,
                    typename variant_type_::executor_t& executor, typename variant_type_::search_config_t config,
                    std::size_t resolved, std::size_t taking) mutable noexcept {
             std::size_t const first = resolved / rows_per_query, matched = taking / rows_per_query;
-            std::span<key_t> const keys {staged_keys.data(), matched * wanted};
-            std::span<score_type_> const scores {staged_scores.data(), matched * wanted};
+            nk::range_t const landing = nk::range(first, first + matched);
+            nk::matrix_span<score_type_> const chunk_scores {staged_scores.data(), matched, wanted};
             expected<typename variant_type_::search_result_t> const found = verb(
-                view, chunk_rows, executor, config, keys, scores,
+                view, chunk_rows, executor, config, keys(landing, nk::slice), chunk_scores,
                 std::span<std::size_t> {matches.counts + first, matched});
             if (!found) return found;
-            land_matches<key_t, score_type_>(matches, first, matched, keys, scores, score_dtype);
+            land_scores<score_type_>(chunk_scores, score_dtype, scores(landing, nk::slice));
             return found;
         };
     };
@@ -2079,7 +2071,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                     arguments->expansion_factor, arguments->progress, arguments->progress_state, arguments->stats,
                     outcome,
                     [&](auto view, auto rows, auto& executor, auto config, auto keys, auto distances, auto counts) {
-                        return view.search(rows, executor, config, matches.wanted, keys, distances, counts, predicate);
+                        return view.search(rows, executor, config, keys, distances, counts, predicate);
                     });
             };
             if (!keyed.callback) search_with(dummy_predicate_t {});
@@ -2285,17 +2277,18 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                 auto walk = [&](std::size_t width, usearch_progress_callback_t progress) noexcept {
                     if (failed(staged_keys.resize(count * width)) || failed(staged_products.resize(count * width)))
                         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to stage the products");
+                    nk::matrix_span<key_t> const kept_keys {staged_keys.data(), count, width};
+                    nk::matrix_span<dot_result_t> const kept_products {staged_products.data(), count, width};
                     auto make_sink = [&](std::size_t, status_t&) noexcept {
                         return [&](specialized_index<variant_type_> view,
                                    typename variant_type_::vectors_view_t chunk_rows,
                                    typename variant_type_::executor_t& executor,
                                    typename variant_type_::search_config_t config, std::size_t resolved,
                                    std::size_t taking) noexcept {
-                            return view.multiply(
-                                chunk_rows, executor, config, width,
-                                to_writable_span(staged_keys).subspan(resolved * width, taking * width),
-                                to_writable_span(staged_products).subspan(resolved * width, taking * width),
-                                to_writable_span(scored).subspan(resolved, taking));
+                            nk::range_t const chunk = nk::range(resolved, resolved + taking);
+                            return view.multiply(chunk_rows, executor, config, kept_keys(chunk, nk::slice),
+                                                 kept_products(chunk, nk::slice),
+                                                 to_writable_span(scored).subspan(resolved, taking));
                         };
                     };
                     return for_each_dense_chunk(variant, arguments->executor, count, arguments->left, 1,
@@ -2326,13 +2319,15 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                     arena->memory.allocate(written * sizeof(usearch_key_t), alignof(usearch_key_t)));
                 auto* const scores = reinterpret_cast<usearch_distance_t*>(
                     arena->memory.allocate(written * sizeof(usearch_distance_t), alignof(usearch_distance_t)));
+                nk::matrix_span<key_t> const kept_keys {staged_keys.data(), count, width};
+                nk::matrix_span<dot_result_t> const kept_products {staged_products.data(), count, width};
                 for (std::size_t row = 0; keys && scores && row != count; ++row) {
                     std::size_t const kept = offsets[row + 1] - offsets[row];
                     if (!kept) continue;
-                    std::memcpy(keys + offsets[row], staged_keys.data() + row * width, kept * sizeof(key_t));
+                    std::memcpy(keys + offsets[row], kept_keys.row(row).data(), kept * sizeof(key_t));
                     [[maybe_unused]] nk_status_t const cast = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
-                        staged_products.data() + row * width, dot_result_t::dtype(), scores + offsets[row], nk_f64_k,
-                        kept, nullptr);
+                        kept_products.row(row).data(), dot_result_t::dtype(), scores + offsets[row], nk_f64_k, kept,
+                        nullptr);
                     assert(cast == nk_success_k && "The serial tier casts every dtype pair");
                 }
                 arena->busy.unlock();
@@ -2396,14 +2391,15 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                         f32_t const score_scale = requested_scale > 0
                                                       ? requested_scale
                                                       : 1 / std::sqrt(static_cast<f32_t>(view.dimensions()));
+                        nk::matrix_span<f32_t> const attended {staged_outputs.data(), taking, columns};
                         expected<typename variant_type_::search_result_t> const found = view.attend(
-                            chunk_rows, head_count, value_lookup, score_scale,
-                            {staged_outputs.data(), taking * columns}, {staged_carry.data(), taking}, executor, config);
+                            chunk_rows, head_count, value_lookup, score_scale, attended, {staged_carry.data(), taking},
+                            executor, config);
                         if (!found) return found;
                         for (std::size_t row = 0; row != taking; ++row) {
                             [[maybe_unused]] nk_status_t const cast =
                                 dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
-                                    staged_outputs.data() + row * columns, nk_f32_k,
+                                    attended.row(row).data(), nk_f32_k,
                                     outputs_base + (resolved + row) * outputs.stride, outputs_dtype, columns, nullptr);
                             assert(cast == nk_success_k && "The serial tier casts every dtype pair");
                             if (carry)
@@ -2440,8 +2436,7 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                     nk_f64_k, arguments->expansion_factor, arguments->progress, arguments->progress_state,
                     arguments->stats, outcome,
                     [&](auto view, auto rows, auto& executor, auto config, auto keys, auto scores, auto counts) {
-                        return view.maxsim(rows, rows_per_query, executor, config, matches.wanted, keys, scores,
-                                           counts);
+                        return view.maxsim(rows, rows_per_query, executor, config, keys, scores, counts);
                     });
         },
         arguments->index->variants);

@@ -170,18 +170,20 @@ std::size_t test_dense_indexes_indexer_search(u64_t seed) {
         auto const queries = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
         dense_indexer_inputs<scalar_t> const inputs = dense_make_indexer_inputs(vectors.view(), queries_count);
         typename indexes_type_::search_config_t const exhaustive {rows_count, wanted};
-        std::vector<key_t> found_keys(queries_count * wanted);
-        std::vector<dense_distance_t> found_distances(queries_count * wanted);
+        auto found_keys = nk::matrix<key_t>::zeros({queries_count, wanted}).value;
+        auto found_distances = nk::matrix<dense_distance_t>::zeros({queries_count, wanted}).value;
         std::array<std::size_t, queries_count> counts;
-        failures += expect(
-            succeeded(indexes
-                          .search(queries, inputs.heads(), driver.executor, exhaustive, wanted, std::span {found_keys},
-                                  std::span {found_distances}, std::span {counts})
-                          .status));
-        for (std::size_t query = 0; query != queries_count; ++query)
-            failures += dense_expect_indexer_matches(
-                inputs, query, std::span<key_t const> {found_keys.data() + query * wanted, counts[query]},
-                std::span<dense_distance_t const> {found_distances.data() + query * wanted, counts[query]});
+        failures += expect(succeeded(indexes
+                                         .search(queries, inputs.heads(), driver.executor, exhaustive,
+                                                 found_keys.span(), found_distances.span(), std::span {counts})
+                                         .status));
+        nk::matrix_view<key_t> const ranked_keys = found_keys.view();
+        nk::matrix_view<dense_distance_t> const ranked_distances = found_distances.view();
+        for (std::size_t query = 0; query != queries_count; ++query) {
+            nk::range_t const kept = nk::range(std::size_t {0}, counts[query]);
+            failures += dense_expect_indexer_matches(inputs, query, ranked_keys(query, kept, nk::slice).as_vector(),
+                                                     ranked_distances(query, kept, nk::slice).as_vector());
+        }
         return failures;
     }
 }
@@ -221,12 +223,12 @@ std::size_t test_dense_indexes_attend(u64_t seed) {
         typename indexes_type_::search_config_t const exhaustive {nodes_count};
         auto const queries = make_vectors<scalar_t>(tokens_count * 4, dimensions,
                                                     stream_key(seed, "indexes_attend", 2));
-        std::vector<f32_t> outputs(queries.extent(0) * dimensions);
+        auto outputs = nk::matrix<f32_t>::zeros({queries.extent(0), dimensions}).value;
         std::vector<dense_softmax_state_t> carry(queries.extent(0));
         auto attend = [&](nk::matrix_view<scalar_t> heads, std::size_t head_count, lookup_t lookup, f32_t score_scale,
                           typename indexes_type_::search_config_t config) noexcept {
             auto const [attended, status] = indexes.attend(
-                heads, head_count, lookup, score_scale, std::span {outputs}.first(heads.extent(0) * dimensions),
+                heads, head_count, lookup, score_scale, outputs(nk::range(std::size_t {0}, heads.extent(0)), nk::slice),
                 std::span {carry}.first(heads.extent(0)), driver.executor, config);
             failures += expect(failed(status) || attended.count == heads.extent(0));
             return status;
@@ -236,7 +238,7 @@ std::size_t test_dense_indexes_attend(u64_t seed) {
             f32_t const score_scale = dense_attend_scale(
                 dense_oracle_dots(dense_widened_rows(heads, index_t::vector_dtype_k),
                                   dense_widened_rows(vectors.view(), index_t::vector_dtype_k), dimensions));
-            std::span<f32_t const> const attended {outputs.data(), heads.extent(0) * dimensions};
+            nk::matrix_view<f32_t> const attended = outputs(nk::range(std::size_t {0}, heads.extent(0)), nk::slice);
             std::span<dense_softmax_state_t const> const carried {carry.data(), heads.extent(0)};
             failures += expect(
                 succeeded(attend(heads, head_count, table.lookup(nodes_count), score_scale, exhaustive)));
@@ -255,7 +257,8 @@ std::size_t test_dense_indexes_attend(u64_t seed) {
         failures += expect_eq(attend(queries.view(), 3, table.lookup(nodes_count), 1, exhaustive),
                               status_t::shape_mismatch_k);
         failures += expect_eq(indexes
-                                  .attend(queries.view(), 4, table.lookup(nodes_count), 1, std::span {outputs}.first(1),
+                                  .attend(queries.view(), 4, table.lookup(nodes_count), 1,
+                                          outputs(nk::range(std::size_t {0}, std::size_t {1}), nk::slice),
                                           std::span {carry}, driver.executor, exhaustive)
                                   .status,
                               status_t::config_mismatch_k);

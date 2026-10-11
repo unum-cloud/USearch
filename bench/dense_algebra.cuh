@@ -375,10 +375,11 @@ inline void report_attend_metrics(std::size_t rows_count, std::size_t head_count
  *  row in @p outputs against full attention over every key, read from `--reference` or computed in one pass. */
 template <typename scalar_type_, typename streamed_dataset_type_>
 bool judge_attention(streamed_dataset_type_ const& streamed, algebra_settings_t const& algebra,
-                     algebra_inputs<scalar_type_> const& inputs, std::span<f32_t> outputs) {
+                     algebra_inputs<scalar_type_> const& inputs, nk::matrix_span<f32_t> outputs) {
     std::size_t const judged = inputs.judged, columns = inputs.values.columns;
     if (inputs.values.scale != 1)
-        for (f32_t& value : outputs.first(judged * columns)) value /= inputs.values.scale;
+        for (std::size_t row = 0; row != judged; ++row)
+            for (std::size_t column = 0; column != columns; ++column) outputs(row, column) /= inputs.values.scale;
     auto const started = steady_clock_t::now();
     std::vector<exact_attention_t> const exact = algebra.reference_path.empty()
                                                      ? exact_attention(streamed.vectors, searched_rows(streamed),
@@ -393,7 +394,7 @@ bool judge_attention(streamed_dataset_type_ const& streamed, algebra_settings_t 
     for (std::size_t row = 0; row != judged; ++row) {
         double difference = 0, magnitude = 0;
         for (std::size_t column = 0; column != columns; ++column) {
-            double const delta = double(outputs[row * columns + column]) - exact[row].output[column];
+            double const delta = double(outputs(row, column)) - exact[row].output[column];
             difference += delta * delta;
             magnitude += exact[row].output[column] * exact[row].output[column];
         }

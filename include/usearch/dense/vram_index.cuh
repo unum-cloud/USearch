@@ -2915,7 +2915,8 @@ struct dense_vram_index {
      *      boundary, as wide as the keys and stored like them, in memory this device reads; a null row refuses the
      *      call with @c shape_mismatch_k.
      *  @param[in] score_scale The factor turning a dot into a logit.
-     *  @param[out] outputs The attended rows, @b [rows,dimensions] row-major, in host or device memory.
+     *  @param[out] outputs The attended rows, one per query row, as wide as the keys and packed, in host or
+     *      device memory.
      *  @param[out] carry Each row's softmax state, one per row, in host or device memory.
      *  @param[inout] context The stream every transfer and the launch ride.
      *  @param[in] config The per-call breadth; @c count plays no part.
@@ -2925,21 +2926,22 @@ struct dense_vram_index {
      */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
-                                     f32_t score_scale, std::span<f32_t> outputs,
+                                     f32_t score_scale, nk::matrix_span<f32_t> outputs,
                                      std::span<dense_softmax_state_t> carry, dense_traversal_context_t& context,
                                      search_config_t config = {},
                                      completion_t completion = completion_t::blocking_k) noexcept {
         std::size_t const rows_count = queries.extent(0);
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
-        if (outputs.size() != rows_count * dimensions() || carry.size() != rows_count)
+        if (outputs.extent(0) != rows_count || outputs.extent(1) != dimensions() || carry.size() != rows_count)
             return {{}, status_t::config_mismatch_k};
+        if (!outputs.is_contiguous()) return {{}, status_t::unsupported_layout_k};
         expected<f32_t*> const landed = submit_attend_(queries, head_count, value_lookup, score_scale, context, config,
                                                        1, size());
         if (!landed || !rows_count) return {{}, landed.status};
         cudaStream_t const stream = context.stream();
-        if (cudaMemcpyAsync(outputs.data(), landed.value, outputs.size_bytes(), cudaMemcpyDefault, stream) !=
+        if (cudaMemcpyAsync(outputs.data(), landed.value, outputs.numel() * sizeof(f32_t), cudaMemcpyDefault, stream) !=
                 cudaSuccess ||
-            cudaMemcpyAsync(carry.data(), landed.value + outputs.size(), carry.size_bytes(), cudaMemcpyDefault,
+            cudaMemcpyAsync(carry.data(), landed.value + outputs.numel(), carry.size_bytes(), cudaMemcpyDefault,
                             stream) != cudaSuccess)
             return {{}, status_t::device_error_k};
         expected<search_result_t> const attended = settle_({{rows_count}, status_t::success_k}, rows_count, context,

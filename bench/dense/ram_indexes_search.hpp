@@ -418,10 +418,11 @@ bool run_search(streamed_dataset_type_& streamed) {
             batch = vectors_view_t {streamed.staging.row(0).data(), count, dimensions};
         }
 
-        std::span<key_t> const keys {bench.results.hit_rows.row(base).data(), count * wanted};
-        std::span<dense_distance_t> const distances {bench.results.hit_distances.row(base).data(), count * wanted};
+        nk::matrix_span<key_t> const keys = bench.results.hit_rows(nk::range(base, base + count), nk::slice);
+        nk::matrix_span<dense_distance_t> const distances = bench.results.hit_distances(nk::range(base, base + count),
+                                                                                        nk::slice);
         auto search = [&](auto const&... ranking) noexcept {
-            return bench.indexes.search(batch, ranking..., bench.executor, config, wanted, keys, distances,
+            return bench.indexes.search(batch, ranking..., bench.executor, config, keys, distances,
                                         std::span<std::size_t> {counts.data(), count});
         };
         auto const [result, status] = [&]() noexcept {

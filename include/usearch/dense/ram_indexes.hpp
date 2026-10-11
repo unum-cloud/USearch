@@ -766,8 +766,7 @@ struct dense_ram_indexes {
      *  @param[in] queries The batch, one query per row, in the shards' stored scalar type.
      *  @param[inout] executor The threads and their scratch; one query occupies one at a time.
      *  @param[in] config The per-shard search configuration, applied uniformly.
-     *  @param[in] wanted Matches kept per query - the row width of @p keys and @p distances.
-     *  @param[out] keys Merged rankings, @b [queries,wanted] row-major.
+     *  @param[out] keys Merged rankings, one query per row, as many matches as its width.
      *  @param[out] distances Distances of the same rankings, parallel to @p keys.
      *  @param[out] counts Per-query merged hit counts, one per query row.
      *
@@ -775,9 +774,9 @@ struct dense_ram_indexes {
      *  what the merged result reports, and every other query's outputs stand.
      */
     expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     std::size_t wanted, std::span<key_t> keys, std::span<distance_t> distances,
+                                     nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
                                      std::span<std::size_t> counts) noexcept {
-        return search_if(queries, executor, config, wanted, keys, distances, counts, dummy_predicate_t {});
+        return search_if(queries, executor, config, keys, distances, counts, dummy_predicate_t {});
     }
 
     /**
@@ -788,13 +787,12 @@ struct dense_ram_indexes {
      *  @return @c config_mismatch_k unless the shards walk by dot.
      */
     expected<search_result_t> search(vectors_view_t queries, dense_indexer_heads<scalar_t> const& heads,
-                                     executor_t& executor, search_config_t config, std::size_t wanted,
-                                     std::span<key_t> keys, std::span<distance_t> distances,
-                                     std::span<std::size_t> counts) noexcept
+                                     executor_t& executor, search_config_t config, nk::matrix_span<key_t> keys,
+                                     nk::matrix_span<distance_t> distances, std::span<std::size_t> counts) noexcept
         requires(!nk::is_integral_dtype<scalar_t>())
     {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
-        return search_rows_(queries, heads, executor, config, wanted, keys, distances, counts, dummy_predicate_t {});
+        return search_rows_(queries, heads, executor, config, keys, distances, counts, dummy_predicate_t {});
     }
 
     /**
@@ -806,9 +804,9 @@ struct dense_ram_indexes {
      */
     template <typename predicate_type_>
     expected<search_result_t> search_if(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                        std::size_t wanted, std::span<key_t> keys, std::span<distance_t> distances,
+                                        nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
                                         std::span<std::size_t> counts, predicate_type_&& predicate) noexcept {
-        return search_rows_(queries, dummy_heads_t {}, executor, config, wanted, keys, distances, counts, predicate);
+        return search_rows_(queries, dummy_heads_t {}, executor, config, keys, distances, counts, predicate);
     }
 
     /**
@@ -818,29 +816,29 @@ struct dense_ram_indexes {
      *  @param[in] left The left-hand rows, one walk per row, in the shards' stored scalar type.
      *  @param[inout] executor The threads and their scratch; one row occupies one at a time.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
-     *  @param[in] wanted Pairs kept per row - the row width of @p keys and @p products.
-     *  @param[out] keys The key of each kept pair, @b [rows,wanted] row-major.
+     *  @param[out] keys The key of each kept pair, one left-hand row per row, as many pairs as its width.
      *  @param[out] products The dot of each kept pair, parallel to @p keys.
-     *  @param[out] counts Pairs scored per row across every shard, above @p wanted when truncated.
+     *  @param[out] counts Pairs scored per row across every shard, above the row width when truncated.
      *
      *  A full row keeps an arbitrary subset of its pairs. A thread that fails stops its own row and
      *  leaves the rest to finish; the first failure is what the merged result reports. Refused with
      *  @c config_mismatch_k unless the shards walk by dot.
      */
     expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
-                                       std::size_t wanted, std::span<key_t> keys, std::span<dot_result_t> products,
+                                       nk::matrix_span<key_t> keys, nk::matrix_span<dot_result_t> products,
                                        std::span<std::size_t> counts) noexcept {
         std::size_t const rows_count = left.extent(0);
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
-        if (counts.size() != rows_count || keys.size() < rows_count * wanted || products.size() < rows_count * wanted)
-            return {{}, status_t::config_mismatch_k};
+        if (counts.size() != rows_count) return {{}, status_t::config_mismatch_k};
+        if (status_t const refusal = dense_rankings_refusal(rows_count, keys, products); failed(refusal))
+            return {{}, refusal};
         if (!rows_count) return {{}, status_t::success_k};
 
         auto multiply_row = [&](std::size_t row, std::size_t, traversal_t& traversal,
                                 std::span<dense_node_id_t const> watermarks) noexcept {
             dense_multiply_fold<key_t, dot_result_t, dense_keyed_ids<keys_column_t>> fold {
-                keys.subspan(row * wanted, wanted), products.subspan(row * wanted, wanted)};
+                to_span(keys.row(row).as_vector()), to_span(products.row(row).as_vector())};
             status_t refusal = status_t::success_k;
             for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
                 fold.resolve.keys = &shards_[shard].keys;
@@ -866,26 +864,25 @@ struct dense_ram_indexes {
      *  @param[inout] executor The threads and their scratch; one token row occupies one at a time.
      *  @param[in] config The per-shard walk configuration, applied uniformly; each row ranks as many
      *      tokens as its expansion factor.
-     *  @param[in] wanted Keys kept per query - the row width of @p keys and @p scores.
-     *  @param[out] keys The best-scoring keys of each query, @b [queries,wanted] row-major.
+     *  @param[out] keys The best-scoring keys of each query, one query per row, as many keys as its width.
      *  @param[out] scores Their summed maxima, largest first, parallel to @p keys.
-     *  @param[out] counts Keys written per query, at most @p wanted.
+     *  @param[out] counts Keys written per query, at most the width of @p keys.
      *
      *  A key some row never ranked misses that row's maximum, so with non-negative per-row maxima
      *  a score lands below its exact value, never above. Refused with @c config_mismatch_k unless the
      *  shards walk by dot.
      */
     expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
-                                     search_config_t config, std::size_t wanted, std::span<key_t> keys,
-                                     std::span<f64_t> scores, std::span<std::size_t> counts) noexcept {
+                                     search_config_t config, nk::matrix_span<key_t> keys, nk::matrix_span<f64_t> scores,
+                                     std::span<std::size_t> counts) noexcept {
         std::size_t const rows_count = queries.extent(0);
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
         std::size_t const groups_count = rows_count / rows_per_query;
-        if (counts.size() != groups_count || keys.size() < groups_count * wanted ||
-            scores.size() < groups_count * wanted)
-            return {{}, status_t::config_mismatch_k};
+        if (counts.size() != groups_count) return {{}, status_t::config_mismatch_k};
+        if (status_t const refusal = dense_rankings_refusal(groups_count, keys, scores); failed(refusal))
+            return {{}, refusal};
         if (!groups_count) return {{}, status_t::success_k};
 
         // Every token row keeps its whole ranked pool, its keys resolved and merged across the shards.
@@ -893,17 +890,17 @@ struct dense_ram_indexes {
         growing_buffer<key_t, forkunion_allocator_t> row_keys {allocator_};
         growing_buffer<distance_t, forkunion_allocator_t> row_distances {allocator_};
         growing_buffer<std::size_t, forkunion_allocator_t> row_counts {allocator_};
-        dense_maxsim_reducer<key_t, forkunion_allocator_t> reduce {allocator_};
+        dense_maxsim_reducer<key_t, distance_t, forkunion_allocator_t> reduce {allocator_};
         if (failed(row_keys.resize_uninitialized(rows_count * width)) ||
             failed(row_distances.resize_uninitialized(rows_count * width)) ||
-            failed(row_counts.resize_uninitialized(rows_count)) ||
-            failed(reduce.reserve(rows_per_query, width, wanted)))
+            failed(row_counts.resize_uninitialized(rows_count)) || failed(reduce.reserve(rows_per_query, width)))
             return {{}, status_t::bad_alloc_k};
-        expected<search_result_t> ranked = search(queries, executor, config, width, to_writable_span(row_keys),
-                                                  to_writable_span(row_distances), to_writable_span(row_counts));
+        nk::matrix_span<key_t> const ranked_keys {row_keys.data(), rows_count, width};
+        nk::matrix_span<distance_t> const ranked_distances {row_distances.data(), rows_count, width};
+        expected<search_result_t> ranked = search(queries, executor, config, ranked_keys, ranked_distances,
+                                                  to_writable_span(row_counts));
         if (!ranked) return ranked;
-        ranked.value.count = reduce(to_span(row_keys), to_span(row_distances), to_span(row_counts), keys, scores,
-                                    counts);
+        ranked.value.count = reduce(ranked_keys, ranked_distances, to_span(row_counts), keys, scores, counts);
         return ranked;
     }
 
@@ -919,7 +916,7 @@ struct dense_ram_indexes {
      *      each shard's key column, so only scored nodes resolve; one without a row refuses with
      *      @c shape_mismatch_k.
      *  @param[in] score_scale The factor turning a dot into a logit.
-     *  @param[out] outputs The attended rows, one per query row, as wide as the keys.
+     *  @param[out] outputs The attended rows, one per query row, as wide as the keys and packed.
      *  @param[out] carry Every query row's softmax state, which merges this call with other branches.
      *  @param[inout] executor The threads and their scratch; one token occupies one at a time.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
@@ -927,15 +924,16 @@ struct dense_ram_indexes {
      */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
-                                     f32_t score_scale, std::span<f32_t> outputs,
+                                     f32_t score_scale, nk::matrix_span<f32_t> outputs,
                                      std::span<dense_softmax_state_t> carry, executor_t& executor,
                                      search_config_t config = {}) noexcept {
         std::size_t const rows_count = queries.extent(0), columns = queries.extent(1);
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
-        if (outputs.size() != rows_count * columns || carry.size() != rows_count)
+        if (outputs.extent(0) != rows_count || outputs.extent(1) != columns || carry.size() != rows_count)
             return {{}, status_t::config_mismatch_k};
+        if (!outputs.is_contiguous()) return {{}, status_t::unsupported_layout_k};
         if (!rows_count) return {{}, status_t::success_k};
 
         auto attend_token = [&](std::size_t token, std::size_t, traversal_t& traversal,
@@ -952,7 +950,7 @@ struct dense_ram_indexes {
                 queries(nk::range(first, first + head_count), nk::slice),
                 shard_lookup,
                 score_scale,
-                outputs.subspan(first * columns, head_count * columns),
+                outputs(nk::range(first, first + head_count), nk::slice),
                 carry.subspan(first, head_count),
                 status};
             rescoring.clear();
@@ -1656,20 +1654,20 @@ struct dense_ram_indexes {
     /** The batched @ref search_if under @p heads, which only a @c dummy_predicate_t accompanies. */
     template <typename heads_type_, typename predicate_type_>
     expected<search_result_t> search_rows_(vectors_view_t queries, heads_type_ const& heads, executor_t& executor,
-                                           search_config_t config, std::size_t wanted, std::span<key_t> keys,
-                                           std::span<distance_t> distances, std::span<std::size_t> counts,
+                                           search_config_t config, nk::matrix_span<key_t> keys,
+                                           nk::matrix_span<distance_t> distances, std::span<std::size_t> counts,
                                            predicate_type_&& predicate) noexcept {
         std::size_t const queries_count = queries.extent(0);
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
-        if (counts.size() != queries_count || keys.size() < queries_count * wanted ||
-            distances.size() < queries_count * wanted)
-            return {{}, status_t::config_mismatch_k};
+        if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
+        if (status_t const refusal = dense_rankings_refusal(queries_count, keys, distances); failed(refusal))
+            return {{}, refusal};
         if (!queries_count) return {{}, status_t::success_k};
 
         auto search_row = [&](std::size_t query, std::size_t, traversal_t& traversal,
                               std::span<dense_node_id_t const> watermarks) noexcept {
-            std::span<key_t> const keys_row = keys.subspan(query * wanted, wanted);
-            std::span<distance_t> const distances_row = distances.subspan(query * wanted, wanted);
+            std::span<key_t> const keys_row = to_span(keys.row(query).as_vector());
+            std::span<distance_t> const distances_row = to_span(distances.row(query).as_vector());
             vector_view_t const query_vector = queries.row(query).as_vector();
             std::size_t found_count = 0;
             status_t refusal = status_t::success_k;

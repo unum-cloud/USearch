@@ -54,18 +54,18 @@ bool run_indexes_algebra(streamed_dataset_type_& streamed, algebra_settings_t co
     config.synchronization = synchronization_t::immutable_k;
     std::size_t const batch_rows = streamed_batch_rows(settings, query_count);
 
-    std::vector<key_t> keys(batch_rows * wanted);
-    std::vector<dot_result_t> products(batch_rows * wanted);
+    auto keys = nk::matrix<key_t>::zeros({batch_rows, wanted}).value;
+    auto products = nk::matrix<dot_result_t>::zeros({batch_rows, wanted}).value;
     std::vector<std::size_t> counts(batch_rows);
     telemetry_lane_t sums;
     double multiply_seconds = 0;
     for (std::size_t offset = 0; offset < query_count;) {
         std::size_t const batch = std::min(batch_rows, query_count - offset);
+        nk::range_t const landing = nk::range(std::size_t {0}, batch);
         auto started = steady_clock_t::now();
         auto const [result, status] = bench.indexes.multiply(
-            inputs.rows(nk::range(offset, offset + batch), nk::slice), bench.executor, config, wanted,
-            std::span {keys.data(), batch * wanted}, std::span {products.data(), batch * wanted},
-            std::span {counts.data(), batch});
+            inputs.rows(nk::range(offset, offset + batch), nk::slice), bench.executor, config, keys(landing, nk::slice),
+            products(landing, nk::slice), std::span {counts.data(), batch});
         multiply_seconds += stdc::duration<double>(steady_clock_t::now() - started).count();
         if (failed(status)) {
             fmt::println("Multiply refused a batch of {} rows at row {}: {}", batch, offset, status_to_string(status));
@@ -92,16 +92,17 @@ bool run_indexes_algebra(streamed_dataset_type_& streamed, algebra_settings_t co
     }
     attention_value_lookup<typename index_t::fragment_t> const lookup {device_values.base(), pitch};
     std::vector<dense_softmax_state_t> carry(attend_rows);
-    std::vector<f32_t> judged_outputs(judged * columns);
-    f32_t* const outputs = reinterpret_cast<f32_t*>(device_outputs.get());
+    auto judged_outputs = nk::matrix<f32_t>::zeros({judged, columns}).value;
+    nk::matrix_span<f32_t> const outputs {reinterpret_cast<f32_t*>(device_outputs.get()), attend_rows, columns};
     sums = telemetry_lane_t {};
     double attend_seconds = 0;
     for (std::size_t offset = 0; offset < query_count;) {
         std::size_t const batch = std::min(attend_rows, query_count - offset);
         auto started = steady_clock_t::now();
-        auto const [result, status] = bench.indexes.attend(
-            inputs.rows(nk::range(offset, offset + batch), nk::slice), head_count, lookup, inputs.score_scale,
-            std::span {outputs, batch * columns}, std::span {carry.data(), batch}, bench.executor, config);
+        auto const [result, status] = bench.indexes.attend(inputs.rows(nk::range(offset, offset + batch), nk::slice),
+                                                           head_count, lookup, inputs.score_scale,
+                                                           outputs(nk::range(std::size_t {0}, batch), nk::slice),
+                                                           std::span {carry.data(), batch}, bench.executor, config);
         attend_seconds += stdc::duration<double>(steady_clock_t::now() - started).count();
         if (failed(status)) {
             fmt::println("Attend refused a batch of {} queries at query {}: {}", batch, offset,
@@ -110,7 +111,7 @@ bool run_indexes_algebra(streamed_dataset_type_& streamed, algebra_settings_t co
         }
         sums.computed_distances += result.computed_distances;
         std::size_t const judged_rows = offset < judged ? std::min(batch, judged - offset) : 0;
-        if (judged_rows && cudaMemcpy(judged_outputs.data() + offset * columns, outputs,
+        if (judged_rows && cudaMemcpy(judged_outputs.row(offset).data(), outputs.data(),
                                       judged_rows * columns * sizeof(f32_t), cudaMemcpyDeviceToHost) != cudaSuccess) {
             fmt::println("Failed to read back the attended rows");
             return false;
@@ -118,7 +119,7 @@ bool run_indexes_algebra(streamed_dataset_type_& streamed, algebra_settings_t co
         offset += batch;
     }
     report_attend_metrics(query_count, head_count, nodes_count, attend_seconds, sums.computed_distances);
-    return judge_attention(streamed, algebra, inputs, std::span<f32_t> {judged_outputs});
+    return judge_attention(streamed, algebra, inputs, judged_outputs.span());
 }
 
 /** The algebra workload the cascade ends in: graph products and graph attention over the built shards, judged

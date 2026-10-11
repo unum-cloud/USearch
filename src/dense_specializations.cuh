@@ -659,8 +659,8 @@ struct specialized_index {
     using refine_config_t = typename index_type_::refine_config_t;
     using refine_result_t = typename index_type_::refine_result_t;
     using health_result_t = typename index_type_::health_result_t;
-    using keys_span_t = std::span<key_t>;
-    using distances_span_t = std::span<typename index_type_::distance_t>;
+    using keys_span_t = nk::matrix_span<key_t>;
+    using distances_span_t = nk::matrix_span<typename index_type_::distance_t>;
     using counts_span_t = std::span<std::size_t>;
 
     /** What an attend resolves value rows through: a host callback per batch on RAM, a device call per key on GPU. */
@@ -694,21 +694,20 @@ struct specialized_index {
     expected<refine_result_t> refine(executor_t& executor, refine_config_t config, shard_ticks_t& ticks) noexcept;
     expected<health_result_t> health(executor_t& executor) noexcept;
     expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     std::size_t wanted, keys_span_t keys, distances_span_t distances,
-                                     counts_span_t counts, dummy_predicate_t) noexcept;
+                                     keys_span_t keys, distances_span_t distances, counts_span_t counts,
+                                     dummy_predicate_t) noexcept;
     expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     std::size_t wanted, keys_span_t keys, distances_span_t distances,
-                                     counts_span_t counts, key_predicate_t& predicate) noexcept
+                                     keys_span_t keys, distances_span_t distances, counts_span_t counts,
+                                     key_predicate_t& predicate) noexcept
         requires is_ram_index<index_type_>;
     expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
-                                       std::size_t wanted, keys_span_t keys,
-                                       std::span<typename index_type_::dot_result_t> products,
+                                       keys_span_t keys, nk::matrix_span<typename index_type_::dot_result_t> products,
                                        counts_span_t counts) noexcept;
     expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
-                                     search_config_t config, std::size_t wanted, keys_span_t keys,
-                                     std::span<f64_t> scores, counts_span_t counts) noexcept;
+                                     search_config_t config, keys_span_t keys, nk::matrix_span<f64_t> scores,
+                                     counts_span_t counts) noexcept;
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
-                                     f32_t score_scale, std::span<f32_t> outputs,
+                                     f32_t score_scale, nk::matrix_span<f32_t> outputs,
                                      std::span<us::dense_softmax_state_t> carry, executor_t& executor,
                                      search_config_t config) noexcept;
     status_t save(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
@@ -830,34 +829,34 @@ expected<typename specialized_index<index_type_>::health_result_t> specialized_i
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
-    vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted, keys_span_t keys,
-    distances_span_t distances, counts_span_t counts, dummy_predicate_t) noexcept {
-    return index.search(queries, executor, config, wanted, keys, distances, counts);
+    vectors_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, distances_span_t distances,
+    counts_span_t counts, dummy_predicate_t) noexcept {
+    return index.search(queries, executor, config, keys, distances, counts);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
-    vectors_view_t queries, executor_t& executor, search_config_t config, std::size_t wanted, keys_span_t keys,
-    distances_span_t distances, counts_span_t counts, key_predicate_t& predicate) noexcept
+    vectors_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, distances_span_t distances,
+    counts_span_t counts, key_predicate_t& predicate) noexcept
     requires is_ram_index<index_type_>
 {
-    return index.search_if(queries, executor, config, wanted, keys, distances, counts, predicate);
+    return index.search_if(queries, executor, config, keys, distances, counts, predicate);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::multiply(
-    vectors_view_t left, executor_t& executor, search_config_t config, std::size_t wanted, keys_span_t keys,
-    std::span<typename index_type_::dot_result_t> products, counts_span_t counts) noexcept {
-    return index.multiply(left, executor, config, wanted, keys, products, counts);
+    vectors_view_t left, executor_t& executor, search_config_t config, keys_span_t keys,
+    nk::matrix_span<typename index_type_::dot_result_t> products, counts_span_t counts) noexcept {
+    return index.multiply(left, executor, config, keys, products, counts);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::maxsim(
-    vectors_view_t queries, std::size_t rows_per_query, executor_t& executor, search_config_t config,
-    std::size_t wanted, keys_span_t keys, std::span<f64_t> scores, counts_span_t counts) noexcept {
-    return index.maxsim(queries, rows_per_query, executor, config, wanted, keys, scores, counts);
+    vectors_view_t queries, std::size_t rows_per_query, executor_t& executor, search_config_t config, keys_span_t keys,
+    nk::matrix_span<f64_t> scores, counts_span_t counts) noexcept {
+    return index.maxsim(queries, rows_per_query, executor, config, keys, scores, counts);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
     vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale,
-    std::span<f32_t> outputs, std::span<us::dense_softmax_state_t> carry, executor_t& executor,
+    nk::matrix_span<f32_t> outputs, std::span<us::dense_softmax_state_t> carry, executor_t& executor,
     search_config_t config) noexcept {
     return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
 }

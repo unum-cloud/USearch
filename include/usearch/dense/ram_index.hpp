@@ -1604,8 +1604,8 @@ struct dense_ram_index {
      *      stored like them: `void(std::span<node_id_t const>, std::span<vector_view_t>)`, one row per ID. A node
      *      without a row refuses with @c shape_mismatch_k, since a missing row is a wrong softmax.
      *  @param[in] score_scale The factor turning a dot into a logit.
-     *  @param[out] outputs The attended rows, one per query row, as wide as the keys and divided by their
-     *      partitions.
+     *  @param[out] outputs The attended rows, one per query row, as wide as the keys, packed and divided by
+     *      their partitions.
      *  @param[out] carry Every query row's softmax state, which merges this walk with other branches.
      *  @param[inout] context The calling thread's scratch & telemetry.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
@@ -1613,14 +1613,15 @@ struct dense_ram_index {
      */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
-                                     f32_t score_scale, std::span<f32_t> outputs,
+                                     f32_t score_scale, nk::matrix_span<f32_t> outputs,
                                      std::span<dense_softmax_state_t> carry, dense_traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         std::size_t const rows_count = queries.extent(0), columns = queries.extent(1);
         if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
-        if (outputs.size() != rows_count * columns || carry.size() != rows_count)
+        if (outputs.extent(0) != rows_count || outputs.extent(1) != columns || carry.size() != rows_count)
             return {{}, status_t::config_mismatch_k};
+        if (!outputs.is_contiguous()) return {{}, status_t::unsupported_layout_k};
         status_t status = status_t::success_k;
         search_result_t attended;
         for (std::size_t first = 0; first != rows_count; first += head_count) {
@@ -1628,7 +1629,7 @@ struct dense_ram_index {
                 queries(nk::range(first, first + head_count), nk::slice),
                 value_lookup,
                 score_scale,
-                outputs.subspan(first * columns, head_count * columns),
+                outputs(nk::range(first, first + head_count), nk::slice),
                 carry.subspan(first, head_count),
                 status};
             rescoring.clear();
@@ -3173,13 +3174,13 @@ struct dense_ram_index {
         vectors_view_t queries;
         value_lookup_type_& value_lookup;
         f32_t score_scale;
-        std::span<f32_t> outputs;
+        nk::matrix_span<f32_t> outputs;
         std::span<dense_softmax_state_t> carry;
         status_t& status;
 
         /** Empties every head's row and running state ahead of the token's first walk. */
         void clear() const noexcept {
-            std::memset(outputs.data(), 0, outputs.size_bytes());
+            std::memset(outputs.data(), 0, outputs.numel() * sizeof(f32_t));
             for (dense_softmax_state_t& state : carry) state = {std::numeric_limits<f32_t>::lowest(), 0};
         }
 
@@ -3188,7 +3189,7 @@ struct dense_ram_index {
             std::size_t const columns = queries.extent(1);
             for (std::size_t head = 0; head != carry.size(); ++head) {
                 f32_t const normalizer = carry[head].partition > 0 ? 1 / carry[head].partition : 0, zero = 0;
-                f32_t* const row = outputs.data() + head * columns;
+                f32_t* const row = outputs.row(head).data();
                 [[maybe_unused]] nk_status_t const scaled = dense_elementwise_chain<capability_>::kit_t::scale(
                     row, columns, &normalizer, &zero, row, nullptr);
                 assert(scaled == nk_success_k && "The serial tier scales on every CPU");
@@ -3246,8 +3247,8 @@ struct dense_ram_index {
                     state.partition *= corrections[head];
                     for (std::size_t lane = 0; lane != count; ++lane) state.partition += weights[lane][head];
                 }
-                dense_values_step<scalar_t, capability_>(outputs.data() + first * columns, group, columns,
-                                                         rows_bytes.data(), weights.data(), corrections, count);
+                dense_values_step<scalar_t, capability_>(outputs.row(first).data(), group, columns, rows_bytes.data(),
+                                                         weights.data(), corrections, count);
             }
             for (std::size_t lane = 0; lane != count; ++lane)
                 scores.distances[lane] = 1 - static_cast<dense_distance_t>(scores.dots[lane]);
