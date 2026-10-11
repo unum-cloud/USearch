@@ -9,7 +9,7 @@ None of it is a public header: the C libraries, the C test and every binding lin
 - `dense_index.cuh` implements `dense_index.h`: the variant grid over every compiled arm, the handle owning the chosen one, and every exported verb as one visit apiece.
 - `dense_index.cpp` and `dense_index.cu` compile that header twice, for the portable library and for the CUDA one, where the VRAM arms join the variant.
 - `dense_specializations.cuh` spells one arm: the scalar and capability tables, the CPU and GPU classes with the ForkUnion primitives they pair, and the `specialized_index` view every class unit instantiates.
-- `dense/ram_variants_<class>.cpp`, `dense/nvme_variants_<class>.cpp` and `dense/vram_variants_<class>.cu` are the class units, each instantiating `specialized_index` over its class's arms, one per storage dtype the class advances.
+- `dense/ram_variants_<class>.cpp`, `dense/nvme_variants_<class>.cpp` and `dense/vram_variants_<class>.{cu,hip,cpp}` are the class units, each instantiating `specialized_index` over its class's arms, one per storage dtype the class advances.
 - `sequence.cpp` instantiates the sequence checkpoint verbs over the default index, so they keep compiling until the sequence modality's entry points land.
   So far `sequence_index.h`, `matrix_index.h` and `geospatial_index.h` are answered only by the brute-force stand-in in `src_stub/`.
 
@@ -36,7 +36,8 @@ The arms are aliases over those templates, keyed by the storage dtype and the cl
 
 - `ram_index<dtype, cpu_class>` → `dense_ram_indexes<uuid_t, dtype, numkong_capabilities_of(cpu_class), waiter_of<cpu_class>, ...>`, with the class's atomic reference and cache hints last.
 - `nvme_index<dtype, cpu_class>` → `dense_nvme_indexes<uuid_t, dtype, numkong_capabilities_of(cpu_class)>`.
-- `vram_index<dtype, gpu_class>` → the class vendor's `dense_vram_<vendor>_indexes<uuid_t, dtype, numkong_capabilities_of(gpu_class)>`.
+- `vram_nvidia_index<dtype, gpu_class>` → `dense_vram_nvidia_indexes<uuid_t, dtype, numkong_capabilities_of(gpu_class)>`, and `vram_amd_index<dtype, gpu_class>` likewise over `dense_vram_amd_indexes`.
+- `vram_apple_index<dtype>` → `dense_vram_apple_indexes<uuid_t, dtype>`, one arm serving every Apple class until a family's kernels differ.
 
 An arm's executor type is its residency, so `is_ram_index`, `is_nvme_index` and `is_vram_index` read it rather than a second tag that could disagree.
 The core verbs land on `specialized_index` members of the same names, `count`, `get`, `reserve`, `clear`, `refine`, `health`, `search`, `multiply`, `maxsim`, `attend`, `save` and `load`.
@@ -70,8 +71,9 @@ The dispatch unit visits every arm yet compiles at the baseline instruction set.
 - `usearch_dense_ram_variants` collects the CPU class units.
   `src/CMakeLists.txt` restates the lineage row for row: `usearch_dense_ram_variant(<class> OVER <parent> <kits>...)` unions the parent's flags with those of every delta kit that compiled, and the unit exists only when its parent does and some delta compiled.
 - `usearch_dense_nvme_variants` reuses those flags for the classes whose kits a storage walk tells apart, so `aws_g5`, `alibaba_c930` and the WebAssembly classes take none.
-- `usearch_dense_vram_variants_<class>` compiles one GPU class for its own architecture alone: `sm_80` with its PTX, `sm_89`, `sm_90a`, `sm_100f` and `sm_120f`.
-- `usearch_dense_vram_variants_apple_metal<N>` compiles one Metal family as plain C++, its kernels compiled from embedded source at first use.
+- `usearch_dense_vram_variants_nvidia_<class>` compiles one NVIDIA class for its own architecture alone: `sm_80` with its PTX, `sm_89`, `sm_90a`, `sm_100f` and `sm_120f`.
+- `usearch_dense_vram_variants_amd_<class>` embeds one AMD class's code object, compiled for its own processors, and the CDNA3 floor for every listed one.
+- `usearch_dense_vram_variants_apple` compiles the Apple arms as plain C++, their kernels compiled from embedded source at first use.
 - `usearch_punned` - `types.cpp`, `sequence.cpp` & the dense dispatch unit, `dense_index.cpp`, or `dense_index.cu` under `USEARCH_BUILD_CUDA`.
 
 `USEARCH_PUNNED_LIBRARIES` and `USEARCH_PUNNED_OBJECTS` hand all of them to `usearch_shared`, `usearch_static` and `usearch_test_c`, and the static archive carries the yyjson, NumKong and ForkUnion objects too, so a binding links one library.

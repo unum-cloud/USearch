@@ -6,7 +6,9 @@ The RAM residency is the portable default every platform owns; the VRAM and NVMe
 ## Residencies
 
 - `ram_metric.hpp` + `ram_index.hpp` - the CPU baseline: compile-time-dispatched NumKong kernel kits chained per capability tier, and the concurrent, watermark-published in-memory index over them.
-- `vram_metric.cuh` + `vram_index.cuh` - the CUDA sibling: per-generation device kits - `ampere` through `blackwellrtx` ceilings - under one index whose geometry is frozen at the first `reserve`.
+- `vram_nvidia_index.hpp` - the NVIDIA sibling, plain C++ over the kernels of `vram_nvidia_index.cuh` and the per-generation device kits of `vram_nvidia_metric.cuh` - `ampere` through `blackwellrtx` ceilings - under one index whose geometry is frozen at the first `reserve`.
+- `vram_index.cuh` - the vendor-neutral device bodies, walk, insert and refine, NVCC and HIP-Clang share, templated on each vendor's lanes policy from `utilities/vram_queue.cuh`.
+- `vram_apple_index.hpp` - the Apple sibling over unified memory: the same verbs, with the walk and insert kernels in `vram_apple_index.metal` and the kits in `vram_apple_metric.metal`, compiled from embedded source at first use.
 - `nvme_index.hpp` - the persisted sibling: one SafeGraphs part walked as a pure state machine of reads, which the engines of `utilities/nvme_device.hpp` submit, from blocking reads through Linux AIO and `io_uring` to SPDK.
 
 ## The Plural Layer
@@ -14,7 +16,8 @@ The RAM residency is the portable default every platform owns; the VRAM and NVMe
 The plural follows the sibling idiom - `ram_indexes.hpp` reads as "many `ram_index` viewed as one":
 
 - `ram_indexes.hpp` - typed multi-shard views with compute-domain routing and merged cross-shard search, one shard per memory domain.
-- `vram_indexes.cuh` - typed multi-shard groups with round-robin ingestion and merged cross-shard search, one shard per device.
+- `vram_nvidia_indexes.hpp` - typed multi-shard groups with round-robin ingestion and merged cross-shard search, one shard per device.
+- `vram_apple_indexes.hpp` - the Apple twin over its one device, so one shard.
 - `nvme_indexes.hpp` - read-only views of the parts a RAM or VRAM group saved, every row's walks over all parts on one executor thread, and key lookups as bulk scans of the key columns; beside them, the freestanding `merge`, `split`, `refine` and `build` that write new parts from old ones in phases of steps, within a workspace the caller lends.
 
 Capability files split beside the residency pairs as they grow - `icelake.hpp`, `sapphireamx.hpp`, `hopper.cuh`, and their siblings.

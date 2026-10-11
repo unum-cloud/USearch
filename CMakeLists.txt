@@ -21,18 +21,28 @@ if (POLICY CMP0077)
     cmake_policy(SET CMP0077 NEW)
 endif ()
 
-# Probed only to default `USEARCH_BUILD_CUDA`: `check_language` caches the host compiler it paired with, which would
-# then outrank a caller's own `CMAKE_CUDA_HOST_COMPILER`.
+# Each GPU vendor is probed only to default its `USEARCH_BUILD_<VENDOR>` switch, and only while the caller leaves it
+# unset. NVIDIA needs NVCC, though `check_language` caches the host compiler it paired with, which would then outrank a
+# caller's own `CMAKE_CUDA_HOST_COMPILER`. AMD needs ROCm's own Clang as the C++ compiler, as the `rocm_*` presets name
+# it. Apple needs only an Apple silicon target, since Metal ships with macOS and its kernels compile at first use.
 include(CheckLanguage)
 set(USEARCH_CAN_BUILD_CUDA OFF)
 if (NOT DEFINED USEARCH_BUILD_CUDA)
     check_language(CUDA)
     if (CMAKE_CUDA_COMPILER)
         set(USEARCH_CAN_BUILD_CUDA ON)
-        message(STATUS "CUDA compiler available: ${CMAKE_CUDA_COMPILER}")
-    else ()
-        message(STATUS "CUDA compiler not available - the `.cu` units stay out of the build")
     endif ()
+endif ()
+set(USEARCH_CAN_BUILD_ROCM OFF)
+if (NOT DEFINED USEARCH_BUILD_ROCM AND CMAKE_CXX_COMPILER MATCHES "/rocm[^/]*/llvm/bin/clang")
+    set(USEARCH_CAN_BUILD_ROCM ON)
+endif ()
+set(USEARCH_CAN_BUILD_METAL OFF)
+if (NOT DEFINED USEARCH_BUILD_METAL
+    AND APPLE
+    AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64"
+)
+    set(USEARCH_CAN_BUILD_METAL ON)
 endif ()
 
 # Options
@@ -47,7 +57,9 @@ option(USEARCH_BUILD_LIB_C_STUB "Compile a brute-force stand-in for the C 99 int
 option(USEARCH_BUILD_LIB_WOLFRAM "Compile a native library for the Wolfram Language bindings" OFF)
 option(USEARCH_BUILD_LIB_PYTHON "Compile the CPython extension; `scikit-build-core` switches it on" OFF)
 option(USEARCH_BUILD_LIB_NODE "Compile the Node addon; `cmake-js` switches it on" OFF)
-option(USEARCH_BUILD_CUDA "Compile CUDA index tests & benchmarks" ${USEARCH_CAN_BUILD_CUDA})
+option(USEARCH_BUILD_CUDA "Compile the NVIDIA index arms, tests and benchmarks with NVCC" ${USEARCH_CAN_BUILD_CUDA})
+option(USEARCH_BUILD_ROCM "Compile the AMD index arms and tests with ROCm's Clang" ${USEARCH_CAN_BUILD_ROCM})
+option(USEARCH_BUILD_METAL "Compile the Apple index arms and tests over Metal" ${USEARCH_CAN_BUILD_METAL})
 option(USEARCH_BUILD_SPDK "Compile the SPDK engine into every target, finding SPDK through pkg-config" OFF)
 
 if (USEARCH_BUILD_SPDK)
@@ -64,6 +76,13 @@ endif ()
 set(USEARCH_CUDA_ARCHITECTURES
     "80-real;90a-real;100f-real;120f-real"
     CACHE STRING "GPU architectures the CUDA tests, benchmarks & dispatch unit compile for"
+)
+
+# The AMD units embed one code object per listed processor: every unit compiles for the processors of its own class, and
+# the CDNA3 floor for every listed one, so it serves a GPU without a class as the NVIDIA floor's PTX does.
+set(USEARCH_ROCM_ARCHITECTURES
+    "gfx942;gfx950;gfx1250"
+    CACHE STRING "AMD processors the code objects compile for: gfx942 for CDNA3, gfx950 for CDNA4, gfx1250 for CDNA5"
 )
 
 # The library, its tests and benchmarks compile the first N storage dtypes of the ladder bf16, u1, i8, e4m3, f16, u8,

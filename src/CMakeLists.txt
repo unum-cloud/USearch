@@ -203,7 +203,7 @@ if (USEARCH_BUILD_CUDA)
     set(usearch_cuda_capabilities_ NUMKONG_TARGET_AMPERE=1 NUMKONG_TARGET_ADA=1 NUMKONG_TARGET_HOPPER=1
                                    NUMKONG_TARGET_BLACKWELL=1 NUMKONG_TARGET_BLACKWELLRTX=1
     )
-    function (usearch_dense_vram_variant class)
+    function (usearch_dense_vram_nvidia_variant class)
         set(target_ usearch_dense_vram_variants_${class})
         add_library(${target_} OBJECT dense/vram_variants_${class}.cu)
         target_include_directories(
@@ -231,13 +231,13 @@ if (USEARCH_BUILD_CUDA)
         )
     endfunction ()
 
-    usearch_dense_vram_variant(
+    usearch_dense_vram_nvidia_variant(
         nvidia_ampere --generate-code=arch=compute_80,code=sm_80 --generate-code=arch=compute_80,code=compute_80
     )
-    usearch_dense_vram_variant(nvidia_ada --generate-code=arch=compute_89,code=sm_89)
-    usearch_dense_vram_variant(nvidia_hopper --generate-code=arch=compute_90a,code=sm_90a)
-    usearch_dense_vram_variant(nvidia_blackwell --generate-code=arch=compute_100f,code=sm_100f)
-    usearch_dense_vram_variant(nvidia_blackwellrtx --generate-code=arch=compute_120f,code=sm_120f)
+    usearch_dense_vram_nvidia_variant(nvidia_ada --generate-code=arch=compute_89,code=sm_89)
+    usearch_dense_vram_nvidia_variant(nvidia_hopper --generate-code=arch=compute_90a,code=sm_90a)
+    usearch_dense_vram_nvidia_variant(nvidia_blackwell --generate-code=arch=compute_100f,code=sm_100f)
+    usearch_dense_vram_nvidia_variant(nvidia_blackwellrtx --generate-code=arch=compute_120f,code=sm_120f)
 
     target_sources(usearch_punned PRIVATE dense_index.cu)
     target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_CUDA_=1" ${usearch_cuda_capabilities_})
@@ -258,6 +258,20 @@ if (USEARCH_BUILD_CUDA)
 else ()
     target_sources(usearch_punned PRIVATE dense_index.cpp)
     target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_CUDA_=0")
+endif ()
+
+# The Apple arms: one plain C++ unit serving every Apple class until a family's kernels differ, whose kernels compile
+# from embedded source at first use, so no Metal toolchain is needed to build it. The dispatch unit and the Apple unit
+# see `USEARCH_ARCH_METAL_=1`.
+if (USEARCH_BUILD_METAL)
+    add_library(usearch_dense_vram_variants_apple OBJECT dense/vram_variants_apple.cpp)
+    usearch_setup_target(usearch_dense_vram_variants_apple)
+    target_include_directories(usearch_dense_vram_variants_apple PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(usearch_dense_vram_variants_apple PRIVATE "USEARCH_ARCH_METAL_=1")
+    target_link_libraries(usearch_dense_vram_variants_apple PRIVATE yyjson forkunion::static)
+    set(USEARCH_PUNNED_LIBRARIES ${USEARCH_PUNNED_LIBRARIES} usearch_dense_vram_variants_apple)
+    target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_METAL_=1")
+    target_link_libraries(usearch_punned PUBLIC "-framework Metal" "-framework Foundation" objc)
 endif ()
 
 # Objects never travel through another object library, so every consumer names the whole set: executables and shared

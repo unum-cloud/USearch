@@ -28,6 +28,15 @@
 #include "usearch/dense_index.h"
 #include "usearch/dense/nvme_indexes.hpp"
 #include "usearch/dense/ram_indexes.hpp"
+#if USEARCH_ARCH_CUDA_
+#include "usearch/dense/vram_nvidia_indexes.hpp"
+#endif
+#if USEARCH_ARCH_ROCM_
+#include "usearch/dense/vram_amd_indexes.hpp"
+#endif
+#if USEARCH_ARCH_METAL_
+#include "usearch/dense/vram_apple_indexes.hpp"
+#endif
 
 /** How many storage dtypes the arms cover, from the front of the ladder bf16, u1, i8, e4m3, f16,
  *  u8, e5m2, i4, u4, e3m2, e2m3. CMake passes it, so only builds that bypass CMake take this
@@ -456,8 +465,10 @@ constexpr nk_capability_t numkong_capabilities_of(gpu_class_t gpu_class) noexcep
     case gpu_class_t::apple_metal7_k: return nk_cap_metal_k;
     case gpu_class_t::apple_metal9_k: return metal9;
     case gpu_class_t::apple_metal10_k: return metal9 | nk_cap_apple10_k;
-    default: return ampere;
+    case gpu_class_t::nvidia_ampere_k: return ampere;
+    case gpu_class_t::unknown_k: return nk_cap_serial_k;
     }
+    return nk_cap_serial_k;
 }
 
 /** Marks @p outcome as running; no waiter watches for this store, so it is relaxed. */
@@ -584,11 +595,25 @@ using ram_index = dense_ram_indexes<us::uuid_t, dtype_, numkong_capabilities_of(
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
 using nvme_index = dense_nvme_indexes<us::uuid_t, dtype_, numkong_capabilities_of(cpu_class_)>;
 
-/** One VRAM alternative: the GPU class alone names the rung, and through it the vendor whose face
- *  defines the index, lowering onto its capability ceiling; that class's unit holds its kernels. */
+/** One NVIDIA alternative: the class names the rung and its capability ceiling; its unit holds the
+ *  kernels. */
+#if USEARCH_ARCH_CUDA_
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
-using vram_index = typename gpu_dense_indexes_of<gpu_vendor_of(
-    gpu_class_)>::template type<us::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
+using vram_nvidia_index = dense_vram_nvidia_indexes<us::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
+#endif
+
+/** One AMD alternative: the class names the rung and its capability ceiling; its unit holds the
+ *  code object. */
+#if USEARCH_ARCH_ROCM_
+template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
+using vram_amd_index = dense_vram_amd_indexes<us::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
+#endif
+
+/** One Apple alternative, serving every Apple class until a family's kernels differ. */
+#if USEARCH_ARCH_METAL_
+template <nk_dtype_t dtype_>
+using vram_apple_index = dense_vram_apple_indexes<us::uuid_t, dtype_>;
+#endif
 
 /** The C predicate lifted onto the index's key vocabulary. */
 struct key_predicate_t {

@@ -37,6 +37,8 @@ inline int selected_device = 0;
 // The one place the test objects name a vendor: the cell this object library composes over.
 #if USEARCH_ARCH_CUDA_
 #include "vram_nvidia.hpp"
+#elif USEARCH_ARCH_METAL_
+#include "vram_apple.hpp"
 #endif // USEARCH_ARCH_CUDA_
 
 namespace unum::usearch::test::dense {

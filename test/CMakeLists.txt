@@ -105,3 +105,17 @@ if (USEARCH_BUILD_CUDA)
     target_compile_definitions(usearch_test_vram PRIVATE "USEARCH_ARCH_CUDA_=1")
     target_link_libraries(usearch_test_vram PRIVATE usearch_test_vram_nvidia CUDA::cudart_static)
 endif ()
+
+# The Apple object compiles everything with the host compiler; its kernels compile from embedded source at first use.
+if (USEARCH_BUILD_METAL)
+    add_library(usearch_test_vram_apple OBJECT ${usearch_test_vram_shards_} dense/vram_apple.cpp)
+    usearch_keep_dense_dtypes(usearch_test_vram_apple)
+    usearch_setup_target(usearch_test_vram_apple HOST)
+    target_include_directories(usearch_test_vram_apple PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_compile_definitions(usearch_test_vram_apple PRIVATE "USEARCH_ARCH_METAL_=1")
+    target_link_libraries(usearch_test_vram_apple PRIVATE fmt::fmt yyjson forkunion::static)
+    target_compile_definitions(usearch_test_vram PRIVATE "USEARCH_ARCH_METAL_=1")
+    target_link_libraries(
+        usearch_test_vram PRIVATE usearch_test_vram_apple "-framework Metal" "-framework Foundation" objc
+    )
+endif ()

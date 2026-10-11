@@ -24,7 +24,8 @@
 #include <cuda_runtime.h> // `cudaGetDeviceCount`, `cudaGetDeviceProperties`
 #include <fmt/format.h>
 
-#include "usearch/dense/vram_nvidia_indexes.cuh"
+#include "usearch/dense/vram_nvidia_index.cuh"
+#include "usearch/dense/vram_nvidia_indexes.hpp"
 #include "usearch/utilities/vram_device.hpp"
 
 #include "dense_search.cuh"

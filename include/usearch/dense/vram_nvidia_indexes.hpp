@@ -2211,11 +2211,5 @@ struct dense_vram_nvidia_indexes {
     u64_t commit_sequence_ = 0;
 };
 
-template <>
-struct gpu_dense_indexes_of<gpu_vendor_t::nvidia_k> {
-    template <typename key_type_, nk_dtype_t vector_dtype_, nk_capability_t capability_>
-    using type = dense_vram_nvidia_indexes<key_type_, vector_dtype_, capability_>;
-};
-
 } // namespace usearch
 } // namespace unum

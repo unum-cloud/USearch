@@ -1111,14 +1111,6 @@ enum class gpu_class_t : u32_t {
     apple_metal10_k,
 };
 
-/** The vendor whose runtime drives a device of @p gpu_class. */
-constexpr gpu_vendor_t gpu_vendor_of(gpu_class_t gpu_class) noexcept {
-    if (gpu_class == gpu_class_t::unknown_k) return gpu_vendor_t::unknown_k;
-    if (gpu_class < gpu_class_t::amd_cdna3_k) return gpu_vendor_t::nvidia_k;
-    if (gpu_class < gpu_class_t::apple_metal7_k) return gpu_vendor_t::amd_k;
-    return gpu_vendor_t::apple_k;
-}
-
 /** One GPU as USearch numbers it: the vendor, that vendor's own ordinal, and its class. */
 struct gpu_device_t {
     gpu_vendor_t vendor = gpu_vendor_t::unknown_k;
@@ -1128,11 +1120,6 @@ struct gpu_device_t {
 
 /** Devices one vendor's listing holds at most, so the process-wide listing needs no heap. */
 inline constexpr std::size_t gpu_devices_capacity_k = 64;
-
-/** The sharded dense index of one GPU vendor, as a member template @c type over the key, the dtype
- *  and the capability ceiling; each vendor's face specializes it, so dispatch names no vendor. */
-template <gpu_vendor_t vendor_>
-struct gpu_dense_indexes_of;
 
 /** Feature bits an I/O engine answers through @c capabilities() once open, since a refused
  *  registration turns @c fixed_buffers_k off at run time, so callers, tests, and docs introspect

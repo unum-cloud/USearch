@@ -40,15 +40,6 @@
 #include "dense_specializations.cuh"
 #include "usearch/utilities/ram_device.hpp" // `forkunion_allocator`, `no_memory_domain_k` - the multi-indexes' host tables
 #include "usearch/utilities/vram_device.hpp" // `gpu_devices`, `gpu_executor_t`, `gpu_arena_t`
-#if USEARCH_ARCH_CUDA_
-#include "usearch/dense/vram_nvidia_indexes.hpp"
-#endif
-#if USEARCH_ARCH_ROCM_
-#include "usearch/dense/vram_amd_indexes.hpp"
-#endif
-#if USEARCH_ARCH_METAL_
-#include "usearch/dense/vram_apple_indexes.hpp"
-#endif
 
 #pragma region Multi Index
 
@@ -711,361 +702,297 @@ struct usearch_dense_index_handle_t {
 #endif // NUMKONG_TARGET_NEONFP8
 #if USEARCH_ARCH_CUDA_
         // nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 11 arms
-        vram_index<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_index<nk_u1_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_index<nk_i8_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_index<nk_e4m3_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_index<nk_f16_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_index<nk_u8_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_index<nk_e5m2_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_index<nk_i4_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_index<nk_u4_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_index<nk_e3m2_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_index<nk_e2m3_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
         // nvidia_blackwell over nvidia_ampere by "100f": every cell, 11 arms
-        vram_index<nk_bf16_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_blackwell_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_index<nk_u1_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_index<nk_i8_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_index<nk_e4m3_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_index<nk_f16_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_index<nk_u8_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_index<nk_e5m2_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_index<nk_i4_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_index<nk_u4_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_index<nk_e3m2_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_index<nk_e2m3_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
         // nvidia_hopper over nvidia_ampere by "90a": every cell, 11 arms
-        vram_index<nk_bf16_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_hopper_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_index<nk_u1_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_index<nk_i8_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_index<nk_e4m3_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_index<nk_f16_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_index<nk_u8_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_index<nk_e5m2_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_index<nk_i4_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_index<nk_u4_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_index<nk_e3m2_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_index<nk_e2m3_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
         // nvidia_ada over nvidia_ampere by "89": every cell, 11 arms
-        vram_index<nk_bf16_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_ada_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_index<nk_u1_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_index<nk_i8_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_index<nk_e4m3_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_index<nk_f16_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_index<nk_u8_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_index<nk_e5m2_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_index<nk_i4_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_index<nk_u4_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_index<nk_e3m2_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_index<nk_e2m3_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_ada_k>, //
 #endif
         // nvidia_ampere, the floor by "80", its PTX serving every GPU without a class:
         // every cell, 11 arms
-        vram_index<nk_bf16_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_ampere_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_index<nk_u1_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_index<nk_i8_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_index<nk_e4m3_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_index<nk_f16_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_index<nk_u8_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_index<nk_e5m2_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_index<nk_i4_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_index<nk_u4_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_index<nk_e3m2_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_index<nk_e2m3_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #endif // USEARCH_ARCH_CUDA_
 #if USEARCH_ARCH_ROCM_
         // amd_cdna5 over amd_cdna3 by "gfx1250", 32-wide waves: every cell, 11 arms
-        vram_index<nk_bf16_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_index<nk_bf16_k, gpu_class_t::amd_cdna5_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_index<nk_u1_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_index<nk_u1_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_index<nk_i8_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_index<nk_i8_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_index<nk_e4m3_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_index<nk_e4m3_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_index<nk_f16_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_index<nk_f16_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_index<nk_u8_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_index<nk_u8_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_index<nk_e5m2_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_index<nk_e5m2_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_index<nk_i4_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_index<nk_i4_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_index<nk_u4_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_index<nk_u4_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_index<nk_e3m2_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_index<nk_e3m2_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_index<nk_e2m3_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_index<nk_e2m3_k, gpu_class_t::amd_cdna5_k>, //
 #endif
         // amd_cdna4 over amd_cdna3 by "gfx950": every cell, 11 arms
-        vram_index<nk_bf16_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_index<nk_bf16_k, gpu_class_t::amd_cdna4_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_index<nk_u1_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_index<nk_u1_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_index<nk_i8_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_index<nk_i8_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_index<nk_e4m3_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_index<nk_e4m3_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_index<nk_f16_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_index<nk_f16_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_index<nk_u8_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_index<nk_u8_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_index<nk_e5m2_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_index<nk_e5m2_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_index<nk_i4_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_index<nk_i4_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_index<nk_u4_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_index<nk_u4_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_index<nk_e3m2_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_index<nk_e3m2_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_index<nk_e2m3_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_index<nk_e2m3_k, gpu_class_t::amd_cdna4_k>, //
 #endif
         // amd_cdna3, the AMD floor by "gfx942": every cell, 11 arms
-        vram_index<nk_bf16_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_index<nk_bf16_k, gpu_class_t::amd_cdna3_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_index<nk_u1_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_index<nk_u1_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_index<nk_i8_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_index<nk_i8_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_index<nk_e4m3_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_index<nk_e4m3_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_index<nk_f16_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_index<nk_f16_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_index<nk_u8_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_index<nk_u8_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_index<nk_e5m2_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_index<nk_e5m2_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_index<nk_i4_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_index<nk_i4_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_index<nk_u4_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_index<nk_u4_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_index<nk_e3m2_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_index<nk_e3m2_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_index<nk_e2m3_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_index<nk_e2m3_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #endif // USEARCH_ARCH_ROCM_
 #if USEARCH_ARCH_METAL_
-        // apple_metal10 over apple_metal7 by the Apple10 family: every cell, 11 arms
-        vram_index<nk_bf16_k, gpu_class_t::apple_metal10_k>, //
+        // apple, serving every Apple class until a family's kernels differ: every cell, 11 arms
+        vram_apple_index<nk_bf16_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_index<nk_u1_k, gpu_class_t::apple_metal10_k>, //
+        vram_apple_index<nk_u1_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_index<nk_i8_k, gpu_class_t::apple_metal10_k>, //
+        vram_apple_index<nk_i8_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_index<nk_e4m3_k, gpu_class_t::apple_metal10_k>, //
+        vram_apple_index<nk_e4m3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_index<nk_f16_k, gpu_class_t::apple_metal10_k>, //
+        vram_apple_index<nk_f16_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_index<nk_u8_k, gpu_class_t::apple_metal10_k>, //
+        vram_apple_index<nk_u8_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_index<nk_e5m2_k, gpu_class_t::apple_metal10_k>, //
+        vram_apple_index<nk_e5m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_index<nk_i4_k, gpu_class_t::apple_metal10_k>, //
+        vram_apple_index<nk_i4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_index<nk_u4_k, gpu_class_t::apple_metal10_k>, //
+        vram_apple_index<nk_u4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_index<nk_e3m2_k, gpu_class_t::apple_metal10_k>, //
+        vram_apple_index<nk_e3m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_index<nk_e2m3_k, gpu_class_t::apple_metal10_k>, //
-#endif
-        // apple_metal9 over apple_metal7 by the Apple9 family: every cell, 11 arms
-        vram_index<nk_bf16_k, gpu_class_t::apple_metal9_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        vram_index<nk_u1_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        vram_index<nk_i8_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        vram_index<nk_e4m3_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        vram_index<nk_f16_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        vram_index<nk_u8_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        vram_index<nk_e5m2_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        vram_index<nk_i4_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        vram_index<nk_u4_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        vram_index<nk_e3m2_k, gpu_class_t::apple_metal9_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        vram_index<nk_e2m3_k, gpu_class_t::apple_metal9_k>, //
-#endif
-        // apple_metal7, the Apple floor, serving Apple GPUs without a class: every cell, 11 arms
-        vram_index<nk_bf16_k, gpu_class_t::apple_metal7_k>, //
-#if USEARCH_DENSE_DTYPES >= 2
-        vram_index<nk_u1_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-        vram_index<nk_i8_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-        vram_index<nk_e4m3_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-        vram_index<nk_f16_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-        vram_index<nk_u8_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-        vram_index<nk_e5m2_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-        vram_index<nk_i4_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-        vram_index<nk_u4_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-        vram_index<nk_e3m2_k, gpu_class_t::apple_metal7_k>, //
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-        vram_index<nk_e2m3_k, gpu_class_t::apple_metal7_k>, //
+        vram_apple_index<nk_e2m3_k>, //
 #endif
 #endif // USEARCH_ARCH_METAL_
 
@@ -1570,361 +1497,297 @@ extern template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::wasm6
 #endif // NUMKONG_TARGET_V128RELAXED
 #if USEARCH_ARCH_CUDA_
 /* nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 11 arms */
-extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 /* nvidia_blackwell over nvidia_ampere by "100f": every cell, 11 arms */
-extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_blackwell_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 /* nvidia_hopper over nvidia_ampere by "90a": every cell, 11 arms */
-extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_hopper_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 /* nvidia_ada over nvidia_ampere by "89": every cell, 11 arms */
-extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_ada_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 /* nvidia_ampere, the floor by "80", its PTX serving every GPU without a class:
  * every cell, 11 arms */
-extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_ampere_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #endif // USEARCH_ARCH_CUDA_
 #if USEARCH_ARCH_ROCM_
 /* amd_cdna5 over amd_cdna3 by "gfx1250", 32-wide waves: every cell, 11 arms */
-extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_index<nk_bf16_k, gpu_class_t::amd_cdna5_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_index<nk_u1_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_index<nk_i8_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_index<nk_e4m3_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_index<nk_f16_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_index<nk_u8_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_index<nk_e5m2_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_index<nk_i4_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_index<nk_u4_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_index<nk_e3m2_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_index<nk_e2m3_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 /* amd_cdna4 over amd_cdna3 by "gfx950": every cell, 11 arms */
-extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_index<nk_bf16_k, gpu_class_t::amd_cdna4_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_index<nk_u1_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_index<nk_i8_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_index<nk_e4m3_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_index<nk_f16_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_index<nk_u8_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_index<nk_e5m2_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_index<nk_i4_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_index<nk_u4_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_index<nk_e3m2_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_index<nk_e2m3_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 /* amd_cdna3, the AMD floor by "gfx942": every cell, 11 arms */
-extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_index<nk_bf16_k, gpu_class_t::amd_cdna3_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_index<nk_u1_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_index<nk_i8_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_index<nk_e4m3_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_index<nk_f16_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_index<nk_u8_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_index<nk_e5m2_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_index<nk_i4_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_index<nk_u4_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_index<nk_e3m2_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_index<nk_e2m3_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #endif // USEARCH_ARCH_ROCM_
 #if USEARCH_ARCH_METAL_
-/* apple_metal10 over apple_metal7 by the Apple10 family: every cell, 11 arms */
-extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::apple_metal10_k>>;
+/* apple, serving every Apple class until a family's kernels differ: every cell, 11 arms */
+extern template struct specialized_index<vram_apple_index<nk_bf16_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::apple_metal10_k>>;
+extern template struct specialized_index<vram_apple_index<nk_u1_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::apple_metal10_k>>;
+extern template struct specialized_index<vram_apple_index<nk_i8_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::apple_metal10_k>>;
+extern template struct specialized_index<vram_apple_index<nk_e4m3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::apple_metal10_k>>;
+extern template struct specialized_index<vram_apple_index<nk_f16_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::apple_metal10_k>>;
+extern template struct specialized_index<vram_apple_index<nk_u8_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::apple_metal10_k>>;
+extern template struct specialized_index<vram_apple_index<nk_e5m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::apple_metal10_k>>;
+extern template struct specialized_index<vram_apple_index<nk_i4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::apple_metal10_k>>;
+extern template struct specialized_index<vram_apple_index<nk_u4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::apple_metal10_k>>;
+extern template struct specialized_index<vram_apple_index<nk_e3m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::apple_metal10_k>>;
-#endif
-/* apple_metal9 over apple_metal7 by the Apple9 family: every cell, 11 arms */
-extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::apple_metal9_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::apple_metal9_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::apple_metal9_k>>;
-#endif
-/* apple_metal7, the Apple floor, serving every Apple GPU without a class: every cell, 11 arms */
-extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::apple_metal7_k>>;
-#if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::apple_metal7_k>>;
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::apple_metal7_k>>;
+extern template struct specialized_index<vram_apple_index<nk_e2m3_k>>;
 #endif
 #endif // USEARCH_ARCH_METAL_
 #if NUMKONG_TARGET_HASWELL
@@ -2532,38 +2395,37 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
     switch (gpu_class) {
 #if USEARCH_ARCH_CUDA_
     case gpu_class_t::nvidia_blackwellrtx_k:
-        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::nvidia_blackwellrtx_k>>(geometry, vram, kernel,
-                                                                                               outcome);
+        return make_punned_dense_index<vram_nvidia_index<dtype_, gpu_class_t::nvidia_blackwellrtx_k>>(geometry, vram,
+                                                                                                      kernel, outcome);
     case gpu_class_t::nvidia_blackwell_k:
-        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::nvidia_blackwell_k>>(geometry, vram, kernel,
-                                                                                            outcome);
+        return make_punned_dense_index<vram_nvidia_index<dtype_, gpu_class_t::nvidia_blackwell_k>>(geometry, vram,
+                                                                                                   kernel, outcome);
     case gpu_class_t::nvidia_hopper_k:
-        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::nvidia_hopper_k>>(geometry, vram, kernel,
-                                                                                         outcome);
+        return make_punned_dense_index<vram_nvidia_index<dtype_, gpu_class_t::nvidia_hopper_k>>(geometry, vram, kernel,
+                                                                                                outcome);
     case gpu_class_t::nvidia_ada_k:
-        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::nvidia_ada_k>>(geometry, vram, kernel, outcome);
+        return make_punned_dense_index<vram_nvidia_index<dtype_, gpu_class_t::nvidia_ada_k>>(geometry, vram, kernel,
+                                                                                             outcome);
     case gpu_class_t::nvidia_ampere_k:
-        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::nvidia_ampere_k>>(geometry, vram, kernel,
-                                                                                         outcome);
+        return make_punned_dense_index<vram_nvidia_index<dtype_, gpu_class_t::nvidia_ampere_k>>(geometry, vram, kernel,
+                                                                                                outcome);
 #endif
 #if USEARCH_ARCH_ROCM_
     case gpu_class_t::amd_cdna5_k:
-        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::amd_cdna5_k>>(geometry, vram, kernel, outcome);
+        return make_punned_dense_index<vram_amd_index<dtype_, gpu_class_t::amd_cdna5_k>>(geometry, vram, kernel,
+                                                                                         outcome);
     case gpu_class_t::amd_cdna4_k:
-        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::amd_cdna4_k>>(geometry, vram, kernel, outcome);
+        return make_punned_dense_index<vram_amd_index<dtype_, gpu_class_t::amd_cdna4_k>>(geometry, vram, kernel,
+                                                                                         outcome);
     case gpu_class_t::amd_cdna3_k:
-        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::amd_cdna3_k>>(geometry, vram, kernel, outcome);
+        return make_punned_dense_index<vram_amd_index<dtype_, gpu_class_t::amd_cdna3_k>>(geometry, vram, kernel,
+                                                                                         outcome);
 #endif
 #if USEARCH_ARCH_METAL_
     case gpu_class_t::apple_metal10_k:
-        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::apple_metal10_k>>(geometry, vram, kernel,
-                                                                                         outcome);
     case gpu_class_t::apple_metal9_k:
-        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::apple_metal9_k>>(geometry, vram, kernel,
-                                                                                        outcome);
     case gpu_class_t::apple_metal7_k:
-        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::apple_metal7_k>>(geometry, vram, kernel,
-                                                                                        outcome);
+        return make_punned_dense_index<vram_apple_index<dtype_>>(geometry, vram, kernel, outcome);
 #endif
     default:
         return propagate_error(usearch_status_device_k, outcome,
