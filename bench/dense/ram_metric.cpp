@@ -26,7 +26,7 @@
  *  @endverbatim
  */
 #include <cstdint> // `std::uint32_t`
-#include <cstring> // `std::strcmp`
+#include <cstring> // `std::strcmp`, `std::memcpy` - the dot lanes a finalizer takes
 
 #include <algorithm>   // `std::max`
 #include <array>       // `std::array`
@@ -494,8 +494,8 @@ static void measure_baseline(loop_t& loop, environment_t const& env, std::size_t
     rate_distances(loop, dim, 1, row_bytes_of<scalar_>(dim));
 }
 
-/** One 16×16 tile of distances per call - gather, pack, and the depth walk - the tile
- *  engine's primitive throughput, comparable against 256 quads-path distances. */
+/** One tile of queries, packed once, against 256 stored rows per call - the stream through the matrix engine, then
+ *  the quads kit's finalizer - comparable against as many quads-path distances. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
     requires tiles_supported<kernel_, scalar_, caps_>
 static void measure_distances_tile(loop_t& loop, environment_t const& env, std::size_t dim) {
@@ -504,35 +504,50 @@ static void measure_distances_tile(loop_t& loop, environment_t const& env, std::
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k || nk_cpu_configure_thread(available) != nk_success_k)
         return loop.skip("the thread cannot run these capabilities");
     using tiles_kit_t = typename dense_tiles_chain<scalar_, caps_>::kit_t;
-    constexpr std::size_t rows_k = tiles_kit_t::tile_rows_k;
-    std::size_t const depth_tiles = dim / tiles_kit_t::tile_depth_k;
+    using quads_kit_t = typename dense_quads_chain<scalar_, caps_>::kit_t;
+    using raw_dot_t = typename scalar_::dot_result_t::raw_t;
+    constexpr std::size_t queries_k = tiles_kit_t::tile_columns_k, rows_k = 256;
 
-    auto storage = nk::matrix<scalar_>::zeros({rows_k, dim}).value;
-    auto const vectors = storage.view();
-    std::array<nk::vector_view<scalar_>, rows_k> views;
-    std::array<vector_norms<typename scalar_::dot_result_t>, rows_k> norms;
-    for (std::size_t row = 0; row != rows_k; ++row) {
-        fill_cyclic(storage.row(row).as_vector(), row);
-        views[row] = vectors.row(row).as_vector();
-        norms[row] = dense_norms<caps_>(views[row]);
-    }
-    typename tiles_kit_t::a_tile_t a_tile;
-    typename tiles_kit_t::b_tile_t b_tile;
-    auto tiled = nk::matrix<f32_t>::zeros({rows_k, rows_k}).value;
-    tiles_kit_t::configure_tiles();
+    using lanes_t = std::array<typename quads_kit_t::finalized_vec_t, queries_k / 4>;
+    auto storage = nk::matrix<scalar_>::zeros({queries_k + rows_k, dim}).value;
+    for (std::size_t row = 0; row != queries_k + rows_k; ++row) fill_cyclic(storage.row(row).as_vector(), row);
+    nk::matrix_view<scalar_> const queries = storage(nk::range(std::size_t {0}, queries_k), nk::slice);
+    nk::matrix_view<scalar_> const rows = storage(nk::range(queries_k, queries_k + rows_k), nk::slice);
+    std::size_t const stride = static_cast<std::size_t>(queries.stride_bytes(0));
+    nk_size_t packed_bytes = 0;
+    if (tiles_kit_t::pack_size(queries_k, dim, &packed_bytes) != nk_success_k) return loop.skip("pack size failed");
+    auto packed = nk::vector<nk::u8_t>::zeros(packed_bytes).value;
+    if (tiles_kit_t::pack(queries.raw_values_data(), queries_k, dim, stride, packed.data(), 0, queries_k, nullptr) !=
+        nk_success_k)
+        return loop.skip("pack failed");
+
+    // The finalizer takes queries four lanes at a time, so the per-query sums regroup into lanes whole.
+    std::array<typename scalar_::dot_result_t, queries_k> query_sumsqs;
+    for (std::size_t query = 0; query != queries_k; ++query)
+        query_sumsqs[query] = dense_norms<caps_>(queries.row(query).as_vector()).sumsq;
+    lanes_t query_lanes;
+    static_assert(sizeof(query_lanes) == sizeof(query_sumsqs), "four sums fill one finalizer lane group");
+    std::memcpy(query_lanes.data(), query_sumsqs.data(), sizeof(query_lanes));
+    std::array<typename scalar_::dot_result_t, rows_k> row_sumsqs;
+    for (std::size_t row = 0; row != rows_k; ++row)
+        row_sumsqs[row] = dense_norms<caps_>(rows.row(row).as_vector()).sumsq;
+    auto dots = nk::matrix<raw_dot_t>::zeros({rows_k, queries_k}).value;
+    std::array<std::array<std::array<f32_t, 4>, queries_k / 4>, rows_k> distances;
 
     for ([[maybe_unused]] std::size_t call : loop) {
-        typename tiles_kit_t::accumulator_tile_t accumulator;
-        tiles_kit_t::init_tile(accumulator);
-        for (std::size_t depth_tile = 0; depth_tile != depth_tiles; ++depth_tile) {
-            tiles_kit_t::gather_a_tile(a_tile, views, depth_tile * tiles_kit_t::tile_depth_k);
-            tiles_kit_t::pack_b_tile(a_tile, b_tile);
-            tiles_kit_t::update_tile(accumulator, a_tile, b_tile);
+        if (tiles_kit_t::dots_packed(rows.raw_values_data(), packed.data(), dots.data(), rows_k, queries_k, dim, stride,
+                                     queries_k * sizeof(raw_dot_t), nullptr) != nk_success_k)
+            return loop.skip("streaming failed");
+        for (std::size_t row = 0; row != rows_k; ++row) {
+            lanes_t row_lanes;
+            std::memcpy(row_lanes.data(), dots.row(row).data(), sizeof(row_lanes));
+            for (std::size_t group = 0; group != queries_k / 4; ++group)
+                distances[row][group] = convert_to_distances<quads_kit_t>(kernel_, row_lanes[group], row_sumsqs[row],
+                                                                          query_lanes[group]);
         }
-        tiles_kit_t::finalize_tile(kernel_, accumulator, norms, norms, tiled.data(), rows_k);
-        do_not_optimize(tiled);
+        do_not_optimize(distances);
     }
-    rate_distances(loop, dim, rows_k * rows_k, rows_k * row_bytes_of<scalar_>(dim));
+    rate_distances(loop, dim, rows_k * queries_k, rows_k * row_bytes_of<scalar_>(dim));
 }
 
 /** Runs the 1-to-1 and 1-to-4 USearch rows for one tuple; unadapted tuples have none. */
@@ -548,13 +563,13 @@ static void bench_quads(environment_t const& env, std::string_view kernel_name, 
         }
 }
 
-/** Runs the tile-engine Gram row for one tuple; tuples without a tile engine have none. */
+/** Runs the matrix-engine row for one tuple; tuples without a tiles kit have none. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 static void bench_tiles(environment_t const& env, std::string_view kernel_name, std::string_view scalar_name,
                         std::string_view caps_name) {
     if constexpr (tiles_supported<kernel_, scalar_, caps_>)
         for (std::size_t const dim : dimensions_to_bench)
-            run_benchmark(env, fmt::format("{}/{}/{}/16x16/{}d", kernel_name, scalar_name, caps_name, dim),
+            run_benchmark(env, fmt::format("{}/{}/{}/tiles/{}d", kernel_name, scalar_name, caps_name, dim),
                           measure_distances_tile<kernel_, scalar_, caps_>, dim);
 }
 
@@ -569,17 +584,20 @@ static void bench_kernel(environment_t const& env, std::string_view kernel_name,
     // sweep - the concept gates silently absorb any tier without a kit.
 #if NUMKONG_ARCH_X8664_
     bench_quads<kernel_, scalar_, nk_cap_diamond_k>(env, kernel_name, scalar_name, "diamond");
+    bench_tiles<kernel_, scalar_, nk_cap_graniteamx_k>(env, kernel_name, scalar_name, "graniteamx");
     bench_quads<kernel_, scalar_, nk_cap_sierra_k>(env, kernel_name, scalar_name, "sierra");
+    bench_tiles<kernel_, scalar_, nk_cap_sapphireamx_k>(env, kernel_name, scalar_name, "sapphireamx");
     bench_quads<kernel_, scalar_, nk_cap_genoa_k>(env, kernel_name, scalar_name, "genoa");
     bench_quads<kernel_, scalar_, nk_cap_alder_k>(env, kernel_name, scalar_name, "alder");
     bench_quads<kernel_, scalar_, nk_cap_icelake_k>(env, kernel_name, scalar_name, "icelake");
     bench_quads<kernel_, scalar_, nk_cap_skylake_k>(env, kernel_name, scalar_name, "skylake");
     bench_quads<kernel_, scalar_, nk_cap_haswell_k>(env, kernel_name, scalar_name, "haswell");
-    bench_tiles<kernel_, scalar_, nk_cap_sapphireamx_k>(env, kernel_name, scalar_name, "sapphireamx");
 #elif NUMKONG_ARCH_ARM64_
     bench_quads<kernel_, scalar_, nk_cap_neonfp8_k>(env, kernel_name, scalar_name, "neonfp8");
-    bench_quads<kernel_, scalar_, nk_cap_neonfhm_k>(env, kernel_name, scalar_name, "neonfhm");
+    bench_tiles<kernel_, scalar_, nk_cap_smebi32_k>(env, kernel_name, scalar_name, "smebi32");
+    bench_tiles<kernel_, scalar_, nk_cap_sme_k>(env, kernel_name, scalar_name, "sme");
     bench_quads<kernel_, scalar_, nk_cap_neonbfdot_k>(env, kernel_name, scalar_name, "neonbfdot");
+    bench_quads<kernel_, scalar_, nk_cap_neonfhm_k>(env, kernel_name, scalar_name, "neonfhm");
     bench_quads<kernel_, scalar_, nk_cap_neonsdot_k>(env, kernel_name, scalar_name, "neonsdot");
     bench_quads<kernel_, scalar_, nk_cap_neon_k>(env, kernel_name, scalar_name, "neon");
 #elif NUMKONG_ARCH_WASM_

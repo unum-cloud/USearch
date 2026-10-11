@@ -291,9 +291,6 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     if (bench.settings.skip_vectors.value) fmt::println("  topping: {} loaded rows", bench.settings.skip_vectors.value);
     fmt::println("  quads: {} · {} · {} kit", scalar_t::dtype_name(), nk_kernel_name(bench.indexes.kernel()),
                  bit_name(compute_choices_k, index_t::picked_quads_capability_k, "serial"));
-    if constexpr (index_t::has_tiles_k)
-        fmt::println("  tiles: {} · reverse refinement",
-                     bit_name(compute_choices_k, index_t::picked_tiles_capability_k, "none"));
     nk_capability_t available = 0;
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = nk_cap_serial_k;
     if (index_t::picked_quads_capability_k == nk_cap_serial_k &&

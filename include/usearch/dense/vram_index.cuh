@@ -2361,8 +2361,6 @@ struct dense_vram_index {
 
     /** The capability of the quads kit the chain picked under @c capability_, surfaced in the bench reports. */
     inline static constexpr nk_capability_t picked_quads_capability_k = quads_chain_t::picked_k;
-    inline static constexpr bool has_tiles_k = false;
-    inline static constexpr nk_capability_t picked_tiles_capability_k = nk_cap_serial_k;
 
     inline static constexpr std::size_t max_node_count_k = dense_cuda_scored_node_t::id_capacity_k;
 

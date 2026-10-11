@@ -41,16 +41,16 @@
  *  @c scalar deduced from the @c nk::vector_view inputs and the metric their first argument.
  *  Call sites read @c distance<caps>(nk_kernel_angular_k,...) - no per-spec method, no per-spec class.
  *
- *  @b Tiles - a second, independent engine axis over the same capability bitmask. Each
- *  @c dense_tiles_chain<scalar,caps> names a tile kit - @c no_tiles_kit_t unless a
- *  matrix engine is adapted for the scalar - and its @c has_tiles_k verdict gates every
- *  caller. A tile kit (e.g. @c u8_sapphireamx_tiles_kit) exposes the primitive walk:
- *  @c configure_tiles once per thread, @c gather_a_tile straight from vector views,
- *  @c pack_b_tile into the engine's interleaved operand layout, @c init_tile and
- *  @c update_tile over the depth, and @c finalize_tile - plus @c scratch_bytes so callers
- *  size scratch without naming tile shapes. All engines share the 16-row @c tile_span_k
- *  geometry, and finalization routes through the same quads kit the chain picked, so a
- *  tiled Gram of distances matches the 1-to-4 path bit for bit.
+ *  @b Tiles - a second engine axis over the same capability bitmask, for scans rather than walks.
+ *  Each @c dense_tiles_chain<scalar,caps> names a matrix-engine kit - @c no_tiles_kit_t where the
+ *  platform has none for the scalar - and its @c has_tiles_k verdict gates the tiled scan. A tiles
+ *  kit, like @c bf16_sapphireamx_tiles_kit_t, packs a batch of queries into the engine's operand
+ *  layout once and streams stored rows against the pack where they lie, answering raw dots; the
+ *  quads kit of the same scalar finalizes them under the runtime metric, so tiled and 4-way scans
+ *  score exactly like the walk. Batches narrower than @c tile_columns_k stay on the 4-way kits. A kit
+ *  also bounds its scan: one pack holds at most @c pack_columns_k queries, and one call streams at most
+ *  @c stream_rows_k rows against it - enough rows to reuse the pack, few enough that the pack and the
+ *  dots it answers stay in the core's cache.
  *
  *  @section Design Goals & Decisions
  *
@@ -186,17 +186,16 @@ inline vector_norms<typename scalar_type_::dot_result_t> invoke_dense_norms_( //
     using native_sum_t = typename scalar_type_::reduce_moments_sum_t;
     using native_sumsq_t = typename scalar_type_::reduce_moments_sumsq_t;
     using dot_result_t = typename scalar_type_::dot_result_t;
-    using raw_scalar_t = typename scalar_type_::raw_t;
     using raw_sum_t = typename native_sum_t::raw_t;
     using raw_sumsq_t = typename native_sumsq_t::raw_t;
 
-    // NumKong's `nk_reduce_moments` take count in dimensions, not number of values and need explict
-    // downcasting to the underlying C-level raw types from its own C++ wrappers.
+    // NumKong's `nk_reduce_moments` take count in dimensions, not number of values, and write the
+    // underlying C-level raw types rather than its own C++ wrappers.
     native_sum_t native_sum;
     native_sumsq_t native_sumsq;
-    [[maybe_unused]] nk_status_t const status = function(
-        reinterpret_cast<raw_scalar_t const*>(vec.data()), vec.size(), sizeof(scalar_type_),
-        reinterpret_cast<raw_sum_t*>(&native_sum), reinterpret_cast<raw_sumsq_t*>(&native_sumsq), nullptr);
+    [[maybe_unused]] nk_status_t const status = function(vec.raw_values_data(), vec.size(), sizeof(scalar_type_),
+                                                         reinterpret_cast<raw_sum_t*>(&native_sum),
+                                                         reinterpret_cast<raw_sumsq_t*>(&native_sumsq), nullptr);
     assert(status == nk_success_k && "A CPU tier reduces any vector, given no stream");
     return {static_cast<dot_result_t>(native_sum), static_cast<dot_result_t>(native_sumsq)};
 }
@@ -2659,395 +2658,290 @@ struct dense_indexer_rescoring {
 
 #pragma endregion Query Corrections
 
-/** Empty tile kit: the scalar has no matrix-engine backend on this
- *  target, so eager refinement stays unavailable and callers keep the lazy 4-way loops. */
+/** The empty tiles kit: the platform has no matrix engine for the scalar, so every scan stays on the 4-way kits. */
 struct no_tiles_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_serial_k;
 };
 
-template <typename finalize_kit_type_>
-struct u8_sapphireamx_tiles_kit;
-template <typename finalize_kit_type_>
-struct i8_sapphireamx_tiles_kit;
-template <typename finalize_kit_type_>
-struct bf16_sapphireamx_tiles_kit;
+struct bf16_sapphireamx_tiles_kit_t;
+struct i8_sapphireamx_tiles_kit_t;
+struct u8_sapphireamx_tiles_kit_t;
+struct e4m3_sapphireamx_tiles_kit_t;
+struct e5m2_sapphireamx_tiles_kit_t;
+struct e3m2_sapphireamx_tiles_kit_t;
+struct e2m3_sapphireamx_tiles_kit_t;
+struct f16_graniteamx_tiles_kit_t;
+struct e5m2_graniteamx_tiles_kit_t;
+struct bf16_sme_tiles_kit_t;
+struct f16_sme_tiles_kit_t;
+struct i8_sme_tiles_kit_t;
+struct u8_sme_tiles_kit_t;
+struct e4m3_sme_tiles_kit_t;
+struct e5m2_sme_tiles_kit_t;
+struct e3m2_sme_tiles_kit_t;
+struct e2m3_sme_tiles_kit_t;
+struct i4x2_sme_tiles_kit_t;
+struct u4x2_sme_tiles_kit_t;
+struct u1x8_smebi32_tiles_kit_t;
 
 #if NUMKONG_TARGET_SAPPHIREAMX
 
-/** u8 tile kit for Sapphire Rapids AMX - the 4-way trio one power-of-two wider:
- *  @c init_tile / @c update_tile / @c finalize_tile over 16×16 accumulator tiles, plus
- *  the gather & pack that feed them. Finalizes through @p finalize_kit_type_ - the very
- *  kit the lazy path picked - so eager & lazy distances agree bit-for-bit. An SME twin
- *  fills the same slots with @c svmopa over ZA tiles, a CUDA twin with @c mma fragments. */
-template <typename finalize_kit_type_>
-struct u8_sapphireamx_tiles_kit {
-    inline static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
-    using finalize_kit_t = finalize_kit_type_;
-    using scalar_t = nk::u8_t;
-    using norms_t = vector_norms<typename scalar_t::dot_result_t>;
-    using a_tile_t = nk_dots_u8_a16x64_sapphireamx_t;
-    using b_tile_t = nk_dots_u8_b64x16_sapphireamx_t;
-    using accumulator_tile_t = nk_dots_u8_state_sapphireamx_t;
-
-    inline static constexpr std::size_t tile_rows_k = 16;
-    inline static constexpr std::size_t tile_columns_k = 16;
-    inline static constexpr std::size_t tile_depth_k = 64;
-
-    /** Row tiles covering @p count rows. */
-    static constexpr std::size_t row_tiles(std::size_t count) noexcept { return divide_round_up(count, tile_rows_k); }
-
-    /** Column tiles covering @p count columns. */
-    static constexpr std::size_t column_tiles(std::size_t count) noexcept {
-        return divide_round_up(count, tile_columns_k);
-    }
-
-    /** Depth tiles covering @p dimensions. */
-    static constexpr std::size_t depth_tiles(std::size_t dimensions) noexcept {
-        return divide_round_up(dimensions, tile_depth_k);
-    }
-
-    /** Bytes of tile scratch one Gram over @p count rows of @p dimensions needs -
-     *  the packed B-tiles plus one row-tile of A-strips - derived from this kit's own
-     *  tile types, so every dtype & engine sizes itself. Includes one alignment margin:
-     *  generic byte allocators promise 16, the tile loads demand 64, and @c scratch_of
-     *  aligns the base up. */
-    static constexpr std::size_t scratch_bytes(std::size_t count, std::size_t dimensions) noexcept {
-        return row_tiles(count) * depth_tiles(dimensions) * sizeof(b_tile_t) +
-               depth_tiles(dimensions) * sizeof(a_tile_t) + alignof(a_tile_t);
-    }
-
-    /** The two regions of one Gram's scratch: the packed B-tiles first, the A-strips after. */
-    struct scratch_t {
-        b_tile_t* b_tiles;
-        a_tile_t* a_tiles;
-    };
-
-    /** Lays @p packed_tiles B-tiles and the A-strips after them over @p scratch, from its first
-     *  address on the tiles' own alignment. */
-    static scratch_t scratch_of(byte_t* scratch, std::size_t packed_tiles) noexcept {
-        std::uintptr_t const base = round_up_to_multiple(reinterpret_cast<std::uintptr_t>(scratch),
-                                                         std::uintptr_t {alignof(a_tile_t)});
-        b_tile_t* const b_tiles = reinterpret_cast<b_tile_t*>(base);
-        return {b_tiles, reinterpret_cast<a_tile_t*>(b_tiles + packed_tiles)};
-    }
-
-    /** One palette programming per refinement - never per tile. */
-    static void configure_tiles() noexcept { nk_amx_tile_configure_sapphireamx_(); }
-
-    /** Gathers one @c tile_depth_k -deep strip of all 16 @p rows - scattered views,
-     *  each touched once per depth sweep: the tile @b is the staging, no contiguous
-     *  matrix ever exists. Row pads repeat valid views, like the 4-way tails; the
-     *  depth tail zero-fills, adding nothing to any dot. */
-    static void gather_a_tile(a_tile_t& a_tile, std::array<nk::vector_view<nk::u8_t>, tile_rows_k> const& rows,
-                              std::size_t depth_offset) noexcept {
-        std::size_t const remaining = rows[0].size() - depth_offset;
-        __mmask64 const depth_mask = remaining >= tile_depth_k ? ~__mmask64 {0} : (__mmask64 {1} << remaining) - 1u;
-        for (std::size_t row = 0; row != tile_rows_k; ++row) {
-            __m512i const strip = _mm512_maskz_loadu_epi8(
-                depth_mask, reinterpret_cast<nk_u8_t const*>(rows[row].data()) + depth_offset);
-            _mm512_store_si512(a_tile.data[row], strip);
-        }
-    }
-
-    /** The transpose network NumKong packs with: a gathered A-tile becomes its own
-     *  quad-interleaved B-tile - the Gram symmetry in one call. */
-    static void pack_b_tile(a_tile_t const& a_tile, b_tile_t& b_tile) noexcept {
-        nk_dots_pack_u8_transposed_sapphireamx_(&a_tile, &b_tile);
-    }
-
-    /** Zeroes the accumulator ahead of a depth walk. */
-    static void init_tile(accumulator_tile_t& tile) noexcept { nk_dots_u8_init_sapphireamx_(&tile); }
-
-    /** tile += A × B for one depth step - @c TDPBUUD here. Deliberately single-step:
-     *  callers interleave the next tile's gather & pack between updates, hiding fetch
-     *  latency behind the matrix op - progressive fetching outweighs the accumulator's
-     *  per-step round-trip through memory. */
-    static void update_tile(accumulator_tile_t& tile, a_tile_t const& a_tile, b_tile_t const& b_tile) noexcept {
-        nk_compiler_barrier_sapphireamx_();
-        _tile_loadd(0, tile.data, 64);
-        _tile_loadd(1, a_tile.data, 64);
-        _tile_loadd(2, b_tile.data, 64);
-        _tile_dpbuud(0, 1, 2);
-        _tile_stored(0, tile.data, 64);
-        nk_compiler_barrier_sapphireamx_();
-    }
-
-    /** Distances under @p kernel through the stored norms for all 16×16 lanes: 4-lane groups
-     *  through the finalize kit's @c convert_to_distances - the epilogue of
-     *  @c invoke_scores_, tiled. Pad lanes finalize too and are simply never read. */
-    static void finalize_tile(nk_kernel_kind_t kernel, accumulator_tile_t const& tile,
-                              std::array<norms_t, tile_rows_k> const& a_norms,
-                              std::array<norms_t, tile_columns_k> const& b_norms, f32_t* distances,
-                              std::size_t stride) noexcept {
-        using finalized_vec_t = typename finalize_kit_t::finalized_vec_t;
-        using dot_result_t = typename scalar_t::dot_result_t;
-        alignas(64) dot_result_t column_sumsqs[tile_columns_k];
-        for (std::size_t column = 0; column != tile_columns_k; ++column) column_sumsqs[column] = b_norms[column].sumsq;
-        for (std::size_t row = 0; row != tile_rows_k; ++row) {
-            f32_t* const distances_row = distances + row * stride;
-            for (std::size_t group = 0; group != tile_columns_k / 4; ++group) {
-                finalized_vec_t dots_vec, sumsqs_vec;
-                dots_vec.xmm = _mm_load_si128(reinterpret_cast<__m128i const*>(&tile.data[row][group * 4]));
-                sumsqs_vec.xmm = _mm_load_si128(reinterpret_cast<__m128i const*>(&column_sumsqs[group * 4]));
-                std::array<f32_t, 4> const lanes = convert_to_distances<finalize_kit_t>(kernel, dots_vec,
-                                                                                        a_norms[row].sumsq, sumsqs_vec);
-                _mm_storeu_ps(distances_row + group * 4, _mm_loadu_ps(lanes.data()));
-            }
-        }
-    }
-};
-
-/** i8 tile kit for Sapphire Rapids AMX - the signed twin of the u8 kit, @c TDPBSSD
- *  over the same 16×64 strips and 16×16 accumulator tiles. Finalizes through
- *  @p finalize_kit_type_ - the very kit the lazy path picked - so eager & lazy distances
- *  agree bit-for-bit. */
-template <typename finalize_kit_type_>
-struct i8_sapphireamx_tiles_kit {
-    inline static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
-    using finalize_kit_t = finalize_kit_type_;
-    using scalar_t = nk::i8_t;
-    using norms_t = vector_norms<typename scalar_t::dot_result_t>;
-    using a_tile_t = nk_dots_i8_a16x64_sapphireamx_t;
-    using b_tile_t = nk_dots_i8_b64x16_sapphireamx_t;
-    using accumulator_tile_t = nk_dots_i8_state_sapphireamx_t;
-
-    inline static constexpr std::size_t tile_rows_k = 16;
-    inline static constexpr std::size_t tile_columns_k = 16;
-    inline static constexpr std::size_t tile_depth_k = 64;
-
-    /** Row tiles covering @p count rows. */
-    static constexpr std::size_t row_tiles(std::size_t count) noexcept { return divide_round_up(count, tile_rows_k); }
-
-    /** Column tiles covering @p count columns. */
-    static constexpr std::size_t column_tiles(std::size_t count) noexcept {
-        return divide_round_up(count, tile_columns_k);
-    }
-
-    /** Depth tiles covering @p dimensions. */
-    static constexpr std::size_t depth_tiles(std::size_t dimensions) noexcept {
-        return divide_round_up(dimensions, tile_depth_k);
-    }
-
-    /** Bytes of tile scratch one Gram over @p count rows of @p dimensions needs -
-     *  the packed B-tiles plus one row-tile of A-strips - derived from this kit's own
-     *  tile types, so every dtype & engine sizes itself. Includes one alignment margin:
-     *  generic byte allocators promise 16, the tile loads demand 64, and @c scratch_of
-     *  aligns the base up. */
-    static constexpr std::size_t scratch_bytes(std::size_t count, std::size_t dimensions) noexcept {
-        return row_tiles(count) * depth_tiles(dimensions) * sizeof(b_tile_t) +
-               depth_tiles(dimensions) * sizeof(a_tile_t) + alignof(a_tile_t);
-    }
-
-    /** The two regions of one Gram's scratch: the packed B-tiles first, the A-strips after. */
-    struct scratch_t {
-        b_tile_t* b_tiles;
-        a_tile_t* a_tiles;
-    };
-
-    /** Lays @p packed_tiles B-tiles and the A-strips after them over @p scratch, from its first
-     *  address on the tiles' own alignment. */
-    static scratch_t scratch_of(byte_t* scratch, std::size_t packed_tiles) noexcept {
-        std::uintptr_t const base = round_up_to_multiple(reinterpret_cast<std::uintptr_t>(scratch),
-                                                         std::uintptr_t {alignof(a_tile_t)});
-        b_tile_t* const b_tiles = reinterpret_cast<b_tile_t*>(base);
-        return {b_tiles, reinterpret_cast<a_tile_t*>(b_tiles + packed_tiles)};
-    }
-
-    /** One palette programming per refinement - never per tile. */
-    static void configure_tiles() noexcept { nk_amx_tile_configure_sapphireamx_(); }
-
-    /** Gathers one @c tile_depth_k -deep strip of all 16 @p rows - scattered views,
-     *  each touched once per depth sweep: the tile @b is the staging, no contiguous
-     *  matrix ever exists. Row pads repeat valid views, like the 4-way tails; the
-     *  depth tail zero-fills, adding nothing to any dot. */
-    static void gather_a_tile(a_tile_t& a_tile, std::array<nk::vector_view<nk::i8_t>, tile_rows_k> const& rows,
-                              std::size_t depth_offset) noexcept {
-        std::size_t const remaining = rows[0].size() - depth_offset;
-        __mmask64 const depth_mask = remaining >= tile_depth_k ? ~__mmask64 {0} : (__mmask64 {1} << remaining) - 1u;
-        for (std::size_t row = 0; row != tile_rows_k; ++row) {
-            __m512i const strip = _mm512_maskz_loadu_epi8(
-                depth_mask, reinterpret_cast<nk_i8_t const*>(rows[row].data()) + depth_offset);
-            _mm512_store_si512(a_tile.data[row], strip);
-        }
-    }
-
-    /** The transpose network NumKong packs with: a gathered A-tile becomes its own
-     *  quad-interleaved B-tile - the Gram symmetry in one call. */
-    static void pack_b_tile(a_tile_t const& a_tile, b_tile_t& b_tile) noexcept {
-        nk_dots_pack_i8_transposed_sapphireamx_(&a_tile, &b_tile);
-    }
-
-    /** Zeroes the accumulator ahead of a depth walk. */
-    static void init_tile(accumulator_tile_t& tile) noexcept { nk_dots_i8_init_sapphireamx_(&tile); }
-
-    /** tile += A × B for one depth step - @c TDPBSSD here. Deliberately single-step:
-     *  callers interleave the next tile's gather & pack between updates, hiding fetch
-     *  latency behind the matrix op - progressive fetching outweighs the accumulator's
-     *  per-step round-trip through memory. */
-    static void update_tile(accumulator_tile_t& tile, a_tile_t const& a_tile, b_tile_t const& b_tile) noexcept {
-        nk_compiler_barrier_sapphireamx_();
-        _tile_loadd(0, tile.data, 64);
-        _tile_loadd(1, a_tile.data, 64);
-        _tile_loadd(2, b_tile.data, 64);
-        _tile_dpbssd(0, 1, 2);
-        _tile_stored(0, tile.data, 64);
-        nk_compiler_barrier_sapphireamx_();
-    }
-
-    /** Distances under @p kernel through the stored norms for all 16×16 lanes: 4-lane groups
-     *  through the finalize kit's @c convert_to_distances - the epilogue of
-     *  @c invoke_scores_, tiled. Pad lanes finalize too and are simply never read. */
-    static void finalize_tile(nk_kernel_kind_t kernel, accumulator_tile_t const& tile,
-                              std::array<norms_t, tile_rows_k> const& a_norms,
-                              std::array<norms_t, tile_columns_k> const& b_norms, f32_t* distances,
-                              std::size_t stride) noexcept {
-        using finalized_vec_t = typename finalize_kit_t::finalized_vec_t;
-        using dot_result_t = typename scalar_t::dot_result_t;
-        alignas(64) dot_result_t column_sumsqs[tile_columns_k];
-        for (std::size_t column = 0; column != tile_columns_k; ++column) column_sumsqs[column] = b_norms[column].sumsq;
-        for (std::size_t row = 0; row != tile_rows_k; ++row) {
-            f32_t* const distances_row = distances + row * stride;
-            for (std::size_t group = 0; group != tile_columns_k / 4; ++group) {
-                finalized_vec_t dots_vec, sumsqs_vec;
-                dots_vec.xmm = _mm_load_si128(reinterpret_cast<__m128i const*>(&tile.data[row][group * 4]));
-                sumsqs_vec.xmm = _mm_load_si128(reinterpret_cast<__m128i const*>(&column_sumsqs[group * 4]));
-                std::array<f32_t, 4> const lanes = convert_to_distances<finalize_kit_t>(kernel, dots_vec,
-                                                                                        a_norms[row].sumsq, sumsqs_vec);
-                _mm_storeu_ps(distances_row + group * 4, _mm_loadu_ps(lanes.data()));
-            }
-        }
-    }
-};
-
-/** bf16 tile kit for Sapphire Rapids AMX - @c TDPBF16PS over 16×32 strips, pair-interleaved
- *  B-tiles and f32 accumulator tiles, half the depth of the byte kits per step. Finalizes
- *  through @p finalize_kit_type_ - the very kit the lazy path picked - so eager & lazy
- *  distances agree bit-for-bit. */
-template <typename finalize_kit_type_>
-struct bf16_sapphireamx_tiles_kit {
-    inline static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
-    using finalize_kit_t = finalize_kit_type_;
+/** bf16 tiles kit - Intel AMX-BF16 & AMX-INT8. */
+struct bf16_sapphireamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
     using scalar_t = nk::bf16_t;
-    using norms_t = vector_norms<typename scalar_t::dot_result_t>;
-    using a_tile_t = nk_dots_bf16_a16x32_sapphireamx_t;
-    using b_tile_t = nk_dots_bf16_b32x16_sapphireamx_t;
-    using accumulator_tile_t = nk_dots_bf16_state_sapphireamx_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_bf16_sapphireamx;
+    static constexpr auto pack = nk_dots_pack_bf16_sapphireamx;
+    static constexpr auto dots_packed = nk_dots_packed_bf16_sapphireamx;
+};
 
-    inline static constexpr std::size_t tile_rows_k = 16;
-    inline static constexpr std::size_t tile_columns_k = 16;
-    inline static constexpr std::size_t tile_depth_k = 32;
+/** i8 tiles kit - Intel AMX-BF16 & AMX-INT8. */
+struct i8_sapphireamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    using scalar_t = nk::i8_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_i8_sapphireamx;
+    static constexpr auto pack = nk_dots_pack_i8_sapphireamx;
+    static constexpr auto dots_packed = nk_dots_packed_i8_sapphireamx;
+};
 
-    /** Row tiles covering @p count rows. */
-    static constexpr std::size_t row_tiles(std::size_t count) noexcept { return divide_round_up(count, tile_rows_k); }
+/** u8 tiles kit - Intel AMX-BF16 & AMX-INT8. */
+struct u8_sapphireamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    using scalar_t = nk::u8_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_u8_sapphireamx;
+    static constexpr auto pack = nk_dots_pack_u8_sapphireamx;
+    static constexpr auto dots_packed = nk_dots_packed_u8_sapphireamx;
+};
 
-    /** Column tiles covering @p count columns. */
-    static constexpr std::size_t column_tiles(std::size_t count) noexcept {
-        return divide_round_up(count, tile_columns_k);
-    }
+/** e4m3 tiles kit - Intel AMX-BF16 & AMX-INT8. */
+struct e4m3_sapphireamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    using scalar_t = nk::e4m3_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_e4m3_sapphireamx;
+    static constexpr auto pack = nk_dots_pack_e4m3_sapphireamx;
+    static constexpr auto dots_packed = nk_dots_packed_e4m3_sapphireamx;
+};
 
-    /** Depth tiles covering @p dimensions. */
-    static constexpr std::size_t depth_tiles(std::size_t dimensions) noexcept {
-        return divide_round_up(dimensions, tile_depth_k);
-    }
+/** e5m2 tiles kit - Intel AMX-BF16 & AMX-INT8. */
+struct e5m2_sapphireamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    using scalar_t = nk::e5m2_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_e5m2_sapphireamx;
+    static constexpr auto pack = nk_dots_pack_e5m2_sapphireamx;
+    static constexpr auto dots_packed = nk_dots_packed_e5m2_sapphireamx;
+};
 
-    /** Bytes of tile scratch one Gram over @p count rows of @p dimensions needs -
-     *  the packed B-tiles plus one row-tile of A-strips - derived from this kit's own
-     *  tile types, so every dtype & engine sizes itself. Includes one alignment margin:
-     *  generic byte allocators promise 16, the tile loads demand 64, and @c scratch_of
-     *  aligns the base up. */
-    static constexpr std::size_t scratch_bytes(std::size_t count, std::size_t dimensions) noexcept {
-        return row_tiles(count) * depth_tiles(dimensions) * sizeof(b_tile_t) +
-               depth_tiles(dimensions) * sizeof(a_tile_t) + alignof(a_tile_t);
-    }
+/** e3m2 tiles kit - Intel AMX-BF16 & AMX-INT8. */
+struct e3m2_sapphireamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    using scalar_t = nk::e3m2_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_e3m2_sapphireamx;
+    static constexpr auto pack = nk_dots_pack_e3m2_sapphireamx;
+    static constexpr auto dots_packed = nk_dots_packed_e3m2_sapphireamx;
+};
 
-    /** The two regions of one Gram's scratch: the packed B-tiles first, the A-strips after. */
-    struct scratch_t {
-        b_tile_t* b_tiles;
-        a_tile_t* a_tiles;
-    };
-
-    /** Lays @p packed_tiles B-tiles and the A-strips after them over @p scratch, from its first
-     *  address on the tiles' own alignment. */
-    static scratch_t scratch_of(byte_t* scratch, std::size_t packed_tiles) noexcept {
-        std::uintptr_t const base = round_up_to_multiple(reinterpret_cast<std::uintptr_t>(scratch),
-                                                         std::uintptr_t {alignof(a_tile_t)});
-        b_tile_t* const b_tiles = reinterpret_cast<b_tile_t*>(base);
-        return {b_tiles, reinterpret_cast<a_tile_t*>(b_tiles + packed_tiles)};
-    }
-
-    /** One palette programming per refinement - never per tile. */
-    static void configure_tiles() noexcept { nk_amx_tile_configure_sapphireamx_(); }
-
-    /** Gathers one @c tile_depth_k -deep strip of all 16 @p rows - scattered views,
-     *  each touched once per depth sweep: the tile @b is the staging, no contiguous
-     *  matrix ever exists. Row pads repeat valid views, like the 4-way tails; the
-     *  depth tail zero-fills, adding nothing to any dot. */
-    static void gather_a_tile(a_tile_t& a_tile, std::array<nk::vector_view<nk::bf16_t>, tile_rows_k> const& rows,
-                              std::size_t depth_offset) noexcept {
-        std::size_t const remaining = rows[0].size() - depth_offset;
-        __mmask32 const depth_mask = remaining >= tile_depth_k ? ~__mmask32 {0} : (__mmask32 {1} << remaining) - 1u;
-        for (std::size_t row = 0; row != tile_rows_k; ++row) {
-            __m512i const strip = _mm512_maskz_loadu_epi16(
-                depth_mask, reinterpret_cast<nk_bf16_t const*>(rows[row].data()) + depth_offset);
-            _mm512_store_si512(a_tile.data[row], strip);
-        }
-    }
-
-    /** The transpose network NumKong packs with: a gathered A-tile becomes its own
-     *  pair-interleaved B-tile - the Gram symmetry in one call. */
-    static void pack_b_tile(a_tile_t const& a_tile, b_tile_t& b_tile) noexcept {
-        nk_dots_pack_bf16_transposed_sapphireamx_(&a_tile, &b_tile);
-    }
-
-    /** Zeroes the accumulator ahead of a depth walk. */
-    static void init_tile(accumulator_tile_t& tile) noexcept { nk_dots_bf16_init_sapphireamx_(&tile); }
-
-    /** tile += A × B for one depth step - @c TDPBF16PS here. Deliberately single-step:
-     *  callers interleave the next tile's gather & pack between updates, hiding fetch
-     *  latency behind the matrix op - progressive fetching outweighs the accumulator's
-     *  per-step round-trip through memory. */
-    static void update_tile(accumulator_tile_t& tile, a_tile_t const& a_tile, b_tile_t const& b_tile) noexcept {
-        nk_compiler_barrier_sapphireamx_();
-        _tile_loadd(0, tile.data, 64);
-        _tile_loadd(1, a_tile.data, 64);
-        _tile_loadd(2, b_tile.data, 64);
-        _tile_dpbf16ps(0, 1, 2);
-        _tile_stored(0, tile.data, 64);
-        nk_compiler_barrier_sapphireamx_();
-    }
-
-    /** Distances under @p kernel through the stored norms for all 16×16 lanes: 4-lane groups
-     *  through the finalize kit's @c convert_to_distances - the epilogue of
-     *  @c invoke_scores_, tiled. Pad lanes finalize too and are simply never read. */
-    static void finalize_tile(nk_kernel_kind_t kernel, accumulator_tile_t const& tile,
-                              std::array<norms_t, tile_rows_k> const& a_norms,
-                              std::array<norms_t, tile_columns_k> const& b_norms, f32_t* distances,
-                              std::size_t stride) noexcept {
-        using finalized_vec_t = typename finalize_kit_t::finalized_vec_t;
-        using dot_result_t = typename scalar_t::dot_result_t;
-        alignas(64) dot_result_t column_sumsqs[tile_columns_k];
-        for (std::size_t column = 0; column != tile_columns_k; ++column) column_sumsqs[column] = b_norms[column].sumsq;
-        for (std::size_t row = 0; row != tile_rows_k; ++row) {
-            f32_t* const distances_row = distances + row * stride;
-            for (std::size_t group = 0; group != tile_columns_k / 4; ++group) {
-                finalized_vec_t dots_vec, sumsqs_vec;
-                dots_vec.xmm = _mm_load_si128(reinterpret_cast<__m128i const*>(&tile.data[row][group * 4]));
-                sumsqs_vec.xmm = _mm_load_si128(reinterpret_cast<__m128i const*>(&column_sumsqs[group * 4]));
-                std::array<f32_t, 4> const lanes = convert_to_distances<finalize_kit_t>(kernel, dots_vec,
-                                                                                        a_norms[row].sumsq, sumsqs_vec);
-                _mm_storeu_ps(distances_row + group * 4, _mm_loadu_ps(lanes.data()));
-            }
-        }
-    }
+/** e2m3 tiles kit - Intel AMX-BF16 & AMX-INT8. */
+struct e2m3_sapphireamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sapphireamx_k;
+    using scalar_t = nk::e2m3_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_e2m3_sapphireamx;
+    static constexpr auto pack = nk_dots_pack_e2m3_sapphireamx;
+    static constexpr auto dots_packed = nk_dots_packed_e2m3_sapphireamx;
 };
 
 #endif // NUMKONG_TARGET_SAPPHIREAMX
 
-/** Tile-kernel capability cascade - a second, independent axis over the same
- *  @p caps_ bitmask as @c dense_quads_chain, so one machine picks icelake for 1-to-1
- *  kernels and sapphireamx for tiles simultaneously. The primary template resolves
- *  to @c no_tiles_kit_t, and only the specialized scalars ever offer a matrix-engine
- *  backend - callers keep their lazy loops everywhere else. */
+#if NUMKONG_TARGET_GRANITEAMX
+
+/** f16 tiles kit - Intel AMX-FP16. */
+struct f16_graniteamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_graniteamx_k;
+    using scalar_t = nk::f16_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_f16_graniteamx;
+    static constexpr auto pack = nk_dots_pack_f16_graniteamx;
+    static constexpr auto dots_packed = nk_dots_packed_f16_graniteamx;
+};
+
+/** e5m2 tiles kit - Intel AMX-FP16. */
+struct e5m2_graniteamx_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_graniteamx_k;
+    using scalar_t = nk::e5m2_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_e5m2_graniteamx;
+    static constexpr auto pack = nk_dots_pack_e5m2_graniteamx;
+    static constexpr auto dots_packed = nk_dots_packed_e5m2_graniteamx;
+};
+
+#endif // NUMKONG_TARGET_GRANITEAMX
+
+#if NUMKONG_TARGET_SME
+
+/** bf16 tiles kit - Arm SME. */
+struct bf16_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    using scalar_t = nk::bf16_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_bf16_sme;
+    static constexpr auto pack = nk_dots_pack_bf16_sme;
+    static constexpr auto dots_packed = nk_dots_packed_bf16_sme;
+};
+
+/** f16 tiles kit - Arm SME. */
+struct f16_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    using scalar_t = nk::f16_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_f16_sme;
+    static constexpr auto pack = nk_dots_pack_f16_sme;
+    static constexpr auto dots_packed = nk_dots_packed_f16_sme;
+};
+
+/** i8 tiles kit - Arm SME. */
+struct i8_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    using scalar_t = nk::i8_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_i8_sme;
+    static constexpr auto pack = nk_dots_pack_i8_sme;
+    static constexpr auto dots_packed = nk_dots_packed_i8_sme;
+};
+
+/** u8 tiles kit - Arm SME. */
+struct u8_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    using scalar_t = nk::u8_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_u8_sme;
+    static constexpr auto pack = nk_dots_pack_u8_sme;
+    static constexpr auto dots_packed = nk_dots_packed_u8_sme;
+};
+
+/** e4m3 tiles kit - Arm SME. */
+struct e4m3_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    using scalar_t = nk::e4m3_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_e4m3_sme;
+    static constexpr auto pack = nk_dots_pack_e4m3_sme;
+    static constexpr auto dots_packed = nk_dots_packed_e4m3_sme;
+};
+
+/** e5m2 tiles kit - Arm SME. */
+struct e5m2_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    using scalar_t = nk::e5m2_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_e5m2_sme;
+    static constexpr auto pack = nk_dots_pack_e5m2_sme;
+    static constexpr auto dots_packed = nk_dots_packed_e5m2_sme;
+};
+
+/** e3m2 tiles kit - Arm SME. */
+struct e3m2_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    using scalar_t = nk::e3m2_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_e3m2_sme;
+    static constexpr auto pack = nk_dots_pack_e3m2_sme;
+    static constexpr auto dots_packed = nk_dots_packed_e3m2_sme;
+};
+
+/** e2m3 tiles kit - Arm SME. */
+struct e2m3_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    using scalar_t = nk::e2m3_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_e2m3_sme;
+    static constexpr auto pack = nk_dots_pack_e2m3_sme;
+    static constexpr auto dots_packed = nk_dots_packed_e2m3_sme;
+};
+
+/** i4x2 tiles kit - Arm SME. */
+struct i4x2_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    using scalar_t = nk::i4x2_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_i4_sme;
+    static constexpr auto pack = nk_dots_pack_i4_sme;
+    static constexpr auto dots_packed = nk_dots_packed_i4_sme;
+};
+
+/** u4x2 tiles kit - Arm SME. */
+struct u4x2_sme_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_sme_k;
+    using scalar_t = nk::u4x2_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_u4_sme;
+    static constexpr auto pack = nk_dots_pack_u4_sme;
+    static constexpr auto dots_packed = nk_dots_packed_u4_sme;
+};
+
+#endif // NUMKONG_TARGET_SME
+
+#if NUMKONG_TARGET_SMEBI32
+
+/** u1x8 tiles kit - Arm SME binary outer products. */
+struct u1x8_smebi32_tiles_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_smebi32_k;
+    using scalar_t = nk::u1x8_t;
+    static constexpr std::size_t tile_columns_k = 16;
+    static constexpr std::size_t pack_columns_k = 256;
+    static constexpr std::size_t stream_rows_k = 256;
+    static constexpr auto pack_size = nk_dots_pack_size_u1_smebi32;
+    static constexpr auto pack = nk_dots_pack_u1_smebi32;
+    static constexpr auto dots_packed = nk_dots_packed_u1_smebi32;
+};
+
+#endif // NUMKONG_TARGET_SMEBI32
+
+/** Matrix-engine capability cascade for every scalar, over the same @p caps_ bitmask as @c dense_quads_chain.
+ *  The primary template resolves to @c no_tiles_kit_t, and only the scalars some engine multiplies specialize it. */
 template <nk::numeric_dtype scalar_, nk_capability_t caps_>
 struct dense_tiles_chain {
     using kit_t = no_tiles_kit_t;
@@ -3057,12 +2951,23 @@ struct dense_tiles_chain {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_tiles_chain<nk::u8_t, caps_> {
-    using kit_t = typename first_available_kit< //
-        no_tiles_kit_t,                         //
-        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
-                    u8_sapphireamx_tiles_kit<typename dense_quads_chain<nk::u8_t, caps_>::kit_t>>> //
-        ::type;
+struct dense_tiles_chain<nk::bf16_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                      //
+        no_tiles_kit_t,                                                                                              //
+        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, bf16_sme_tiles_kit_t>,                        //
+        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0, bf16_sapphireamx_tiles_kit_t> //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cpus_k) != 0)
+struct dense_tiles_chain<nk::u1x8_t, caps_> {
+    using kit_t = typename first_available_kit<                                                          //
+        no_tiles_kit_t,                                                                                  //
+        chain_layer<NUMKONG_TARGET_SMEBI32 && (caps_ & nk_cap_smebi32_k) != 0, u1x8_smebi32_tiles_kit_t> //
+        >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
@@ -3070,25 +2975,109 @@ struct dense_tiles_chain<nk::u8_t, caps_> {
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
 struct dense_tiles_chain<nk::i8_t, caps_> {
-    using kit_t = typename first_available_kit< //
-        no_tiles_kit_t,                         //
-        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
-                    i8_sapphireamx_tiles_kit<typename dense_quads_chain<nk::i8_t, caps_>::kit_t>>> //
-        ::type;
+    using kit_t = typename first_available_kit<                                                                    //
+        no_tiles_kit_t,                                                                                            //
+        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, i8_sme_tiles_kit_t>,                        //
+        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0, i8_sapphireamx_tiles_kit_t> //
+        >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_tiles_chain<nk::bf16_t, caps_> {
-    using kit_t = typename first_available_kit< //
-        no_tiles_kit_t,                         //
-        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0,
-                    bf16_sapphireamx_tiles_kit<typename dense_quads_chain<nk::bf16_t, caps_>::kit_t>>> //
-        ::type;
+struct dense_tiles_chain<nk::e4m3_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                      //
+        no_tiles_kit_t,                                                                                              //
+        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, e4m3_sme_tiles_kit_t>,                        //
+        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0, e4m3_sapphireamx_tiles_kit_t> //
+        >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cpus_k) != 0)
+struct dense_tiles_chain<nk::f16_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                  //
+        no_tiles_kit_t,                                                                                          //
+        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, f16_sme_tiles_kit_t>,                     //
+        chain_layer<NUMKONG_TARGET_GRANITEAMX && (caps_ & nk_cap_graniteamx_k) != 0, f16_graniteamx_tiles_kit_t> //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cpus_k) != 0)
+struct dense_tiles_chain<nk::u8_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                    //
+        no_tiles_kit_t,                                                                                            //
+        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, u8_sme_tiles_kit_t>,                        //
+        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0, u8_sapphireamx_tiles_kit_t> //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cpus_k) != 0)
+struct dense_tiles_chain<nk::e5m2_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                      //
+        no_tiles_kit_t,                                                                                              //
+        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, e5m2_sme_tiles_kit_t>,                        //
+        chain_layer<NUMKONG_TARGET_GRANITEAMX && (caps_ & nk_cap_graniteamx_k) != 0, e5m2_graniteamx_tiles_kit_t>,   //
+        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0, e5m2_sapphireamx_tiles_kit_t> //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cpus_k) != 0)
+struct dense_tiles_chain<nk::i4x2_t, caps_> {
+    using kit_t = typename first_available_kit<                                              //
+        no_tiles_kit_t,                                                                      //
+        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, i4x2_sme_tiles_kit_t> //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cpus_k) != 0)
+struct dense_tiles_chain<nk::u4x2_t, caps_> {
+    using kit_t = typename first_available_kit<                                              //
+        no_tiles_kit_t,                                                                      //
+        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, u4x2_sme_tiles_kit_t> //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cpus_k) != 0)
+struct dense_tiles_chain<nk::e3m2_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                      //
+        no_tiles_kit_t,                                                                                              //
+        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, e3m2_sme_tiles_kit_t>,                        //
+        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0, e3m2_sapphireamx_tiles_kit_t> //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_cpus_k) != 0)
+struct dense_tiles_chain<nk::e2m3_t, caps_> {
+    using kit_t = typename first_available_kit<                                                                      //
+        no_tiles_kit_t,                                                                                              //
+        chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, e2m3_sme_tiles_kit_t>,                        //
+        chain_layer<NUMKONG_TARGET_SAPPHIREAMX && (caps_ & nk_cap_sapphireamx_k) != 0, e2m3_sapphireamx_tiles_kit_t> //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+    static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
+};
+
 } // namespace usearch
 } // namespace unum
