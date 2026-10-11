@@ -1113,7 +1113,8 @@ void test_deferred_search(void) {
     expect(!blocking.outcome.message, blocking.outcome.message);
 
     search_every_row(index, executor, usearch_completion_deferred_k, rows, &deferred);
-    expect_eq(deferred.outcome.status, usearch_status_deferred_k, "A submitted call is deferred until waited on");
+    expect_eq(usearch_outcome_status(&deferred.outcome), usearch_status_deferred_k,
+              "A submitted call is deferred until waited on");
     expect_eq(usearch_outcome_wait(&deferred.outcome), usearch_status_success_k, "A waited search must finish");
     expect(same_matches(&blocking.matches, &deferred.matches),
            "A deferred search must land the matches a blocking one does");
@@ -1209,7 +1210,8 @@ void test_deferred_holds_arena(void) {
     search_outputs_t outputs = {.arena = create_arena(executor)};
 
     search_every_row(index, executor, usearch_completion_deferred_k, rows, &outputs);
-    expect_eq(outputs.outcome.status, usearch_status_deferred_k, "A submitted call is deferred until waited on");
+    expect_eq(usearch_outcome_status(&outputs.outcome), usearch_status_deferred_k,
+              "A submitted call is deferred until waited on");
 
     // Without an executor the get runs at once, draining nothing, so it meets the deferred call's hold.
     usearch_outcome_t outcome = {0};

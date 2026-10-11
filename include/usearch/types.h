@@ -32,9 +32,11 @@
  *  A call with a @c NULL executor runs on the calling thread and is final when it returns.
  *  Submission copies the structure; everything it points to stays borrowed until final.
  *
- *  - @c outcome->status reads @c usearch_status_deferred_k until final, even for a call refused at submission.
+ *  - @c outcome->status reads @c usearch_status_deferred_k until final, even for a call refused at
+ *    submission.
  *  - The message, then the final status, are stored with release ordering and a wake.
- *  - The caller reads the status with acquire ordering, by polling or through @c usearch_outcome_wait.
+ *  - The caller reads the status with acquire ordering, polling through @c usearch_outcome_status
+ *    or waiting through @c usearch_outcome_wait.
  *  - A GPU executor stores the final status from a host callback that still fires after a device fault.
  *  - Executors own their streams, so a caller orders dependent calls by waiting on the first.
  *  - A submission finding the deferred table full, sized by @c deferred_limit, finishes @c usearch_status_contended_k.
@@ -657,7 +659,18 @@ typedef usearch_continuation_t (*usearch_progress_callback_t)( //
  *  Never wait on a call's own outcome from inside its progress handler or predicate: the call
  *  finishes only after they return.
  */
-USEARCH_EXPORT usearch_status_t usearch_outcome_wait(usearch_outcome_t const* outcome);
+USEARCH_EXPORT usearch_status_t usearch_outcome_wait(usearch_outcome_t* outcome);
+
+/**
+ *  @brief Reads the status of @p outcome without waiting, with the acquire ordering its final
+ *      store pairs with, so a final status also publishes every output of the call.
+ *  @param[in] outcome An outcome passed to a call.
+ *  @return @c usearch_status_deferred_k while the call is not final, then its final status.
+ *
+ *  The one way to poll: the status word is atomic only by this contract, so a caller reading the
+ *  field directly needs an atomic load its language may not offer on foreign memory.
+ */
+USEARCH_EXPORT usearch_status_t usearch_outcome_status(usearch_outcome_t* outcome);
 
 /** Whether a call returns with its final status, or once submitted to its executor. */
 typedef enum usearch_completion_t {
@@ -896,7 +909,8 @@ USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor);
  *  - A @c NULL arena is refused with @c usearch_status_invalid_argument_k.
  *  - A call whose inputs point into the arena it is about to rewind reports
  *    @c usearch_status_invalid_argument_k.
- *  - An arena serves one call at a time; a second call naming it finishes @c usearch_status_contended_k.
+ *  - An arena serves one call at a time; a second call naming it finishes
+ *    @c usearch_status_contended_k, and a deferred one does so at submission.
  *  - A call on another residency or device than the arena's reports @c usearch_status_device_k.
  *  - A blocking call borrows the arena until it returns, and a deferred one holds it until final.
  *  - A call that fails, is cancelled, or has nothing to report leaves its outputs @c NULL.

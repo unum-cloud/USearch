@@ -1121,8 +1121,11 @@ check_iterator_laundering() {
 # public ones under `include/` always with the `project_include_prefix`. Includes under an `#if` keep their
 # quoting but sit outside the grouping; an include guard is not such an `#if`.
 check_include_groups() {
-    local misgrouped
-    misgrouped=$(awk -v project="$project_include_prefix" -v file="$file" '
+    local misgrouped includes_touched
+    # A change to any include answers for every include of the file, so an untouched misorder never survives it.
+    includes_touched=$(awk 'NR == FNR { added[$1 + 0]; next }
+        (FNR in added) && /^[[:space:]]*#[[:space:]]*include/ { print 1; exit }' "$staged_lines_path" "$staged_blob")
+    misgrouped=$(awk -v project="$project_include_prefix" -v file="$file" -v whole="$includes_touched" '
         BEGIN {
             split("cassert cctype cerrno cfenv cfloat cinttypes climits clocale cmath csetjmp csignal cstdarg " \
                   "cstddef cstdint cstdio cstdlib cstring ctime cuchar cwchar cwctype " \
@@ -1152,7 +1155,7 @@ check_include_groups() {
                 root = header; sub(/[\/.].*$/, "", root)
                 # CPython must precede every standard header it reconfigures, so it leads outside the groups.
                 if (header == "Python.h") next
-                touched = (FNR in added)
+                touched = (FNR in added) || whole
                 if (root == project) rank = 6
                 else if (header in clibrary) rank = 1
                 else if ((header in platform) || header ~ /^(sys|linux|arpa|netinet|asm)\//) rank = 2
@@ -1178,11 +1181,12 @@ check_include_groups() {
                 if (touched && !quoted && rank == 6)
                     printf "line %d: <%s> is an own header - write \"%s\"\n", FNR, header, header
                 if (depth) next
-                if (touched && block && rank != block)
+                # A touched include answers for its whole group, the untouched lines it opens included.
+                if ((touched || opener) && block && rank != block)
                     printf "line %d: a %s header shares its group with %s ones\n", FNR, labels[rank], labels[block]
                 if (touched && !block && rank < previous)
                     printf "line %d: a %s group follows a %s group\n", FNR, labels[rank], labels[previous]
-                if (!block) block = rank
+                if (!block) { block = rank; opener = touched }
             }
             else if ($0 !~ /^[[:space:]]*#/) { if (block) previous = block; block = 0 }
         }' "$staged_lines_path" "$staged_blob")

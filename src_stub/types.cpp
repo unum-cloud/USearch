@@ -132,14 +132,19 @@ char const* usearch_version_name(void) { return "3.0.0"; }
 char const* usearch_capabilities_compiled(void) { return "serial"; }
 char const* usearch_capabilities_available(void) { return "serial"; }
 
-usearch_status_t usearch_outcome_wait(usearch_outcome_t const* outcome) {
+usearch_status_t usearch_outcome_wait(usearch_outcome_t* outcome) {
     if (!outcome) return usearch_status_invalid_argument_k;
     wait_for_calls_using(outcome);
-    std::atomic_ref status(const_cast<usearch_status_t&>(outcome->status));
+    std::atomic_ref status(outcome->status);
     usearch_status_t current = status.load(std::memory_order_acquire);
     for (; current == usearch_status_deferred_k; current = status.load(std::memory_order_acquire))
         status.wait(usearch_status_deferred_k, std::memory_order_acquire);
     return current;
+}
+
+usearch_status_t usearch_outcome_status(usearch_outcome_t* outcome) {
+    if (!outcome) return usearch_status_invalid_argument_k;
+    return std::atomic_ref(outcome->status).load(std::memory_order_acquire);
 }
 
 void usearch_arena_init(usearch_arena_init_t* arguments) {

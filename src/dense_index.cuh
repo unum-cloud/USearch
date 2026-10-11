@@ -3567,10 +3567,9 @@ USEARCH_EXPORT void usearch_dense_metadata_read_buffer(usearch_dense_metadata_re
 
 #pragma region Executors
 
-USEARCH_EXPORT usearch_status_t usearch_outcome_wait(usearch_outcome_t const* outcome) {
+USEARCH_EXPORT usearch_status_t usearch_outcome_wait(usearch_outcome_t* outcome) {
     finish_calls_using(outcome);
-    // The status word is written by the library and only read here, so the cast never races a store.
-    std::atomic_ref<usearch_status_t> status {const_cast<usearch_status_t&>(outcome->status)};
+    std::atomic_ref<usearch_status_t> status {outcome->status};
     usearch_status_t seen = status.load(std::memory_order_acquire);
     for (; seen == usearch_status_deferred_k; seen = status.load(std::memory_order_acquire))
         status.wait(usearch_status_deferred_k, std::memory_order_acquire);

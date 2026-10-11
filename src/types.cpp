@@ -13,12 +13,14 @@
  *  A handle's own `capabilities` is a narrower question - what dispatch picked for the geometry
  *  that handle froze - and each modality answers that one for itself.
  */
-#include <cstdio>      // `std::snprintf`
+#include <cstdio> // `std::snprintf`
+
+#include <atomic>      // `std::atomic_ref`
 #include <string_view> // `std::string_view` - a name compared without a terminator
 
-#include <usearch/types.h>
-
 #include <numkong/numkong.h>
+
+#include "usearch/types.h"
 
 /** Rendered once on first use, so the pointer the C interface hands out stays valid. */
 static char const* rendered_version() {
@@ -82,6 +84,10 @@ USEARCH_EXPORT char const* usearch_capabilities_available(void) {
     nk_capability_t available = 0;
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k) available = 0;
     return render_capabilities(rendered, sizeof(rendered), available);
+}
+
+USEARCH_EXPORT usearch_status_t usearch_outcome_status(usearch_outcome_t* outcome) {
+    return std::atomic_ref<usearch_status_t> {outcome->status}.load(std::memory_order_acquire);
 }
 
 USEARCH_EXPORT char const* usearch_status_name(usearch_status_t status) {

@@ -91,7 +91,7 @@ for (size_t shard = 0; shard != 4; ++shard)
 for (size_t shard = 0; shard != 4; ++shard) usearch_outcome_wait(&outcomes[shard]);
 ```
 
-The status reads `usearch_status_deferred_k` until the call is final, then the library stores the message and the final status with release ordering, and touches nothing the struct names after that; the caller reads it with acquire ordering, by waiting or polling.
+The status reads `usearch_status_deferred_k` until the call is final, then the library stores the message and the final status with release ordering, and touches nothing the struct names after that; the caller reads it with acquire ordering, polling through `usearch_outcome_status` or waiting through `usearch_outcome_wait`.
 Each executor tracks its deferred calls in a fixed table of `deferred_limit` slots.
 A deferred submission that finds the table full finishes at once with `usearch_status_contended_k`, so submitting never allocates, and blocking calls take no slot at all.
 A blocking call on an executor runs after every earlier call finishes and before any later one starts.
