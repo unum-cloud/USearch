@@ -5,7 +5,7 @@
 //  Vector Search over equidimensional dense embeddings - the Swift twin of
 //  include/usearch/dense_index.h.
 //
-//  Every verb is a batch over strided matrices, so a memory-mapped dataset reaches the index
+//  Every verb is a batch over strided rows, so a memory-mapped dataset reaches the index
 //  with no reshape and no copy, and a single vector is a one-row matrix. The candidate-pool
 //  breadth rides each call rather than the handle, which lets a recall sweep run against one
 //  immutable index with no mutation between points.
@@ -18,244 +18,164 @@ import USearchC
 // MARK: - Options
 
 /// A distance kind supported out of the box, with SIMD kernels dispatched by the machine's
-/// capabilities. All of them derive from a single inner-product kernel with pre-computed
-/// magnitudes; hamming and jaccard are bit-level, over the packed sub-byte kinds.
+/// capabilities, carrying the C enumerator itself. All of them derive from a single inner-product
+/// kernel with pre-computed magnitudes; hamming and jaccard are bit-level, over the packed
+/// sub-byte kinds.
 ///
-/// The C layer's custom-callback escape hatch stays unexposed: a caller-supplied metric forfeits
-/// the SIMD kernel chains and the magnitude cache both.
-public enum Metric: Int32, Sendable {
-    /// A metric the library could not name.
-    case unknown = 0
+/// Arbitrary metrics belong to the C++ baseline tier, which forfeits the SIMD kernel chains and
+/// the magnitude cache both.
+public struct DenseMetric: Hashable, Sendable, CustomStringConvertible {
+    /// The C enumerator.
+    let raw: usearch_dense_metric_t
+
+    /// No kind named - an unset field, refused by every constructor.
+    public static let unknown = DenseMetric(raw: usearch_dense_metric_unknown_k)
     /// The inner product.
-    case inner = 1
+    public static let inner = DenseMetric(raw: usearch_dense_metric_inner_k)
     /// The cosine distance.
-    case angular = 2
+    public static let angular = DenseMetric(raw: usearch_dense_metric_angular_k)
     /// The L2 distance.
-    case euclidean = 3
+    public static let euclidean = DenseMetric(raw: usearch_dense_metric_euclidean_k)
     /// The count of differing bits.
-    case hamming = 4
+    public static let hamming = DenseMetric(raw: usearch_dense_metric_hamming_k)
     /// The bit-level jaccard distance.
-    case jaccard = 5
+    public static let jaccard = DenseMetric(raw: usearch_dense_metric_jaccard_k)
 
-    /// The metric rendered as its C enumerator's stem.
-    public var name: String {
-        switch self {
-        case .unknown: return "unknown"
-        case .inner: return "inner"
-        case .angular: return "angular"
-        case .euclidean: return "euclidean"
-        case .hamming: return "hamming"
-        case .jaccard: return "jaccard"
-        }
+    /// The metric rendered as the library spells it. Calls `usearch_dense_metric_name`.
+    public var description: String { String(cString: usearch_dense_metric_name(raw)) }
+
+    /// Reads a spelling back, and nil for one no metric carries. Calls
+    /// `usearch_dense_metric_from_name`.
+    public init?(name: String) {
+        guard let raw = parsed(name, usearch_dense_metric_from_name, usearch_dense_metric_name) else { return nil }
+        self.raw = raw
     }
 
-    var raw: usearch_dense_metric_t { usearch_dense_metric_t(rawValue: UInt32(bitPattern: rawValue)) }
-
-    /// Lifts a tag the library wrote, refusing to guess at one this build cannot name.
-    static func lifted(_ raw: usearch_dense_metric_t) throws(Error) -> Metric {
-        guard let metric = Metric(rawValue: Int32(bitPattern: raw.rawValue)), metric != .unknown else {
-            throw fail(.unknownKind, "the checkpoint names an unknown metric")
-        }
-        return metric
-    }
+    init(raw: usearch_dense_metric_t) { self.raw = raw }
 }
 
-/// The construction and loading options of a dense index.
+/// The construction options of a dense index, as `initRam` and `initVram` freeze them.
 ///
 /// Stored rows always round up to the SIMD step quantum, so rows stay cache-line aligned and
 /// every kernel runs tail-free; the arena is slightly larger for it, and that is not a knob.
 public struct DenseOptions: Sendable {
-    /// The width of the indexed vectors; zero defers the geometry to a later load, which reads
-    /// it off the checkpoint.
+    /// The width of the indexed vectors; zero leaves the geometry unfrozen, so the index admits
+    /// no rows.
     public var dimensions: Int
     /// The distance kind used between vectors.
-    public var metric: Metric
+    public var metric: DenseMetric
     /// The scalar type vectors are stored and quantized into.
     public var quantization: Scalar
     /// The bound on connections per node in the graph; zero derives.
     public var connectivity: Int
     /// The bound on entries sharing one key; zero derives to one - unique keys.
     public var valuesPerKey: Int
-    /// Where the payload lives, and what loading a checkpoint means.
-    public var residency: Residency
 
-    /// An angular bf16 index in RAM, with every optional field derived.
+    /// An angular bf16 index, with every optional field derived.
     public init(
         dimensions: Int = 0,
-        metric: Metric = .angular,
+        metric: DenseMetric = .angular,
         quantization: Scalar = .bf16,
         connectivity: Int = 0,
-        valuesPerKey: Int = 0,
-        residency: Residency = .default
+        valuesPerKey: Int = 0
     ) {
         self.dimensions = dimensions
         self.metric = metric
         self.quantization = quantization
         self.connectivity = connectivity
         self.valuesPerKey = valuesPerKey
-        self.residency = residency
-    }
-
-    /// Lowers the options against an already-copied placement, leaving the custom-metric
-    /// callback null. The placement must outlive every call the options are passed to.
-    func lowered(_ placement: LoweredResidency) -> usearch_dense_options_t {
-        var raw = usearch_dense_options_t()
-        raw.metric = metric.raw
-        raw.quantization = quantization.raw
-        raw.dimensions = dimensions
-        raw.connectivity = connectivity
-        raw.values_per_key = valuesPerKey
-        placement.write(into: &raw)
-        return raw
-    }
-
-    /// Lifts a lowered struct back into options, the residency arriving with an empty placement
-    /// the caller fills.
-    static func lifted(_ raw: usearch_dense_options_t) throws(Error) -> DenseOptions {
-        DenseOptions(
-            dimensions: raw.dimensions,
-            metric: try Metric.lifted(raw.metric),
-            quantization: try Scalar.lifted(raw.quantization),
-            connectivity: raw.connectivity,
-            valuesPerKey: raw.values_per_key,
-            residency: try Residency.lifted(raw.residency)
-        )
-    }
-
-    /// Lowers the options and lifts them straight back - the marshalling round trip, and the
-    /// only thing that exercises the residency union without an index behind it. The placement
-    /// lists do not survive it, since lifting never reads them back.
-    public func reloaded() throws(Error) -> DenseOptions {
-        let placement = LoweredResidency(residency)
-        return try withExtendedLifetime(placement) { () throws(Error) -> DenseOptions in
-            try DenseOptions.lifted(lowered(placement))
-        }
     }
 }
 
 /// The geometry and metric a checkpoint froze - everything a reader learns without opening it,
 /// and nothing a reader must choose for itself.
 ///
-/// A checkpoint records neither the residency nor the bound on entries sharing one key: the first
+/// A checkpoint records neither the placement nor the bound on entries sharing one key: the first
 /// says where it was written rather than where a reader must keep it, and the second bounds a live
-/// handle's mutable state rather than the serialized form. Both stay the caller's to choose in the
-/// `DenseOptions` a handle is built from.
+/// handle's mutable state rather than the serialized form. Both stay the caller's to choose when
+/// loading.
 public struct DenseMetadata: Sendable {
     /// The scalars per stored vector.
     public var dimensions: Int
     /// The distance kind the checkpoint scores with.
-    public var metric: Metric
+    public var metric: DenseMetric
     /// The scalar type its rows are stored and quantized into.
     public var quantization: Scalar
     /// The connections-per-node bound the graph was built with.
     public var connectivity: Int
 
-    /// Lifts the geometry and metric a checkpoint's headers describe.
-    static func lifted(_ raw: usearch_dense_metadata_t) throws(Error) -> DenseMetadata {
-        DenseMetadata(
-            dimensions: raw.dimensions,
-            metric: try Metric.lifted(raw.metric),
-            quantization: try Scalar.lifted(raw.quantization),
-            connectivity: raw.connectivity
-        )
+    init(_ raw: usearch_dense_metadata_t) {
+        dimensions = raw.dimensions
+        metric = DenseMetric(raw: raw.metric)
+        quantization = Scalar(raw: raw.quantization)
+        connectivity = raw.connectivity
     }
 }
 
-// MARK: - Per-Call Settings & Telemetry
+/// A live index's frozen metadata and current counters, each read once, so under concurrent
+/// insertions they may come from slightly different moments.
+public struct DenseIndexDescription: Sendable {
+    /// The frozen metric, quantization, dimensions and connectivity, as a checkpoint reports them.
+    public var metadata: DenseMetadata
+    /// The stored entries.
+    public var size: Int
+    /// The entries hosted without growing again.
+    public var capacity: Int
+    /// The bytes the handle holds; traversal scratch is the executor's.
+    public var memoryUsage: Int
+    /// The capability codename the index dispatched to on this machine.
+    public var capabilities: String
 
-/// The traversal telemetry one call reports. Every call overwrites it rather than accumulating,
-/// so a sweep over many batches sums them itself.
-public struct TraversalStats: Equatable, Sendable {
+    init(_ raw: usearch_dense_index_description_t) {
+        metadata = DenseMetadata(raw.metadata)
+        size = raw.size
+        capacity = raw.capacity
+        memoryUsage = raw.memory_usage
+        capabilities = raw.capabilities.map { String(cString: $0) } ?? ""
+    }
+}
+
+/// One reachability audit: the population it judged, and how much of it a search reaches.
+public struct DenseReachability: Equatable, Sendable {
+    /// The entries published when the audit started; compare `reachable` against this, never a
+    /// later size.
+    public var audited: Int
+    /// Of those, the entries a search reaches from the landmarks; the rest no search finds until
+    /// a refinement re-links them.
+    public var reachable: Int
+    /// The levels the sweep took to converge - a diameter proxy.
+    public var sweeps: Int
+
+    init(_ raw: usearch_dense_reachability_t) {
+        audited = raw.audited
+        reachable = raw.reachable
+        sweeps = raw.sweeps
+    }
+}
+
+// MARK: - Per-Call Configs & Telemetry
+
+/// The traversal telemetry one call reports, passed in a config and written by the call. Every
+/// call overwrites it rather than accumulating, so a sweep over many batches sums them itself,
+/// and it belongs to one call until that call is final.
+public final class DenseTraversalStats: @unchecked Sendable {
+    /// The C counters the call writes, at an address that holds for a deferred call.
+    let raw: UnsafeMutablePointer<usearch_dense_traversal_stats_t>
+
+    public init() {
+        raw = .allocate(capacity: 1)
+        raw.initialize(to: usearch_dense_traversal_stats_t())
+    }
+
+    deinit { raw.deallocate() }
+
     /// The graph members the call visited.
-    public var visitedMembers: Int = 0
+    public var visitedMembers: Int { raw.pointee.visited_members }
     /// The distances the call computed, diversity re-selections included.
-    public var computedDistances: Int = 0
+    public var computedDistances: Int { raw.pointee.computed_distances }
     /// The starvation re-seedings - a graph-connectivity health signal rather than a cost
     /// counter.
-    public var restarts: Int = 0
-
-    /// Folds another call's telemetry into this one.
-    public mutating func accumulate(_ other: TraversalStats) {
-        visitedMembers += other.visitedMembers
-        computedDistances += other.computedDistances
-        restarts += other.restarts
-    }
-
-    init() {}
-
-    init(_ raw: usearch_dense_traversal_stats_t) {
-        visitedMembers = raw.visited_members
-        computedDistances = raw.computed_distances
-        restarts = raw.restarts
-    }
-}
-
-/// The per-call settings of insertion and refinement, the two verbs that write to the graph.
-/// Every zeroed field derives, which is what almost every caller wants.
-///
-/// Extensible by design: construct one and set what matters rather than naming every field, so a
-/// setting added later leaves existing call sites compiling.
-public struct InsertionOptions: Equatable, Sendable {
-    /// The candidate-pool breadth the insertion walk searches for neighbors with; zero derives it
-    /// from the geometry.
-    public var expansionFactor: Int = 0
-
-    public init(expansionFactor: Int = 0) {
-        self.expansionFactor = expansionFactor
-    }
-
-    /// Lowers into the struct the C interface reads.
-    var lowered: usearch_dense_insertion_options_t {
-        usearch_dense_insertion_options_t(expansion_factor: expansionFactor)
-    }
-}
-
-/// The per-call settings of every read-only walk - both search forms, the sparse product, and
-/// late interaction. Every zeroed field derives.
-///
-/// Extensible by design, like `InsertionOptions`: construct one and set what matters rather than
-/// naming every field, so a setting added later leaves existing call sites compiling.
-public struct SearchOptions: Equatable, Sendable {
-    /// The candidate-pool breadth the walk explores; zero derives it from the geometry.
-    public var expansionFactor: Int = 0
-
-    public init(expansionFactor: Int = 0) {
-        self.expansionFactor = expansionFactor
-    }
-
-    /// Lowers into the struct the C interface reads.
-    var lowered: usearch_dense_search_options_t {
-        usearch_dense_search_options_t(expansion_factor: expansionFactor)
-    }
-}
-
-/// The per-call settings of `attend(...)`. Every zeroed field derives.
-///
-/// Extensible by design, like `SearchOptions`: construct one and set what matters.
-public struct AttentionOptions: Equatable, Sendable {
-    /// The candidate-pool breadth; zero derives it from the geometry.
-    public var expansionFactor: Int = 0
-    /// The logit scale, conventionally the inverse square root of the head dimensionality; zero
-    /// derives it from the index's frozen geometry.
-    public var scoreScale: Float = 0
-    /// The residual-mass threshold the walk stops at - the mass-denominated sibling of the radius
-    /// a search terminates on; zero derives.
-    public var massTolerance: Float = 0
-
-    public init(expansionFactor: Int = 0, scoreScale: Float = 0, massTolerance: Float = 0) {
-        self.expansionFactor = expansionFactor
-        self.scoreScale = scoreScale
-        self.massTolerance = massTolerance
-    }
-
-    /// Lowers into the struct the C interface reads.
-    var lowered: usearch_dense_attention_options_t {
-        usearch_dense_attention_options_t(
-            expansion_factor: expansionFactor,
-            score_scale: scoreScale,
-            mass_tolerance: massTolerance
-        )
-    }
+    public var restarts: Int { raw.pointee.restarts }
 }
 
 /// Flash Attention's running maximum and partition for one query row.
@@ -263,7 +183,7 @@ public struct AttentionOptions: Equatable, Sendable {
 /// The two are one concept: a maximum without its partition is a number nothing can rescale, so
 /// they share an element rather than travelling as two arrays a caller could supply half of.
 /// Carrying them is what folds one attention call into another over the same queries.
-public struct SoftmaxState: Equatable, Sendable {
+public struct DenseSoftmaxState: Equatable, Sendable {
     /// The largest logit seen so far - the recurrence's `m`.
     public var maximumScore: Float = 0
     /// The sum of exponentials taken against that maximum - the recurrence's `l`.
@@ -275,110 +195,407 @@ public struct SoftmaxState: Equatable, Sendable {
     }
 }
 
-// MARK: - Results
+/// How `attend` resolves scored keys to value rows: a key names its row of `values`, whose rows
+/// must be as wide as the keys and stored in the index's own quantization.
+///
+/// The index stores no values, so only the keys a walk scores are ever resolved. A key without a
+/// row, or values of another width or scalar kind than the library reads, refuses the call with
+/// `shapeMismatch`, since a missing row is a wrong softmax rather than a smaller one.
+public struct ValueLookup: Sendable {
+    /// The value rows, which must outlive the call.
+    public var values: RowsView
+    /// The row of `values` holding a key's value, or nil for none. It runs on the executor's
+    /// threads together, so it must be safe for concurrent use; the first error it throws leaves
+    /// that key without a row and is what the call throws.
+    public var row: @Sendable (Key) throws -> Int?
 
-/// One retrieved entry.
-public struct Match: Equatable, Sendable {
-    /// The matched entry's key.
-    public let key: Key
-    /// Its distance to the query, in the index's metric.
-    public let distance: Distance
-
-    /// Pairs a key with its distance. Written out so the inlinable readers below may call it.
-    @usableFromInline init(key: Key, distance: Distance) {
-        self.key = key
-        self.distance = distance
+    public init(values: RowsView, row: @escaping @Sendable (Key) throws -> Int?) {
+        self.values = values
+        self.row = row
     }
 }
 
-/// Where a ranked run lands - three caller-owned buffers, sized together, and the shape every
-/// ranking verb fills. Mirrors `usearch_matches_span_t`.
-///
-/// It borrows and never owns, so a benchmark loop allocates once and never again, and it stays
-/// valid only as long as the storage it was built from. `span[query]` reads one query's row and
-/// stops at the cells the engine wrote - indexing the buffers directly walks into memory the
-/// engine never touched.
-public struct MatchesSpan: RandomAccessCollection {
-    /// The `queries × wanted` key matrix, rows contiguous.
-    public let keys: UnsafeMutableBufferPointer<Key>
-    /// The `queries × wanted` distance matrix, rows contiguous.
-    public let distances: UnsafeMutableBufferPointer<Distance>
-    /// The per-query match counts, one entry per query.
-    public let counts: UnsafeMutableBufferPointer<Int>
-    /// The upper bound on matches per query - the "k" in "kANN" and the row width of both
-    /// matrices.
-    public let wanted: Int
+/// The knobs of `insert`. Every zeroed field derives, which is what almost every caller wants.
+public struct DenseInsertConfig {
+    /// The candidate-pool breadth the insertion walk searches for neighbors with; zero derives it
+    /// from the geometry.
+    public var expansionFactor: Int
+    /// Called with rows admitted; it reports and cannot cancel.
+    public var progress: Progress?
+    /// The traversal telemetry to write.
+    public var stats: DenseTraversalStats?
 
-    /// Lends three buffers the caller already sized to `counts.count × wanted`.
-    ///
-    /// The row width is derived from the lengths rather than asked for, so the space reserved and
-    /// the count asked for cannot disagree.
+    public init(expansionFactor: Int = 0, progress: Progress? = nil, stats: DenseTraversalStats? = nil) {
+        self.expansionFactor = expansionFactor
+        self.progress = progress
+        self.stats = stats
+    }
+}
+
+/// The knobs of `refine`. Every zeroed field derives.
+public struct DenseRefineConfig {
+    /// The candidate-pool breadth the re-selection walk explores; zero derives it from the geometry.
+    public var expansionFactor: Int
+    /// Called with nodes swept; a stop leaves the graph correct and merely less improved.
+    public var progress: Progress?
+    /// The traversal telemetry to write.
+    public var stats: DenseTraversalStats?
+
+    public init(expansionFactor: Int = 0, progress: Progress? = nil, stats: DenseTraversalStats? = nil) {
+        self.expansionFactor = expansionFactor
+        self.progress = progress
+        self.stats = stats
+    }
+}
+
+/// The knobs of `search`. Every zeroed field derives.
+public struct DenseSearchConfig {
+    /// The candidate-pool breadth the walk explores; zero derives it from the geometry.
+    public var expansionFactor: Int
+    /// Narrows the matches to the keys it approves. Non-matching entries still route the
+    /// traversal, so recall does not collapse at low selectivity. It runs on the executor's
+    /// threads together, so it must be safe for concurrent use; an error it throws never unwinds
+    /// into a C frame, but rejects that key, and the first one is what the call throws.
+    public var predicate: (@Sendable (Key) throws -> Bool)?
+    /// Called with queries resolved.
+    public var progress: Progress?
+    /// The traversal telemetry to write.
+    public var stats: DenseTraversalStats?
+
     public init(
-        keys: UnsafeMutableBufferPointer<Key>,
-        distances: UnsafeMutableBufferPointer<Distance>,
-        counts: UnsafeMutableBufferPointer<Int>
-    ) throws(Error) {
-        guard !counts.isEmpty else { throw fail(.shapeMismatch, "a run must hold at least one query") }
-        guard keys.count == distances.count else {
-            throw fail(.shapeMismatch, "the key and distance buffers are not the same shape")
-        }
-        guard !keys.isEmpty, keys.count % counts.count == 0 else {
-            throw fail(.shapeMismatch, "the buffers do not divide into one row per query")
-        }
-        self.keys = keys
-        self.distances = distances
-        self.counts = counts
-        wanted = keys.count / counts.count
+        expansionFactor: Int = 0,
+        predicate: (@Sendable (Key) throws -> Bool)? = nil,
+        progress: Progress? = nil,
+        stats: DenseTraversalStats? = nil
+    ) {
+        self.expansionFactor = expansionFactor
+        self.predicate = predicate
+        self.progress = progress
+        self.stats = stats
     }
+}
 
-    /// The first query's position, which a collection walk starts from.
-    @inlinable public var startIndex: Int { 0 }
+/// The knobs of `maxsim`. Every zeroed field derives.
+public struct DenseMaxsimConfig {
+    /// The candidate-pool breadth; zero derives it from the geometry.
+    public var expansionFactor: Int
+    /// Called with queries resolved.
+    public var progress: Progress?
+    /// The traversal telemetry to write.
+    public var stats: DenseTraversalStats?
 
-    /// One past the last query's position.
-    @inlinable public var endIndex: Int { counts.count }
-
-    /// One query's matches, trimmed to the cells the engine actually wrote.
-    @inlinable public subscript(query: Int) -> QueryMatches { QueryMatches(run: self, query: query) }
-
-    /// One query's row of a run, walked without copying it out.
-    public struct QueryMatches: RandomAccessCollection {
-        /// The run this row belongs to, whose buffers it reads through.
-        public let run: MatchesSpan
-        /// Which query's row it is.
-        public let query: Int
-
-        /// Names one row of a run. Written out so the inlinable subscript above may call it.
-        @usableFromInline init(run: MatchesSpan, query: Int) {
-            self.run = run
-            self.query = query
-        }
-
-        /// Whether the engine had more to report than the wanted width could hold.
-        @inlinable public var wasTruncated: Bool { run.counts[query] > run.wanted }
-
-        /// The first match's position, which a collection walk starts from.
-        @inlinable public var startIndex: Int { 0 }
-
-        /// One past the last match the engine wrote, capped at the wanted width.
-        @inlinable public var endIndex: Int { Swift.min(run.counts[query], run.wanted) }
-
-        /// The match at a position, key and distance read from their paired buffers.
-        @inlinable public subscript(position: Int) -> Match {
-            let cell = query * run.wanted + position
-            return Match(key: run.keys[cell], distance: run.distances[cell])
-        }
+    public init(expansionFactor: Int = 0, progress: Progress? = nil, stats: DenseTraversalStats? = nil) {
+        self.expansionFactor = expansionFactor
+        self.progress = progress
+        self.stats = stats
     }
+}
 
-    /// Lowers into the descriptor the C interface fills.
-    var lowered: usearch_matches_span_t {
-        usearch_matches_span_t(
-            keys: UnsafeMutableRawPointer(keys.baseAddress!).assumingMemoryBound(to: usearch_key_t.self),
-            keys_stride_bytes: wanted * MemoryLayout<usearch_key_t>.stride,
-            scores: distances.baseAddress,
-            scores_stride_bytes: wanted * MemoryLayout<usearch_distance_t>.stride,
-            counts: counts.baseAddress,
-            wanted: wanted
+/// The knobs of `multiply`. Every zeroed field derives.
+public struct DenseMultiplyConfig {
+    /// The bound on pairs kept per row, the first ones its walk scored; zero keeps every pair.
+    public var wanted: Int
+    /// The candidate-pool breadth, which widens the emitted pattern; zero derives.
+    public var expansionFactor: Int
+    /// Called with rows resolved.
+    public var progress: Progress?
+    /// The traversal telemetry to write.
+    public var stats: DenseTraversalStats?
+
+    public init(
+        wanted: Int = 0,
+        expansionFactor: Int = 0,
+        progress: Progress? = nil,
+        stats: DenseTraversalStats? = nil
+    ) {
+        self.wanted = wanted
+        self.expansionFactor = expansionFactor
+        self.progress = progress
+        self.stats = stats
+    }
+}
+
+/// The knobs of `attend`. Every zeroed field derives.
+public struct DenseAttendConfig {
+    /// The query heads sharing the index's key-value head, and with it one walk per token; it must
+    /// divide the query rows, and zero means one.
+    public var headCount: Int
+    /// The softmax state to write, one per query row, which must outlive the call; nil skips it.
+    public var carry: UnsafeMutableBufferPointer<DenseSoftmaxState>?
+    /// The candidate-pool breadth; zero derives it from the geometry. A wider pool walks further,
+    /// folding more of the tail.
+    public var expansionFactor: Int
+    /// The logit scale, conventionally the inverse square root of the head dimensionality; zero
+    /// derives it from the index's frozen geometry.
+    public var scoreScale: Float
+    /// Called with queries resolved.
+    public var progress: Progress?
+    /// The traversal telemetry to write.
+    public var stats: DenseTraversalStats?
+
+    public init(
+        headCount: Int = 0,
+        carry: UnsafeMutableBufferPointer<DenseSoftmaxState>? = nil,
+        expansionFactor: Int = 0,
+        scoreScale: Float = 0,
+        progress: Progress? = nil,
+        stats: DenseTraversalStats? = nil
+    ) {
+        self.headCount = headCount
+        self.carry = carry
+        self.expansionFactor = expansionFactor
+        self.scoreScale = scoreScale
+        self.progress = progress
+        self.stats = stats
+    }
+}
+
+/// The knobs of `merge`.
+public struct DenseMergeConfig {
+    /// Called with donors absorbed.
+    public var progress: Progress?
+
+    public init(progress: Progress? = nil) { self.progress = progress }
+}
+
+/// The knobs of `save`.
+public struct DenseSaveConfig {
+    /// Called with shards written.
+    public var progress: Progress?
+
+    public init(progress: Progress? = nil) { self.progress = progress }
+}
+
+/// The knobs of `saveBuffer`.
+public struct DenseSaveBufferConfig {
+    /// Called with bytes written.
+    public var progress: Progress?
+
+    public init(progress: Progress? = nil) { self.progress = progress }
+}
+
+/// The knobs of `searchStream`.
+public struct DenseSearchStreamInitConfig {
+    /// The candidate-pool breadth the walk explores; zero derives it from the geometry.
+    public var expansionFactor: Int
+
+    public init(expansionFactor: Int = 0) { self.expansionFactor = expansionFactor }
+}
+
+/// The knobs of `loadRam`.
+public struct DenseLoadRamConfig {
+    /// The executor the read fans out over, one shard per thread; nil reads on the calling thread.
+    public var executor: Executor?
+    /// The memory domains to place the parts on, part `p` landing on shard `p` modulo their count;
+    /// empty derives every node the process may allocate on.
+    public var memoryDomains: [Int32]
+    /// The bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    public var valuesPerKey: Int
+    /// Called with shards placed.
+    public var progress: Progress?
+
+    public init(
+        executor: Executor? = nil,
+        memoryDomains: [Int32] = [],
+        valuesPerKey: Int = 0,
+        progress: Progress? = nil
+    ) {
+        self.executor = executor
+        self.memoryDomains = memoryDomains
+        self.valuesPerKey = valuesPerKey
+        self.progress = progress
+    }
+}
+
+/// The knobs of `loadVram`.
+public struct DenseLoadVramConfig {
+    /// The executor the upload runs on, one stream per device; nil uploads from the calling thread.
+    public var executor: Executor?
+    /// The devices to place the parts on, part `p` landing on device `p` modulo their count; empty
+    /// derives one free device.
+    public var devices: [Int32]
+    /// The bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    public var valuesPerKey: Int
+    /// Called with shards placed.
+    public var progress: Progress?
+
+    public init(executor: Executor? = nil, devices: [Int32] = [], valuesPerKey: Int = 0, progress: Progress? = nil) {
+        self.executor = executor
+        self.devices = devices
+        self.valuesPerKey = valuesPerKey
+        self.progress = progress
+    }
+}
+
+/// The knobs of `loadRamBuffer`.
+public struct DenseLoadRamBufferConfig {
+    /// The executor the copy fans out over; nil copies on the calling thread.
+    public var executor: Executor?
+    /// The memory domains to place shards on; the monolith lands whole on the first.
+    public var memoryDomains: [Int32]
+    /// The bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    public var valuesPerKey: Int
+    /// Called with bytes placed.
+    public var progress: Progress?
+
+    public init(
+        executor: Executor? = nil,
+        memoryDomains: [Int32] = [],
+        valuesPerKey: Int = 0,
+        progress: Progress? = nil
+    ) {
+        self.executor = executor
+        self.memoryDomains = memoryDomains
+        self.valuesPerKey = valuesPerKey
+        self.progress = progress
+    }
+}
+
+/// The knobs of `loadVramBuffer`.
+public struct DenseLoadVramBufferConfig {
+    /// The executor the upload runs on, one stream per device; nil uploads from the calling thread.
+    public var executor: Executor?
+    /// The devices to place shards on; the monolith lands whole on the first.
+    public var devices: [Int32]
+    /// The bound on entries sharing one key, which no checkpoint records; zero derives to one.
+    public var valuesPerKey: Int
+    /// Called with bytes placed.
+    public var progress: Progress?
+
+    public init(executor: Executor? = nil, devices: [Int32] = [], valuesPerKey: Int = 0, progress: Progress? = nil) {
+        self.executor = executor
+        self.devices = devices
+        self.valuesPerKey = valuesPerKey
+        self.progress = progress
+    }
+}
+
+/// The knobs of `viewNvme`.
+public struct DenseViewNvmeConfig {
+    /// The NVMe executor whose rings read the checkpoint's headers; nil reads on the calling thread.
+    public var executor: Executor?
+    /// The devices the parts are served from - a filesystem path, a transport identifier, or a
+    /// FUSE mount over object storage; empty serves each part where its manifest points.
+    public var paths: [String]
+
+    public init(executor: Executor? = nil, paths: [String] = []) {
+        self.executor = executor
+        self.paths = paths
+    }
+}
+
+// MARK: - Results
+
+/// The rows `get` or `attend` wrote into an arena, one per entry sharing the key or per query, read
+/// in place as `Value`. Mirrors `usearch_rows_view_t`.
+public struct DenseVectors<Value: ScalarValue>: RandomAccessCollection {
+    /// The arena the rows live in, and which call wrote them.
+    let write: ArenaWrite
+    /// The packed rows the call wrote.
+    let vectors: usearch_rows_view_t
+    /// One past the last row the call wrote.
+    public let endIndex: Int
+
+    /// The first row's position, which a collection walk starts from.
+    public var startIndex: Int { 0 }
+
+    /// The bytes between consecutive rows, as the library reported them.
+    public var stride: Int { vectors.stride }
+
+    /// The logical values in each row, as the library reported them.
+    public var columns: Int { vectors.columns }
+
+    /// One row's stored values, packed at their natural width.
+    public subscript(row: Int) -> Row {
+        write.check(row, below: endIndex)
+        let perValue = Value.scalarKind.dimensionsPerValue
+        return Row(
+            write: write,
+            base: vectors.data! + row * vectors.stride,
+            endIndex: (columns + perValue - 1) / perValue
         )
+    }
+
+    /// One row of the arena's values, read in place.
+    public struct Row: RandomAccessCollection {
+        /// The arena the row lives in, and which call wrote it.
+        let write: ArenaWrite
+        /// The row's first value.
+        let base: UnsafeRawPointer
+        /// One past the last value in the row.
+        public let endIndex: Int
+
+        /// The first value's position, which a collection walk starts from.
+        public var startIndex: Int { 0 }
+
+        /// The value at a position.
+        public subscript(position: Int) -> Value {
+            write.check(position, below: endIndex)
+            return base.load(fromByteOffset: position * MemoryLayout<Value>.stride, as: Value.self)
+        }
+    }
+}
+
+/// The keys a cursor pull wrote into an arena, in walk order. Mirrors `usearch_keys_view_t`.
+public struct DenseKeys: RandomAccessCollection {
+    /// The arena the keys live in, and which call wrote them.
+    let write: ArenaWrite
+    /// The keys the call wrote.
+    let keys: usearch_keys_view_t
+    /// One past the last key the call wrote.
+    public let endIndex: Int
+
+    /// The first key's position, which a collection walk starts from.
+    public var startIndex: Int { 0 }
+
+    /// The key at a position.
+    public subscript(position: Int) -> Key {
+        write.check(position, below: endIndex)
+        return Key(
+            raw: UnsafeRawPointer(keys.data!).load(fromByteOffset: position * keys.stride, as: usearch_key_t.self)
+        )
+    }
+}
+
+/// The ragged sparse product `multiply` wrote into an arena: per left row, every pair its walk
+/// scored, in traversal order, read in place. Mirrors `usearch_matches_tape_view_t`.
+public struct DenseProducts: RandomAccessCollection {
+    /// The arena the pairs live in, and which call wrote them.
+    let write: ArenaWrite
+    /// The keys, products and offsets the call wrote.
+    let products: usearch_matches_tape_view_t
+    /// One past the last left row.
+    public let endIndex: Int
+    /// Pairs the walks scored across every row, before the wanted bound cut any.
+    public let required: Int
+
+    /// The first row's position, which a collection walk starts from.
+    public var startIndex: Int { 0 }
+
+    /// One left row's pairs, in traversal order.
+    public subscript(row: Int) -> MatchesRow {
+        write.check(row, below: endIndex)
+        let cells = products.offsets[row] ..< products.offsets[row + 1]
+        return MatchesRow(write: write, keys: products.keys, scores: products.scores, cells: cells)
+    }
+}
+
+/// The monolith `saveBuffer` wrote into an arena, read in place. Mirrors `usearch_bytes_view_t`.
+public struct Monolith {
+    /// The arena the bytes live in, and which call wrote them.
+    let write: ArenaWrite
+    /// The bytes the call wrote.
+    let monolith: usearch_bytes_view_t
+
+    /// The bytes in the monolith.
+    public var count: Int { monolith.length }
+
+    /// Lends the serialized checkpoint to `body`, which must not keep the buffer past its return.
+    public func withUnsafeBytes<Result, Failure: Swift.Error>(
+        _ body: (UnsafeRawBufferPointer) throws(Failure) -> Result
+    ) throws(Failure) -> Result {
+        write.check()
+        return try body(UnsafeRawBufferPointer(start: monolith.data, count: monolith.length))
     }
 }
 
@@ -391,165 +608,331 @@ public struct MatchesSpan: RandomAccessCollection {
 /// visibility watermark and never write to the graph, while insertions synchronize through
 /// per-node locks and publish in order. Serialization is the one exception, demanding a
 /// mutation-free window, though concurrent readers keep searching throughout.
+///
+/// Every verb called on the index runs on the calling thread and blocks until its outcome is
+/// final; `on(_:)` runs the same verbs on an executor, and `deferred(_:)` submits them there.
 public final class DenseIndex: @unchecked Sendable {
-    /// The native handle, released by `deinit` and never reassigned, so every verb sees the one
-    /// the initializer claimed and the engine's own synchronization is all that sharing relies on.
-    private let handle: usearch_dense_index_t
+    /// The native handle, released by `deinit`, and null once a merge consumed it, so every verb
+    /// sees the one the lifecycle verb claimed and the engine's own synchronization is all that
+    /// sharing relies on.
+    var raw: usearch_dense_index_t?
 
-    /// Initializes an index for the residency its options select.
-    public init(options: borrowing DenseOptions) throws(Error) {
-        let placement = LoweredResidency(options.residency)
-        let created = try withExtendedLifetime(placement) { () throws(Error) -> usearch_dense_index_t? in
-            var raw = options.lowered(placement)
-            return try throwing { usearch_dense_init(&raw, $0) }
-        }
-        guard let created else { throw fail(.internalFailure, "the library returned no handle and no error") }
-        handle = created
+    /// Adopts a handle a lifecycle verb just created.
+    private init(raw: usearch_dense_index_t) {
+        self.raw = raw
     }
 
-    deinit { usearch_dense_free(handle) }
+    /// Calls `usearch_dense_free`.
+    deinit { usearch_dense_free(raw) }
 
-    /// Reads a checkpoint's geometry and metric metadata without loading it - from the
-    /// manifest's summary when the path names one, so no shard is opened.
-    public static func metadata(path: borrowing String) throws(Error) -> DenseMetadata {
-        var raw = usearch_dense_metadata_t()
-        try withBorrowed(path) { (borrowed) throws(Error) in
-            try throwing { usearch_dense_metadata(borrowed, &raw, $0) }
-        }
-        return try DenseMetadata.lifted(raw)
-    }
-
-    /// Reads geometry and metric metadata from a serialized monolith buffer.
-    public static func metadata(buffer: borrowing RawSpan) throws(Error) -> DenseMetadata {
-        guard buffer.byteCount != 0 else { throw fail(.malformedInput, "the buffer is empty") }
-        var raw = usearch_dense_metadata_t()
-        try buffer.withUnsafeBytes { (bytes) throws(Error) in
-            let view = usearch_bytes_view_t(
-                data: bytes.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                length: bytes.count
+    /// Initializes an empty, mutable index in host memory, one shard per memory domain; an empty
+    /// list derives every node the process may allocate on. Calls `usearch_dense_init_ram`.
+    public static func initRam(
+        _ options: DenseOptions,
+        memoryDomains: [Int32] = []
+    ) throws(USearchError) -> DenseIndex {
+        let landing = Landing()
+        let index = landing.slots(usearch_dense_index_t?.none)
+        try landing.lend(memoryDomains) { (domains) throws(USearchError) in
+            var arguments = usearch_dense_init_ram_t(
+                index: index,
+                outcome: landing.outcome,
+                metric: options.metric.raw,
+                quantization: options.quantization.raw,
+                dimensions: options.dimensions,
+                connectivity: options.connectivity,
+                values_per_key: options.valuesPerKey,
+                ram: usearch_ram_options_t(memory_domains: domains, memory_domains_count: memoryDomains.count)
             )
-            try throwing { usearch_dense_metadata_buffer(view, &raw, $0) }
+            usearch_dense_init_ram(&arguments)
         }
-        return try DenseMetadata.lifted(raw)
+        return try adopted(index, landing)
     }
 
-    /// Reserves capacity for a total number of entries, the current size included.
-    public func reserve(_ capacity: Int) throws(Error) {
-        try throwing { usearch_dense_reserve(handle, capacity, $0) }
-    }
-
-    /// Erases all entries, keeping the reserved capacity and the frozen geometry.
-    public func clear() throws(Error) {
-        try throwing { usearch_dense_clear(handle, $0) }
-    }
-
-    /// The number of stored entries.
-    public var size: Int { get throws(Error) { try measure(usearch_dense_size) } }
-
-    /// The reserved capacity in entries.
-    public var capacity: Int { get throws(Error) { try measure(usearch_dense_capacity) } }
-
-    /// The frozen dimensionality of the stored vectors; zero while the geometry still defers to
-    /// a later load.
-    public var dimensions: Int { get throws(Error) { try measure(usearch_dense_dimensions) } }
-
-    /// The frozen connections-per-node bound of the graph.
-    public var connectivity: Int { get throws(Error) { try measure(usearch_dense_connectivity) } }
-
-    /// The memory usage of the index in bytes.
-    public var memoryUsage: Int { get throws(Error) { try measure(usearch_dense_memory_usage) } }
-
-    /// The bytes one monolith of the index takes under the default layout - what `save(executor:buffer:)`
-    /// needs; a manifest checkpoint's parts sum to about the same, plus the manifest.
-    public var storageRequirements: Int {
-        get throws(Error) { try measure(usearch_dense_storage_requirements) }
-    }
-
-    /// The capability codename the index dispatched to on this machine.
-    public var capabilities: String {
-        get throws(Error) {
-            let raw = try throwing { usearch_dense_capabilities(handle, $0) }
-            guard let raw else { throw fail(.internalFailure, "the library reported no capabilities and no error") }
-            return String(cString: raw)
+    /// Initializes an empty, mutable index in device memory, sharded across the named devices and
+    /// never replicated; an empty list derives one free device. Calls `usearch_dense_init_vram`.
+    public static func initVram(_ options: DenseOptions, devices: [Int32] = []) throws(USearchError) -> DenseIndex {
+        let landing = Landing()
+        let index = landing.slots(usearch_dense_index_t?.none)
+        try landing.lend(devices) { (lentDevices) throws(USearchError) in
+            var arguments = usearch_dense_init_vram_t(
+                index: index,
+                outcome: landing.outcome,
+                metric: options.metric.raw,
+                quantization: options.quantization.raw,
+                dimensions: options.dimensions,
+                connectivity: options.connectivity,
+                values_per_key: options.valuesPerKey,
+                vram: usearch_vram_options_t(devices: lentDevices, devices_count: devices.count)
+            )
+            usearch_dense_init_vram(&arguments)
         }
+        return try adopted(index, landing)
     }
 
-    /// Inserts a matrix of vectors under their keys - the native batch operation, where a single
+    /// Copies a checkpoint into a new, mutable index in host memory. The geometry and metric come
+    /// from the checkpoint's own headers, and part `p` lands whole on shard `p` modulo the shard
+    /// count, wherever it was written from.
+    ///
+    /// A cancelled or failed load creates no index. Calls `usearch_dense_load_ram`.
+    public static func loadRam(
+        _ path: String,
+        config: DenseLoadRamConfig = DenseLoadRamConfig()
+    ) throws(USearchError) -> DenseIndex {
+        let landing = Landing()
+        let index = landing.slots(usearch_dense_index_t?.none)
+        let (progress, progressState) = landing.lend(config.progress)
+        try landing.lend(path) { (path) throws(USearchError) in
+            try landing.lend(config.memoryDomains) { (domains) throws(USearchError) in
+                var arguments = usearch_dense_load_ram_t(
+                    index: index,
+                    executor: config.executor?.raw,
+                    outcome: landing.outcome,
+                    completion: landing.completion,
+                    path: path,
+                    ram: usearch_ram_options_t(
+                        memory_domains: domains,
+                        memory_domains_count: config.memoryDomains.count
+                    ),
+                    values_per_key: config.valuesPerKey,
+                    progress: progress,
+                    progress_state: progressState
+                )
+                usearch_dense_load_ram(&arguments)
+            }
+        }
+        return try adopted(index, landing)
+    }
+
+    /// Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
+    /// `loadRam`. Calls `usearch_dense_load_vram`.
+    public static func loadVram(
+        _ path: String,
+        config: DenseLoadVramConfig = DenseLoadVramConfig()
+    ) throws(USearchError) -> DenseIndex {
+        let landing = Landing()
+        let index = landing.slots(usearch_dense_index_t?.none)
+        let (progress, progressState) = landing.lend(config.progress)
+        try landing.lend(path) { (path) throws(USearchError) in
+            try landing.lend(config.devices) { (devices) throws(USearchError) in
+                var arguments = usearch_dense_load_vram_t(
+                    index: index,
+                    executor: config.executor?.raw,
+                    outcome: landing.outcome,
+                    completion: landing.completion,
+                    path: path,
+                    vram: usearch_vram_options_t(devices: devices, devices_count: config.devices.count),
+                    values_per_key: config.valuesPerKey,
+                    progress: progress,
+                    progress_state: progressState
+                )
+                usearch_dense_load_vram(&arguments)
+            }
+        }
+        return try adopted(index, landing)
+    }
+
+    /// Copies a monolith from a buffer into a new index in host memory, as `loadRam` does a path.
+    /// Calls `usearch_dense_load_ram_buffer`.
+    public static func loadRamBuffer(
+        _ buffer: RawSpan,
+        config: DenseLoadRamBufferConfig = DenseLoadRamBufferConfig()
+    ) throws(USearchError) -> DenseIndex {
+        let landing = Landing()
+        let index = landing.slots(usearch_dense_index_t?.none)
+        let (progress, progressState) = landing.lend(config.progress)
+        try buffer.withUnsafeBytes { (bytes) throws(USearchError) in
+            try landing.lend(config.memoryDomains) { (domains) throws(USearchError) in
+                var arguments = usearch_dense_load_ram_buffer_t(
+                    index: index,
+                    executor: config.executor?.raw,
+                    outcome: landing.outcome,
+                    completion: landing.completion,
+                    buffer: usearch_bytes_view_t(bytes),
+                    ram: usearch_ram_options_t(
+                        memory_domains: domains,
+                        memory_domains_count: config.memoryDomains.count
+                    ),
+                    values_per_key: config.valuesPerKey,
+                    progress: progress,
+                    progress_state: progressState
+                )
+                usearch_dense_load_ram_buffer(&arguments)
+            }
+        }
+        return try adopted(index, landing)
+    }
+
+    /// Copies a monolith from a buffer into a new index in device memory, as `loadVram` does a
+    /// path. Calls `usearch_dense_load_vram_buffer`.
+    public static func loadVramBuffer(
+        _ buffer: RawSpan,
+        config: DenseLoadVramBufferConfig = DenseLoadVramBufferConfig()
+    ) throws(USearchError) -> DenseIndex {
+        let landing = Landing()
+        let index = landing.slots(usearch_dense_index_t?.none)
+        let (progress, progressState) = landing.lend(config.progress)
+        try buffer.withUnsafeBytes { (bytes) throws(USearchError) in
+            try landing.lend(config.devices) { (devices) throws(USearchError) in
+                var arguments = usearch_dense_load_vram_buffer_t(
+                    index: index,
+                    executor: config.executor?.raw,
+                    outcome: landing.outcome,
+                    completion: landing.completion,
+                    buffer: usearch_bytes_view_t(bytes),
+                    vram: usearch_vram_options_t(devices: devices, devices_count: config.devices.count),
+                    values_per_key: config.valuesPerKey,
+                    progress: progress,
+                    progress_state: progressState
+                )
+                usearch_dense_load_vram_buffer(&arguments)
+            }
+        }
+        return try adopted(index, landing)
+    }
+
+    /// Serves a checkpoint in place through a memory mapping, as a read-only index whose mutating
+    /// verbs report `readOnly`; the files must stay unmodified while it lives. Calls
+    /// `usearch_dense_view_ram`.
+    public static func viewRam(_ path: String) throws(USearchError) -> DenseIndex {
+        let landing = Landing()
+        let index = landing.slots(usearch_dense_index_t?.none)
+        try landing.lend(path) { (path) throws(USearchError) in
+            var arguments = usearch_dense_view_ram_t(index: index, outcome: landing.outcome, path: path)
+            usearch_dense_view_ram(&arguments)
+        }
+        return try adopted(index, landing)
+    }
+
+    /// Serves a checkpoint in place from NVMe drives, read through the executor's submission rings,
+    /// as a read-only index. Until NVMe checkpoints carry keys, it reports `unsupported`. Calls
+    /// `usearch_dense_view_nvme`.
+    public static func viewNvme(
+        _ path: String,
+        config: DenseViewNvmeConfig = DenseViewNvmeConfig()
+    ) throws(USearchError) -> DenseIndex {
+        let landing = Landing()
+        let index = landing.slots(usearch_dense_index_t?.none)
+        try landing.lend(path) { (path) throws(USearchError) in
+            withPaths(config.paths) { nvme in
+                var arguments = usearch_dense_view_nvme_t(
+                    index: index,
+                    executor: config.executor?.raw,
+                    outcome: landing.outcome,
+                    completion: landing.completion,
+                    path: path,
+                    nvme: nvme
+                )
+                usearch_dense_view_nvme(&arguments)
+            }
+        }
+        return try adopted(index, landing)
+    }
+
+    /// Reads a checkpoint's geometry and metric without loading it - from the manifest's summary
+    /// when the path names one, so no shard is opened. Calls `usearch_dense_metadata_read`.
+    public static func metadataRead(_ path: String, executor: Executor? = nil) throws(USearchError) -> DenseMetadata {
+        let landing = Landing()
+        let metadata = landing.slots(usearch_dense_metadata_t())
+        try landing.lend(path) { (path) throws(USearchError) in
+            var arguments = usearch_dense_metadata_read_t(
+                executor: executor?.raw,
+                outcome: landing.outcome,
+                completion: landing.completion,
+                path: path,
+                metadata: metadata
+            )
+            usearch_dense_metadata_read(&arguments)
+        }
+        return try landing.read { DenseMetadata(metadata.pointee) }
+    }
+
+    /// Reads geometry and metric metadata from a serialized monolith buffer. Calls
+    /// `usearch_dense_metadata_read_buffer`.
+    public static func metadataReadBuffer(
+        _ buffer: RawSpan,
+        executor: Executor? = nil
+    ) throws(USearchError) -> DenseMetadata {
+        let landing = Landing()
+        let metadata = landing.slots(usearch_dense_metadata_t())
+        buffer.withUnsafeBytes { bytes in
+            var arguments = usearch_dense_metadata_read_buffer_t(
+                executor: executor?.raw,
+                outcome: landing.outcome,
+                completion: landing.completion,
+                buffer: usearch_bytes_view_t(bytes),
+                metadata: metadata
+            )
+            usearch_dense_metadata_read_buffer(&arguments)
+        }
+        return try landing.read { DenseMetadata(metadata.pointee) }
+    }
+
+    /// Adopts the handle a blocking lifecycle verb wrote, or throws its failure.
+    private static func adopted(
+        _ index: UnsafeMutablePointer<usearch_dense_index_t?>,
+        _ landing: Landing
+    ) throws(USearchError) -> DenseIndex {
+        try landing.read { () throws(USearchError) in DenseIndex(raw: try created(index)) }
+    }
+
+    /// The same verbs, blocking on `executor` after every call submitted there before them.
+    /// Binding-only: names the executor every call passes.
+    public func on(_ executor: Executor) -> DenseIndexOn { DenseIndexOn(index: self, executor: executor) }
+
+    /// The same verbs, submitted to `executor` and answered at once as a `Deferred`. Binding-only:
+    /// names the executor and the deferred completion every call passes.
+    public func deferred(_ executor: Executor) -> DenseIndexDeferredOn {
+        DenseIndexDeferredOn(index: self, executor: executor)
+    }
+
+    /// The verbs on the calling thread.
+    private var here: DenseIndexOn { DenseIndexOn(index: self, executor: nil) }
+
+    /// Reserves capacity for a total number of entries, the current size included. Calls
+    /// `usearch_dense_reserve`.
+    public func reserve(_ capacity: Int) throws(USearchError) { try here.reserve(capacity) }
+
+    /// Erases all entries, keeping the reserved capacity and the frozen geometry. Calls
+    /// `usearch_dense_clear`.
+    public func clear() throws(USearchError) { try here.clear() }
+
+    /// Reports the frozen metadata and the current counters in one call. Calls
+    /// `usearch_dense_describe`.
+    public func describe() throws(USearchError) -> DenseIndexDescription { try here.describe() }
+
+    /// The number of entries stored under a key; zero means the index holds none. Calls
+    /// `usearch_dense_count`.
+    public func count(key: Key) throws(USearchError) -> Int { try here.count(key: key) }
+
+    /// Whether the index holds at least one entry under a key. Binding-only: calls `count`.
+    public func contains(key: Key) throws(USearchError) -> Bool { try here.contains(key: key) }
+
+    /// Retrieves every vector stored under a key, one row per entry sharing the key, in insertion
+    /// order, converted to `Value`; an absent key yields no rows. The rows land in `arena`, read in
+    /// place by the result until the arena's next call. Calls `usearch_dense_get`.
+    public func get<Value: ScalarValue>(
+        key: Key,
+        as value: Value.Type,
+        arena: Arena
+    ) throws(USearchError) -> DenseVectors<Value> {
+        try here.get(key: key, as: value, arena: arena)
+    }
+
+    /// Inserts rows of vectors under their keys - the native batch operation, where a single
     /// vector is a one-row matrix. Overlaps safely with concurrent searches on the same handle.
     ///
     /// The input scalar type is independent of the stored quantization; the library converts on
-    /// ingest. An expansion factor of zero derives the candidate-pool breadth.
-    ///
-    /// A batch is all-or-nothing: every fallible step runs before the first entry identity is
-    /// claimed, so a thrown failure leaves the index untouched. An accelerator fault severe
-    /// enough to poison the device context is the sole exception, reporting `deviceFailure` and
-    /// latching the index unusable rather than partially applied.
-    @discardableResult
-    public func add<Element: ScalarValue>(
-        executor: Executor,
-        keys: borrowing [Key],
-        vectors: borrowing MatrixView<Element>,
-        options: InsertionOptions = InsertionOptions()
-    ) throws(Error) -> (rows: Int, stats: TraversalStats) {
-        try vectors.validate(dimensions: try frozenDimensions())
-        guard !keys.isEmpty else { return (0, TraversalStats()) }
-
-        var view = vectors.lowered
-        var lowered = options.lowered
-        var rawStats = usearch_dense_traversal_stats_t()
-        let added = try keys.withUnsafeBufferPointer { (keysBuffer) throws(Error) -> Int in
-            try keysBuffer.withMemoryRebound(to: usearch_key_t.self) { (rawKeys) throws(Error) -> Int in
-                let run = usearch_keys_view_t(data: rawKeys.baseAddress, count: rawKeys.count)
-                return try throwing {
-                    usearch_dense_add(handle, executor.raw, run, &view, &lowered, nil, nil, &rawStats, $0)
-                }
-            }
-        }
-        return (added, TraversalStats(rawStats))
-    }
-
-    /// Resolves a matrix of queries into caller-owned outputs - the allocation-free batch path,
-    /// parallelized internally.
-    ///
-    /// Never writes to the graph, so any number of these may overlap with concurrent insertions.
-    @discardableResult
-    public func search<Element: ScalarValue>(
-        executor: Executor,
-        queries: borrowing MatrixView<Element>,
-        into matches: MatchesSpan,
-        options: SearchOptions = SearchOptions()
-    ) throws(Error) -> TraversalStats {
-        try searchDispatch(
-            executor: executor,
-            queries: queries,
-            matches: matches,
-            options: options,
-            admits: nil
-        )
-    }
-
-    /// The filtered sibling of `search(executor:queries:into:options:)`, admitting only the keys
-    /// the predicate approves. Non-matching entries still route the traversal, so recall does not
-    /// collapse at low selectivity.
-    ///
-    /// The predicate runs on the executor's threads, so it must be safe for concurrent use, and
-    /// it cannot throw: a Swift error unwinding into a C frame would tear the engine's traversal
-    /// down mid-walk.
-    @discardableResult
-    public func search<Element: ScalarValue>(
-        executor: Executor,
-        queries: borrowing MatrixView<Element>,
-        into matches: MatchesSpan,
-        options: SearchOptions = SearchOptions(),
-        admitting admits: @escaping (Key) -> Bool
-    ) throws(Error) -> TraversalStats {
-        try searchDispatch(
-            executor: executor,
-            queries: queries,
-            matches: matches,
-            options: options,
-            admits: admits
-        )
+    /// ingest. A batch is all-or-nothing, and its rows become visible at once: every fallible step
+    /// runs before the first entry identity is claimed, so a thrown failure leaves the index
+    /// untouched. Every row is claimed before the handler's first report, so it reports but cannot
+    /// cancel. Calls `usearch_dense_insert`.
+    public func insert(
+        keys: [Key],
+        vectors: RowsView,
+        config: DenseInsertConfig = DenseInsertConfig()
+    ) throws(USearchError) {
+        try here.insert(keys: keys, vectors: vectors, config: config)
     }
 
     /// Re-selects the neighbors of every stored entry against the finished graph, returning the
@@ -557,47 +940,28 @@ public final class DenseIndex: @unchecked Sendable {
     ///
     /// A build step rather than a repair: a cheap insertion pass followed by one refinement
     /// reaches a better graph, in less total time, than one expensive insertion pass - so a wide
-    /// expansion factor belongs here rather than in `add`. Searches may run throughout.
+    /// expansion factor belongs here rather than in `insert`. Searches may run throughout. Calls
+    /// `usearch_dense_refine`.
     @discardableResult
-    public func refine(
-        executor: Executor,
-        options: InsertionOptions = InsertionOptions()
-    ) throws(Error) -> (changed: Int, stats: TraversalStats) {
-        var lowered = options.lowered
-        var rawStats = usearch_dense_traversal_stats_t()
-        let changed = try throwing {
-            usearch_dense_refine(handle, executor.raw, &lowered, nil, nil, &rawStats, $0)
-        }
-        return (changed, TraversalStats(rawStats))
+    public func refine(config: DenseRefineConfig = DenseRefineConfig()) throws(USearchError) -> Int {
+        try here.refine(config: config)
     }
 
-    /// The approximate sparse product of a matrix against the indexed rows - the linear-algebra
-    /// sibling of `search`, reporting every pair the traversal scored rather than only the
-    /// nearest of them.
-    ///
-    /// Pairs arrive in traversal order rather than sorted, and carry no duplicates. A count above
-    /// the wanted width means that row was truncated to its nearest pairs, which
-    /// each query's `wasTruncated` reports. Runs on an inner-product index alone, since a
-    /// product needs logits rather than distances.
-    @discardableResult
-    public func multiply<Element: ScalarValue>(
-        executor: Executor,
-        left: borrowing MatrixView<Element>,
-        into products: MatchesSpan,
-        options: SearchOptions = SearchOptions()
-    ) throws(Error) -> TraversalStats {
-        try left.validate(dimensions: try frozenDimensions())
-        guard products.count == left.rows else {
-            throw fail(.shapeMismatch, "the outputs are not sized for one row per left row")
-        }
-        var view = left.lowered
-        var lowered = options.lowered
-        var span = products.lowered
-        var rawStats = usearch_dense_traversal_stats_t()
-        try throwing { failure in
-            usearch_dense_multiply(handle, executor.raw, &view, &span, &lowered, nil, nil, &rawStats, failure)
-        }
-        return TraversalStats(rawStats)
+    /// Audits how much of the graph a search can reach from its landmarks; entries it misses stay
+    /// unfound until a refinement re-links them. Calls `usearch_dense_health`.
+    public func health() throws(USearchError) -> DenseReachability { try here.health() }
+
+    /// Resolves rows of queries into up to `wanted` matches apiece, landing in `arena` - the native
+    /// batch operation, parallelized internally on an executor. The result reads the arena in place
+    /// until its next call. Never writes to the graph, so any number of these may overlap with
+    /// concurrent insertions. Calls `usearch_dense_search`.
+    public func search(
+        _ queries: RowsView,
+        wanted: Int,
+        arena: Arena,
+        config: DenseSearchConfig = DenseSearchConfig()
+    ) throws(USearchError) -> Matches {
+        try here.search(queries, wanted: wanted, arena: arena, config: config)
     }
 
     /// Late-interaction scoring of multi-row queries against multi-row entries: every query row
@@ -605,430 +969,1046 @@ public final class DenseIndex: @unchecked Sendable {
     ///
     /// A document is one key holding its token rows, which is what a `valuesPerKey` above one
     /// exists for. `rowsPerQuery` is the token count each query occupies, `queries` holds them end
-    /// to end, and the outputs are sized over documents rather than rows. Approximate downward
-    /// only: a token whose neighborhood the walk never entered contributes no maximum, so a key
-    /// can score below its exact value but never above it. Runs on an inner-product index alone.
+    /// to end, and up to `wanted` documents land in `arena`, one row per whole query rather than
+    /// per token. Approximate downward only: a token whose neighborhood the walk never entered
+    /// contributes no maximum, so a key can score below its exact value but never above it. Runs on
+    /// an inner-product index alone.
     ///
-    /// See <https://arxiv.org/abs/2004.12832> - ColBERT, which introduced this scoring.
-    @discardableResult
-    public func maxsim<Element: ScalarValue>(
-        executor: Executor,
-        queries: borrowing MatrixView<Element>,
+    /// See <https://arxiv.org/abs/2004.12832> - ColBERT, which introduced this scoring. Calls
+    /// `usearch_dense_maxsim`.
+    public func maxsim(
+        _ queries: RowsView,
         rowsPerQuery: Int,
-        into documents: MatchesSpan,
-        options: SearchOptions = SearchOptions()
-    ) throws(Error) -> TraversalStats {
-        try queries.validate(dimensions: try frozenDimensions())
-        guard rowsPerQuery > 0, queries.rows % rowsPerQuery == 0 else {
-            throw fail(.shapeMismatch, "the query rows do not divide into whole queries")
-        }
-        guard documents.count == queries.rows / rowsPerQuery else {
-            throw fail(.shapeMismatch, "the outputs are not sized for one row per whole query")
-        }
-        var view = queries.lowered
-        var lowered = options.lowered
-        var span = documents.lowered
-        var rawStats = usearch_dense_traversal_stats_t()
-        try throwing { failure in
-            usearch_dense_maxsim(
-                handle,
-                executor.raw,
-                &view,
-                rowsPerQuery,
-                &span,
-                &lowered,
-                nil,
-                nil,
-                &rawStats,
-                failure
-            )
-        }
-        return TraversalStats(rawStats)
+        wanted: Int,
+        arena: Arena,
+        config: DenseMaxsimConfig = DenseMaxsimConfig()
+    ) throws(USearchError) -> Matches {
+        try here.maxsim(queries, rowsPerQuery: rowsPerQuery, wanted: wanted, arena: arena, config: config)
     }
 
-    /// Softmax-weighted attention of a query matrix over the indexed keys, folded into the graph
-    /// walk in a single pass - no match list is materialized, and each value row is gathered
-    /// exactly once, at the moment its key was scored.
+    /// The approximate sparse product of rows against the indexed rows - the linear-algebra
+    /// sibling of `search`, reporting every pair the traversal scored rather than only the
+    /// nearest of them.
     ///
-    /// The index holds the keys and `values` holds the value rows, addressed by key: an entry's
-    /// key is its row offset into `values`, so a context inserted in position order needs no
-    /// mapping. `outputs` comes back already divided by its partition.
+    /// Pairs arrive in traversal order rather than sorted, and carry no duplicates. A non-zero
+    /// `wanted` keeps the first pairs each row's walk scored, and `required` says how many there
+    /// were. The keys, products and row offsets land in `arena` as one ragged run. Runs on an
+    /// inner-product index alone, since a product needs logits rather than distances. Calls
+    /// `usearch_dense_multiply`.
+    public func multiply(
+        _ left: RowsView,
+        arena: Arena,
+        config: DenseMultiplyConfig = DenseMultiplyConfig()
+    ) throws(USearchError) -> DenseProducts {
+        try here.multiply(left, arena: arena, config: config)
+    }
+
+    /// Softmax attention of a run of query heads over every indexed key their graph walks score,
+    /// folded as Flash Attention folds key tiles, with no top-k cut.
     ///
-    /// Passing a `carry` asks for the online-softmax state, one entry per query row, which folds
-    /// this branch into another over the same queries by partial-softmax rescaling. Runs on an
-    /// inner-product index alone, since a softmax needs logits.
+    /// Row `t · headCount + h` of `queries`, `outputs` and `carry` is head `h` of token `t`: the
+    /// `headCount` query heads of grouped-query attention share the index's one key-value head and
+    /// one walk per token. The index stores no values, so `lookup` resolves the keys of every
+    /// scored batch to rows of its values.
+    ///
+    /// The outputs land in `arena` as `Value` rows, and come back divided by the partition. Passing
+    /// a `carry` asks for the softmax state, one entry per query row, which folds this branch into
+    /// another over the same queries by partial-softmax rescaling. Runs on an inner-product index
+    /// alone.
     ///
     /// See <https://arxiv.org/abs/2205.14135> - Flash Attention, whose recurrence this reuses.
-    @discardableResult
-    public func attend<Query: ScalarValue, Value: ScalarValue, Output: ScalarValue>(
-        executor: Executor,
-        queries: borrowing MatrixView<Query>,
-        values: borrowing MatrixView<Value>,
-        into outputs: borrowing MatrixSpan<Output>,
-        carry: UnsafeMutableBufferPointer<SoftmaxState>? = nil,
-        options: AttentionOptions = AttentionOptions()
-    ) throws(Error) -> TraversalStats {
-        try queries.validate(dimensions: try frozenDimensions())
-        guard outputs.rows >= queries.rows else {
-            throw fail(.shapeMismatch, "the outputs hold fewer rows than there are queries")
-        }
-        guard outputs.dimensions == values.dimensions else {
-            throw fail(.shapeMismatch, "the outputs are not as wide as the value rows")
-        }
-        if let carry, carry.count < queries.rows {
-            throw fail(.shapeMismatch, "the carry holds fewer states than there are queries")
-        }
-
-        var queriesView = queries.lowered
-        var valuesView = values.lowered
-        var outputsSpan = outputs.lowered
-        var lowered = options.lowered
-        var rawStats = usearch_dense_traversal_stats_t()
-        var failure = usearch_error_t()
-        let attend = { (states: UnsafeMutablePointer<usearch_dense_softmax_state_t>?) -> Void in
-            usearch_dense_attend(
-                self.handle,
-                executor.raw,
-                &queriesView,
-                &valuesView,
-                &outputsSpan,
-                states,
-                &lowered,
-                nil,
-                nil,
-                &rawStats,
-                &failure
-            )
-        }
-        if let carry {
-            carry.withMemoryRebound(to: usearch_dense_softmax_state_t.self) { attend($0.baseAddress) }
-        }
-        else {
-            attend(nil)
-        }
-        try check(failure)
-        return TraversalStats(rawStats)
+    /// Calls `usearch_dense_attend`.
+    public func attend<Value: ScalarValue>(
+        _ queries: RowsView,
+        lookup: ValueLookup,
+        as value: Value.Type,
+        arena: Arena,
+        config: DenseAttendConfig = DenseAttendConfig()
+    ) throws(USearchError) -> DenseVectors<Value> {
+        try here.attend(queries, lookup: lookup, as: value, arena: arena, config: config)
     }
 
-    /// The number of entries stored under a key; zero means the index holds none.
-    public func count(key: Key) throws(Error) -> Int {
-        return try throwing { usearch_dense_count(handle, key.raw, $0) }
-    }
-
-    /// Whether the index holds at least one entry under a key.
-    public func contains(key: Key) throws(Error) -> Bool { try count(key: key) != 0 }
-
-    /// Retrieves the vectors stored under a key into the matrix, one row per entry sharing the
-    /// key, in insertion order.
-    ///
-    /// Returns the true number of entries, never the number written: a count above the matrix's
-    /// row capacity means the copy was truncated, so size for that many and call again.
-    /// `count(key:)` is the same number without the copy.
-    public func get<Element: ScalarValue>(
-        key: Key,
-        into vectors: borrowing MatrixSpan<Element>
-    ) throws(Error) -> Int {
-        try vectors.validate(dimensions: try frozenDimensions())
-        var span = vectors.lowered
-        return try throwing { usearch_dense_get(handle, key.raw, &span, $0) }
+    /// Absorbs every donor into this index, linking across donors via landmark stitching. Every
+    /// donor absorbed is consumed, and every later verb on one reports `uninitialized`; a merge
+    /// stopped early hands the rest back to their indexes once final. A donor named twice, or the
+    /// receiver itself, refuses with `invalidArgument`. Calls `usearch_dense_merge`.
+    public func merge(_ donors: [DenseIndex], config: DenseMergeConfig = DenseMergeConfig()) throws(USearchError) {
+        try here.merge(donors, config: config)
     }
 
     /// Writes the index under a path, in the layout its extension picks - one `.safegraphs`
     /// monolith, or a `.safegraphs.json` manifest beside its shards. Demands a mutation-free
-    /// window; concurrent readers keep searching throughout.
-    public func save(executor: Executor, path: borrowing String) throws(Error) {
-        try withBorrowed(path) { (borrowed) throws(Error) in
-            try throwing { usearch_dense_save(handle, executor.raw, borrowed, nil, nil, $0) }
-        }
+    /// window; concurrent readers keep searching throughout. Calls `usearch_dense_save`.
+    public func save(path: String, config: DenseSaveConfig = DenseSaveConfig()) throws(USearchError) {
+        try here.save(path: path, config: config)
     }
 
-    /// Reads a checkpoint into this handle, shard by shard, with the handle's residency deciding
-    /// the behavior: materialize into RAM, upload to the devices, or open in place on disk. A
-    /// handle whose geometry was left zeroed freezes it here, from the checkpoint's own headers.
-    public func load(executor: Executor, path: borrowing String) throws(Error) {
-        try withBorrowed(path) { (borrowed) throws(Error) in
-            try throwing { usearch_dense_load(handle, executor.raw, borrowed, nil, nil, $0) }
-        }
+    /// Writes the index as one monolith, the same bytes `save(path:)` writes to a `.safegraphs`
+    /// path, into `arena`. Calls `usearch_dense_save_buffer`.
+    public func saveBuffer(
+        arena: Arena,
+        config: DenseSaveBufferConfig = DenseSaveBufferConfig()
+    ) throws(USearchError) -> Monolith {
+        try here.saveBuffer(arena: arena, config: config)
     }
 
-    /// Writes the index into a caller-owned buffer as one monolith. Size the buffer with
-    /// `storageRequirements`.
-    public func save(executor: Executor, buffer: inout MutableRawSpan) throws(Error) {
-        guard buffer.byteCount != 0 else { throw fail(.shapeMismatch, "the buffer is empty") }
-        let handle = handle
-        try buffer.withUnsafeMutableBytes { (raw) throws(Error) in
-            let span = usearch_bytes_span_t(
-                data: raw.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                length: raw.count
-            )
-            try throwing { usearch_dense_save_buffer(handle, executor.raw, span, nil, nil, $0) }
-        }
-    }
-
-    /// Reads a monolith from a buffer into this handle, with the residency deciding the behavior
-    /// like `load(executor:path:)`. A residency that opens in place demands the buffer outlive
-    /// the handle.
-    public func load(executor: Executor, buffer: borrowing RawSpan) throws(Error) {
-        guard buffer.byteCount != 0 else { throw fail(.malformedInput, "the buffer is empty") }
-        let handle = handle
-        try buffer.withUnsafeBytes { (raw) throws(Error) in
-            let view = usearch_bytes_view_t(
-                data: raw.baseAddress!.assumingMemoryBound(to: UInt8.self),
-                length: raw.count
-            )
-            try throwing { usearch_dense_load_buffer(handle, executor.raw, view, nil, nil, $0) }
-        }
-    }
-
-    /// Opens a consistent snapshot cursor over the current contents, for export or migration.
-    ///
-    /// The watermark is captured here, so entries published after this call never appear
-    /// mid-iteration.
-    public func cursor() throws(Error) -> DenseCursor {
-        let opened = try throwing { usearch_dense_cursor(handle, $0) }
-        guard let opened else { throw fail(.internalFailure, "the library returned no cursor and no error") }
-        return DenseCursor(handle: opened, index: self)
-    }
+    /// Opens a row scan over the current contents, for export or migration. Each shard's
+    /// publication watermark is read as the walk enters it, so a row once passed is never
+    /// revisited. Calls `usearch_dense_cursor_init`.
+    public func cursor() throws(USearchError) -> DenseCursor { try here.cursor() }
 
     /// Opens a resumable nearest-neighbor stream over one query row, so a caller that post-filters
-    /// aggressively pulls until satisfied rather than guessing a wanted count upfront.
-    ///
-    /// A live finder pins one of the executor's threads until it is released, so an executor with
-    /// few threads and many open finders starves; drop each one the moment its caller stops
-    /// pulling rather than at the end of the enclosing scope.
-    public func find<Element: ScalarValue>(
-        executor: Executor,
-        query: borrowing MatrixView<Element>
-    ) throws(Error) -> DenseFinder {
-        try query.validate(dimensions: try frozenDimensions())
-        guard query.rows == 1 else { throw fail(.shapeMismatch, "a finder streams one query row") }
-        var view = query.lowered
-        let opened = try throwing { usearch_dense_find(handle, executor.raw, &view, $0) }
-        guard let opened else { throw fail(.internalFailure, "the library returned no finder and no error") }
-        return DenseFinder(handle: opened, index: self, executor: executor)
-    }
-
-    // The filtered search hands the engine a pointer to this box rather than to a Swift closure,
-    // which has no stable C representation.
-    private final class AdmissionBox {
-        let admits: (Key) -> Bool
-        init(_ admits: @escaping (Key) -> Bool) { self.admits = admits }
-    }
-
-    private func searchDispatch<Element: ScalarValue>(
-        executor: Executor,
-        queries: borrowing MatrixView<Element>,
-        matches: MatchesSpan,
-        options: SearchOptions,
-        admits: ((Key) -> Bool)?
-    ) throws(Error) -> TraversalStats {
-        try queries.validate(dimensions: try frozenDimensions())
-        guard matches.count == queries.rows else {
-            throw fail(.shapeMismatch, "the outputs are not sized for one row per query")
-        }
-        var view = queries.lowered
-        var lowered = options.lowered
-        var span = matches.lowered
-        var rawStats = usearch_dense_traversal_stats_t()
-        var failure = usearch_error_t()
-        if let admits {
-            let box = AdmissionBox(admits)
-            withExtendedLifetime(box) {
-                let state = Unmanaged.passUnretained(box).toOpaque()
-                usearch_dense_search_if(
-                    handle,
-                    executor.raw,
-                    &view,
-                    &span,
-                    &lowered,
-                    DenseIndex.usearchDenseAdmits,
-                    state,
-                    nil,
-                    nil,
-                    &rawStats,
-                    &failure
-                )
-            }
-        }
-        else {
-            usearch_dense_search(handle, executor.raw, &view, &span, &lowered, nil, nil, &rawStats, &failure)
-        }
-        try check(failure)
-        return TraversalStats(rawStats)
-    }
-
-    /// The admission trampoline the engine calls from the executor's threads. The boxed closure
-    /// cannot throw, so nothing unwinds out of this frame and into C.
-    private static let usearchDenseAdmits: usearch_predicate_t = { key, state in
-        // A lost box means the trampoline is broken. Admitting would turn a filtered search into
-        // an unfiltered one and answer wrong rows without saying so.
-        guard let state else { return usearch_reject_k }
-        let box = Unmanaged<AdmissionBox>.fromOpaque(state).takeUnretainedValue()
-        return box.admits(Key(raw: key)) ? usearch_admit_k : usearch_reject_k
-    }
-
-    /// The frozen row width, refusing the verbs whose geometry a later load still decides.
-    private func frozenDimensions() throws(Error) -> Int {
-        let dimensions = try self.dimensions
-        guard dimensions != 0 else {
-            throw fail(.uninitialized, "the index geometry is unfrozen; reserve or load a checkpoint first")
-        }
-        return dimensions
-    }
-
-    /// Pairs a probe's reading with its error slot.
-    private func measure(
-        _ probe: (usearch_dense_index_t?, UnsafeMutablePointer<usearch_error_t>?) -> Int
-    ) throws(Error) -> Int {
-        return try throwing { probe(handle, $0) }
+    /// aggressively pulls until satisfied rather than guessing a wanted count upfront. Calls
+    /// `usearch_dense_search_stream_init`.
+    public func searchStream(
+        _ query: RowsView,
+        config: DenseSearchStreamInitConfig = DenseSearchStreamInitConfig()
+    ) throws(USearchError) -> DenseSearchStream {
+        try here.searchStream(query, config: config)
     }
 }
 
-// MARK: - Cursors & Finders
+// MARK: - Receivers
 
-/// A consistent snapshot cursor over an index's contents; see `DenseIndex.cursor()`.
+/// An index's verbs on an executor, each blocking until final after every call submitted there
+/// before it; see `DenseIndex.on(_:)` and the index's own verbs for what each one does.
 ///
-/// The walk is a sequential row scan, so it stays a batch operation - export, migration, and
-/// visualization all move whole batches.
-public final class DenseCursor {
-    /// The native handle, released by `deinit` and never reassigned.
-    private let handle: usearch_dense_cursor_t
-    /// The index the snapshot was taken of, held so the cursor cannot outlive it.
-    private let index: DenseIndex
+/// A blocking call borrows the arena it is given, and its result reads it until the arena's next
+/// call.
+public struct DenseIndexOn: Sendable {
+    /// The index every verb addresses.
+    let index: DenseIndex
+    /// The executor every verb runs on, or nil for the calling thread.
+    let executor: Executor?
 
-    init(handle: usearch_dense_cursor_t, index: DenseIndex) {
-        self.handle = handle
-        self.index = index
+    /// Runs one verb, blocking until it is final.
+    private func run<Value>(
+        _ verb: (DenseCall) throws(USearchError) -> Submission<Value>
+    ) throws(USearchError) -> Value {
+        try verb(DenseCall(index: index, executor: executor, landing: Landing())).wait()
     }
 
-    deinit { usearch_dense_cursor_free(handle) }
-
-    /// Copies the next batch of keys into `keys`, walking the key column alone; the rows written
-    /// come back, and zero means the snapshot is exhausted.
-    public func next(into keys: inout MutableSpan<Key>) throws(Error) -> Int {
-        try advance(keys: &keys, vectors: nil)
+    /// Calls `usearch_dense_reserve`.
+    public func reserve(_ capacity: Int) throws(USearchError) {
+        try run { (call) throws(USearchError) in try call.reserve(capacity) }
     }
 
-    /// Copies the next batch of keys and the vectors they identify. The key run bounds the batch,
-    /// so the matrix must have room for at least as many rows.
-    public func next<Element: ScalarValue>(
-        into keys: inout MutableSpan<Key>,
-        vectors: borrowing MatrixSpan<Element>
-    ) throws(Error) -> Int {
-        try advance(keys: &keys, vectors: vectors.lowered)
+    /// Calls `usearch_dense_clear`.
+    public func clear() throws(USearchError) { try run { (call) throws(USearchError) in try call.clear() } }
+
+    /// Calls `usearch_dense_describe`.
+    public func describe() throws(USearchError) -> DenseIndexDescription {
+        try run { (call) throws(USearchError) in try call.describe() }
     }
 
-    /// Advances the snapshot by one batch, with or without the vector export.
-    ///
-    /// The key run arrives as a `MutableSpan`, which cannot outlive the storage it borrows - so a
-    /// buffer whose owner has already been released is not a call this signature accepts.
-    private func advance(
-        keys: inout MutableSpan<Key>,
-        vectors: usearch_matrix_span_t?
-    ) throws(Error) -> Int {
-        let handle = handle
-        return try keys.withUnsafeMutableBufferPointer { (typedKeys) throws(Error) -> Int in
-            try typedKeys.withMemoryRebound(to: usearch_key_t.self) { (rawKeys) throws(Error) -> Int in
-                let run = usearch_keys_span_t(data: rawKeys.baseAddress, capacity: rawKeys.count)
-                guard var span = vectors else {
-                    return try throwing { usearch_dense_cursor_next(handle, run, nil, $0) }
-                }
-                return try throwing { usearch_dense_cursor_next(handle, run, &span, $0) }
-            }
+    /// Calls `usearch_dense_count`.
+    public func count(key: Key) throws(USearchError) -> Int {
+        try run { (call) throws(USearchError) in try call.count(key) }
+    }
+
+    /// Binding-only: calls `count`.
+    public func contains(key: Key) throws(USearchError) -> Bool { try count(key: key) != 0 }
+
+    /// Calls `usearch_dense_get`.
+    public func get<Value: ScalarValue>(
+        key: Key,
+        as value: Value.Type,
+        arena: Arena
+    ) throws(USearchError) -> DenseVectors<Value> {
+        try run { (call) throws(USearchError) in try call.get(key, as: value, arena: arena) }
+    }
+
+    /// Calls `usearch_dense_insert`.
+    public func insert(
+        keys: [Key],
+        vectors: RowsView,
+        config: DenseInsertConfig = DenseInsertConfig()
+    ) throws(USearchError) {
+        try run { (call) throws(USearchError) in try call.insert(keys, vectors, config: config) }
+    }
+
+    /// Calls `usearch_dense_refine`.
+    @discardableResult
+    public func refine(config: DenseRefineConfig = DenseRefineConfig()) throws(USearchError) -> Int {
+        try run { (call) throws(USearchError) in try call.refine(config: config) }
+    }
+
+    /// Calls `usearch_dense_health`.
+    public func health() throws(USearchError) -> DenseReachability {
+        try run { (call) throws(USearchError) in try call.health() }
+    }
+
+    /// Calls `usearch_dense_search`.
+    public func search(
+        _ queries: RowsView,
+        wanted: Int,
+        arena: Arena,
+        config: DenseSearchConfig = DenseSearchConfig()
+    ) throws(USearchError) -> Matches {
+        try run { (call) throws(USearchError) in try call.search(queries, wanted: wanted, arena: arena, config: config)
         }
+    }
+
+    /// Calls `usearch_dense_maxsim`.
+    public func maxsim(
+        _ queries: RowsView,
+        rowsPerQuery: Int,
+        wanted: Int,
+        arena: Arena,
+        config: DenseMaxsimConfig = DenseMaxsimConfig()
+    ) throws(USearchError) -> Matches {
+        try run { (call) throws(USearchError) in
+            try call.maxsim(queries, rowsPerQuery: rowsPerQuery, wanted: wanted, arena: arena, config: config)
+        }
+    }
+
+    /// Calls `usearch_dense_multiply`.
+    public func multiply(
+        _ left: RowsView,
+        arena: Arena,
+        config: DenseMultiplyConfig = DenseMultiplyConfig()
+    ) throws(USearchError) -> DenseProducts {
+        try run { (call) throws(USearchError) in try call.multiply(left, arena: arena, config: config) }
+    }
+
+    /// Calls `usearch_dense_attend`.
+    public func attend<Value: ScalarValue>(
+        _ queries: RowsView,
+        lookup: ValueLookup,
+        as value: Value.Type,
+        arena: Arena,
+        config: DenseAttendConfig = DenseAttendConfig()
+    ) throws(USearchError) -> DenseVectors<Value> {
+        try run { (call) throws(USearchError) in
+            try call.attend(queries, lookup: lookup, as: value, arena: arena, config: config)
+        }
+    }
+
+    /// Calls `usearch_dense_merge`.
+    public func merge(_ donors: [DenseIndex], config: DenseMergeConfig = DenseMergeConfig()) throws(USearchError) {
+        try run { (call) throws(USearchError) in try call.merge(donors, config: config) }
+    }
+
+    /// Calls `usearch_dense_save`.
+    public func save(path: String, config: DenseSaveConfig = DenseSaveConfig()) throws(USearchError) {
+        try run { (call) throws(USearchError) in try call.save(path, config: config) }
+    }
+
+    /// Calls `usearch_dense_save_buffer`.
+    public func saveBuffer(
+        arena: Arena,
+        config: DenseSaveBufferConfig = DenseSaveBufferConfig()
+    ) throws(USearchError) -> Monolith {
+        try run { (call) throws(USearchError) in try call.saveBuffer(arena: arena, config: config) }
+    }
+
+    /// Opens a cursor whose every pull blocks on this executor. Calls `usearch_dense_cursor_init`.
+    public func cursor() throws(USearchError) -> DenseCursor {
+        try run { (call) throws(USearchError) in try call.cursor() }
+    }
+
+    /// Opens a stream whose every pull blocks on this executor. Calls
+    /// `usearch_dense_search_stream_init`.
+    public func searchStream(
+        _ query: RowsView,
+        config: DenseSearchStreamInitConfig = DenseSearchStreamInitConfig()
+    ) throws(USearchError) -> DenseSearchStream {
+        try run { (call) throws(USearchError) in try call.searchStream(query, config: config) }
     }
 }
 
-/// A resumable nearest-neighbor stream over one query; see `DenseIndex.find(executor:query:)`.
+/// An index's verbs submitted to an executor, each answering a `Deferred` at once; see
+/// `DenseIndex.deferred(_:)` and the index's own verbs for what each one does.
 ///
-/// Best-first traversal is naturally pausable, so the stream owns a live frontier and visited set
-/// and yields matches lazily - at the price of pinning one of the executor's threads for as long
-/// as it lives. Ordering beyond the expansion horizon is best-effort nearest rather than globally
-/// exact, so pulling far past that breadth degrades the ranking rather than ending the stream.
-public final class DenseFinder: Sequence, IteratorProtocol {
-    /// Matches pulled per crossing into the library, amortising the call over a run of them.
-    private static let matchesPerPull = 64
+/// A failure this binding catches before the call crosses throws at submission. Every object whose
+/// memory a call reads, like rows built over a `Tensor`, stays alive until it is final, and memory
+/// borrowed from elsewhere must outlive it too. The index, the executor and the arena are borrowed
+/// as a blocking call borrows them, since releasing any of them waits for the calls naming it.
+public struct DenseIndexDeferredOn: Sendable {
+    /// The index every verb addresses.
+    let index: DenseIndex
+    /// The executor every verb is submitted to.
+    let executor: Executor
 
-    /// The native handle, released by `deinit` and never reassigned.
-    private let handle: usearch_dense_finder_t
-    /// The index being walked, held so the stream cannot outlive it.
-    private let index: DenseIndex
-    /// The executor whose thread the stream pins, held for the same reason.
-    private let executor: Executor
-    /// The keys of the batch last pulled, sized once at construction.
-    private var keys: [Key]
-    /// The distances of that batch, positionally paired with `keys`.
-    private var distances: [Distance]
-    /// How many of those slots the last pull filled.
-    private var filled: Int
-    /// How many of the filled slots `next()` has already yielded.
-    private var position: Int
-    /// Whether the traversal reported itself drained, or a pull failed.
-    private var drained: Bool
-    /// The failure that ended iteration early, and nil when the stream simply ran out.
-    public private(set) var failure: Error?
-
-    init(handle: usearch_dense_finder_t, index: DenseIndex, executor: Executor) {
-        self.handle = handle
-        self.index = index
-        self.executor = executor
-        keys = [Key](repeating: .nilKey, count: DenseFinder.matchesPerPull)
-        distances = [Distance](repeating: 0, count: DenseFinder.matchesPerPull)
-        filled = 0
-        position = 0
-        drained = false
+    /// Submits one verb, whose landing its `Deferred` keeps until final.
+    private func submit<Value>(
+        _ verb: (DenseCall) throws(USearchError) -> Submission<Value>
+    ) throws(USearchError) -> Deferred<Value> {
+        Deferred(try verb(DenseCall(index: index, executor: executor, landing: Landing(usearch_completion_deferred_k))))
     }
 
-    deinit { usearch_dense_find_free(handle) }
+    /// Calls `usearch_dense_reserve`.
+    public func reserve(_ capacity: Int) throws(USearchError) -> Deferred<Void> {
+        try submit { (call) throws(USearchError) in try call.reserve(capacity) }
+    }
 
-    /// The next-nearest match, or nil once the traversal is drained. A failed pull ends iteration
-    /// and lands in `failure`, since an iterator cannot throw.
-    public func next() -> Match? {
-        if position == filled {
-            guard !drained, refill() else { return nil }
+    /// Calls `usearch_dense_clear`.
+    public func clear() throws(USearchError) -> Deferred<Void> {
+        try submit { (call) throws(USearchError) in try call.clear() }
+    }
+
+    /// Calls `usearch_dense_describe`.
+    public func describe() throws(USearchError) -> Deferred<DenseIndexDescription> {
+        try submit { (call) throws(USearchError) in try call.describe() }
+    }
+
+    /// Calls `usearch_dense_count`.
+    public func count(key: Key) throws(USearchError) -> Deferred<Int> {
+        try submit { (call) throws(USearchError) in try call.count(key) }
+    }
+
+    /// Calls `usearch_dense_get`.
+    public func get<Value: ScalarValue>(
+        key: Key,
+        as value: Value.Type,
+        arena: Arena
+    ) throws(USearchError) -> Deferred<DenseVectors<Value>> {
+        try submit { (call) throws(USearchError) in try call.get(key, as: value, arena: arena) }
+    }
+
+    /// Calls `usearch_dense_insert`.
+    public func insert(
+        keys: [Key],
+        vectors: RowsView,
+        config: DenseInsertConfig = DenseInsertConfig()
+    ) throws(USearchError) -> Deferred<Void> {
+        try submit { (call) throws(USearchError) in try call.insert(keys, vectors, config: config) }
+    }
+
+    /// Calls `usearch_dense_refine`.
+    public func refine(config: DenseRefineConfig = DenseRefineConfig()) throws(USearchError) -> Deferred<Int> {
+        try submit { (call) throws(USearchError) in try call.refine(config: config) }
+    }
+
+    /// Calls `usearch_dense_health`.
+    public func health() throws(USearchError) -> Deferred<DenseReachability> {
+        try submit { (call) throws(USearchError) in try call.health() }
+    }
+
+    /// Calls `usearch_dense_search`.
+    public func search(
+        _ queries: RowsView,
+        wanted: Int,
+        arena: Arena,
+        config: DenseSearchConfig = DenseSearchConfig()
+    ) throws(USearchError) -> Deferred<Matches> {
+        try submit { (call) throws(USearchError) in
+            try call.search(queries, wanted: wanted, arena: arena, config: config)
         }
-        position += 1
-        return Match(key: keys[position - 1], distance: distances[position - 1])
     }
 
-    /// Pulls one batch into the buffers, reporting whether anything landed.
-    private func refill() -> Bool {
-        let handle = handle
+    /// Calls `usearch_dense_maxsim`.
+    public func maxsim(
+        _ queries: RowsView,
+        rowsPerQuery: Int,
+        wanted: Int,
+        arena: Arena,
+        config: DenseMaxsimConfig = DenseMaxsimConfig()
+    ) throws(USearchError) -> Deferred<Matches> {
+        try submit { (call) throws(USearchError) in
+            try call.maxsim(queries, rowsPerQuery: rowsPerQuery, wanted: wanted, arena: arena, config: config)
+        }
+    }
+
+    /// Calls `usearch_dense_multiply`.
+    public func multiply(
+        _ left: RowsView,
+        arena: Arena,
+        config: DenseMultiplyConfig = DenseMultiplyConfig()
+    ) throws(USearchError) -> Deferred<DenseProducts> {
+        try submit { (call) throws(USearchError) in try call.multiply(left, arena: arena, config: config) }
+    }
+
+    /// Calls `usearch_dense_attend`.
+    public func attend<Value: ScalarValue>(
+        _ queries: RowsView,
+        lookup: ValueLookup,
+        as value: Value.Type,
+        arena: Arena,
+        config: DenseAttendConfig = DenseAttendConfig()
+    ) throws(USearchError) -> Deferred<DenseVectors<Value>> {
+        try submit { (call) throws(USearchError) in
+            try call.attend(queries, lookup: lookup, as: value, arena: arena, config: config)
+        }
+    }
+
+    /// Calls `usearch_dense_merge`.
+    public func merge(
+        _ donors: [DenseIndex],
+        config: DenseMergeConfig = DenseMergeConfig()
+    ) throws(USearchError) -> Deferred<Void> {
+        try submit { (call) throws(USearchError) in try call.merge(donors, config: config) }
+    }
+
+    /// Calls `usearch_dense_save`.
+    public func save(path: String, config: DenseSaveConfig = DenseSaveConfig()) throws(USearchError) -> Deferred<Void> {
+        try submit { (call) throws(USearchError) in try call.save(path, config: config) }
+    }
+
+    /// Calls `usearch_dense_save_buffer`.
+    public func saveBuffer(
+        arena: Arena,
+        config: DenseSaveBufferConfig = DenseSaveBufferConfig()
+    ) throws(USearchError) -> Deferred<Monolith> {
+        try submit { (call) throws(USearchError) in try call.saveBuffer(arena: arena, config: config) }
+    }
+}
+
+/// The whole queries the rows hold, which only this side can count, since the C call takes the
+/// query count rather than the rows.
+private func wholeQueries(_ queries: RowsView, _ rowsPerQuery: Int) throws(USearchError) -> Int {
+    guard rowsPerQuery > 0, queries.rows % rowsPerQuery == 0 else {
+        throw USearchError(status: .shapeMismatch, message: "the query rows do not divide into whole queries")
+    }
+    return queries.rows / rowsPerQuery
+}
+
+// MARK: - Calls
+
+/// The index, executor and landing one verb lowers into its argument structure, and the one place
+/// each verb is written.
+///
+/// Every verb reads its result through a local `read`, called at once for a blocking call and kept
+/// only by a deferred one, so the blocking path forms no escaping closure.
+struct DenseCall {
+    /// The index the call addresses.
+    let index: DenseIndex
+    /// The executor the call runs on, or nil for the calling thread.
+    let executor: Executor?
+    /// Where the call's outcome and slots live until it is final.
+    let landing: Landing
+
+    /// Whether the call blocks or returns once submitted.
+    private var completion: usearch_completion_t { landing.completion }
+
+    /// The handle the call names, refused once a merge consumed it.
+    private func open() throws(USearchError) -> usearch_dense_index_t {
+        guard let handle = index.raw else {
+            throw USearchError(status: .uninitialized, message: "a merge consumed this index")
+        }
+        return handle
+    }
+
+    func reserve(_ capacity: Int) throws(USearchError) -> Submission<Void> {
+        var arguments = usearch_dense_reserve_t(
+            index: try open(),
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: completion,
+            capacity: capacity
+        )
+        usearch_dense_reserve(&arguments)
+        return try landing.submitted()
+    }
+
+    func clear() throws(USearchError) -> Submission<Void> {
+        var arguments = usearch_dense_clear_t(
+            index: try open(),
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: completion
+        )
+        usearch_dense_clear(&arguments)
+        return try landing.submitted()
+    }
+
+    func describe() throws(USearchError) -> Submission<DenseIndexDescription> {
+        let handle = try open()
+        let description = landing.slots(usearch_dense_index_description_t())
+        var arguments = usearch_dense_describe_t(
+            index: handle,
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: completion,
+            description: description
+        )
+        usearch_dense_describe(&arguments)
+        func read() -> DenseIndexDescription { DenseIndexDescription(description.pointee) }
+        return try landing.isDeferred ? .pending(landing, read) : .final(landing.read(read))
+    }
+
+    func count(_ key: Key) throws(USearchError) -> Submission<Int> {
+        let handle = try open()
+        let entries = landing.slots(0)
+        var arguments = usearch_dense_count_t(
+            index: handle,
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: completion,
+            key: key.raw,
+            entries: entries
+        )
+        usearch_dense_count(&arguments)
+        func read() -> Int { entries.pointee }
+        return try landing.isDeferred ? .pending(landing, read) : .final(landing.read(read))
+    }
+
+    func get<Value: ScalarValue>(
+        _ key: Key,
+        as value: Value.Type,
+        arena: Arena
+    ) throws(USearchError) -> Submission<DenseVectors<Value>> {
+        let handle = try open()
+        let vectors = landing.slots(usearch_rows_view_t())
+        let written = landing.slots(0)
+        let write = landing.lend(arena)
+        var arguments = usearch_dense_get_t(
+            index: handle,
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: completion,
+            key: key.raw,
+            vectors: vectors,
+            written: written,
+            arena: arena.raw,
+            outputs_scalar: Value.scalarKind.raw
+        )
+        usearch_dense_get(&arguments)
+        // A generic local function is boxed even where it does not escape, so the reader is a literal.
+        if landing.isDeferred {
+            return .pending(landing) { DenseVectors(write: write, vectors: vectors.pointee, endIndex: written.pointee) }
+        }
+        return .final(
+            try landing.read { DenseVectors(write: write, vectors: vectors.pointee, endIndex: written.pointee) }
+        )
+    }
+
+    func insert(
+        _ keys: [Key],
+        _ vectors: RowsView,
+        config: DenseInsertConfig
+    ) throws(USearchError) -> Submission<Void> {
+        // The key run carries no count of its own, so only this side can see it disagree.
+        guard keys.count == vectors.rows else {
+            throw USearchError(status: .shapeMismatch, message: "the key count does not match the vector row count")
+        }
+        let handle = try open()
+        landing.anchor(vectors.owner)
+        landing.anchor(config.stats)
+        let (progress, progressState) = landing.lend(config.progress)
+        try landing.lend(keys) { (keys) throws(USearchError) in
+            var arguments = usearch_dense_insert_t(
+                index: handle,
+                executor: executor?.raw,
+                outcome: landing.outcome,
+                completion: completion,
+                count: vectors.rows,
+                keys: usearch_keys_view_t(
+                    data: UnsafeRawPointer(keys)?.assumingMemoryBound(to: usearch_key_t.self),
+                    stride: MemoryLayout<usearch_key_t>.stride
+                ),
+                vectors: vectors.raw,
+                expansion_factor: config.expansionFactor,
+                progress: progress,
+                progress_state: progressState,
+                stats: config.stats?.raw
+            )
+            usearch_dense_insert(&arguments)
+        }
+        return try landing.submitted()
+    }
+
+    func refine(config: DenseRefineConfig) throws(USearchError) -> Submission<Int> {
+        let handle = try open()
+        landing.anchor(config.stats)
+        let changed = landing.slots(0)
+        let (progress, progressState) = landing.lend(config.progress)
+        var arguments = usearch_dense_refine_t(
+            index: handle,
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: completion,
+            changed: changed,
+            expansion_factor: config.expansionFactor,
+            progress: progress,
+            progress_state: progressState,
+            stats: config.stats?.raw
+        )
+        usearch_dense_refine(&arguments)
+        func read() -> Int { changed.pointee }
+        return try landing.isDeferred ? .pending(landing, read) : .final(landing.read(read))
+    }
+
+    func health() throws(USearchError) -> Submission<DenseReachability> {
+        let handle = try open()
+        let reachability = landing.slots(usearch_dense_reachability_t())
+        var arguments = usearch_dense_health_t(
+            index: handle,
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: completion,
+            reachability: reachability
+        )
+        usearch_dense_health(&arguments)
+        func read() -> DenseReachability { DenseReachability(reachability.pointee) }
+        return try landing.isDeferred ? .pending(landing, read) : .final(landing.read(read))
+    }
+
+    func search(
+        _ queries: RowsView,
+        wanted: Int,
+        arena: Arena,
+        config: DenseSearchConfig
+    ) throws(USearchError) -> Submission<Matches> {
+        let handle = try open()
+        landing.anchor(queries.owner)
+        landing.anchor(config.stats)
+        let matches = landing.slots(usearch_matches_view_t())
+        let write = landing.lend(arena)
+        let (predicate, predicateState) = landing.lend(config.predicate)
+        let (progress, progressState) = landing.lend(config.progress)
+        var arguments = usearch_dense_search_t(
+            index: handle,
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: completion,
+            count: queries.rows,
+            queries: queries.raw,
+            matches: matches,
+            arena: arena.raw,
+            wanted: wanted,
+            expansion_factor: config.expansionFactor,
+            predicate: predicate,
+            predicate_state: predicateState,
+            progress: progress,
+            progress_state: progressState,
+            stats: config.stats?.raw
+        )
+        usearch_dense_search(&arguments)
+        func read() -> Matches { Matches(write: write, view: matches.pointee, endIndex: queries.rows) }
+        return try landing.isDeferred ? .pending(landing, read) : .final(landing.read(read))
+    }
+
+    func maxsim(
+        _ queries: RowsView,
+        rowsPerQuery: Int,
+        wanted: Int,
+        arena: Arena,
+        config: DenseMaxsimConfig
+    ) throws(USearchError) -> Submission<Matches> {
+        let count = try wholeQueries(queries, rowsPerQuery)
+        let handle = try open()
+        landing.anchor(queries.owner)
+        landing.anchor(config.stats)
+        let matches = landing.slots(usearch_matches_view_t())
+        let write = landing.lend(arena)
+        let (progress, progressState) = landing.lend(config.progress)
+        var arguments = usearch_dense_maxsim_t(
+            index: handle,
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: completion,
+            count: count,
+            queries: queries.raw,
+            rows_per_query: rowsPerQuery,
+            matches: matches,
+            arena: arena.raw,
+            wanted: wanted,
+            expansion_factor: config.expansionFactor,
+            progress: progress,
+            progress_state: progressState,
+            stats: config.stats?.raw
+        )
+        usearch_dense_maxsim(&arguments)
+        func read() -> Matches { Matches(write: write, view: matches.pointee, endIndex: count) }
+        return try landing.isDeferred ? .pending(landing, read) : .final(landing.read(read))
+    }
+
+    func multiply(
+        _ left: RowsView,
+        arena: Arena,
+        config: DenseMultiplyConfig
+    ) throws(USearchError) -> Submission<DenseProducts> {
+        let handle = try open()
+        landing.anchor(left.owner)
+        landing.anchor(config.stats)
+        let products = landing.slots(usearch_matches_tape_view_t())
+        let required = landing.slots(0)
+        let write = landing.lend(arena)
+        let (progress, progressState) = landing.lend(config.progress)
+        var arguments = usearch_dense_multiply_t(
+            index: handle,
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: completion,
+            count: left.rows,
+            left: left.raw,
+            products: products,
+            written: nil,
+            required: required,
+            arena: arena.raw,
+            wanted: config.wanted,
+            expansion_factor: config.expansionFactor,
+            progress: progress,
+            progress_state: progressState,
+            stats: config.stats?.raw
+        )
+        usearch_dense_multiply(&arguments)
+        func read() -> DenseProducts {
+            DenseProducts(write: write, products: products.pointee, endIndex: left.rows, required: required.pointee)
+        }
+        return try landing.isDeferred ? .pending(landing, read) : .final(landing.read(read))
+    }
+
+    func attend<Value: ScalarValue>(
+        _ queries: RowsView,
+        lookup: ValueLookup,
+        as value: Value.Type,
+        arena: Arena,
+        config: DenseAttendConfig
+    ) throws(USearchError) -> Submission<DenseVectors<Value>> {
+        // The carry pointer has no length, so only this side can see it fall short.
+        if let carry = config.carry, carry.count < queries.rows {
+            throw USearchError(status: .shapeMismatch, message: "the carry holds fewer states than there are queries")
+        }
+        let handle = try open()
+        landing.anchor(queries.owner)
+        landing.anchor(lookup.values.owner)
+        landing.anchor(config.stats)
+        let outputs = landing.slots(usearch_rows_view_t())
+        let write = landing.lend(arena)
+        let (progress, progressState) = landing.lend(config.progress)
+        var arguments = usearch_dense_attend_t(
+            index: handle,
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: completion,
+            count: queries.rows,
+            queries: queries.raw,
+            head_count: config.headCount,
+            value_lookup: valueLookupTrampoline,
+            value_lookup_state: landing.place(LookupState(lookup: lookup, landing: landing)),
+            carry: UnsafeMutableRawPointer(config.carry?.baseAddress)?
+                .assumingMemoryBound(to: usearch_dense_softmax_state_t.self),
+            outputs: outputs,
+            arena: arena.raw,
+            outputs_scalar: Value.scalarKind.raw,
+            expansion_factor: config.expansionFactor,
+            score_scale: config.scoreScale,
+            progress: progress,
+            progress_state: progressState,
+            stats: config.stats?.raw
+        )
+        usearch_dense_attend(&arguments)
+        let rows = queries.rows
+        if landing.isDeferred {
+            return .pending(landing) { DenseVectors(write: write, vectors: outputs.pointee, endIndex: rows) }
+        }
+        return .final(try landing.read { DenseVectors(write: write, vectors: outputs.pointee, endIndex: rows) })
+    }
+
+    func merge(_ donors: [DenseIndex], config: DenseMergeConfig) throws(USearchError) -> Submission<Void> {
+        // The library would absorb one handle twice, so only distinct donors other than the receiver cross.
+        let distinct = Set(donors.map(ObjectIdentifier.init))
+        guard distinct.count == donors.count, !distinct.contains(ObjectIdentifier(index)) else {
+            throw USearchError(status: .invalidArgument, message: "a donor is named twice or is the receiver")
+        }
+        let handle = try open()
+        // The library nulls each slot it consumes, so the slots are the landing's own.
+        let slots = landing.slots(usearch_dense_index_t?.none, count: donors.count)
+        for (position, donor) in donors.enumerated() {
+            guard let raw = donor.raw else {
+                throw USearchError(status: .uninitialized, message: "a merge consumed this donor")
+            }
+            slots[position] = raw
+        }
+        for donor in donors { donor.raw = nil }
+        let (progress, progressState) = landing.lend(config.progress)
+        var arguments = usearch_dense_merge_t(
+            index: handle,
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: completion,
+            count: donors.count,
+            donors: slots,
+            progress: progress,
+            progress_state: progressState
+        )
+        usearch_dense_merge(&arguments)
+        // The handles belong to the call until final, then whichever it left go back to their donors.
+        landing.onFinal {
+            for (position, donor) in donors.enumerated() {
+                if let survivor = slots[position] { donor.raw = survivor }
+            }
+        }
+        return try landing.submitted()
+    }
+
+    func save(_ path: String, config: DenseSaveConfig) throws(USearchError) -> Submission<Void> {
+        let handle = try open()
+        let (progress, progressState) = landing.lend(config.progress)
+        try landing.lend(path) { (path) throws(USearchError) in
+            var arguments = usearch_dense_save_t(
+                index: handle,
+                executor: executor?.raw,
+                outcome: landing.outcome,
+                completion: completion,
+                path: path,
+                progress: progress,
+                progress_state: progressState
+            )
+            usearch_dense_save(&arguments)
+        }
+        return try landing.submitted()
+    }
+
+    func saveBuffer(arena: Arena, config: DenseSaveBufferConfig) throws(USearchError) -> Submission<Monolith> {
+        let handle = try open()
+        let monolith = landing.slots(usearch_bytes_view_t())
+        let write = landing.lend(arena)
+        let (progress, progressState) = landing.lend(config.progress)
+        var arguments = usearch_dense_save_buffer_t(
+            index: handle,
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: completion,
+            monolith: monolith,
+            arena: arena.raw,
+            progress: progress,
+            progress_state: progressState
+        )
+        usearch_dense_save_buffer(&arguments)
+        func read() -> Monolith { Monolith(write: write, monolith: monolith.pointee) }
+        return try landing.isDeferred ? .pending(landing, read) : .final(landing.read(read))
+    }
+
+    func cursor() throws(USearchError) -> Submission<DenseCursor> {
+        let handle = try open()
+        let cursor = landing.slots(usearch_dense_cursor_t?.none)
+        var arguments = usearch_dense_cursor_init_t(cursor: cursor, index: handle, outcome: landing.outcome)
+        usearch_dense_cursor_init(&arguments)
+        func read() throws(USearchError) -> DenseCursor {
+            DenseCursor(raw: try created(cursor), index: index, executor: executor)
+        }
+        return try landing.isDeferred ? .pending(landing, read) : .final(landing.read(read))
+    }
+
+    func searchStream(
+        _ query: RowsView,
+        config: DenseSearchStreamInitConfig
+    ) throws(USearchError) -> Submission<DenseSearchStream> {
+        // The C call takes one row and no count, so only this side can see a matrix carrying more.
+        guard query.rows == 1 else {
+            throw USearchError(status: .shapeMismatch, message: "a search stream walks one query row")
+        }
+        let handle = try open()
+        let stream = landing.slots(usearch_dense_search_stream_t?.none)
+        var arguments = usearch_dense_search_stream_init_t(
+            stream: stream,
+            index: handle,
+            outcome: landing.outcome,
+            query: query.raw,
+            expansion_factor: config.expansionFactor
+        )
+        usearch_dense_search_stream_init(&arguments)
+        func read() throws(USearchError) -> DenseSearchStream {
+            DenseSearchStream(raw: try created(stream), index: index, executor: executor)
+        }
+        return try landing.isDeferred ? .pending(landing, read) : .final(landing.read(read))
+    }
+}
+
+/// A filtered search's predicate and the landing its first thrown error goes to, placed in that
+/// landing, since a Swift closure has no stable C representation.
+private final class AdmissionState {
+    let admits: @Sendable (Key) throws -> Bool
+    /// The landing that keeps this state, so it outlives every call of the trampoline.
+    unowned let landing: Landing
+
+    init(admits: @escaping @Sendable (Key) throws -> Bool, landing: Landing) {
+        self.admits = admits
+        self.landing = landing
+    }
+}
+
+/// The admission trampoline the engine calls from the executor's threads. A thrown error is
+/// latched and rejects the key, so nothing unwinds out of this frame and into C.
+private let admissionTrampoline: usearch_predicate_t = { key, state in
+    // A lost state means the trampoline is broken. Admitting would turn a filtered search into
+    // an unfiltered one and answer wrong rows without saying so.
+    guard let state else { return usearch_reject_k }
+    let admission = Unmanaged<AdmissionState>.fromOpaque(state).takeUnretainedValue()
+    do {
+        return try admission.admits(Key(raw: key)) ? usearch_admit_k : usearch_reject_k
+    }
+    catch {
+        admission.landing.latch(error)
+        return usearch_reject_k
+    }
+}
+
+extension Landing {
+    /// Lends an optional predicate as the callback and state pair a search takes; nil lends nulls.
+    fileprivate func lend(
+        _ predicate: (@Sendable (Key) throws -> Bool)?
+    ) -> (usearch_predicate_t?, UnsafeMutableRawPointer?) {
+        guard let predicate else { return (nil, nil) }
+        return (admissionTrampoline, place(AdmissionState(admits: predicate, landing: self)))
+    }
+}
+
+/// Attention's value lookup and the landing its first thrown error goes to, placed in that
+/// landing, since a C trampoline cannot capture the lookup itself.
+private final class LookupState {
+    let lookup: ValueLookup
+    /// The landing that keeps this state, so it outlives every call of the trampoline.
+    unowned let landing: Landing
+
+    init(lookup: ValueLookup, landing: Landing) {
+        self.lookup = lookup
+        self.landing = landing
+    }
+}
+
+/// The value-lookup trampoline the engine calls from the executor's threads, once per scored batch.
+private let valueLookupTrampoline: usearch_value_lookup_t = { state, keys, count, scalar, columns, rows in
+    guard let rows else { return }
+    // A row left unresolved, or a lost state, refuses the call rather than reading garbage.
+    guard let state, let keys else { return rows.update(repeating: nil, count: count) }
+    let lookup = Unmanaged<LookupState>.fromOpaque(state).takeUnretainedValue()
+    let values = lookup.lookup.values
+    // The library reads rows of its own shape, so values of another one answer no row at all.
+    guard scalar == values.scalar.raw, columns == values.columns else {
+        return rows.update(repeating: nil, count: count)
+    }
+    for position in 0 ..< count {
         do {
-            filled = try keys.withUnsafeMutableBufferPointer { (keysBuffer) throws(Error) -> Int in
-                try keysBuffer.withMemoryRebound(to: usearch_key_t.self) { (rawKeys) throws(Error) -> Int in
-                    try distances.withUnsafeMutableBufferPointer { (scores) throws(Error) -> Int in
-                        let run = usearch_keys_span_t(data: rawKeys.baseAddress, capacity: rawKeys.count)
-                        return try throwing { usearch_dense_find_next(handle, run, scores.baseAddress, $0) }
-                    }
-                }
-            }
+            let row = try lookup.lookup.row(Key(raw: keys[position]))
+            rows[position] = row.flatMap { $0 >= 0 && $0 < values.rows ? values.data + $0 * values.stride : nil }
         }
         catch {
-            failure = error
-            filled = 0
+            lookup.landing.latch(error)
+            rows[position] = nil
         }
-        position = 0
-        drained = filled == 0
-        return filled != 0
     }
 }
 
-// MARK: - Helpers
+// MARK: - Cursors & Streams
 
-/// Views a Swift string as the pointer-and-length pair every path argument takes. The string is
-/// never terminated, by contract, so nothing is copied past the UTF-8 encoding itself.
-func withBorrowed<Value>(
-    _ text: borrowing String,
-    _ body: (usearch_bytes_view_t) throws(Error) -> Value
-) throws(Error) -> Value {
-    var text = copy text
-    var outcome: Result<Value, Error>?
-    text.withUTF8 { buffer in
-        outcome = Result { () throws(Error) -> Value in
-            try body(usearch_bytes_view_t(data: buffer.baseAddress, length: buffer.count))
+/// A row scan over an index's contents; see `DenseIndex.cursor()`.
+///
+/// The walk is a sequential row scan, so it stays a batch operation - export, migration, and
+/// visualization all move whole batches. Every pull blocks on the executor of the receiver that
+/// opened it, and the cursor keeps its index alive.
+public final class DenseCursor {
+    /// The native handle, released by `deinit` and never reassigned.
+    private let raw: usearch_dense_cursor_t
+    /// The index the scan walks, held so the cursor cannot outlive it.
+    private let index: DenseIndex
+    /// The executor every pull runs on, or nil for the calling thread.
+    private let executor: Executor?
+
+    init(raw: usearch_dense_cursor_t, index: DenseIndex, executor: Executor?) {
+        self.raw = raw
+        self.index = index
+        self.executor = executor
+    }
+
+    /// Calls `usearch_dense_cursor_free`.
+    deinit { usearch_dense_cursor_free(raw) }
+
+    /// Copies up to `wanted` next keys into `arena`, walking the key column alone; an empty batch
+    /// means the scan is exhausted. Calls `usearch_dense_cursor_next`.
+    public func next(wanted: Int, arena: Arena) throws(USearchError) -> DenseKeys {
+        try pull(wanted, nil, arena).keys
+    }
+
+    /// Copies up to `wanted` next keys and the vectors they identify into `arena`, the rows
+    /// converted to `Value`; an empty batch means the scan is exhausted. Calls
+    /// `usearch_dense_cursor_next`.
+    public func next<Value: ScalarValue>(
+        wanted: Int,
+        as value: Value.Type,
+        arena: Arena
+    ) throws(USearchError) -> (keys: DenseKeys, vectors: DenseVectors<Value>) {
+        let (keys, vectors) = try pull(wanted, Value.scalarKind, arena)
+        return (keys, DenseVectors(write: keys.write, vectors: vectors, endIndex: keys.count))
+    }
+
+    /// Advances the scan by one batch, exporting rows only when `scalar` names their kind.
+    private func pull(
+        _ wanted: Int,
+        _ scalar: Scalar?,
+        _ arena: Arena
+    ) throws(USearchError) -> (keys: DenseKeys, vectors: usearch_rows_view_t) {
+        guard let handle = index.raw else {
+            throw USearchError(status: .uninitialized, message: "a merge consumed this index")
+        }
+        let landing = Landing()
+        let keys = landing.slots(usearch_keys_view_t())
+        let vectors = landing.slots(usearch_rows_view_t())
+        let written = landing.slots(0)
+        let write = landing.lend(arena)
+        var arguments = usearch_dense_cursor_next_t(
+            index: handle,
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: landing.completion,
+            cursor: raw,
+            keys: keys,
+            vectors: scalar == nil ? nil : vectors,
+            written: written,
+            arena: arena.raw,
+            wanted: wanted,
+            outputs_scalar: (scalar ?? .unknown).raw
+        )
+        usearch_dense_cursor_next(&arguments)
+        return try landing.read {
+            (DenseKeys(write: write, keys: keys.pointee, endIndex: written.pointee), vectors.pointee)
         }
     }
-    guard let outcome else { throw fail(.internalFailure, "the path was never presented to the call") }
-    return try outcome.get()
+}
+
+/// A resumable nearest-neighbor stream over one query; see `DenseIndex.searchStream`.
+///
+/// Best-first traversal is naturally pausable, so the stream keeps a live frontier and visited set
+/// and yields matches lazily. Ordering beyond the expansion horizon is best-effort nearest rather
+/// than globally exact, so pulling far past that breadth degrades the ranking rather than ending
+/// the stream. Every pull blocks on the executor of the receiver that opened it.
+public final class DenseSearchStream {
+    /// The native handle, released by `deinit` and never reassigned.
+    private let raw: usearch_dense_search_stream_t
+    /// The index being walked, held so the stream cannot outlive it.
+    private let index: DenseIndex
+    /// The executor every pull runs on, or nil for the calling thread.
+    private let executor: Executor?
+
+    init(raw: usearch_dense_search_stream_t, index: DenseIndex, executor: Executor?) {
+        self.raw = raw
+        self.index = index
+        self.executor = executor
+    }
+
+    /// Calls `usearch_dense_search_stream_free`.
+    deinit { usearch_dense_search_stream_free(raw) }
+
+    /// Pulls up to `wanted` more matches into `arena`, as the one row of a search, nearest first;
+    /// an empty row means the traversal is drained. Calls `usearch_dense_search_stream_next`.
+    public func next(wanted: Int, arena: Arena) throws(USearchError) -> Matches {
+        guard let handle = index.raw else {
+            throw USearchError(status: .uninitialized, message: "a merge consumed this index")
+        }
+        let landing = Landing()
+        let matches = landing.slots(usearch_matches_view_t())
+        let write = landing.lend(arena)
+        var arguments = usearch_dense_search_stream_next_t(
+            index: handle,
+            executor: executor?.raw,
+            outcome: landing.outcome,
+            completion: landing.completion,
+            stream: raw,
+            matches: matches,
+            arena: arena.raw,
+            wanted: wanted
+        )
+        usearch_dense_search_stream_next(&arguments)
+        return try landing.read { Matches(write: write, view: matches.pointee, endIndex: 1) }
+    }
+}
+
+extension usearch_bytes_view_t {
+    /// Views a byte buffer as the pointer-and-length pair every buffer argument takes.
+    fileprivate init(_ bytes: UnsafeRawBufferPointer) {
+        self.init(data: bytes.baseAddress?.assumingMemoryBound(to: UInt8.self), length: bytes.count)
+    }
 }

@@ -14,11 +14,11 @@ import PackageDescription
 let package = Package(
     name: "USearch",
     platforms: [
-        .macOS(.v12),
-        .iOS(.v15),
-        .watchOS(.v9),
-        .tvOS(.v15),
-        .visionOS(.v1),
+        .macOS(.v15),
+        .iOS(.v18),
+        .tvOS(.v18),
+        .watchOS(.v11),
+        .visionOS(.v2),
     ],
     products: [
         .library(
@@ -33,6 +33,9 @@ let package = Package(
         .target(
             name: "USearchC",
             path: ".",
+            // The NumKong and StringZilla checkouts sit under this path, and their Metal kernels would read
+            // as resources.
+            exclude: ["numkong", "stringzilla"],
             sources: ["swift/shim.c"],
             publicHeadersPath: "include",
             cSettings: [.headerSearchPath("include")]

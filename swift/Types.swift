@@ -4,112 +4,137 @@
 //
 //  Shared vocabulary of the USearch Swift SDK - the twin of include/usearch/types.h.
 //
-//  Statuses, keys, scalar kinds, matrix lowering, and residency are modality-agnostic, so they
-//  live here and the dense modality builds on them in DenseIndex.swift.
+//  Statuses, keys, scalar kinds, rows, executors, arenas, and deferred calls are
+//  modality-agnostic, so they live here and the dense modality builds on them in DenseIndex.swift.
 //
-//  Batches travel in NumKong's `MatrixView` and `MatrixSpan`, and its low-precision types are the
-//  scalars a caller builds rows out of; this file only tags them with the kind the C descriptors
-//  carry.
+//  Batches travel in a `RowsView` over NumKong's `MatrixView` or `Tensor`, and its low-precision
+//  types are the scalars a caller builds rows out of; this file only tags them with the kind the C
+//  descriptors carry.
 //
 
+import Dispatch
 import NumKong
+import Synchronization
 
 import USearchC
 
 // MARK: - Errors
 
-/// What went wrong, in the vocabulary the engine and this binding share. Validation performed
-/// here before a call crosses reports the status the engine would have reported for the same
-/// fault.
-public enum Status: Int32, Sendable {
-    /// The call completed and carries no message.
-    case success = 0
-    /// An allocation or reservation could not be satisfied.
-    case outOfMemory = 1
-    /// Dimensionality, row counts, or output capacity disagree.
-    case shapeMismatch = 2
-    /// A stride or packing the engine cannot traverse.
-    case unsupportedLayout = 3
-    /// A scalar, metric, or residency tag this build does not know.
-    case unknownKind = 4
-    /// A mutating verb reached a handle that opens its checkpoint in place.
-    case readOnly = 5
-    /// A file could not be opened, read, written, or parsed.
-    case ioFailure = 6
-    /// A device could not be selected, or its memory could not be claimed.
-    case deviceFailure = 7
-    /// A caller-supplied representation could not be decoded.
-    case malformedInput = 8
-    /// The library reported neither success nor a failure.
-    case internalFailure = 9
-    /// A hard design ceiling was reached, like the 32-bit identity space.
-    case overflow = 10
-    /// The verb needs a prior successful reservation that never happened.
-    case uninitialized = 11
-    /// The request contradicts an already-frozen configuration.
-    case configMismatch = 12
-    /// A synchronization contract was violated by a concurrent operation; discard any produced
-    /// output and retry in a quieter phase.
-    case contended = 13
-    /// A progress handler asked the operation to stop; it unwound and published nothing.
-    case cancelled = 14
-    /// A status a newer library reported and this build cannot name; never success.
-    case unrecognized = -1
+/// What went wrong, in the vocabulary the engine and this binding share - one constant per
+/// `usearch_status_*_k`, carrying the C enumerator itself. Validation performed here before a call
+/// crosses reports the status the engine would have reported for the same fault.
+///
+/// A `USearchError` never carries `success` or `deferred`; a `Deferred` call reports both.
+public struct Status: Hashable, Sendable, CustomStringConvertible {
+    /// The C enumerator.
+    let raw: usearch_status_t
 
-    /// The status rendered as its C enumerator's stem.
-    public var name: String {
-        switch self {
-        case .success: return "success"
-        case .outOfMemory: return "out_of_memory"
-        case .shapeMismatch: return "shape_mismatch"
-        case .unsupportedLayout: return "unsupported_layout"
-        case .unknownKind: return "unknown_kind"
-        case .readOnly: return "read_only"
-        case .ioFailure: return "io"
-        case .deviceFailure: return "device"
-        case .malformedInput: return "malformed_input"
-        case .internalFailure: return "internal"
-        case .overflow: return "overflow"
-        case .uninitialized: return "uninitialized"
-        case .configMismatch: return "config_mismatch"
-        case .contended: return "contended"
-        case .cancelled: return "cancelled"
-        case .unrecognized: return "unrecognized"
-        }
+    /// The call succeeded and carries no message.
+    public static let success = Status(raw: usearch_status_success_k)
+    /// The call was submitted deferred and is not final yet.
+    public static let deferred = Status(raw: usearch_status_deferred_k)
+    /// An allocation or reservation could not be satisfied.
+    public static let outOfMemory = Status(raw: usearch_status_out_of_memory_k)
+    /// Dimensionality or row counts disagree.
+    public static let shapeMismatch = Status(raw: usearch_status_shape_mismatch_k)
+    /// A stride or packing the engine cannot traverse.
+    public static let unsupportedLayout = Status(raw: usearch_status_unsupported_layout_k)
+    /// A scalar, metric, or residency tag this build does not know.
+    public static let unknownKind = Status(raw: usearch_status_unknown_kind_k)
+    /// A mutating verb reached a handle that serves its checkpoint in place.
+    public static let readOnly = Status(raw: usearch_status_read_only_k)
+    /// A file could not be opened, read, written, or parsed.
+    public static let io = Status(raw: usearch_status_io_k)
+    /// A device could not be selected, or its memory could not be claimed.
+    public static let device = Status(raw: usearch_status_device_k)
+    /// A caller-supplied representation could not be decoded.
+    public static let malformed = Status(raw: usearch_status_malformed_k)
+    /// The library reported neither success nor a failure.
+    public static let `internal` = Status(raw: usearch_status_internal_k)
+    /// A hard design ceiling was reached, like the 32-bit ID space.
+    public static let overflow = Status(raw: usearch_status_overflow_k)
+    /// The verb needs a prior successful reservation that never happened.
+    public static let uninitialized = Status(raw: usearch_status_uninitialized_k)
+    /// The request contradicts an already-frozen configuration.
+    public static let configMismatch = Status(raw: usearch_status_config_mismatch_k)
+    /// A call was refused rather than waited for - a full deferred table, a busy arena, or a
+    /// blocking call from inside a callback of the executor it would wait on.
+    public static let contended = Status(raw: usearch_status_contended_k)
+    /// A progress handler asked the operation to stop; what the finished increments leave behind
+    /// is each verb's own contract.
+    public static let cancelled = Status(raw: usearch_status_cancelled_k)
+    /// The verb is declared for every residency but this one does not implement it.
+    public static let unsupported = Status(raw: usearch_status_unsupported_k)
+    /// An argument breaks the verb's contract.
+    public static let invalidArgument = Status(raw: usearch_status_invalid_argument_k)
+
+    /// The status rendered as the library spells it, like `invalid-argument`. Calls
+    /// `usearch_status_name`.
+    public var description: String { String(cString: usearch_status_name(raw)) }
+
+    /// Reads a spelling back, and nil for one no status carries. Calls `usearch_status_from_name`.
+    public init?(name: String) {
+        guard let raw = parsed(name, usearch_status_from_name, usearch_status_name) else { return nil }
+        self.raw = raw
     }
+
+    init(raw: usearch_status_t) { self.raw = raw }
 }
 
 /// One failed call: a status every caller can branch on, and the detail the status cannot
 /// carry.
-public struct Error: Swift.Error, CustomStringConvertible, Equatable, Sendable {
+public struct USearchError: Swift.Error, CustomStringConvertible, Equatable, Sendable {
     /// The failure identity, shared with every other SDK.
     public let status: Status
     /// The library's static detail, or this binding's own when it rejected the call.
     public let message: String
+    /// What a caller's closure threw to stop the call, and nil for every other failure.
+    public let cause: (any Swift.Error)?
 
-    public var description: String { "usearch: \(status.name): \(message)" }
+    public var description: String { "usearch: \(status): \(message)" }
+
+    init(status: Status, message: String) {
+        self.status = status
+        self.message = message
+        cause = nil
+    }
+
+    /// Lifts a final outcome. Messages are static library storage and need no deallocation, so the
+    /// copy is the only cost.
+    init(_ outcome: usearch_outcome_t) {
+        status = Status(raw: outcome.status)
+        message = outcome.message.map { String(cString: $0) } ?? ""
+        cause = nil
+    }
+
+    /// Carries what a caller's closure threw: a `USearchError` as it was, any other as `cancelled`.
+    init(thrown: any Swift.Error) {
+        if let thrown = thrown as? USearchError {
+            self = thrown
+            return
+        }
+        status = .cancelled
+        message = String(describing: thrown)
+        cause = thrown
+    }
+
+    /// Equal in status and message, which is as far as an arbitrary cause compares.
+    public static func == (left: USearchError, right: USearchError) -> Bool {
+        left.status == right.status && left.message == right.message
+    }
 }
 
-/// Builds the failure this binding reports for a fault it caught before the boundary.
-func fail(_ status: Status, _ message: String) -> Error {
-    Error(status: status, message: message)
-}
-
-/// Turns a populated C error slot into a Swift error. Messages are static library storage and
-/// need no deallocation, so the copy is the only cost.
-func check(_ raw: usearch_error_t) throws(Error) {
-    guard raw.status != usearch_success_k else { return }
-    let named = Status(rawValue: Int32(bitPattern: raw.status.rawValue)) ?? .unrecognized
-    let status = named == .success ? .unrecognized : named
-    throw Error(status: status, message: raw.message.map { String(cString: $0) } ?? "")
-}
-
-/// Runs one C call against a zeroed error slot and lifts a populated slot into a thrown error.
-func throwing<Value>(_ body: (UnsafeMutablePointer<usearch_error_t>) -> Value) throws(Error) -> Value {
-    var failure = usearch_error_t()
-    let value = body(&failure)
-    try check(failure)
-    return value
+/// Reads `name` through a C `from_name` table, keeping only a value whose own spelling echoes it,
+/// since every table answers some default for a name it does not know.
+func parsed<Raw>(
+    _ name: String,
+    _ read: (usearch_bytes_view_t) -> Raw,
+    _ spell: (Raw) -> UnsafePointer<CChar>?
+) -> Raw? {
+    let raw = Array(name.utf8).withUnsafeBufferPointer {
+        read(usearch_bytes_view_t(data: $0.baseAddress, length: $0.count))
+    }
+    return spell(raw).map { String(cString: $0) } == name ? raw : nil
 }
 
 // MARK: - Keys & Distances
@@ -123,72 +148,58 @@ public typealias Distance = Double
 /// reports how many. Integer identities park in the low eight bytes, so `Key(42)`
 /// prints as `00000000-0000-0000-0000-00000000002a`.
 public struct Key: Hashable, Comparable, CustomStringConvertible, ExpressibleByIntegerLiteral, Sendable {
-    /// The sixteen identity bytes, most significant first, laid out exactly as the C key so batches
+    /// The sixteen identity bytes, most significant first - the C key itself, so batches
     /// reinterpret rather than copy.
-    var storage: InlineArray<16, UInt8>
+    var raw: usearch_key_t
 
     /// The all-zero key.
     public static let nilKey = Key()
 
     /// Builds the all-zero key.
-    public init() { storage = .init(repeating: 0) }
+    public init() { raw = usearch_key_t() }
 
     /// Parks an integer identity in the low eight bytes, zeroing the rest.
     public init(_ value: UInt64) {
-        storage = .init(repeating: 0)
-        for position in 0 ..< 8 { storage[15 - position] = UInt8(truncatingIfNeeded: value >> (8 * position)) }
+        raw = usearch_key_t()
+        for position in 0 ..< 8 { raw[15 - position] = UInt8(truncatingIfNeeded: value >> (8 * position)) }
     }
 
     public init(integerLiteral value: UInt64) { self.init(value) }
 
     /// Adopts sixteen bytes, most significant first.
-    public init(bytes: borrowing [UInt8]) throws(Error) {
-        guard bytes.count == 16 else { throw fail(.malformedInput, "a key is sixteen bytes, most significant first") }
-        storage = .init(repeating: 0)
-        for position in 0 ..< 16 { storage[position] = bytes[position] }
+    public init(bytes: [UInt8]) throws(USearchError) {
+        guard bytes.count == 16 else {
+            throw USearchError(status: .malformed, message: "a key is sixteen bytes, most significant first")
+        }
+        raw = usearch_key_t()
+        for position in 0 ..< 16 { raw[position] = bytes[position] }
     }
 
     /// Reads the rendering `description` produces. Dashes may sit anywhere, or nowhere.
-    public init(parsing text: borrowing String) throws(Error) {
-        let malformed = "the key is not thirty-two hexadecimal digits"
+    public init(parsing text: String) throws(USearchError) {
+        let malformed = USearchError(status: .malformed, message: "the key is not thirty-two hexadecimal digits")
         var digits: [UInt8] = []
         digits.reserveCapacity(32)
         for character in text.unicodeScalars where character != "-" {
-            guard digits.count < 32, let digit = character.hexadecimalDigit else {
-                throw fail(.malformedInput, malformed)
-            }
+            guard digits.count < 32, let digit = character.hexadecimalDigit else { throw malformed }
             digits.append(digit)
         }
-        guard digits.count == 32 else { throw fail(.malformedInput, malformed) }
-        storage = .init(repeating: 0)
-        for position in 0 ..< 16 { storage[position] = digits[position * 2] << 4 | digits[position * 2 + 1] }
+        guard digits.count == 32 else { throw malformed }
+        raw = usearch_key_t()
+        for position in 0 ..< 16 { raw[position] = digits[position * 2] << 4 | digits[position * 2 + 1] }
     }
 
-    /// Adopts the C key, whose array member Swift imports as a tuple.
-    init(raw: usearch_key_t) {
-        self.init()
-        withUnsafeBytes(of: raw.bytes) { source in
-            for position in 0 ..< 16 { storage[position] = source[position] }
-        }
-    }
-
-    /// The C key this identity is, for the two verbs that take one by value.
-    var raw: usearch_key_t {
-        var lowered = usearch_key_t()
-        withUnsafeMutableBytes(of: &lowered.bytes) { target in
-            for position in 0 ..< 16 { target[position] = storage[position] }
-        }
-        return lowered
-    }
+    /// Adopts the C key.
+    init(raw: usearch_key_t) { self.raw = raw }
 
     /// The sixteen identity bytes, most significant first.
-    public var byteArray: [UInt8] { (0 ..< 16).map { storage[$0] } }
+    public var byteArray: [UInt8] { (0 ..< 16).map { raw[$0] } }
 
     /// The integer identity in the low eight bytes, and nil when the high eight carry anything.
     public var integerIdentity: UInt64? {
-        for position in 0 ..< 8 where storage[position] != 0 { return nil }
+        for position in 0 ..< 8 where raw[position] != 0 { return nil }
         var value: UInt64 = 0
-        for position in 8 ..< 16 { value = value << 8 | UInt64(storage[position]) }
+        for position in 8 ..< 16 { value = value << 8 | UInt64(raw[position]) }
         return value
     }
 
@@ -200,26 +211,34 @@ public struct Key: Hashable, Comparable, CustomStringConvertible, ExpressibleByI
             if position == 4 || position == 6 || position == 8 || position == 10 {
                 rendered.append(UInt8(ascii: "-"))
             }
-            rendered.append(hexadecimal[Int(storage[position] >> 4)])
-            rendered.append(hexadecimal[Int(storage[position] & 0x0f)])
+            rendered.append(hexadecimal[Int(raw[position] >> 4)])
+            rendered.append(hexadecimal[Int(raw[position] & 0x0f)])
         }
         return String(decoding: rendered, as: UTF8.self)
     }
 
     public func hash(into hasher: inout Hasher) {
-        for position in 0 ..< 16 { hasher.combine(storage[position]) }
+        for position in 0 ..< 16 { hasher.combine(raw[position]) }
     }
 
     public static func == (first: Key, second: Key) -> Bool {
-        for position in 0 ..< 16 where first.storage[position] != second.storage[position] { return false }
+        for position in 0 ..< 16 where first.raw[position] != second.raw[position] { return false }
         return true
     }
 
     public static func < (first: Key, second: Key) -> Bool {
-        for position in 0 ..< 16 where first.storage[position] != second.storage[position] {
-            return first.storage[position] < second.storage[position]
+        for position in 0 ..< 16 where first.raw[position] != second.raw[position] {
+            return first.raw[position] < second.raw[position]
         }
         return false
+    }
+}
+
+extension usearch_key_t {
+    /// One identity byte, read through the tuple Swift imports the C array member as.
+    fileprivate subscript(position: Int) -> UInt8 {
+        get { withUnsafeBytes(of: bytes) { $0[position] } }
+        set { withUnsafeMutableBytes(of: &bytes) { $0[position] = newValue } }
     }
 }
 
@@ -257,76 +276,62 @@ extension Unicode.Scalar {
 
 // MARK: - Scalars
 
-/// A stored or exchanged scalar type, named by width and encoding. Sub-byte kinds pack several
-/// dimensions per byte, as their `xN` suffixes spell.
-public enum Scalar: Int32, Sendable {
-    /// A type the library could not name.
-    case unknown = 0
-    /// 64-bit double precision.
-    case f64 = 1
-    /// 32-bit single precision.
-    case f32 = 2
-    /// The brain floating-point format.
-    case bf16 = 3
-    /// IEEE half precision.
-    case f16 = 4
-    /// 8-bit floating point with five exponent bits.
-    case e5m2 = 5
-    /// 8-bit floating point with four exponent bits.
-    case e4m3 = 6
-    /// 6-bit floating point with three exponent bits.
-    case e3m2 = 7
-    /// 6-bit floating point with two exponent bits.
-    case e2m3 = 8
-    /// An 8-bit signed integer.
-    case i8 = 10
-    /// Two 4-bit signed integers per byte.
-    case i4x2 = 11
-    /// An 8-bit unsigned integer.
-    case u8 = 20
-    /// Two 4-bit unsigned integers per byte.
-    case u4x2 = 21
-    /// Eight single-bit dimensions per byte.
-    case u1x8 = 22
+/// A stored or exchanged scalar type, named by width and encoding, carrying the C enumerator
+/// itself. Sub-byte kinds pack several dimensions per byte, as their `xN` suffixes spell.
+public struct Scalar: Hashable, Sendable, CustomStringConvertible {
+    /// The C enumerator.
+    let raw: usearch_scalar_t
 
-    /// The kind rendered as its C enumerator's stem.
-    public var name: String {
-        switch self {
-        case .unknown: return "unknown"
-        case .f64: return "f64"
-        case .f32: return "f32"
-        case .bf16: return "bf16"
-        case .f16: return "f16"
-        case .e5m2: return "e5m2"
-        case .e4m3: return "e4m3"
-        case .e3m2: return "e3m2"
-        case .e2m3: return "e2m3"
-        case .i8: return "i8"
-        case .i4x2: return "i4x2"
-        case .u8: return "u8"
-        case .u4x2: return "u4x2"
-        case .u1x8: return "u1x8"
-        }
+    /// No scalar named - an unset field.
+    public static let unknown = Scalar(raw: usearch_scalar_unknown_k)
+    /// 64-bit double precision.
+    public static let f64 = Scalar(raw: usearch_scalar_f64_k)
+    /// 32-bit single precision.
+    public static let f32 = Scalar(raw: usearch_scalar_f32_k)
+    /// The brain floating-point format.
+    public static let bf16 = Scalar(raw: usearch_scalar_bf16_k)
+    /// IEEE half precision.
+    public static let f16 = Scalar(raw: usearch_scalar_f16_k)
+    /// 8-bit floating point with five exponent bits.
+    public static let e5m2 = Scalar(raw: usearch_scalar_e5m2_k)
+    /// 8-bit floating point with four exponent bits.
+    public static let e4m3 = Scalar(raw: usearch_scalar_e4m3_k)
+    /// 6-bit floating point with three exponent bits.
+    public static let e3m2 = Scalar(raw: usearch_scalar_e3m2_k)
+    /// 6-bit floating point with two exponent bits.
+    public static let e2m3 = Scalar(raw: usearch_scalar_e2m3_k)
+    /// An 8-bit signed integer.
+    public static let i8 = Scalar(raw: usearch_scalar_i8_k)
+    /// Two 4-bit signed integers per byte.
+    public static let i4x2 = Scalar(raw: usearch_scalar_i4x2_k)
+    /// A 32-bit signed integer, the coordinates of geospatial points.
+    public static let i32 = Scalar(raw: usearch_scalar_i32_k)
+    /// An 8-bit unsigned integer.
+    public static let u8 = Scalar(raw: usearch_scalar_u8_k)
+    /// Two 4-bit unsigned integers per byte.
+    public static let u4x2 = Scalar(raw: usearch_scalar_u4x2_k)
+    /// Eight single-bit dimensions per byte.
+    public static let u1x8 = Scalar(raw: usearch_scalar_u1x8_k)
+
+    /// The kind rendered as the library spells it. Calls `usearch_scalar_name`.
+    public var description: String { String(cString: usearch_scalar_name(raw)) }
+
+    /// Reads a spelling back, and nil for one no kind carries. Calls `usearch_scalar_from_name`.
+    public init?(name: String) {
+        guard let raw = parsed(name, usearch_scalar_from_name, usearch_scalar_name) else { return nil }
+        self.raw = raw
     }
+
+    init(raw: usearch_scalar_t) { self.raw = raw }
 
     /// How many logical dimensions one stored value carries: one for the byte-and-wider kinds,
     /// more for the packed ones.
-    @inlinable public var dimensionsPerValue: Int {
+    var dimensionsPerValue: Int {
         switch self {
         case .i4x2, .u4x2: return 2
         case .u1x8: return 8
         default: return 1
         }
-    }
-
-    var raw: usearch_scalar_t { usearch_scalar_t(rawValue: UInt32(bitPattern: rawValue)) }
-
-    /// Lifts a tag the library wrote, refusing to guess at the numbering gaps it reserves.
-    static func lifted(_ raw: usearch_scalar_t) throws(Error) -> Scalar {
-        guard let kind = Scalar(rawValue: Int32(bitPattern: raw.rawValue)), kind != .unknown else {
-            throw fail(.unknownKind, "the checkpoint names an unknown scalar kind")
-        }
-        return kind
     }
 }
 
@@ -378,246 +383,445 @@ extension U1x8: ScalarValue {
     public static var scalarKind: Scalar { .u1x8 }
 }
 
-// MARK: - Matrices
+// MARK: - Rows
 
-/// Bytes spanned by a rectangle of `rows` by `columns` elements, refusing the products that do
-/// not fit an `Int`.
+/// A borrowed run of rows along a call's batch axis - the input of every verb whose rows share one
+/// width - mirroring `usearch_rows_view_t`, plus the row count the call takes as its `count`.
 ///
-/// The wanted count of a search has no ceiling, so the outputs it implies are the one place a
-/// caller's arithmetic can silently wrap before a single byte is allocated.
-func checkedExtent(rows: Int, columns: Int, elementBytes: Int) throws(Error) -> Int {
-    guard rows >= 0, columns >= 0, elementBytes > 0 else {
-        throw fail(.shapeMismatch, "a matrix extent cannot be negative")
+/// Built over a NumKong `MatrixView`, it borrows and stays valid only as long as the storage the
+/// view points into, so a memory-mapped dataset reaches the index with no reshape and no copy.
+/// Built over a `Tensor`, it keeps the tensor alive, which is what a deferred call needs.
+public struct RowsView: @unchecked Sendable {
+    /// The first row.
+    public let data: UnsafeRawPointer
+    /// The rows the run carries, which the call takes as its batch axis.
+    public let rows: Int
+    /// Bytes between the starts of consecutive rows; zero repeats the first row.
+    public let stride: Int
+    /// Logical values per row, wider than a view's `columns` for the packed sub-byte kinds.
+    public let columns: Int
+    /// The scalar kind the rows hold.
+    public let scalar: Scalar
+    /// The storage the rows live in, held when the view keeps it alive.
+    let owner: AnyObject?
+
+    /// Borrows the rows of a NumKong view, which must outlive every call reading them.
+    public init<Element: ScalarValue>(_ matrix: MatrixView<Element>) { self.init(matrix, owner: nil) }
+
+    /// Views the rows of a NumKong tensor, keeping it alive as long as the view is.
+    public init<Element: ScalarValue>(_ tensor: Tensor<Element>) { self.init(tensor.view(), owner: tensor) }
+
+    private init<Element: ScalarValue>(_ matrix: MatrixView<Element>, owner: AnyObject?) {
+        data = UnsafeRawPointer(matrix.baseAddress)
+        rows = matrix.rows
+        stride = matrix.rowStrideBytes
+        columns = matrix.columns * Element.scalarKind.dimensionsPerValue
+        scalar = Element.scalarKind
+        self.owner = owner
     }
-    let (cells, cellsOverflowed) = rows.multipliedReportingOverflow(by: columns)
-    guard !cellsOverflowed else { throw fail(.overflow, "the matrix has more cells than an index can address") }
-    let (bytes, bytesOverflowed) = cells.multipliedReportingOverflow(by: elementBytes)
-    guard !bytesOverflowed else { throw fail(.overflow, "the matrix spans more bytes than an index can address") }
-    return bytes
+
+    /// The descriptor the C interface reads.
+    var raw: usearch_rows_view_t {
+        usearch_rows_view_t(data: data, stride: stride, columns: columns, scalar: scalar.raw)
+    }
 }
 
-/// Every batch input takes a NumKong matrix - a base pointer, a row count, and a byte pitch
-/// between consecutive row starts - so a memory-mapped dataset reaches the index with no reshape
-/// and no copy, and a single vector is a one-row matrix.
-///
-/// A matrix borrows and never owns; it stays valid only as long as the storage it was built from,
-/// which is why every call site here builds one inside a `withUnsafeBufferPointer`.
-extension MatrixView where Element: ScalarValue {
-    /// The logical width of one row, which is wider than `cols` for the sub-byte kinds that pack
-    /// several dimensions into one stored value.
-    var dimensions: Int { cols * Element.scalarKind.dimensionsPerValue }
+// MARK: - Matches
 
-    /// Lowers into the descriptor the C interface reads, borrowing the same storage this matrix
-    /// already borrows and tagging it with the kind its element type names.
-    var lowered: usearch_matrix_view_t {
-        usearch_matrix_view_t(
-            data: UnsafeRawPointer(baseAddress),
-            rows: rows,
-            columns: dimensions,
-            stride_bytes: rowStrideBytes,
-            scalar_kind: Element.scalarKind.raw
+/// One retrieved entry.
+public struct Match: Equatable, Sendable {
+    /// The matched entry's key.
+    public let key: Key
+    /// Its distance to the query, in the index's metric.
+    public let distance: Distance
+}
+
+/// The ranked rows a search, a `maxsim` or a stream pull wrote into an arena, one per query, read
+/// in place. Mirrors `usearch_matches_view_t`.
+public struct Matches: RandomAccessCollection {
+    /// The arena the rows live in, and which call wrote them.
+    let write: ArenaWrite
+    /// The packed rows the call wrote.
+    let view: usearch_matches_view_t
+    /// One past the last query the call resolved.
+    public let endIndex: Int
+
+    /// The first query's position, which a collection walk starts from.
+    public var startIndex: Int { 0 }
+
+    /// The columns per query the call wrote, at most its `wanted` - the "k" in "kANN".
+    public var columns: Int { view.columns }
+
+    /// One query's matches, as many as the call wrote.
+    public subscript(query: Int) -> MatchesRow {
+        write.check(query, below: endIndex)
+        let start = query * view.columns
+        return MatchesRow(
+            write: write,
+            keys: view.keys,
+            scores: view.scores,
+            cells: start ..< start + view.counts[query]
         )
     }
+}
 
-    /// Checks the matrix against a frozen geometry. A width of zero skips the geometry check, for
-    /// the handles whose geometry a later load decides.
-    func validate(dimensions frozen: Int) throws(Error) {
-        guard rows >= 0, cols > 0 else { throw fail(.shapeMismatch, "a matrix row cannot be empty") }
-        guard rowStrideBytes >= cols * MemoryLayout<Element>.stride else {
-            throw fail(.unsupportedLayout, "the row pitch cannot hold a whole row")
-        }
-        guard frozen == 0 || dimensions == frozen else {
-            throw fail(.shapeMismatch, "the matrix rows are not as wide as the index geometry")
-        }
+/// One query's matches, or one left row's pairs, read in place from the arena they live in.
+public struct MatchesRow: RandomAccessCollection {
+    /// The arena the row lives in, and which call wrote it.
+    let write: ArenaWrite
+    /// The keys of every row of the call.
+    let keys: UnsafePointer<usearch_key_t>?
+    /// The scores of every row of the call, positionally paired with `keys`.
+    let scores: UnsafePointer<usearch_distance_t>?
+    /// The cells of `keys` and `scores` this row spans.
+    let cells: Range<Int>
+
+    /// The first match's position, which a collection walk starts from.
+    public var startIndex: Int { 0 }
+
+    /// One past the last match the call wrote.
+    public var endIndex: Int { cells.count }
+
+    /// The match at a position, key and score read from their paired arrays.
+    public subscript(position: Int) -> Match {
+        write.check(position, below: cells.count)
+        let cell = cells.lowerBound + position
+        return Match(key: Key(raw: keys![cell]), distance: scores![cell])
     }
 }
 
-extension MatrixSpan where Element: ScalarValue {
-    /// The logical width of one row, counted like its read-only twin's.
-    var dimensions: Int { cols * Element.scalarKind.dimensionsPerValue }
+// MARK: - Progress
 
-    /// Lowers into the descriptor the C interface writes through, whose `capacity` is the rows
-    /// this matrix can receive rather than a count it promises to fill.
-    var lowered: usearch_matrix_span_t {
-        usearch_matrix_span_t(
-            data: UnsafeMutableRawPointer(baseAddress),
-            capacity: rows,
-            columns: dimensions,
-            stride_bytes: rowStrideBytes,
-            scalar_kind: Element.scalarKind.raw
-        )
-    }
-
-    /// Checks the matrix against a frozen geometry, like its read-only twin.
-    func validate(dimensions frozen: Int) throws(Error) {
-        guard rows >= 0, cols > 0 else { throw fail(.shapeMismatch, "a matrix row cannot be empty") }
-        guard rowStrideBytes >= cols * MemoryLayout<Element>.stride else {
-            throw fail(.unsupportedLayout, "the row pitch cannot hold a whole row")
-        }
-        guard frozen == 0 || dimensions == frozen else {
-            throw fail(.shapeMismatch, "the matrix rows are not as wide as the index geometry")
-        }
-    }
+/// Whether the operation a progress handler is watching carries on or unwinds.
+public enum Continuation: Sendable {
+    /// Carry on to the next unit of work.
+    case `continue`
+    /// Stop; what the finished increments leave behind is each verb's own contract.
+    case cancel
 }
 
-// MARK: - Residency
-
-/// Where an index's payload lives, which engine traverses it, and the hardware its shards are
-/// placed across - one shard per named memory domain, device, or path.
+/// A periodic report of a long call's advance - units finished and units in total, in whatever
+/// the verb consumes - and the caller's chance to stop it.
 ///
-/// Names where the index lives, never who walks it: threads and streams belong to the
-/// `Executor` the fanned-out verbs take. An empty placement derives one from the machine.
-public enum Residency: Sendable {
-    /// A volatile-memory index traversed by CPU threads - the concurrent baseline. The NUMA
-    /// node ids name where shards are placed; an empty list derives every node the process may
-    /// allocate on.
-    case ram(memoryDomains: [Int32])
-    /// An accelerator-memory index traversed by GPU warps, sharded across the named device
-    /// ordinals and never replicated; an empty list derives one free device.
-    case vram(devices: [Int32])
-    /// A persisted index traversed through pluggable I/O engines, sized past RAM. A path is
-    /// whatever identifies a device to the engine that can reach it - a filesystem path, a
-    /// transport identifier, or a FUSE mount over object storage; an empty list leaves every
-    /// shard where its manifest points.
-    case nvme(paths: [String])
+/// Never invoked concurrently, however many threads perform the work, so the handler needs no
+/// synchronization of its own; an error it throws never unwinds into a C frame, but stops the call
+/// as `.cancel` would and is thrown once the call is final. It runs on whichever thread advanced the
+/// work, hence `@Sendable`.
+public typealias Progress = @Sendable (_ completed: Int, _ total: Int) throws -> Continuation
 
-    /// A RAM index whose memory domains the machine derives.
-    public static let `default` = Residency.ram(memoryDomains: [])
+/// A progress handler and the landing its first thrown error goes to, placed in that landing,
+/// since a Swift closure has no stable C representation.
+private final class ProgressState {
+    let progress: Progress
+    /// The landing that keeps this state, so it outlives every call of the trampoline.
+    unowned let landing: Landing
 
-    /// The tag naming the active arm of the C options union.
-    var tag: usearch_residency_t {
+    init(progress: @escaping Progress, landing: Landing) {
+        self.progress = progress
+        self.landing = landing
+    }
+}
+
+/// The trampoline every reporting verb hands the engine.
+private let progressTrampoline: usearch_progress_callback_t = { completed, total, state in
+    guard let state else { return usearch_cancel_k }
+    let progress = Unmanaged<ProgressState>.fromOpaque(state).takeUnretainedValue()
+    do {
+        return try progress.progress(completed, total) == .cancel ? usearch_cancel_k : usearch_continue_k
+    }
+    catch {
+        progress.landing.latch(error)
+        return usearch_cancel_k
+    }
+}
+
+// MARK: - Landings
+
+/// Everything one call points the library at, held where it cannot move until the call is final.
+///
+/// Submission copies the argument structure, so only its pointees live here: the outcome, the slots
+/// the call writes, the closures it calls back, and for a deferred call the copies of what it
+/// borrows and the objects whose memory it reads. A blocking call releases it on return, and a
+/// deferred one is kept by its `Deferred` until final.
+final class Landing {
+    /// Whether the call blocks or returns once submitted.
+    let completion: usearch_completion_t
+    /// The outcome the call stores its final status in.
+    let outcome = UnsafeMutablePointer<usearch_outcome_t>.allocate(capacity: 1)
+    /// The first error a lent closure threw, from whichever thread threw it.
+    private let thrown = Mutex<(any Swift.Error)?>(nil)
+    /// The trivial values the call reads or writes through, freed with the landing.
+    private var slots: [UnsafeMutableRawPointer] = []
+    /// The callback states the call reads, and the objects whose memory a deferred call reads.
+    private var anchors: [AnyObject] = []
+    /// What the call hands back once final, like the donors a merge did not consume, taken by the
+    /// first wait to settle, since several threads may wait at once.
+    private let finals = Mutex<[@Sendable () -> Void]>([])
+    /// The arena lent to the call, until `rewind` learns whether the call took it.
+    private var lent: ArenaWrite?
+
+    init(_ completion: usearch_completion_t = usearch_completion_blocking_k) {
+        self.completion = completion
+        outcome.initialize(to: usearch_outcome_t())
+    }
+
+    /// Runs only once the call is final: it returned blocking, its `Deferred` waited, or it never crossed.
+    deinit {
+        settle()
+        for slot in slots { slot.deallocate() }
+        outcome.deallocate()
+    }
+
+    /// Whether the call returns once submitted, so its result is read on a later wait.
+    var isDeferred: Bool { completion == usearch_completion_deferred_k }
+
+    /// Allocates `count` trivial values, initialized to `initial`, which the call reads or writes
+    /// through.
+    func slots<Value>(_ initial: Value, count: Int = 1) -> UnsafeMutablePointer<Value> {
+        let values = UnsafeMutablePointer<Value>.allocate(capacity: count)
+        values.initialize(repeating: initial, count: count)
+        slots.append(UnsafeMutableRawPointer(values))
+        return values
+    }
+
+    /// Keeps a callback's state alive until the call is final, answering the pointer its trampoline
+    /// reads it through.
+    func place(_ state: AnyObject) -> UnsafeMutableRawPointer {
+        anchors.append(state)
+        return Unmanaged.passUnretained(state).toOpaque()
+    }
+
+    /// Keeps `error` unless another thread's got there first, so the first failure wins.
+    func latch(_ error: any Swift.Error) {
+        thrown.withLock { if $0 == nil { $0 = error } }
+    }
+
+    /// The error a lent closure threw, read once the call is final.
+    var failure: USearchError? {
+        thrown.withLock { $0 }.map { USearchError(thrown: $0) }
+    }
+
+    /// Keeps an object alive until a deferred call is final; a blocking call's caller already does.
+    func anchor(_ object: AnyObject?) {
+        if isDeferred, let object { anchors.append(object) }
+    }
+
+    /// Lends trivial `values` to the call: in place while a blocking call runs, or as a copy the
+    /// landing owns, since a deferred call reads them after the verb returns.
+    func lend<Element, Value>(
+        _ values: [Element],
+        _ body: (UnsafePointer<Element>?) throws(USearchError) -> Value
+    ) throws(USearchError) -> Value {
+        guard isDeferred, let first = values.first else {
+            return try values.withUnsafeBufferPointer { (values) throws(USearchError) -> Value in
+                try body(values.baseAddress)
+            }
+        }
+        let copy = slots(first, count: values.count)
+        _ = UnsafeMutableBufferPointer(start: copy, count: values.count).update(fromContentsOf: values)
+        return try body(copy)
+    }
+
+    /// Lends the UTF-8 bytes of a path, never terminated, by contract.
+    func lend<Value>(
+        _ text: String,
+        _ body: (usearch_bytes_view_t) throws(USearchError) -> Value
+    ) throws(USearchError) -> Value {
+        let bytes = Array(text.utf8)
+        return try lend(bytes) { (data) throws(USearchError) -> Value in
+            try body(usearch_bytes_view_t(data: data, length: bytes.count))
+        }
+    }
+
+    /// Lends an optional handler as the callback and state pair every reporting verb takes, so the
+    /// trampoline can never be paired with the wrong state; nil lends nulls.
+    func lend(_ progress: Progress?) -> (usearch_progress_callback_t?, UnsafeMutableRawPointer?) {
+        guard let progress else { return (nil, nil) }
+        return (progressTrampoline, place(ProgressState(progress: progress, landing: self)))
+    }
+
+    /// Lends `arena` to the call, answering the stamp its views carry once `rewind` advances the
+    /// arena to it.
+    func lend(_ arena: Arena) -> ArenaWrite {
+        let write = ArenaWrite(arena: arena, generation: arena.generation &+ 1)
+        lent = write
+        return write
+    }
+
+    /// Advances the lent arena once the library took the call, after a blocking one returns or right
+    /// after a deferred one is submitted, so the views earlier calls wrote there stop reading. Failed
+    /// calls advance it too, and only a `contended` one, which never touched the arena, does not.
+    func rewind() {
+        guard let write = lent else { return }
+        lent = nil
+        if usearch_outcome_status(outcome) != usearch_status_contended_k { write.arena.generation &+= 1 }
+    }
+
+    /// Hands back what the call may leave behind once it is final: now for a blocking call, which is
+    /// final on return, or on every wait of a deferred one, so each must hand back at most once.
+    func onFinal(_ body: @escaping () -> Void) {
+        guard isDeferred else { return body() }
+        // What the closure captures belongs to the call until final, so the first settler may run it.
+        nonisolated(unsafe) let body = body
+        finals.withLock { $0.append { body() } }
+    }
+
+    private func settle() {
+        var actions: [@Sendable () -> Void] = []
+        finals.withLock { swap(&$0, &actions) }
+        for action in actions { action() }
+    }
+
+    /// Waits until the call is final, hands back what it left, then answers its result or throws its
+    /// failure, a closure's before the library's.
+    func read<Value>(_ result: () throws(USearchError) -> Value) throws(USearchError) -> Value {
+        let status = usearch_outcome_wait(outcome)
+        rewind()
+        settle()
+        if let failure { throw failure }
+        guard status == usearch_status_success_k else { throw USearchError(outcome.pointee) }
+        return try result()
+    }
+
+    /// The submission of a verb with nothing to read but its status.
+    func submitted() throws(USearchError) -> Submission<Void> {
+        try isDeferred ? .pending(self) {} : .final(read {})
+    }
+}
+
+/// A call the library accepted, and how to read what it produced.
+///
+/// A verb reads a blocking call's result at once, through a reader it borrows, and keeps the reader
+/// only for a deferred one - so only a deferred call pays for the closure.
+enum Submission<Value> {
+    /// A blocking call's result, read once the call returned final.
+    case final(Value)
+    /// A deferred call's landing, and how to read its result once final.
+    case pending(Landing, () throws(USearchError) -> Value)
+
+    /// Blocks until the call is final, then answers its result or throws its failure.
+    func wait() throws(USearchError) -> Value {
         switch self {
-        case .ram: return usearch_residency_ram_k
-        case .vram: return usearch_residency_vram_k
-        case .nvme: return usearch_residency_nvme_k
-        }
-    }
-
-    /// The residency a tag names, with an empty placement.
-    ///
-    /// A checkpoint records where it was written, never where a reader must keep it, so the
-    /// placement lists come back empty for the caller to fill before initialization.
-    static func lifted(_ tag: usearch_residency_t) throws(Error) -> Residency {
-        switch tag {
-        case usearch_residency_ram_k: return .ram(memoryDomains: [])
-        case usearch_residency_vram_k: return .vram(devices: [])
-        case usearch_residency_nvme_k: return .nvme(paths: [])
-        default: throw fail(.unknownKind, "the checkpoint names a residency this binding does not know")
+        case .final(let value): return value
+        case .pending(let landing, let result): return try landing.read(result)
         }
     }
 }
 
-/// The C-side copies of a residency's placement lists, keeping every pointer the options union
-/// carries valid for as long as this holder is alive.
+/// The handle a lifecycle call wrote, which its success promises.
+func created<Handle>(_ slot: UnsafeMutablePointer<Handle?>) throws(USearchError) -> Handle {
+    guard let handle = slot.pointee else {
+        throw USearchError(status: .internal, message: "the library reported success without a handle")
+    }
+    return handle
+}
+
+// MARK: - Deferred Calls
+
+/// A call submitted to an executor, which finishes there while the caller does other work.
 ///
-/// Swift array storage cannot outlive the closure that borrowed it, and an NVMe placement needs
-/// one byte view per path pointing into storage of its own, so both are copied out once here
-/// rather than nested closure by closure.
-final class LoweredResidency {
-    /// The tag naming which of the three arms below the options union reads.
-    let tag: usearch_residency_t
-    /// The host-memory arm, zeroed unless the residency is RAM.
-    let ram: usearch_ram_options_t
-    /// The accelerator arm, zeroed unless the residency is VRAM.
-    let vram: usearch_vram_options_t
-    /// The persisted arm, zeroed unless the residency is NVMe.
-    let nvme: usearch_nvme_options_t
+/// It owns the call's outcome and outputs, and keeps alive every object whose memory the call reads,
+/// until the call is final. The handles it names, the arena among them, it borrows as a blocking
+/// call does. Releasing an unfinished one waits for it first.
+public final class Deferred<Value> {
+    /// The landing and the result reader.
+    private let submission: Submission<Value>
 
-    /// The NUMA node ids or device ordinals the two integer arms point at.
-    private let ordinals: UnsafeMutableBufferPointer<Int32>
-    /// One borrowed view per NVMe path, pointing into `text`.
-    private let views: UnsafeMutableBufferPointer<usearch_bytes_view_t>
-    /// The UTF-8 bytes of every NVMe path, laid end to end and never terminated.
-    private let text: UnsafeMutableBufferPointer<UInt8>
-
-    /// Copies whichever placement list the residency names, leaving the other two arms zeroed.
-    init(_ residency: Residency) {
-        tag = residency.tag
-        switch residency {
-        case .ram(let memoryDomains):
-            ordinals = LoweredResidency.copied(memoryDomains)
-            views = UnsafeMutableBufferPointer(start: nil, count: 0)
-            text = UnsafeMutableBufferPointer(start: nil, count: 0)
-            ram = usearch_ram_options_t(
-                memory_domains: ordinals.baseAddress.map { UnsafePointer($0) },
-                memory_domains_count: ordinals.count
-            )
-            vram = usearch_vram_options_t()
-            nvme = usearch_nvme_options_t()
-        case .vram(let devices):
-            ordinals = LoweredResidency.copied(devices)
-            views = UnsafeMutableBufferPointer(start: nil, count: 0)
-            text = UnsafeMutableBufferPointer(start: nil, count: 0)
-            ram = usearch_ram_options_t()
-            vram = usearch_vram_options_t(
-                devices: ordinals.baseAddress.map { UnsafePointer($0) },
-                devices_count: ordinals.count
-            )
-            nvme = usearch_nvme_options_t()
-        case .nvme(let paths):
-            ordinals = UnsafeMutableBufferPointer(start: nil, count: 0)
-            (views, text) = LoweredResidency.copied(paths)
-            ram = usearch_ram_options_t()
-            vram = usearch_vram_options_t()
-            nvme = usearch_nvme_options_t(
-                paths: views.baseAddress.map { UnsafePointer($0) },
-                paths_count: views.count
-            )
-        }
+    init(_ submission: Submission<Value>) {
+        self.submission = submission
+        if case .pending(let landing, _) = submission { landing.rewind() }
     }
 
     deinit {
-        ordinals.deallocate()
-        views.deallocate()
-        text.deallocate()
+        if case .pending(let landing, _) = submission { _ = usearch_outcome_wait(landing.outcome) }
     }
 
-    /// Stamps the tag and the arm it selects into a zeroed options structure.
-    func write(into options: inout usearch_dense_options_t) {
-        options.residency = tag
-        switch tag {
-        case usearch_residency_vram_k: options.vram = vram
-        case usearch_residency_nvme_k: options.nvme = nvme
-        default: options.ram = ram
-        }
+    /// `deferred` until the call is final, then `success` or its failure, read without blocking.
+    /// Binding-only: reads the status word `usearch_outcome_wait` would, with its acquire ordering.
+    public var status: Status {
+        guard case .pending(let landing, _) = submission else { return .success }
+        let raw = usearch_outcome_status(landing.outcome)
+        guard raw != usearch_status_deferred_k else { return .deferred }
+        return landing.failure?.status ?? Status(raw: raw)
     }
 
-    /// Copies a placement list out of Swift storage, reporting an empty list as the null pointer
-    /// the C interface derives from.
-    private static func copied(_ ordinals: [Int32]) -> UnsafeMutableBufferPointer<Int32> {
-        guard !ordinals.isEmpty else { return UnsafeMutableBufferPointer(start: nil, count: 0) }
-        let buffer = UnsafeMutableBufferPointer<Int32>.allocate(capacity: ordinals.count)
-        _ = buffer.initialize(fromContentsOf: ordinals)
-        return buffer
-    }
+    /// Blocks until the call is final, then answers its result or throws its failure, the same
+    /// every time it is asked. Calls `usearch_outcome_wait`.
+    public func wait() throws(USearchError) -> Value { try submission.wait() }
+}
 
-    /// Copies every path's UTF-8 bytes into one run and builds the views naming them.
-    private static func copied(
-        _ paths: [String]
-    ) -> (UnsafeMutableBufferPointer<usearch_bytes_view_t>, UnsafeMutableBufferPointer<UInt8>) {
-        let total = paths.reduce(0) { $0 + $1.utf8.count }
-        guard !paths.isEmpty, total != 0 else {
-            return (UnsafeMutableBufferPointer(start: nil, count: 0), UnsafeMutableBufferPointer(start: nil, count: 0))
-        }
-        let text = UnsafeMutableBufferPointer<UInt8>.allocate(capacity: total)
-        let views = UnsafeMutableBufferPointer<usearch_bytes_view_t>.allocate(capacity: paths.count)
-        var offset = 0
-        for (position, path) in paths.enumerated() {
-            let start = offset
-            for byte in path.utf8 {
-                text[offset] = byte
-                offset += 1
+// A call reading arena views stays on the arena's thread, so only a Sendable result may travel.
+extension Deferred: @unchecked Sendable where Value: Sendable {}
+
+extension Deferred {
+    /// Waits for the call on a Dispatch thread, so an `async` caller suspends rather than blocks,
+    /// and the cooperative pool keeps every thread; the result is read back in the caller's
+    /// isolation. Binding-only: runs `wait`.
+    nonisolated(nonsending) public var value: Value {
+        get async throws(USearchError) {
+            if case .pending(let landing, _) = submission {
+                nonisolated(unsafe) let outcome = landing.outcome
+                await withCheckedContinuation { continuation in
+                    DispatchQueue.global().async {
+                        _ = usearch_outcome_wait(outcome)
+                        continuation.resume()
+                    }
+                }
             }
-            views[position] = usearch_bytes_view_t(
-                data: UnsafePointer(text.baseAddress! + start),
-                length: offset - start
-            )
+            return try wait()
         }
-        return (views, text)
     }
 }
 
 // MARK: - Executors
+
+/// Where an executor computes, and with it where the arenas it makes keep their memory, carrying
+/// the C enumerator.
+public struct Residency: Hashable, Sendable, CustomStringConvertible {
+    /// The C enumerator.
+    let raw: usearch_residency_t
+
+    /// Host memory, walked by host threads.
+    public static let ram = Residency(raw: usearch_residency_ram_k)
+    /// Device memory, walked by device streams; no host read reaches it.
+    public static let vram = Residency(raw: usearch_residency_vram_k)
+    /// NVMe drives, read through host submission rings into host memory.
+    public static let nvme = Residency(raw: usearch_residency_nvme_k)
+
+    /// The residency rendered as the library spells it. Calls `usearch_residency_name`.
+    public var description: String { String(cString: usearch_residency_name(raw)) }
+
+    /// Reads a spelling back, and nil for one no residency carries. Calls
+    /// `usearch_residency_from_name`.
+    public init?(name: String) {
+        guard let raw = parsed(name, usearch_residency_from_name, usearch_residency_name) else { return nil }
+        self.raw = raw
+    }
+
+    init(raw: usearch_residency_t) { self.raw = raw }
+}
+
+/// What an executor does with its threads or streams once it goes idle, carrying the C enumerator.
+public struct Mood: Hashable, Sendable, CustomStringConvertible {
+    /// The C enumerator.
+    let raw: usearch_mood_t
+
+    /// Idle threads and streams sleep; the next call pays a wake-up.
+    public static let parked = Mood(raw: usearch_mood_parked_k)
+    /// Idle threads and streams stay hot, trading power for the next call's latency.
+    public static let spinning = Mood(raw: usearch_mood_spinning_k)
+
+    /// The mood rendered as the library spells it. Calls `usearch_mood_name`.
+    public var description: String { String(cString: usearch_mood_name(raw)) }
+
+    /// Reads a spelling back, and nil for one no mood carries. Calls `usearch_mood_from_name`.
+    public init?(name: String) {
+        guard let raw = parsed(name, usearch_mood_from_name, usearch_mood_name) else { return nil }
+        self.raw = raw
+    }
+
+    init(raw: usearch_mood_t) { self.raw = raw }
+}
 
 /// The host threads or device streams a fanned-out verb runs on, and the traversal scratch each
 /// of them walks with.
@@ -625,85 +829,221 @@ final class LoweredResidency {
 /// One executor serves any number of index handles, so separate categories of indexes share one
 /// machine's cores or devices instead of each claiming a private set. Its kind is fixed by the
 /// factory that spawned it and must match the residency of every handle it drives; a mismatch
-/// reports `deviceFailure` on the first call.
+/// reports `device`.
 ///
-/// An executor admits one driver at a time - a second concurrent call reports `contended` - so a
-/// thread that wants to drive its own calls spawns its own executor. Index handles stay freely
-/// shareable.
+/// A verb called on the index itself runs on the calling thread - single-threaded on RAM, on the
+/// handle's device and default stream on VRAM. Calls on one executor run in submission order, and
+/// index handles stay freely shareable.
 public final class Executor: @unchecked Sendable {
     /// The native handle, released by `deinit`. Immutable for the object's whole life, so the
     /// engine's own synchronization is the only thing sharing this across threads relies on.
-    private let handle: usearch_executor_t
+    let raw: usearch_executor_t
+    /// Where it computes, which the factory that spawned it named.
+    public let residency: Residency
 
     /// Adopts a handle a factory below spawned.
-    private init(handle: usearch_executor_t) {
-        self.handle = handle
+    private init(raw: usearch_executor_t, residency: Residency) {
+        self.raw = raw
+        self.residency = residency
     }
 
-    /// Spawns host workers for RAM-resident indexes, interleaved across the compute domains local
+    /// Spawns host threads for RAM-resident indexes, interleaved across the compute domains local
     /// to `memoryDomains` - the very list the indexes were initialized with.
     ///
     /// Zero `threads` takes 7/8 of the cores those domains carry, since full occupancy starves the
-    /// ordered publication path.
-    public static func forRam(memoryDomains: [Int32] = [], threads: Int = 0) throws(Error) -> Executor {
-        let placement = LoweredResidency(.ram(memoryDomains: memoryDomains))
-        return try spawned(placement) { failure in
-            withUnsafePointer(to: placement.ram) { usearch_executor_for_ram($0, threads, failure) }
+    /// ordered publication path. Every factory's `deferredLimit` sizes the table of deferred calls
+    /// it tracks at once, and zero takes a default. Calls `usearch_executor_for_ram`.
+    public static func forRam(
+        memoryDomains: [Int32] = [],
+        threads: Int = 0,
+        deferredLimit: Int = 0
+    ) throws(USearchError) -> Executor {
+        let landing = Landing()
+        let executor = landing.slots(usearch_executor_t?.none)
+        try landing.lend(memoryDomains) { (domains) throws(USearchError) in
+            var arguments = usearch_executor_for_ram_t(
+                executor: executor,
+                outcome: landing.outcome,
+                ram: usearch_ram_options_t(memory_domains: domains, memory_domains_count: memoryDomains.count),
+                threads: threads,
+                deferred_limit: deferredLimit
+            )
+            usearch_executor_for_ram(&arguments)
         }
+        return try landing.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .ram) }
     }
 
-    /// Spawns host workers for NVMe-resident indexes, one submission ring apiece, across the
+    /// Creates a RAM executor over a borrowed ForkUnion `fu_pool_t`, so several libraries in one
+    /// process share one set of threads while each keeps its own scratch. The pool must outlive
+    /// the executor, and keeps its lender's mood. Calls `usearch_executor_on_pool`.
+    public static func onPool(
+        memoryDomains: [Int32] = [],
+        pool: UnsafeMutableRawPointer,
+        deferredLimit: Int = 0
+    ) throws(USearchError) -> Executor {
+        let landing = Landing()
+        let executor = landing.slots(usearch_executor_t?.none)
+        try landing.lend(memoryDomains) { (domains) throws(USearchError) in
+            var arguments = usearch_executor_on_pool_t(
+                executor: executor,
+                outcome: landing.outcome,
+                ram: usearch_ram_options_t(memory_domains: domains, memory_domains_count: memoryDomains.count),
+                pool: pool,
+                deferred_limit: deferredLimit
+            )
+            usearch_executor_on_pool(&arguments)
+        }
+        return try landing.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .ram) }
+    }
+
+    /// Spawns host threads for NVMe-resident indexes, one submission ring apiece, across the
     /// compute domains local to the devices `paths` names.
     ///
-    /// Zero `threads` derives from those devices' queue capabilities.
-    public static func forNvme(paths: [String] = [], threads: Int = 0) throws(Error) -> Executor {
-        let placement = LoweredResidency(.nvme(paths: paths))
-        return try spawned(placement) { failure in
-            withUnsafePointer(to: placement.nvme) { usearch_executor_for_nvme($0, threads, failure) }
+    /// Zero `threads` derives from those devices' queue capabilities. Calls
+    /// `usearch_executor_for_nvme`.
+    public static func forNvme(
+        paths: [String] = [],
+        threads: Int = 0,
+        deferredLimit: Int = 0
+    ) throws(USearchError) -> Executor {
+        let landing = Landing()
+        let executor = landing.slots(usearch_executor_t?.none)
+        withPaths(paths) { nvme in
+            var arguments = usearch_executor_for_nvme_t(
+                executor: executor,
+                outcome: landing.outcome,
+                nvme: nvme,
+                threads: threads,
+                deferred_limit: deferredLimit
+            )
+            usearch_executor_for_nvme(&arguments)
         }
+        return try landing.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .nvme) }
     }
 
     /// Opens one submission stream on every named device, all of them driven by the one host thread
     /// that calls the verbs - which is why this factory takes no thread count.
-    public static func forVram(devices: [Int32] = []) throws(Error) -> Executor {
-        let placement = LoweredResidency(.vram(devices: devices))
-        return try spawned(placement) { failure in
-            withUnsafePointer(to: placement.vram) { usearch_executor_for_vram($0, failure) }
+    ///
+    /// `streams` borrows the caller's CUDA streams, one per device in `devices` order, and nil
+    /// creates the executor's own. A zero `scratchLimit` lets per-device scratch grow as geometry
+    /// asks. Calls `usearch_executor_for_vram`.
+    public static func forVram(
+        devices: [Int32] = [],
+        streams: [UnsafeMutableRawPointer?]? = nil,
+        scratchLimit: Int = 0,
+        deferredLimit: Int = 0
+    ) throws(USearchError) -> Executor {
+        // The C side reads one stream per device behind a pointer that carries no count.
+        if let streams, streams.count != devices.count {
+            throw USearchError(status: .shapeMismatch, message: "the streams must name one per device")
+        }
+        let landing = Landing()
+        let executor = landing.slots(usearch_executor_t?.none)
+        try landing.lend(devices) { (lentDevices) throws(USearchError) in
+            try landing.lend(streams ?? []) { (lentStreams) throws(USearchError) in
+                var arguments = usearch_executor_for_vram_t(
+                    executor: executor,
+                    outcome: landing.outcome,
+                    vram: usearch_vram_options_t(devices: lentDevices, devices_count: devices.count),
+                    streams: streams == nil ? nil : lentStreams,
+                    scratch_limit: scratchLimit,
+                    deferred_limit: deferredLimit
+                )
+                usearch_executor_for_vram(&arguments)
+            }
+        }
+        return try landing.read { () throws(USearchError) in Executor(raw: try created(executor), residency: .vram) }
+    }
+
+    deinit { usearch_executor_free(raw) }
+
+    /// Waits for every call submitted to this executor, then adopts `mood` whenever it next goes
+    /// idle; a failure is the executor's own, such as a lost device, never one of a drained call.
+    /// Calls `usearch_executor_drain`.
+    public func drain(mood: Mood = .parked) throws(USearchError) {
+        let landing = Landing()
+        var arguments = usearch_executor_drain_t(executor: raw, outcome: landing.outcome, mood: mood.raw)
+        usearch_executor_drain(&arguments)
+        try landing.read {}
+    }
+}
+
+/// Lends NVMe paths as the byte views `usearch_nvme_options_t` points at, for one blocking call.
+func withPaths<Value>(_ paths: [String], _ body: (usearch_nvme_options_t) -> Value) -> Value {
+    let bytes = paths.flatMap(\.utf8)
+    return bytes.withUnsafeBufferPointer { bytes in
+        var offset = 0
+        let views = paths.map { path in
+            defer { offset += path.utf8.count }
+            return usearch_bytes_view_t(data: bytes.baseAddress.map { $0 + offset }, length: path.utf8.count)
+        }
+        return views.withUnsafeBufferPointer { views in
+            body(usearch_nvme_options_t(paths: views.baseAddress, paths_count: views.count))
         }
     }
+}
 
-    /// Runs one factory against a zeroed error slot, keeping the placement copies alive across it
-    /// and refusing a null handle the library reported no failure for.
-    private static func spawned(
-        _ placement: LoweredResidency,
-        _ open: (UnsafeMutablePointer<usearch_error_t>) -> usearch_executor_t?
-    ) throws(Error) -> Executor {
-        let created = try withExtendedLifetime(placement) { () throws(Error) -> usearch_executor_t? in
-            try throwing { failure in open(failure) }
-        }
-        guard let created else { throw fail(.internalFailure, "the library returned no executor and no error") }
-        return Executor(handle: created)
+// MARK: - Arenas
+
+/// Memory the library writes every output whose length scales with a call into - matches, rows,
+/// products, monoliths, cursor and stream batches - reused across calls so a steady loop allocates
+/// once.
+///
+/// Every such verb requires one and answers a view reading it in place. Each call given the arena
+/// rewinds it, so the views an earlier call answered stop reading: any read of them traps, as an
+/// out-of-bounds index does. To keep a result past the next call, give that call another arena.
+/// Every call borrows the arena, deferred ones included, and one naming it while another call
+/// writes it is refused with `contended`. An arena serves one call at a time and is not `Sendable`.
+public final class Arena {
+    /// The native handle, released by `deinit`.
+    let raw: usearch_arena_t
+    /// Where its memory lives, which the executor that made it decided.
+    public let residency: Residency
+    /// Advanced by every call given the arena, so a view remembers which call wrote it.
+    var generation: UInt64 = 0
+
+    /// Makes an arena where `executor` computes, host pages or its GPU's memory, decided once; nil
+    /// makes host pages for calls on the calling thread. Calls `usearch_arena_init`.
+    public init(on executor: Executor? = nil) throws(USearchError) {
+        let landing = Landing()
+        let arena = landing.slots(usearch_arena_t?.none)
+        var arguments = usearch_arena_init_t(arena: arena, executor: executor?.raw, outcome: landing.outcome)
+        usearch_arena_init(&arguments)
+        raw = try landing.read { () throws(USearchError) in try created(arena) }
+        residency = executor?.residency ?? .ram
     }
 
-    deinit { usearch_executor_free(handle) }
+    /// Calls `usearch_arena_free`.
+    deinit { usearch_arena_free(raw) }
+}
 
-    /// Waits for every deferred call on this executor to finish, reporting the first failure a
-    /// drained call held back.
-    public func drain() throws(Error) {
-        try throwing { usearch_executor_drain(handle, $0) }
+/// The arena a view reads, and which of the calls given it wrote the view.
+struct ArenaWrite {
+    let arena: Arena
+    let generation: UInt64
+
+    /// Refuses a read the arena no longer backs, or one reaching device memory.
+    func check() {
+        precondition(arena.generation == generation, "the arena was rewound since this view was written: uninitialized")
+        precondition(arena.residency != .vram, "the view is device memory, which no host read reaches")
     }
 
-    /// The raw handle the modality verbs pass across the boundary.
-    var raw: usearch_executor_t { handle }
+    /// Refuses as `check()` does, then a `position` past `count`, as a collection does.
+    func check(_ position: Int, below count: Int) {
+        check()
+        precondition(position >= 0 && position < count, "the position is out of bounds")
+    }
 }
 
 // MARK: - Introspection
 
-/// The version of the linked library.
-public func usearchVersion() -> String { String(cString: usearch_version()) }
+/// The version of the linked library, like `3.0.0`. Calls `usearch_version_name`.
+public func version() -> String { String(cString: usearch_version_name()) }
 
-/// The hardware capabilities the linked binary was compiled with, comma separated.
-public func usearchCapabilitiesCompiled() -> String { String(cString: usearch_capabilities_compiled()) }
+/// The hardware capabilities the linked binary was compiled with, comma separated. Calls
+/// `usearch_capabilities_compiled`.
+public func capabilitiesCompiled() -> String { String(cString: usearch_capabilities_compiled()) }
 
-/// The hardware capabilities the current machine offers at runtime, comma separated.
-public func usearchCapabilitiesAvailable() -> String { String(cString: usearch_capabilities_available()) }
+/// The hardware capabilities the current machine offers at runtime, comma separated. Calls
+/// `usearch_capabilities_available`.
+public func capabilitiesAvailable() -> String { String(cString: usearch_capabilities_available()) }
