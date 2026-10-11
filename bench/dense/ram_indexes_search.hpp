@@ -83,8 +83,6 @@ struct bench_indexes_context {
     using vector_view_t = typename indexes_t::vector_view_t;
     using vectors_view_t = typename indexes_t::vectors_view_t;
 
-    static constexpr nk_kernel_kind_t kernel_kind_k = index_t::kernel_kind_k;
-
     /** The parsed CLI, borrowed for the run's lifetime. */
     settings_t const& settings;
 
@@ -97,20 +95,20 @@ struct bench_indexes_context {
     /** The backend-neutral judgment state both phases fill. */
     bench_results_t results;
 
-    /** The host tables follow the first named memory domain, or the heap when none is named. */
-    bench_indexes_context(settings_t const& settings) noexcept
+    /** The shards walk by @p kernel; the host tables follow the first named memory domain, or the heap when
+     *  none is named. */
+    bench_indexes_context(settings_t const& settings, nk_kernel_kind_t kernel) noexcept
         : settings(settings),
-          indexes(forkunion_allocator_t {settings.memory_domains.empty() ? no_memory_domain_k
-                                                                         : settings.memory_domains.front()}) {}
+          indexes(kernel, forkunion_allocator_t {settings.memory_domains.empty() ? no_memory_domain_k
+                                                                                 : settings.memory_domains.front()}) {}
 };
 
 /** The checkpoint manifest path: dtype, kernel and connectivity stamped into the name, so a
  *  geometry-mismatched run finds nothing rather than restoring the wrong graph. */
 template <typename indexes_type_>
-std::string checkpoint_path_of(settings_t const& settings, std::string_view name) {
-    using index_t = typename indexes_type_::index_t;
+std::string checkpoint_path_of(settings_t const& settings, indexes_type_ const& indexes, std::string_view name) {
     return fmt::format("{}/{}-{}-{}-c{}.safegraphs.json", settings.checkpoints_dir, name,
-                       index_t::scalar_t::dtype_name(), nk_kernel_name(index_t::kernel_kind_k),
+                       indexes_type_::scalar_t::dtype_name(), nk_kernel_name(indexes.kernel()),
                        settings.connectivity.value);
 }
 
@@ -120,7 +118,7 @@ template <typename streamed_dataset_type_>
 bool save_indexes(streamed_dataset_type_& streamed) {
     using bench_t = typename streamed_dataset_type_::bench_t;
     auto& bench = streamed.bench;
-    std::string const path = checkpoint_path_of<typename bench_t::indexes_t>(bench.settings, bench.settings.save_name);
+    std::string const path = checkpoint_path_of(bench.settings, bench.indexes, bench.settings.save_name);
     save_config_t config;
     config.layout = checkpoint_layout_t::distributed_k;
     auto started = steady_clock_t::now();
@@ -189,8 +187,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_topology_t topology) {
 
     // The checkpoint's own summary sizes the reservation inside @c load, so shards reach it bare.
     if (!bench.settings.load_name.empty()) {
-        std::string const path = checkpoint_path_of<typename bench_t::indexes_t>(bench.settings,
-                                                                                 bench.settings.load_name);
+        std::string const path = checkpoint_path_of(bench.settings, bench.indexes, bench.settings.load_name);
         if (status_t const restored = bench.indexes.load(path, load_config_t {}, bench.executor); failed(restored)) {
             fmt::println("Failed to load {}: {}", path, status_to_string(restored));
             return false;
@@ -292,8 +289,7 @@ bool run_insertion(streamed_dataset_type_& streamed) {
     fmt::println("\nInsertions");
     fmt::println("  shape: {} × {}d", inserted_rows, dimensions);
     if (bench.settings.skip_vectors.value) fmt::println("  topping: {} loaded rows", bench.settings.skip_vectors.value);
-    fmt::println("  quads: {} · {} · {} kit", scalar_t::dtype_name(),
-                 nk_kernel_name(streamed_dataset_type_::bench_t::kernel_kind_k),
+    fmt::println("  quads: {} · {} · {} kit", scalar_t::dtype_name(), nk_kernel_name(bench.indexes.kernel()),
                  bit_name(compute_choices_k, index_t::picked_quads_capability_k, "serial"));
     if constexpr (index_t::has_tiles_k)
         fmt::println("  tiles: {} · reverse refinement",
@@ -386,7 +382,7 @@ bool run_search(streamed_dataset_type_& streamed) {
     std::size_t const dimensions = streamed.vectors.extent(1);
     std::size_t const wanted = bench.settings.top_k.value;
     bench_indexer_heads<typename index_t::scalar_t> heads;
-    if (!open_indexer_heads<index_t>(streamed, heads)) return false;
+    if (!open_indexer_heads(bench.indexes, streamed, heads)) return false;
     std::size_t const search_count = searched_count(streamed, heads);
     if (!reserve_results(bench.results, search_count, wanted)) return false;
 
@@ -429,7 +425,7 @@ bool run_search(streamed_dataset_type_& streamed) {
                                         std::span<std::size_t> {counts.data(), count});
         };
         auto const [result, status] = [&]() noexcept {
-            if constexpr (scores_indexer<index_t>())
+            if constexpr (!nk::is_integral_dtype<typename index_t::scalar_t>())
                 if (heads.engaged()) return search(heads.rows(base, count));
             return search();
         }();
@@ -470,32 +466,25 @@ struct search_workload_t {
 
 #pragma region Dispatch Cascade
 
-/** Gate: a (stored dtype, kernel) cell is runnable once its kit chain is adapted in
- *  @c usearch/dense/ram_metric.hpp; unadapted combinations report as skipped. */
-template <nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, nk_capability_t capability_>
-concept ram_kit_adapted = requires {
-    sizeof(dense_quads_chain<kernel_, typename nk::type_for<stored_dtype_>::type, capability_>);
-};
-
 /** No-op sibling picked when the cell's CPU kit chain is not adapted yet. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
-          nk_capability_t capability_, typename wait_type_, typename workload_type_>
-    requires(!ram_kit_adapted<stored_dtype_, kernel_, capability_>)
-int stage_and_run(bench_launch<dataset_scalar_type_> const&, workload_type_ const&) {
-    fmt::println("skipped: no CPU kit adapted for {} · {}", dtype_name(stored_dtype_), nk_kernel_name(kernel_));
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_,
+          typename workload_type_>
+    requires(!dense_quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>)
+int stage_and_run(bench_launch<dataset_scalar_type_> const&, nk_kernel_kind_t kernel, workload_type_ const&) {
+    fmt::println("skipped: no CPU kit adapted for {} · {}", dtype_name(stored_dtype_), nk_kernel_name(kernel));
     return 0;
 }
 
 /** The innermost hop: binds the concrete sharded-index instantiation, wires the typed source views
- *  and the batch-shaped staging into a @c streamed_dataset, builds the shards, and hands them to
- *  @p workload. Staging is one contiguous plane, sized after the executor spawns so its rows follow
- *  the thread count. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
-          nk_capability_t capability_, typename wait_type_, typename workload_type_>
-    requires(ram_kit_adapted<stored_dtype_, kernel_, capability_>)
-int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, workload_type_ const& workload) {
-    using indexes_t =
-        dense_ram_indexes<u32_t, stored_dtype_, kernel_, capability_, wait_type_, fu::preferred_atomic_ref>;
+ *  and the batch-shaped staging into a @c streamed_dataset, builds the shards under @p kernel, and
+ *  hands them to @p workload. Staging is one contiguous plane, sized after the executor spawns so its
+ *  rows follow the thread count. */
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_,
+          typename workload_type_>
+    requires dense_quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>
+int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_kind_t kernel,
+                  workload_type_ const& workload) {
+    using indexes_t = dense_ram_indexes<u32_t, stored_dtype_, capability_, wait_type_, fu::preferred_atomic_ref>;
     using bench_context_type_ = bench_indexes_context<indexes_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_type_>;
     using scalar_t = typename bench_context_type_::scalar_t;
@@ -520,7 +509,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, workload_typ
             ? dataset.queries()
             : sliced_vectors(nk::range(std::size_t {0}, std::min<std::size_t>(1000, rows)), nk::slice);
 
-    bench_context_type_ bench {launch.settings};
+    bench_context_type_ bench {launch.settings, kernel};
     streamed_t streamed {bench, sliced_vectors, source_queries};
     if (!prepare(streamed, launch.machine.topology)) return 1;
 
@@ -562,20 +551,20 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, workload_typ
     return workload.run(streamed) ? 0 : 1;
 }
 
-/** Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal hop into
+/** Kernel axis: admits the runtime metric the stored dtype scores by, the terminal hop into
  *  @ref stage_and_run; a dot-only workload pins the dot kernel instead. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_,
           typename workload_type_>
 int run_with_metric(bench_launch<dataset_scalar_type_> const& launch, workload_type_ const& workload) {
     if constexpr (workload_type_::dot_only_k)
-        return stage_and_run<dataset_scalar_type_, stored_dtype_, nk_kernel_dot_k, capability_, wait_type_>(launch,
-                                                                                                            workload);
+        return stage_and_run<dataset_scalar_type_, stored_dtype_, capability_, wait_type_>(launch, nk_kernel_dot_k,
+                                                                                           workload);
     else
         return dispatch_kernel<stored_dtype_>(
             launch.settings.kernel,
             [&](auto kernel) {
-                return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, capability_, wait_type_>(
-                    launch, workload);
+                return stage_and_run<dataset_scalar_type_, stored_dtype_, capability_, wait_type_>(launch, kernel.value,
+                                                                                                   workload);
             },
             [&](auto metric) {
                 fmt::println("Unsupported metric {} for {} vectors", nk_kernel_name(metric), dtype_name(stored_dtype_));

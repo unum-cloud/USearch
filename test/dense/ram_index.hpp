@@ -28,12 +28,6 @@
 
 namespace unum::usearch::test::dense {
 
-/** Gate: a (dtype, kernel) cell is testable once its serial kernel kit is adapted. */
-template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-concept index_combo_supported = requires {
-    typename dense_quads_chain<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>::kit_t;
-};
-
 /** No-op sibling picked when the cell cannot be compiled on this target: its serial
  *  kernels are not adapted yet, or the requested kit is absent from the build. */
 template <                                       //
@@ -41,9 +35,10 @@ template <                                       //
     typename waiter_type_ = dummy_waiter_t,      //
     nk_capability_t caps_ = nk_cap_serial_k,     //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
-    requires(!index_combo_supported<dtype_, kernel_> || !dense_cell_compiled<dtype_, kernel_, caps_>)
+    requires(!dense_cell_testable<dtype_, kernel_, caps_>)
 static std::size_t test_configuration(char const* name, u64_t) {
-    if constexpr (!index_combo_supported<dtype_, kernel_>) return report(name, "serial kernels not adapted yet");
+    if constexpr (!dense_quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>)
+        return report(name, "serial kernels not adapted yet");
     else return report(name, "kit not compiled for this target");
 }
 
@@ -52,16 +47,16 @@ template <                                       //
     typename waiter_type_ = dummy_waiter_t,      //
     nk_capability_t caps_ = nk_cap_serial_k,     //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
-    requires(index_combo_supported<dtype_, kernel_> && dense_cell_compiled<dtype_, kernel_, caps_>)
+    requires dense_cell_testable<dtype_, kernel_, caps_>
 static std::size_t test_configuration(char const* name, u64_t seed) {
 
-    using index_t = dense_ram_index<dtype_, kernel_, caps_, waiter_type_, atomic_ref_, fu::standard_cache_hints_t,
+    using index_t = dense_ram_index<dtype_, caps_, waiter_type_, atomic_ref_, fu::standard_cache_hints_t,
                                     counting_allocator_t, counting_allocator_t, std::allocator<byte_t>>;
 
     if (!dense_cell_admitted<caps_, atomic_ref_>()) return report(name, "capabilities missing at runtime");
 
     auto make_index = [](allocation_ledger_t& ledger) {
-        return index_t {counting_allocator_t(ledger), counting_allocator_t(ledger)};
+        return index_t {kernel_, counting_allocator_t(ledger), counting_allocator_t(ledger)};
     };
 
     // The suite is composed here, not reflected: every call below is a capability claim
@@ -98,18 +93,16 @@ static std::size_t test_configuration(char const* name, u64_t seed) {
 /** The starved cell: the same index over ledgered traversal scratch, so a refused re-table
  *  has somewhere to come from, walked by the saturation scenario alone. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-    requires(index_combo_supported<dtype_, kernel_>)
+    requires dense_quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>
 static std::size_t test_starved_configuration(char const* name, u64_t seed) {
     using index_t =
-        dense_ram_index<dtype_, kernel_, nk_cap_serial_k, dummy_waiter_t, fu::standard_atomic_ref,
-                        fu::standard_cache_hints_t, counting_allocator_t, counting_allocator_t, counting_allocator_t>;
+        dense_ram_index<dtype_, nk_cap_serial_k, dummy_waiter_t, fu::standard_atomic_ref, fu::standard_cache_hints_t,
+                        counting_allocator_t, counting_allocator_t, counting_allocator_t>;
     auto make_index = [](allocation_ledger_t& ledger) {
-        return index_t {counting_allocator_t(ledger), counting_allocator_t(ledger)};
+        return index_t {kernel_, counting_allocator_t(ledger), counting_allocator_t(ledger)};
     };
     return report(name, test_dense_saturated<index_t>(make_index, seed));
 }
-
-#pragma region Suite Entry Points
 
 /** Per-dtype CPU index suite entries the shard translation units define and
  *  @c dense.cpp composes explicitly; each returns its shard's failure count. */
@@ -121,7 +114,5 @@ std::size_t check_ram_index_i8(settings_t const& settings);
 std::size_t check_ram_index_i4(settings_t const& settings);
 std::size_t check_ram_index_u8(settings_t const& settings);
 std::size_t check_ram_index_u1(settings_t const& settings);
-
-#pragma endregion Suite Entry Points
 
 } // namespace unum::usearch::test::dense

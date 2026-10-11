@@ -35,7 +35,7 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
     std::size_t const nodes_count = 4 * dense_thread_nodes_k;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
 
-    indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+    indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(place_shards(indexes)));
     failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions}).status));
 
@@ -82,7 +82,7 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
 /** The planned insertion: launched rows stay out of the size, the locators and a search until @c finish publishes
  *  every one, a plan short of rows refuses to finish and stays whole, its gate turns a second batch away, and a plan
  *  dying unfinished publishes nothing and leaves its shard refusing every later batch. */
-template <typename indexes_type_>
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
     requires vram_indexes<indexes_type_>
 std::size_t test_dense_indexes_planned_insert(u64_t seed) {
     using scalar_t = typename indexes_type_::scalar_t;
@@ -93,7 +93,7 @@ std::size_t test_dense_indexes_planned_insert(u64_t seed) {
 
     dense_indexes_executor<indexes_type_> writer, reader;
     if (failed(writer.status) || failed(reader.status)) return failures + expect(false);
-    indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+    indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
     failures += expect(succeeded(writer.place_shards(indexes)));
     failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
     auto const vectors = make_vectors<scalar_t>(2 * rows_count, dimensions, stream_key(seed, "indexes_planned"));
@@ -158,7 +158,7 @@ std::size_t test_dense_indexes_indexer_search(u64_t seed) {
 
         dense_indexes_executor<indexes_type_> driver;
         if (failed(driver.status)) return failures + expect(false);
-        indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+        indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
         failures += expect(succeeded(driver.place_shards(indexes)));
         failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
         auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_indexer"));
@@ -206,7 +206,7 @@ std::size_t test_dense_indexes_attend(u64_t seed) {
 
         dense_indexes_executor<indexes_type_> driver;
         if (failed(driver.status)) return failures + expect(false);
-        indexes_type_ indexes {forkunion_allocator_t {no_memory_domain_k}};
+        indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
         failures += expect(succeeded(driver.place_shards(indexes)));
         failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions}).status));
         auto const vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexes_attend"));
@@ -269,20 +269,20 @@ template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_cuda_indexes_configuration(char const* name, u64_t seed) {
     if (failed(cuda_device_specs_t::query(0).status)) return report(name, "no CUDA device reachable");
 
-    using indexes_t = dense_vram_indexes<u32_t, dtype_, kernel_, cuda_arch_blackwellrtx_k>;
+    using indexes_t = dense_vram_indexes<u32_t, dtype_, cuda_arch_blackwellrtx_k>;
 
     // The suite is composed here, not reflected: every call below is a capability claim
     // this sharded, executor-driven category makes about itself.
     std::size_t failures_count = 0;
-    failures_count += test_dense_indexes_guards<indexes_t>(seed);
-    failures_count += test_dense_indexes_duplicate_keys<indexes_t>(seed);
+    failures_count += test_dense_indexes_guards<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_duplicate_keys<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_save_load<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_split_load<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_buffer_roundtrip<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_cancelled_load<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_concurrent_add<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_search_race<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_planned_insert<indexes_t>(seed);
+    failures_count += test_dense_indexes_planned_insert<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed);

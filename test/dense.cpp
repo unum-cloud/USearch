@@ -37,25 +37,25 @@ std::size_t test::check_dense(settings_t const& settings) {
     if (settings.selects("ram_metric_f64")) failures_count += dense::check_ram_metric_f64();
     if (settings.selects("ram_metric_f32")) failures_count += dense::check_ram_metric_f32();
     if (settings.selects("ram_metric_bf16")) failures_count += dense::check_ram_metric_bf16();
-    if (settings.selects("ram_metric_f16")) failures_count += dense::check_ram_metric_f16();
-    if (settings.selects("ram_metric_e5m2")) failures_count += dense::check_ram_metric_e5m2();
+    if (settings.selects("ram_metric_u1")) failures_count += dense::check_ram_metric_u1();
+    if (settings.selects("ram_metric_i8")) failures_count += dense::check_ram_metric_i8();
     if (settings.selects("ram_metric_e4m3")) failures_count += dense::check_ram_metric_e4m3();
+    if (settings.selects("ram_metric_f16")) failures_count += dense::check_ram_metric_f16();
+    if (settings.selects("ram_metric_u8")) failures_count += dense::check_ram_metric_u8();
+    if (settings.selects("ram_metric_e5m2")) failures_count += dense::check_ram_metric_e5m2();
+    if (settings.selects("ram_metric_i4")) failures_count += dense::check_ram_metric_i4();
+    if (settings.selects("ram_metric_u4")) failures_count += dense::check_ram_metric_u4();
     if (settings.selects("ram_metric_e3m2")) failures_count += dense::check_ram_metric_e3m2();
     if (settings.selects("ram_metric_e2m3")) failures_count += dense::check_ram_metric_e2m3();
-    if (settings.selects("ram_metric_i8")) failures_count += dense::check_ram_metric_i8();
-    if (settings.selects("ram_metric_i4")) failures_count += dense::check_ram_metric_i4();
-    if (settings.selects("ram_metric_u8")) failures_count += dense::check_ram_metric_u8();
-    if (settings.selects("ram_metric_u4")) failures_count += dense::check_ram_metric_u4();
-    if (settings.selects("ram_metric_u1")) failures_count += dense::check_ram_metric_u1();
 
     if (settings.selects("ram_index_f32")) failures_count += dense::check_ram_index_f32(settings);
     if (settings.selects("ram_index_bf16")) failures_count += dense::check_ram_index_bf16(settings);
-    if (settings.selects("ram_index_f16")) failures_count += dense::check_ram_index_f16(settings);
-    if (settings.selects("ram_index_e5m2")) failures_count += dense::check_ram_index_e5m2(settings);
-    if (settings.selects("ram_index_i8")) failures_count += dense::check_ram_index_i8(settings);
-    if (settings.selects("ram_index_i4")) failures_count += dense::check_ram_index_i4(settings);
-    if (settings.selects("ram_index_u8")) failures_count += dense::check_ram_index_u8(settings);
     if (settings.selects("ram_index_u1")) failures_count += dense::check_ram_index_u1(settings);
+    if (settings.selects("ram_index_i8")) failures_count += dense::check_ram_index_i8(settings);
+    if (settings.selects("ram_index_f16")) failures_count += dense::check_ram_index_f16(settings);
+    if (settings.selects("ram_index_u8")) failures_count += dense::check_ram_index_u8(settings);
+    if (settings.selects("ram_index_e5m2")) failures_count += dense::check_ram_index_e5m2(settings);
+    if (settings.selects("ram_index_i4")) failures_count += dense::check_ram_index_i4(settings);
 
     if (settings.selects("ram_indexes")) failures_count += dense::check_ram_indexes(settings);
 

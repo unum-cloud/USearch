@@ -5,7 +5,7 @@
  *  @brief Throughput benchmarks for @c dense/ram_metric.hpp distance functions for 1-to-1, 1-to-4,
  *      and tiled kernels against NumKong's monolithic 1-to-1 reference.
  *
- *  Mirrors the structure of @c test/dense/ram_metric.hpp - the @c quads_supported concept
+ *  Mirrors the structure of @c test/dense/ram_metric.hpp - the @c dense_quads_supported concept
  *  gates each cell so unadapted (kernel, scalar, caps) tuples never run, and new kits or
  *  chains light up matching rows automatically. Three flavors per supported tuple: USearch's
  *  @c distance (1-to-1), USearch's @c distances (1-to-4 fan-out), and NumKong's @c nk::dot /
@@ -278,20 +278,16 @@ constexpr u64_t adjacency_family_k = 0xABCDEF01ull;
 
 constexpr std::array<std::size_t, 3> dimensions_to_bench = {256, 768, 1536};
 
-/** True iff @c dense_quads_chain has a specialization for this (kernel, scalar, caps)
- *  tuple - unadapted tuples never run. */
-template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-concept quads_supported = requires { typename dense_quads_chain<kernel_, scalar_, caps_>::kit_t; };
-
 /** True iff USearch has any kit for this (kernel, scalar) pair across capability
  *  tiers - serial is the always-available floor, so checking it covers the matrix. */
 template <nk_kernel_kind_t kernel_, typename scalar_>
-concept quads_in_scope = quads_supported<kernel_, scalar_, nk_cap_serial_k>;
+concept quads_in_scope = dense_quads_supported<kernel_, scalar_, nk_cap_serial_k>;
 
 /** True iff a tile engine is compiled for this tuple - the tiles chain always names
  *  a kit, so the gate is its @c has_tiles_k verdict, never the alias's existence. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-concept tiles_supported = dense_tiles_chain<kernel_, scalar_, caps_>::has_tiles_k;
+concept tiles_supported = dense_quads_supported<kernel_, scalar_, caps_> &&
+                          dense_tiles_chain<scalar_, caps_>::has_tiles_k;
 
 /** Whether this machine runs every bit of @p caps_; serial always runs. */
 template <nk_capability_t caps_>
@@ -417,7 +413,7 @@ static void measure_distance(loop_t& loop, environment_t const& env, std::size_t
         std::size_t const row = random_generator() & row_index_mask;
         adjacency.touch(random_generator());
         auto candidate_view = pool.matrix.view().row(row).as_vector();
-        auto distance_value = distance<kernel_, caps_>(query_view, query_norms, candidate_view, pool.norms[row]);
+        auto distance_value = distance<caps_>(kernel_, query_view, query_norms, candidate_view, pool.norms[row]);
         do_not_optimize(distance_value);
     }
     rate_distances(loop, dim, 1, row_bytes_of<scalar_>(dim));
@@ -447,7 +443,7 @@ static void measure_distances_quad(loop_t& loop, environment_t const& env, std::
             pool.matrix.view().row(row2).as_vector(), pool.matrix.view().row(row3).as_vector()};
         std::array<vector_norms<typename scalar_::dot_result_t>, 4> const candidate_norms {
             pool.norms[row0], pool.norms[row1], pool.norms[row2], pool.norms[row3]};
-        auto distance_values = distances<kernel_, caps_>(query_view, query_norms, candidate_views, candidate_norms);
+        auto distance_values = distances<caps_>(kernel_, query_view, query_norms, candidate_views, candidate_norms);
         do_not_optimize(distance_values);
     }
     rate_distances(loop, dim, 4, 4 * row_bytes_of<scalar_>(dim));
@@ -507,7 +503,7 @@ static void measure_distances_tile(loop_t& loop, environment_t const& env, std::
     nk_capability_t available = 0;
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k || nk_cpu_configure_thread(available) != nk_success_k)
         return loop.skip("the thread cannot run these capabilities");
-    using tiles_kit_t = typename dense_tiles_chain<kernel_, scalar_, caps_>::kit_t;
+    using tiles_kit_t = typename dense_tiles_chain<scalar_, caps_>::kit_t;
     constexpr std::size_t rows_k = tiles_kit_t::tile_rows_k;
     std::size_t const depth_tiles = dim / tiles_kit_t::tile_depth_k;
 
@@ -533,7 +529,7 @@ static void measure_distances_tile(loop_t& loop, environment_t const& env, std::
             tiles_kit_t::pack_b_tile(a_tile, b_tile);
             tiles_kit_t::update_tile(accumulator, a_tile, b_tile);
         }
-        tiles_kit_t::finalize_tile(accumulator, norms, norms, tiled.data(), rows_k);
+        tiles_kit_t::finalize_tile(kernel_, accumulator, norms, norms, tiled.data(), rows_k);
         do_not_optimize(tiled);
     }
     rate_distances(loop, dim, rows_k * rows_k, rows_k * row_bytes_of<scalar_>(dim));
@@ -543,7 +539,7 @@ static void measure_distances_tile(loop_t& loop, environment_t const& env, std::
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 static void bench_quads(environment_t const& env, std::string_view kernel_name, std::string_view scalar_name,
                         std::string_view caps_name) {
-    if constexpr (quads_supported<kernel_, scalar_, caps_>)
+    if constexpr (dense_quads_supported<kernel_, scalar_, caps_>)
         for (std::size_t const dim : dimensions_to_bench) {
             run_benchmark(env, fmt::format("{}/{}/{}/1to1/{}d", kernel_name, scalar_name, caps_name, dim),
                           measure_distance<kernel_, scalar_, caps_>, dim);

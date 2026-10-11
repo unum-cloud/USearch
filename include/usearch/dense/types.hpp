@@ -140,7 +140,7 @@ struct dense_index_header_t {
     /** The stored @c nk_dtype_t; must match the loading instantiation. */
     u32_t dtype;
 
-    /** The @c nk_kernel_kind_t metric; must match the loading instantiation. */
+    /** The @c nk_kernel_kind_t metric; must match the loading index's kernel. */
     u32_t kernel;
 
     /** Scalar dimensions per vector - one half of the frozen geometry. */
@@ -153,8 +153,6 @@ struct dense_index_header_t {
     u32_t node_count;
 };
 static_assert(sizeof(dense_index_header_t) == 32 && std::is_trivially_copyable_v<dense_index_header_t>);
-
-#pragma region Indexer Heads
 
 /** A lightning indexer, as DeepSeek V4 and GLM 5 pick sparse-attention keys: a node scores `Σₕ wₕ·ReLU(qₕ·k)`
  *  against these heads, and its distance is `1 − score`, while the walk navigates by the query rows,
@@ -180,8 +178,6 @@ struct dense_indexer_heads {
 struct dummy_heads_t {
     dummy_heads_t row(std::size_t) const noexcept { return {}; }
 };
-
-#pragma endregion Indexer Heads
 
 /** One ranked hit while @c dense_maxsim_reducer folds a query, then one document's summed maxima. */
 template <typename key_type_>

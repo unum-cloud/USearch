@@ -507,16 +507,16 @@ inline constexpr bool is_vram_index = false;
 
 /** One RAM alternative: the CPU class alone names the rung, lowering onto its NumKong mask, its waiter,
  *  its atomic reference and its cache hints. */
-template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, cpu_class_t cpu_class_>
-using ram_index = dense_ram_indexes<us::uuid_t, dtype_, kernel_, numkong_capabilities_of(cpu_class_),
-                                    waiter_of<cpu_class_>, atomic_ref_for_cpu_class<cpu_class_>::template type,
+template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
+using ram_index = dense_ram_indexes<us::uuid_t, dtype_, numkong_capabilities_of(cpu_class_), waiter_of<cpu_class_>,
+                                    atomic_ref_for_cpu_class<cpu_class_>::template type,
                                     typename cache_hints_for_cpu_class<cpu_class_>::type>;
 #if USEARCH_BUILD_CUDA
 
 /** One VRAM alternative: the GPU class alone names the rung, lowering onto its architecture ceiling;
  *  its kernels come from that class's unit, compiled for its architecture alone. */
-template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, gpu_class_t gpu_class_>
-using vram_index = dense_vram_indexes<us::uuid_t, dtype_, kernel_, cuda_arch_of(gpu_class_)>;
+template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
+using vram_index = dense_vram_indexes<us::uuid_t, dtype_, cuda_arch_of(gpu_class_)>;
 #endif
 
 /** The C predicate lifted onto the index's key vocabulary. */
@@ -692,17 +692,14 @@ struct specialized_index {
     expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
                                        std::size_t wanted, keys_span_t keys,
                                        std::span<typename index_type_::dot_result_t> products,
-                                       counts_span_t counts) noexcept
-        requires(index_type_::kernel_kind_k == nk_kernel_dot_k);
+                                       counts_span_t counts) noexcept;
     expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
                                      search_config_t config, std::size_t wanted, keys_span_t keys,
-                                     std::span<f64_t> scores, counts_span_t counts) noexcept
-        requires(index_type_::kernel_kind_k == nk_kernel_dot_k);
+                                     std::span<f64_t> scores, counts_span_t counts) noexcept;
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
                                      f32_t score_scale, std::span<f32_t> outputs,
                                      std::span<us::dense_softmax_state_t> carry, executor_t& executor,
-                                     search_config_t config) noexcept
-        requires(index_type_::kernel_kind_k == nk_kernel_dot_k);
+                                     search_config_t config) noexcept;
     status_t save(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
     status_t save(bytes_span_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept;
     status_t load(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
@@ -837,26 +834,20 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::multiply(
     vectors_view_t left, executor_t& executor, search_config_t config, std::size_t wanted, keys_span_t keys,
-    std::span<typename index_type_::dot_result_t> products, counts_span_t counts) noexcept
-    requires(index_type_::kernel_kind_k == nk_kernel_dot_k)
-{
+    std::span<typename index_type_::dot_result_t> products, counts_span_t counts) noexcept {
     return index.multiply(left, executor, config, wanted, keys, products, counts);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::maxsim(
     vectors_view_t queries, std::size_t rows_per_query, executor_t& executor, search_config_t config,
-    std::size_t wanted, keys_span_t keys, std::span<f64_t> scores, counts_span_t counts) noexcept
-    requires(index_type_::kernel_kind_k == nk_kernel_dot_k)
-{
+    std::size_t wanted, keys_span_t keys, std::span<f64_t> scores, counts_span_t counts) noexcept {
     return index.maxsim(queries, rows_per_query, executor, config, wanted, keys, scores, counts);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
     vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale,
     std::span<f32_t> outputs, std::span<us::dense_softmax_state_t> carry, executor_t& executor,
-    search_config_t config) noexcept
-    requires(index_type_::kernel_kind_k == nk_kernel_dot_k)
-{
+    search_config_t config) noexcept {
     return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
 }
 template <typename index_type_>

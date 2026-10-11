@@ -338,10 +338,10 @@ std::size_t searched_count(streamed_dataset_type_ const& streamed,
     return heads.engaged() ? heads.weights.extent(0) : searched_rows(streamed).extent(0);
 }
 
-/** Whether @p index_type_ ranks by indexer heads, as its `search` overload requires: dot-kernel floating-point keys. */
+/** Whether @p index ranks by indexer heads, as its `search` overload requires: dot-kernel floating-point keys. */
 template <typename index_type_>
-constexpr bool scores_indexer() noexcept {
-    return index_type_::kernel_kind_k == nk_kernel_dot_k && !nk::is_integral_dtype<typename index_type_::scalar_t>();
+bool scores_indexer(index_type_ const& index) noexcept {
+    return index.kernel() == nk_kernel_dot_k && !nk::is_integral_dtype<typename index_type_::scalar_t>();
 }
 
 /** Reads the RetriEval matrix @p path through the opener of `--vectors`, in whichever scalar its extension names,
@@ -359,17 +359,16 @@ inline bool read_widened_rows(std::string_view path, nk::matrix<f32_t>& widened)
                         }) == 0;
 }
 
-/** Opens `--heads` and `--weights` over the searched queries of @p streamed as @p index_type_ ranks them, casting
+/** Opens `--heads` and `--weights` over the searched queries of @p streamed as @p index ranks them, casting
  *  the heads, and without `--queries` their `Σₕ wₕ·qₕ` navigation rows, into the stored scalar under the staging
  *  scale, so the walks score against the same keys; without `--heads` it opens nothing. */
 template <typename index_type_, typename streamed_dataset_type_>
-bool open_indexer_heads(streamed_dataset_type_ const& streamed,
+bool open_indexer_heads(index_type_ const& index, streamed_dataset_type_ const& streamed,
                         bench_indexer_heads<typename index_type_::scalar_t>& heads) {
     using scalar_t = typename index_type_::scalar_t;
     settings_t const& settings = streamed.bench.settings;
     if (settings.heads_path.empty() && settings.weights_path.empty()) return true;
-    if (!scores_indexer<index_type_>())
-        return fmt::println("--heads ranks floating-point keys under --metric dot"), false;
+    if (!scores_indexer(index)) return fmt::println("--heads ranks floating-point keys under --metric dot"), false;
     if (settings.self_recall == switch_t::present_k)
         return fmt::println("--heads brings its own queries, so --self-recall has none to judge"), false;
     if (!read_widened_rows(settings.heads_path, heads.widened_heads) ||

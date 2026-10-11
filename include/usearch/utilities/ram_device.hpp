@@ -14,7 +14,7 @@
 #include <cstdlib> // `std::aligned_alloc`, `std::free` - the heap fallback of a domainless allocator
 
 #include <mutex>       // `std::unique_lock`, `std::adopt_lock` - the executor's one-caller hold
-#include <type_traits> // `std::remove_reference_t` - the trampolines' callback recovery
+#include <type_traits> // `std::remove_reference_t`, `std::true_type` - callback recovery & move propagation
 #include <utility>     // `std::swap`, `std::move`, `std::exchange`
 
 #include <forkunion.h>         // `fu_allocate_on_domain_id`, `fu_pool_spawn`, `fu_local_memory_of`
@@ -42,6 +42,9 @@ inline constexpr fu_memory_domain_id_t no_memory_domain_k = -1;
 template <typename value_type_ = byte_t>
 struct forkunion_allocator {
     using value_type = value_type_;
+
+    /** A moved-in buffer is freed on the domain it was claimed on, not on the slot's own. */
+    using propagate_on_container_move_assignment = std::true_type;
 
     /** The OS memory-domain ID storage is claimed on. */
     fu_memory_domain_id_t memory_domain = no_memory_domain_k;

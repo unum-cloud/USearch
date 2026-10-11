@@ -102,12 +102,11 @@ static __global__ void dense_cuda_merge_attention_kernel(byte_t* blocks, u32_t r
  *  are engaged rather than being declared whole. The shard's configs, views and results are
  *  re-exported verbatim, so a batched call and a single one read the same.
  */
-template <                                               //
-    typename key_type_ = uuid_t,                         //
-    nk_dtype_t vector_dtype_ = nk_i8_k,                  //
-    nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k, //
-    cuda_arch_t capability_ = cuda_arch_ampere_k,        //
-    typename key_hash_type_ = std::hash<key_type_>       //
+template <                                         //
+    typename key_type_ = uuid_t,                   //
+    nk_dtype_t vector_dtype_ = nk_i8_k,            //
+    cuda_arch_t capability_ = cuda_arch_ampere_k,  //
+    typename key_hash_type_ = std::hash<key_type_> //
     >
 struct dense_vram_indexes {
 
@@ -130,7 +129,7 @@ struct dense_vram_indexes {
     using locators_map_t = chunked_multimap<key_t, key_locator_t, key_hash_type_, forkunion_allocator_t>;
 
     /** The shard type - geometry parameters in the shard's own order, so the two never disagree. */
-    using index_t = dense_vram_index<vector_dtype_, kernel_kind_, capability_>;
+    using index_t = dense_vram_index<vector_dtype_, capability_>;
     static_assert(index_family<index_t>);
 
     /** Keys of one shard's rows, indexed by that shard's own node IDs; host-resident, growing in the chunks the CPU
@@ -175,21 +174,19 @@ struct dense_vram_indexes {
     /** The stored scalar vocabulary, re-exported for dispatchers gating crossing rows. */
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
 
-    /** The distance kernel this instantiation walks with. */
-    inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
-
     /** The compute-capability ceiling the kernels compiled under. */
     inline static constexpr cuda_arch_t capability_k = capability_;
 
 #pragma region Placement
 
-    /** Every index names the host allocator its shard table, key columns, locator map and
-     *  checkpoint catalogs sit on; nothing is placed by default. */
+    /** Every index names the @p kernel its shards score by and the host allocator its shard table, key
+     *  columns, locator map and checkpoint catalogs sit on; nothing is placed by default. */
     dense_vram_indexes() = delete;
-    explicit dense_vram_indexes(forkunion_allocator_t allocator) noexcept
-        : shards_(allocator), locators_of_key_(allocator), allocator_(allocator) {}
+    explicit dense_vram_indexes(nk_kernel_kind_t kernel, forkunion_allocator_t allocator) noexcept
+        : kernel_(kernel), shards_(allocator), locators_of_key_(allocator), allocator_(allocator) {}
     dense_vram_indexes(dense_vram_indexes&& other) noexcept
-        : shards_(other.allocator_), locators_of_key_(other.allocator_), allocator_(other.allocator_) {
+        : kernel_(other.kernel_), shards_(other.allocator_), locators_of_key_(other.allocator_),
+          allocator_(other.allocator_) {
         swap(other);
     }
     dense_vram_indexes& operator=(dense_vram_indexes&& other) noexcept { return swap(other), *this; }
@@ -202,6 +199,7 @@ struct dense_vram_indexes {
     /** Exchanges two indexes whole; a move implies the caller holds both exclusively, so the
      *  insertion gate is not swapped along with the state it guards. */
     void swap(dense_vram_indexes& other) noexcept {
+        std::swap(kernel_, other.kernel_);
         std::swap(shards_, other.shards_);
         std::swap(locators_of_key_, other.locators_of_key_);
         std::swap(allocator_, other.allocator_);
@@ -215,11 +213,12 @@ struct dense_vram_indexes {
         return emplace(std::move(shard));
     }
 
-    /** Appends one shard the caller already built, consuming it; refuses any whose frozen geometry
-     *  differs from the shards already here, any already reserved, and any whose device already
-     *  holds one - the index shards, never replicates. @ref reserve closes the shard set. */
+    /** Appends one shard the caller already built, consuming it; refuses any scoring by another metric,
+     *  any whose frozen geometry differs from the shards already here, any already reserved, and any
+     *  whose device already holds one - the index shards, never replicates. @ref reserve closes the
+     *  shard set. */
     status_t emplace(std::unique_ptr<index_t>&& shard) noexcept {
-        if (!shard) return status_t::config_mismatch_k;
+        if (!shard || shard->kernel() != kernel_) return status_t::config_mismatch_k;
         if (capacity()) return status_t::config_mismatch_k;
         if (shard->capacity()) return status_t::config_mismatch_k;
         if (!shards_.empty() && (shard->dimensions() != dimensions() || shard->connectivity() != connectivity()))
@@ -246,6 +245,9 @@ struct dense_vram_indexes {
 #pragma endregion Placement
 
 #pragma region Measures and Reservation
+
+    /** The metric every shard scores by, fixed at construction. */
+    nk_kernel_kind_t kernel() const noexcept { return kernel_; }
 
     /** Shards in the index, one per engaged device. */
     std::size_t shards_count() const noexcept { return shards_.size(); }
@@ -743,13 +745,15 @@ struct dense_vram_indexes {
     }
 
     /** The batched @c search ranked by a lightning indexer: every shard walks the queries under the same @p heads,
-     *  passed to it as is, so the merged distances are 1 − Σₕ wₕ · ReLU(qₕ · k) whichever shard scored them. */
+     *  passed to it as is, so the merged distances are 1 − Σₕ wₕ · ReLU(qₕ · k) whichever shard scored them. A dot
+     *  verb: any other metric refuses with @c config_mismatch_k. */
     expected<search_result_t> search(vectors_view_t queries, dense_indexer_heads<scalar_t> const& heads,
                                      executor_t& executor, search_config_t config, std::size_t wanted,
                                      std::span<key_t> keys, std::span<distance_t> distances,
                                      std::span<std::size_t> counts) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k && !nk::is_integral_dtype<scalar_t>())
+        requires(!nk::is_integral_dtype<scalar_t>())
     {
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         return search_(queries, executor, config, wanted, keys, distances, counts, heads);
     }
 
@@ -767,15 +771,14 @@ struct dense_vram_indexes {
      *
      *  A full row keeps an arbitrary subset of its pairs. A refused shard stops the fan-out but keeps
      *  every shard already landed, so the pairs and the counts always agree; the first refusal is what
-     *  the merged result reports.
+     *  the merged result reports. A metric other than dot refuses with @c config_mismatch_k.
      */
     expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
                                        std::size_t wanted, std::span<key_t> keys, std::span<dot_result_t> products,
-                                       std::span<std::size_t> counts) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k)
-    {
+                                       std::span<std::size_t> counts) noexcept {
         std::size_t const rows_count = left.extent(0);
         std::size_t const shards = shards_.size();
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
         if (counts.size() != rows_count || keys.size() < rows_count * wanted || products.size() < rows_count * wanted)
             return {{}, status_t::config_mismatch_k};
@@ -837,14 +840,14 @@ struct dense_vram_indexes {
      *  @param[out] counts Keys written per query, at most @p wanted.
      *
      *  A key some row never ranked misses that row's maximum, so with non-negative per-row maxima
-     *  a score lands below its exact value, never above.
+     *  a score lands below its exact value, never above. A metric other than dot refuses with
+     *  @c config_mismatch_k.
      */
     expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
                                      search_config_t config, std::size_t wanted, std::span<key_t> keys,
-                                     std::span<f64_t> scores, std::span<std::size_t> counts) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k)
-    {
+                                     std::span<f64_t> scores, std::span<std::size_t> counts) noexcept {
         std::size_t const rows_count = queries.extent(0);
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
         if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
         std::size_t const groups_count = rows_count / rows_per_query;
@@ -889,17 +892,17 @@ struct dense_vram_indexes {
      *  @param[out] carry Each row's softmax state over every shard, one per row, in host or device memory.
      *  @param[inout] executor The contexts and streams, paired positionally with the shards.
      *  @param[in] config The per-shard walk configuration, applied uniformly; @c count plays no part.
-     *  @return The query rows attended, and the traversal telemetry every shard spent.
+     *  @return The query rows attended, and the traversal telemetry every shard spent; @c config_mismatch_k
+     *      unless the shards score by dot.
      */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
                                      f32_t score_scale, std::span<f32_t> outputs,
                                      std::span<dense_softmax_state_t> carry, executor_t& executor,
-                                     search_config_t config = {}) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k)
-    {
+                                     search_config_t config = {}) noexcept {
         using shard_lookup_t = dense_cuda_keyed_lookup<key_t, std::remove_cvref_t<value_lookup_type_>>;
         std::size_t const rows_count = queries.extent(0), shards = shards_.size();
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
         if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
         if (outputs.size() != rows_count * dimensions() || carry.size() != rows_count)
@@ -1520,9 +1523,9 @@ struct dense_vram_indexes {
   private:
 
     /** One unreserved shard placed on @p device; null when the allocation fails. */
-    static std::unique_ptr<index_t> build_(int device) noexcept {
+    std::unique_ptr<index_t> build_(int device) const noexcept {
         typename index_t::vectors_allocator_t const allocator {device};
-        return std::unique_ptr<index_t>(new (std::nothrow) index_t(allocator, allocator));
+        return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel_, allocator, allocator));
     }
 
     /** Whether @p executor drives exactly this index's devices, in this index's order - the pairing
@@ -1814,7 +1817,7 @@ struct dense_vram_indexes {
     status_t custom_fields_(growing_buffer<safegraphs_custom_field_t, forkunion_allocator_t>& fields,
                             save_config_t const& config) const noexcept {
         if (failed(fields.reserve_exactly(2 + config.provenance.size()))) return status_t::bad_alloc_k;
-        fields.push_back_reserved({"metric", nk_kernel_name(kernel_kind_)});
+        fields.push_back_reserved({"metric", nk_kernel_name(kernel_)});
         fields.push_back_reserved({"quantization", nk_dtype_name(vector_dtype_)});
         for (safegraphs_custom_field_t const& field : config.provenance) fields.push_back_reserved(field);
         return status_t::success_k;
@@ -2008,7 +2011,7 @@ struct dense_vram_indexes {
     }
 
     /** Whether @p part can land here: three regular columns of the index's own dtypes, the tokens
-     *  it names agreeing with this instantiation, the geometry @p first froze, and every column
+     *  it names agreeing with this index, the geometry @p first froze, and every column
      *  describing the same rows. */
     status_t vetted_part_(part_t const& part, safegraphs_header_t const& first) const noexcept {
         safegraphs_header_t const& header = part.header;
@@ -2019,7 +2022,7 @@ struct dense_vram_indexes {
         if (header.key.shape != column_shape_t {scalar_shape_t {}} || header.value.shape != first.value.shape ||
             header.neighbors.shape != first.neighbors.shape)
             return status_t::config_mismatch_k;
-        if (!part.metric.empty() && nk_kernel_named(part.metric.characters, part.metric.view().size()) != kernel_kind_)
+        if (!part.metric.empty() && nk_kernel_named(part.metric.characters, part.metric.view().size()) != kernel_)
             return status_t::config_mismatch_k;
         if (!part.quantization.empty() &&
             nk_dtype_named(part.quantization.characters, part.quantization.view().size()) != vector_dtype_)
@@ -2129,6 +2132,9 @@ struct dense_vram_indexes {
     }
 
 #pragma endregion Checkpoints
+
+    /** The metric every shard scores by. */
+    nk_kernel_kind_t kernel_;
 
     /** The owned shards, graph and keys together. A shard's key column is sized at @c reserve and
      *  never grown, since a search reads it while rows are still landing. */

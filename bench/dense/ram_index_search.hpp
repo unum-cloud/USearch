@@ -92,10 +92,11 @@ struct bench_context {
     using vectors_view_t = typename index_t::vectors_view_t;
     using distance_t = typename index_t::distance_t;
 
-    static constexpr nk_kernel_kind_t kernel_kind_k = index_t::kernel_kind_k;
-
     /** The parsed CLI, borrowed for the run's lifetime. */
     settings_t const& settings;
+
+    /** The metric the index scores by - the CLI's, or dot where the workload pins it. */
+    nk_kernel_kind_t kernel;
 
     /** The one index under measurement; the indirection buys address stability. */
     std::unique_ptr<index_t> index;
@@ -109,7 +110,7 @@ struct bench_context {
     /** The backend-neutral judgment state both phases fill. */
     bench_results_t results;
 
-    bench_context(settings_t const& settings) noexcept : settings(settings) {}
+    bench_context(settings_t const& settings, nk_kernel_kind_t kernel) noexcept : settings(settings), kernel(kernel) {}
 };
 
 /** Builds the index on the chosen memory domain, reserves it for the viewed rows, and sizes all
@@ -144,7 +145,7 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
     fu_memory_domain_id_t const domain = bench.settings.memory_domains.empty() //
                                              ? fu_memory_domain_id_t {-1}
                                              : bench.settings.memory_domains.front();
-    bench.index = std::make_unique<index_t>(allocator_t {domain}, allocator_t {domain});
+    bench.index = std::make_unique<index_t>(bench.kernel, allocator_t {domain}, allocator_t {domain});
     streamed.id_to_row.resize(rows);
 
     // Reserving first freezes the CLI geometry a checkpoint then has to agree with.
@@ -262,8 +263,7 @@ bool run_insertion(streamed_dataset_type_& streamed, fu_pool_t pool) {
     fmt::println("\nInsertions");
     fmt::println("  shape: {} × {}d", inserted_rows, streamed.vectors.extent(1));
     if (bench.settings.skip_vectors.value) fmt::println("  topping: {} loaded rows", bench.settings.skip_vectors.value);
-    fmt::println("  quads: {} · {} · {} kit", scalar_t::dtype_name(),
-                 nk_kernel_name(streamed_dataset_type_::bench_t::kernel_kind_k),
+    fmt::println("  quads: {} · {} · {} kit", scalar_t::dtype_name(), nk_kernel_name(bench.kernel),
                  bit_name(compute_choices_k, index_t::picked_quads_capability_k, "serial"));
     if constexpr (index_t::has_tiles_k)
         fmt::println("  tiles: {} · reverse refinement",
@@ -430,7 +430,7 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     std::span<u32_t> const rows_span {merged_rows, bench.settings.top_k.value};
     std::span<dense_distance_t> const distances_span {merged_distances, bench.settings.top_k.value};
     auto search = [&]() noexcept {
-        if constexpr (scores_indexer<index_t>())
+        if constexpr (!nk::is_integral_dtype<typename index_t::scalar_t>())
             if (task.heads.engaged())
                 return bench.index->search(query_vector, task.heads.rows(query, 1), traversal, config);
         return bench.index->search(query_vector, traversal, config);
@@ -456,7 +456,7 @@ bool run_search(streamed_dataset_type_& streamed, fu_pool_t pool) {
     using index_t = typename streamed_dataset_type_::bench_t::index_t;
     auto& bench = streamed.bench;
     bench_indexer_heads<typename index_t::scalar_t> heads;
-    if (!open_indexer_heads<index_t>(streamed, heads)) return false;
+    if (!open_indexer_heads(*bench.index, streamed, heads)) return false;
     std::size_t const query_count = searched_count(streamed, heads);
     if (!reserve_results(bench.results, query_count, bench.settings.top_k.value)) return false;
     bench.results.latencies_us.resize(query_count);
@@ -497,31 +497,25 @@ struct search_workload_t {
 
 #pragma region Dispatch Cascade
 
-/** Gate: a (stored dtype, kernel) cell is runnable once its kit chain is adapted in
- *  @c usearch/dense/ram_metric.hpp; unadapted combinations report as skipped. */
-template <nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_, nk_capability_t capability_>
-concept ram_kit_adapted = requires {
-    sizeof(dense_quads_chain<kernel_, typename nk::type_for<stored_dtype_>::type, capability_>);
-};
-
 /** No-op sibling picked when the cell's CPU kit chain is not adapted yet. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
-          nk_capability_t capability_, typename wait_type_, typename workload_type_>
-    requires(!ram_kit_adapted<stored_dtype_, kernel_, capability_>)
-int stage_and_run(bench_launch<dataset_scalar_type_> const&, workload_type_ const&) {
-    fmt::println("skipped: no CPU kit adapted for {} · {}", dtype_name(stored_dtype_), nk_kernel_name(kernel_));
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_,
+          typename workload_type_>
+    requires(!dense_quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>)
+int stage_and_run(bench_launch<dataset_scalar_type_> const&, nk_kernel_kind_t kernel, workload_type_ const&) {
+    fmt::println("skipped: no CPU kit adapted for {} · {}", dtype_name(stored_dtype_), nk_kernel_name(kernel));
     return 0;
 }
 
 /** The innermost hop: binds the concrete volatile-index instantiation, wires the typed source
- *  views and the bounded staging trampoline into a @c streamed_dataset, builds the index, and
- *  hands it to @p workload. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
-          nk_capability_t capability_, typename wait_type_, typename workload_type_>
-    requires(ram_kit_adapted<stored_dtype_, kernel_, capability_>)
-int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, workload_type_ const& workload) {
+ *  views and the bounded staging trampoline into a @c streamed_dataset, builds the index under
+ *  @p kernel, and hands it to @p workload. */
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_,
+          typename workload_type_>
+    requires dense_quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>
+int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_kind_t kernel,
+                  workload_type_ const& workload) {
     using allocator_t = forkunion_allocator<std::byte>;
-    using index_t = dense_ram_index<stored_dtype_, kernel_, capability_, wait_type_, fu::preferred_atomic_ref,
+    using index_t = dense_ram_index<stored_dtype_, capability_, wait_type_, fu::preferred_atomic_ref,
                                     fu::preferred_cache_hints_t, allocator_t, allocator_t, allocator_t>;
     using bench_context_type_ = bench_context<index_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_type_>;
@@ -547,7 +541,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, workload_typ
             ? dataset.queries()
             : sliced_vectors(nk::range(std::size_t {0}, std::min<std::size_t>(1000, rows)), nk::slice);
 
-    bench_context_type_ bench {launch.settings};
+    bench_context_type_ bench {launch.settings, kernel};
     streamed_t streamed {bench, sliced_vectors, source_queries};
 
     // Owns the staging trampoline planes for the whole run.
@@ -596,20 +590,20 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, workload_typ
     return workload.run(streamed, launch.machine.pool) ? 0 : 1;
 }
 
-/** Kernel axis: lowers the runtime metric to a compile-time kernel kind, the terminal hop into
+/** Kernel axis: admits the runtime metric the stored dtype scores by, the terminal hop into
  *  @ref stage_and_run; a dot-only workload pins the dot kernel instead. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_,
           typename workload_type_>
 int run_with_metric(bench_launch<dataset_scalar_type_> const& launch, workload_type_ const& workload) {
     if constexpr (workload_type_::dot_only_k)
-        return stage_and_run<dataset_scalar_type_, stored_dtype_, nk_kernel_dot_k, capability_, wait_type_>(launch,
-                                                                                                            workload);
+        return stage_and_run<dataset_scalar_type_, stored_dtype_, capability_, wait_type_>(launch, nk_kernel_dot_k,
+                                                                                           workload);
     else
         return dispatch_kernel<stored_dtype_>(
             launch.settings.kernel,
             [&](auto kernel) {
-                return stage_and_run<dataset_scalar_type_, stored_dtype_, kernel.value, capability_, wait_type_>(
-                    launch, workload);
+                return stage_and_run<dataset_scalar_type_, stored_dtype_, capability_, wait_type_>(launch, kernel.value,
+                                                                                                   workload);
             },
             [&](auto metric) {
                 fmt::println("Unsupported metric {} for {} vectors", nk_kernel_name(metric), dtype_name(stored_dtype_));

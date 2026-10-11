@@ -579,11 +579,11 @@ struct checkpoint_paths_t {
  *  instantiating the same combination computes the same names, and a mismatched one finds
  *  nothing. */
 template <typename index_type_>
-static checkpoint_paths_t checkpoint_paths_of(settings_t const& settings, std::string_view name, std::size_t slot,
-                                              std::size_t slot_count) {
-    std::string const prefix = fmt::format(
-        "{}/{}-{}-{}-c{}-{}-{}", settings.checkpoints_dir, name, index_type_::scalar_t::dtype_name(),
-        nk_kernel_name(index_type_::kernel_kind_k), settings.connectivity.value, slot, slot_count);
+static checkpoint_paths_t checkpoint_paths_of(settings_t const& settings, index_type_ const& index,
+                                              std::string_view name, std::size_t slot, std::size_t slot_count) {
+    std::string const prefix = fmt::format("{}/{}-{}-{}-c{}-{}-{}", settings.checkpoints_dir, name,
+                                           index_type_::scalar_t::dtype_name(), nk_kernel_name(index.kernel()),
+                                           settings.connectivity.value, slot, slot_count);
     return {fmt::format("{}.vectors.{}bin", prefix, index_type_::scalar_t::dtype_name()), //
             prefix + ".neighbors.ibin", prefix + ".rows.ibin"};
 }
@@ -613,7 +613,7 @@ template <typename index_type_>
 static bool load_checkpoint(settings_t const& settings, index_type_& index, std::size_t dimensions,
                             std::span<u32_t> id_to_row, std::size_t slot, std::size_t slot_count) {
     using scalar_t = typename index_type_::scalar_t;
-    checkpoint_paths_t const paths = checkpoint_paths_of<index_type_>(settings, settings.load_name, slot, slot_count);
+    checkpoint_paths_t const paths = checkpoint_paths_of(settings, index, settings.load_name, slot, slot_count);
     auto [vectors_mapping, vectors_map_status] = mapped_file_t::read(paths.vectors);
     auto [neighbors_mapping, neighbors_map_status] = mapped_file_t::read(paths.neighbors);
     auto [rows_mapping, rows_map_status] = mapped_file_t::read(paths.rows);
@@ -705,7 +705,7 @@ static std::size_t save_checkpoint(settings_t const& settings, index_type_& inde
         return 0;
     }
 
-    checkpoint_paths_t const paths = checkpoint_paths_of<index_type_>(settings, settings.save_name, slot, slot_count);
+    checkpoint_paths_t const paths = checkpoint_paths_of(settings, index, settings.save_name, slot, slot_count);
     nk::matrix_view<u32_t> const rows_map_view {id_to_row.data(), {shape.nodes, 1}};
     bool const written =
         utilities::matrix_save<scalar_t>(paths.vectors.c_str(), vectors.view()) == status_t::success_k &&

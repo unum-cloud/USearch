@@ -256,16 +256,34 @@ std::size_t dense_expect_attend(make_index_type_ const& make_index, allocation_l
     return failures;
 }
 
-/** @ref dense_expect_attend for the dot kernel, then the ledger it left must balance; no other kernel offers it. */
+/** @ref dense_expect_attend for the dot kernel, then the ledger it left must balance; every other kernel refuses it
+ *  at runtime, before reading any input. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
     requires dense_device_resident<index_type_>
 std::size_t test_dense_attend(make_index_type_ const& make_index, u64_t seed) {
-    if constexpr (kernel_ != nk_kernel_dot_k) return 0;
+    allocation_ledger_t ledger;
+    if constexpr (kernel_ != nk_kernel_dot_k) {
+        index_type_ index = make_index(ledger);
+        typename index_type_::dense_traversal_context_t context {{}};
+        return expect_eq(index
+                             .attend(typename index_type_::vectors_view_t {}, 1,
+                                     dense_cuda_value_lookup<typename index_type_::fragment_t> {}, 1.f,
+                                     std::span<f32_t> {}, std::span<dense_softmax_state_t> {}, context)
+                             .status,
+                         status_t::config_mismatch_k);
+    }
     else {
-        allocation_ledger_t ledger;
         std::size_t const failures = dense_expect_attend<index_type_>(make_index, ledger, seed);
         return failures + expect_eq(ledger.live_bytes.load(), 0);
     }
+}
+
+/** A metric outside the dtype's family reaches no kit, so the first reservation refuses it before mapping anything. */
+template <typename index_type_>
+    requires dense_device_resident<index_type_>
+std::size_t test_dense_foreign_metric() {
+    index_type_ index {index_type_::vector_dtype_k == nk_u1_k ? nk_kernel_angular_k : nk_kernel_hamming_k};
+    return expect_eq(index.reserve({64, connectivity_16_k, 64}).status, status_t::unknown_kind_k);
 }
 
 /** Device search under indexer heads against the @c f64 oracle, every node ID its stored row: a pool as wide as the
@@ -322,14 +340,16 @@ template <nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>
 std::size_t test_cuda_configuration(char const* name, u64_t seed) {
     using allocator_t = counting_cuda_allocator_t;
     using index_t =
-        dense_vram_index<dtype_, kernel_, cuda_arch_blackwellrtx_k, allocator_t, allocator_t, cuda_device_allocator_t>;
+        dense_vram_index<dtype_, cuda_arch_blackwellrtx_k, allocator_t, allocator_t, cuda_device_allocator_t>;
     auto make_index = [](allocation_ledger_t& ledger) {
-        return index_t {allocator_t {counting_allocator_t(ledger)}, allocator_t {counting_allocator_t(ledger)}};
+        return index_t {kernel_, allocator_t {counting_allocator_t(ledger)},
+                        allocator_t {counting_allocator_t(ledger)}};
     };
     // The suite is composed here, not reflected: every call below is a capability claim
     // this fully-concurrent, serializable category makes about itself.
     std::size_t failures_count = 0;
     failures_count += test_dense_guards<index_t>(make_index, seed);
+    failures_count += test_dense_foreign_metric<index_t>();
     failures_count += test_dense_three_vectors<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_growth_and_recall<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_save_load_roundtrip<index_t, kernel_>(make_index, seed);

@@ -27,7 +27,7 @@
 #include <forkunion/types.hpp> // `fu::round_up_to_multiple` & friends
 
 #include <numkong/capabilities.h> // `nk_kernel_kind_t` & the kernel-kind constants
-#include <numkong/matrix.hpp>
+#include <numkong/tensor.hpp>     // `nk::matrix_span`, `nk::range` & `nk::slice` - the batches' views
 #include <numkong/types.h>
 #include <numkong/vector.hpp>
 
@@ -100,7 +100,7 @@ struct dense_cuda_planes_view {
     /** Vector plane, @b [rows,row_fragments] fragments, one aligned row per node. */
     fragment_t* vectors;
 
-    /** Norms plane, @b [rows] records, written once pre-publication. */
+    /** Norms plane, @b [rows] records, written once pre-publication; null under dot, which reads none. */
     norms_t* norms;
 
     /** Neighbor plane, @b [rows,connectivity] IDs; slot 0 doubles as the lock word. */
@@ -124,6 +124,9 @@ struct dense_cuda_planes_view {
      *  indices split without division; exact while word x row_fragments stays under 2^31. */
     u32_t row_fragments_magic;
 
+    /** The metric the kit's epilogue finalizes dots into - runtime, so one kernel serves every metric. */
+    nk_kernel_kind_t kernel;
+
     /** Rows physically resident on the executing device, feeding the locality telemetry; both zero
      *  when the view spans one device. */
     u32_t resident_begin = 0, resident_end = 0;
@@ -141,7 +144,11 @@ struct dense_cuda_planes_view {
     __device__ __forceinline__ fragment_t* vector_span_for(dense_node_id_t node_id) const noexcept {
         return vectors + static_cast<std::size_t>(node_id) * row_fragments;
     }
-    __device__ __forceinline__ norms_t norm_for(dense_node_id_t node_id) const noexcept { return norms[node_id]; }
+
+    /** A row's norms, or zeros from the empty plane - a warp-uniform branch on a launch argument. */
+    __device__ __forceinline__ norms_t norm_for(dense_node_id_t node_id) const noexcept {
+        return norms ? norms[node_id] : norms_t {};
+    }
     __device__ __forceinline__ norms_t& norm_ref_for(dense_node_id_t node_id) const noexcept { return norms[node_id]; }
     __device__ __forceinline__ u32_t* neighbors_for(dense_node_id_t node_id) const noexcept {
         return neighbors + static_cast<std::size_t>(node_id) * connectivity;
@@ -384,7 +391,7 @@ __device__ __forceinline__ dense_cuda_scored_node_t dense_cuda_score_batch( //
             typename kit_::dot_t const dot = dense_cuda_reduce(accumulators[slot], planes.lanes_per_row);
             u32_t const row = (group_base + slot) * rows_per_gather + subwarp;
             if (leader && group_base + slot < planes.lanes_per_row && row < gathered_count) {
-                dense_distance_t const distance = kit_::distance(dot, query_state, batch_norms[slot]);
+                dense_distance_t const distance = kit_::distance(planes.kernel, dot, query_state, batch_norms[slot]);
                 gathered.scored[row] = dense_cuda_scored_node_t::make(distance, batch_ids[row]);
                 gathered.dots[row] = dot;
             }
@@ -816,7 +823,7 @@ __device__ __forceinline__ u32_t dense_cuda_select_diverse( //
                 for (u32_t fragment = 0; fragment != planes.row_fragments; ++fragment)
                     accumulator = kit_::accumulate_dot(cache.at(candidate_index, fragment),
                                                        cache.at(kept_position, fragment), accumulator);
-                f32_t const between = kit_::distance(accumulator, cache_norms[candidate_index],
+                f32_t const between = kit_::distance(planes.kernel, accumulator, cache_norms[candidate_index],
                                                      cache_norms[kept_position]);
                 lane_diverse = between >= to_query;
                 ++context.telemetry.scored;
@@ -922,7 +929,8 @@ __device__ __forceinline__ void dense_cuda_back_link_neighbors( //
             accumulator = kit_::accumulate_dot(planes.vector_for(new_node_id, word), cache.at(target_row_k, word),
                                                accumulator);
         typename kit_::dot_t const self_dot = dense_cuda_reduce(accumulator, 32u);
-        f32_t const newcomer_distance = kit_::distance(__shfl_sync(0xFFFFFFFFu, self_dot, 0), target_state, new_norms);
+        f32_t const newcomer_distance = kit_::distance(planes.kernel, __shfl_sync(0xFFFFFFFFu, self_dot, 0),
+                                                       target_state, new_norms);
         telemetry.scored += connectivity + 1;
 
         // Score the neighbors a warp-width at a time, pre-sort each batch bitonically, and merge
@@ -989,8 +997,8 @@ __device__ __forceinline__ void dense_cuda_back_link_neighbors( //
                     for (u32_t fragment = 0; fragment != planes.row_fragments; ++fragment)
                         pair_accumulator = kit_::accumulate_dot(cache.at(candidate_position, fragment),
                                                                 cache.at(kept_position, fragment), pair_accumulator);
-                    f32_t const between = kit_::distance(pair_accumulator, cache_norms[candidate_position],
-                                                         cache_norms[kept_position]);
+                    f32_t const between = kit_::distance(planes.kernel, pair_accumulator,
+                                                         cache_norms[candidate_position], cache_norms[kept_position]);
                     lane_diverse = between >= candidate_distance;
                     ++telemetry.scored;
                 }
@@ -1205,7 +1213,7 @@ __device__ __forceinline__ void dense_cuda_insert_one( //
     norms_accumulator = dense_cuda_reduce_norms(norms_accumulator);
     norms_accumulator = dense_cuda_broadcast_norms(norms_accumulator);
     typename kit_::norms_t const new_norms = kit_::partials_to_norms(norms_accumulator);
-    if (lane == 0) planes.norm_ref_for(new_node_id) = new_norms;
+    if (lane == 0 && planes.norms) planes.norm_ref_for(new_node_id) = new_norms;
     typename kit_::norms_t const query_state = new_norms;
     __syncwarp();
 
@@ -1568,7 +1576,7 @@ __device__ __forceinline__ void dense_cuda_merge_links_one( //
                 for (u32_t fragment = 0; fragment != planes.row_fragments; ++fragment)
                     pair_accumulator = kit_::accumulate_dot(cache.at(candidate_position, fragment),
                                                             cache.at(kept_position, fragment), pair_accumulator);
-                f32_t const between = kit_::distance(pair_accumulator, cache_norms[candidate_position],
+                f32_t const between = kit_::distance(planes.kernel, pair_accumulator, cache_norms[candidate_position],
                                                      cache_norms[kept_position]);
                 lane_diverse = between >= to_query;
                 ++telemetry.scored;
@@ -1668,6 +1676,9 @@ struct dense_cuda_search_sink {
     /** Matches kept per query. */
     u32_t count;
 
+    /** The metric the ranked distances convert out of. */
+    nk_kernel_kind_t kernel;
+
     template <typename frontier_>
     __device__ __forceinline__ fold_t open(u32_t, dense_cuda_warp_context<frontier_> const&, int) const noexcept {
         return {};
@@ -1684,7 +1695,8 @@ struct dense_cuda_search_sink {
             if (rank < count) {
                 std::size_t const slot = static_cast<std::size_t>(query_index) * count + rank;
                 result_ids[slot] = ranked_entry.id();
-                if (result_distances) result_distances[slot] = kit_::convert_to_distance(ranked_entry.distance());
+                if (result_distances)
+                    result_distances[slot] = kit_::convert_to_distance(kernel, ranked_entry.distance());
             }
         }
     }
@@ -2166,7 +2178,7 @@ static __global__ void dense_cuda_reconnect_island_kernel(u32_t* neighbors, u32_
 
 #if defined(__CUDACC__)
 
-template <nk_dtype_t, nk_kernel_kind_t, cuda_arch_t, typename, typename, typename>
+template <nk_dtype_t, cuda_arch_t, typename, typename, typename>
 struct dense_vram_index;
 
 /** One stream's device-side scratch for driving a CUDA index: the traversal arena, the batch
@@ -2247,7 +2259,7 @@ struct dense_cuda_traversal_context {
 
     /** Only the index's verbs reach the raw scratch - callers observe a context through @c results,
      *  @ref spent and @ref missed, never through its buffers. */
-    template <nk_dtype_t, nk_kernel_kind_t, cuda_arch_t, typename, typename, typename>
+    template <nk_dtype_t, cuda_arch_t, typename, typename, typename>
     friend struct dense_vram_index;
 
     using telemetry_allocator_t = typename allocator_t::template rebind<dense_cuda_telemetry_block_t>::other;
@@ -2306,7 +2318,6 @@ struct dense_cuda_traversal_context {
  */
 template <                                                                      //
     nk_dtype_t vector_dtype_ = nk_i8_k,                                         //
-    nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,                        //
     cuda_arch_t capability_ = cuda_arch_ampere_k,                               //
     typename vectors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>,   //
     typename neighbors_allocator_type_ = cuda_virtual_memory_allocator<byte_t>, //
@@ -2315,7 +2326,7 @@ struct dense_vram_index {
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
 
-    using kit_chain_t = dense_cuda_kit_chain<vector_dtype_, kernel_kind_, capability_>;
+    using kit_chain_t = dense_cuda_kit_chain<vector_dtype_, capability_>;
     using kit_t = typename kit_chain_t::kit_t;
     using vectors_allocator_t = vectors_allocator_type_;
     using neighbors_allocator_t = neighbors_allocator_type_;
@@ -2347,7 +2358,6 @@ struct dense_vram_index {
      *  Batches claim disjoint ID ranges and the publication protocol makes overlapping searches
      *  safe. */
     inline static constexpr synchronization_t synchronization_ceiling_k = synchronization_t::concurrent_k;
-    inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
 
     /** Capability labels for the shared reports: the GPU picks no CPU SIMD tier. */
     inline static constexpr nk_capability_t picked_quads_capability_k = nk_cap_serial_k;
@@ -2377,12 +2387,13 @@ struct dense_vram_index {
         return static_cast<u32_t>(geometry);
     }
 
-    /** One allocator per plane concern, each carrying its device placement; the index pins itself
-     *  to the vectors allocator's device and demands the neighbors allocator agree. */
-    dense_vram_index(vectors_allocator_t const& vectors_allocator = {},
-                     neighbors_allocator_t const& neighbors_allocator = {}) noexcept
-        : device_ {vectors_allocator.device()}, vectors_plane_(vectors_allocator), norms_plane_(vectors_allocator),
-          neighbors_plane_(neighbors_allocator) {}
+    /** The @p kernel every walk scores by, checked against the dtype at the first @c reserve, and one
+     *  allocator per plane concern, each carrying its device placement; the index pins itself to the
+     *  vectors allocator's device and demands the neighbors allocator agree. */
+    explicit dense_vram_index(nk_kernel_kind_t kernel, vectors_allocator_t const& vectors_allocator = {},
+                              neighbors_allocator_t const& neighbors_allocator = {}) noexcept
+        : device_ {vectors_allocator.device()}, kernel_ {kernel}, vectors_plane_(vectors_allocator),
+          norms_plane_(vectors_allocator), neighbors_plane_(neighbors_allocator) {}
     dense_vram_index(dense_vram_index const&) = delete;
     dense_vram_index& operator=(dense_vram_index const&) = delete;
 
@@ -2399,15 +2410,16 @@ struct dense_vram_index {
         return standard_atomic_ref<status_t const>(status_).load(std::memory_order_acquire);
     }
 
-    /** Rows mapped across all three planes, the smallest of the three, since slabs are a fixed byte
-     *  size and each plane maps a different row count per slab. */
+    /** Rows mapped across the planes, the smallest of their counts, since slabs are a fixed byte
+     *  size and each plane maps a different row count per slab; dot's empty norms plane bounds nothing. */
     std::size_t capacity() const noexcept {
         std::size_t const neighbors_row_bytes = connectivity() * sizeof(u32_t);
         std::size_t const vector_row_bytes = row_bytes();
         if (!neighbors_row_bytes || !vector_row_bytes) return 0;
         std::size_t const by_vectors = vectors_plane_.committed_bytes() / vector_row_bytes;
-        std::size_t const by_norms = norms_plane_.committed_bytes() / sizeof(norms_t);
         std::size_t const by_neighbors = neighbors_plane_.committed_bytes() / neighbors_row_bytes;
+        if (kernel_ == nk_kernel_dot_k) return min_of(by_vectors, by_neighbors);
+        std::size_t const by_norms = norms_plane_.committed_bytes() / sizeof(norms_t);
         return min_of(by_vectors, min_of(by_norms, by_neighbors));
     }
     std::size_t connectivity() const noexcept {
@@ -2428,6 +2440,9 @@ struct dense_vram_index {
     /** The pinned device's identity and limits, queried once at the first @c reserve. */
     cuda_device_specs_t const& device_specs() const noexcept { return device_; }
 
+    /** The metric every walk scores by, fixed at construction. */
+    nk_kernel_kind_t kernel() const noexcept { return kernel_; }
+
     /** Device-side plane views - the audit surface for invariant checkers & tests. */
     planes_view_t planes() const noexcept {
         u32_t const fragments = row_fragments();
@@ -2438,7 +2453,8 @@ struct dense_vram_index {
                 fragments,
                 lanes_per_row(),
                 steps_per_row(),
-                static_cast<u32_t>(((u64_t {1} << 31) + fragments - 1) / fragments)};
+                static_cast<u32_t>(((u64_t {1} << 31) + fragments - 1) / fragments),
+                kernel_};
     }
 
     /** Bytes of one packed logical row, bit-exact for sub-byte scalars. */
@@ -2531,8 +2547,8 @@ struct dense_vram_index {
         bytes_view_t neighbors;
     };
 
-    /** Bytes this index occupies - the three committed device planes, the published-row count, and
-     *  the host struct; traversal scratch belongs to executors and contexts. */
+    /** Bytes this index occupies - the committed device planes, the published-row count, and the
+     *  host struct; traversal scratch belongs to executors and contexts. */
     std::size_t memory_usage() const noexcept {
         return sizeof(dense_vram_index) + vectors_plane_.committed_bytes() + norms_plane_.committed_bytes() +
                neighbors_plane_.committed_bytes() + (published_rows_ ? sizeof(u32_t) : 0);
@@ -2588,6 +2604,13 @@ struct dense_vram_index {
      *  in effect; the first successful call freezes the geometry and the virtual-address ceiling,
      *  later ones only map slabs. */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
+        // The kits' epilogues fall through to the last metric of each family, so no other kind may reach them.
+        bool const scored = vector_dtype_ == nk_u1_k
+                                ? kernel_ == nk_kernel_dot_k || kernel_ == nk_kernel_hamming_k ||
+                                      kernel_ == nk_kernel_jaccard_k
+                                : kernel_ == nk_kernel_dot_k || kernel_ == nk_kernel_angular_k ||
+                                      kernel_ == nk_kernel_sqeuclidean_k || kernel_ == nk_kernel_euclidean_k;
+        if (!scored) return {0, status_t::unknown_kind_k};
         if (neighbors_plane_.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
         if (!config.dimensions || !std::has_single_bit(static_cast<u32_t>(config.connectivity)))
             return {0, status_t::config_mismatch_k};
@@ -2613,7 +2636,9 @@ struct dense_vram_index {
             cuInit(0);
             // Virtual address space is free, so the ceiling is generous and independent of the first
             // requested capacity; the reservation itself is the ceiling, no cached row count shadows it.
-            std::size_t const bytes_per_row = row_bytes() + sizeof(norms_t) + connectivity * sizeof(u32_t);
+            bool const normed = kernel_ != nk_kernel_dot_k;
+            std::size_t const bytes_per_row = row_bytes() + (normed ? sizeof(norms_t) : 0) +
+                                              connectivity * sizeof(u32_t);
             // Device planes budget against VRAM; managed planes oversubscribe it and budget against host
             // memory through their own backend, which keeps the topology symbols out of device instantiations.
             std::size_t budget_bytes = 4 * device_.vram_bytes;
@@ -2622,7 +2647,8 @@ struct dense_vram_index {
             std::size_t const ceiling_rows = min_of(max_node_count_k,
                                                     max_of<std::size_t>(config.capacity, budget_bytes / bytes_per_row));
             if (vectors_plane_.reserve_range(ceiling_rows * row_bytes(), device_.ordinal) != status_t::success_k ||
-                norms_plane_.reserve_range(ceiling_rows * sizeof(norms_t), device_.ordinal) != status_t::success_k ||
+                (normed &&
+                 norms_plane_.reserve_range(ceiling_rows * sizeof(norms_t), device_.ordinal) != status_t::success_k) ||
                 neighbors_plane_.reserve_range(ceiling_rows * connectivity * sizeof(u32_t), device_.ordinal) !=
                     status_t::success_k)
                 return {0, status_t::bad_alloc_k};
@@ -2822,14 +2848,15 @@ struct dense_vram_index {
 
     /** The batched @c search ranked by a lightning indexer: a node's distance is 1 − Σₕ wₕ · ReLU(qₕ · k) over the
      *  @p heads of its query, which must match the queries in count and the index in dimensions, while the walk
-     *  navigates by @p queries. */
+     *  navigates by @p queries. A dot verb: any other metric refuses with @c config_mismatch_k. */
     expected<search_result_t> search(vectors_view_t queries, dense_indexer_heads<scalar_t> const& heads,
                                      nk::matrix_span<dense_node_id_t> result_ids,
                                      nk::matrix_span<dense_distance_t> result_distances,
                                      dense_traversal_context_t& context, search_config_t config = {},
                                      completion_t completion = completion_t::blocking_k) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k && !nk::is_integral_dtype<scalar_t>())
+        requires(!nk::is_integral_dtype<scalar_t>())
     {
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         return settle_(submit_search_(queries, result_ids, result_distances, context, config, size(), heads),
                        queries.extent(0), context, completion);
     }
@@ -2863,14 +2890,14 @@ struct dense_vram_index {
      *  @param[in] completion Blocking drains the context's stream and reports the telemetry;
      *      deferred returns once queued, and the caller drains before reading any output.
      *  @return The pairs scored over every row once blocking - zero when deferred, where @p counts
-     *      carry them after the drain - and the traversal telemetry this call spent.
+     *      carry them after the drain - and the traversal telemetry this call spent; @c config_mismatch_k
+     *      unless the index scores by dot.
      */
     expected<search_result_t> multiply(vectors_view_t left, nk::matrix_span<dense_node_id_t> node_ids,
                                        nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
                                        dense_traversal_context_t& context, search_config_t config = {},
-                                       completion_t completion = completion_t::blocking_k) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k)
-    {
+                                       completion_t completion = completion_t::blocking_k) noexcept {
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         expected<search_result_t> landed = settle_(
             submit_multiply_(left, node_ids, products, counts, context, config, size()), left.extent(0), context,
             completion);
@@ -2897,17 +2924,17 @@ struct dense_vram_index {
      *  @param[inout] context The stream every transfer and the launch ride.
      *  @param[in] config The per-call breadth; @c count plays no part.
      *  @param[in] completion As in @c multiply; a deferred call leaves a missing row to @c context.missed().
-     *  @return The query rows attended, and the traversal telemetry this call spent.
+     *  @return The query rows attended, and the traversal telemetry this call spent; @c config_mismatch_k unless
+     *      the index scores by dot.
      */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
                                      f32_t score_scale, std::span<f32_t> outputs,
                                      std::span<dense_softmax_state_t> carry, dense_traversal_context_t& context,
                                      search_config_t config = {},
-                                     completion_t completion = completion_t::blocking_k) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k)
-    {
+                                     completion_t completion = completion_t::blocking_k) noexcept {
         std::size_t const rows_count = queries.extent(0);
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (outputs.size() != rows_count * dimensions() || carry.size() != rows_count)
             return {{}, status_t::config_mismatch_k};
         expected<f32_t*> const landed = submit_attend_(queries, head_count, value_lookup, score_scale, context, config,
@@ -3421,10 +3448,11 @@ struct dense_vram_index {
         }
 
         /** Publishes the appended rows once every batch's vectors and neighbors landed: the norms
-         *  derive on the device, the row count lands, the claim lifts, and the watermark turns over
-         *  the rows once every earlier batch has. A success spends the plan, so a second call answers
-         *  @c uninitialized_k instead of publishing twice, and so does a turn refused by a failure an
-         *  earlier batch kept; any other refusal leaves it whole, so the missing steps can still land. */
+         *  derive on the device unless the metric is dot, the row count lands, the claim lifts, and
+         *  the watermark turns over the rows once every earlier batch has. A success spends the plan,
+         *  so a second call answers @c uninitialized_k instead of publishing twice, and so does a turn
+         *  refused by a failure an earlier batch kept; any other refusal leaves it whole, so the
+         *  missing steps can still land. */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (standard_atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != rows ||
@@ -3433,7 +3461,8 @@ struct dense_vram_index {
             if (rows) {
                 u32_t const blocks = static_cast<u32_t>(index_->device_.multiprocessor_count) *
                                      search_blocks_per_multiprocessor_k;
-                if (failed(cuda_launch(dense_cuda_derive_norms_kernel<kit_t>, blocks, block_threads_k, 0, stream,
+                if (index_->kernel_ != nk_kernel_dot_k &&
+                    failed(cuda_launch(dense_cuda_derive_norms_kernel<kit_t>, blocks, block_threads_k, 0, stream,
                                        index_->planes(), static_cast<u32_t>(base), static_cast<u32_t>(rows))))
                     return index_->fail_(status_t::device_error_k);
                 u32_t const restored = static_cast<u32_t>(base + rows);
@@ -3522,7 +3551,7 @@ struct dense_vram_index {
 
     /** The sharded index walks its shards under one snapshot of their watermarks, merges their attends on its first
      *  device, and publishes or fails their batches together. */
-    template <typename, nk_dtype_t, nk_kernel_kind_t, cuda_arch_t, typename>
+    template <typename, nk_dtype_t, cuda_arch_t, typename>
     friend struct dense_vram_indexes;
 
 #pragma region Insertion
@@ -3843,7 +3872,8 @@ struct dense_vram_index {
             wants_distances ? reinterpret_cast<dense_distance_t*>(staged.value.outputs + ids_bytes) : nullptr;
         cudaStream_t const stream = context.stream();
         if (status_t const launched = launch_walk_(
-                staged.value, dense_cuda_search_sink<kit_t> {device_ids, device_distances, config.count}, stream);
+                staged.value, dense_cuda_search_sink<kit_t> {device_ids, device_distances, config.count, kernel_},
+                stream);
             failed(launched))
             return {{}, launched};
         // The landing may be wider than the count, so a multi-index can hand every shard its own
@@ -4198,7 +4228,10 @@ struct dense_vram_index {
         if (rows <= capacity()) return status_t::success_k;
         std::size_t const neighbors_before = neighbors_plane_.committed_bytes();
         if (status_t status = vectors_plane_.commit(rows * row_bytes()); status != status_t::success_k) return status;
-        if (status_t status = norms_plane_.commit(rows * sizeof(norms_t)); status != status_t::success_k) return status;
+        if (status_t status = kernel_ == nk_kernel_dot_k ? status_t::success_k
+                                                         : norms_plane_.commit(rows * sizeof(norms_t));
+            status != status_t::success_k)
+            return status;
         if (status_t status = neighbors_plane_.commit(rows * connectivity() * sizeof(u32_t));
             status != status_t::success_k)
             return status;
@@ -4273,6 +4306,9 @@ struct dense_vram_index {
     /** Hardware identity: the ordinal comes from the vectors allocator at construction, the
      *  remaining specs fill at the first @c reserve. */
     cuda_device_specs_t device_;
+
+    /** The metric every walk scores by; under dot, the one metric that reads no norms, the norms plane stays empty. */
+    nk_kernel_kind_t kernel_;
 
     /** The frozen geometry word: dimensions high, connectivity low, zero when unreserved. */
     packed_geometry_id_t geometry_ = 0;

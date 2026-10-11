@@ -1599,7 +1599,6 @@ struct dense_nvme_context {
  */
 template <                                                                 //
     nk_dtype_t vector_dtype_ = nk_bf16_k,                                  //
-    nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,                   //
     nk_capability_t capability_ = nk_cap_icelake_k,                        //
     typename engine_type_ = dense_posix_sync_engine<fu::standard_yield_t>, //
     typename offsets_allocator_type_ = std::allocator<byte_t>              //
@@ -1607,7 +1606,6 @@ template <                                                                 //
 struct dense_nvme_index {
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
-    inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
 
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using dot_result_t = typename scalar_t::dot_result_t;
@@ -1631,28 +1629,36 @@ struct dense_nvme_index {
     using offsets_tensor_t = nk::tensor<u64_t, offsets_allocator_t, 1>;
 
     /** The capability bit of the distance kit the chain actually picked - lower than
-     *  @c capability_ when no SIMD kit is adapted for this dtype & metric pair yet. */
+     *  @c capability_ when no SIMD kit is adapted for this dtype yet. */
     inline static constexpr nk_capability_t picked_quads_capability_k =
-        dense_quads_chain<kernel_kind_, scalar_t, capability_>::picked_k;
+        dense_quads_chain<scalar_t, capability_>::picked_k;
 
     /** The strongest @c synchronization_t contract this design honors: the payload
      *  is immutable, so arbitrary readers share one instance with no fences at all. */
     inline static constexpr synchronization_t synchronization_ceiling_k = synchronization_t::immutable_k;
 
-    dense_nvme_index(offsets_allocator_type_ const& allocator = {}) noexcept
-        : offsets_(offsets_allocator_t(allocator)) {}
+    explicit dense_nvme_index(nk_kernel_kind_t kernel, offsets_allocator_type_ const& allocator = {}) noexcept
+        : offsets_(offsets_allocator_t(allocator)), kernel_(kernel) {}
     dense_nvme_index(dense_nvme_index const&) = delete;
     dense_nvme_index& operator=(dense_nvme_index const&) = delete;
     ~dense_nvme_index() noexcept { close(); }
 
+    /** The distance kind every search ranks by, fixed at construction. */
+    nk_kernel_kind_t kernel() const noexcept { return kernel_; }
+
     /** @brief Loads the directory - header & offsets - through ordinary buffered reads,
      *      and keeps a separate descriptor for the engines, optionally @c O_DIRECT.
+     *
+     *  Refuses with @c unknown_kind_k a kernel the dtype's kits cannot finalize, and with
+     *  @c config_mismatch_k a payload serialized under another dtype or kernel.
      *
      *  @param[in] path Payload file or block device holding the serialized graph.
      *  @param[in] caching Routes the engine-side descriptor through the page cache,
      *      or around it - @c O_DIRECT on Linux, @c F_NOCACHE on macOS.
      */
     inline status_t open(char const* path, dense_io_caching_t caching = dense_io_caching_t::cached_k) noexcept {
+        if (!dense_kernel_supported<typename dense_quads_chain<scalar_t, capability_>::kit_t>(kernel_))
+            return status_t::unknown_kind_k;
 #if defined(_WIN32)
         (void)path, (void)caching;
         return status_t::uninitialized_k; // Windows file plumbing arrives with its engine's bring-up.
@@ -1664,7 +1670,7 @@ struct dense_nvme_index {
         if (header_bytes != sizeof(header) || header.magic != dense_index_header_t::magic_k ||
             header.version != dense_index_header_t::version_k)
             return status_t::malformed_k;
-        if (header.dtype != static_cast<u32_t>(vector_dtype_) || header.kernel != static_cast<u32_t>(kernel_kind_))
+        if (header.dtype != static_cast<u32_t>(vector_dtype_) || header.kernel != static_cast<u32_t>(kernel_))
             return status_t::config_mismatch_k;
 
         dimensions_ = header.dimensions;
@@ -1847,20 +1853,11 @@ struct dense_nvme_index {
         return usearch::dense_norms<capability_, scalar_t>(vec);
     }
 
-    /** Trampoline for @c usearch::distance with hardened types. */
-    inline static distance_t distance(                   //
-        vector_view_t query, vector_norms_t query_norms, //
-        vector_view_t candidate, vector_norms_t candidate_norms) noexcept {
-        return usearch::distance<kernel_kind_, capability_, scalar_t>( //
-            query, query_norms, candidate, candidate_norms);
-    }
-
     /** Trampoline for @c usearch::distances with hardened types. */
-    inline static std::array<distance_t, 4> distances(   //
+    inline std::array<distance_t, 4> distances(          //
         vector_view_t query, vector_norms_t query_norms, //
-        std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms) noexcept {
-        return usearch::distances<kernel_kind_, capability_, scalar_t>( //
-            query, query_norms, candidates, candidates_norms);
+        std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms) const noexcept {
+        return usearch::distances<capability_, scalar_t>(kernel_, query, query_norms, candidates, candidates_norms);
     }
 
     /** Issues one record fetch on behalf of @p slot_index, leasing an arena index. */
@@ -2016,6 +2013,7 @@ struct dense_nvme_index {
     }
 
     offsets_tensor_t offsets_;
+    nk_kernel_kind_t kernel_;
     small_size_t dimensions_ = 0;
     small_size_t connectivity_ceiling_ = 0;
     std::size_t record_capacity_ = 0;

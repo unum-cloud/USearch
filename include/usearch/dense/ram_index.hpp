@@ -75,7 +75,6 @@ struct dense_ram_cursor;
  */
 template <                                                                    //
     nk_dtype_t vector_dtype_ = nk_bf16_k,                                     //
-    nk_kernel_kind_t kernel_kind_ = nk_kernel_angular_k,                      //
     nk_capability_t capability_ = nk_cap_icelake_k,                           //
     typename wait_type_ = fu::standard_yield_t,                               //
     template <typename> class atomic_ref_template_ = fu::standard_atomic_ref, //
@@ -180,17 +179,15 @@ struct dense_multiply_fold {
 template <                                          //
     nk_dtype_t vector_dtype_ = nk_bf16_k,           //
     nk_capability_t capability_ = nk_cap_icelake_k, //
-    typename stored_norms_type_ =                   //
-    usearch::vector_norms<typename nk::type_for<vector_dtype_>::type::dot_result_t>,
     typename allocator_type_ = std::allocator<byte_t>>
 struct dense_traversal_context;
 
-template <nk_dtype_t vector_dtype_, nk_capability_t capability_, typename stored_norms_type_, typename allocator_type_>
+template <nk_dtype_t vector_dtype_, nk_capability_t capability_, typename allocator_type_>
 struct dense_traversal_context {
 
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using vector_view_t = nk::vector_view<scalar_t>;
-    using vector_norms_t = stored_norms_type_;
+    using vector_norms_t = usearch::vector_norms<typename scalar_t::dot_result_t>;
 
     using allocator_t = allocator_type_;
     using candidates_allocator_t =
@@ -345,9 +342,9 @@ struct dense_traversal_context {
     [[no_unique_address]] allocator_t allocator_;
 };
 
-template <                                                                                //
-    nk_dtype_t vector_dtype_, nk_kernel_kind_t kernel_kind_, nk_capability_t capability_, //
-    typename wait_type_, template <typename> class atomic_ref_template_,                  //
+template <                                                               //
+    nk_dtype_t vector_dtype_, nk_capability_t capability_,               //
+    typename wait_type_, template <typename> class atomic_ref_template_, //
     typename cache_hints_type_, typename vectors_allocator_type_, typename neighbors_allocator_type_,
     typename traversals_allocator_type_> //
 struct dense_ram_index {
@@ -375,9 +372,8 @@ struct dense_ram_index {
     using vector_view_t = nk::vector_view<scalar_t>;
     using vector_span_t = nk::vector_span<scalar_t>;
 
-    /** What the chunks store per row: real moments for norm-consuming finalizes, the zero-size
-     *  stand-in for dot, which spares the second random gather per candidate. */
-    using vector_norms_t = stored_norms<kernel_kind_, scalar_t>;
+    /** What the norms chunks store per row, for the metrics whose finalize reads them. */
+    using vector_norms_t = vector_norms<dot_result_t>;
 
     using vectors_view_t = nk::matrix_view<scalar_t>;
     using node_ids_span_t = nk::vector_span<node_id_t>;
@@ -400,38 +396,30 @@ struct dense_ram_index {
     friend struct dense_ram_cursor;
 
     // The sharded index walks every shard under one token's attention heads, so one running state spans them.
-    template <typename, nk_dtype_t, nk_kernel_kind_t, nk_capability_t, typename, template <typename> class, typename,
-              typename>
+    template <typename, nk_dtype_t, nk_capability_t, typename, template <typename> class, typename, typename>
     friend struct dense_ram_indexes;
 
-    inline static constexpr nk_kernel_kind_t kernel_kind_k = kernel_kind_;
-
     /** The capability bit of the distance kit the chain actually picked - lower than
-     *  @c capability_ when no SIMD kit is adapted for this dtype & metric pair yet. */
+     *  @c capability_ when no SIMD kit is adapted for this dtype yet. */
     inline static constexpr nk_capability_t picked_quads_capability_k =
-        dense_quads_chain<kernel_kind_, scalar_t, capability_>::picked_k;
+        dense_quads_chain<scalar_t, capability_>::picked_k;
 
     /** The tile backend's capability, on its own independent axis - one machine runs icelake
      *  1-to-1 kernels and sapphireamx tiles simultaneously. */
     inline static constexpr nk_capability_t picked_tiles_capability_k =
-        dense_tiles_chain<kernel_kind_, scalar_t, capability_>::picked_k;
+        dense_tiles_chain<scalar_t, capability_>::picked_k;
 
     /** The tile kit behind the tiled refinement paths; @c no_tiles_kit_t when none compiled. */
-    using tiles_kit_t = typename dense_tiles_chain<kernel_kind_, scalar_t, capability_>::kit_t;
+    using tiles_kit_t = typename dense_tiles_chain<scalar_t, capability_>::kit_t;
 
     /** The distance kit the chain picked; its step is the row pitch the chunks round to. */
-    using quads_kit_t = typename dense_quads_chain<kernel_kind_, scalar_t, capability_>::kit_t;
+    using quads_kit_t = typename dense_quads_chain<scalar_t, capability_>::kit_t;
 
-    /** Whether a tile engine is compiled in for this kernel & dtype pair. */
-    inline static constexpr bool has_tiles_k = dense_tiles_chain<kernel_kind_, scalar_t, capability_>::has_tiles_k;
-    static_assert( //
-        kernel_kind_k == nk_kernel_dot_k || kernel_kind_k == nk_kernel_angular_k ||
-        kernel_kind_k == nk_kernel_euclidean_k || kernel_kind_k == nk_kernel_sqeuclidean_k ||
-        kernel_kind_k == nk_kernel_hamming_k || kernel_kind_k == nk_kernel_jaccard_k);
+    /** Whether a tile engine is compiled in for this dtype. */
+    inline static constexpr bool has_tiles_k = dense_tiles_chain<scalar_t, capability_>::has_tiles_k;
 
     /** Each thread scanning the graph needs its own object like this. */
-    using dense_traversal_context_t =
-        dense_traversal_context<vector_dtype_, capability_, vector_norms_t, candidates_allocator_t>;
+    using dense_traversal_context_t = dense_traversal_context<vector_dtype_, capability_, candidates_allocator_t>;
     using results_array_t = typename dense_traversal_context_t::results_array_t;
     using frontier_queue_t = typename dense_traversal_context_t::frontier_queue_t;
     using visited_set_t = typename dense_traversal_context_t::visited_set_t;
@@ -505,21 +493,25 @@ struct dense_ram_index {
     dense_ram_index& operator=(dense_ram_index&&) noexcept = delete;
 
     /**
-     *  @brief Constructs an empty index, remembering the allocators to hand to every future chunk.
+     *  @brief Constructs an empty index walking by @p kernel, remembering the allocators to hand to every
+     *      future chunk; a @p kernel the dtype's kits cannot finalize is refused at the first @c reserve.
      *
      *  The chunk directories pad every header to @c default_alignment_k, so a grower's
      *  half-built header never shares a cache line with the ones readers dereference. Their
      *  storage is allocated lazily, ahead of the first chunk.
      */
-    dense_ram_index(vectors_allocator_type_ const& vectors_allocator = {},
-                    neighbors_allocator_type_ const& neighbors_allocator = {}) noexcept
+    explicit dense_ram_index(nk_kernel_kind_t kernel, vectors_allocator_type_ const& vectors_allocator = {},
+                             neighbors_allocator_type_ const& neighbors_allocator = {}) noexcept
         : vectors_allocator_(vectors_allocator), neighbors_allocator_(neighbors_allocator),
           vectors_chunks_(vectors_allocator, round_up_to_multiple(sizeof(vectors_chunk_t), default_alignment_k)),
           norms_chunks_(vectors_allocator, round_up_to_multiple(sizeof(norms_chunk_t), default_alignment_k)),
-          neighbors_chunks_(neighbors_allocator, round_up_to_multiple(sizeof(neighbors_chunk_t), default_alignment_k)) {
-    }
+          neighbors_chunks_(neighbors_allocator, round_up_to_multiple(sizeof(neighbors_chunk_t), default_alignment_k)),
+          kernel_(kernel) {}
 
 #pragma region Measures
+
+    /** The distance kind every walk ranks by, fixed at construction. */
+    nk_kernel_kind_t kernel() const noexcept { return kernel_; }
 
     /** Number of published vectors - the visibility watermark; the index itself stores no keys. */
     std::size_t size() const noexcept {
@@ -567,7 +559,7 @@ struct dense_ram_index {
         std::size_t const rows = chunk_schedule_t::rows_before(chunks);
         std::size_t bytes = sizeof(dense_ram_index);
         bytes += rows * padded_row_values(frozen) * sizeof(scalar_t);
-        if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>) bytes += rows * sizeof(vector_norms_t);
+        if (stores_norms()) bytes += rows * sizeof(vector_norms_t);
         bytes += rows * frozen.connectivity() * sizeof(node_id_t);
         return bytes;
     }
@@ -668,9 +660,11 @@ struct dense_ram_index {
      *  receives @c status_t::config_mismatch_k, as does a geometry with no dimensions, with sub-byte
      *  dimensions that leave a storage value partly filled, or with a connectivity that is not a
      *  power of two. Constructors allocate nothing, so every storage
-     *  failure surfaces here, in the returned status.
+     *  failure surfaces here, in the returned status, and so does a kernel the dtype's kits cannot
+     *  finalize, as @c status_t::unknown_kind_k.
      */
     expected<std::size_t> reserve(reserve_capacity_t config) noexcept {
+        if (!dense_kernel_supported<quads_kit_t>(kernel_)) return {0, status_t::unknown_kind_k};
         // Sub-byte rows fill whole storage values: a ragged tail would be dropped by the kernels' tail loads.
         if (!config.dimensions || config.dimensions % nk::dimensions_per_value<scalar_t>() ||
             !std::has_single_bit(static_cast<u32_t>(config.connectivity)))
@@ -1521,11 +1515,13 @@ struct dense_ram_index {
      *  @param[inout] context The calling thread's scratch & telemetry: the matches end up in
      *      @c context.results, ascending by distance - the highest score first.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     *  @return @c config_mismatch_k unless the index walks by dot.
      */
     expected<search_result_t> search(vector_view_t query_vector, dense_indexer_heads<scalar_t> const& heads,
                                      dense_traversal_context_t& context, search_config_t config = {}) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k && !nk::is_integral_dtype<scalar_t>())
+        requires(!nk::is_integral_dtype<scalar_t>())
     {
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         return walk_(query_vector, dummy_fold_t {}, dense_indexer_rescoring<capability_, scalar_t> {heads}, context,
                      config, static_cast<node_id_t>(size()));
     }
@@ -1580,14 +1576,13 @@ struct dense_ram_index {
      *  @param[out] products The dot of each kept pair, parallel to @p node_ids.
      *  @param[inout] context The calling thread's scratch & telemetry.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
-     *  @return The pairs scored in @c count - above the spans' width when they were truncated.
+     *  @return The pairs scored in @c count - above the spans' width when they were truncated - or
+     *      @c config_mismatch_k unless the index walks by dot.
      */
     expected<search_result_t> multiply(vector_view_t left, std::span<dense_node_id_t> node_ids,
                                        std::span<dot_result_t> products, dense_traversal_context_t& context,
-                                       search_config_t config = {}) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k)
-    {
-        if (products.size() != node_ids.size()) return {{}, status_t::config_mismatch_k};
+                                       search_config_t config = {}) noexcept {
+        if (kernel_ != nk_kernel_dot_k || products.size() != node_ids.size()) return {{}, status_t::config_mismatch_k};
         dense_multiply_fold<dense_node_id_t, dot_result_t> fold {node_ids, products};
         expected<search_result_t> walked = search(left, fold, context, config);
         walked.value.count = fold.scored;
@@ -1614,15 +1609,14 @@ struct dense_ram_index {
      *  @param[out] carry Every query row's softmax state, which merges this walk with other branches.
      *  @param[inout] context The calling thread's scratch & telemetry.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
-     *  @return The query rows attended in @c count.
+     *  @return The query rows attended in @c count, or @c config_mismatch_k unless the index walks by dot.
      */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
                                      f32_t score_scale, std::span<f32_t> outputs,
                                      std::span<dense_softmax_state_t> carry, dense_traversal_context_t& context,
-                                     search_config_t config = {}) noexcept
-        requires(kernel_kind_ == nk_kernel_dot_k)
-    {
+                                     search_config_t config = {}) noexcept {
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         std::size_t const rows_count = queries.extent(0), columns = queries.extent(1);
         if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
         if (outputs.size() != rows_count * columns || carry.size() != rows_count)
@@ -2067,10 +2061,10 @@ struct dense_ram_index {
                     bytes_of(vectors.row(row).data(), row_values),
                     columns.vectors.subspan(vectors_first + row * row_bytes, row_bytes));
             }
-            if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>)
+            if (index_->stores_norms())
                 for (std::size_t offset_in_chunk = 0; offset_in_chunk != range.size(); ++offset_in_chunk) {
                     location_t const row {location.chunk, location.offset + offset_in_chunk};
-                    index_->norm_ref_for(row) = dense_norms(index_->vector_for(row));
+                    index_->norm_ref_for(row) = index_->dense_norms(index_->vector_for(row));
                 }
             atomic_ref<std::size_t>(covered_vectors).add(range.size(), std::memory_order_release);
 
@@ -2178,52 +2172,48 @@ struct dense_ram_index {
 
 #pragma region Storage
 
-    /** Trampoline for the kernel-aware @c usearch::dense_norms with hardened types - computed
-     *  moments for norm-consuming kernels, the empty stand-in for dot. */
-    inline static vector_norms_t dense_norms(vector_view_t vec) noexcept {
-        return usearch::dense_norms<kernel_kind_, capability_, scalar_t>(vec);
+    /** Whether rows keep norms: every metric but dot finalizes through them, and so does dot on a kit whose
+     *  finalize subtracts the candidates' row sums. Otherwise the norms chunks stay empty. */
+    inline bool stores_norms() const noexcept {
+        return kernel_ != nk_kernel_dot_k || dense_quads_compensated<quads_kit_t>;
     }
 
-    /** Trampoline for @c usearch::distance with hardened types. */
-    inline static distance_t distance(                   //
-        vector_view_t query, vector_norms_t query_norms, //
-        vector_view_t candidate, vector_norms_t candidate_norms) noexcept {
-        return usearch::distance<kernel_kind_, capability_, scalar_t>( //
-            query, query_norms, candidate, candidate_norms);
+    /** Trampoline for @c usearch::dense_norms with hardened types - zeroed moments, without touching the
+     *  vector, when the rows keep none. */
+    inline vector_norms_t dense_norms(vector_view_t vec) const noexcept {
+        return stores_norms() ? usearch::dense_norms<capability_, scalar_t>(vec) : vector_norms_t {};
     }
 
     /** Trampoline for @c usearch::distances with hardened types. */
-    inline static std::array<distance_t, 4> distances(   //
+    inline std::array<distance_t, 4> distances(          //
         vector_view_t query, vector_norms_t query_norms, //
-        std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms) noexcept {
-        return usearch::distances<kernel_kind_, capability_, scalar_t>( //
-            query, query_norms, candidates, candidates_norms);
+        std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms) const noexcept {
+        return usearch::distances<capability_, scalar_t>(kernel_, query, query_norms, candidates, candidates_norms);
     }
 
     /** Trampoline for @c usearch::scores with hardened types - the walk's scoring, whose dots a fold reads. */
-    inline static dense_scores<dot_result_t, 4> scores(  //
+    inline dense_scores<dot_result_t, 4> scores(         //
         vector_view_t query, vector_norms_t query_norms, //
-        std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms) noexcept {
-        return usearch::scores<kernel_kind_, capability_, scalar_t>( //
-            query, query_norms, candidates, candidates_norms);
+        std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms) const noexcept {
+        return usearch::scores<capability_, scalar_t>(kernel_, query, query_norms, candidates, candidates_norms);
     }
 
     /** As @c scores, streaming @p next_candidates in under this CPU class's cache hints. */
-    inline static dense_scores<dot_result_t, 4> scores(                                          //
+    inline dense_scores<dot_result_t, 4> scores(                                                 //
         vector_view_t query, vector_norms_t query_norms,                                         //
         std::array<vector_view_t, 4> candidates, std::array<vector_norms_t, 4> candidates_norms, //
-        std::array<vector_view_t, 4> next_candidates) noexcept {
-        return usearch::scores<kernel_kind_, capability_, scalar_t>( //
-            query, query_norms, candidates, candidates_norms, next_candidates, cache_hints_type_ {});
+        std::array<vector_view_t, 4> next_candidates) const noexcept {
+        return usearch::scores<capability_, scalar_t>( //
+            kernel_, query, query_norms, candidates, candidates_norms, next_candidates, cache_hints_type_ {});
     }
 
     /** Scores @p query against four consecutive entries of the cached @p vectors & @p norms
      *  arrays starting at @p start; the gather cursor sticks at @p count - 1, so short tails
      *  repeat the last entry and the kernel always streams four valid lanes. */
-    inline static std::array<distance_t, 4> distances_quad_of(     //
+    inline std::array<distance_t, 4> distances_quad_of(            //
         vector_view_t query, vector_norms_t query_norms,           //
         vector_view_t const* vectors, vector_norms_t const* norms, //
-        small_size_t start, small_size_t count) noexcept {
+        small_size_t start, small_size_t count) const noexcept {
         std::array<vector_view_t, 4> lane_vectors;
         std::array<vector_norms_t, 4> lane_norms;
         for (small_size_t lane = 0, source = start; lane != lane_vectors.size(); ++lane) {
@@ -2351,11 +2341,11 @@ struct dense_ram_index {
         return vectors_chunks_[location.chunk].row(location.offset).as_vector();
     }
 
-    /** Copy of the pre-computed norms of the vector stored at @p location - the empty stand-in,
-     *  without touching memory, when the kernel never reads norms. */
+    /** Copy of the pre-computed norms of the vector stored at @p location - zeroed moments, without
+     *  touching memory, when the rows keep none. */
     inline vector_norms_t norm_for(location_t const& location) const noexcept {
-        if constexpr (std::is_same_v<vector_norms_t, no_norms_t>) return {};
-        else return norms_chunks_[location.chunk][location.offset];
+        if (!stores_norms()) return {};
+        return norms_chunks_[location.chunk][location.offset];
     }
 
     /** Mutable reference to the norms slot at @p location - only for the slot's unpublished owner. */
@@ -2407,10 +2397,9 @@ struct dense_ram_index {
             std::size_t const chunk_rows = chunk_schedule_t::rows_in(chunks_count_);
 
             auto vectors_chunk = vectors_chunk_t::zeros({chunk_rows, chunk_dimensions}, vectors_allocator_);
-            // Norms chunks exist only for kernels whose finalize reads them; dot pays nothing.
+            // Norms chunks exist only when the finalize reads them, which a dot does on compensated kits alone.
             nk::expected<norms_chunk_t> norms_chunk {{}, nk::status_t::success_k};
-            if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>)
-                norms_chunk = norms_chunk_t::zeros({chunk_rows}, norms_allocator_t(vectors_allocator_));
+            if (stores_norms()) norms_chunk = norms_chunk_t::zeros({chunk_rows}, norms_allocator_t(vectors_allocator_));
             // The all-ones fill is load-bearing: a sentinel leading slot reads as unpublished, and
             // sentinel tails terminate short rows, so no neighbor counts are stored anywhere.
             auto neighbors_chunk = neighbors_chunk_t::full( //
@@ -2509,10 +2498,10 @@ struct dense_ram_index {
     std::size_t select_diverse(results_array_t const& candidates, std::size_t limit, selection_t& out,
                                dense_traversal_context_t& context) const noexcept {
         // Pools spanning at least one tile take the rectangles, keyed off `tile_span_k` alone
-        // rather than a tuned threshold.
+        // rather than a tuned threshold. Dot inserts faster on quads, so it never takes them.
         std::size_t computed_distances;
         if constexpr (has_tiles_k)
-            computed_distances = candidates.size() >= tile_span_k
+            computed_distances = candidates.size() >= tile_span_k && kernel_ != nk_kernel_dot_k
                                      ? select_diverse_via_tiles(candidates, limit, out, context)
                                      : select_diverse_via_quads(candidates, limit, out, context);
         else computed_distances = select_diverse_via_quads(candidates, limit, out, context);
@@ -2646,7 +2635,7 @@ struct dense_ram_index {
                     for (std::size_t depth_tile = 0; depth_tile != depth_tiles; ++depth_tile)
                         tiles_kit_t::update_tile(accumulator, a_tiles[depth_tile],
                                                  kept_tiles[kept_tile * depth_tiles + depth_tile]);
-                    tiles_kit_t::finalize_tile(accumulator, span_norms, kept_tile_norms, //
+                    tiles_kit_t::finalize_tile(kernel_, accumulator, span_norms, kept_tile_norms, //
                                                pairs + kept_tile * columns_k, stride);
                 }
                 computed_distances += span_count * kept_tiles_frozen * columns_k;
@@ -2758,7 +2747,7 @@ struct dense_ram_index {
                     tiles_kit_t::update_tile(accumulator, a_tiles[depth_tile],
                                              b_tiles[column_tile * depth_tiles + depth_tile]);
                 tiles_kit_t::finalize_tile(
-                    accumulator, row_norms, column_norms,
+                    kernel_, accumulator, row_norms, column_norms,
                     context.pair_distances.data() + row_tile * rows_k * stride + column_tile * columns_k, stride);
             }
         }
@@ -2976,10 +2965,12 @@ struct dense_ram_index {
             refining_candidates.clear();
             selection_t& refined = context.refined_neighbors;
             std::size_t refine_distances = 0;
-            if constexpr (has_tiles_k) {
-                refine_distances = stage_scores_via_tiles(neighbor_vector, neighbor_norms, new_vector, new_norms,
-                                                          selected[selected_index].distance, context);
-                select_diverse_via_pairs(refining_candidates, node_connectivity, refined, new_node_id, context);
+            if (has_tiles_k && kernel_ != nk_kernel_dot_k) {
+                if constexpr (has_tiles_k) {
+                    refine_distances = stage_scores_via_tiles(neighbor_vector, neighbor_norms, new_vector, new_norms,
+                                                              selected[selected_index].distance, context);
+                    select_diverse_via_pairs(refining_candidates, node_connectivity, refined, new_node_id, context);
+                }
             }
             else {
                 refine_distances = stage_scores_via_quads(neighbor_vector, neighbor_norms, new_node_id,
@@ -3035,7 +3026,7 @@ struct dense_ram_index {
         vector_span_t const owned_vector = vector_span_for(new_location);
         std::memcpy(owned_vector.byte_data(), new_vector.byte_data(), stored_row_values(frozen) * sizeof(scalar_t));
         vector_norms_t const new_norms = dense_norms(owned_vector);
-        if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>) norm_ref_for(new_location) = new_norms;
+        if (stores_norms()) norm_ref_for(new_location) = new_norms;
 
         // The first row of a virgin index finds nothing to walk to and publishes with no neighbors;
         // later rows wire back to it.
@@ -3206,7 +3197,8 @@ struct dense_ram_index {
         }
 
         void operator()(std::array<node_id_t, 4> const& ids, std::array<vector_view_t, 4> const& keys,
-                        dense_scores<dot_result_t, 4>& scores, std::size_t count) const noexcept {
+                        std::array<vector_norms_t, 4> const& norms, dense_scores<dot_result_t, 4>& scores,
+                        std::size_t count) const noexcept {
             if (failed(status)) return;
             std::size_t const columns = queries.extent(1), head_count = carry.size();
             std::array<vector_view_t, 4> rows;
@@ -3226,11 +3218,15 @@ struct dense_ram_index {
                 std::array<std::array<f32_t, 8>, 4> weights {};
                 std::array<f32_t, 8> corrections {};
                 for (std::size_t head = 0; head != group; ++head) {
+                    vector_view_t const head_row = queries.row(first + head).as_vector();
+                    // A compensated finalize reads the head's own row sum beside the keys' stored ones.
+                    vector_norms_t head_norms {};
+                    if constexpr (dense_quads_compensated<quads_kit_t>)
+                        if (first + head) head_norms = usearch::dense_norms<capability_>(head_row);
                     dense_scores<dot_result_t, 4> const head_scores =
-                        first + head ? usearch::scores<nk_kernel_dot_k, capability_, scalar_t>(
-                                           queries.row(first + head).as_vector(), no_norms_t {}, keys,
-                                           std::array<no_norms_t, 4> {})
-                                     : scores;
+                        first + head
+                            ? usearch::scores<capability_, scalar_t>(nk_kernel_dot_k, head_row, head_norms, keys, norms)
+                            : scores;
                     dense_softmax_state_t& state = carry[first + head];
                     f32_t maximum = state.maximum_score;
                     for (std::size_t lane = 0; lane != count; ++lane) {
@@ -3458,7 +3454,7 @@ struct dense_ram_index {
         }
         dense_scores<dot_result_t, 4> landmark_scores = scores( //
             query, query_norms, landmarks_vectors, landmarks_norms);
-        rescoring(landmarks_ids, landmarks_vectors, landmark_scores, landmarks_in_batch);
+        rescoring(landmarks_ids, landmarks_vectors, landmarks_norms, landmark_scores, landmarks_in_batch);
         context.computed_distances += landmarks_in_batch;
         std::array<dense_scored_node_t, 4> landmarks_scored;
         for (small_size_t lane = 0; lane != landmarks_in_batch; ++lane)
@@ -3612,7 +3608,7 @@ struct dense_ram_index {
                     query, query_norms, gathered_vectors, gathered_norms,
                     vectors_quad_of(candidate_neighbors, neighbor_slot, admission.first_invisible_id,
                                     gathered_vectors));
-                rescoring(gathered_ids, gathered_vectors, gathered_scores, gathered_count);
+                rescoring(gathered_ids, gathered_vectors, gathered_norms, gathered_scores, gathered_count);
                 context.computed_distances += gathered_count;
                 std::array<dense_scored_node_t, 4> scored_batch;
                 for (small_size_t lane = 0; lane != gathered_count; ++lane)
@@ -3692,6 +3688,9 @@ struct dense_ram_index {
 
     /** Read-mostly after the freeze - kept off the watermark's line with the other cold members. */
     alignas(default_alignment_k) geometry_t geometry_ {};
+
+    /** The distance kind every walk ranks by; only the distance epilogue and the norms plane read it. */
+    nk_kernel_kind_t kernel_;
 
     /** Constructed chunks per directory. Deliberately non-atomic: only the elected grower mutates
      *  it, and successive growers are ordered by the acquire/release pair on
