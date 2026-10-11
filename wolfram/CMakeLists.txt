@@ -5,9 +5,11 @@ if (NOT WOLFRAM_PATH)
     set(WOLFRAM_PATH "/usr/local/Wolfram/Mathematica")
 endif ()
 
-if (TARGET usearch_static)
+# The C interface's archive is declared in `c/`, which the root adds after this directory, so the switch decides rather
+# than the target's existence.
+if (USEARCH_BUILD_LIB_C)
     set(USEARCH_WOLFRAM_LIBRARY usearch_static)
-elseif (TARGET usearch_static_stub)
+elseif (USEARCH_BUILD_LIB_C_STUB)
     set(USEARCH_WOLFRAM_LIBRARY usearch_static_stub)
 else ()
     message(FATAL_ERROR "The Wolfram SDK links the C interface; configure with `-DUSEARCH_BUILD_LIB_C=1`.")
@@ -17,7 +19,7 @@ endif ()
 # link.
 add_library(usearch_wolfram SHARED lib.c)
 usearch_setup_target(usearch_wolfram)
-target_include_directories(usearch_wolfram PRIVATE "${WOLFRAM_PATH}/SystemFiles/IncludeFiles/C/")
+target_include_directories(usearch_wolfram SYSTEM PRIVATE "${WOLFRAM_PATH}/SystemFiles/IncludeFiles/C/")
 target_link_libraries(usearch_wolfram PRIVATE ${USEARCH_WOLFRAM_LIBRARY})
 
 # The one target without a `lib` prefix: Wolfram finds a library in `LibraryResources/$SystemID` by its bare name.
