@@ -250,25 +250,30 @@ concept extended_atomic_ref = requires(reference_type_ reference, value_type_ va
     reference.fetch_add_if_at_most(value, value, std::memory_order_relaxed);
 };
 
+/** A reference spelling only the standard's verbs, such as @c std::atomic_ref, for which the
+ *  functions below spell the rest. */
 template <typename reference_type_, typename value_type_>
-    requires(!extended_atomic_ref<reference_type_, value_type_>)
+concept plain_atomic_ref = !extended_atomic_ref<reference_type_, value_type_>;
+
+template <typename reference_type_, typename value_type_>
+    requires plain_atomic_ref<reference_type_, value_type_>
 void atomic_add(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
     reference.fetch_add(operand, order);
 }
 template <typename reference_type_, typename value_type_>
-    requires(!extended_atomic_ref<reference_type_, value_type_>)
+    requires plain_atomic_ref<reference_type_, value_type_>
 void atomic_sub(reference_type_ reference, value_type_ operand, std::memory_order order) noexcept {
     reference.fetch_sub(operand, order);
 }
 template <typename reference_type_, typename value_type_>
-    requires(!extended_atomic_ref<reference_type_, value_type_>)
+    requires plain_atomic_ref<reference_type_, value_type_>
 void atomic_clear_bits(reference_type_ reference, value_type_ bits, std::memory_order order) noexcept {
     reference.fetch_and(static_cast<value_type_>(~bits), order);
 }
 
 /** Adds @p operand only if the sum stays at most @p limit; returns the value held before. */
 template <typename reference_type_, typename value_type_>
-    requires(!extended_atomic_ref<reference_type_, value_type_>)
+    requires plain_atomic_ref<reference_type_, value_type_>
 value_type_ atomic_fetch_add_if_at_most(reference_type_ reference, value_type_ operand, value_type_ limit,
                                         std::memory_order order) noexcept {
     value_type_ observed = reference.load(std::memory_order_relaxed);

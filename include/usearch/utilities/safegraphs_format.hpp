@@ -283,6 +283,17 @@ struct safegraphs_header_t {
         if (!column.offsets) return {};
         return slice_of(monolith, data_offset + column.offsets->bytes.first, column.offsets->bytes.size());
     }
+
+    /** The norms column's bytes when they are the ones a reader keeping @p dtype norms takes: a sum
+     *  and a sum of squares for every node; empty otherwise, and always for an @c unknown_k
+     *  @p dtype, which keeps none. */
+    template <typename bytes_type_>
+    bytes_type_ norms_of(bytes_type_ monolith, dtype_t dtype) const noexcept {
+        if (dtype == dtype_t::unknown_k || norms.dtype != dtype || norms.offsets ||
+            norms.shape != safegraphs_norms_shape_k || norms.nodes() != nodes())
+            return {};
+        return data_of(monolith, norms);
+    }
 };
 
 /** Reads @p value into @p extent, answering false where this host cannot address it. A

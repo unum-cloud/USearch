@@ -77,8 +77,7 @@ static_assert(cuda_reservable_allocator<counting_cuda_allocator_t>);
  *  while counting past it, a short row ends in sentinels, every kept pair names a distinct stored row with its
  *  exact dot, and mismatched spans refuse. */
 template <typename index_type_, typename make_index_type_>
-    requires dense_device_resident<index_type_>
-std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
+std::size_t dense_expect_vram_multiply(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using dot_result_t = typename index_type_::dot_result_t;
     using search_config_t = typename index_type_::search_config_t;
@@ -133,16 +132,16 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
     return failures;
 }
 
-/** The host overloads - the dot kernel's and every other kernel's empty one - pick alongside the device one below. */
-using test::test_dense_multiply;
-
-/** @ref dense_expect_multiply, then the ledger it left must balance. */
+/** @ref dense_expect_vram_multiply for the dot kernel, then the ledger it left must balance; no
+ *  other kernel offers it. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-    requires(kernel_ == nk_kernel_dot_k && dense_device_resident<index_type_>)
-std::size_t test_dense_multiply(make_index_type_ const& make_index, u64_t seed) {
-    allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_multiply<index_type_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+std::size_t test_dense_vram_multiply(make_index_type_ const& make_index, u64_t seed) {
+    if constexpr (kernel_ != nk_kernel_dot_k) return 0;
+    else {
+        allocation_ledger_t ledger;
+        std::size_t const failures = dense_expect_vram_multiply<index_type_>(make_index, ledger, seed);
+        return failures + expect_eq(ledger.live_bytes.load(), 0);
+    }
 }
 
 /** A device lookup over a value table whose rows sit a 16-byte pitch apart: an ID below @c count names its row, a node
@@ -191,8 +190,7 @@ dense_cuda_value_table<fragment_type_> dense_cuda_upload_values(nk::matrix_view<
  *  row, mismatched outputs, and a head count that does not divide the rows or whose softmax states and accumulators
  *  no warp seats refuse. */
 template <typename index_type_, typename make_index_type_>
-    requires dense_device_resident<index_type_>
-std::size_t dense_expect_attend(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
+std::size_t dense_expect_vram_attend(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using lookup_t = dense_cuda_value_lookup<typename index_type_::fragment_t>;
     constexpr std::size_t nodes_count = dense_thread_nodes_k, tokens_count = 4, crowded_heads = 1024;
@@ -256,14 +254,14 @@ std::size_t dense_expect_attend(make_index_type_ const& make_index, allocation_l
     return failures;
 }
 
-/** @ref dense_expect_attend for the dot kernel, then the ledger it left must balance; no other kernel offers it. */
+/** @ref dense_expect_vram_attend for the dot kernel, then the ledger it left must balance; no other
+ *  kernel offers it. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-    requires dense_device_resident<index_type_>
-std::size_t test_dense_attend(make_index_type_ const& make_index, u64_t seed) {
+std::size_t test_dense_vram_attend(make_index_type_ const& make_index, u64_t seed) {
     if constexpr (kernel_ != nk_kernel_dot_k) return 0;
     else {
         allocation_ledger_t ledger;
-        std::size_t const failures = dense_expect_attend<index_type_>(make_index, ledger, seed);
+        std::size_t const failures = dense_expect_vram_attend<index_type_>(make_index, ledger, seed);
         return failures + expect_eq(ledger.live_bytes.load(), 0);
     }
 }
@@ -271,8 +269,8 @@ std::size_t test_dense_attend(make_index_type_ const& make_index, u64_t seed) {
 /** Device search under indexer heads against the @c f64 oracle, every node ID its stored row: a pool as wide as the
  *  index walks every node, so each query lands exactly the top by the score Σₕ wₕ · ReLU(qₕ · k), at 1 − score. */
 template <typename index_type_, typename make_index_type_>
-    requires dense_device_resident<index_type_>
-std::size_t dense_expect_indexer_search(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
+std::size_t dense_expect_vram_indexer_search(make_index_type_ const& make_index, allocation_ledger_t& ledger,
+                                             u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     constexpr std::size_t nodes_count = dense_thread_nodes_k, queries_count = 4, wanted = 16;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
@@ -303,14 +301,14 @@ std::size_t dense_expect_indexer_search(make_index_type_ const& make_index, allo
     return failures;
 }
 
-/** @ref dense_expect_indexer_search for the dot kernel over floating-point keys, then the ledger must balance. */
+/** @ref dense_expect_vram_indexer_search for the dot kernel over floating-point keys, then the
+ *  ledger must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-    requires dense_device_resident<index_type_>
-std::size_t test_dense_indexer_search(make_index_type_ const& make_index, u64_t seed) {
+std::size_t test_dense_vram_indexer_search(make_index_type_ const& make_index, u64_t seed) {
     if constexpr (kernel_ != nk_kernel_dot_k || nk::is_integral_dtype<typename index_type_::scalar_t>()) return 0;
     else {
         allocation_ledger_t ledger;
-        std::size_t const failures = dense_expect_indexer_search<index_type_>(make_index, ledger, seed);
+        std::size_t const failures = dense_expect_vram_indexer_search<index_type_>(make_index, ledger, seed);
         return failures + expect_eq(ledger.live_bytes.load(), 0);
     }
 }
@@ -339,9 +337,9 @@ std::size_t test_cuda_configuration(char const* name, u64_t seed) {
     failures_count += test_dense_refine_settles<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_health_audits<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_heal_islands<index_t>(make_index, seed);
-    failures_count += test_dense_multiply<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_attend<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_indexer_search<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_vram_multiply<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_vram_attend<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_vram_indexer_search<index_t, kernel_>(make_index, seed);
     return report(name, failures_count);
 }
 

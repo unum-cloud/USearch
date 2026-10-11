@@ -1292,7 +1292,8 @@ struct dense_vram_indexes {
             if (step.shard >= plans_.size() || step.part >= parts_.size()) return status_t::config_mismatch_k;
             part_t const& part = parts_[step.part];
             typename index_t::columns_view_t const columns {part.header.data_of(part.monolith, part.header.value),
-                                                            part.header.data_of(part.monolith, part.header.neighbors)};
+                                                            part.header.data_of(part.monolith, part.header.neighbors),
+                                                            part.header.norms_of(part.monolith, norms_column_dtype_k)};
             return plans_[step.shard].load(step.inner, columns, step.source_range);
         }
 
@@ -1515,6 +1516,53 @@ struct dense_vram_indexes {
             ++total;
         });
         return total;
+    }
+
+    /**
+     *  @brief The batched @ref count: the entries stored under every key of @p keys.
+     *
+     *  @param[in] keys The keys to count, repeats and absent ones included.
+     *  @param[out] entries The entries under each key, parallel to @p keys; zero means absent.
+     *  @param[inout] executor Unused here, since the locator map lives on the host; it rides in the
+     *      signature so a caller drives a device index exactly as it drives a host one.
+     */
+    status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t&) const noexcept {
+        if (entries.size() != keys.size()) return status_t::config_mismatch_k;
+        for (std::size_t position = 0; position != keys.size(); ++position) entries[position] = count(keys[position]);
+        return status_t::success_k;
+    }
+
+    /** The batched @ref contains: one in @p entries where a key of @p keys holds any entry, zero
+     *  where it holds none; the executor rides in the signature as in the batched @ref count. */
+    status_t contains(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t&) const noexcept {
+        if (entries.size() != keys.size()) return status_t::config_mismatch_k;
+        for (std::size_t position = 0; position != keys.size(); ++position)
+            entries[position] = contains(keys[position]) ? 1 : 0;
+        return status_t::success_k;
+    }
+
+    /**
+     *  @brief The batched @ref get: up to @p wanted rows of every key of @p keys, and every key's
+     *      true total, each row riding one blocking device-to-host copy as in the single-key form.
+     *
+     *  @param[in] keys The keys to export, repeats and absent ones included.
+     *  @param[out] vectors @b [keys·wanted,dimensions]: row q · @p wanted + i is the i-th row of
+     *      key q.
+     *  @param[in] wanted Rows kept per key.
+     *  @param[out] entries The true total under each key, parallel to @p keys; above @p wanted
+     *      when its rows truncated, zero when absent.
+     *  @param[inout] executor Unused here, as in the batched @ref count.
+     */
+    status_t get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
+                 std::span<std::size_t> entries, executor_t&) const noexcept {
+        if (entries.size() != keys.size() || vectors.extent(0) < keys.size() * wanted ||
+            (wanted && vectors.extent(1) < row_values_()))
+            return status_t::config_mismatch_k;
+        for (std::size_t position = 0; position != keys.size(); ++position) {
+            std::size_t const first = position * wanted;
+            entries[position] = get(keys[position], vectors(nk::range(first, first + wanted), nk::slice), wanted);
+        }
+        return status_t::success_k;
     }
 
   private:
@@ -1783,6 +1831,10 @@ struct dense_vram_indexes {
      *  the packing and the column's shape counts logical dimensions. */
     inline static constexpr dtype_t value_column_dtype_k = safegraphs_value_dtype<scalar_t>();
 
+    /** The norms column's dtype: the dot product's own token, since the device keeps norms for
+     *  every kernel. */
+    inline static constexpr dtype_t norms_column_dtype_k = safegraphs_value_dtype<dot_result_t>();
+
     /** Whether the index can write @p config through @p executor: placed, reserved, tokenized,
      *  legal, paired, unbroken, and certified quiescent. */
     status_t saveable_(save_config_t const& config, executor_t const& executor) const noexcept {
@@ -1823,8 +1875,8 @@ struct dense_vram_indexes {
     /** The monolith header for @p nodes rows under @p config 's alignment. */
     expected<safegraphs_header_t> monolith_header_(std::size_t nodes, save_config_t const& config,
                                                    std::span<safegraphs_custom_field_t const> fields) const noexcept {
-        safegraphs_regular_shape_t const shape {nodes,        key_dtype_k,    value_column_dtype_k,
-                                                dimensions(), dtype_t::u32_k, connectivity()};
+        safegraphs_regular_shape_t const shape {nodes,          key_dtype_k,    value_column_dtype_k, dimensions(),
+                                                dtype_t::u32_k, connectivity(), norms_column_dtype_k};
         return safegraphs_regular_header(shape, config.alignment, fields);
     }
 
@@ -1869,7 +1921,8 @@ struct dense_vram_indexes {
         index_t& one = *shards_[shard].index;
         if (cudaSetDevice(one.device_specs().ordinal) != cudaSuccess) return status_t::device_error_k;
         typename index_t::columns_t const columns {header.rows_of(target, header.value, first_row, nodes),
-                                                   header.rows_of(target, header.neighbors, first_row, nodes)};
+                                                   header.rows_of(target, header.neighbors, first_row, nodes),
+                                                   header.rows_of(target, header.norms, first_row, nodes)};
         auto [inner, status] = one.plan_save(columns, config.synchronization, executor.stream(shard).handle,
                                              static_cast<dense_node_id_t>(first_row));
         if (failed(status)) return status;
@@ -2091,8 +2144,6 @@ struct dense_vram_indexes {
             return reserved;
 
         if (failed(plan.plans_.reserve_exactly(shards))) return status_t::bad_alloc_k;
-        std::size_t const vectors_row_bytes = row_values_() * sizeof(scalar_t);
-        std::size_t const neighbors_row_bytes = connectivity * sizeof(dense_node_id_t);
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
             if (cudaSetDevice(one.device_specs().ordinal) != cudaSuccess) return status_t::device_error_k;
@@ -2117,8 +2168,6 @@ struct dense_vram_indexes {
                     step.inner.index_rows = {static_cast<dense_node_id_t>(low), static_cast<dense_node_id_t>(high)};
                     step.inner.source_rows = {static_cast<dense_node_id_t>(assignment.rows.first + low - first_row),
                                               static_cast<dense_node_id_t>(assignment.rows.first + high - first_row)};
-                    step.inner.vectors_bytes = (high - low) * vectors_row_bytes;
-                    step.inner.neighbors_bytes = (high - low) * neighbors_row_bytes;
                     if (failed(plan.steps_.push_back(step))) return status_t::bad_alloc_k;
                 }
                 first_row = bound_row;

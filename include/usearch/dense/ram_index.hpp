@@ -132,6 +132,22 @@ struct dense_filtering_fold {
         admitted.insert(std::span(admissions), expansion_factor);
         return walk_demand_t::continue_k;
     }
+
+    /** The keyed form: @p keys hold each lane's key, so a per-key predicate filters a walk that has
+     *  no key column to resolve node IDs through. */
+    template <typename dot_result_type_, typename key_type_>
+    walk_demand_t absorb(std::span<dense_scored_node_t const> scored_nodes, std::span<dot_result_type_ const>,
+                         std::span<key_type_ const> keys) noexcept {
+        dense_admissions_t admissions;
+        for (std::size_t lane = 0; lane != scored_nodes.size(); ++lane)
+            if (predicate(keys[lane]) == admission_t::admit_k) {
+                // One quad in, four slots of capacity, so the buffer cannot refuse.
+                [[maybe_unused]] fu::status_t const pushed = admissions.push_back(scored_nodes[lane]);
+            }
+        network_sort(std::span(admissions), dense_closer_scored_node_t {});
+        admitted.insert(std::span(admissions), expansion_factor);
+        return walk_demand_t::continue_k;
+    }
 };
 
 /** Reads every scored quad - live lanes in kernel order beside their native dots, both valid only
@@ -140,6 +156,15 @@ template <typename fold_type_, typename dot_result_type_>
 concept dense_fold = requires(fold_type_& fold, std::span<dense_scored_node_t const> scored_nodes,
                               std::span<dot_result_type_ const> dots) {
     { fold.absorb(scored_nodes, dots) } noexcept -> std::same_as<walk_demand_t>;
+};
+
+/** A fold that reads every scored quad's keys with its lanes and dots, as filtered search over a
+ *  per-key predicate does, so a walk with no key column reads each scored row's key beside its
+ *  vector. */
+template <typename fold_type_, typename dot_result_type_, typename key_type_>
+concept dense_keyed_fold = requires(fold_type_& fold, std::span<dense_scored_node_t const> scored_nodes,
+                                    std::span<dot_result_type_ const> dots, std::span<key_type_ const> keys) {
+    { fold.absorb(scored_nodes, dots, keys) } noexcept -> std::same_as<walk_demand_t>;
 };
 
 /** Graph products of one left-hand row as a fold: each scored pair appends its resolved ID and native
@@ -174,6 +199,156 @@ struct dense_multiply_fold {
         return walk_demand_t::continue_k;
     }
 };
+
+#pragma region Rescorings
+
+/** The walks' default rescoring: none, so every node keeps the score the kit gave it. */
+struct dummy_rescoring_t {
+    template <typename ids_type_, typename keys_type_, typename scores_type_>
+    void operator()(ids_type_ const&, keys_type_ const&, scores_type_&, std::size_t) const noexcept {}
+};
+
+/** Indexer heads as a walk's rescoring: each scored dot becomes Σₕ wₕ·ReLU(⟨qₕ, k⟩) and its
+ *  distance 1 − score. */
+template <nk_capability_t capability_, typename scalar_type_>
+struct dense_indexer_rescoring {
+
+    /** The heads of the one query row being walked. */
+    dense_indexer_heads<scalar_type_> heads;
+
+    template <typename dot_type_, std::size_t fan_out_>
+    void operator()(std::array<dense_node_id_t, fan_out_> const&,
+                    std::array<nk::vector_view<scalar_type_>, fan_out_> const& keys,
+                    dense_scores<dot_type_, fan_out_>& scores, std::size_t count) const noexcept {
+        static_assert(!nk::is_integral_dtype<scalar_type_>(), "Indexer scoring needs floating-point keys");
+        std::array<dot_type_, fan_out_> indexed {};
+        for (std::size_t head = 0; head != heads.heads.extent(0); ++head) {
+            dense_scores<dot_type_, fan_out_> const head_scores =
+                usearch::scores<nk_kernel_dot_k, capability_, scalar_type_>(
+                    heads.heads.row(head).as_vector(), no_norms_t {}, keys, std::array<no_norms_t, fan_out_> {});
+            dot_type_ const weight = dot_type_(heads.weights(0, head));
+            for (std::size_t lane = 0; lane != count; ++lane)
+                indexed[lane] += weight * max_of(head_scores.dots[lane], dot_type_ {});
+        }
+        for (std::size_t lane = 0; lane != count; ++lane) {
+            scores.dots[lane] = indexed[lane];
+            scores.distances[lane] = 1 - indexed[lane];
+        }
+    }
+};
+
+/** One token's query heads as the walk's rescoring and its attention fold in one: a node ranks by
+ *  its best head as 1 − maxₕ⟨qₕ, k⟩, and every scored batch folds into each head's running softmax,
+ *  in base 2 until @c finish. Head zero navigates the walk; a node without a value row fails
+ *  @c status. */
+template <nk_capability_t capability_, typename scalar_type_, typename value_lookup_type_>
+struct dense_attention_rescoring {
+    using vector_view_t = nk::vector_view<scalar_type_>;
+    using dot_result_t = typename scalar_type_::dot_result_t;
+
+    /** The token's heads, one row each. */
+    nk::matrix_view<scalar_type_> queries;
+
+    /** Resolves a scored batch to its value rows, as wide as the keys. */
+    value_lookup_type_& value_lookup;
+
+    /** The factor turning a dot into a logit. */
+    f32_t score_scale;
+
+    /** The heads' attended rows, back to back. */
+    std::span<f32_t> outputs;
+
+    /** The heads' running softmax states. */
+    std::span<dense_softmax_state_t> carry;
+
+    /** The first refusal, which every later batch skips on. */
+    status_t& status;
+
+    /** Empties every head's row and running state ahead of the token's first walk. */
+    void clear() const noexcept {
+        std::memset(outputs.data(), 0, outputs.size_bytes());
+        for (dense_softmax_state_t& state : carry) state = {std::numeric_limits<f32_t>::lowest(), 0};
+    }
+
+    /** Divides every head's row by its partition and turns its base-2 maximum into a natural-log
+     *  one. */
+    void finish() const noexcept {
+        std::size_t const columns = queries.extent(1);
+        for (std::size_t head = 0; head != carry.size(); ++head) {
+            f32_t const normalizer = carry[head].partition > 0 ? 1 / carry[head].partition : 0, zero = 0;
+            f32_t* const row = outputs.data() + head * columns;
+            [[maybe_unused]] nk_status_t const scaled = dense_elementwise_chain<capability_>::kit_t::scale(
+                row, columns, &normalizer, &zero, row, nullptr);
+            assert(scaled == nk_success_k && "The serial tier scales on every CPU");
+            carry[head].maximum_score *= std::numbers::ln2_v<f32_t>;
+        }
+    }
+
+    /** Folds one scored batch, its value rows resolved by node ID. */
+    void operator()(std::array<dense_node_id_t, 4> const& ids, std::array<vector_view_t, 4> const& keys,
+                    dense_scores<dot_result_t, 4>& scores, std::size_t count) const noexcept {
+        (*this)(ids, keys, scores, count, std::span<dense_node_id_t const>(ids).first(count));
+    }
+
+    /** Folds one scored batch, its value rows resolved by @p lookup_keys: the rows' own keys, read
+     *  beside the vectors by a walk that holds no key column to resolve node IDs through. */
+    template <typename lookup_key_type_>
+    void operator()(std::array<dense_node_id_t, 4> const&, std::array<vector_view_t, 4> const& keys,
+                    dense_scores<dot_result_t, 4>& scores, std::size_t count,
+                    std::span<lookup_key_type_ const> lookup_keys) const noexcept {
+        if (failed(status)) return;
+        std::size_t const columns = queries.extent(1), head_count = carry.size();
+        std::array<vector_view_t, 4> rows;
+        std::array<char const*, 4> rows_bytes;
+        value_lookup(lookup_keys.first(count), std::span(rows).first(count));
+        for (std::size_t lane = 0; lane != count; ++lane) {
+            if (rows[lane].size() != columns) {
+                status = status_t::shape_mismatch_k;
+                return;
+            }
+            rows_bytes[lane] = rows[lane].byte_data();
+        }
+        f32_t const logit_scale = score_scale * std::numbers::log2e_v<f32_t>;
+        for (std::size_t first = 0; first < head_count; first += 8) {
+            std::size_t const group = min_of<std::size_t>(8, head_count - first);
+            // One exp2 tile per scored node across the group's heads; the zeros past them
+            // exponentiate harmlessly.
+            std::array<std::array<f32_t, 8>, 4> weights {};
+            std::array<f32_t, 8> corrections {};
+            for (std::size_t head = 0; head != group; ++head) {
+                dense_scores<dot_result_t, 4> const head_scores =
+                    first + head
+                        ? usearch::scores<nk_kernel_dot_k, capability_, scalar_type_>(
+                              queries.row(first + head).as_vector(), no_norms_t {}, keys, std::array<no_norms_t, 4> {})
+                        : scores;
+                dense_softmax_state_t& state = carry[first + head];
+                f32_t maximum = state.maximum_score;
+                for (std::size_t lane = 0; lane != count; ++lane) {
+                    weights[lane][head] = logit_scale * static_cast<f32_t>(head_scores.dots[lane]);
+                    maximum = max_of(maximum, weights[lane][head]);
+                    scores.dots[lane] = max_of(scores.dots[lane], head_scores.dots[lane]);
+                }
+                for (std::size_t lane = 0; lane != count; ++lane) weights[lane][head] -= maximum;
+                corrections[head] = state.maximum_score - maximum;
+                state.maximum_score = maximum;
+            }
+            for (std::size_t lane = 0; lane != count; ++lane)
+                dense_elementwise_chain<capability_>::kit_t::exp2(weights[lane]);
+            dense_elementwise_chain<capability_>::kit_t::exp2(corrections);
+            for (std::size_t head = 0; head != group; ++head) {
+                dense_softmax_state_t& state = carry[first + head];
+                state.partition *= corrections[head];
+                for (std::size_t lane = 0; lane != count; ++lane) state.partition += weights[lane][head];
+            }
+            dense_values_step<scalar_type_, capability_>(outputs.data() + first * columns, group, columns,
+                                                         rows_bytes.data(), weights.data(), corrections, count);
+        }
+        for (std::size_t lane = 0; lane != count; ++lane)
+            scores.distances[lane] = 1 - static_cast<dense_distance_t>(scores.dots[lane]);
+    }
+};
+
+#pragma endregion Rescorings
 
 /** Per-thread traversal scratch: candidate queues, visited set, neighbor selection buffers and
  *  the running telemetry counters - one instance per scanning thread. */
@@ -613,7 +788,7 @@ struct dense_ram_index {
         return {count, frozen.dimensions(), frozen.connectivity()};
     }
 
-    /** Where a save lands: two row-major planes the caller sized from @ref saved_shape, handed
+    /** Where a save lands: row-major planes the caller sized from @ref saved_shape, handed
      *  over at planning so no step names a destination of its own. */
     struct columns_t {
 
@@ -622,6 +797,9 @@ struct dense_ram_index {
 
         /** The neighbors plane, @c connectivity IDs per node. */
         bytes_span_t neighbors;
+
+        /** The norms plane, one @c vector_norms_t per node, or empty to write none. */
+        bytes_span_t norms;
     };
 
     /** Where a load reads from - the read-only twin of @ref columns_t. */
@@ -632,6 +810,10 @@ struct dense_ram_index {
 
         /** The neighbors plane, @c connectivity IDs per node. */
         bytes_view_t neighbors;
+
+        /** The norms plane, one @c vector_norms_t per node, or empty to derive them from the
+         *  vectors. */
+        bytes_view_t norms;
     };
 
 #pragma endregion Measures
@@ -1630,7 +1812,7 @@ struct dense_ram_index {
         status_t status = status_t::success_k;
         search_result_t attended;
         for (std::size_t first = 0; first != rows_count; first += head_count) {
-            attention_rescoring<value_lookup_type_> const rescoring {
+            dense_attention_rescoring<capability_, scalar_t, value_lookup_type_> const rescoring {
                 queries(nk::range(first, first + head_count), nk::slice),
                 value_lookup,
                 score_scale,
@@ -1678,7 +1860,7 @@ struct dense_ram_index {
     /**
      *  @brief One save in flight: the watermark it took, the contract it runs under, and the storage
      *      chunks it hands out to any number of threads. Vectors and sentinel-padded neighbor rows
-     *      are what a snapshot holds; norms re-derive on load.
+     *      are what a snapshot holds, and the norms when the columns carry a plane for them.
      *
      *  A checkpointing reader, not a mutator: concurrent searches keep running on every arm.
      *  Under @c concurrent_k every row is copied under its slot-zero lock, as writers edit it, and
@@ -1744,12 +1926,6 @@ struct dense_ram_index {
 
             /** Where they sit in the caller's buffer, counted from its first row. */
             iota_view<node_id_t> source_rows;
-
-            /** Bytes this step's vector rows occupy inside the plan's vectors column. */
-            std::size_t vectors_bytes = 0;
-
-            /** Bytes this step's neighbor rows occupy inside the plan's neighbors column. */
-            std::size_t neighbors_bytes = 0;
         };
 
         /** Step @p position of the plan; an empty one past the last. */
@@ -1759,12 +1935,9 @@ struct dense_ram_index {
             std::size_t const first = chunk_schedule_t::rows_before(static_cast<small_size_t>(position));
             std::size_t const bound = min_of(chunk_schedule_t::rows_before(static_cast<small_size_t>(position + 1)),
                                              static_cast<std::size_t>(visible));
-            geometry_t const frozen = index_->geometry();
             step.position = position;
             step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             step.source_rows = step.index_rows;
-            step.vectors_bytes = step.index_rows.size() * stored_row_values(frozen) * sizeof(scalar_t);
-            step.neighbors_bytes = step.index_rows.size() * frozen.connectivity() * sizeof(node_id_t);
             return step;
         }
 
@@ -1777,9 +1950,9 @@ struct dense_ram_index {
         }
 
         /**
-         *  @brief Copies step @p step 's rows into the plan's own columns: the vectors straight
-         *      from chunk memory, since published vectors never change, and the neighbors rebased
-         *      through @p scratch.
+         *  @brief Copies step @p step 's rows into the plan's own columns: the vectors and their
+         *      norms straight from chunk memory, since neither changes once published, and the
+         *      neighbors rebased through @p scratch.
          *
          *  Every ID under the watermark is shifted by @c id_shift, every other folded to the sentinel.
          *
@@ -1791,18 +1964,16 @@ struct dense_ram_index {
             iota_view<node_id_t> const rows = step.index_rows;
             if (rows.empty()) return status_t::config_mismatch_k;
             geometry_t const frozen = index_->geometry();
-            std::size_t const row_values = stored_row_values(frozen);
             std::size_t const connectivity = frozen.connectivity();
-            std::size_t const step_scalars = rows.size() * row_values;
             std::size_t const step_slots = rows.size() * connectivity;
-            std::size_t const vectors_first = step.source_rows.first * row_values * sizeof(scalar_t);
-            std::size_t const neighbors_first = step.source_rows.first * connectivity * sizeof(node_id_t);
-            if (step.vectors_bytes != step_scalars * sizeof(scalar_t) ||
-                step.neighbors_bytes != step_slots * sizeof(node_id_t))
-                return status_t::config_mismatch_k;
-            if (vectors_first > columns.vectors.size() || neighbors_first > columns.neighbors.size() ||
-                columns.vectors.size() - vectors_first < step.vectors_bytes ||
-                columns.neighbors.size() - neighbors_first < step.neighbors_bytes)
+            // Chunk rows are padded to whole kit steps, while checkpoints keep logical rows.
+            std::size_t const row_bytes = stored_row_values(frozen) * sizeof(scalar_t);
+            std::size_t const first = step.source_rows.first;
+            bytes_span_t const vectors_rows = plane_rows(columns.vectors, first, rows.size(), row_bytes);
+            bytes_span_t const neighbors_rows = plane_rows(columns.neighbors, first, rows.size(),
+                                                           connectivity * sizeof(node_id_t));
+            bytes_span_t const norms_rows = plane_rows(columns.norms, first, rows.size(), sizeof(vector_norms_t));
+            if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
             if (scratch.extent(0) < rows.size() || scratch.extent(1) != connectivity || !scratch.is_contiguous())
                 return status_t::config_mismatch_k;
@@ -1810,13 +1981,12 @@ struct dense_ram_index {
             location_t const location = chunk_schedule_t::locate(rows.first);
             vectors_view_t const vectors = index_->vectors_chunks_[location.chunk](
                 nk::range(location.offset, location.offset + rows.size()), nk::slice);
-            // Chunk rows are padded to whole kit steps, while checkpoints keep logical rows.
-            std::size_t const row_bytes = row_values * sizeof(scalar_t);
-            for (std::size_t row = 0; row != rows.size(); ++row) {
-                [[maybe_unused]] status_t const copied = copy_bytes(
-                    columns.vectors.subspan(vectors_first + row * row_bytes, row_bytes),
-                    bytes_of(vectors.row(row).data(), row_values));
-            }
+            for (std::size_t row = 0; row != rows.size(); ++row)
+                std::memcpy(vectors_rows.data() + row * row_bytes, vectors.row(row).data(), row_bytes);
+            if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>)
+                if (!norms_rows.empty())
+                    std::memcpy(norms_rows.data(), index_->norms_chunks_[location.chunk].data() + location.offset,
+                                norms_rows.size());
             atomic_ref<std::size_t>(covered_vectors).add(rows.size(), std::memory_order_release);
 
             node_id_t const* source = index_->neighbors_chunks_[location.chunk].view().row(location.offset).data();
@@ -1836,8 +2006,7 @@ struct dense_ram_index {
             for (std::size_t word = 0; word != step_slots; ++word)
                 staged[word] = staged[word] < visible ? static_cast<node_id_t>(staged[word] + id_shift)
                                                       : dense_node_id_unknown_k;
-            [[maybe_unused]] status_t const copied_neighbors = copy_bytes(
-                columns.neighbors.subspan(neighbors_first, step.neighbors_bytes), bytes_of(staged, step_slots));
+            std::memcpy(neighbors_rows.data(), staged, neighbors_rows.size());
             atomic_ref<std::size_t>(covered_neighbors).add(rows.size(), std::memory_order_release);
             return status_t::success_k;
         }
@@ -1897,7 +2066,8 @@ struct dense_ram_index {
         if (plan.visible != plan.dispensed) return {{}, status_t::contended_k};
         std::size_t const rows = static_cast<std::size_t>(plan.visible);
         if (columns.vectors.size() < rows * stored_row_values(frozen) * sizeof(scalar_t) ||
-            columns.neighbors.size() < rows * frozen.connectivity() * sizeof(node_id_t))
+            columns.neighbors.size() < rows * frozen.connectivity() * sizeof(node_id_t) ||
+            (!columns.norms.empty() && columns.norms.size() < rows * sizeof(vector_norms_t)))
             return {{}, status_t::config_mismatch_k};
         return {std::move(plan), status_t::success_k};
     }
@@ -1917,11 +2087,12 @@ struct dense_ram_index {
      *      chunks they span, filled by any number of threads; @ref finish publishes them.
      *
      *  Demands sole ownership of an index whose geometry is already frozen. A source's IDs are
-     *  local to the rows it delivers, so every chunk shifts them onto the appended range and
-     *  folds every other ID onto the sentinel; norms re-derive as the vectors land. Repeated
-     *  plans append, which is how several parts land in one shard. The plan owns the claim its
-     *  rows ride in: one that dies before @c finish releases them, so the next plan appends at
-     *  the same base and the rows it half-filled are never published.
+     *  local to the rows it delivers, so every chunk shifts them onto the appended range and folds
+     *  every other ID onto the sentinel; norms land beside the vectors, or re-derive from them
+     *  where the source carries none. Repeated plans append, which is how several parts land in one
+     *  shard. The plan owns the claim its rows ride in: one that dies before @c finish releases
+     *  them, so the next plan appends at the same base and the rows it half-filled are never
+     *  published.
      */
     struct [[nodiscard]] load_plan_t {
 
@@ -1975,12 +2146,6 @@ struct dense_ram_index {
 
             /** Where they come from in the caller's buffer, from its first row. */
             iota_view<node_id_t> source_rows;
-
-            /** Bytes this step's vector rows occupy inside the plan's vectors column. */
-            std::size_t vectors_bytes = 0;
-
-            /** Bytes this step's neighbor rows occupy inside the plan's neighbors column. */
-            std::size_t neighbors_bytes = 0;
         };
 
         /** Step @p position of the plan; an empty one past the last. */
@@ -1994,12 +2159,9 @@ struct dense_ram_index {
             std::size_t const bound = min_of(
                 chunk_schedule_t::rows_before(static_cast<small_size_t>(first_chunk + position + 1)),
                 static_cast<std::size_t>(base) + rows);
-            geometry_t const frozen = index_->geometry();
             step.position = position;
             step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             step.source_rows = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
-            step.vectors_bytes = step.index_rows.size() * stored_row_values(frozen) * sizeof(scalar_t);
-            step.neighbors_bytes = step.index_rows.size() * frozen.connectivity() * sizeof(node_id_t);
             return step;
         }
 
@@ -2014,7 +2176,8 @@ struct dense_ram_index {
 
         /**
          *  @brief Copies step @p step 's rows out of the plan's own columns straight into chunk
-         *      memory: the vectors with their norms derived as they land, then the neighbors.
+         *      memory: the vectors with their norms, copied or derived as they land, then the
+         *      neighbors.
          *
          *  Every ID inside @c source_range is folded onto the appended range and every other onto
          *  the sentinel.
@@ -2037,18 +2200,16 @@ struct dense_ram_index {
             iota_view<node_id_t> const range = step.index_rows;
             if (range.empty()) return status_t::config_mismatch_k;
             geometry_t const frozen = index_->geometry();
-            std::size_t const row_values = stored_row_values(frozen);
             std::size_t const connectivity = frozen.connectivity();
-            std::size_t const step_scalars = range.size() * row_values;
             std::size_t const step_slots = range.size() * connectivity;
-            std::size_t const vectors_first = step.source_rows.first * row_values * sizeof(scalar_t);
-            std::size_t const neighbors_first = step.source_rows.first * connectivity * sizeof(node_id_t);
-            if (step.vectors_bytes != step_scalars * sizeof(scalar_t) ||
-                step.neighbors_bytes != step_slots * sizeof(node_id_t))
-                return status_t::config_mismatch_k;
-            if (vectors_first > columns.vectors.size() || neighbors_first > columns.neighbors.size() ||
-                columns.vectors.size() - vectors_first < step.vectors_bytes ||
-                columns.neighbors.size() - neighbors_first < step.neighbors_bytes)
+            // Checkpoints keep logical rows, while chunk rows are padded to whole kit steps.
+            std::size_t const row_bytes = stored_row_values(frozen) * sizeof(scalar_t);
+            std::size_t const first = step.source_rows.first;
+            bytes_view_t const vectors_rows = plane_rows(columns.vectors, first, range.size(), row_bytes);
+            bytes_view_t const neighbors_rows = plane_rows(columns.neighbors, first, range.size(),
+                                                           connectivity * sizeof(node_id_t));
+            bytes_view_t const norms_rows = plane_rows(columns.norms, first, range.size(), sizeof(vector_norms_t));
+            if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
             // The part's rows land at this step's own index rows, so an ID's shift follows from
             // the step rather than from the plan's base - the two agree for a one-part plan.
@@ -2060,25 +2221,23 @@ struct dense_ram_index {
             location_t const location = chunk_schedule_t::locate(range.first);
             nk::matrix_span<scalar_t> const vectors = index_->vectors_chunks_[location.chunk](
                 nk::range(location.offset, location.offset + range.size()), nk::slice);
-            // Checkpoints keep logical rows, while chunk rows are padded to whole kit steps.
-            std::size_t const row_bytes = row_values * sizeof(scalar_t);
-            for (std::size_t row = 0; row != range.size(); ++row) {
-                [[maybe_unused]] status_t const copied = copy_bytes(
-                    bytes_of(vectors.row(row).data(), row_values),
-                    columns.vectors.subspan(vectors_first + row * row_bytes, row_bytes));
+            for (std::size_t row = 0; row != range.size(); ++row)
+                std::memcpy(vectors.row(row).data(), vectors_rows.data() + row * row_bytes, row_bytes);
+            if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>) {
+                if (!norms_rows.empty())
+                    std::memcpy(index_->norms_chunks_[location.chunk].data() + location.offset, norms_rows.data(),
+                                norms_rows.size());
+                else
+                    for (std::size_t offset_in_chunk = 0; offset_in_chunk != range.size(); ++offset_in_chunk) {
+                        location_t const row {location.chunk, location.offset + offset_in_chunk};
+                        index_->norm_ref_for(row) = dense_norms(index_->vector_for(row));
+                    }
             }
-            if constexpr (!std::is_same_v<vector_norms_t, no_norms_t>)
-                for (std::size_t offset_in_chunk = 0; offset_in_chunk != range.size(); ++offset_in_chunk) {
-                    location_t const row {location.chunk, location.offset + offset_in_chunk};
-                    index_->norm_ref_for(row) = dense_norms(index_->vector_for(row));
-                }
             atomic_ref<std::size_t>(covered_vectors).add(range.size(), std::memory_order_release);
 
             nk::matrix_span<node_id_t> const neighbors = index_->neighbors_chunks_[location.chunk](
                 nk::range(location.offset, location.offset + range.size()), nk::slice);
-            [[maybe_unused]] status_t const copied_neighbors = copy_bytes(
-                bytes_of(neighbors.data(), step_slots),
-                columns.neighbors.subspan(neighbors_first, step.neighbors_bytes));
+            std::memcpy(neighbors.data(), neighbors_rows.data(), neighbors_rows.size());
             std::span<node_id_t> const landed {neighbors.data(), step_slots};
             rebase_neighbors(landed, source_range, shift, dense_node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, dense_node_id_unknown_k);
@@ -2124,7 +2283,8 @@ struct dense_ram_index {
      *  Refuses an unfrozen geometry, columns shorter than the rows, an insert mid-flight, and rows
      *  past the ID space.
      *
-     *  @param[in] columns Where the rows come from, both planes sized for @p rows.
+     *  @param[in] columns Where the rows come from, every plane but an empty norms one sized for
+     *      @p rows.
      *  @param[in] rows Rows to append.
      *  @param[in] source_range The ID space the source's rows speak.
      */
@@ -2133,7 +2293,8 @@ struct dense_ram_index {
         geometry_t const frozen = geometry();
         if (!frozen) return {{}, status_t::config_mismatch_k};
         if (columns.vectors.size() < rows * stored_row_values(frozen) * sizeof(scalar_t) ||
-            columns.neighbors.size() < rows * frozen.connectivity() * sizeof(node_id_t))
+            columns.neighbors.size() < rows * frozen.connectivity() * sizeof(node_id_t) ||
+            (!columns.norms.empty() && columns.norms.size() < rows * sizeof(vector_norms_t)))
             return {{}, status_t::config_mismatch_k};
         auto [plan, status] = plan_load(rows);
         if (failed(status)) return {{}, status};
@@ -3173,90 +3334,6 @@ struct dense_ram_index {
 #pragma endregion Refinement
 
 #pragma region Search
-
-    /** One token's query heads as the walk's rescoring and its attention fold in one: a node ranks by its best
-     *  head as 1 − maxₕ⟨qₕ, k⟩, and every scored batch folds into each head's running softmax, in base 2 until
-     *  @c finish. Head zero navigates the walk; a node without a value row fails @c status. */
-    template <typename value_lookup_type_>
-    struct attention_rescoring {
-        vectors_view_t queries;
-        value_lookup_type_& value_lookup;
-        f32_t score_scale;
-        std::span<f32_t> outputs;
-        std::span<dense_softmax_state_t> carry;
-        status_t& status;
-
-        /** Empties every head's row and running state ahead of the token's first walk. */
-        void clear() const noexcept {
-            std::memset(outputs.data(), 0, outputs.size_bytes());
-            for (dense_softmax_state_t& state : carry) state = {std::numeric_limits<f32_t>::lowest(), 0};
-        }
-
-        /** Divides every head's row by its partition and turns its base-2 maximum into a natural-log one. */
-        void finish() const noexcept {
-            std::size_t const columns = queries.extent(1);
-            for (std::size_t head = 0; head != carry.size(); ++head) {
-                f32_t const normalizer = carry[head].partition > 0 ? 1 / carry[head].partition : 0, zero = 0;
-                f32_t* const row = outputs.data() + head * columns;
-                [[maybe_unused]] nk_status_t const scaled = dense_elementwise_chain<capability_>::kit_t::scale(
-                    row, columns, &normalizer, &zero, row, nullptr);
-                assert(scaled == nk_success_k && "The serial tier scales on every CPU");
-                carry[head].maximum_score *= std::numbers::ln2_v<f32_t>;
-            }
-        }
-
-        void operator()(std::array<node_id_t, 4> const& ids, std::array<vector_view_t, 4> const& keys,
-                        dense_scores<dot_result_t, 4>& scores, std::size_t count) const noexcept {
-            if (failed(status)) return;
-            std::size_t const columns = queries.extent(1), head_count = carry.size();
-            std::array<vector_view_t, 4> rows;
-            std::array<char const*, 4> rows_bytes;
-            value_lookup(std::span<node_id_t const>(ids).first(count), std::span(rows).first(count));
-            for (std::size_t lane = 0; lane != count; ++lane) {
-                if (rows[lane].size() != columns) {
-                    status = status_t::shape_mismatch_k;
-                    return;
-                }
-                rows_bytes[lane] = rows[lane].byte_data();
-            }
-            f32_t const logit_scale = score_scale * std::numbers::log2e_v<f32_t>;
-            for (std::size_t first = 0; first < head_count; first += 8) {
-                std::size_t const group = min_of<std::size_t>(8, head_count - first);
-                // One exp2 tile per scored node across the group's heads; the zeros past them exponentiate harmlessly.
-                std::array<std::array<f32_t, 8>, 4> weights {};
-                std::array<f32_t, 8> corrections {};
-                for (std::size_t head = 0; head != group; ++head) {
-                    dense_scores<dot_result_t, 4> const head_scores =
-                        first + head ? usearch::scores<nk_kernel_dot_k, capability_, scalar_t>(
-                                           queries.row(first + head).as_vector(), no_norms_t {}, keys,
-                                           std::array<no_norms_t, 4> {})
-                                     : scores;
-                    dense_softmax_state_t& state = carry[first + head];
-                    f32_t maximum = state.maximum_score;
-                    for (std::size_t lane = 0; lane != count; ++lane) {
-                        weights[lane][head] = logit_scale * static_cast<f32_t>(head_scores.dots[lane]);
-                        maximum = max_of(maximum, weights[lane][head]);
-                        scores.dots[lane] = max_of(scores.dots[lane], head_scores.dots[lane]);
-                    }
-                    for (std::size_t lane = 0; lane != count; ++lane) weights[lane][head] -= maximum;
-                    corrections[head] = state.maximum_score - maximum;
-                    state.maximum_score = maximum;
-                }
-                for (std::size_t lane = 0; lane != count; ++lane)
-                    dense_elementwise_chain<capability_>::kit_t::exp2(weights[lane]);
-                dense_elementwise_chain<capability_>::kit_t::exp2(corrections);
-                for (std::size_t head = 0; head != group; ++head) {
-                    dense_softmax_state_t& state = carry[first + head];
-                    state.partition *= corrections[head];
-                    for (std::size_t lane = 0; lane != count; ++lane) state.partition += weights[lane][head];
-                }
-                dense_values_step<scalar_t, capability_>(outputs.data() + first * columns, group, columns,
-                                                         rows_bytes.data(), weights.data(), corrections, count);
-            }
-            for (std::size_t lane = 0; lane != count; ++lane)
-                scores.distances[lane] = 1 - static_cast<dense_distance_t>(scores.dots[lane]);
-        }
-    };
 
     /** The body of @c search_typed below the watermark snapshot @p first_invisible_id the caller took:
      *  the index's own, or one consistent across shards. */

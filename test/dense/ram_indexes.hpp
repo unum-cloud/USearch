@@ -35,8 +35,7 @@ template <                                       //
     typename waiter_type_ = dummy_waiter_t,      //
     nk_capability_t caps_ = nk_cap_serial_k,     //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
-    requires(!indexes_combo_supported<dtype_, kernel_> || !dense_cell_compiled<dtype_, kernel_, caps_>)
-static std::size_t test_configuration(char const* name, u64_t) {
+static std::size_t test_ram_indexes_configuration(char const* name, u64_t) {
     if constexpr (!indexes_combo_supported<dtype_, kernel_>) return report(name, "serial kernels not adapted yet");
     else return report(name, "kit not compiled for this target");
 }
@@ -46,8 +45,8 @@ template <                                       //
     typename waiter_type_ = dummy_waiter_t,      //
     nk_capability_t caps_ = nk_cap_serial_k,     //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
-    requires(indexes_combo_supported<dtype_, kernel_> && dense_cell_compiled<dtype_, kernel_, caps_>)
-static std::size_t test_configuration(char const* name, u64_t seed) {
+    requires indexes_combo_supported<dtype_, kernel_> && dense_cell_compiled<dtype_, kernel_, caps_>
+static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) {
 
     using indexes_t = dense_ram_indexes<u32_t, dtype_, kernel_, caps_, waiter_type_, atomic_ref_>;
     if (!dense_cell_admitted<caps_, atomic_ref_>()) return report(name, "capabilities missing at runtime");
@@ -74,12 +73,8 @@ static std::size_t test_configuration(char const* name, u64_t seed) {
     return report(name, failures_count);
 }
 
-#pragma region Suite Entry Points
-
 /** The sharded-index suite entry its translation unit defines and @c dense.cpp
  *  composes explicitly; returns the suite's failure count. */
 std::size_t check_ram_indexes(settings_t const& settings);
-
-#pragma endregion Suite Entry Points
 
 } // namespace unum::usearch::test::dense

@@ -2510,7 +2510,7 @@ struct dense_vram_index {
     };
     saved_shape_t saved_shape() const noexcept { return {size(), dimensions(), connectivity()}; }
 
-    /** Where a save lands: two row-major host planes the caller sized from @ref saved_shape, handed
+    /** Where a save lands: row-major host planes the caller sized from @ref saved_shape, handed
      *  over at planning so no step names a destination of its own. */
     struct columns_t {
 
@@ -2519,6 +2519,9 @@ struct dense_vram_index {
 
         /** The neighbors plane, @c connectivity IDs per node. */
         bytes_span_t neighbors;
+
+        /** The norms plane, one @c norms_t per node, or empty to write none. */
+        bytes_span_t norms;
     };
 
     /** Where a load reads from - the read-only twin of @ref columns_t. */
@@ -2529,6 +2532,9 @@ struct dense_vram_index {
 
         /** The neighbors plane, @c connectivity IDs per node. */
         bytes_view_t neighbors;
+
+        /** The norms plane, one @c norms_t per node, or empty to derive them from the vectors. */
+        bytes_view_t norms;
     };
 
     /** Bytes this index occupies - the three committed device planes, the published-row count, and
@@ -3047,7 +3053,7 @@ struct dense_vram_index {
      *      in place.
      *
      *  Vectors travel as logical rows with the fragment padding stripped, neighbors verbatim under
-     *  the positional sentinel convention; norms re-derive on load.
+     *  the positional sentinel convention, and norms verbatim when the columns carry their plane.
      *
      *  One host thread drives a device, so batches are taken one after another, though the tallies
      *  keep the shape a threaded caller expects.
@@ -3063,7 +3069,8 @@ struct dense_vram_index {
         /** The stream every device-to-host copy queues on, drained before its bytes move. */
         cudaStream_t stream = nullptr;
 
-        /** Page-locked host bytes: one batch of packed vector rows, then its neighbor IDs. */
+        /** Page-locked host bytes: one batch of packed vector rows, then its neighbor IDs, then its
+         *  norms. */
         bounce_t bounce {cuda_pinned_allocator_t {}};
 
         /** Rows under the watermark at planning. */
@@ -3111,12 +3118,6 @@ struct dense_vram_index {
 
             /** Where they sit in the caller's buffer, counted from its first row. */
             iota_view<node_id_t> source_rows;
-
-            /** Bytes this step's vector rows occupy inside the plan's vectors column. */
-            std::size_t vectors_bytes = 0;
-
-            /** Bytes this step's neighbor rows occupy inside the plan's neighbors column. */
-            std::size_t neighbors_bytes = 0;
         };
 
         /** Step @p position of the plan; an empty one past the last. */
@@ -3128,8 +3129,6 @@ struct dense_vram_index {
             step.position = position;
             step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             step.source_rows = step.index_rows;
-            step.vectors_bytes = step.index_rows.size() * index_->packed_row_bytes();
-            step.neighbors_bytes = step.index_rows.size() * index_->connectivity() * sizeof(node_id_t);
             return step;
         }
 
@@ -3140,7 +3139,8 @@ struct dense_vram_index {
 
         /** @brief Copies step @p step 's rows off the device into the plan's own columns: the
          *      vectors with the fragment padding stripped, then the neighbors with every ID under
-         *      the watermark shifted by @c id_shift and every other folded to the sentinel.
+         *      the watermark shifted by @c id_shift and every other folded to the sentinel, then
+         *      the norms where the columns take them.
          *
          *  @param[in] step The step to copy, as @ref steps hands them out.
          *  @param[inout] scratch Unused here, since the bounce is already host memory; it rides
@@ -3154,14 +3154,11 @@ struct dense_vram_index {
             std::size_t const connectivity = index_->connectivity();
             std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
             std::size_t const step_slots = rows.size() * connectivity;
-            std::size_t const vectors_first = step.source_rows.first * scalar_row_bytes;
-            std::size_t const neighbors_first = step.source_rows.first * neighbors_row_bytes;
-            if (step.vectors_bytes != rows.size() * scalar_row_bytes ||
-                step.neighbors_bytes != step_slots * sizeof(node_id_t))
-                return status_t::config_mismatch_k;
-            if (vectors_first > columns.vectors.size() || neighbors_first > columns.neighbors.size() ||
-                columns.vectors.size() - vectors_first < step.vectors_bytes ||
-                columns.neighbors.size() - neighbors_first < step.neighbors_bytes)
+            std::size_t const first = step.source_rows.first;
+            bytes_span_t const vectors_rows = plane_rows(columns.vectors, first, rows.size(), scalar_row_bytes);
+            bytes_span_t const neighbors_rows = plane_rows(columns.neighbors, first, rows.size(), neighbors_row_bytes);
+            bytes_span_t const norms_rows = plane_rows(columns.norms, first, rows.size(), sizeof(norms_t));
+            if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
             if (cudaMemcpy2DAsync(
                     bounce.data(), scalar_row_bytes,
@@ -3169,9 +3166,19 @@ struct dense_vram_index {
                     index_->row_bytes(), scalar_row_bytes, rows.size(), cudaMemcpyDeviceToHost, stream) != cudaSuccess)
                 return status_t::device_error_k;
             if (cudaStreamSynchronize(stream) != cudaSuccess) return status_t::device_error_k;
-            [[maybe_unused]] status_t const copied_vectors = copy_bytes(
-                columns.vectors.subspan(vectors_first, step.vectors_bytes),
-                bytes_of(bounce.data(), step.vectors_bytes));
+            std::memcpy(vectors_rows.data(), bounce.data(), vectors_rows.size());
+            // The norms count with the vectors, so a refused copy of either leaves the step
+            // uncovered.
+            if (!norms_rows.empty()) {
+                byte_t* const bounce_norms = bounce.data() + batch_rows * (scalar_row_bytes + neighbors_row_bytes);
+                if (cudaMemcpyAsync(
+                        bounce_norms,
+                        index_->norms_plane_.base() + static_cast<std::size_t>(rows.first) * sizeof(norms_t),
+                        norms_rows.size(), cudaMemcpyDeviceToHost, stream) != cudaSuccess)
+                    return status_t::device_error_k;
+                if (cudaStreamSynchronize(stream) != cudaSuccess) return status_t::device_error_k;
+                std::memcpy(norms_rows.data(), bounce_norms, norms_rows.size());
+            }
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
 
             byte_t* const bounce_neighbors = bounce.data() + batch_rows * scalar_row_bytes;
@@ -3185,8 +3192,7 @@ struct dense_vram_index {
             for (std::size_t word = 0; word != step_slots; ++word)
                 landed[word] = landed[word] < visible ? static_cast<node_id_t>(landed[word] + id_shift)
                                                       : dense_node_id_unknown_k;
-            [[maybe_unused]] status_t const copied_neighbors = copy_bytes(
-                columns.neighbors.subspan(neighbors_first, step.neighbors_bytes), bytes_of(landed, step_slots));
+            std::memcpy(neighbors_rows.data(), landed, neighbors_rows.size());
             standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(rows.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
@@ -3229,10 +3235,12 @@ struct dense_vram_index {
         if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         std::size_t const rows = size();
         if (columns.vectors.size() < rows * packed_row_bytes() ||
-            columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t))
+            columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
+            (!columns.norms.empty() && columns.norms.size() < rows * sizeof(norms_t)))
             return {{}, status_t::config_mismatch_k};
         save_plan_t plan {*this, columns, id_shift, stream, static_cast<node_id_t>(rows)};
-        std::size_t const batch_bytes = plan.batch_rows * (packed_row_bytes() + connectivity() * sizeof(node_id_t));
+        std::size_t const batch_bytes = plan.batch_rows *
+                                        (packed_row_bytes() + connectivity() * sizeof(node_id_t) + sizeof(norms_t));
         if (batch_bytes && failed(plan.bounce.resize_uninitialized(batch_bytes))) return {{}, status_t::bad_alloc_k};
         return {std::move(plan), status_t::success_k};
     }
@@ -3251,7 +3259,7 @@ struct dense_vram_index {
     /**
      *  @brief One load in flight: the rows it appends past every claimed one, the planes grown to
      *      hold them, and the batches they span, each filled through one pinned bounce and
-     *      uploaded on the stream; @ref finish derives the norms and publishes.
+     *      uploaded on the stream; @ref finish derives the norms no batch carried and publishes.
      *
      *  Holds the claim for its whole life, so nothing else claims rows while it runs. A source's
      *  IDs are local to the rows it delivers, so every batch shifts them onto the appended range
@@ -3270,7 +3278,8 @@ struct dense_vram_index {
         /** The stream every host-to-device copy and the norms kernel queue on. */
         cudaStream_t stream = nullptr;
 
-        /** Page-locked host bytes: one batch of packed vector rows, then its neighbor IDs. */
+        /** Page-locked host bytes: one batch of packed vector rows, then its neighbor IDs, then its
+         *  norms. */
         bounce_t bounce {cuda_pinned_allocator_t {}};
 
         /** The first appended ID - the row the claim landed at. */
@@ -3288,6 +3297,10 @@ struct dense_vram_index {
         /** Rows whose neighbors landed, tallied through @c std::atomic_ref. */
         std::size_t covered_neighbors = 0;
 
+        /** Rows whose norms landed from the columns, tallied through @c std::atomic_ref; @c finish
+         *  derives every row's when it falls short. */
+        std::size_t covered_norms = 0;
+
         load_plan_t() noexcept = default;
 
         /** The index appended to at @p base on @p stream, and the claim held meanwhile - unowned
@@ -3303,8 +3316,8 @@ struct dense_vram_index {
             : columns(other.columns), source_range(other.source_range), stream(other.stream),
               bounce(std::move(other.bounce)), base(other.base), rows(std::exchange(other.rows, 0)),
               batch_rows(other.batch_rows), covered_vectors(other.covered_vectors),
-              covered_neighbors(other.covered_neighbors), index_(std::exchange(other.index_, nullptr)),
-              claiming_(std::move(other.claiming_)) {}
+              covered_neighbors(other.covered_neighbors), covered_norms(other.covered_norms),
+              index_(std::exchange(other.index_, nullptr)), claiming_(std::move(other.claiming_)) {}
         load_plan_t& operator=(load_plan_t&&) = delete;
         // The tallies are this plan's own: a copy would tally into a twin `finish` never reads.
         load_plan_t(load_plan_t const&) = delete;
@@ -3324,12 +3337,6 @@ struct dense_vram_index {
 
             /** Where they come from in the caller's buffer, from its first row. */
             iota_view<node_id_t> source_rows;
-
-            /** Bytes this step's vector rows occupy inside the plan's vectors column. */
-            std::size_t vectors_bytes = 0;
-
-            /** Bytes this step's neighbor rows occupy inside the plan's neighbors column. */
-            std::size_t neighbors_bytes = 0;
         };
 
         /** Step @p position of the plan; an empty one past the last. */
@@ -3341,8 +3348,6 @@ struct dense_vram_index {
             step.position = position;
             step.index_rows = {static_cast<node_id_t>(first), static_cast<node_id_t>(bound)};
             step.source_rows = {static_cast<node_id_t>(first - base), static_cast<node_id_t>(bound - base)};
-            step.vectors_bytes = step.index_rows.size() * index_->packed_row_bytes();
-            step.neighbors_bytes = step.index_rows.size() * index_->connectivity() * sizeof(node_id_t);
             return step;
         }
 
@@ -3353,8 +3358,9 @@ struct dense_vram_index {
 
         /** @brief Copies step @p step 's rows out of the plan's own columns through the bounce:
          *      the vectors into the fragment-padded plane rows, whose fresh tails arrive zeroed,
-         *      then the neighbors with every ID inside @c source_range folded onto the appended
-         *      range and every other onto the sentinel.
+         *      and their norms where the columns carry them, then the neighbors with every ID
+         *      inside @c source_range folded onto the appended range and every other onto the
+         *      sentinel.
          *
          *  @param[in] step The step to fill, as @ref steps hands them out.
          */
@@ -3376,14 +3382,11 @@ struct dense_vram_index {
             std::size_t const connectivity = index_->connectivity();
             std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
             std::size_t const step_slots = range.size() * connectivity;
-            std::size_t const vectors_first = step.source_rows.first * scalar_row_bytes;
-            std::size_t const neighbors_first = step.source_rows.first * neighbors_row_bytes;
-            if (step.vectors_bytes != range.size() * scalar_row_bytes ||
-                step.neighbors_bytes != step_slots * sizeof(node_id_t))
-                return status_t::config_mismatch_k;
-            if (vectors_first > columns.vectors.size() || neighbors_first > columns.neighbors.size() ||
-                columns.vectors.size() - vectors_first < step.vectors_bytes ||
-                columns.neighbors.size() - neighbors_first < step.neighbors_bytes)
+            std::size_t const first = step.source_rows.first;
+            bytes_view_t const vectors_rows = plane_rows(columns.vectors, first, range.size(), scalar_row_bytes);
+            bytes_view_t const neighbors_rows = plane_rows(columns.neighbors, first, range.size(), neighbors_row_bytes);
+            bytes_view_t const norms_rows = plane_rows(columns.norms, first, range.size(), sizeof(norms_t));
+            if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
             // The part's rows land at this step's own index rows, so an ID's shift follows from
             // the step rather than from the plan's base - the two agree for a one-part plan.
@@ -3391,21 +3394,28 @@ struct dense_vram_index {
             // The device indexes its buckets by neighbor ID unchecked, so every rebased ID must land in this plan.
             if (static_cast<std::size_t>(shift) + source_range.size() > static_cast<std::size_t>(base) + rows)
                 return status_t::config_mismatch_k;
-            [[maybe_unused]] status_t const staged_vectors = copy_bytes(
-                bytes_of(bounce.data(), step.vectors_bytes),
-                columns.vectors.subspan(vectors_first, step.vectors_bytes));
+            std::memcpy(bounce.data(), vectors_rows.data(), vectors_rows.size());
             if (cudaMemcpy2DAsync(
                     index_->vectors_plane_.base() + static_cast<std::size_t>(range.first) * index_->row_bytes(),
                     index_->row_bytes(), bounce.data(), scalar_row_bytes, scalar_row_bytes, range.size(),
                     cudaMemcpyHostToDevice, stream) != cudaSuccess)
                 return index_->fail_(status_t::device_error_k);
+            if (!norms_rows.empty()) {
+                byte_t* const bounce_norms = bounce.data() + batch_rows * (scalar_row_bytes + neighbors_row_bytes);
+                std::memcpy(bounce_norms, norms_rows.data(), norms_rows.size());
+                if (cudaMemcpyAsync(
+                        index_->norms_plane_.base() + static_cast<std::size_t>(range.first) * sizeof(norms_t),
+                        bounce_norms, norms_rows.size(), cudaMemcpyHostToDevice, stream) != cudaSuccess)
+                    return index_->fail_(status_t::device_error_k);
+                // Tallied ahead of the drain: a failed one keeps the vectors short, which `finish`
+                // refuses.
+                standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(range.size(), std::memory_order_acq_rel);
+            }
             if (cudaStreamSynchronize(stream) != cudaSuccess) return index_->fail_(status_t::device_error_k);
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
 
             byte_t* const bounce_neighbors = bounce.data() + batch_rows * scalar_row_bytes;
-            [[maybe_unused]] status_t const staged_neighbors = copy_bytes(
-                bytes_of(bounce_neighbors, step.neighbors_bytes),
-                columns.neighbors.subspan(neighbors_first, step.neighbors_bytes));
+            std::memcpy(bounce_neighbors, neighbors_rows.data(), neighbors_rows.size());
             node_id_t* const landed = reinterpret_cast<node_id_t*>(bounce_neighbors);
             rebase_neighbors(std::span<node_id_t> {landed, step_slots}, source_range, shift, dense_node_id_unknown_k);
             compact_neighbors(std::span<node_id_t> {landed, step_slots}, connectivity, range.first,
@@ -3421,10 +3431,11 @@ struct dense_vram_index {
         }
 
         /** Publishes the appended rows once every batch's vectors and neighbors landed: the norms
-         *  derive on the device, the row count lands, the claim lifts, and the watermark turns over
-         *  the rows once every earlier batch has. A success spends the plan, so a second call answers
-         *  @c uninitialized_k instead of publishing twice, and so does a turn refused by a failure an
-         *  earlier batch kept; any other refusal leaves it whole, so the missing steps can still land. */
+         *  derive on the device unless every batch carried them, the row count lands, the claim
+         *  lifts, and the watermark turns over the rows once every earlier batch has. A success
+         *  spends the plan, so a second call answers @c uninitialized_k instead of publishing
+         *  twice, and so does a turn refused by a failure an earlier batch kept; any other refusal
+         *  leaves it whole, so the missing steps can still land. */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (standard_atomic_ref<std::size_t> {covered_vectors}.load(std::memory_order_acquire) != rows ||
@@ -3433,7 +3444,10 @@ struct dense_vram_index {
             if (rows) {
                 u32_t const blocks = static_cast<u32_t>(index_->device_.multiprocessor_count) *
                                      search_blocks_per_multiprocessor_k;
-                if (failed(cuda_launch(dense_cuda_derive_norms_kernel<kit_t>, blocks, block_threads_k, 0, stream,
+                // One launch derives every row, so a load mixing carried and missing norms
+                // re-derives the carried.
+                if (standard_atomic_ref<std::size_t> {covered_norms}.load(std::memory_order_acquire) != rows &&
+                    failed(cuda_launch(dense_cuda_derive_norms_kernel<kit_t>, blocks, block_threads_k, 0, stream,
                                        index_->planes(), static_cast<u32_t>(base), static_cast<u32_t>(rows))))
                     return index_->fail_(status_t::device_error_k);
                 u32_t const restored = static_cast<u32_t>(base + rows);
@@ -3466,7 +3480,8 @@ struct dense_vram_index {
      *  Refuses an unreserved index, a kept failure, columns shorter than the rows, a claim already
      *  held, and rows past the ID space.
      *
-     *  @param[in] columns Where the rows come from, both planes sized for @p rows.
+     *  @param[in] columns Where the rows come from, every plane but an empty norms one sized for
+     *      @p rows.
      *  @param[in] rows Rows to append.
      *  @param[in] source_range The ID space the source's rows speak.
      *  @param[in] stream The stream every copy and the norms kernel queue on.
@@ -3475,7 +3490,8 @@ struct dense_vram_index {
                                     cudaStream_t stream = nullptr) noexcept {
         if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (columns.vectors.size() < rows * packed_row_bytes() ||
-            columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t))
+            columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
+            (!columns.norms.empty() && columns.norms.size() < rows * sizeof(norms_t)))
             return {{}, status_t::config_mismatch_k};
         auto [plan, status] = plan_load(rows, stream);
         if (failed(status)) return {{}, status};
@@ -3499,7 +3515,8 @@ struct dense_vram_index {
         node_id_t const base = static_cast<node_id_t>(claimed_());
         if (rows > max_node_count_k - base) return {{}, status_t::overflow_k};
         load_plan_t plan {*this, {}, {}, stream, std::move(claiming), base, rows};
-        std::size_t const batch_bytes = plan.batch_rows * (packed_row_bytes() + connectivity() * sizeof(node_id_t));
+        std::size_t const batch_bytes = plan.batch_rows *
+                                        (packed_row_bytes() + connectivity() * sizeof(node_id_t) + sizeof(norms_t));
         if (failed(plan.bounce.resize_uninitialized(batch_bytes))) return {{}, status_t::bad_alloc_k};
         if (status_t const grown = grow_rows_(base + rows, stream); failed(grown)) return {{}, grown};
         return {std::move(plan), status_t::success_k};

@@ -25,8 +25,7 @@ concept vram_indexes = std::is_same_v<typename indexes_type_::executor_t, cuda_e
  *  so the exclusion is the executor's - a search on a claimed executor is refused, and the
  *  reader walks the published rows only once the writer has returned. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-    requires vram_indexes<indexes_type_>
-std::size_t test_dense_indexes_search_race(u64_t seed) {
+std::size_t test_dense_vram_indexes_search_race(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -83,7 +82,6 @@ std::size_t test_dense_indexes_search_race(u64_t seed) {
  *  every one, a plan short of rows refuses to finish and stays whole, its gate turns a second batch away, and a plan
  *  dying unfinished publishes nothing and leaves its shard refusing every later batch. */
 template <typename indexes_type_>
-    requires vram_indexes<indexes_type_>
 std::size_t test_dense_indexes_planned_insert(u64_t seed) {
     using scalar_t = typename indexes_type_::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -146,8 +144,7 @@ std::size_t test_dense_indexes_planned_insert(u64_t seed) {
 /** The VRAM reading of the sharded indexer search, keys equal to their rows: every shard walks the same queries
  *  under the same heads with a pool as wide as the index, so the merged top of every query is the oracle's. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-    requires vram_indexes<indexes_type_>
-std::size_t test_dense_indexes_indexer_search(u64_t seed) {
+std::size_t test_dense_vram_indexes_indexer_search(u64_t seed) {
     using scalar_t = typename indexes_type_::scalar_t;
     if constexpr (kernel_ != nk_kernel_dot_k || nk::is_integral_dtype<scalar_t>()) return 0;
     else {
@@ -192,8 +189,7 @@ std::size_t test_dense_indexes_indexer_search(u64_t seed) {
  *  a value row, mismatched outputs, and a head count that does not divide the rows refuse. Only the dot kernel
  *  attends. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-    requires vram_indexes<indexes_type_>
-std::size_t test_dense_indexes_attend(u64_t seed) {
+std::size_t test_dense_vram_indexes_attend(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     if constexpr (kernel_ != nk_kernel_dot_k) return 0;
     else {
@@ -281,13 +277,13 @@ std::size_t test_cuda_indexes_configuration(char const* name, u64_t seed) {
     failures_count += test_dense_indexes_buffer_roundtrip<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_cancelled_load<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_concurrent_add<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_search_race<indexes_t, kernel_>(seed);
+    failures_count += test_dense_vram_indexes_search_race<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_planned_insert<indexes_t>(seed);
     failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_indexer_search<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_attend<indexes_t, kernel_>(seed);
+    failures_count += test_dense_vram_indexes_indexer_search<indexes_t, kernel_>(seed);
+    failures_count += test_dense_vram_indexes_attend<indexes_t, kernel_>(seed);
     return report(name, failures_count);
 }
 

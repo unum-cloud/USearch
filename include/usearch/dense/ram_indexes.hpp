@@ -940,30 +940,25 @@ struct dense_ram_indexes {
         auto attend_token = [&](std::size_t token, std::size_t, traversal_t& traversal,
                                 std::span<dense_node_id_t const> watermarks) noexcept {
             std::size_t const first = token * head_count;
-            dense_keyed_ids<keys_column_t> keyed;
-            auto shard_lookup = [&](std::span<dense_node_id_t const> nodes, std::span<vector_view_t> rows) noexcept {
-                std::array<key_t, 4> keys;
-                for (std::size_t lane = 0; lane != nodes.size(); ++lane) keys[lane] = keyed(nodes[lane]);
-                value_lookup(std::span<key_t const>(keys).first(nodes.size()), rows);
-            };
             status_t status = status_t::success_k;
-            typename index_t::template attention_rescoring<decltype(shard_lookup)> const rescoring {
+            shard_value_lookup<value_lookup_type_> shard_lookup {nullptr, value_lookup};
+            dense_attention_rescoring<capability_, scalar_t, decltype(shard_lookup)> const attention {
                 queries(nk::range(first, first + head_count), nk::slice),
                 shard_lookup,
                 score_scale,
                 outputs.subspan(first * columns, head_count * columns),
                 carry.subspan(first, head_count),
                 status};
-            rescoring.clear();
+            attention.clear();
             for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
-                keyed.keys = &shards_[shard].keys;
+                shard_lookup.keys = &shards_[shard].keys;
                 expected<search_result_t> const walked = shards_[shard].index->walk_(
-                    rescoring.queries.row(0).as_vector(), dummy_fold_t {}, rescoring, traversal, config,
+                    attention.queries.row(0).as_vector(), dummy_fold_t {}, attention, traversal, config,
                     watermarks[shard]);
                 if (!walked) return walked.status;
                 if (failed(status)) return status;
             }
-            rescoring.finish();
+            attention.finish();
             return status_t::success_k;
         };
         expected<search_result_t> attended = for_each_row_(rows_count / head_count, executor, config, attend_token, {});
@@ -1299,7 +1294,8 @@ struct dense_ram_indexes {
             if (step.shard >= plans_.size() || step.part >= parts_.size()) return status_t::config_mismatch_k;
             part_t const& part = parts_[step.part];
             typename index_t::columns_view_t const columns {part.header.data_of(part.monolith, part.header.value),
-                                                            part.header.data_of(part.monolith, part.header.neighbors)};
+                                                            part.header.data_of(part.monolith, part.header.neighbors),
+                                                            part.header.norms_of(part.monolith, norms_column_dtype_k)};
             return plans_[step.shard].load(step.inner, columns, step.source_range);
         }
 
@@ -1507,7 +1503,78 @@ struct dense_ram_indexes {
         return total;
     }
 
+    /**
+     *  @brief The batched @ref count: the entries stored under every key of @p keys, one key per
+     *      task over the executor's threads.
+     *
+     *  @param[in] keys The keys to count, repeats and absent ones included.
+     *  @param[out] entries The entries under each key, parallel to @p keys; zero means absent.
+     *  @param[inout] executor The threads the lookups fan out over.
+     */
+    status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) const noexcept {
+        if (entries.size() != keys.size()) return status_t::config_mismatch_k;
+        auto [executor_claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return claim_status;
+        return executor.for_tasks(keys.size(), [&](std::size_t position, std::size_t, std::size_t) noexcept {
+            entries[position] = count(keys[position]);
+        });
+    }
+
+    /** The batched @ref contains: one in @p entries where a key of @p keys holds any entry, zero
+     *  where it holds none, one key per task over the executor's threads. */
+    status_t contains(std::span<key_t const> keys, std::span<std::size_t> entries,
+                      executor_t& executor) const noexcept {
+        if (entries.size() != keys.size()) return status_t::config_mismatch_k;
+        auto [executor_claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return claim_status;
+        return executor.for_tasks(keys.size(), [&](std::size_t position, std::size_t, std::size_t) noexcept {
+            entries[position] = contains(keys[position]) ? 1 : 0;
+        });
+    }
+
+    /**
+     *  @brief The batched @ref get: up to @p wanted rows of every key of @p keys, and every key's
+     *      true total, one key per task over the executor's threads.
+     *
+     *  @param[in] keys The keys to export, repeats and absent ones included.
+     *  @param[out] vectors @b [keys·wanted,dimensions]: row q · @p wanted + i is the i-th row of
+     *      key q.
+     *  @param[in] wanted Rows kept per key.
+     *  @param[out] entries The true total under each key, parallel to @p keys; above @p wanted
+     *      when its rows truncated, zero when absent.
+     *  @param[inout] executor The threads the copies fan out over.
+     */
+    status_t get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
+                 std::span<std::size_t> entries, executor_t& executor) const noexcept {
+        if (entries.size() != keys.size() || vectors.extent(0) < keys.size() * wanted ||
+            (wanted && vectors.extent(1) < row_values_()))
+            return status_t::config_mismatch_k;
+        auto [executor_claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return claim_status;
+        return executor.for_tasks(keys.size(), [&](std::size_t position, std::size_t, std::size_t) noexcept {
+            std::size_t const first = position * wanted;
+            entries[position] = get(keys[position], vectors(nk::range(first, first + wanted), nk::slice), wanted);
+        });
+    }
+
   private:
+
+    /** The caller's key-taking value lookup, fed a walk's node IDs through one shard's keys. */
+    template <typename value_lookup_type_>
+    struct shard_value_lookup {
+
+        /** The key column of the shard being walked, rebound per shard. */
+        keys_column_t const* keys = nullptr;
+
+        /** The caller's lookup, which takes keys. */
+        value_lookup_type_& value_lookup;
+
+        void operator()(std::span<dense_node_id_t const> nodes, std::span<vector_view_t> rows) const noexcept {
+            std::array<key_t, 4> node_keys;
+            for (std::size_t lane = 0; lane != nodes.size(); ++lane) node_keys[lane] = (*keys)[nodes[lane]];
+            value_lookup(std::span<key_t const>(node_keys).first(nodes.size()), rows);
+        }
+    };
 
     /** One unreserved shard placed on @p memory_domain; null when the allocation fails. */
     static std::unique_ptr<index_t> build_(fu_memory_domain_id_t memory_domain) noexcept {
@@ -1754,6 +1821,12 @@ struct dense_ram_indexes {
      *  carries the packing and the column's shape counts logical dimensions. */
     inline static constexpr dtype_t value_column_dtype_k = safegraphs_value_dtype<scalar_t>();
 
+    /** The norms column's dtype: the dot product's own token where the kernel keeps norms, and
+     *  @c unknown_k where it keeps none, so no column is written. */
+    inline static constexpr dtype_t norms_column_dtype_k = std::is_same_v<typename index_t::vector_norms_t, no_norms_t>
+                                                               ? dtype_t::unknown_k
+                                                               : safegraphs_value_dtype<dot_result_t>();
+
     /** Whether the index can write @p config: placed, reserved, tokenized, and legal. */
     status_t saveable_(save_config_t const& config) const noexcept {
         static_assert(key_dtype_k != dtype_t::unknown_k, "The key type has no interchange token");
@@ -1787,8 +1860,8 @@ struct dense_ram_indexes {
     /** The monolith header for @p nodes rows under @p config 's alignment. */
     expected<safegraphs_header_t> monolith_header_(std::size_t nodes, save_config_t const& config,
                                                    std::span<safegraphs_custom_field_t const> fields) const noexcept {
-        safegraphs_regular_shape_t const shape {nodes,        key_dtype_k,    value_column_dtype_k,
-                                                dimensions(), dtype_t::u32_k, connectivity()};
+        safegraphs_regular_shape_t const shape {nodes,          key_dtype_k,    value_column_dtype_k, dimensions(),
+                                                dtype_t::u32_k, connectivity(), norms_column_dtype_k};
         return safegraphs_regular_header(shape, config.alignment, fields);
     }
 
@@ -1930,7 +2003,8 @@ struct dense_ram_indexes {
                               safegraphs_header_t const& header, std::size_t first_row, std::size_t nodes,
                               save_config_t const& config) noexcept {
         typename index_t::columns_t const columns {header.rows_of(target, header.value, first_row, nodes),
-                                                   header.rows_of(target, header.neighbors, first_row, nodes)};
+                                                   header.rows_of(target, header.neighbors, first_row, nodes),
+                                                   header.rows_of(target, header.norms, first_row, nodes)};
         auto [inner, status] = shards_[shard].index->plan_save(columns, config.synchronization,
                                                                static_cast<dense_node_id_t>(first_row));
         if (failed(status)) return status;
@@ -2140,8 +2214,6 @@ struct dense_ram_indexes {
             return reserved;
 
         if (failed(plan.plans_.reserve_exactly(shards))) return status_t::bad_alloc_k;
-        std::size_t const vectors_row_bytes = row_values_() * sizeof(scalar_t);
-        std::size_t const neighbors_row_bytes = connectivity * sizeof(dense_node_id_t);
         for (std::size_t shard = 0; shard != shards; ++shard) {
             auto [inner, status] = shards_[shard].index->plan_load(shard_rows[shard]);
             if (failed(status)) return status;
@@ -2164,8 +2236,6 @@ struct dense_ram_indexes {
                     step.inner.index_rows = {static_cast<dense_node_id_t>(low), static_cast<dense_node_id_t>(high)};
                     step.inner.source_rows = {static_cast<dense_node_id_t>(assignment.rows.first + low - first_row),
                                               static_cast<dense_node_id_t>(assignment.rows.first + high - first_row)};
-                    step.inner.vectors_bytes = (high - low) * vectors_row_bytes;
-                    step.inner.neighbors_bytes = (high - low) * neighbors_row_bytes;
                     if (failed(plan.steps_.push_back(step))) return status_t::bad_alloc_k;
                 }
                 first_row = bound_row;

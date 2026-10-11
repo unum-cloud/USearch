@@ -290,6 +290,15 @@ inline status_t copy_bytes(bytes_span_t destination, bytes_view_t source) noexce
     return status_t::success_k;
 }
 
+/** Rows @p first to @p first + @p count of a row-major @p plane whose rows are @p row_bytes wide,
+ *  or empty when the plane holds fewer. */
+template <typename bytes_type_>
+bytes_type_ plane_rows(bytes_type_ plane, std::size_t first, std::size_t count, std::size_t row_bytes) noexcept {
+    std::size_t const begin = first * row_bytes, bytes = count * row_bytes;
+    if (begin > plane.size() || plane.size() - begin < bytes) return {};
+    return plane.subspan(begin, bytes);
+}
+
 /** Whether a filtered search admits one candidate or passes over it - rejected nodes
  *  still route the walk, they just never enter the reported pool. Mirrors
  *  @c usearch_admission_t value for value, so the two enums cannot drift. */

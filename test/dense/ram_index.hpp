@@ -41,8 +41,7 @@ template <                                       //
     typename waiter_type_ = dummy_waiter_t,      //
     nk_capability_t caps_ = nk_cap_serial_k,     //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
-    requires(!index_combo_supported<dtype_, kernel_> || !dense_cell_compiled<dtype_, kernel_, caps_>)
-static std::size_t test_configuration(char const* name, u64_t) {
+static std::size_t test_ram_index_configuration(char const* name, u64_t) {
     if constexpr (!index_combo_supported<dtype_, kernel_>) return report(name, "serial kernels not adapted yet");
     else return report(name, "kit not compiled for this target");
 }
@@ -52,8 +51,8 @@ template <                                       //
     typename waiter_type_ = dummy_waiter_t,      //
     nk_capability_t caps_ = nk_cap_serial_k,     //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
-    requires(index_combo_supported<dtype_, kernel_> && dense_cell_compiled<dtype_, kernel_, caps_>)
-static std::size_t test_configuration(char const* name, u64_t seed) {
+    requires index_combo_supported<dtype_, kernel_> && dense_cell_compiled<dtype_, kernel_, caps_>
+static std::size_t test_ram_index_configuration(char const* name, u64_t seed) {
 
     using index_t = dense_ram_index<dtype_, kernel_, caps_, waiter_type_, atomic_ref_, fu::standard_cache_hints_t,
                                     counting_allocator_t, counting_allocator_t, std::allocator<byte_t>>;
@@ -98,7 +97,7 @@ static std::size_t test_configuration(char const* name, u64_t seed) {
 /** The starved cell: the same index over ledgered traversal scratch, so a refused re-table
  *  has somewhere to come from, walked by the saturation scenario alone. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-    requires(index_combo_supported<dtype_, kernel_>)
+    requires index_combo_supported<dtype_, kernel_>
 static std::size_t test_starved_configuration(char const* name, u64_t seed) {
     using index_t =
         dense_ram_index<dtype_, kernel_, nk_cap_serial_k, dummy_waiter_t, fu::standard_atomic_ref,
@@ -108,8 +107,6 @@ static std::size_t test_starved_configuration(char const* name, u64_t seed) {
     };
     return report(name, test_dense_saturated<index_t>(make_index, seed));
 }
-
-#pragma region Suite Entry Points
 
 /** Per-dtype CPU index suite entries the shard translation units define and
  *  @c dense.cpp composes explicitly; each returns its shard's failure count. */
@@ -121,7 +118,5 @@ std::size_t check_ram_index_i8(settings_t const& settings);
 std::size_t check_ram_index_i4(settings_t const& settings);
 std::size_t check_ram_index_u8(settings_t const& settings);
 std::size_t check_ram_index_u1(settings_t const& settings);
-
-#pragma endregion Suite Entry Points
 
 } // namespace unum::usearch::test::dense

@@ -125,6 +125,83 @@ check_blank_line_runs() {
         "$file separates paragraphs with more than one blank line - Markdown needs exactly one:"
 }
 
+# Prose reads at 100 columns while code runs to clang-format's 120, so a docblock line or a whole-line `//`
+# comment stops at 100. URLs, `@code` and `@verbatim` bodies are exempt, and a macro line is measured without
+# the padding clang-format adds before its trailing backslash.
+check_prose_comment_width() {
+    local wide
+    wide=$(awk '
+        FILENAME == ARGV[1] { added[$1 + 0]; next }
+        {
+            text = $0
+            if (!inside && text ~ /^[[:space:]]*\/\*([^*]|\*[^\/])*\*\/[[:space:]]*[^[:space:]\\]/) next
+            if (text ~ /^[[:space:]]*\/\*/) { inside = 1; in_code = 0 }
+            prose = inside || text ~ /^[[:space:]]*\/\//
+            if (inside && text ~ /@(code|verbatim)/) in_code = 1
+            if (inside && text ~ /@end(code|verbatim)/) in_code = 0
+            if (inside && text ~ /\*\//) inside = 0
+            if (!prose || in_code || !(FNR in added) || text ~ /https?:\/\//) next
+            characters = text
+            sub(/[[:space:]]*\\$/, "", characters)
+            gsub(/[\200-\277]/, "", characters)
+            if (length(characters) > 100) printf "line %d: %d columns\n", FNR, length(characters)
+        }' "$staged_lines_path" "$staged_blob")
+    [ -z "$wide" ] || fail "$wide" \
+        "$file writes prose past 100 columns - rewrap it, only code may reach 120:"
+}
+
+# A comment line that breaks a sentence while the next word would fit under the paragraph's widest line is an
+# edit nobody re-flowed. A colon ending, a URL, tags, bullets, code blocks, aligned rows and `Label:` lines start
+# a new paragraph, and the measure is the paragraph's own widest other line, capped at the 100-column prose.
+check_prose_paragraph_filled() {
+    local underfilled
+    underfilled=$(awk '
+        function characters(text) { gsub(/[\200-\277]/, "", text); return length(text) }
+        function first_word(text) {
+            if (text ~ /^`[^`]*`/) { match(text, /^`[^`]*`[^[:space:]]*/); return substr(text, 1, RLENGTH) }
+            sub(/[[:space:]].*$/, "", text); return text
+        }
+        function hold_paragraph_line(line, body, width) { ++held; held_line[held] = line; held_body[held] = body; held_width[held] = width }
+        function report_paragraph_room(    index_, other, measure, word) {
+            for (index_ = 1; index_ < held; ++index_) {
+                if (held_body[index_] ~ /[.:;!?][])"`\047]*$/) continue
+                if (!((held_line[index_] in added) || (held_line[index_ + 1] in added))) continue
+                measure = 0
+                for (other = 1; other <= held; ++other) if (other != index_ && held_width[other] > measure) measure = held_width[other]
+                if (measure > 100) measure = 100
+                word = first_word(held_body[index_ + 1])
+                if (held_width[index_] + 1 + characters(word) <= measure) printf "line %d: room for `%s` from the next line\n", held_line[index_], word
+            }
+            held = 0
+        }
+        function previous_text_ok(text) { return text !~ /:[[:space:]]*(\*\/)?[[:space:]]*$/ && text !~ /https?:\/\// }
+        FILENAME == ARGV[1] { added[$1 + 0]; next }
+        {
+            text = $0
+            opens = (text ~ /^[[:space:]]*\/\*/)
+            if (opens) { inside = 1; in_code = 0 }
+            slashed = !inside && text ~ /^[[:space:]]*\/\//
+            if (inside && text ~ /@(code|verbatim)/) in_code = 1
+            body = text
+            sub(/[[:space:]]*\*\/[[:space:]]*$/, "", body)
+            sub(/^[[:space:]]*(\/\*\*?|\*|\/\/\/?)[[:space:]]*/, "", body)
+            flowing = (inside || slashed) && !in_code && body != "" && body !~ /^\||https?:\/\// &&
+                body !~ /[^[:space:]]   *[^[:space:]]/ && text !~ /@end(code|verbatim)/ && text !~ /^[[:space:]]*\/\/[[:space:]]{4,}/
+            continues = flowing && body !~ /^(@|- |[0-9]+\. |[A-Z][A-Za-z]*( [A-Za-z]+){0,2}: )/ && !opens
+            if (!(continues && previous_flowing && previous_kind == (slashed ? "slashed" : "block")))
+                report_paragraph_room()
+            if (flowing) hold_paragraph_line(FNR, body, characters(text))
+            previous_flowing = flowing && text !~ /\*\// && previous_text_ok(text)
+            previous_kind = slashed ? "slashed" : "block"
+            if (inside && text ~ /@end(code|verbatim)/) in_code = 0
+            if (inside && text ~ /\*\//) inside = 0
+        }
+        END { report_paragraph_room() }' "$staged_lines_path" "$staged_blob")
+    [ -z "$underfilled" ] || fail "$underfilled" \
+        "$file leaves a comment line underfilled - it breaks a sentence while the next word fits under" \
+        "            the paragraph's widest line, so pull the word up or re-flow:"
+}
+
 # Backward-looking prose in comments - "v2", "v3", "the previous implementation" - rots the moment
 # the rewrite ships and reads as changelog noise. Docstrings describe behavior on its own terms,
 # forward-looking; history belongs in commit messages and design documents.
@@ -1125,6 +1202,22 @@ check_preprocessor_nesting() {
         "            and an #endif closing a nested pair names its condition:"
 }
 
+# A requires-clause names what it admits. Parentheses wrap only what the grammar needs them for, a comparison,
+# a call or a negation, never names joined by && and ||; and a clause never opens with a negation: a fallback
+# beside `requires X` stays unconstrained, since the constrained overload already wins wherever X holds.
+check_requires_clauses() {
+    local negated wrapped name='[A-Za-z_][A-Za-z0-9_:]*(<[^()&|]*>)?'
+    negated=$(printf '%s\n' "$added" | grep -E '^\+[^/*]*requires[[:space:]]*\([[:space:]]*!' || true)
+    [ -z "$negated" ] || fail "$negated" \
+        "$file opens a requires-clause with a negation - leave the fallback unconstrained, name the" \
+        "            alternative as a concept of its own, or branch with if constexpr:"
+    wrapped=$(printf '%s\n' "$added" |
+        grep -E "^\+[^/*]*requires[[:space:]]*\([[:space:]]*$name([[:space:]]*(&&|\|\|)[[:space:]]*$name)*[[:space:]]*\)[[:space:]]*\$" ||
+        true)
+    [ -z "$wrapped" ] || fail "$wrapped" \
+        "$file wraps plain names in parentheses - write \`requires concept<type_> && other<type_>\`:"
+}
+
 # endregion C++ Surface and Containers
 
 # region Concurrency and Atomics
@@ -1413,6 +1506,8 @@ judge_path() {
         check_glued_arrows
         check_ids_capitalized
         check_backward_references
+        check_prose_comment_width
+        check_prose_paragraph_filled
         check_region_labels
         check_region_lengths
         check_namespace_directories
@@ -1442,6 +1537,7 @@ judge_path() {
         check_c_limit_macros
         check_template_parameter_underscores
         check_template_type_suffixes
+        check_requires_clauses
         check_function_like_macros
         check_spelled_byte_spans
         check_redundant_nodiscard

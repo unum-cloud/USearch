@@ -28,7 +28,7 @@
 #include <cstdlib> // `std::abs`
 #include <cstring> // `std::strlen`, `std::memcmp` - the fetched-row byte comparison
 
-#include <algorithm> // `std::sort`, `std::unique`, `std::all_of`
+#include <algorithm> // `std::sort`, `std::unique`, `std::all_of`, `std::rotate`
 #include <array>     // `std::array`
 #include <atomic>    // `std::atomic`
 #include <bit>       // `std::bit_cast` - the ULP distance of the oracle audits; `std::bit_floor` - a cell's ceiling
@@ -725,7 +725,6 @@ std::size_t dense_expect_indexer_matches(dense_indexer_inputs<scalar_type_> cons
 
 /** Indexer search on one index under an exhaustive walk, every node addressing its own row. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-    requires(!dense_device_resident<index_type_>)
 std::size_t dense_expect_indexer_search(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     std::size_t failures = 0;
@@ -761,7 +760,6 @@ std::size_t dense_expect_indexer_search(make_index_type_ const& make_index, allo
 
 /** @ref dense_expect_indexer_search for the dot kernel over floating-point keys, then the ledger must balance. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-    requires(!dense_device_resident<index_type_>)
 std::size_t test_dense_indexer_search(make_index_type_ const& make_index, u64_t seed) {
     if constexpr (kernel_ != nk_kernel_dot_k || nk::is_integral_dtype<typename index_type_::scalar_t>()) return 0;
     else {
@@ -774,7 +772,6 @@ std::size_t test_dense_indexer_search(make_index_type_ const& make_index, u64_t 
 /** Sharded indexer search under an exhaustive walk: keys equal their rows, so the merged top of every query is
  *  judged against the same @c f64 oracle whichever shard scored it. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-    requires ram_indexes<indexes_type_>
 std::size_t test_dense_indexes_indexer_search(u64_t seed) {
     using scalar_t = typename indexes_type_::scalar_t;
     if constexpr (kernel_ != nk_kernel_dot_k || nk::is_integral_dtype<scalar_t>()) return 0;
@@ -1594,7 +1591,6 @@ std::size_t dense_expect_product_row(nk::vector_view<scalar_type_> left, nk::mat
  *  while counting past it, every kept pair names a distinct stored row with its exact dot, and mismatched
  *  spans refuse. */
 template <typename index_type_, typename make_index_type_>
-    requires(!dense_device_resident<index_type_>)
 std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     constexpr std::size_t rows_count = dense_thread_nodes_k, left_count = 4;
@@ -1638,27 +1634,22 @@ std::size_t dense_expect_multiply(make_index_type_ const& make_index, allocation
     return failures;
 }
 
-/** Graph products are a dot-kernel verb, so every other kernel has nothing to check. */
+/** @ref dense_expect_multiply for the dot kernel, then the ledger it left must balance; no other
+ *  kernel offers it. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-    requires(kernel_ != nk_kernel_dot_k)
-std::size_t test_dense_multiply(make_index_type_ const&, u64_t) {
-    return 0;
-}
-
-/** @ref dense_expect_multiply, then the ledger it left must balance. */
-template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-    requires(kernel_ == nk_kernel_dot_k && !dense_device_resident<index_type_>)
 std::size_t test_dense_multiply(make_index_type_ const& make_index, u64_t seed) {
-    allocation_ledger_t ledger;
-    std::size_t const failures = dense_expect_multiply<index_type_>(make_index, ledger, seed);
-    return failures + expect_eq(ledger.live_bytes.load(), 0);
+    if constexpr (kernel_ != nk_kernel_dot_k) return 0;
+    else {
+        allocation_ledger_t ledger;
+        std::size_t const failures = dense_expect_multiply<index_type_>(make_index, ledger, seed);
+        return failures + expect_eq(ledger.live_bytes.load(), 0);
+    }
 }
 
 /** Attention against exact full attention in @c f64 under an exhaustive walk, one head per walk and four sharing
  *  one, every node ID its stored row; a narrow walk stays bounded; a node without a value row, a mismatched
  *  output and heads that do not divide the rows refuse. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-    requires(!dense_device_resident<index_type_>)
 std::size_t dense_expect_attend(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
     using vector_view_t = typename index_type_::vector_view_t;
@@ -1736,7 +1727,6 @@ std::size_t dense_expect_attend(make_index_type_ const& make_index, allocation_l
 
 /** @ref dense_expect_attend for the dot kernel, then the ledger it left must balance; no other kernel offers it. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-    requires(!dense_device_resident<index_type_>)
 std::size_t test_dense_attend(make_index_type_ const& make_index, u64_t seed) {
     if constexpr (kernel_ != nk_kernel_dot_k) return 0;
     else {
@@ -1746,19 +1736,11 @@ std::size_t test_dense_attend(make_index_type_ const& make_index, u64_t seed) {
     }
 }
 
-/** Sharded graph products are a dot-kernel verb, so every other kernel has nothing to check. */
-template <typename indexes_type_, nk_kernel_kind_t kernel_>
-    requires(kernel_ != nk_kernel_dot_k)
-std::size_t test_dense_indexes_products(u64_t) {
-    return 0;
-}
-
 /** Sharded graph products against the native dots: every scored pair is counted, a narrow row keeps its
  *  width while counting past it, every kept pair names a distinct stored row with its exact dot, and
  *  mismatched spans refuse. */
-template <typename indexes_type_, nk_kernel_kind_t kernel_>
-    requires(kernel_ == nk_kernel_dot_k)
-std::size_t test_dense_indexes_products(u64_t seed) {
+template <typename indexes_type_>
+std::size_t dense_expect_indexes_products(u64_t seed) {
     using scalar_t = typename indexes_type_::scalar_t;
     using key_t = typename indexes_type_::key_t;
     constexpr std::size_t rows_count = dense_thread_nodes_k, left_count = 4;
@@ -1803,19 +1785,18 @@ std::size_t test_dense_indexes_products(u64_t seed) {
     return failures;
 }
 
-/** Sharded MaxSim is a dot-kernel verb, so every other kernel has nothing to check. */
+/** @ref dense_expect_indexes_products for the dot kernel; no other kernel offers graph products. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-    requires(kernel_ != nk_kernel_dot_k)
-std::size_t test_dense_indexes_maxsim(u64_t) {
-    return 0;
+std::size_t test_dense_indexes_products(u64_t seed) {
+    if constexpr (kernel_ != nk_kernel_dot_k) return 0;
+    else return dense_expect_indexes_products<indexes_type_>(seed);
 }
 
 /** Sharded MaxSim against the native dots: 64 documents of 4 token rows share their keys, a walk as wide as
  *  the index ranks exactly the oracle's best documents at their exact scores, a default one never scores a
  *  key above its own, and a ragged batch refuses. */
-template <typename indexes_type_, nk_kernel_kind_t kernel_>
-    requires(kernel_ == nk_kernel_dot_k)
-std::size_t test_dense_indexes_maxsim(u64_t seed) {
+template <typename indexes_type_>
+std::size_t dense_expect_indexes_maxsim(u64_t seed) {
     using scalar_t = typename indexes_type_::scalar_t;
     using key_t = typename indexes_type_::key_t;
     using search_config_t = typename indexes_type_::search_config_t;
@@ -1896,12 +1877,18 @@ std::size_t test_dense_indexes_maxsim(u64_t seed) {
     return failures;
 }
 
+/** @ref dense_expect_indexes_maxsim for the dot kernel; no other kernel offers MaxSim. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+std::size_t test_dense_indexes_maxsim(u64_t seed) {
+    if constexpr (kernel_ != nk_kernel_dot_k) return 0;
+    else return dense_expect_indexes_maxsim<indexes_type_>(seed);
+}
+
 /** Attention across the shards against exact full attention in @c f64 under exhaustive walks, one head per walk
  *  and four sharing one, rows keyed by their own position: every shard's walk folds into one running state per
  *  head. Narrow walks stay bounded; a key without a value row, a mismatched output and heads that do not divide
  *  the rows refuse. Only the dot kernel attends. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-    requires ram_indexes<indexes_type_>
 std::size_t test_dense_indexes_attend(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
@@ -2384,6 +2371,27 @@ std::size_t test_dense_indexes_duplicate_keys(u64_t seed) {
     auto fetched = make_vectors<scalar_t>(2, dimensions, stream_key(seed, "guards", 3));
     failures += expect_eq(indexes.get(shared, fetched.span(), 2), rows / 2);
     failures += expect_eq(indexes.get(static_cast<key_t>(2), fetched.span(), 2), 0u);
+
+    // The batched verbs answer what the single-key ones do, repeats and absent keys included, and
+    // every key's rows land in its own band of the batch, in the single-key order.
+    std::array<key_t, 4> const probes {shared, static_cast<key_t>(1), static_cast<key_t>(2), shared};
+    std::span<key_t const> const probed {probes};
+    std::array<std::size_t, 4> counted {}, contained {}, gotten {};
+    auto batch = make_vectors<scalar_t>(probes.size() * 2, dimensions, stream_key(seed, "guards", 4));
+    failures += expect(succeeded(indexes.count(probed, std::span {counted}, driver.executor)));
+    failures += expect(succeeded(indexes.contains(probed, std::span {contained}, driver.executor)));
+    failures += expect(succeeded(indexes.get(probed, batch.span(), 2, std::span {gotten}, driver.executor)));
+    std::size_t const row_bytes = dense_rows_bytes(fetched.view(), 1);
+    for (std::size_t probe = 0; probe != probes.size(); ++probe) {
+        failures += expect_eq(counted[probe], indexes.count(probes[probe]));
+        failures += expect_eq(contained[probe], indexes.contains(probes[probe]) ? 1u : 0u);
+        failures += expect_eq(gotten[probe], indexes.get(probes[probe], fetched.span(), 2));
+        for (std::size_t row = 0; row != min_of<std::size_t>(gotten[probe], 2); ++row)
+            failures += expect(std::memcmp(batch.view().row(probe * 2 + row).as_vector().byte_data(),
+                                           fetched.view().row(row).as_vector().byte_data(), row_bytes) == 0);
+    }
+    failures += expect_eq(indexes.get(probed, batch.span(), 3, std::span {gotten}, driver.executor),
+                          status_t::config_mismatch_k);
     return failures;
 }
 
@@ -2694,9 +2702,77 @@ std::size_t test_dense_indexes_pooled_save(u64_t seed) {
     return failures;
 }
 
+/** The norms column of @p monolith, which a sharded index saved over @p rows rows: present where
+ *  the shards keep norms, taken as written by a restore, and derived again for a part without the
+ *  column or with a dtype the shards never keep. Every restore saves again, and the norms that save
+ *  writes are the ones it holds. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_, typename executor_type_>
+std::size_t dense_indexes_expect_norms(std::vector<std::byte> const& monolith, executor_type_& executor,
+                                       std::size_t rows) {
+    using index_t = typename indexes_type_::index_t;
+    using dot_result_t = typename indexes_type_::dot_result_t;
+    using norms_t = vector_norms<dot_result_t>;
+    constexpr bool keeps_norms_k = dense_device_resident<index_t> || kernel_ != nk_kernel_dot_k;
+    std::size_t failures = 0;
+    auto const [header, header_status] = safegraphs_read_header(bytes_view_t {monolith});
+    failures += expect(succeeded(header_status));
+    if (!keeps_norms_k) return failures + expect(header.norms.dtype == dtype_t::unknown_k);
+    failures += expect(header.norms.dtype == safegraphs_value_dtype<dot_result_t>() &&
+                       header.norms.shape == safegraphs_norms_shape_k && header.norms.nodes() == rows);
+    if (failures) return failures;
+
+    save_config_t const config = dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::monolith_k);
+    auto resaved_norms = [&](std::vector<std::byte> const& source) {
+        std::vector<norms_t> norms(rows);
+        indexes_type_ restored {forkunion_allocator_t {no_memory_domain_k}};
+        failures += expect(succeeded(place_shards(restored)));
+        failures += expect(succeeded(restored.load(bytes_view_t {source}, load_config_t {}, executor)));
+        std::vector<std::byte> resaved(restored.storage_requirements(config).value);
+        failures += expect(succeeded(restored.save(bytes_span_t {resaved}, config, executor)));
+        auto const [resaved_header, resaved_status] = safegraphs_read_header(bytes_view_t {resaved});
+        bytes_view_t const column = resaved_header.data_of(bytes_view_t {resaved}, resaved_header.norms);
+        failures += expect(succeeded(resaved_status) && column.size() == rows * sizeof(norms_t));
+        if (column.size() == rows * sizeof(norms_t)) std::memcpy(norms.data(), column.data(), column.size());
+        return norms;
+    };
+    // Every copy rotates the stored rows by one, so a restore that took them would show it.
+    auto doctored = [&](safegraphs_column_t norms) {
+        std::vector<std::byte> copy = monolith;
+        bytes_span_t const column = header.data_of(bytes_span_t {copy}, header.norms);
+        std::rotate(column.begin(), column.begin() + sizeof(norms_t), column.end());
+        safegraphs_header_t patched = header;
+        patched.norms = norms;
+        std::array<safegraphs_custom_field_t, 2> const fields {
+            {{"metric", nk_kernel_name(kernel_)}, {"quantization", nk_dtype_name(index_t::vector_dtype_k)}}};
+        failures += expect(succeeded(safegraphs_write_header(bytes_span_t {copy}, patched, fields)));
+        return copy;
+    };
+
+    std::vector<norms_t> original(rows);
+    std::memcpy(original.data(), header.data_of(bytes_view_t {monolith}, header.norms).data(), rows * sizeof(norms_t));
+    std::vector<std::byte> const rotated = doctored(header.norms);
+    std::vector<norms_t> const taken = resaved_norms(rotated);
+    failures += expect(std::memcmp(taken.data(), header.data_of(bytes_view_t {rotated}, header.norms).data(),
+                                   rows * sizeof(norms_t)) == 0);
+
+    safegraphs_column_t mistyped = header.norms;
+    mistyped.dtype = sizeof(dot_result_t) == 8 ? dtype_t::b64_k : dtype_t::b32_k;
+    std::vector<norms_t> const without_column = resaved_norms(doctored({}));
+    std::vector<norms_t> const under_mistype = resaved_norms(doctored(mistyped));
+    for (std::size_t sample = 0; sample != 8; ++sample) {
+        std::size_t const row = sample * (rows / 8);
+        f64_t const sum = static_cast<f64_t>(original[row].sum), sumsq = static_cast<f64_t>(original[row].sumsq);
+        failures += expect_near(static_cast<f64_t>(without_column[row].sum), sum);
+        failures += expect_near(static_cast<f64_t>(without_column[row].sumsq), sumsq);
+        failures += expect_near(static_cast<f64_t>(under_mistype[row].sum), sum);
+        failures += expect_near(static_cast<f64_t>(under_mistype[row].sumsq), sumsq);
+    }
+    return failures;
+}
+
 /** Buffers hold one consolidated monolith: @c storage_requirements sizes it, the summary reads from
- *  it, a fresh index restores from it, and a short buffer, a distributed layout, or a
- *  cancelled save leave nothing a reader accepts. */
+ *  it, a fresh index restores from it, its norms as written or derived again, and a short buffer, a
+ *  distributed layout, or a cancelled save leave nothing a reader accepts. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
 std::size_t test_dense_indexes_buffer_roundtrip(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
@@ -2732,6 +2808,7 @@ std::size_t test_dense_indexes_buffer_roundtrip(u64_t seed) {
     failures += expect(succeeded(place_shards(restored)));
     failures += expect(succeeded(restored.load(bytes_view_t {buffer}, load_config_t {}, executor)));
     failures += dense_indexes_expect_restored(restored, vectors, keys, dimensions, seed);
+    failures += dense_indexes_expect_norms<indexes_type_, kernel_>(buffer, executor, rows);
 
     // A buffer one byte short, a distributed layout, and a cancelled save all leave no monolith.
     std::vector<std::byte> shorter(bytes - 1);
@@ -2892,7 +2969,6 @@ std::size_t test_dense_indexes_concurrent_add(u64_t seed) {
  *  outside the assigned range. Every batch spans both shards yet shows whole or not at all.
  *  RAM only: a VRAM index admits no search during a mutation. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-    requires ram_indexes<indexes_type_>
 std::size_t test_dense_indexes_search_race(u64_t seed) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;

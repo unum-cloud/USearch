@@ -3636,9 +3636,9 @@ struct haswell_elementwise_kit_t {
         _mm256_storeu_ps(values.data(), nk_exp2_f32x8_haswell_(_mm256_loadu_ps(values.data())));
     }
 };
+#endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_SKYLAKE
-
 /** Skylake's casts and arithmetic over Haswell's exponentials, as one tile fills a single AVX2 register. */
 struct skylake_elementwise_kit_t : haswell_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
@@ -3646,26 +3646,23 @@ struct skylake_elementwise_kit_t : haswell_elementwise_kit_t {
     static constexpr auto scale = nk_each_scale_f32_skylake;
     static constexpr auto blend = nk_each_blend_f32_skylake;
 };
+#endif // NUMKONG_TARGET_SKYLAKE
 
 #if NUMKONG_TARGET_ICELAKE
-
 /** Icelake's casts over Skylake's arithmetic, which Icelake adds no kernels to. */
 struct icelake_elementwise_kit_t : skylake_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_icelake_k;
     static constexpr auto cast = nk_cast_icelake;
 };
+#endif // NUMKONG_TARGET_ICELAKE
 
 #if NUMKONG_TARGET_SAPPHIRE
-
 /** Sapphire's half-precision casts over Skylake's arithmetic. */
-struct sapphire_elementwise_kit_t : icelake_elementwise_kit_t {
+struct sapphire_elementwise_kit_t : skylake_elementwise_kit_t {
     static constexpr nk_capability_t capability_k = nk_cap_sapphire_k;
     static constexpr auto cast = nk_cast_sapphire;
 };
 #endif // NUMKONG_TARGET_SAPPHIRE
-#endif // NUMKONG_TARGET_ICELAKE
-#endif // NUMKONG_TARGET_SKYLAKE
-#endif // NUMKONG_TARGET_HASWELL
 
 #if NUMKONG_TARGET_NEON
 struct neon_elementwise_kit_t {
@@ -4026,44 +4023,6 @@ template <nk_kernel_kind_t kernel_, nk_capability_t caps_, nk::numeric_dtype sca
     return invoke_scores_<4, kit_t>(query, moments_of<scalar_>(query_norms), candidates,
                                     moments_of<scalar_>(candidates_norms), next_candidates, hints);
 }
-
-#pragma region Query Corrections
-
-/** The walks' default rescoring: none, so every node keeps the score the kit gave it. */
-struct dummy_rescoring_t {
-    template <typename ids_type_, typename keys_type_, typename scores_type_>
-    void operator()(ids_type_ const&, keys_type_ const&, scores_type_&, std::size_t) const noexcept {}
-};
-
-/** Indexer heads as a walk's rescoring: each scored dot becomes Σₕ wₕ·ReLU(⟨qₕ, k⟩) and its distance 1 − score. */
-template <nk_capability_t capability_, typename scalar_type_>
-struct dense_indexer_rescoring {
-
-    /** The heads of the one query row being walked. */
-    dense_indexer_heads<scalar_type_> heads;
-
-    template <typename dot_type_, std::size_t fan_out_>
-    void operator()(std::array<dense_node_id_t, fan_out_> const&,
-                    std::array<nk::vector_view<scalar_type_>, fan_out_> const& keys,
-                    dense_scores<dot_type_, fan_out_>& scores, std::size_t count) const noexcept {
-        static_assert(!nk::is_integral_dtype<scalar_type_>(), "Indexer scoring needs floating-point keys");
-        std::array<dot_type_, fan_out_> indexed {};
-        for (std::size_t head = 0; head != heads.heads.extent(0); ++head) {
-            dense_scores<dot_type_, fan_out_> const head_scores =
-                usearch::scores<nk_kernel_dot_k, capability_, scalar_type_>(
-                    heads.heads.row(head).as_vector(), no_norms_t {}, keys, std::array<no_norms_t, fan_out_> {});
-            dot_type_ const weight = dot_type_(heads.weights(0, head));
-            for (std::size_t lane = 0; lane != count; ++lane)
-                indexed[lane] += weight * max_of(head_scores.dots[lane], dot_type_ {});
-        }
-        for (std::size_t lane = 0; lane != count; ++lane) {
-            scores.dots[lane] = indexed[lane];
-            scores.distances[lane] = 1 - indexed[lane];
-        }
-    }
-};
-
-#pragma endregion Query Corrections
 
 /** Empty tile kit: the (kernel, scalar) pair has no matrix-engine backend on this
  *  target, so eager refinement stays unavailable and callers keep the lazy 4-way loops. */

@@ -480,7 +480,6 @@ concept ram_kit_adapted = requires {
 /** No-op sibling picked when the cell's CPU kit chain is not adapted yet. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
           nk_capability_t capability_, typename wait_type_, typename workload_type_>
-    requires(!ram_kit_adapted<stored_dtype_, kernel_, capability_>)
 int stage_and_run(bench_launch<dataset_scalar_type_> const&, workload_type_ const&) {
     fmt::println("skipped: no CPU kit adapted for {} · {}", dtype_name(stored_dtype_), nk_kernel_name(kernel_));
     return 0;
@@ -492,7 +491,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const&, workload_type_ cons
  *  the thread count. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_kernel_kind_t kernel_,
           nk_capability_t capability_, typename wait_type_, typename workload_type_>
-    requires(ram_kit_adapted<stored_dtype_, kernel_, capability_>)
+    requires ram_kit_adapted<stored_dtype_, kernel_, capability_>
 int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, workload_type_ const& workload) {
     using indexes_t =
         dense_ram_indexes<u32_t, stored_dtype_, kernel_, capability_, wait_type_, fu::preferred_atomic_ref>;

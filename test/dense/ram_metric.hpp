@@ -111,7 +111,6 @@ static f32_t reference_distance(nk::vector_view<scalar_> first_vector,
 /** No-op overload picked when the (kernel, scalar, caps) tuple isn't wired up -
  *  lets the caller enumerate the full capability list without if-constexpr gates inline. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-    requires(!quads_supported<kernel_, scalar_, caps_>)
 static int check_quads(std::size_t /*dim*/) noexcept {
     return 0;
 }
@@ -184,7 +183,6 @@ static int check_quads(std::size_t dim) noexcept {
 
 /** No-op sibling picked when no tile engine exists for the tuple. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-    requires(!tiles_supported<kernel_, scalar_, caps_>)
 static int check_tiles() noexcept {
     return 0;
 }
@@ -287,8 +285,6 @@ int check_scalar<nk::u1x8_t>() noexcept {
 template <typename scalar_>
 concept scalar_wired = quads_supported<nk_kernel_dot_k, scalar_, nk_cap_serial_k>;
 
-#pragma region Suite Entry Points
-
 /** Per-dtype metric suite entries the shard translation units define and
  *  @c dense.cpp composes explicitly; each returns its shard's failure count. */
 std::size_t check_ram_metric_f64();
@@ -304,7 +300,5 @@ std::size_t check_ram_metric_i4();
 std::size_t check_ram_metric_u8();
 std::size_t check_ram_metric_u4();
 std::size_t check_ram_metric_u1();
-
-#pragma endregion Suite Entry Points
 
 } // namespace unum::usearch::test::dense
