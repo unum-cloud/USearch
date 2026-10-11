@@ -2,8 +2,8 @@
  *  @file bench/dense/vram_index_algebra.cuh
  *  @author Ash Vardanian
  *  @date September 27, 2026
- *  @brief Profiling harness for graph products and graph attention over the GPU-resident @c dense_vram_index,
- *      shared by the per-dtype algebra shards.
+ *  @brief Profiling harness for graph products and graph attention over the GPU-resident
+ *      @c dense_vram_nvidia_index, shared by the per-dtype algebra shards.
  *
  *  The build phases and the cascade below the stored dtype come from @c dense/vram_index_search.cuh, and the value
  * tables and the oracle from @c dense_algebra.cuh. Both verbs score dot products only, so the workload pins the kernel

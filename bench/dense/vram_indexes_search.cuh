@@ -2,13 +2,13 @@
  *  @file bench/dense/vram_indexes_search.cuh
  *  @author Ash Vardanian
  *  @date October 7, 2026
- *  @brief Profiling harness for searching the sharded @c dense_vram_indexes over real persisted datasets, shared by
- *      the per-dtype benchmark shards.
+ *  @brief Profiling harness for searching the sharded @c dense_vram_nvidia_indexes over real
+ *      persisted datasets, shared by the per-dtype benchmark shards.
  *
- *  The multi-device category: one sharded index holding a shard per `--devices` ordinal, driven through one
- *  @c cuda_executor_t with batched insertions, and batched searches scattered over every shard and merged on the
- *  host - the handle the C surface exposes, measured end to end. The cascade ends in the workload its entry hop
- *  names.
+ *  The multi-device category: one sharded index holding a shard per @c USEARCH_DEVICES ordinal,
+ *  driven through one @c cuda_executor_t with batched insertions, and batched searches scattered
+ *  over every shard and merged on the host - the handle the C surface exposes, measured end to end.
+ *  The cascade ends in the workload its entry hop names.
  *
  *  Keys are dataset rows, so a merged ranking judges directly against the ground truth and no ID-to-row
  *  bookkeeping exists. Checkpoints ride the sharded index's own SafeGraphs verbs, under the names the CPU sharded
@@ -30,14 +30,6 @@
 namespace unum::usearch::bench::dense {
 
 #pragma region Pipeline
-
-/** The flag every multi-device binary takes: the device group, one shard per ordinal. */
-inline std::array<flag_t, 1> devices_flags(settings_t& settings) noexcept {
-    return {{
-        {"--devices", "list", "comma-separated ordinals, one shard per device; --device alone by default",
-         &settings.devices},
-    }};
-}
 
 /**
  *  @brief The state one fully-typed sharded-index run shares between its phases: the indexes, the
@@ -372,7 +364,8 @@ struct indexes_search_workload_t {
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
 int stage_indexes_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                           std::span<int const> devices, nk_kernel_kind_t kernel, workload_type_ const& workload) {
-    cuda_indexes_context<dense_vram_indexes<u32_t, stored_dtype_, capability_>> bench {settings, devices, kernel};
+    cuda_indexes_context<dense_vram_nvidia_indexes<u32_t, stored_dtype_, capability_>> bench {settings, devices,
+                                                                                              kernel};
     return stream_and_run(dataset, bench, [&](auto& streamed) {
         return prepare_indexes(streamed) && run_indexes_insertion(streamed) && run_indexes_refinement(streamed) &&
                (settings.save_name.empty() || save_indexes(streamed)) && workload.run(streamed);

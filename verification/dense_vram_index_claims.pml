@@ -2,7 +2,7 @@
  *  @brief The CUDA index's host side: the claim under its spin mutex, the planes grown before it,
  *      the watermark each batch turns after its drain as a search's bound, and the admission ramp.
  *
- *  From `include/usearch/dense/vram_index.cuh`: one claim per batch under `claiming_`, a
+ *  From `include/usearch/dense/vram_nvidia_index.cuh`: one claim per batch under `claiming_`, a
  *  `fu::spin_mutex_t`, IDs dense from `claimed_rows_`, the planes grown under the mutex and
  *  sentinel-filled before any launch, the claim stored only once the launch is accepted, the
  *  device's admission ramp on `published_rows`, a counter in device memory no host thread

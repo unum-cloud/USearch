@@ -6,8 +6,9 @@
  *      owning the chosen one, and every exported entry point as one visit apiece.
  *
  *  Compiled twice: as @c dense_index.cpp for the portable library and as @c dense_index.cu for
- *  the CUDA one, with @c USEARCH_BUILD_CUDA deciding whether the VRAM arms join the variant and
- *  @c USEARCH_DENSE_DTYPES how many storage dtypes every class contributes to it.
+ *  the CUDA one, with @c USEARCH_ARCH_CUDA_, @c USEARCH_ARCH_ROCM_ and @c USEARCH_ARCH_METAL_
+ *  deciding which vendors' VRAM arms join the variant and @c USEARCH_DENSE_DTYPES how many
+ *  storage dtypes every class contributes to it.
  *  Arms are ordered newest-capability-first inside each dtype cell, since a machine reporting
  *  Ice Lake also reports Haswell and Skylake; the serial floor is last and unconditional. The
  *  arms' bodies compile in the per-class units, never here.
@@ -38,6 +39,16 @@
 
 #include "dense_specializations.cuh"
 #include "usearch/utilities/ram_device.hpp" // `forkunion_allocator`, `no_memory_domain_k` - the multi-indexes' host tables
+#include "usearch/utilities/vram_device.hpp" // `gpu_devices`, `gpu_executor_t`, `gpu_arena_t`
+#if USEARCH_ARCH_CUDA_
+#include "usearch/dense/vram_nvidia_indexes.hpp"
+#endif
+#if USEARCH_ARCH_ROCM_
+#include "usearch/dense/vram_amd_indexes.hpp"
+#endif
+#if USEARCH_ARCH_METAL_
+#include "usearch/dense/vram_apple_indexes.hpp"
+#endif
 
 #pragma region Multi Index
 
@@ -49,8 +60,8 @@
  *  Arms exist per wired @c (dtype,capability) cell - those whose NumKong kernel kits are
  *  adapted - never the full cross product: an unwired cell would not compile, and advertising
  *  it would only move the failure from the build to the caller. Each arm keeps its metric as a
- *  runtime field, since only the distance epilogue reads it. The VRAM siblings join under the
- *  CUDA build, and the read-only NVMe siblings wherever a CPU class picks a kit of its own.
+ *  runtime field, since only the distance epilogue reads it. The VRAM siblings join per GPU vendor
+ *  the build carries, and the read-only NVMe siblings wherever a CPU class picks a kit of its own.
  */
 struct usearch_dense_index_handle_t {
 
@@ -698,7 +709,7 @@ struct usearch_dense_index_handle_t {
         nvme_index<nk_e2m3_k, cpu_class_t::nvidia_vera_k>, //
 #endif
 #endif // NUMKONG_TARGET_NEONFP8
-#if USEARCH_BUILD_CUDA
+#if USEARCH_ARCH_CUDA_
         // nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 11 arms
         vram_index<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
@@ -860,7 +871,203 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         vram_index<nk_e2m3_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
-#endif // USEARCH_BUILD_CUDA
+#endif // USEARCH_ARCH_CUDA_
+#if USEARCH_ARCH_ROCM_
+        // amd_cdna5 over amd_cdna3 by "gfx1250", 32-wide waves: every cell, 11 arms
+        vram_index<nk_bf16_k, gpu_class_t::amd_cdna5_k>, //
+#if USEARCH_DENSE_DTYPES >= 2
+        vram_index<nk_u1_k, gpu_class_t::amd_cdna5_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+        vram_index<nk_i8_k, gpu_class_t::amd_cdna5_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+        vram_index<nk_e4m3_k, gpu_class_t::amd_cdna5_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+        vram_index<nk_f16_k, gpu_class_t::amd_cdna5_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+        vram_index<nk_u8_k, gpu_class_t::amd_cdna5_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+        vram_index<nk_e5m2_k, gpu_class_t::amd_cdna5_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+        vram_index<nk_i4_k, gpu_class_t::amd_cdna5_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+        vram_index<nk_u4_k, gpu_class_t::amd_cdna5_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+        vram_index<nk_e3m2_k, gpu_class_t::amd_cdna5_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+        vram_index<nk_e2m3_k, gpu_class_t::amd_cdna5_k>, //
+#endif
+        // amd_cdna4 over amd_cdna3 by "gfx950": every cell, 11 arms
+        vram_index<nk_bf16_k, gpu_class_t::amd_cdna4_k>, //
+#if USEARCH_DENSE_DTYPES >= 2
+        vram_index<nk_u1_k, gpu_class_t::amd_cdna4_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+        vram_index<nk_i8_k, gpu_class_t::amd_cdna4_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+        vram_index<nk_e4m3_k, gpu_class_t::amd_cdna4_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+        vram_index<nk_f16_k, gpu_class_t::amd_cdna4_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+        vram_index<nk_u8_k, gpu_class_t::amd_cdna4_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+        vram_index<nk_e5m2_k, gpu_class_t::amd_cdna4_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+        vram_index<nk_i4_k, gpu_class_t::amd_cdna4_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+        vram_index<nk_u4_k, gpu_class_t::amd_cdna4_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+        vram_index<nk_e3m2_k, gpu_class_t::amd_cdna4_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+        vram_index<nk_e2m3_k, gpu_class_t::amd_cdna4_k>, //
+#endif
+        // amd_cdna3, the AMD floor by "gfx942": every cell, 11 arms
+        vram_index<nk_bf16_k, gpu_class_t::amd_cdna3_k>, //
+#if USEARCH_DENSE_DTYPES >= 2
+        vram_index<nk_u1_k, gpu_class_t::amd_cdna3_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+        vram_index<nk_i8_k, gpu_class_t::amd_cdna3_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+        vram_index<nk_e4m3_k, gpu_class_t::amd_cdna3_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+        vram_index<nk_f16_k, gpu_class_t::amd_cdna3_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+        vram_index<nk_u8_k, gpu_class_t::amd_cdna3_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+        vram_index<nk_e5m2_k, gpu_class_t::amd_cdna3_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+        vram_index<nk_i4_k, gpu_class_t::amd_cdna3_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+        vram_index<nk_u4_k, gpu_class_t::amd_cdna3_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+        vram_index<nk_e3m2_k, gpu_class_t::amd_cdna3_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+        vram_index<nk_e2m3_k, gpu_class_t::amd_cdna3_k>, //
+#endif
+#endif // USEARCH_ARCH_ROCM_
+#if USEARCH_ARCH_METAL_
+        // apple_metal10 over apple_metal7 by the Apple10 family: every cell, 11 arms
+        vram_index<nk_bf16_k, gpu_class_t::apple_metal10_k>, //
+#if USEARCH_DENSE_DTYPES >= 2
+        vram_index<nk_u1_k, gpu_class_t::apple_metal10_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+        vram_index<nk_i8_k, gpu_class_t::apple_metal10_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+        vram_index<nk_e4m3_k, gpu_class_t::apple_metal10_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+        vram_index<nk_f16_k, gpu_class_t::apple_metal10_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+        vram_index<nk_u8_k, gpu_class_t::apple_metal10_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+        vram_index<nk_e5m2_k, gpu_class_t::apple_metal10_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+        vram_index<nk_i4_k, gpu_class_t::apple_metal10_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+        vram_index<nk_u4_k, gpu_class_t::apple_metal10_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+        vram_index<nk_e3m2_k, gpu_class_t::apple_metal10_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+        vram_index<nk_e2m3_k, gpu_class_t::apple_metal10_k>, //
+#endif
+        // apple_metal9 over apple_metal7 by the Apple9 family: every cell, 11 arms
+        vram_index<nk_bf16_k, gpu_class_t::apple_metal9_k>, //
+#if USEARCH_DENSE_DTYPES >= 2
+        vram_index<nk_u1_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+        vram_index<nk_i8_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+        vram_index<nk_e4m3_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+        vram_index<nk_f16_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+        vram_index<nk_u8_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+        vram_index<nk_e5m2_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+        vram_index<nk_i4_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+        vram_index<nk_u4_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+        vram_index<nk_e3m2_k, gpu_class_t::apple_metal9_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+        vram_index<nk_e2m3_k, gpu_class_t::apple_metal9_k>, //
+#endif
+        // apple_metal7, the Apple floor, serving Apple GPUs without a class: every cell, 11 arms
+        vram_index<nk_bf16_k, gpu_class_t::apple_metal7_k>, //
+#if USEARCH_DENSE_DTYPES >= 2
+        vram_index<nk_u1_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+        vram_index<nk_i8_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+        vram_index<nk_e4m3_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+        vram_index<nk_f16_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+        vram_index<nk_u8_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+        vram_index<nk_e5m2_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+        vram_index<nk_i4_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+        vram_index<nk_u4_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+        vram_index<nk_e3m2_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+        vram_index<nk_e2m3_k, gpu_class_t::apple_metal7_k>, //
+#endif
+#endif // USEARCH_ARCH_METAL_
 
         // The NVMe serial floor: every wired cell, every platform.
         nvme_index<nk_bf16_k, cpu_class_t::serial_k>, //
@@ -1361,7 +1568,7 @@ extern template struct specialized_index<ram_index<nk_e3m2_k, cpu_class_t::wasm6
 extern template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::wasm64_extended_k>>;
 #endif
 #endif // NUMKONG_TARGET_V128RELAXED
-#if USEARCH_BUILD_CUDA
+#if USEARCH_ARCH_CUDA_
 /* nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 11 arms */
 extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
@@ -1523,7 +1730,203 @@ extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::nvid
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
-#endif // USEARCH_BUILD_CUDA
+#endif // USEARCH_ARCH_CUDA_
+#if USEARCH_ARCH_ROCM_
+/* amd_cdna5 over amd_cdna3 by "gfx1250", 32-wide waves: every cell, 11 arms */
+extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::amd_cdna5_k>>;
+#if USEARCH_DENSE_DTYPES >= 2
+extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::amd_cdna5_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::amd_cdna5_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::amd_cdna5_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::amd_cdna5_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::amd_cdna5_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::amd_cdna5_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::amd_cdna5_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::amd_cdna5_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::amd_cdna5_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::amd_cdna5_k>>;
+#endif
+/* amd_cdna4 over amd_cdna3 by "gfx950": every cell, 11 arms */
+extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::amd_cdna4_k>>;
+#if USEARCH_DENSE_DTYPES >= 2
+extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::amd_cdna4_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::amd_cdna4_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::amd_cdna4_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::amd_cdna4_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::amd_cdna4_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::amd_cdna4_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::amd_cdna4_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::amd_cdna4_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::amd_cdna4_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::amd_cdna4_k>>;
+#endif
+/* amd_cdna3, the AMD floor by "gfx942": every cell, 11 arms */
+extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::amd_cdna3_k>>;
+#if USEARCH_DENSE_DTYPES >= 2
+extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::amd_cdna3_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::amd_cdna3_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::amd_cdna3_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::amd_cdna3_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::amd_cdna3_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::amd_cdna3_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::amd_cdna3_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::amd_cdna3_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::amd_cdna3_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::amd_cdna3_k>>;
+#endif
+#endif // USEARCH_ARCH_ROCM_
+#if USEARCH_ARCH_METAL_
+/* apple_metal10 over apple_metal7 by the Apple10 family: every cell, 11 arms */
+extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::apple_metal10_k>>;
+#if USEARCH_DENSE_DTYPES >= 2
+extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::apple_metal10_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::apple_metal10_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::apple_metal10_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::apple_metal10_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::apple_metal10_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::apple_metal10_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::apple_metal10_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::apple_metal10_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::apple_metal10_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::apple_metal10_k>>;
+#endif
+/* apple_metal9 over apple_metal7 by the Apple9 family: every cell, 11 arms */
+extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::apple_metal9_k>>;
+#if USEARCH_DENSE_DTYPES >= 2
+extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::apple_metal9_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::apple_metal9_k>>;
+#endif
+/* apple_metal7, the Apple floor, serving every Apple GPU without a class: every cell, 11 arms */
+extern template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::apple_metal7_k>>;
+#if USEARCH_DENSE_DTYPES >= 2
+extern template struct specialized_index<vram_index<nk_u1_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+extern template struct specialized_index<vram_index<nk_i8_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+extern template struct specialized_index<vram_index<nk_e4m3_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+extern template struct specialized_index<vram_index<nk_f16_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+extern template struct specialized_index<vram_index<nk_u8_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+extern template struct specialized_index<vram_index<nk_e5m2_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+extern template struct specialized_index<vram_index<nk_i4_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+extern template struct specialized_index<vram_index<nk_u4_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+extern template struct specialized_index<vram_index<nk_e3m2_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+extern template struct specialized_index<vram_index<nk_e2m3_k, gpu_class_t::apple_metal7_k>>;
+#endif
+#endif // USEARCH_ARCH_METAL_
 #if NUMKONG_TARGET_HASWELL
 /* NVMe intel_haswell over serial by haswell: every dtype, 11 arms */
 extern template struct specialized_index<nvme_index<nk_bf16_k, cpu_class_t::intel_haswell_k>>;
@@ -1893,32 +2296,44 @@ static void compose_capabilities(usearch_dense_index_handle_t& handle, multi_typ
         if (picked & named.bit) append_capability(handle, named.name);
 }
 
-#if USEARCH_BUILD_CUDA
+/** The USearch device ordinal at @p position of @p vram, naming device zero when it names none. */
+static std::size_t named_ordinal(usearch_vram_options_t const& vram, std::size_t position) noexcept {
+    return vram.devices && vram.devices_count ? static_cast<std::size_t>(vram.devices[position]) : 0;
+}
 
-/** Appends one VRAM shard per named device ordinal; an empty list takes ordinal zero. */
+/** Devices @p vram names, one when it names none. */
+static std::size_t named_count(usearch_vram_options_t const& vram) noexcept {
+    return vram.devices && vram.devices_count ? vram.devices_count : 1;
+}
+
+/** Appends one VRAM shard per named USearch device ordinal, on that device's vendor ordinal. */
 template <typename multi_type_>
     requires is_vram_index<multi_type_>
 static status_t place_shards(multi_type_& variant, usearch_vram_options_t const& vram) noexcept {
-    if (!vram.devices || !vram.devices_count) return specialized_index {variant}.emplace(0);
-    for (std::size_t position = 0; position != vram.devices_count; ++position)
-        if (status_t const placed = specialized_index {variant}.emplace(static_cast<int>(vram.devices[position]));
+    std::span<gpu_device_t const> const devices = gpu_devices();
+    for (std::size_t position = 0; position != named_count(vram); ++position) {
+        std::size_t const ordinal = named_ordinal(vram, position);
+        if (ordinal >= devices.size()) return status_t::device_error_k;
+        if (status_t const placed = specialized_index {variant}.emplace(
+                static_cast<int>(devices[ordinal].vendor_ordinal));
             failed(placed))
             return placed;
+    }
     return status_t::success_k;
 }
 
-/** Fills the handle's capability string once, from the resident device's generation. */
+/** Fills the handle's capability string once, from the listed class of the first shard's device. */
 template <typename multi_type_>
     requires is_vram_index<multi_type_>
 static void compose_capabilities(usearch_dense_index_handle_t& handle, multi_type_& variant) noexcept {
     if (!specialized_index {variant}.shards_count()) return;
-    auto const [specs, status] = cuda_device_specs_t::query(specialized_index {variant}.device(0));
-    if (failed(status)) return;
-    gpu_class_t const running = gpu_class_of(specs.arch());
-    for (gpu_class_name_t const& named : gpu_class_names_k)
-        if (named.gpu_class == running) return append_capability(handle, named.name);
+    u32_t const resident = static_cast<u32_t>(specialized_index {variant}.device(0));
+    for (gpu_device_t const& device : gpu_devices()) {
+        if (device.vendor != multi_type_::vendor_k || device.vendor_ordinal != resident) continue;
+        for (gpu_class_name_t const& named : gpu_class_names_k)
+            if (named.gpu_class == device.gpu_class) return append_capability(handle, named.name);
+    }
 }
-#endif
 
 /** The host allocator a multi-index keeps its tables on: the first named memory domain on RAM,
  *  the heap's domain otherwise. */
@@ -2087,30 +2502,35 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
 #endif
 }
 
-#if USEARCH_BUILD_CUDA
-
-/** The generation every named device shares - the one each shard's cubins must be built for - or
- *  @c unknown_k when a device cannot be queried or two devices differ. */
-static gpu_class_t shared_gpu_class(usearch_vram_options_t const& vram) noexcept {
-    bool const named = vram.devices && vram.devices_count;
-    gpu_class_t shared = gpu_class_t::unknown_k;
-    for (std::size_t position = 0; position != (named ? vram.devices_count : 1); ++position) {
-        auto const [specs, status] = cuda_device_specs_t::query(named ? static_cast<int>(vram.devices[position]) : 0);
-        if (failed(status)) return gpu_class_t::unknown_k;
-        gpu_class_t const device_class = gpu_class_of(specs.arch());
-        if (position && device_class != shared) return gpu_class_t::unknown_k;
-        shared = device_class;
+/** The class every named device shares, read off the process listing: an index spans one vendor,
+ *  since its shards merge through peer copies, and one generation, since its arms run one class's
+ *  kernels. Mixed vendors refuse with @c config_mismatch_k, and an unlisted ordinal or mixed
+ *  generations with @c device_error_k. */
+static expected<gpu_class_t> shared_gpu_class(usearch_vram_options_t const& vram) noexcept {
+    std::span<gpu_device_t const> const devices = gpu_devices();
+    gpu_device_t shared;
+    for (std::size_t position = 0; position != named_count(vram); ++position) {
+        std::size_t const ordinal = named_ordinal(vram, position);
+        if (ordinal >= devices.size()) return {gpu_class_t::unknown_k, status_t::device_error_k};
+        gpu_device_t const device = devices[ordinal];
+        if (position && device.vendor != shared.vendor) return {gpu_class_t::unknown_k, status_t::config_mismatch_k};
+        if (position && device.gpu_class != shared.gpu_class) return {gpu_class_t::unknown_k, status_t::device_error_k};
+        shared = device;
     }
-    return shared;
+    return {shared.gpu_class, status_t::success_k};
 }
 
-/** The VRAM sibling of the RAM @ref make_index: the devices' generation picks the class, whose unit
- *  alone carries cubins for them, the way the CPU ladder picks the class the machine reports; every
+/** The VRAM sibling of the RAM @ref make_index: the devices' class picks the arm, whose unit alone
+ *  carries kernels for them, the way the CPU ladder picks the class the machine reports; every
  *  dtype has a kit there, and @ref with_metric admits only the metrics its family scores by. */
 template <nk_dtype_t dtype_>
 static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry, usearch_vram_options_t const& vram,
                                         nk_kernel_kind_t kernel, usearch_outcome_t* outcome) noexcept {
-    switch (shared_gpu_class(vram)) {
+    auto const [gpu_class, status] = shared_gpu_class(vram);
+    if (status == status_t::config_mismatch_k)
+        return propagate_error(status, outcome, "One index spans one GPU vendor"), nullptr;
+    switch (gpu_class) {
+#if USEARCH_ARCH_CUDA_
     case gpu_class_t::nvidia_blackwellrtx_k:
         return make_punned_dense_index<vram_index<dtype_, gpu_class_t::nvidia_blackwellrtx_k>>(geometry, vram, kernel,
                                                                                                outcome);
@@ -2125,21 +2545,34 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
     case gpu_class_t::nvidia_ampere_k:
         return make_punned_dense_index<vram_index<dtype_, gpu_class_t::nvidia_ampere_k>>(geometry, vram, kernel,
                                                                                          outcome);
+#endif
+#if USEARCH_ARCH_ROCM_
+    case gpu_class_t::amd_cdna5_k:
+        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::amd_cdna5_k>>(geometry, vram, kernel, outcome);
+    case gpu_class_t::amd_cdna4_k:
+        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::amd_cdna4_k>>(geometry, vram, kernel, outcome);
+    case gpu_class_t::amd_cdna3_k:
+        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::amd_cdna3_k>>(geometry, vram, kernel, outcome);
+#endif
+#if USEARCH_ARCH_METAL_
+    case gpu_class_t::apple_metal10_k:
+        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::apple_metal10_k>>(geometry, vram, kernel,
+                                                                                         outcome);
+    case gpu_class_t::apple_metal9_k:
+        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::apple_metal9_k>>(geometry, vram, kernel,
+                                                                                        outcome);
+    case gpu_class_t::apple_metal7_k:
+        return make_punned_dense_index<vram_index<dtype_, gpu_class_t::apple_metal7_k>>(geometry, vram, kernel,
+                                                                                        outcome);
+#endif
     default:
         return propagate_error(usearch_status_device_k, outcome,
-                               "The devices could not be queried, or do not share one GPU generation"),
+                               std::variant_size_v<gpu_executor_t> == 1
+                                   ? "This build carries no GPU backends"
+                                   : "The devices are not listed, or do not share one GPU generation"),
                nullptr;
     }
 }
-#else
-
-/** The portable build's stand-in: every VRAM request lands on one static message. */
-template <nk_dtype_t dtype_>
-static usearch_dense_index_t make_index(usearch_dense_metadata_t const&, usearch_vram_options_t const&,
-                                        nk_kernel_kind_t, usearch_outcome_t* outcome) noexcept {
-    return propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA backends"), nullptr;
-}
-#endif
 
 /** Routes a numeric dtype's metric onto its three wired kernels, built where @p placement names. */
 template <nk_dtype_t dtype_, typename placement_type_>
@@ -2282,13 +2715,7 @@ struct usearch_executor_handle_t {
     /** The next listed executor, so a wait or a free finds the calls naming its handle. */
     usearch_executor_handle_t* next_listed = nullptr;
 
-    std::variant<forkunion_executor_t, nvme_executor_t
-#if USEARCH_BUILD_CUDA
-                 ,
-                 cuda_executor_t
-#endif
-                 >
-        executor;
+    std::variant<forkunion_executor_t, nvme_executor_t, gpu_executor_t> executor;
 };
 
 /** Discovers the topology and spawns @p threads over it into @p handle, answering @p handle, or null
@@ -2339,9 +2766,7 @@ static usearch_executor_t call_executor_for(multi_type_&, usearch_executor_handl
     return spawn_nvme_executor(call_executor, 1, config, outcome);
 }
 
-#if USEARCH_BUILD_CUDA
-
-/** The executor a null handle runs VRAM work on: the default streams of the index's devices. */
+/** The executor a null handle runs VRAM work on: the default streams or queues of its devices. */
 template <typename multi_type_>
     requires is_vram_index<multi_type_>
 static usearch_executor_t call_executor_for(multi_type_& variant, usearch_executor_handle_t& call_executor,
@@ -2351,12 +2776,41 @@ static usearch_executor_t call_executor_for(multi_type_& variant, usearch_execut
     if (failed(devices.resize(shards.shards_count())))
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the devices"), nullptr;
     for (std::size_t shard = 0; shard != devices.size(); ++shard) devices[shard] = shards.device(shard);
-    auto [built, status] = cuda_executor_t::on_default_streams(devices);
+    auto [built, status] = multi_type_::executor_t::on_default_streams(devices);
     if (failed(status)) return propagate_error(status, outcome), nullptr;
-    call_executor.executor = std::move(built);
+    call_executor.executor = gpu_executor_t {std::move(built)};
     return &call_executor;
 }
-#endif
+
+/** Applies @p visitor to whichever executor @p executor holds, a GPU one included; an empty GPU
+ *  alternative answers @c device_error_k. */
+template <typename visitor_type_>
+static status_t visit_executor(usearch_executor_handle_t& executor, visitor_type_&& visitor) noexcept {
+    return std::visit(
+        [&]<typename executor_type_>(executor_type_& typed) noexcept {
+            if constexpr (!std::is_same_v<executor_type_, gpu_executor_t>) return visitor(typed);
+            else
+                return std::visit(
+                    [&]<typename gpu_type_>(gpu_type_& gpu) noexcept {
+                        if constexpr (std::is_same_v<gpu_type_, std::monostate>) return status_t::device_error_k;
+                        else return visitor(gpu);
+                    },
+                    typed);
+        },
+        executor.executor);
+}
+
+/** The residency's executor inside @p executor 's variant: GPU executors nest one level deeper. */
+template <typename executor_type_>
+static executor_type_* residency_executor(usearch_executor_handle_t& executor) noexcept {
+    if constexpr (std::is_same_v<executor_type_, forkunion_executor_t> ||
+                  std::is_same_v<executor_type_, nvme_executor_t>)
+        return std::get_if<executor_type_>(&executor.executor);
+    else {
+        gpu_executor_t* const gpu = std::get_if<gpu_executor_t>(&executor.executor);
+        return gpu ? std::get_if<executor_type_>(gpu) : nullptr;
+    }
+}
 
 /** The typed executor behind the C handle, or null with @c usearch_status_device_k on a kind
  *  mismatch. A null handle builds @p call_executor for this call alone. */
@@ -2366,7 +2820,7 @@ static typename multi_type_::executor_t* executor_of(multi_type_& variant, usear
                                                      usearch_outcome_t* outcome) noexcept {
     if (!executor) executor = call_executor_for(variant, call_executor, outcome);
     if (!executor) return nullptr;
-    typename multi_type_::executor_t* const typed = std::get_if<typename multi_type_::executor_t>(&executor->executor);
+    typename multi_type_::executor_t* const typed = residency_executor<typename multi_type_::executor_t>(*executor);
     if (!typed)
         propagate_error(usearch_status_device_k, outcome, "The executor's kind must match the handle's residency");
     return typed;
@@ -2379,9 +2833,9 @@ inline constexpr int host_device_k = -1;
  *  or on one device, and the call holding it. */
 struct usearch_arena_handle_t {
     growing_arena<forkunion_allocator_t> memory {forkunion_allocator_t {no_memory_domain_k}};
-#if USEARCH_BUILD_CUDA
-    growing_arena<cuda_device_allocator_t> device_memory {cuda_device_allocator_t {}};
-#endif
+
+    /** Device memory on the first device of the executor the arena was made for, or none. */
+    gpu_arena_t device_memory;
 
     /** The GPU ordinal the memory lives on, or @c host_device_k. */
     int device = host_device_k;
@@ -2406,10 +2860,7 @@ static void release_arena(usearch_arena_t arena, usearch_outcome_t const* call) 
 
 /** Whether @p address lies in memory @p arena handed out, which its next rewind reuses or frees. */
 static bool arena_contains(usearch_arena_handle_t const& arena, void const* address) noexcept {
-#if USEARCH_BUILD_CUDA
-    if (arena.device != host_device_k) return arena.device_memory.contains(address);
-#endif
-    return arena.memory.contains(address);
+    return arena.device_memory ? arena.device_memory.contains(address) : arena.memory.contains(address);
 }
 
 /** Holds @p arena for the call whose outcome is @p call and rewinds it, freeing the previous call's
@@ -2430,9 +2881,7 @@ static usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcom
             return propagate_error(usearch_status_invalid_argument_k, outcome,
                                    "An input lies inside the arena it rewinds"),
                    nullptr;
-#if USEARCH_BUILD_CUDA
     arena->device_memory.clear();
-#endif
     arena->memory.clear();
     return arena;
 }
@@ -2441,12 +2890,7 @@ static usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcom
  *  device; null when the arena cannot grow. */
 template <typename value_type_>
 static value_type_* carve(usearch_arena_handle_t& arena, std::size_t count) noexcept {
-#if USEARCH_BUILD_CUDA
-    if (arena.device != host_device_k)
-        return cudaSetDevice(arena.device) == cudaSuccess ? reinterpret_cast<value_type_*>(arena.device_memory.allocate(
-                                                                count * sizeof(value_type_), default_alignment_k))
-                                                          : nullptr;
-#endif
+    if (arena.device_memory) return arena.device_memory.template allocate<value_type_>(count);
     return reinterpret_cast<value_type_*>(arena.memory.allocate(count * sizeof(value_type_), default_alignment_k));
 }
 
@@ -2932,12 +3376,10 @@ static void visit_writable(usearch_dense_index_handle_t& index, usearch_outcome_
         index.variants);
 }
 
-/** Lands one finished output row in an arena on @p device, or on the host when it names none; a
- *  device row rides one blocking upload, since the walk that produced it staged on the host. */
-static bool land_row(std::byte* landing, void const* row, std::size_t bytes, int device) noexcept {
-#if USEARCH_BUILD_CUDA
-    if (device != host_device_k) return cudaMemcpy(landing, row, bytes, cudaMemcpyHostToDevice) == cudaSuccess;
-#endif
+/** Lands one finished output row in @p arena, on its device or on the host; a device row rides one
+ *  blocking upload, since the walk that produced it staged on the host. */
+static bool land_row(usearch_arena_handle_t& arena, std::byte* landing, void const* row, std::size_t bytes) noexcept {
+    if (arena.device_memory) return succeeded(arena.device_memory.upload(landing, row, bytes));
     std::memcpy(landing, row, bytes);
     return true;
 }
@@ -3569,6 +4011,9 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                                 "A softmax weighs logits, so the kind must be inner product");
             else if (!arguments->value_lookup)
                 propagate_error(usearch_status_invalid_argument_k, outcome, "The value lookup must be set");
+            else if constexpr (is_vram_index<variant_type_> &&
+                               gpu_vendor_of_index<variant_type_>() != gpu_vendor_t::nvidia_k)
+                propagate_error(usearch_status_unsupported_k, outcome, "Device attention runs on NVIDIA alone");
             else {
                 int device = host_device_k;
                 if constexpr (is_vram_index<variant_type_>) device = specialized_index {variant}.device(0);
@@ -3612,7 +4057,7 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                                     device == host_device_k ? target : narrowed.data(), outputs_dtype, columns,
                                     nullptr);
                             assert(cast == nk_success_k && "The serial tier casts every dtype pair");
-                            if (device != host_device_k && !land_row(target, narrowed.data(), row_bytes, device))
+                            if (device != host_device_k && !land_row(*arena, target, narrowed.data(), row_bytes))
                                 return found.status = status_t::device_error_k, found;
                             if (carry)
                                 carry[resolved + row] = std::bit_cast<usearch_dense_softmax_state_t>(staged_carry[row]);
@@ -3799,16 +4244,13 @@ USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments) {
     *arguments->arena = nullptr;
     usearch_arena_t const arena = new (std::nothrow) usearch_arena_handle_t {};
     if (!arena) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the arena"), void();
-#if USEARCH_BUILD_CUDA
-    // A VRAM executor lands its outputs on its first device; every other executor computes on the
-    // host.
+    // A VRAM executor lands its outputs on its vendor's first device; every other executor computes
+    // on the host.
     if (arguments->executor)
-        if (cuda_executor_t const* const devices = std::get_if<cuda_executor_t>(&arguments->executor->executor)) {
-            arena->device = devices->device(0);
-            arena->device_memory = growing_arena<cuda_device_allocator_t> {
-                cuda_device_allocator_t {nullptr, arena->device}};
+        if (gpu_executor_t const* const devices = std::get_if<gpu_executor_t>(&arguments->executor->executor)) {
+            arena->device_memory = gpu_arena_t::on(*devices);
+            arena->device = arena->device_memory.device();
         }
-#endif
     *arguments->arena = arena;
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
@@ -3837,26 +4279,46 @@ USEARCH_EXPORT void usearch_executor_on_pool(usearch_executor_on_pool_t* argumen
 USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
-#if USEARCH_BUILD_CUDA
-    static_assert(sizeof(int) == sizeof(int32_t));
+    if (std::variant_size_v<gpu_executor_t> == 1)
+        return propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends"), void();
     usearch_vram_options_t const& vram = arguments->vram;
-    int const fallback_device = 0;
-    std::span<int const> const devices = vram.devices && vram.devices_count
-                                             ? std::span {reinterpret_cast<int const*>(vram.devices),
-                                                          vram.devices_count}
-                                             : std::span {&fallback_device, 1};
     if (arguments->streams)
         return propagate_error(usearch_status_unsupported_k, outcome, "Borrowed streams are not wired yet"), void();
-    auto [spawned, status] = cuda_executor_t::spawn(devices);
+    // The ABI names USearch ordinals, which the listing resolves to each vendor's own.
+    std::span<gpu_device_t const> const listed = gpu_devices();
+    growing_buffer<gpu_device_t> devices {global_allocator};
+    if (failed(devices.resize(named_count(vram))))
+        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the devices"), void();
+    for (std::size_t position = 0; position != devices.size(); ++position) {
+        std::size_t const ordinal = named_ordinal(vram, position);
+        if (ordinal >= listed.size())
+            return propagate_error(usearch_status_device_k, outcome, "A device ordinal is past the listing"), void();
+        devices[position] = listed[ordinal];
+    }
+    auto [spawned, status] = spawn_gpu_executor(devices);
+    if (status == status_t::config_mismatch_k)
+        return propagate_error(status, outcome, "One executor drives one GPU vendor"), void();
     if (failed(status)) return propagate_error(status, outcome), void();
     usearch_executor_t const executor = new (std::nothrow) usearch_executor_handle_t {};
     if (!executor)
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the executor"), void();
     executor->executor = std::move(spawned);
     hand_out_executor(executor, arguments->deferred_limit, arguments->executor, outcome);
-#else
-    propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA executor");
-#endif
+}
+
+static_assert(static_cast<u32_t>(gpu_vendor_t::apple_k) == usearch_gpu_vendor_apple_k);
+static_assert(static_cast<u32_t>(gpu_class_t::apple_metal10_k) == usearch_gpu_class_apple_metal10_k);
+
+USEARCH_EXPORT void usearch_gpu_devices(usearch_gpu_devices_t* arguments) {
+    call_outcome_t outcome(arguments->outcome);
+    std::span<gpu_device_t const> const listed = gpu_devices();
+    std::size_t const copied = arguments->devices ? min_of(listed.size(), arguments->devices_capacity) : 0;
+    for (std::size_t position = 0; position != copied; ++position)
+        arguments->devices[position] = {static_cast<usearch_gpu_vendor_t>(listed[position].vendor),
+                                        listed[position].vendor_ordinal,
+                                        static_cast<usearch_gpu_class_t>(listed[position].gpu_class)};
+    if (arguments->devices_count) *arguments->devices_count = listed.size();
+    propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
 USEARCH_EXPORT void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments) {
@@ -3913,7 +4375,7 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments) 
     // A drain from a callback meets the claim of the call running it, and answers contended rather
     // than waiting on itself.
     auto const claimable = [](auto& typed) noexcept { return typed.claim().status; };
-    if (status_t const claimed = std::visit(claimable, executor.executor); failed(claimed))
+    if (status_t const claimed = visit_executor(executor, claimable); failed(claimed))
         return propagate_error(claimed, outcome), void();
     std::size_t last = 0;
     {
@@ -3926,7 +4388,7 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments) 
         auto const [claim, status] = typed.claim();
         return failed(status) ? status : typed.drain();
     };
-    propagate_error(std::visit(drain, executor.executor), outcome);
+    propagate_error(visit_executor(executor, drain), outcome);
 }
 
 USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor) {

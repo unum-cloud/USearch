@@ -190,11 +190,13 @@ if (USEARCH_BUILD_CUDA)
                        CUDA_STANDARD 20
                        CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}"
         )
+        set_target_properties(${bench_target_} PROPERTIES CUDA_RUNTIME_LIBRARY Static)
+        # The device listing names its classes through the C interface's own probes, compiled in as the tests do.
+        target_sources(${bench_target_} PRIVATE ${PROJECT_SOURCE_DIR}/src/types.cpp)
         target_compile_options(${bench_target_} PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-        target_compile_definitions(${bench_target_} PRIVATE ${bench_cuda_capabilities_})
+        target_compile_definitions(${bench_target_} PRIVATE "USEARCH_ARCH_CUDA_=1" ${bench_cuda_capabilities_})
         target_link_libraries(
-            ${bench_target_} PRIVATE fmt::fmt yyjson CUDA::cuda_driver forkunion::static stringzilla::static
-                                     numkong::header
+            ${bench_target_} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::static numkong::header
         )
     endforeach ()
 endif ()

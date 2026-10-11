@@ -350,10 +350,6 @@ struct settings_t {
      *  other value is enforced, so a base-page fallback cannot pass as a huge-page result. */
     count_t huge_pages {.minimum = 0};
 
-    /** CUDA device group for the multi-index pipeline: one shard index per listed ordinal.
-     *  Empty runs the single-device pipeline on `--device`. */
-    counts_t devices {.minimum = 0};
-
     /** Merge the shards into one stitched graph after ingest and answer queries with a single
      *  walk; absent scatters every query to all shards and k-way merges the hits on the host. */
     switch_t merge = switch_t::absent_k;

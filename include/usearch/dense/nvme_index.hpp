@@ -13,13 +13,13 @@
  *
  *  @section dense_nvme_format Storage Format
  *
- *  A part is a SafeGraphs monolith, exactly as @c dense_ram_indexes and @c dense_vram_indexes
- *  save it: a key column, a value column, a fixed-width neighbors column, and the producer's
- *  norms. The index reads the header once, at @c view, and keeps only the columns' offsets, so
- *  its memory never grows with the node count. Expanding a node costs one covering read of its
- *  neighbors row, and scoring one costs a covering read of its value row, each rounded out to
- *  the medium's block; norms are recomputed from the landed row, so the norms column is never
- *  read.
+ *  A part is a SafeGraphs monolith, exactly as @c dense_ram_indexes and
+ *  @c dense_vram_nvidia_indexes save it: a key column, a value column, a fixed-width neighbors
+ *  column, and the producer's norms. The index reads the header once, at @c view, and keeps only
+ *  the columns' offsets, so its memory never grows with the node count. Expanding a node costs one
+ *  covering read of its neighbors row, and scoring one costs a covering read of its value row, each
+ *  rounded out to the medium's block; norms are recomputed from the landed row, so the norms column
+ *  is never read.
  *
  *  @section dense_nvme_tiering Hot Working Set & Cold Storage
  *

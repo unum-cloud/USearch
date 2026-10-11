@@ -56,44 +56,52 @@ target_include_directories(usearch_test_header_only_witness PRIVATE ${PROJECT_SO
 set_target_properties(usearch_test_header_only_witness PROPERTIES CXX_STANDARD 20)
 add_test(NAME usearch_test_header_only_witness COMMAND usearch_test_header_only_witness)
 
-# The CUDA suite skips `usearch_setup_target`: its host-compiler flags - `-march=native`, `-fmax-errors` - don't survive
-# the CUDA driver, so the target wires the interface includes directly.
+# The one VRAM runner: every vendor compiles the vendor-neutral residency shards into an object library of its own, with
+# its `USEARCH_ARCH_<VENDOR>_` naming the cell they compose over, and registers its entry with the runner, which links
+# whichever vendors this build carries and names none of them.
+set(usearch_test_vram_shards_
+    dense/vram_index_bf16.cpp
+    dense/vram_index_f16.cpp
+    dense/vram_index_e5m2.cpp
+    dense/vram_index_e4m3.cpp
+    dense/vram_index_e3m2.cpp
+    dense/vram_index_e2m3.cpp
+    dense/vram_index_i8.cpp
+    dense/vram_index_i4.cpp
+    dense/vram_index_u8.cpp
+    dense/vram_index_u4.cpp
+    dense/vram_index_u1.cpp
+    dense/vram_indexes.cpp
+)
+add_executable(usearch_test_vram dense_vram.cpp ${PROJECT_SOURCE_DIR}/src/types.cpp)
+usearch_keep_dense_dtypes(usearch_test_vram)
+usearch_setup_target(usearch_test_vram HOST)
+target_link_libraries(usearch_test_vram PRIVATE fmt::fmt yyjson forkunion::static)
+add_test(NAME usearch_test_vram COMMAND usearch_test_vram)
+
+# The NVIDIA object compiles the shards with the host compiler over the plain-C++ faces, and its entry with NVCC, since
+# device attention looks values up on the device and the cells' kernels instantiate beside it.
 if (USEARCH_BUILD_CUDA)
     enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
 
-    add_executable(
-        usearch_test_cuda
-        dense.cu
-        dense/vram_index_bf16.cu
-        dense/vram_index_f16.cu
-        dense/vram_index_e5m2.cu
-        dense/vram_index_e4m3.cu
-        dense/vram_index_e3m2.cu
-        dense/vram_index_e2m3.cu
-        dense/vram_index_i8.cu
-        dense/vram_index_i4.cu
-        dense/vram_index_u8.cu
-        dense/vram_index_u4.cu
-        dense/vram_index_u1.cu
-        dense/vram_indexes.cu
-    )
-    usearch_keep_dense_dtypes(usearch_test_cuda)
-    target_include_directories(
-        usearch_test_cuda PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
-                                  ${CMAKE_CURRENT_SOURCE_DIR}
-    )
+    add_library(usearch_test_vram_nvidia OBJECT ${usearch_test_vram_shards_} dense/vram_nvidia.cu)
+    usearch_keep_dense_dtypes(usearch_test_vram_nvidia)
+    usearch_setup_target(usearch_test_vram_nvidia HOST)
+    target_include_directories(usearch_test_vram_nvidia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     set_target_properties(
-        usearch_test_cuda
+        usearch_test_vram_nvidia
         PROPERTIES CXX_STANDARD 20
                    CUDA_STANDARD 20
                    CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}"
     )
-    # The capability probes and dispatch points answer from NumKong's archive as in `usearch_test`; the device units
-    # test a generation's kits only when every listed architecture runs them.
+    # The device units test a generation's kits only when every listed architecture runs them.
     usearch_cuda_capabilities(test_cuda_capabilities_ "${USEARCH_CUDA_ARCHITECTURES}")
-    target_sources(usearch_test_cuda PRIVATE ${PROJECT_SOURCE_DIR}/src/types.cpp)
-    target_compile_definitions(usearch_test_cuda PRIVATE ${test_cuda_capabilities_})
-    target_compile_options(usearch_test_cuda PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-    target_link_libraries(usearch_test_cuda PRIVATE fmt::fmt yyjson CUDA::cuda_driver forkunion::static numkong::header)
+    target_compile_definitions(usearch_test_vram_nvidia PRIVATE "USEARCH_ARCH_CUDA_=1" ${test_cuda_capabilities_})
+    target_compile_options(usearch_test_vram_nvidia PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
+    target_link_libraries(
+        usearch_test_vram_nvidia PRIVATE fmt::fmt yyjson forkunion::static numkong::header CUDA::cudart_static
+    )
+    target_compile_definitions(usearch_test_vram PRIVATE "USEARCH_ARCH_CUDA_=1")
+    target_link_libraries(usearch_test_vram PRIVATE usearch_test_vram_nvidia CUDA::cudart_static)
 endif ()

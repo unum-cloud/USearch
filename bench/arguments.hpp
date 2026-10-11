@@ -23,7 +23,7 @@
 
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::uint64_t`
-#include <cstdlib> // `std::exit`, `std::strtod`
+#include <cstdlib> // `std::exit`, `std::strtod`, `std::getenv`
 
 #include <array>        // `std::array`
 #include <charconv>     // `std::from_chars`
@@ -188,6 +188,18 @@ inline std::optional<double> parse_real(std::string_view text) noexcept {
     double const real = std::strtod(text.data(), &end);
     if (text.empty() || end != text.data() + text.size() || !(real >= 0)) return std::nullopt;
     return real;
+}
+
+/** The USearch device ordinals @c USEARCH_DEVICES lists, comma-separated, as positions in
+ *  @c usearch_gpu_devices; none when it is unset or empty. Text that does not parse prints
+ *  `USEARCH_DEVICES="text" does not parse` with the grammar it expects and exits with status 1. */
+inline counts_t env_devices() {
+    counts_t devices {.minimum = 0};
+    char const* const text = std::getenv("USEARCH_DEVICES");
+    if (!text || !*text) return devices;
+    if (parse_counts(text, devices) == argument_status_t::parsed_k) return devices;
+    fmt::println(stderr, "USEARCH_DEVICES=\"{}\" does not parse, expected unsigned integers like 0,1", text);
+    std::exit(1);
 }
 
 #pragma endregion Values

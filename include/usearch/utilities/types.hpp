@@ -77,6 +77,20 @@
 #endif // defined(__wasm__) || defined(__EMSCRIPTEN__)
 #endif // !defined(USEARCH_ARCH_WASM_)
 
+/*  GPU backends compiled into this unit: USEARCH_ARCH_CUDA_, USEARCH_ARCH_ROCM_,
+ *  USEARCH_ARCH_METAL_. CMake defines each from its `USEARCH_BUILD_*` option, since the toolchain
+ *  alone cannot tell a dispatch unit that carries a vendor's arms from one that merely sees its
+ *  headers. */
+#if !defined(USEARCH_ARCH_CUDA_)
+#define USEARCH_ARCH_CUDA_ 0
+#endif
+#if !defined(USEARCH_ARCH_ROCM_)
+#define USEARCH_ARCH_ROCM_ 0
+#endif
+#if !defined(USEARCH_ARCH_METAL_)
+#define USEARCH_ARCH_METAL_ 0
+#endif
+
 /*  The `alignas` width that keeps two threads' words off one cache line, picked from the target as
  *  ForkUnion picks `FORKUNION_DEFAULT_ALIGNMENT`; `ram_device.hpp` asserts the two agree. */
 #if !defined(USEARCH_DEFAULT_ALIGNMENT)
@@ -1036,9 +1050,25 @@ enum class cpu_class_t : u32_t {
     wasm64_extended_k,
 };
 
-/** The GPU families USearch ships tuned variants for, the device twin of
- *  @ref cpu_class_t: one class per generation of kernel kits, each compiled for its own
- *  architecture alone and lowered onto a CUDA architecture ceiling where the CUDA SDK is linked. */
+/** The GPU vendors USearch drives, each through a runtime loaded on first use, so one binary
+ *  addresses every vendor's cards at once and loads where none is installed. */
+enum class gpu_vendor_t : u32_t {
+    unknown_k = 0,
+
+    /** NVIDIA, through the static CUDA runtime and driver entry points it resolves. */
+    nvidia_k,
+
+    /** AMD, through the HIP runtime opened at first use and embedded code objects. */
+    amd_k,
+
+    /** Apple, through Metal and kernels compiled from embedded source at first use. */
+    apple_k,
+};
+
+/** The GPU families USearch ships tuned variants for, the device twin of @ref cpu_class_t: one
+ *  class per generation of kernel kits, each compiled for its own architecture alone. A class
+ *  implies its vendor, and within a vendor an unknown newer device takes the newest class it
+ *  satisfies. */
 enum class gpu_class_t : u32_t {
     unknown_k = 0,
 
@@ -1061,7 +1091,48 @@ enum class gpu_class_t : u32_t {
 
     /** Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
     nvidia_rubin_k,
+
+    /** CDNA3 AMD - MI300X & MI325X: gfx942, 64-wide waves, FNUZ fp8. */
+    amd_cdna3_k,
+
+    /** CDNA4 AMD - MI350X & MI355X: gfx950, OCP fp8. */
+    amd_cdna4_k,
+
+    /** CDNA5 AMD - MI400: gfx1250, 32-wide waves. */
+    amd_cdna5_k,
+
+    /** Apple7-family GPUs and every Apple GPU without a class of its own - M1 & M2. */
+    apple_metal7_k,
+
+    /** Apple9-family GPUs - M3 & M4. */
+    apple_metal9_k,
+
+    /** Apple10-family GPUs - M5: the Neural Accelerator matrix units. */
+    apple_metal10_k,
 };
+
+/** The vendor whose runtime drives a device of @p gpu_class. */
+constexpr gpu_vendor_t gpu_vendor_of(gpu_class_t gpu_class) noexcept {
+    if (gpu_class == gpu_class_t::unknown_k) return gpu_vendor_t::unknown_k;
+    if (gpu_class < gpu_class_t::amd_cdna3_k) return gpu_vendor_t::nvidia_k;
+    if (gpu_class < gpu_class_t::apple_metal7_k) return gpu_vendor_t::amd_k;
+    return gpu_vendor_t::apple_k;
+}
+
+/** One GPU as USearch numbers it: the vendor, that vendor's own ordinal, and its class. */
+struct gpu_device_t {
+    gpu_vendor_t vendor = gpu_vendor_t::unknown_k;
+    u32_t vendor_ordinal = 0;
+    gpu_class_t gpu_class = gpu_class_t::unknown_k;
+};
+
+/** Devices one vendor's listing holds at most, so the process-wide listing needs no heap. */
+inline constexpr std::size_t gpu_devices_capacity_k = 64;
+
+/** The sharded dense index of one GPU vendor, as a member template @c type over the key, the dtype
+ *  and the capability ceiling; each vendor's face specializes it, so dispatch names no vendor. */
+template <gpu_vendor_t vendor_>
+struct gpu_dense_indexes_of;
 
 /** Feature bits an I/O engine answers through @c capabilities() once open, since a refused
  *  registration turns @c fixed_buffers_k off at run time, so callers, tests, and docs introspect

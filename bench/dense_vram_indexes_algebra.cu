@@ -192,7 +192,6 @@ int bench_dense_vram_indexes_algebra(int argc, char const* const* argv) {
             });
     };
     return dense::run_cuda_bench(argc, argv, "usearch_bench_dense_vram_indexes_algebra", on_dataset,
-                                 &dense::devices_flags,
                                  [&](settings_t& settings) { return algebra_flags(settings, algebra); });
 }
 

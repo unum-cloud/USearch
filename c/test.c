@@ -1086,6 +1086,22 @@ void test_library_probes(void) {
     usearch_traversal_t const scan = usearch_traversal_from_name((usearch_bytes_view_t) {(uint8_t const*)"scan", 4});
     expect_eq(scan, usearch_traversal_scan_k, "A traversal reads back from its name");
     expect(strcmp(usearch_traversal_name(usearch_traversal_walk_k), "walk") == 0, "A traversal spells its name");
+
+    // A machine without GPUs lists none, so the call succeeds everywhere and names what it lists.
+    usearch_gpu_device_t devices[8];
+    size_t devices_count = 0;
+    usearch_outcome_t outcome = {0};
+    usearch_gpu_devices(&(usearch_gpu_devices_t) {.outcome = &outcome,
+                                                  .devices = devices,
+                                                  .devices_capacity = 8,
+                                                  .devices_count = &devices_count});
+    expect_eq(outcome.status, usearch_status_success_k, "Listing the GPUs must succeed");
+    for (size_t position = 0; position != devices_count && position != 8; ++position) {
+        expect(devices[position].vendor != usearch_gpu_vendor_unknown_k, "A listed GPU names its vendor");
+        expect(strcmp(usearch_gpu_class_name(devices[position].gpu_class), "unknown") != 0,
+               "A listed GPU names its class");
+        printf("- GPU %zu: %s\n", position, usearch_gpu_class_name(devices[position].gpu_class));
+    }
     printf("Test: Library Probes - PASSED\n");
 }
 

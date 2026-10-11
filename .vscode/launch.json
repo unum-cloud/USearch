@@ -72,7 +72,7 @@
       "name": "Unit Test CUDA",
       "type": "cuda-gdb",
       "request": "launch",
-      "program": "${workspaceFolder}/build_cuda_relwithdebinfo/test/usearch_test_cuda",
+      "program": "${workspaceFolder}/build_cuda_relwithdebinfo/test/usearch_test_vram",
       "cwd": "${workspaceFolder}",
       "stopAtEntry": false,
       "breakOnLaunch": false,

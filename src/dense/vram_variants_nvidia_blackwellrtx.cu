@@ -5,6 +5,8 @@
  *  @brief The nvidia_blackwellrtx unit: the Blackwell kits again, compiled for "120f" alone.
  */
 #include "dense_specializations.cuh"
+#include "usearch/dense/vram_nvidia_indexes.hpp"
+#include "usearch/dense/vram_nvidia_index.cuh"
 
 template struct specialized_index<vram_index<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #if USEARCH_DENSE_DTYPES >= 2

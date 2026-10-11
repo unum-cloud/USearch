@@ -2,16 +2,16 @@
  *  @file bench/dense/vram_index_search.cuh
  *  @author Ash Vardanian
  *  @date July 22, 2026
- *  @brief Profiling harness for searching the GPU-resident @c dense_vram_index over real persisted
- *      datasets, shared by the per-dtype benchmark shards.
+ *  @brief Profiling harness for searching the GPU-resident @c dense_vram_nvidia_index over real
+ *      persisted datasets, shared by the per-dtype benchmark shards.
  *
  *  The backend-neutral surface - settings, checkpoints and dataset streaming - lives in @c dense.cuh,
  *  the telemetry and result judgment in @c dense_search.cuh; this header owns everything CUDA: the
- *  device options and the process setup every CUDA binary runs, one device, one @c dense_vram_index
- *  instantiation, batch-shaped run loops, and the compile-time cascade lowering memory space,
- *  generation ceiling, and metric below the stored dtype - the axis the shard translation units
- *  split. The cascade ends in a workload, so one pipeline serves the search and algebra families,
- *  and the multi-device binaries reuse its streaming.
+ *  device options and the process setup every CUDA binary runs, one device, one
+ *  @c dense_vram_nvidia_index instantiation, batch-shaped run loops, and the compile-time cascade
+ *  lowering memory space, generation ceiling, and metric below the stored dtype - the axis the
+ *  shard translation units split. The cascade ends in a workload, so one pipeline serves the search
+ *  and algebra families, and the multi-device binaries reuse its streaming.
  */
 #pragma once
 
@@ -24,7 +24,8 @@
 #include <cuda_runtime.h> // `cudaGetDeviceCount`, `cudaGetDeviceProperties`
 #include <fmt/format.h>
 
-#include "usearch/dense/vram_indexes.cuh"
+#include "usearch/dense/vram_nvidia_indexes.cuh"
+#include "usearch/utilities/vram_device.hpp"
 
 #include "dense_search.cuh"
 #include "utilities/persisted_dataset.hpp"
@@ -50,11 +51,9 @@ constexpr nk_capability_t cuda_ceiling_of(nk_capability_t generation) noexcept {
     return generation == nk_cap_ampere_k ? ampere : ampere | nk_cap_ada_k | generation;
 }
 
-/** The device knobs the CUDA binaries parse beside @c settings_t, before any dtype is known. */
+/** The device knobs the CUDA binaries parse beside @c settings_t, before any dtype is known; the
+ *  devices themselves come from @c USEARCH_DEVICES. */
 struct cuda_cli_t {
-
-    /** The CUDA ordinal every plane and launch lands on. */
-    count_t device {.minimum = 0};
 
     /** The `--max-compute` name, resolved against @ref cuda_compute_choices_k once parsed. */
     std::string_view max_compute_name;
@@ -64,18 +63,16 @@ struct cuda_cli_t {
 };
 
 /**
- *  @brief The flags every CUDA binary takes: the device and its memory, and the launch shape.
+ *  @brief The flags every CUDA binary takes: the device memory and the launch shape.
  *
  *  @verbatim
- *  --device           0                    CUDA device ordinal
  *  --max-compute      the newest compiled  Compute ceiling by GPU generation, or ampere
  *  --managed-memory   off                  Managed-memory planes oversubscribing VRAM
  *  --batch            65536                Rows and queries per launch
  *  @endverbatim
  */
-inline std::array<flag_t, 4> cuda_flags(settings_t& settings, cuda_cli_t& device_cli) noexcept {
+inline std::array<flag_t, 3> cuda_flags(settings_t& settings, cuda_cli_t& device_cli) noexcept {
     return {{
-        {"--device", "id", "CUDA device ordinal; 0 by default", &device_cli.device},
         {"--max-compute", "name", "compute ceiling by GPU generation, like `hopper`, or `ampere`; newest by default",
          &device_cli.max_compute_name},
         {"--managed-memory", "", "managed-memory planes: oversubscribe VRAM through the pager, host-RAM ceiling",
@@ -495,8 +492,8 @@ template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability
           typename plane_allocator_, typename workload_type_>
 int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                   int device, nk_kernel_kind_t kernel, workload_type_ const& workload) {
-    using index_t =
-        dense_vram_index<stored_dtype_, capability_, plane_allocator_, plane_allocator_, cuda_device_allocator_t>;
+    using index_t = dense_vram_nvidia_index<stored_dtype_, capability_, plane_allocator_, plane_allocator_,
+                                            cuda_device_allocator_t>;
     cuda_bench_context<index_t> bench {settings, device, kernel};
     return stream_and_run(dataset, bench, [&](auto& streamed) {
         return prepare(streamed) && run_insertion(streamed) && run_refinement(streamed) &&
@@ -568,10 +565,11 @@ int run_with_stored_dtype(utilities::persisted_dataset<dataset_scalar_type_> con
 
 #pragma region Process Setup
 
-/** The process every CUDA binary runs around its cascade: reads the flags of @p binary_name and the ones each of
- *  @p binary_flags adds, probes the devices - every `--devices` ordinal, or `--device` alone - resolves the compute
- *  ceiling, prints them, and opens the dataset for @p on_dataset - handed the dataset, the settings, the devices, the
- *  ceiling, and the plane space. */
+/** The process every CUDA binary runs around its cascade: reads the flags of @p binary_name and
+ *  the ones each of @p binary_flags adds, probes the devices - every NVIDIA one
+ *  @c USEARCH_DEVICES names, or the first listed - resolves the compute ceiling, prints them, and
+ *  opens the dataset for @p on_dataset - handed the dataset, the settings, the devices' CUDA
+ *  ordinals, the ceiling, and the plane space. */
 template <typename on_dataset_type_, typename... binary_flags_types_>
 int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, on_dataset_type_&& on_dataset,
                    binary_flags_types_... binary_flags) {
@@ -602,18 +600,27 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
         max_compute = cuda_compute_choices_k[named].bit;
     }
 
-    int devices_count = 0;
-    if (cudaGetDeviceCount(&devices_count) != cudaSuccess) devices_count = 0;
-    std::span<std::size_t const> const ordinals = settings.devices.size
-                                                      ? settings.devices.view()
-                                                      : std::span<std::size_t const> {&device_cli.device.value, 1};
-    if (std::ranges::any_of(ordinals,
-                            [&](std::size_t ordinal) noexcept { return ordinal >= std::size_t(devices_count); })) {
-        fmt::println(stderr, "{}=\"{}\" does not parse, expected ordinals below {}",
-                     settings.devices.size ? "--devices" : "--device", fmt::join(ordinals, ","), devices_count);
+    // `USEARCH_DEVICES` names USearch ordinals; the CUDA runtime takes each NVIDIA device's own.
+    std::span<gpu_device_t const> const listed = gpu_devices();
+    counts_t const named = env_devices();
+    std::vector<int> devices;
+    for (std::size_t const ordinal : named.view())
+        if (ordinal < listed.size() && listed[ordinal].vendor == gpu_vendor_t::nvidia_k)
+            devices.push_back(static_cast<int>(listed[ordinal].vendor_ordinal));
+    if (!named.size)
+        for (gpu_device_t const& device : listed)
+            if (device.vendor == gpu_vendor_t::nvidia_k && devices.empty())
+                devices.push_back(static_cast<int>(device.vendor_ordinal));
+    if (devices.empty() || devices.size() != (named.size ? named.size : 1)) {
+        fmt::println(stderr,
+                     "USEARCH_DEVICES=\"{}\" names no NVIDIA device of the {} listed:", fmt::join(named.view(), ","),
+                     listed.size());
+        for (std::size_t position = 0; position != listed.size(); ++position)
+            fmt::println(stderr, "- {}: {} #{}", position,
+                         usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(listed[position].gpu_class)),
+                         listed[position].vendor_ordinal);
         return 1;
     }
-    std::vector<int> const devices(ordinals.begin(), ordinals.end());
     cudaSetDevice(devices.front());
     fmt::println("USearch {}.{}.{}", USEARCH_VERSION_MAJOR, USEARCH_VERSION_MINOR, USEARCH_VERSION_PATCH);
     for (int const device : devices) {

@@ -2,8 +2,8 @@
  *  @file bench/dense/vram_indexes_algebra.cuh
  *  @author Ash Vardanian
  *  @date October 9, 2026
- *  @brief Profiling harness for graph products and graph attention over the sharded @c dense_vram_indexes, shared
- *      by the per-dtype algebra shards.
+ *  @brief Profiling harness for graph products and graph attention over the sharded
+ *      @c dense_vram_nvidia_indexes, shared by the per-dtype algebra shards.
  *
  *  The build phases and the cascade below the stored dtype come from @c dense/vram_indexes_search.cuh, and the
  *  value lookup from @c dense/vram_index_algebra.cuh. Every token walks every shard, and the first device merges the

@@ -21,9 +21,9 @@ namespace unum {
 namespace usearch {
 
 /** Capability cascade for every scalar, shared by all its metrics: each capability group - the
- *  CPU's in @c ram_metric.hpp, NVIDIA's in @c vram_metric.cuh - specializes it under a constraint
- *  on @p caps_. Reading order is the priority order; the first row whose @c available flag is true
- *  wins, else the fallback does. */
+ *  CPU's in @c ram_metric.hpp, NVIDIA's in @c vram_nvidia_metric.cuh - specializes it under a
+ *  constraint on @p caps_. Reading order is the priority order; the first row whose @c available
+ *  flag is true wins, else the fallback does. */
 template <nk::numeric_dtype scalar_, nk_capability_t caps_>
 struct dense_quads_chain;
 
@@ -195,6 +195,33 @@ struct dense_indexer_heads {
 /** The walks' default: no heads, so every node scores as the kit scored it. */
 struct dummy_heads_t {
     dummy_heads_t row(std::size_t) const noexcept { return {}; }
+};
+
+/** Warps per thread block across every kernel of the VRAM design - four schedulers per
+ *  multiprocessor on every modern GPU, one lane group each. */
+inline constexpr u32_t dense_vram_warps_per_block_k = 4;
+
+/** Resident blocks per multiprocessor - shared by the launch grids and the kernels' launch
+ *  bounds, so the register allocator sizes to it; small-pool search kernels fit four. */
+inline constexpr u32_t dense_vram_resident_blocks_per_multiprocessor_k = 3;
+
+/** Rows of the per-warp shared candidate cache; also bounds the diversity-selection pool prefix
+ *  and the staging arrays. */
+inline constexpr u32_t dense_vram_cache_rows_k = 64;
+
+/** Device-resident telemetry counters, one block per driving context, zeroed at each submission
+ *  and read after its drain. */
+struct dense_vram_telemetry_block_t {
+    u64_t hops, scored, lock_attempts, lock_skips, reselections, restarts, locked_drops;
+
+    /** Scored candidates split by plane residency; zero unless the view names a resident range. */
+    u64_t local_scored, remote_scored;
+
+    /** Frontier tail entries shed past their slice, and visited-set claims out of probes. */
+    u64_t tail_drops, visited_saturations;
+
+    /** Nodes whose neighbors a refinement merge landed in a different sequence than they held. */
+    u64_t changed_nodes;
 };
 
 /** Why @p keys and @p scores cannot hold @p rows rankings side by side with contiguous rows, or

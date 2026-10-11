@@ -869,7 +869,7 @@ check_chevron_launches() {
     local chevrons
     chevrons=$(printf '%s\n' "$added" | blank_c_comments_preserving_columns | grep -E '<<<' || true)
     [ -z "$chevrons" ] || fail "$chevrons" \
-        "$file launches a kernel with <<<>>> - call cuda_launch from utilities/vram_device.hpp, which returns" \
+        "$file launches a kernel with <<<>>> - call cuda_launch from utilities/vram_nvidia_device.hpp, which returns" \
         "            the launch's status_t:"
 }
 
@@ -1108,6 +1108,15 @@ check_cuda_raw_atomics() {
         "$file calls a CUDA atomic intrinsic - use cuda_atomic_ref with an explicit memory order:"
 }
 
+# A file every GPU vendor compiles names no vendor: its symbols are `dense_vram_*`, and its lanes come from the
+# policy a kit names, never from one vendor's own.
+check_vendor_neutral() {
+    local named
+    named=$(printf '%s\n' "$added" | grep -E 'dense_cuda_|dense_hip_|dense_metal_|cuda_lanes_t|hip_lanes_t' || true)
+    [ -z "$named" ] || fail "$named" \
+        "$file is shared by every GPU vendor - name its symbols dense_vram_* and its lanes the policy:"
+}
+
 # Calling a call's result the same way: `vectors.view()(range, slice)` reads as a typo and hides which object
 # the second call lands on. NumKong's owning tensors slice themselves - `vectors(range, slice)` - and any other
 # first result takes a name before it is called.
@@ -1331,7 +1340,7 @@ check_annotate_release_before_unlock() {
 # The dependency-free core: include/usearch/basic/ and its transitive utilities/ suppliers ship
 # as a standalone header-only library - standard-library & OS headers only, no submodules. The
 # supplier set is computed from the includes themselves, so a new supplier joins the checked set
-# the moment basic/ names it, and hardware wrappers like utilities/vram_device.hpp or
+# the moment basic/ names it, and hardware wrappers like utilities/vram_nvidia_device.hpp or
 # utilities/ram_device.hpp - which legitimately include CUDA or ForkUnion - never enter it.
 dependency_free_core_files() {
     local closure frontier next supplier fresh
@@ -1615,6 +1624,10 @@ judge_path() {
         check_host_threads
         check_cuda_raw_atomics
         ;;&
+    # The device code NVCC and HIP-Clang share.
+    include/usearch/dense/vram_index.cuh | include/usearch/utilities/vram_queue.cuh)
+        check_vendor_neutral
+        ;;&
     # The test and benchmark harness headers, whose directories name their namespaces.
     test/*.hpp | test/*.cuh | test/*.h | bench/*.hpp | bench/*.cuh | bench/*.h)
         check_harness_namespace
@@ -1652,7 +1665,8 @@ judge_path() {
     .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
     esac
     case "$file" in
-    test/harness.hpp | test/main.cpp | test/dense.cu) ;;
+    test/harness.hpp | test/main.cpp | test/dense_vram.cpp | test/dense/vram_nvidia.cu | test/dense/vram_amd.cpp | \
+        test/dense/vram_apple.cpp) ;;
     test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh) check_test_bodies_quiet ;;
     esac
     case "$file" in

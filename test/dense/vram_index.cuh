@@ -2,74 +2,50 @@
  *  @file test/dense/vram_index.cuh
  *  @author Ash Vardanian
  *  @date July 22, 2026
- *  @brief The CUDA-side suite composer for @c dense_vram_index smoke & concurrency tests, shared by
- *      the per-dtype shards.
+ *  @brief The suite composer for the VRAM-resident index's smoke & concurrency tests, shared by the
+ *      per-dtype shards and composed over each vendor's cell.
  *
- *  Adapts the harness's host-side allocation ledger to device memory, so the same
- *  live-bytes-must-balance discipline audits the GPU planes.
+ *  The shards are vendor-neutral C++, compiled once into each vendor's object library with that
+ *  vendor's @c USEARCH_ARCH_<VENDOR>_ set. A vendor's test header specializes @ref vram_cell with
+ *  its ledgered index, its sharded collection and their factory, so the scenarios stay templated
+ *  on the index alone while the harness's live-bytes-must-balance ledger audits the GPU planes.
  */
 #pragma once
 
-#include "usearch/dense/vram_index.cuh"
+#include <string> // `std::string` - a cell's vendor-prefixed name
 
 #include "dense.cuh"
 
 namespace unum::usearch::test::dense {
 
-/** Ledgered device allocator: the virtual-memory plane backend with every committed
- *  slab tallied into the harness's @c allocation_ledger_t, and a converting constructor
- *  from the harness's host-side @c counting_allocator - so @c make_ledgered_index
- *  constructs the CUDA index unchanged and the ledger provably balances device bytes. */
-template <typename value_type_ = std::byte>
-struct counting_cuda_allocator {
-    using value_type = value_type_;
-    inline static constexpr cuda_address_space_t address_space_k = cuda_address_space_t::device_k;
-    template <typename other_>
-    struct rebind {
-        using other = counting_cuda_allocator<other_>;
-    };
+/**
+ *  @brief One vendor's (dtype, kernel) cell: @c index_t over ledgered planes, the sharded
+ *      @c indexes_t, @c make_index building the index on a ledger, and the @c vendor_prefix_k its
+ *      reports carry.
+ *
+ *  A cell whose vendor runs device attention names @c attends_k and covers it in its own unit;
+ *  every other cell's index must refuse attention with @c unsupported_k.
+ */
+template <gpu_vendor_t vendor_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
+struct vram_cell;
 
-    cuda_virtual_memory_allocator<value_type_> virtual_memory_;
-    allocation_ledger_t* ledger_ = nullptr;
-    std::size_t tallied_bytes_ = 0;
+/** The vendor ordinal of the device under test, which the vendor's entry selects first. */
+inline int selected_device = 0;
 
-    counting_cuda_allocator() noexcept = default;
-    counting_cuda_allocator(counting_allocator_t const& host) noexcept : ledger_(host.ledger_) {}
-    counting_cuda_allocator(counting_cuda_allocator const& other) noexcept
-        : virtual_memory_(other.virtual_memory_), ledger_(other.ledger_) {}
-    template <typename other_>
-    counting_cuda_allocator(counting_cuda_allocator<other_> const& other) noexcept
-        : virtual_memory_(other.virtual_memory_), ledger_(other.ledger_) {}
-    ~counting_cuda_allocator() noexcept { release(); }
+} // namespace unum::usearch::test::dense
 
-    status_t reserve_range(std::size_t bytes, int device) noexcept {
-        return virtual_memory_.reserve_range(bytes, device);
-    }
-    status_t commit(std::size_t bytes) noexcept {
-        status_t const status = virtual_memory_.commit(bytes);
-        if (ledger_ && virtual_memory_.committed_bytes() > tallied_bytes_) {
-            ledger_->live_bytes.fetch_add(
-                static_cast<std::ptrdiff_t>(virtual_memory_.committed_bytes() - tallied_bytes_));
-            ledger_->total_allocations.fetch_add(1);
-            tallied_bytes_ = virtual_memory_.committed_bytes();
-        }
-        return status;
-    }
-    value_type* base() const noexcept { return virtual_memory_.base(); }
-    std::size_t reserved_bytes() const noexcept { return virtual_memory_.reserved_bytes(); }
-    std::size_t committed_bytes() const noexcept { return virtual_memory_.committed_bytes(); }
-    int device() const noexcept { return virtual_memory_.device(); }
-    void release() noexcept {
-        if (ledger_ && tallied_bytes_) ledger_->live_bytes.fetch_sub(static_cast<std::ptrdiff_t>(tallied_bytes_));
-        tallied_bytes_ = 0;
-        virtual_memory_.release();
-    }
-};
+// The one place the test objects name a vendor: the cell this object library composes over.
+#if USEARCH_ARCH_CUDA_
+#include "vram_nvidia.hpp"
+#endif // USEARCH_ARCH_CUDA_
 
-/** The byte specialization every CUDA fixture places its index through. */
-using counting_cuda_allocator_t = counting_cuda_allocator<byte_t>;
+namespace unum::usearch::test::dense {
 
-static_assert(cuda_reservable_allocator<counting_cuda_allocator_t>);
+/** The vendor whose object library compiles this unit; internal, so each copy keeps its own. */
+constexpr gpu_vendor_t vram_object_vendor_k = USEARCH_ARCH_CUDA_    ? gpu_vendor_t::nvidia_k
+                                              : USEARCH_ARCH_ROCM_  ? gpu_vendor_t::amd_k
+                                              : USEARCH_ARCH_METAL_ ? gpu_vendor_t::apple_k
+                                                                    : gpu_vendor_t::unknown_k;
 
 #pragma region Algebra
 
@@ -149,136 +125,21 @@ std::size_t test_dense_vram_multiply(make_index_type_ const& make_index, u64_t s
     }
 }
 
-/** A device lookup over a value table whose rows sit a 16-byte pitch apart: an ID below @c count names its row, a node
- *  ID on one GPU and a key on shards, and any other has none. */
-template <typename fragment_type_>
-struct dense_cuda_value_lookup {
-    byte_t const* rows;
-    std::size_t pitch;
-    std::size_t count;
-
-    __device__ fragment_type_ const* operator()(u32_t id) const noexcept {
-        return id < count ? reinterpret_cast<fragment_type_ const*>(rows + id * pitch) : nullptr;
-    }
-};
-
-/** A value table copied onto the device, its rows a 16-byte pitch apart; null rows when the copy failed. */
-template <typename fragment_type_>
-struct dense_cuda_value_table {
-    cuda_unique_ptr<byte_t> rows;
-    std::size_t pitch;
-
-    /** The device lookup over the first @p count rows. */
-    dense_cuda_value_lookup<fragment_type_> lookup(std::size_t count) const noexcept {
-        return {rows.get(), pitch, count};
-    }
-};
-
-/** Copies @p values onto the device as the table every attend lookup in these suites reads. */
-template <typename fragment_type_, typename scalar_type_>
-dense_cuda_value_table<fragment_type_> dense_cuda_upload_values(nk::matrix_view<scalar_type_> values) {
-    std::size_t const rows_count = values.extent(0);
-    std::size_t const row_bytes = divide_round_up<std::size_t>(values.extent(1) * nk_dtype_bits(scalar_type_::dtype()),
-                                                               8);
-    std::size_t const pitch = round_up_to_multiple<std::size_t>(row_bytes, 16);
-    dense_cuda_value_table<fragment_type_> table {cuda_make_unique(cuda_device_allocator_t {}, rows_count * pitch),
-                                                  pitch};
-    if (table.rows && cudaMemcpy2D(table.rows.get(), pitch, values.byte_data(), values.stride_bytes(0), row_bytes,
-                                   rows_count, cudaMemcpyHostToDevice) != cudaSuccess)
-        table.rows.reset();
-    return table;
-}
-
-/** Device attention against exact full attention, value rows looked up by node ID in a device table: an exhaustive
- *  walk scores every node, so each head's output and carry match the @c f64 oracle over every key, with one head per
- *  token and with four sharing its walk, while a narrow walk stays within the oracle's bounds; a node without a value
- *  row, mismatched outputs, and a head count that does not divide the rows or whose softmax states and accumulators
- *  no warp seats refuse. */
+/** An index without device attention refuses it with @c unsupported_k, whatever it is given. */
 template <typename index_type_, typename make_index_type_>
-std::size_t dense_expect_vram_attend(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
-    using scalar_t = typename index_type_::scalar_t;
-    using lookup_t = dense_cuda_value_lookup<typename index_type_::fragment_t>;
-    constexpr std::size_t nodes_count = dense_thread_nodes_k, tokens_count = 4, crowded_heads = 1024;
-    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
-    std::size_t failures = 0;
-    index_type_ index = make_index(ledger);
-    typename index_type_::dense_traversal_context_t context {{}};
-    failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
-    auto const vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "attend"));
-    auto const values = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "attend", 1));
-    std::vector<dense_node_id_t> assigned_ids(nodes_count);
-    if (failed(index.insert(vectors.view(), {assigned_ids.data(), nodes_count}, context).status))
-        return failures + expect(false);
-    failures += expect_contiguous_ids(std::span {assigned_ids}, 0);
-    auto const table = dense_cuda_upload_values<typename index_type_::fragment_t>(values.view());
-    if (!table.rows) return failures + expect(false);
-
-    typename index_type_::search_config_t const exhaustive {nodes_count};
-    auto const queries = make_vectors<scalar_t>(tokens_count * 4, dimensions, stream_key(seed, "attend", 2));
-    auto outputs = nk::matrix<f32_t>::zeros({crowded_heads, dimensions}).value;
-    std::vector<dense_softmax_state_t> carry(crowded_heads);
-    auto attend = [&](nk::matrix_view<scalar_t> heads, std::size_t head_count, lookup_t lookup, f32_t score_scale,
-                      typename index_type_::search_config_t config) noexcept {
-        auto const [attended, status] = index.attend(heads, head_count, lookup, score_scale,
-                                                     outputs(nk::range(std::size_t {0}, heads.extent(0)), nk::slice),
-                                                     std::span {carry}.first(heads.extent(0)), context, config);
-        failures += expect(failed(status) || attended.count == heads.extent(0));
-        return status;
-    };
-    for (std::size_t const head_count : {std::size_t {1}, std::size_t {4}}) {
-        auto const heads = queries(nk::range(std::size_t {0}, tokens_count * head_count), nk::slice);
-        f32_t const score_scale = dense_attend_scale(
-            dense_oracle_dots(dense_widened_rows(heads, index_type_::vector_dtype_k),
-                              dense_widened_rows(vectors.view(), index_type_::vector_dtype_k), dimensions));
-        nk::matrix_view<f32_t> const attended = outputs(nk::range(std::size_t {0}, heads.extent(0)), nk::slice);
-        std::span<dense_softmax_state_t const> const carried {carry.data(), heads.extent(0)};
-        failures += expect(attend(heads, head_count, table.lookup(nodes_count), score_scale, exhaustive) ==
-                           status_t::success_k);
-        failures += dense_expect_full_attention(
-            vectors.view(), heads, head_count,
-            [&](std::size_t row) noexcept { return values.view().row(row).as_vector(); }, score_scale, attended,
-            carried);
-        failures += expect(attend(heads, head_count, table.lookup(nodes_count), score_scale, {}) ==
-                           status_t::success_k);
-        failures += dense_expect_attention_bounds(vectors.view(), values.view(), heads, score_scale, attended, carried);
-    }
-
-    // The walk scores every node, so the one past a shortened table refuses.
-    failures += expect(attend(queries.view(), 4, table.lookup(nodes_count - 1), 1, exhaustive) ==
-                       status_t::shape_mismatch_k);
-    failures += expect(attend(queries.view(), 3, table.lookup(nodes_count), 1, exhaustive) ==
-                       status_t::shape_mismatch_k);
-    failures += expect(index
-                           .attend(queries.view(), 4, table.lookup(nodes_count), 1,
-                                   outputs(nk::range(std::size_t {0}, std::size_t {1}), nk::slice),
-                                   std::span {carry}.first(queries.extent(0)), context, exhaustive)
-                           .status == status_t::config_mismatch_k);
-    // A thousand heads' softmax states and accumulator rows seat in no warp's shared memory.
-    auto const crowded = make_vectors<scalar_t>(crowded_heads, dimensions, stream_key(seed, "attend", 3));
-    failures += expect(attend(crowded.view(), crowded_heads, table.lookup(nodes_count), 1, exhaustive) ==
-                       status_t::config_mismatch_k);
-    return failures;
-}
-
-/** @ref dense_expect_vram_attend for the dot kernel, then the ledger it left must balance; every
- *  other kernel refuses it at runtime, before reading any input. */
-template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
-std::size_t test_dense_vram_attend(make_index_type_ const& make_index, u64_t seed) {
+std::size_t test_dense_vram_attend_refused(make_index_type_ const& make_index) {
     allocation_ledger_t ledger;
-    if constexpr (kernel_ != nk_kernel_dot_k) {
+    std::size_t failures = 0;
+    {
         index_type_ index = make_index(ledger);
         typename index_type_::dense_traversal_context_t context {{}};
-        return expect_eq(index
-                             .attend(typename index_type_::vectors_view_t {}, 1,
-                                     dense_cuda_value_lookup<typename index_type_::fragment_t> {}, 1.f,
-                                     nk::matrix_span<f32_t> {}, std::span<dense_softmax_state_t> {}, context)
-                             .status,
-                         status_t::config_mismatch_k);
+        failures += expect_eq(index
+                                  .attend(typename index_type_::vectors_view_t {}, 1, nullptr, 1.f,
+                                          nk::matrix_span<f32_t> {}, std::span<dense_softmax_state_t> {}, context)
+                                  .status,
+                              status_t::unsupported_k);
     }
-    else {
-        std::size_t const failures = dense_expect_vram_attend<index_type_>(make_index, ledger, seed);
-        return failures + expect_eq(ledger.live_bytes.load(), 0);
-    }
+    return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
 /** A metric outside the dtype's family reaches no kit, so the first reservation refuses it before
@@ -336,16 +197,22 @@ std::size_t test_dense_vram_indexer_search(make_index_type_ const& make_index, u
 
 #pragma endregion Algebra
 
-/** Composes one (dtype, kernel) cell's suite over the ledgered device allocator. */
-template <nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>
-std::size_t test_cuda_configuration(char const* name, u64_t seed) {
-    using allocator_t = counting_cuda_allocator_t;
-    using index_t =
-        dense_vram_index<dtype_, dense_nvidia_capabilities_k, allocator_t, allocator_t, cuda_device_allocator_t>;
-    auto make_index = [](allocation_ledger_t& ledger) {
-        return index_t {kernel_, allocator_t {counting_allocator_t(ledger)},
-                        allocator_t {counting_allocator_t(ledger)}};
-    };
+/** Composes one (dtype, kernel) cell's suite over @p vendor_ 's ledgered index, reported under
+ *  @p name prefixed by the vendor's toolkit. */
+template <gpu_vendor_t vendor_, nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>
+std::size_t test_vram_configuration(char const* name, u64_t seed) {
+    using cell_t = vram_cell<vendor_, dtype_, kernel_>;
+    using index_t = typename cell_t::index_t;
+    static_assert(std::is_move_constructible_v<typename index_t::save_plan_t> &&
+                      !std::is_copy_constructible_v<typename index_t::save_plan_t> &&
+                      !std::is_move_assignable_v<typename index_t::save_plan_t>,
+                  "The device plans are move-only and never assigned over");
+    static_assert(std::is_move_constructible_v<typename index_t::load_plan_t> &&
+                      !std::is_copy_constructible_v<typename index_t::load_plan_t> &&
+                      !std::is_move_assignable_v<typename index_t::load_plan_t>,
+                  "The device plans are move-only and never assigned over");
+    auto make_index = [](allocation_ledger_t& ledger) { return cell_t::make_index(ledger); };
+    std::string const vendor_name = fmt::format("{}-{}", cell_t::vendor_prefix_k, name);
     // The suite is composed here, not reflected: every call below is a capability claim
     // this fully-concurrent, serializable category makes about itself.
     std::size_t failures_count = 0;
@@ -361,23 +228,73 @@ std::size_t test_cuda_configuration(char const* name, u64_t seed) {
     failures_count += test_dense_health_audits<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_heal_islands<index_t>(make_index, seed);
     failures_count += test_dense_vram_multiply<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_vram_attend<index_t, kernel_>(make_index, seed);
+    if constexpr (!requires { cell_t::attends_k; })
+        failures_count += test_dense_vram_attend_refused<index_t>(make_index);
     failures_count += test_dense_vram_indexer_search<index_t, kernel_>(make_index, seed);
-    return report(name, failures_count);
+    return report(vendor_name.c_str(), failures_count);
 }
 
-/** Per-dtype CUDA suite entries the shard translation units define and the suite's
- *  @c main composes explicitly; each returns its shard's failure count. */
+/** Per-dtype VRAM suite entries the shard translation units define for the vendor of their object
+ *  library and its entry composes explicitly; each returns its shard's failure count. */
+template <gpu_vendor_t vendor_>
 std::size_t check_vram_index_bf16(settings_t const& settings);
+template <gpu_vendor_t vendor_>
 std::size_t check_vram_index_f16(settings_t const& settings);
+template <gpu_vendor_t vendor_>
 std::size_t check_vram_index_e5m2(settings_t const& settings);
+template <gpu_vendor_t vendor_>
 std::size_t check_vram_index_e4m3(settings_t const& settings);
+template <gpu_vendor_t vendor_>
 std::size_t check_vram_index_e3m2(settings_t const& settings);
+template <gpu_vendor_t vendor_>
 std::size_t check_vram_index_e2m3(settings_t const& settings);
+template <gpu_vendor_t vendor_>
 std::size_t check_vram_index_i8(settings_t const& settings);
+template <gpu_vendor_t vendor_>
 std::size_t check_vram_index_i4(settings_t const& settings);
+template <gpu_vendor_t vendor_>
 std::size_t check_vram_index_u8(settings_t const& settings);
+template <gpu_vendor_t vendor_>
 std::size_t check_vram_index_u4(settings_t const& settings);
+template <gpu_vendor_t vendor_>
 std::size_t check_vram_index_u1(settings_t const& settings);
+
+/** Runs every per-dtype cell the settings select for @p vendor_, in the dtype ladder's order. */
+template <gpu_vendor_t vendor_>
+std::size_t check_vram_index_cells(settings_t const& settings) {
+    std::size_t failures_count = 0;
+    if (settings.selects("vram_index_bf16")) failures_count += check_vram_index_bf16<vendor_>(settings);
+#if USEARCH_DENSE_DTYPES >= 2
+    if (settings.selects("vram_index_u1")) failures_count += check_vram_index_u1<vendor_>(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+    if (settings.selects("vram_index_i8")) failures_count += check_vram_index_i8<vendor_>(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+    if (settings.selects("vram_index_e4m3")) failures_count += check_vram_index_e4m3<vendor_>(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+    if (settings.selects("vram_index_f16")) failures_count += check_vram_index_f16<vendor_>(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+    if (settings.selects("vram_index_u8")) failures_count += check_vram_index_u8<vendor_>(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+    if (settings.selects("vram_index_e5m2")) failures_count += check_vram_index_e5m2<vendor_>(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+    if (settings.selects("vram_index_i4")) failures_count += check_vram_index_i4<vendor_>(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+    if (settings.selects("vram_index_u4")) failures_count += check_vram_index_u4<vendor_>(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+    if (settings.selects("vram_index_e3m2")) failures_count += check_vram_index_e3m2<vendor_>(settings);
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+    if (settings.selects("vram_index_e2m3")) failures_count += check_vram_index_e2m3<vendor_>(settings);
+#endif
+    return failures_count;
+}
 
 } // namespace unum::usearch::test::dense

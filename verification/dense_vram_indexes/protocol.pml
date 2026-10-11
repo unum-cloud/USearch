@@ -1,5 +1,5 @@
 /**
- *  `dense_vram_indexes` from `include/usearch/dense/vram_indexes.cuh`: the sharded CUDA index,
+ *  `dense_vram_nvidia_indexes` from `include/usearch/dense/vram_nvidia_indexes.cuh`: the sharded CUDA index,
  *  whose batches spread rows over the shards, each shard growing as it claims, and write every key
  *  before the shard's claim; whose one mutation gate answers `contended_k` to a second batch, and
  *  so serializes the key columns' covers too; whose batch turns every shard's watermark inside one
@@ -74,7 +74,7 @@ byte part[mutators * shards]; // per mutator and shard, the row its batch landed
 inline take_gate(t, seen) { read_modify_write(t, mutating, order_acquire, seen, 1) }
 inline drop_gate(t) { store(t, mutating, order_release, 0) }
 
-// the shard's insert claiming the next row: `dense_vram_index::insert`
+// the shard's insert claiming the next row: `dense_vram_nvidia_index::insert`
 inline claim_row(t, shard, first_id) {
     atomic {
         first_id = claims[shard];

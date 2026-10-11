@@ -37,8 +37,10 @@
 #include <string_view>  // `std::string_view` - the settings readers
 #include <system_error> // `std::errc`
 #include <thread>       // `std::this_thread::yield`, `std::this_thread::sleep_for`
+#include <vector>       // `std::vector` - the selected devices
 
 #include <fmt/format.h>
+#include <fmt/ranges.h> // `fmt::join` - the selected devices
 
 #include <numkong/tensor.hpp>
 #include <numkong/vector.hpp>
@@ -126,6 +128,20 @@ inline std::uint32_t env_seed(char const* name, std::uint32_t fallback) noexcept
     return env_parsed(name, fallback, parse_seed, "an unsigned integer or random");
 }
 
+/** Comma-separated unsigned device ordinals, like "0" or "0,2". */
+inline std::optional<std::vector<std::uint32_t>> parse_ordinals(std::string_view text) {
+    std::vector<std::uint32_t> ordinals;
+    for (std::size_t begin = 0; begin <= text.size();) {
+        std::size_t const end = min_of(text.find(',', begin), text.size());
+        std::uint32_t ordinal = 0;
+        auto const [parsed, parse_status] = std::from_chars(text.data() + begin, text.data() + end, ordinal);
+        if (parse_status != std::errc {} || parsed != text.data() + end) return std::nullopt;
+        ordinals.push_back(ordinal);
+        begin = end + 1;
+    }
+    return ordinals;
+}
+
 /** Every setting the suites read, its default as the initializer, filled once by @c read_settings. */
 struct settings_t {
 
@@ -135,6 +151,10 @@ struct settings_t {
 
     /** Seed every scenario family derives its streams from. Override: @c USEARCH_SEED, where random draws one. */
     std::uint32_t seed = 42;
+
+    /** USearch device ordinals the GPU suites run on, positions in @c gpu_devices; none runs the
+     *  first device of every vendor present. Override: @c USEARCH_DEVICES, comma-separated. */
+    std::vector<std::uint32_t> devices;
 
     /** Whether @p name passes the filter. */
     bool selects(std::string_view name) const {
@@ -160,6 +180,8 @@ inline settings_t read_settings() noexcept {
 #endif
     }
     settings.seed = env_seed("USEARCH_SEED", settings.seed);
+    settings.devices = env_parsed("USEARCH_DEVICES", settings.devices, parse_ordinals,
+                                  "comma-separated unsigned device ordinals");
     return settings;
 }
 
@@ -167,6 +189,22 @@ inline settings_t read_settings() noexcept {
 inline void print(settings_t const& settings) {
     fmt::println("- Seed: {}", settings.seed);
     fmt::println("- Filter: {}", settings.filter.empty() ? std::string_view("none") : settings.filter);
+    if (settings.devices.empty()) fmt::println("- Devices: first of each vendor");
+    else fmt::println("- Devices: {}", fmt::join(settings.devices, ","));
+}
+
+/** One vendor's VRAM suites, as its test object registers them with the runner. */
+struct vram_suite_t {
+    gpu_vendor_t vendor = gpu_vendor_t::unknown_k;
+    std::size_t (*check)(settings_t const& settings, gpu_device_t const& device) = nullptr;
+};
+
+/** Registers @p added when it names a check, and answers every suite registered so far. */
+inline std::span<vram_suite_t const> vram_suites(vram_suite_t added = {}) noexcept {
+    static vram_suite_t suites[4];
+    static std::size_t count = 0;
+    if (added.check && count != std::size(suites)) suites[count++] = added;
+    return {suites, count};
 }
 
 /** The names the C interface reports for this build and this machine, so the suite checks the strings users see. */
@@ -425,8 +463,6 @@ nk::matrix<scalar_, allocator_type_> make_vectors(std::size_t count, std::size_t
     return vectors;
 }
 
-#pragma region Suite Entry Points
-
 std::size_t check_dense(settings_t const& settings);
 
 namespace utilities {
@@ -440,8 +476,6 @@ std::size_t check_sentences(settings_t const& settings);
 std::size_t check_bioinformatics(settings_t const& settings);
 std::size_t check_meshes(settings_t const& settings);
 } // namespace basic
-
-#pragma endregion Suite Entry Points
 
 } // namespace unum::usearch::test
 

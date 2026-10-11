@@ -217,6 +217,15 @@ struct dense_arena_context {
 template <typename index_type_>
 constexpr bool dense_device_resident = requires(index_type_ const& index) { index.device_specs(); };
 
+/** Whether a dot index still writes norms: a compensated host kit finalizes even a dot through the
+ *  row sums, while the device kits never do - asked without naming a device index's kit, which a
+ *  device index need not expose. */
+template <typename index_type_>
+constexpr bool dense_dot_keeps_norms() noexcept {
+    if constexpr (dense_device_resident<index_type_>) return false;
+    else return dense_quads_compensated<typename index_type_::quads_kit_t>;
+}
+
 /** Whether a sharded index runs on ForkUnion threads - the RAM residency. */
 template <typename indexes_type_>
 concept ram_indexes = std::is_same_v<typename indexes_type_::executor_t, forkunion_executor_t>;
@@ -2909,10 +2918,7 @@ std::size_t dense_indexes_expect_norms(std::vector<std::byte> const& monolith, e
     using index_t = typename indexes_type_::index_t;
     using dot_result_t = typename indexes_type_::dot_result_t;
     using norms_t = vector_norms<dot_result_t>;
-    // A compensated host kit finalizes even a dot through the row sums; the device kits never do.
-    constexpr bool keeps_norms_k = kernel_ != nk_kernel_dot_k ||
-                                   (!dense_device_resident<index_t> &&
-                                    dense_quads_compensated<typename index_t::quads_kit_t>);
+    constexpr bool keeps_norms_k = kernel_ != nk_kernel_dot_k || dense_dot_keeps_norms<index_t>();
     std::size_t failures = 0;
     auto const [header, header_status] = safegraphs_read_header(bytes_view_t {monolith});
     failures += expect(succeeded(header_status));

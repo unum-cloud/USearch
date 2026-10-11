@@ -7,7 +7,7 @@
 add_library(usearch_dense_ram_variants OBJECT dense/ram_variants_serial.cpp)
 usearch_setup_target(usearch_dense_ram_variants)
 target_include_directories(usearch_dense_ram_variants PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(usearch_dense_ram_variants PRIVATE "USEARCH_BUILD_CUDA=0")
+target_compile_definitions(usearch_dense_ram_variants PRIVATE "USEARCH_ARCH_CUDA_=0")
 target_link_libraries(usearch_dense_ram_variants PRIVATE yyjson forkunion::static)
 set(usearch_variant_serial_exists_ TRUE)
 set(usearch_variant_serial_flags_)
@@ -157,7 +157,7 @@ usearch_dense_ram_variant(wasm64_extended OVER wasm32_v128 v128relaxed)
 add_library(usearch_dense_nvme_variants OBJECT dense/nvme_variants_serial.cpp)
 usearch_setup_target(usearch_dense_nvme_variants)
 target_include_directories(usearch_dense_nvme_variants PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_definitions(usearch_dense_nvme_variants PRIVATE "USEARCH_BUILD_CUDA=0")
+target_compile_definitions(usearch_dense_nvme_variants PRIVATE "USEARCH_ARCH_CUDA_=0")
 target_link_libraries(usearch_dense_nvme_variants PRIVATE yyjson forkunion::static)
 foreach (
     class_
@@ -212,7 +212,7 @@ if (USEARCH_BUILD_CUDA)
         )
         # Skips `usearch_setup_target`, whose host-compiler flags the CUDA driver rejects, so it links NumKong's and
         # ForkUnion's compilable capabilities itself.
-        target_compile_definitions(${target_} PRIVATE "USEARCH_BUILD_CUDA=1" ${usearch_cuda_capabilities_})
+        target_compile_definitions(${target_} PRIVATE "USEARCH_ARCH_CUDA_=1" ${usearch_cuda_capabilities_})
         set_target_properties(
             ${target_}
             PROPERTIES CXX_STANDARD 20
@@ -222,14 +222,8 @@ if (USEARCH_BUILD_CUDA)
         )
         target_compile_options(${target_} PRIVATE --expt-relaxed-constexpr ${ARGN})
         target_link_libraries(
-            ${target_}
-            PRIVATE yyjson
-                    CUDA::cuda_driver
-                    forkunion::static
-                    numkong::header
-                    numkong::cpu_capabilities_compiled
-                    stringzilla::cpu_capabilities_compiled
-                    forkunion::cpu_capabilities_compiled
+            ${target_} PRIVATE yyjson forkunion::static numkong::header numkong::cpu_capabilities_compiled
+                               stringzilla::cpu_capabilities_compiled forkunion::cpu_capabilities_compiled
         )
         set(USEARCH_PUNNED_LIBRARIES
             ${USEARCH_PUNNED_LIBRARIES} ${target_}
@@ -246,7 +240,7 @@ if (USEARCH_BUILD_CUDA)
     usearch_dense_vram_variant(nvidia_blackwellrtx --generate-code=arch=compute_120f,code=sm_120f)
 
     target_sources(usearch_punned PRIVATE dense_index.cu)
-    target_compile_definitions(usearch_punned PRIVATE "USEARCH_BUILD_CUDA=1" ${usearch_cuda_capabilities_})
+    target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_CUDA_=1" ${usearch_cuda_capabilities_})
     set_target_properties(
         usearch_punned
         PROPERTIES CUDA_STANDARD 20
@@ -258,10 +252,12 @@ if (USEARCH_BUILD_CUDA)
         usearch_punned PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
                                "$<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xcudafe --pending_instantiations=1024>"
     )
-    target_link_libraries(usearch_punned PRIVATE CUDA::cuda_driver)
+    # The static runtime opens the driver itself and the planes resolve the rest through it, so nothing links `libcuda`
+    # and the library loads on machines without one.
+    set_target_properties(usearch_punned PROPERTIES CUDA_RUNTIME_LIBRARY Static)
 else ()
     target_sources(usearch_punned PRIVATE dense_index.cpp)
-    target_compile_definitions(usearch_punned PRIVATE "USEARCH_BUILD_CUDA=0")
+    target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_CUDA_=0")
 endif ()
 
 # Objects never travel through another object library, so every consumer names the whole set: executables and shared

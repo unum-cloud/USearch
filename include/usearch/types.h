@@ -527,7 +527,53 @@ typedef enum usearch_gpu_class_t {
 
     /** Rubin-class NVIDIA - the Vera-Rubin platform's device half. */
     usearch_gpu_class_nvidia_rubin_k,
+
+    /** CDNA3 AMD - MI300X & MI325X: gfx942, 64-wide waves, FNUZ fp8. */
+    usearch_gpu_class_amd_cdna3_k,
+
+    /** CDNA4 AMD - MI350X & MI355X: gfx950, OCP fp8. */
+    usearch_gpu_class_amd_cdna4_k,
+
+    /** CDNA5 AMD - MI400: gfx1250, 32-wide waves. */
+    usearch_gpu_class_amd_cdna5_k,
+
+    /** Apple7-family GPUs and every Apple GPU without a class of its own - M1 & M2. */
+    usearch_gpu_class_apple_metal7_k,
+
+    /** Apple9-family GPUs - M3 & M4. */
+    usearch_gpu_class_apple_metal9_k,
+
+    /** Apple10-family GPUs - M5: the Neural Accelerator matrix units. */
+    usearch_gpu_class_apple_metal10_k,
 } usearch_gpu_class_t;
+
+/** The GPU vendors one binary drives at once, each through a runtime loaded on first use. */
+typedef enum usearch_gpu_vendor_t {
+    usearch_gpu_vendor_unknown_k = 0,
+
+    /** NVIDIA, through the CUDA driver when one is installed. */
+    usearch_gpu_vendor_nvidia_k,
+
+    /** AMD, through the HIP runtime when one is installed. */
+    usearch_gpu_vendor_amd_k,
+
+    /** Apple, through Metal, present on every Apple silicon Mac. */
+    usearch_gpu_vendor_apple_k,
+} usearch_gpu_vendor_t;
+
+/** One GPU as USearch numbers it: its position in @c usearch_gpu_devices is the USearch device
+ *  ordinal every VRAM call names. */
+typedef struct usearch_gpu_device_t {
+
+    /** The vendor whose runtime drives the device. */
+    usearch_gpu_vendor_t vendor;
+
+    /** The device's ordinal in its vendor's runtime, as @c nvidia-smi or @c rocm-smi list it. */
+    uint32_t vendor_ordinal;
+
+    /** The class whose kernels run on it. */
+    usearch_gpu_class_t gpu_class;
+} usearch_gpu_device_t;
 
 /**
  *  @brief Where an index's payload lives and which engine traverses it - the vocabulary the
@@ -591,11 +637,15 @@ typedef struct usearch_ram_options_t {
  *
  *  Planes are device-resident, never migratable: an index outgrowing the named devices
  *  fails rather than paging to the host, and the answer is to name more devices.
+ *
+ *  One index spans one vendor and one class, so naming devices of two vendors or two generations
+ *  refuses with @c usearch_status_config_mismatch_k; separate indexes may sit on different vendors
+ *  in one process.
  */
 typedef struct usearch_vram_options_t {
 
-    /** CUDA device ordinals to place shards on, borrowed for the duration of the
-     *  call; @c NULL derives one free device. */
+    /** USearch device ordinals to place shards on, NVIDIA devices first, then AMD, then Apple, as
+     *  @c usearch_gpu_devices lists them, borrowed for the call; @c NULL picks device zero. */
     int32_t const* devices;
 
     /** Number of entries in @c devices; zero derives. */
@@ -839,6 +889,32 @@ typedef struct usearch_executor_for_vram_t {
  *  by the time one of them would return. A GPU executor never changes process-wide device flags.
  */
 USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments);
+
+/** The arguments of @c usearch_gpu_devices. */
+typedef struct usearch_gpu_devices_t {
+
+    /** Output for the outcome, final when the call returns. */
+    usearch_outcome_t* outcome;
+
+    /** Output for up to @c devices_capacity devices, in USearch ordinal order; may be @c NULL. */
+    usearch_gpu_device_t* devices;
+
+    /** Entries @c devices holds. */
+    size_t devices_capacity;
+
+    /** Output for every device this process can drive, which may exceed @c devices_capacity. */
+    size_t* devices_count;
+} usearch_gpu_devices_t;
+
+/**
+ *  @brief Lists every GPU this process can drive, NVIDIA devices first, then AMD, then Apple, so
+ *      the position of a device is the USearch ordinal @c usearch_vram_options_t names it by.
+ *
+ *  Each vendor's runtime loads on first use, and a vendor whose runtime is absent lists no devices,
+ *  so the call succeeds with a zero count on a machine without GPUs. The listing is taken once per
+ *  process and never changes after.
+ */
+USEARCH_EXPORT void usearch_gpu_devices(usearch_gpu_devices_t* arguments);
 
 /** The arguments of @c usearch_executor_for_nvme. */
 typedef struct usearch_executor_for_nvme_t {

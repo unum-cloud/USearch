@@ -71,8 +71,10 @@ USearch 3.0.0
 
 Both lists come from the C interface, the same strings the bindings report.
 "Compiled for" is `usearch_capabilities_compiled()`, the NumKong capability levels this build carries kernels for, and "This machine" is `usearch_capabilities_available()`, those of them this processor can also run.
-`usearch_test_cuda` opens with `- CUDA: <device> sm_<major><minor>` for the first visible device.
-Without one it prints `- CUDA: no device` and exits 0, skipping every GPU test.
+`usearch_test_vram` runs on the GPUs `USEARCH_DEVICES` names, comma-separated USearch device ordinals like `0` or `0,2`, positions in the listing `usearch_gpu_devices` reports: NVIDIA devices first, then AMD, then Apple.
+Unset, it takes the first device of every vendor present, and an ordinal past the listing prints the listing and exits 1.
+It links one object library per vendor the build carries, and each device opens with its vendor's line: `- CUDA: <device> sm_<major><minor> #<ordinal>`, `- ROCm: device #<ordinal> amd-cdna<N>` or `- Metal: device #<ordinal> apple-metal<N>`.
+Without any GPU it prints `- GPU: none listed` and exits 0, skipping every GPU test.
 
 Those three configurations, and the benchmarking one from [bench/README.md](bench/README.md), are also packaged as CMake presets, so the flag soup below is optional:
 

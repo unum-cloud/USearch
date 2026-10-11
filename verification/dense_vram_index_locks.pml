@@ -2,7 +2,7 @@
  *  @brief The CUDA index's rows: publication by one release, the bounded slot-zero lock, the
  *      back-link's sweep and append, and a traversal warp whose follower lanes read behind a shuffle.
  *
- *  From `include/usearch/dense/vram_index.cuh`: no device watermark, one warp per node, slot zero
+ *  From `include/usearch/dense/vram_nvidia_index.cuh`: no device watermark, one warp per node, slot zero
  *  of every row the combined lock and first-neighbor word; a search walk also skips every ID at or
  *  past the host watermark it launched under, which `dense_vram_index_claims.pml` models, and the
  *  reader here is a walk that admits node 1. A warp is two lanes here, the leader and one follower,

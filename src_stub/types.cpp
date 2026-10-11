@@ -191,7 +191,12 @@ void usearch_executor_for_nvme(usearch_executor_for_nvme_t* arguments) {
 void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
-    propagate_error(usearch_status_device_k, outcome, "This build carries no CUDA backends");
+    propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
+}
+
+void usearch_gpu_devices(usearch_gpu_devices_t* arguments) {
+    deferred_outcome_t outcome(arguments->outcome);
+    if (arguments->devices_count) *arguments->devices_count = 0;
 }
 
 void usearch_executor_drain(usearch_executor_drain_t* arguments) {

@@ -46,6 +46,12 @@
  *  migrate, so an index outgrowing its devices fails rather than paging to the host - the answer
  *  to a dataset past one accelerator is to name more of them.
  *
+ *  Devices are named by USearch ordinal, a position in @c usearch_gpu_devices, so one binary drives
+ *  NVIDIA, AMD and Apple GPUs alike. An index spans one vendor and one generation; Apple's unified
+ *  memory counts as device memory, since the GPU manages it, and its single device hosts one shard.
+ *  Attention runs on NVIDIA devices alone, and the AMD and Apple handles refuse it with
+ *  @c usearch_status_unsupported_k.
+ *
  *  Inputs already on the executor's device in the right layout are read in place, pinned and
  *  managed host inputs upload directly, and only pageable host inputs pass through the executor's
  *  pinned bounce buffer. Outputs land in an arena on the executor's device, so until the devices
@@ -280,7 +286,7 @@ typedef struct usearch_dense_init_vram_t {
     /** Upper bound on entries sharing one key; zero derives to one - unique keys. */
     size_t values_per_key;
 
-    /** The devices to place one shard on apiece. */
+    /** The devices to place one shard on apiece, by USearch ordinal. */
     usearch_vram_options_t vram;
 } usearch_dense_init_vram_t;
 

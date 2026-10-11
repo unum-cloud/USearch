@@ -224,6 +224,12 @@ USEARCH_EXPORT char const* usearch_gpu_class_name(usearch_gpu_class_t gpu_class)
     case usearch_gpu_class_nvidia_blackwell_k: return "nvidia-blackwell";
     case usearch_gpu_class_nvidia_blackwellrtx_k: return "nvidia-blackwellrtx";
     case usearch_gpu_class_nvidia_rubin_k: return "nvidia-rubin";
+    case usearch_gpu_class_amd_cdna3_k: return "amd-cdna3";
+    case usearch_gpu_class_amd_cdna4_k: return "amd-cdna4";
+    case usearch_gpu_class_amd_cdna5_k: return "amd-cdna5";
+    case usearch_gpu_class_apple_metal7_k: return "apple-metal7";
+    case usearch_gpu_class_apple_metal9_k: return "apple-metal9";
+    case usearch_gpu_class_apple_metal10_k: return "apple-metal10";
     default: return "unknown";
     }
 }

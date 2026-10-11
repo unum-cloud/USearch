@@ -28,9 +28,6 @@
 #include "usearch/dense_index.h"
 #include "usearch/dense/nvme_indexes.hpp"
 #include "usearch/dense/ram_indexes.hpp"
-#if USEARCH_BUILD_CUDA
-#include "usearch/dense/vram_indexes.cuh"
-#endif
 
 /** How many storage dtypes the arms cover, from the front of the ladder bf16, u1, i8, e4m3, f16,
  *  u8, e5m2, i4, u4, e3m2, e2m3. CMake passes it, so only builds that bypass CMake take this
@@ -425,43 +422,43 @@ struct gpu_class_name_t {
     char const* name;
 };
 inline constexpr gpu_class_name_t gpu_class_names_k[] = {
-    {gpu_class_t::nvidia_ampere_k, "nvidia_ampere"},
-    {gpu_class_t::nvidia_ada_k, "nvidia_ada"},
-    {gpu_class_t::nvidia_hopper_k, "nvidia_hopper"},
-    {gpu_class_t::nvidia_blackwell_k, "nvidia_blackwell"},
-    {gpu_class_t::nvidia_blackwellrtx_k, "nvidia_blackwellrtx"},
-    {gpu_class_t::nvidia_rubin_k, "nvidia_rubin"},
+    {gpu_class_t::nvidia_ampere_k, "nvidia-ampere"},
+    {gpu_class_t::nvidia_ada_k, "nvidia-ada"},
+    {gpu_class_t::nvidia_hopper_k, "nvidia-hopper"},
+    {gpu_class_t::nvidia_blackwell_k, "nvidia-blackwell"},
+    {gpu_class_t::nvidia_blackwellrtx_k, "nvidia-blackwellrtx"},
+    {gpu_class_t::nvidia_rubin_k, "nvidia-rubin"},
+    {gpu_class_t::amd_cdna3_k, "amd-cdna3"},
+    {gpu_class_t::amd_cdna4_k, "amd-cdna4"},
+    {gpu_class_t::amd_cdna5_k, "amd-cdna5"},
+    {gpu_class_t::apple_metal7_k, "apple-metal7"},
+    {gpu_class_t::apple_metal9_k, "apple-metal9"},
+    {gpu_class_t::apple_metal10_k, "apple-metal10"},
 };
 
-#if USEARCH_BUILD_CUDA
-
-/** Lowers one GPU class onto NumKong's NVIDIA capabilities, as @c nk_cuda_capabilities_detected
- *  reports them: the Ampere & Ada bits accumulate, while Hopper, Blackwell & RTX Blackwell each
- *  run only their own kits. Rubin rides the Blackwell kits until its own land. */
+/** Lowers one GPU class onto NumKong's GPU capabilities. On NVIDIA, as
+ *  @c nk_cuda_capabilities_detected reports them, the Ampere & Ada bits accumulate, while Hopper,
+ *  Blackwell & RTX Blackwell each run only their own kits, and Rubin rides the Blackwell kits until
+ *  its own land. AMD and Apple generations accumulate over their vendor's floor. */
 constexpr nk_capability_t numkong_capabilities_of(gpu_class_t gpu_class) noexcept {
     nk_capability_t const ampere = nk_cap_cuda_k | nk_cap_ampere_k, ada = ampere | nk_cap_ada_k;
+    nk_capability_t const cdna3 = nk_cap_rocm_k | nk_cap_cdna3_k, cdna4 = cdna3 | nk_cap_cdna4_k;
+    nk_capability_t const metal9 = nk_cap_metal_k | nk_cap_apple9_k;
     switch (gpu_class) {
     case gpu_class_t::nvidia_ada_k: return ada;
     case gpu_class_t::nvidia_hopper_k: return ada | nk_cap_hopper_k;
     case gpu_class_t::nvidia_blackwell_k:
     case gpu_class_t::nvidia_rubin_k: return ada | nk_cap_blackwell_k;
     case gpu_class_t::nvidia_blackwellrtx_k: return ada | nk_cap_blackwellrtx_k;
+    case gpu_class_t::amd_cdna3_k: return cdna3;
+    case gpu_class_t::amd_cdna4_k: return cdna4;
+    case gpu_class_t::amd_cdna5_k: return cdna4 | nk_cap_cdna5_k;
+    case gpu_class_t::apple_metal7_k: return nk_cap_metal_k;
+    case gpu_class_t::apple_metal9_k: return metal9;
+    case gpu_class_t::apple_metal10_k: return metal9 | nk_cap_apple10_k;
     default: return ampere;
     }
 }
-
-/** The class whose unit carries cubins for a device of compute capability @p arch; any generation
- *  without a class of its own runs the Ampere unit, natively on 8.x and through its PTX past that. */
-constexpr gpu_class_t gpu_class_of(int arch) noexcept {
-    switch (arch / 100) {
-    case 8: return arch >= cuda_arch_ada_k ? gpu_class_t::nvidia_ada_k : gpu_class_t::nvidia_ampere_k;
-    case 9: return gpu_class_t::nvidia_hopper_k;
-    case 10: return gpu_class_t::nvidia_blackwell_k;
-    case 12: return gpu_class_t::nvidia_blackwellrtx_k;
-    default: return gpu_class_t::nvidia_ampere_k;
-    }
-}
-#endif
 
 /** Marks @p outcome as running; no waiter watches for this store, so it is relaxed. */
 inline void propagate_pending(usearch_outcome_t* outcome) noexcept {
@@ -557,13 +554,20 @@ inline nk::matrix_view<typename multi_type_::scalar_t> stored_rows_of( //
  *  disagree with the variant. */
 template <typename multi_type_>
 inline constexpr bool is_ram_index = std::is_same_v<typename multi_type_::executor_t, forkunion_executor_t>;
-#if USEARCH_BUILD_CUDA
+
+/** Whether an executor drives GPUs: every vendor's names the vendor it drives. */
+template <typename executor_type_>
+inline constexpr bool is_gpu_executor = requires { executor_type_::vendor_k; };
+
 template <typename multi_type_>
-inline constexpr bool is_vram_index = std::is_same_v<typename multi_type_::executor_t, cuda_executor_t>;
-#else
+inline constexpr bool is_vram_index = is_gpu_executor<typename multi_type_::executor_t>;
+
+/** The vendor a VRAM arm's devices belong to, and @c unknown_k for every other residency. */
 template <typename multi_type_>
-inline constexpr bool is_vram_index = false;
-#endif
+constexpr gpu_vendor_t gpu_vendor_of_index() noexcept {
+    if constexpr (is_vram_index<multi_type_>) return multi_type_::vendor_k;
+    else return gpu_vendor_t::unknown_k;
+}
 
 template <typename multi_type_>
 inline constexpr bool is_nvme_index = std::is_same_v<typename multi_type_::executor_t, nvme_executor_t>;
@@ -579,13 +583,12 @@ using ram_index = dense_ram_indexes<us::uuid_t, dtype_, numkong_capabilities_of(
  *  headers and the transport is the executor's runtime choice. */
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
 using nvme_index = dense_nvme_indexes<us::uuid_t, dtype_, numkong_capabilities_of(cpu_class_)>;
-#if USEARCH_BUILD_CUDA
 
-/** One VRAM alternative: the GPU class alone names the rung, lowering onto its architecture ceiling;
- *  its kernels come from that class's unit, compiled for its architecture alone. */
+/** One VRAM alternative: the GPU class alone names the rung, and through it the vendor whose face
+ *  defines the index, lowering onto its capability ceiling; that class's unit holds its kernels. */
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
-using vram_index = dense_vram_indexes<us::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
-#endif
+using vram_index = typename gpu_dense_indexes_of<gpu_vendor_of(
+    gpu_class_)>::template type<us::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
 
 /** The C predicate lifted onto the index's key vocabulary. */
 struct key_predicate_t {
@@ -625,7 +628,7 @@ struct device_value_lookup_t {
     usearch_scalar_t scalar;
     std::size_t dimensions;
 
-#if USEARCH_BUILD_CUDA
+#if USEARCH_ARCH_CUDA_
     __device__ void const* operator()(us::uuid_t key) const noexcept {
         usearch_key_t const scored = std::bit_cast<usearch_key_t>(key);
         void const* row = nullptr;

@@ -2,24 +2,22 @@
  *  @file test/dense/vram_indexes.cuh
  *  @author Ash Vardanian
  *  @date September 1, 2026
- *  @brief The CUDA-side suite composer for @c dense_vram_indexes - the sharded index over one shard
- *      per device - shared by its translation unit.
+ *  @brief The suite composer for the sharded VRAM index - one shard per device - shared by its
+ *      translation unit and instantiated per vendor, as @c vram_index.cuh is.
  *
- *  The scenarios live in @c dense.cuh, templated over the sharded-index type; the VRAM forms
- *  of the placement and executor helpers live here, since they name the CUDA executor.
+ *  The scenarios live in @c dense.cuh, templated over the sharded-index type; the VRAM forms of
+ *  the placement and executor helpers live here, over whichever executor the cell's index names.
  */
 #pragma once
 
-#include "usearch/dense/vram_indexes.cuh"
-
 #include "dense.cuh"
-#include "dense/vram_index.cuh" // `dense_cuda_upload_values` - the device value table attend looks keys up in
+#include "vram_index.cuh" // `vram_cell`, `selected_device`
 
 namespace unum::usearch::test::dense {
 
-/** Whether a sharded index runs on CUDA streams - the VRAM residency. */
+/** Whether a sharded index places its shards on GPUs - the VRAM residency, whichever vendor's. */
 template <typename indexes_type_>
-concept vram_indexes = std::is_same_v<typename indexes_type_::executor_t, cuda_executor_t>;
+concept vram_indexes = requires { indexes_type_::vendor_k; };
 
 /** The VRAM reading of the search race: the index admits no search during a mutation,
  *  so the exclusion is the executor's - a search on a claimed executor is refused, and the
@@ -185,90 +183,13 @@ std::size_t test_dense_vram_indexes_indexer_search(u64_t seed) {
     }
 }
 
-/** The VRAM reading of the sharded attention, keys equal to their rows and value rows looked up by key in a device
- *  table: every shard walks every node, so each head's merged output and carry match exact full attention, with one
- *  head per token and with four sharing its walk, while a narrow walk stays within the oracle's bounds; a key without
- *  a value row, mismatched outputs, and a head count that does not divide the rows refuse. Only the dot kernel
- *  attends. */
-template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_vram_indexes_attend(u64_t seed) {
-    using index_t = typename indexes_type_::index_t;
-    if constexpr (kernel_ != nk_kernel_dot_k) return 0;
-    else {
-        using lookup_t = dense_cuda_value_lookup<typename index_t::fragment_t>;
-        using scalar_t = typename index_t::scalar_t;
-        using key_t = typename indexes_type_::key_t;
-        constexpr std::size_t nodes_count = dense_thread_nodes_k, tokens_count = 4;
-        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
-        std::size_t failures = 0;
-
-        dense_indexes_executor<indexes_type_> driver;
-        if (failed(driver.status)) return failures + expect(false);
-        indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
-        failures += expect(succeeded(driver.place_shards(indexes)));
-        failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions}).status));
-        auto const vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexes_attend"));
-        auto const values = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexes_attend", 1));
-        std::vector<key_t> keys(nodes_count);
-        for (std::size_t row = 0; row != nodes_count; ++row) keys[row] = static_cast<key_t>(row);
-        failures += expect(
-            succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
-        auto const table = dense_cuda_upload_values<typename index_t::fragment_t>(values.view());
-        if (!table.rows) return failures + expect(false);
-
-        typename indexes_type_::search_config_t const exhaustive {nodes_count};
-        auto const queries = make_vectors<scalar_t>(tokens_count * 4, dimensions,
-                                                    stream_key(seed, "indexes_attend", 2));
-        auto outputs = nk::matrix<f32_t>::zeros({queries.extent(0), dimensions}).value;
-        std::vector<dense_softmax_state_t> carry(queries.extent(0));
-        auto attend = [&](nk::matrix_view<scalar_t> heads, std::size_t head_count, lookup_t lookup, f32_t score_scale,
-                          typename indexes_type_::search_config_t config) noexcept {
-            auto const [attended, status] = indexes.attend(
-                heads, head_count, lookup, score_scale, outputs(nk::range(std::size_t {0}, heads.extent(0)), nk::slice),
-                std::span {carry}.first(heads.extent(0)), driver.executor, config);
-            failures += expect(failed(status) || attended.count == heads.extent(0));
-            return status;
-        };
-        for (std::size_t const head_count : {std::size_t {1}, std::size_t {4}}) {
-            auto const heads = queries(nk::range(std::size_t {0}, tokens_count * head_count), nk::slice);
-            f32_t const score_scale = dense_attend_scale(
-                dense_oracle_dots(dense_widened_rows(heads, index_t::vector_dtype_k),
-                                  dense_widened_rows(vectors.view(), index_t::vector_dtype_k), dimensions));
-            nk::matrix_view<f32_t> const attended = outputs(nk::range(std::size_t {0}, heads.extent(0)), nk::slice);
-            std::span<dense_softmax_state_t const> const carried {carry.data(), heads.extent(0)};
-            failures += expect(
-                succeeded(attend(heads, head_count, table.lookup(nodes_count), score_scale, exhaustive)));
-            failures += dense_expect_full_attention(
-                vectors.view(), heads, head_count,
-                [&](std::size_t row) noexcept { return values.view().row(row).as_vector(); }, score_scale, attended,
-                carried);
-            failures += expect(succeeded(attend(heads, head_count, table.lookup(nodes_count), score_scale, {})));
-            failures += dense_expect_attention_bounds(vectors.view(), values.view(), heads, score_scale, attended,
-                                                      carried);
-        }
-
-        // Every shard walks every node, so the key past a shortened table refuses.
-        failures += expect_eq(attend(queries.view(), 4, table.lookup(nodes_count - 1), 1, exhaustive),
-                              status_t::shape_mismatch_k);
-        failures += expect_eq(attend(queries.view(), 3, table.lookup(nodes_count), 1, exhaustive),
-                              status_t::shape_mismatch_k);
-        failures += expect_eq(indexes
-                                  .attend(queries.view(), 4, table.lookup(nodes_count), 1,
-                                          outputs(nk::range(std::size_t {0}, std::size_t {1}), nk::slice),
-                                          std::span {carry}, driver.executor, exhaustive)
-                                  .status,
-                              status_t::config_mismatch_k);
-        return failures;
-    }
-}
-
-/** Composes one (dtype, kernel) cell's sharded suite over device zero, skipping it
- *  where no device answers. */
-template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-std::size_t test_cuda_indexes_configuration(char const* name, u64_t seed) {
-    if (failed(cuda_device_specs_t::query(0).status)) return report(name, "no CUDA device reachable");
-
-    using indexes_t = dense_vram_indexes<u32_t, dtype_, dense_nvidia_capabilities_k>;
+/** Composes one (dtype, kernel) cell's sharded suite over @p vendor_ 's collection on the device
+ *  under test, reported under @p name prefixed by the vendor's toolkit. */
+template <gpu_vendor_t vendor_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
+std::size_t test_vram_indexes_configuration(char const* name, u64_t seed) {
+    using cell_t = vram_cell<vendor_, dtype_, kernel_>;
+    using indexes_t = typename cell_t::indexes_t;
+    std::string const vendor_name = fmt::format("{}-{}", cell_t::vendor_prefix_k, name);
 
     // The suite is composed here, not reflected: every call below is a capability claim
     // this sharded, executor-driven category makes about itself.
@@ -286,12 +207,12 @@ std::size_t test_cuda_indexes_configuration(char const* name, u64_t seed) {
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed);
     failures_count += test_dense_vram_indexes_indexer_search<indexes_t, kernel_>(seed);
-    failures_count += test_dense_vram_indexes_attend<indexes_t, kernel_>(seed);
-    return report(name, failures_count);
+    return report(vendor_name.c_str(), failures_count);
 }
 
-/** The sharded CUDA suite entry its translation unit defines and the suite's @c main
- *  composes explicitly; returns the suite's failure count. */
+/** The sharded VRAM suite entry its translation unit defines for the vendor of its object library
+ *  and that vendor's entry composes explicitly; returns the suite's failure count. */
+template <gpu_vendor_t vendor_>
 std::size_t check_vram_indexes(settings_t const& settings);
 
 } // namespace unum::usearch::test::dense
@@ -299,16 +220,16 @@ std::size_t check_vram_indexes(settings_t const& settings);
 /*  The residency forms specialize templates of the enclosing @c test namespace, which only a
  *  scope enclosing it may do, so they follow the namespace at file scope and qualify what they name. */
 
-/** The VRAM form: one stream on device zero. */
+/** The VRAM form: one stream or queue on the device under test. */
 template <us::test::dense::vram_indexes indexes_type_>
 struct us::test::dense_indexes_executor<indexes_type_> {
-    using executor_t = us::cuda_executor_t;
+    using executor_t = typename indexes_type_::executor_t;
 
     executor_t executor;
     us::status_t status = us::status_t::uninitialized_k;
 
     dense_indexes_executor() noexcept {
-        int const device = 0;
+        int const device = us::test::dense::selected_device;
         auto [executor, spawn_status] = executor_t::spawn(std::span<int const> {&device, 1});
         status = spawn_status;
         this->executor = std::move(executor);
@@ -316,19 +237,21 @@ struct us::test::dense_indexes_executor<indexes_type_> {
     dense_indexes_executor(dense_indexes_executor const&) = delete;
     dense_indexes_executor& operator=(dense_indexes_executor const&) = delete;
 
-    /** Places the shards one sharded scenario drives: one VRAM shard on device zero, since
-     *  the index refuses two on one device. */
-    static us::status_t place_shards(indexes_type_& indexes) noexcept { return indexes.emplace(0); }
+    /** Places the shards one sharded scenario drives: one VRAM shard on the device under test,
+     *  since the index refuses two on one device. */
+    static us::status_t place_shards(indexes_type_& indexes) noexcept {
+        return indexes.emplace(us::test::dense::selected_device);
+    }
 };
 
 /** The VRAM form: the one-row verbs take the executor itself, as no single context can
  *  walk every device. */
 template <us::test::dense::vram_indexes indexes_type_>
 struct us::test::dense_indexes_row_driver<indexes_type_> {
-    us::cuda_executor_t& executor;
+    typename indexes_type_::executor_t& executor;
     us::status_t status = us::status_t::success_k;
 
     dense_indexes_row_driver(indexes_type_&, us::test::dense_indexes_executor<indexes_type_>& driver) noexcept
         : executor(driver.executor) {}
-    us::cuda_executor_t& handle() noexcept { return executor; }
+    typename indexes_type_::executor_t& handle() noexcept { return executor; }
 };
