@@ -20,10 +20,8 @@
 
 #include <numkong/numkong.h>
 
-namespace {
-
 /** Rendered once on first use, so the pointer the C interface hands out stays valid. */
-char const* rendered_version() {
+static char const* rendered_version() {
     static char rendered[32] = {0};
     if (!rendered[0])
         std::snprintf(rendered, sizeof(rendered), "%d.%d.%d", USEARCH_VERSION_MAJOR, USEARCH_VERSION_MINOR,
@@ -32,7 +30,7 @@ char const* rendered_version() {
 }
 
 /** The kernel families a capability mask can name, newest class last. */
-constexpr struct {
+static constexpr struct {
     nk_capability_t bit;
     char const* name;
 } capability_names_k[] = {
@@ -46,7 +44,7 @@ constexpr struct {
 };
 
 /** Composes @p mask into @p rendered as a comma-separated list, once. */
-char const* render_capabilities(char* rendered, size_t capacity, nk_capability_t mask) {
+static char const* render_capabilities(char* rendered, size_t capacity, nk_capability_t mask) {
     if (rendered[0]) return rendered;
     char* cursor = rendered;
     char* const sentinel = rendered + capacity - 1;
@@ -60,11 +58,9 @@ char const* render_capabilities(char* rendered, size_t capacity, nk_capability_t
 }
 
 /** @brief Whether @p name spells @p spelling exactly, with no terminator assumed on either side. */
-bool named(usearch_bytes_view_t name, char const* spelling) noexcept {
+static bool named(usearch_bytes_view_t name, char const* spelling) noexcept {
     return std::string_view {reinterpret_cast<char const*>(name.data), name.length} == spelling;
 }
-
-} // namespace
 
 extern "C" {
 
@@ -188,9 +184,12 @@ USEARCH_EXPORT char const* usearch_cpu_class_name(usearch_cpu_class_t cpu_class)
     case usearch_cpu_class_intel_skylake_k: return "intel-skylake";
     case usearch_cpu_class_intel_icelake_k: return "intel-icelake";
     case usearch_cpu_class_amd_genoa_k: return "amd-genoa";
+    case usearch_cpu_class_intel_sapphire_k: return "intel-sapphire";
+    case usearch_cpu_class_intel_granite_k: return "intel-granite";
     case usearch_cpu_class_intel_diamond_k: return "intel-diamond";
     case usearch_cpu_class_aws_g2_k: return "aws-g2";
     case usearch_cpu_class_apple_m2_k: return "apple-m2";
+    case usearch_cpu_class_apple_m4_k: return "apple-m4";
     case usearch_cpu_class_aws_g5_k: return "aws-g5";
     case usearch_cpu_class_nvidia_vera_k: return "nvidia-vera";
     case usearch_cpu_class_alibaba_c930_k: return "alibaba-c930";

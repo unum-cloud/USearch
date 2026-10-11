@@ -101,12 +101,15 @@ inline constexpr numkong_capability_name_t numkong_capability_names_k[] = {
     {nk_cap_neonbfdot_k, "neonbfdot"},
     {nk_cap_neonfhm_k, "neonfhm"},
     {nk_cap_neonfp8_k, "neonfp8"},
+    {nk_cap_sme_k, "sme"},
+    {nk_cap_smebi32_k, "smebi32"},
     {nk_cap_haswell_k, "haswell"},
     {nk_cap_skylake_k, "skylake"},
     {nk_cap_icelake_k, "icelake"},
     {nk_cap_genoa_k, "genoa"},
     {nk_cap_sapphire_k, "sapphire"},
     {nk_cap_sapphireamx_k, "sapphireamx"},
+    {nk_cap_graniteamx_k, "graniteamx"},
     {nk_cap_alder_k, "alder"},
     {nk_cap_sierra_k, "sierra"},
     {nk_cap_diamond_k, "diamond"},
@@ -128,13 +131,20 @@ constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcep
     case cpu_class_t::intel_skylake_k: return numkong_capabilities_of(cpu_class_t::intel_haswell_k) | nk_cap_skylake_k;
     case cpu_class_t::intel_icelake_k: return numkong_capabilities_of(cpu_class_t::intel_skylake_k) | nk_cap_icelake_k;
     case cpu_class_t::amd_genoa_k: return numkong_capabilities_of(cpu_class_t::intel_icelake_k) | nk_cap_genoa_k;
+    case cpu_class_t::intel_sapphire_k:
+        return numkong_capabilities_of(cpu_class_t::amd_genoa_k) | nk_cap_sapphire_k | nk_cap_sapphireamx_k;
+    case cpu_class_t::intel_granite_k:
+        return numkong_capabilities_of(cpu_class_t::intel_sapphire_k) | nk_cap_graniteamx_k;
     case cpu_class_t::intel_diamond_k:
-        return numkong_capabilities_of(cpu_class_t::amd_genoa_k) | nk_cap_alder_k | nk_cap_sierra_k | nk_cap_diamond_k;
+        return numkong_capabilities_of(cpu_class_t::intel_granite_k) | nk_cap_alder_k | nk_cap_sierra_k |
+               nk_cap_diamond_k;
     case cpu_class_t::aws_g2_k: return nk_cap_serial_k | nk_cap_neon_k;
     case cpu_class_t::apple_m2_k:
     case cpu_class_t::aws_g5_k:
         return numkong_capabilities_of(cpu_class_t::aws_g2_k) | nk_cap_neonsdot_k | nk_cap_neonbfdot_k |
                nk_cap_neonfhm_k;
+    case cpu_class_t::apple_m4_k:
+        return numkong_capabilities_of(cpu_class_t::apple_m2_k) | nk_cap_sme_k | nk_cap_smebi32_k;
     case cpu_class_t::nvidia_vera_k: return numkong_capabilities_of(cpu_class_t::aws_g5_k) | nk_cap_neonfp8_k;
     case cpu_class_t::alibaba_c930_k: return nk_cap_serial_k | nk_cap_rvv_k | nk_cap_rvvbb_k;
     case cpu_class_t::wasm32_v128_k: return nk_cap_serial_k | nk_cap_v128_k;
@@ -149,13 +159,16 @@ constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcep
  *  E-cores share the Haswell floor. */
 constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
     switch (cpu_class) {
-    case cpu_class_t::intel_diamond_k: return cpu_class_t::amd_genoa_k;
+    case cpu_class_t::intel_diamond_k: return cpu_class_t::intel_granite_k;
+    case cpu_class_t::intel_granite_k: return cpu_class_t::intel_sapphire_k;
+    case cpu_class_t::intel_sapphire_k: return cpu_class_t::amd_genoa_k;
     case cpu_class_t::amd_genoa_k: return cpu_class_t::intel_icelake_k;
     case cpu_class_t::intel_icelake_k: return cpu_class_t::intel_skylake_k;
     case cpu_class_t::intel_skylake_k: return cpu_class_t::intel_haswell_k;
     case cpu_class_t::intel_sierra_k: return cpu_class_t::intel_haswell_k;
     case cpu_class_t::nvidia_vera_k: return cpu_class_t::aws_g5_k;
     case cpu_class_t::aws_g5_k: return cpu_class_t::apple_m2_k;
+    case cpu_class_t::apple_m4_k: return cpu_class_t::apple_m2_k;
     case cpu_class_t::apple_m2_k: return cpu_class_t::aws_g2_k;
     case cpu_class_t::wasm64_extended_k: return cpu_class_t::wasm32_v128_k;
     default: return cpu_class_t::serial_k;
@@ -186,6 +199,14 @@ template <>
 struct waiter_for_cpu_class<cpu_class_t::amd_genoa_k> {
     using type = fu::x86_pause_t;
 };
+template <>
+struct waiter_for_cpu_class<cpu_class_t::intel_sapphire_k> {
+    using type = fu::x86_pause_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::intel_granite_k> {
+    using type = fu::x86_pause_t;
+};
 #endif
 #if FORKUNION_TARGET_X86_TPAUSE
 template <>
@@ -204,6 +225,10 @@ struct waiter_for_cpu_class<cpu_class_t::aws_g2_k> {
 };
 template <>
 struct waiter_for_cpu_class<cpu_class_t::apple_m2_k> {
+    using type = fu::arm64_yield_t;
+};
+template <>
+struct waiter_for_cpu_class<cpu_class_t::apple_m4_k> {
     using type = fu::arm64_yield_t;
 };
 #endif
@@ -256,6 +281,11 @@ struct atomic_ref_for_cpu_class<cpu_class_t::apple_m2_k> {
     using type = fu::arm64_rcpc_atomic_ref<value_type_>;
 };
 template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::apple_m4_k> {
+    template <typename value_type_>
+    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
+};
+template <>
 struct atomic_ref_for_cpu_class<cpu_class_t::aws_g5_k> {
     template <typename value_type_>
     using type = fu::arm64_rcpc_atomic_ref<value_type_>;
@@ -268,6 +298,11 @@ struct atomic_ref_for_cpu_class<cpu_class_t::nvidia_vera_k> {
 #elif FORKUNION_TARGET_ARM64_LSE
 template <>
 struct atomic_ref_for_cpu_class<cpu_class_t::apple_m2_k> {
+    template <typename value_type_>
+    using type = fu::arm64_lse_atomic_ref<value_type_>;
+};
+template <>
+struct atomic_ref_for_cpu_class<cpu_class_t::apple_m4_k> {
     template <typename value_type_>
     using type = fu::arm64_lse_atomic_ref<value_type_>;
 };
@@ -314,6 +349,14 @@ struct cache_hints_for_cpu_class<cpu_class_t::amd_genoa_k> {
     using type = fu::x86_cache_hints_t;
 };
 template <>
+struct cache_hints_for_cpu_class<cpu_class_t::intel_sapphire_k> {
+    using type = fu::x86_cache_hints_t;
+};
+template <>
+struct cache_hints_for_cpu_class<cpu_class_t::intel_granite_k> {
+    using type = fu::x86_cache_hints_t;
+};
+template <>
 struct cache_hints_for_cpu_class<cpu_class_t::intel_sierra_k> {
     using type = fu::x86_cache_hints_t;
 };
@@ -329,6 +372,10 @@ struct cache_hints_for_cpu_class<cpu_class_t::aws_g2_k> {
 };
 template <>
 struct cache_hints_for_cpu_class<cpu_class_t::apple_m2_k> {
+    using type = fu::arm64_prefetch_cache_hints_t;
+};
+template <>
+struct cache_hints_for_cpu_class<cpu_class_t::apple_m4_k> {
     using type = fu::arm64_prefetch_cache_hints_t;
 };
 template <>

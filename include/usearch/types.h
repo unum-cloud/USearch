@@ -485,7 +485,14 @@ typedef enum usearch_cpu_class_t {
     /** Genoa-class x86 - Zen 4 and newer: native bf16 dot products over AVX-512. */
     usearch_cpu_class_amd_genoa_k,
 
-    /** Diamond Rapids-class x86: the AVX-512 lineage plus AVX10.2's FP8 conversions,
+    /** Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16 &
+     *  AMX-INT8 tiles. */
+    usearch_cpu_class_intel_sapphire_k,
+
+    /** Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles. */
+    usearch_cpu_class_intel_granite_k,
+
+    /** Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions,
      *  TPAUSE waits, CMPCCXADD conditional adds. */
     usearch_cpu_class_intel_diamond_k,
 
@@ -496,6 +503,9 @@ typedef enum usearch_cpu_class_t {
     /** Armv8.6+ NEON: dot products, bf16 & f16 fused multiplies - Apple M2,
      *  Cortex-A710 & X2 class silicon. */
     usearch_cpu_class_apple_m2_k,
+
+    /** Apple M4-class Arm: the Armv8.6 NEON bundle plus the SME outer-product tiles. */
+    usearch_cpu_class_apple_m4_k,
 
     /** Graviton5-class Arm - Neoverse V3, Armv9.2: monitored waits guaranteed. */
     usearch_cpu_class_aws_g5_k,

@@ -102,10 +102,12 @@ usearch_dense_ram_variant(
 usearch_dense_ram_variant(intel_skylake OVER intel_haswell skylake)
 usearch_dense_ram_variant(intel_icelake OVER intel_skylake icelake)
 usearch_dense_ram_variant(amd_genoa OVER intel_icelake genoa)
+usearch_dense_ram_variant(intel_sapphire OVER amd_genoa sapphire sapphireamx)
+usearch_dense_ram_variant(intel_granite OVER intel_sapphire graniteamx)
 usearch_dense_ram_variant(
     intel_diamond
     OVER
-    amd_genoa
+    intel_granite
     alder
     sierra
     diamond
@@ -123,6 +125,7 @@ usearch_dense_ram_variant(
     arm64_lse
     arm64_rcpc
 )
+usearch_dense_ram_variant(apple_m4 OVER apple_m2 sme smebi32)
 usearch_dense_ram_variant(aws_g5 OVER apple_m2 arm64_wfet)
 usearch_dense_ram_variant(nvidia_vera OVER aws_g5 neonfp8)
 usearch_dense_ram_variant(

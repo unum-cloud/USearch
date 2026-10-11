@@ -918,7 +918,14 @@ enum class cpu_class_t : u32_t {
     /** Genoa-class x86 - Zen 4 and newer: native @c bf16 dot products over AVX-512. */
     amd_genoa_k,
 
-    /** Diamond Rapids-class x86: the AVX-512 lineage plus AVX10.2's FP8 conversions and
+    /** Sapphire Rapids-class x86: the Genoa bundle plus AVX-512 FP16 and the AMX-BF16 &
+     *  AMX-INT8 tiles. */
+    intel_sapphire_k,
+
+    /** Granite Rapids-class x86: the Sapphire Rapids bundle plus the AMX-FP16 tiles. */
+    intel_granite_k,
+
+    /** Diamond Rapids-class x86: the Granite Rapids bundle plus AVX10.2's FP8 conversions and
      *  the Sierra vector bundle, @c TPAUSE waits, @c CMPCCXADD conditional adds. */
     intel_diamond_k,
 
@@ -930,8 +937,12 @@ enum class cpu_class_t : u32_t {
      *  Apple M2; Cortex-A710 & X2 - Snapdragon 8 Gen 1, AmpereOne - carry the same. */
     apple_m2_k,
 
+    /** Apple M4-class Arm: the @c apple_m2_k bundle plus the SME outer-product tiles,
+     *  @c BMOPA among them, without plain SVE. */
+    apple_m4_k,
+
     /** Graviton5-class Arm - Neoverse V3, Armv9.2: the @c apple_m2_k bundle with
-     *  @c FEAT_WFxT guaranteed, so waits monitor instead of spinning; M4-class too. */
+     *  @c FEAT_WFxT guaranteed, so waits monitor instead of spinning. */
     aws_g5_k,
 
     /** Vera-class Arm - NVIDIA's Armv9.2+ cores with @c FEAT_FP8 dot products. */
