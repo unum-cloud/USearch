@@ -48,9 +48,9 @@
  *
  *  Inputs already on the executor's device in the right layout are read in place, pinned and
  *  managed host inputs upload directly, and only pageable host inputs pass through the executor's
- *  pinned bounce buffer. Until the devices hold an ID-to-key table and merge shards on the device,
- *  a search whose output spans are device memory reports @c usearch_status_device_k, rather than
- *  routing device bytes through the host.
+ *  pinned bounce buffer. Outputs land in an arena on the executor's device, so until the devices
+ *  hold an ID-to-key table and merge shards on the device, a VRAM search reports
+ *  @c usearch_status_device_k, rather than routing device bytes through the host.
  *
  *  @section dense_index_nvme_traversals NVME Traversals & Mergers
  *
@@ -89,10 +89,11 @@
  *  Every verb this header declares is exported by the engine and by the stand-in alike, so a
  *  residency that lacks one answers @c usearch_status_unsupported_k rather than a missing symbol.
  *
- *  @c usearch_dense_insert, @c usearch_dense_search, @c usearch_dense_count, @c usearch_dense_refine
- *  and the serialization family, except @c usearch_dense_save_buffer, answer on a RAM handle and on
- *  a VRAM one alike. A search with a @c predicate answers on RAM and is refused on VRAM with
- *  @c usearch_status_device_k, since a host predicate cannot narrow a device walk.
+ *  @c usearch_dense_insert, @c usearch_dense_count, @c usearch_dense_refine and the serialization
+ *  family, except @c usearch_dense_save_buffer, answer on a RAM handle and on a VRAM one alike.
+ *  @c usearch_dense_search answers on RAM and waits on device merges on VRAM. A search with a
+ *  @c predicate is refused on VRAM with @c usearch_status_device_k even then, since a host predicate
+ *  cannot narrow a device walk.
  *  @c usearch_dense_cursor_init answers on RAM only; VRAM rows are read back through a search.
  *  @c usearch_dense_get, @c usearch_dense_save_buffer, @c usearch_dense_multiply and
  *  @c usearch_dense_maxsim answer on RAM only, the first three waiting on device arenas.
@@ -736,14 +737,20 @@ typedef struct usearch_dense_search_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Queries to resolve; the outputs have @c count rows of @c matches.wanted entries. */
+    /** Queries to resolve; the outputs have @c count rows of @c wanted entries. */
     size_t count;
 
     /** The rows to resolve, one query apiece. */
     usearch_rows_view_t queries;
 
-    /** Where the run lands. */
-    usearch_matches_span_t matches;
+    /** Output for the run, inside @c arena. */
+    usearch_matches_view_t* matches;
+
+    /** Memory for @c matches, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
+    size_t wanted;
 
     /** The @b optional candidate-pool breadth the walk explores; zero derives. */
     size_t expansion_factor;
@@ -768,19 +775,17 @@ typedef struct usearch_dense_search_t {
  *  @brief Performs k-Approximate Nearest Neighbors Search for a run of queries - the native batch
  *      operation, parallelized internally; one query is a count of one. Never writes to the
  *      graph, so any number may overlap with concurrent insertions. @ref dense_index_concurrency
- *  @retval usearch_status_shape_mismatch_k @c matches.capacity is below @c count.
- *  @retval usearch_status_device_k A @c predicate on a VRAM handle, or device output spans there.
+ *  @retval usearch_status_device_k A @c predicate on a VRAM handle, or a VRAM search before device merges.
  *
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
  *  the traversal rather than terminating it, so recall does not collapse at low selectivity - the
  *  walk crosses rejected regions to reach admitted ones behind them. The cost is that the
- *  predicate is called far more often than @c matches.wanted, once per scored candidate, so it
+ *  predicate is called far more often than @c wanted, once per scored candidate, so it
  *  belongs on the caller's fast path - and it is invoked concurrently from the executor's threads,
  *  so it must tolerate that.
  *
- *  A cancelled search reports @c usearch_status_cancelled_k and leaves every output row
- *  indeterminate, since a query resolved before the stop is indistinguishable from one that never
- *  ran.
+ *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL, since a
+ *  query resolved before the stop is indistinguishable from one that never ran.
  *
  *  @code{.c}
  *  static usearch_admission_t admits_tenant(usearch_key_t key, void* state) {
@@ -788,12 +793,15 @@ typedef struct usearch_dense_search_t {
  *  }
  *
  *  uint8_t tenant = 7;
+ *  usearch_matches_view_t matches;
  *  usearch_outcome_t outcome = {0};
  *  usearch_dense_search(&(usearch_dense_search_t){
  *      .index = index, .executor = executor, .outcome = &outcome,
  *      .count = 32, .queries = {rows_base, 256 * sizeof(float), 256, usearch_scalar_f32_k},
- *      .matches = {keys, 10 * sizeof(usearch_key_t), distances, 10 * sizeof(double), counts, 32, 10},
+ *      .matches = &matches, .arena = arena, .wanted = 10,
  *      .predicate = admits_tenant, .predicate_state = &tenant});
+ *  // Row 3's nearest key, valid until the next call given `arena`.
+ *  usearch_key_t nearest = matches.keys[3 * matches.wanted];
  *  @endcode
  */
 USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments);
@@ -847,30 +855,24 @@ typedef struct usearch_dense_get_t {
     /** The key whose entries are exported. */
     usearch_key_t key;
 
-    /** The scalar type to export as, converted from storage where it differs. */
-    usearch_scalar_t scalar;
-
     /** Output for every row, packed at their natural width, inside @c arena. */
-    void** vectors;
+    usearch_rows_view_t* vectors;
 
     /** The @b optional output for the rows written; zero when the key is absent. */
     size_t* written;
 
-    /** The @b optional output for the bytes between consecutive rows of @c vectors. */
-    size_t* stride;
+    /** Memory for @c vectors, rewound by the call. */
+    usearch_arena_t arena;
 
-    /** The @b optional output for the values in each row the call landed. */
-    size_t* columns;
-
-    /** Memory for @c vectors: reused when it points to an arena, created when it points to @c NULL. */
-    usearch_arena_t* arena;
+    /** The scalar type to export as, converted from storage where it differs. */
+    usearch_scalar_t outputs_scalar;
 } usearch_dense_get_t;
 
 /**
  *  @brief Retrieves every vector stored under one key into @c arena, one row per entry sharing the
  *      key, in insertion order - one call, however many there turn out to be.
  *
- *  The rows span @c written entries; an absent key leaves @c vectors @c NULL.
+ *  The rows span @c written entries; an absent key leaves @c vectors->data @c NULL.
  */
 USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments);
 
@@ -962,23 +964,31 @@ typedef struct usearch_dense_cursor_next_t {
     /** The cursor to advance. */
     usearch_dense_cursor_t cursor;
 
-    /** Where the identities land; its capacity bounds the batch. */
-    usearch_keys_span_t keys;
+    /** Output for the identities, inside @c arena. */
+    usearch_keys_view_t* keys;
 
-    /** The @b optional rows, room for @c keys.capacity of them; a @c NULL @c data skips vector export. */
-    usearch_rows_span_t vectors;
+    /** The @b optional output for the rows, packed inside @c arena; @c NULL skips vector export. */
+    usearch_rows_view_t* vectors;
 
     /** Output for the rows written; zero when the walk is exhausted. */
     size_t* written;
+
+    /** Memory for @c keys and @c vectors, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** The upper bound on rows this pull writes. */
+    size_t wanted;
+
+    /** The scalar type to export @c vectors as, converted from storage where it differs. */
+    usearch_scalar_t outputs_scalar;
 } usearch_dense_cursor_next_t;
 
 /**
- *  @brief Copies the next batch of entries out of the cursor.
+ *  @brief Copies the next batch of entries out of the cursor into @c arena.
  *  @retval usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
- *  @retval usearch_status_shape_mismatch_k @c vectors.capacity is below @c keys.capacity.
  *
- *  The keys are what every batch carries, so their capacity is the batch size and a vector export
- *  must have room for as many - which is what lets the key-only form bound itself.
+ *  The keys are what every batch carries, and the rows ride beside them when asked for, so one
+ *  @c wanted bounds both.
  */
 USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments);
 
@@ -1030,9 +1040,15 @@ typedef struct usearch_dense_search_stream_next_t {
     /** The stream to advance. */
     usearch_dense_search_stream_t stream;
 
-    /** Where the pull lands, as one row of a search: up to @c matches.wanted more matches, their
-     *  number in @c matches.counts[0], zero once the walk is drained. */
-    usearch_matches_span_t matches;
+    /** Output for the pull, as one row of a search inside @c arena: up to @c wanted more matches,
+     *  their number in @c matches->counts[0], zero once the walk is drained. */
+    usearch_matches_view_t* matches;
+
+    /** Memory for @c matches, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** The upper bound on matches this pull writes. */
+    size_t wanted;
 } usearch_dense_search_stream_next_t;
 
 /**
@@ -1100,14 +1116,11 @@ typedef struct usearch_dense_save_buffer_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Output for the monolith's first byte, inside @c arena. */
-    uint8_t** bytes;
+    /** Output for the monolith's bytes and length, inside @c arena. */
+    usearch_bytes_view_t* monolith;
 
-    /** Output for the monolith's length in bytes. */
-    size_t* length;
-
-    /** Memory for @c bytes: reused when it points to an arena, created when it points to @c NULL. */
-    usearch_arena_t* arena;
+    /** Memory for @c monolith, rewound by the call. */
+    usearch_arena_t arena;
 
     /** The @b optional handler, called with bytes written; @c NULL skips it. */
     usearch_progress_callback_t progress;
@@ -1126,7 +1139,7 @@ typedef struct usearch_dense_save_buffer_t {
  *
  *  Writing to memory is not writing quickly. A terabyte monolith on a handful of cores runs for
  *  minutes, so this reports and cancels like its path-taking sibling, and a cancelled call leaves
- *  @c bytes @c NULL.
+ *  @c monolith->data @c NULL.
  */
 USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* arguments);
 
@@ -1266,25 +1279,18 @@ typedef struct usearch_dense_multiply_t {
     /** The left-hand rows, multiplied against every indexed row the walk reaches. */
     usearch_rows_view_t left;
 
-    /** Output for @c count + 1 offsets into @c keys and @c scores, row @c i spanning pairs
-     *  @c offsets[i] up to @c offsets[i+1]. */
-    size_t* offsets;
-
-    /** Output for the keys inside @c arena, naming each pair's indexed row. */
-    usearch_key_t** keys;
-
-    /** Output for the products inside @c arena, positionally paired with @c keys. */
-    usearch_distance_t** scores;
-
-    /** Memory for @c keys and @c scores: reused when it points to an arena, created when it points
-     *  to @c NULL. */
-    usearch_arena_t* arena;
+    /** Output for the pairs inside @c arena: each one's indexed key and product, row @c i spanning
+     *  @c products->offsets[i] up to @c products->offsets[i+1]. */
+    usearch_matches_tape_view_t* products;
 
     /** The @b optional output for the pairs written across every row. */
     size_t* written;
 
     /** The @b optional output for the pairs scored across every row, before @c wanted cut any. */
     size_t* required;
+
+    /** Memory for @c products, rewound by the call. */
+    usearch_arena_t arena;
 
     /** The @b optional bound on pairs kept per row, the first ones its walk scored; zero keeps every pair. */
     size_t wanted;
@@ -1313,8 +1319,8 @@ typedef struct usearch_dense_multiply_t {
  *  indexed row at most once per left-hand row. A wider @c expansion_factor widens the emitted
  *  pattern, that breadth being what decides how much the walk touches.
  *
- *  How many pairs a walk scores is known only once it finishes, so the call lands the keys and the
- *  scores in @c arena as a ragged output with Apache Arrow offsets, in one call. A non-zero
+ *  How many pairs a walk scores is known only once it finishes, so the call lands the keys, the
+ *  scores and their Apache Arrow offsets in @c arena as one ragged output, in one call. A non-zero
  *  @c wanted keeps the first pairs each row's walks scored, shard by shard in placement order,
  *  and @c required says how many there were.
  *
@@ -1335,17 +1341,16 @@ typedef struct usearch_dense_multiply_t {
  *
  *  // Here: B was built once and is the index, C is ragged and holds only the pairs the walk
  *  // scored, and the executor carries what a cuBLAS handle plus its stream would.
- *  usearch_key_t* columns;
- *  usearch_distance_t* products;
  *  usearch_arena_t arena = NULL;
+ *  usearch_matches_tape_view_t c;
  *  usearch_outcome_t outcome = {0};
+ *  usearch_arena_init(&(usearch_arena_init_t){.arena = &arena, .executor = executor, .outcome = &outcome});
  *  usearch_dense_multiply(&(usearch_dense_multiply_t){
  *      .index = index, .executor = executor, .outcome = &outcome,
- *      .count = m, .left = {a, a_stride, k, usearch_scalar_f32_k},
- *      .offsets = offsets, .keys = &columns, .scores = &products, .arena = &arena});
+ *      .count = m, .left = {a, a_stride, k, usearch_scalar_f32_k}, .products = &c, .arena = arena});
  *  for (size_t row = 0; row != m; ++row)
- *      for (size_t pair = offsets[row]; pair != offsets[row + 1]; ++pair)
- *          accumulate(row, columns[pair], products[pair]);
+ *      for (size_t pair = c.offsets[row]; pair != c.offsets[row + 1]; ++pair)
+ *          accumulate(row, c.keys[pair], c.scores[pair]);
  *
  *  // The next product reuses the arena, and frees nothing until the last one.
  *  usearch_arena_free(arena);
@@ -1411,11 +1416,17 @@ typedef struct usearch_dense_attend_t {
     /** Opaque pointer forwarded into every @c value_lookup call. */
     void* value_lookup_state;
 
-    /** Where the attended rows land, @c count of them, as wide as the keys. */
-    usearch_rows_span_t outputs;
-
-    /** The @b optional online-softmax state, one per query row; @c NULL skips it. */
+    /** The @b optional online-softmax state, one per query row, lent by the caller; @c NULL skips it. */
     usearch_dense_softmax_state_t* carry;
+
+    /** Output for the attended rows inside @c arena, @c count of them, as wide as the keys. */
+    usearch_rows_view_t* outputs;
+
+    /** Memory for @c outputs, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** The @b optional scalar type the attended rows land as; zero takes the queries' own. */
+    usearch_scalar_t outputs_scalar;
 
     /** The @b optional candidate-pool breadth; zero derives. A wider pool walks further, folding more of
      *  the tail. */
@@ -1439,8 +1450,8 @@ typedef struct usearch_dense_attend_t {
  *  @brief Softmax attention of a run of query heads over every indexed key their graph walks score,
  *      folded as Flash Attention folds key tiles. @ref dense_index_linear_algebra
  *  @retval usearch_status_invalid_argument_k @c value_lookup is NULL.
- *  @retval usearch_status_shape_mismatch_k @c head_count does not divide @c count, @c outputs holds
- *      fewer rows than the call or rows of another width than the keys, or a lookup yields a NULL row.
+ *  @retval usearch_status_shape_mismatch_k @c head_count does not divide @c count, or a lookup yields
+ *      a NULL row.
  *
  *  One walk per token runs by a search's own frontier and stopping rule, ranking a key by the best
  *  of the token's heads, so every head's own region is explored. Every key the walk scores folds into
@@ -1480,16 +1491,16 @@ typedef struct usearch_dense_attend_t {
  *
  *  @code{.c}
  *  // One layer, one key-value head shared by 8 query heads: row t · 8 + h is head h of token t.
+ *  usearch_rows_view_t attended;
  *  usearch_outcome_t outcome = {0};
  *  usearch_dense_attend(&(usearch_dense_attend_t){
  *      .index = index, .executor = executor, .outcome = &outcome, .count = tokens * 8,
  *      .queries = {query_rows, dimensions * 2, dimensions, usearch_scalar_bf16_k}, .head_count = 8,
  *      .value_lookup = value_rows_of, .value_lookup_state = value_cache,
- *      .outputs = {attended_rows, dimensions * 2, dimensions, tokens * 8, usearch_scalar_bf16_k},
- *      .carry = carry});
+ *      .outputs = &attended, .carry = carry, .arena = arena});
  *
  *  // The recent window never entered the index, so it merges in by the same rule, counting no key twice.
- *  merge_recent_window(attended_rows, carry, tokens * 8, dimensions);
+ *  merge_recent_window(attended.data, attended.stride, carry, tokens * 8, dimensions);
  *  @endcode
  */
 USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments);
@@ -1509,7 +1520,7 @@ typedef struct usearch_dense_maxsim_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Queries - the batch axis; the outputs have @c count rows of @c matches.wanted entries. */
+    /** Queries - the batch axis; the outputs have @c count rows of @c wanted entries. */
     size_t count;
 
     /** The token rows of every query laid end to end, @c count times @c rows_per_query of them. */
@@ -1518,9 +1529,15 @@ typedef struct usearch_dense_maxsim_t {
     /** Rows in every query; uniform, so ColBERT's padding applies as is. */
     size_t rows_per_query;
 
-    /** Where the scored keys land - @c wanted is the "k" over documents, not rows, and @c scores
-     *  carries each key's summed maxima, largest first. */
-    usearch_matches_span_t matches;
+    /** Output for the scored keys inside @c arena, @c scores carrying each key's summed maxima,
+     *  largest first. */
+    usearch_matches_view_t* matches;
+
+    /** Memory for @c matches, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** The upper bound on keys per query - the "k" over documents, not rows. */
+    size_t wanted;
 
     /** The @b optional candidate-pool breadth; zero derives. */
     size_t expansion_factor;
@@ -1539,7 +1556,6 @@ typedef struct usearch_dense_maxsim_t {
  *  @brief Late-interaction scoring of multi-row queries against multi-row entries: every query row
  *      takes its best match within a key, and those maxima sum to that key's score.
  *  @ref dense_index_linear_algebra
- *  @retval usearch_status_shape_mismatch_k @c matches.capacity is below @c count.
  *
  *  This is what @c values_per_key above one exists for. A document is one key holding its token
  *  rows, and the walk stays over individual tokens under a plain inner product - no set-to-set
@@ -1557,11 +1573,12 @@ typedef struct usearch_dense_maxsim_t {
  *
  *  @code{.c}
  *  // 4 queries of 32 padded token rows each, scored against documents of any length.
+ *  usearch_matches_view_t documents;
  *  usearch_outcome_t outcome = {0};
  *  usearch_dense_maxsim(&(usearch_dense_maxsim_t){
  *      .index = index, .executor = executor, .outcome = &outcome,
  *      .count = 4, .queries = {query_tokens, 128 * sizeof(float), 128, usearch_scalar_f32_k}, .rows_per_query = 32,
- *      .matches = {keys, 10 * sizeof(usearch_key_t), scores, 10 * sizeof(double), counts, 4, 10}});
+ *      .matches = &documents, .arena = arena, .wanted = 10});
  *  @endcode
  */
 USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments);

@@ -7,13 +7,13 @@
  *
  *  Every SDK in this repository talks to the same C ABI, and most of what breaks in one is the
  *  binding rather than the engine: a leaked handle, a stride counted in scalars instead of
- *  bytes, an unread outcome, an output row written past its capacity. Finding those should not
+ *  bytes, an unread outcome, an output read past the rows the call wrote. Finding those should not
  *  cost a build of the instantiation grid, so this file answers the dense verbs with the C++
  *  standard library alone - no submodules, no SIMD, no CUDA - over the store and locks of
  *  @c lib.hpp. A binding suite runs unchanged against this library or the engine's.
  *
  *  Search here is an exact scan, so recall is trivially perfect and ties fall in insertion
- *  order. What this proves is the binding: handle lifetime, strided input and output, the
+ *  order. What this proves is the binding: handle lifetime, strided input, arena output, the
  *  callback ABI, the truncation and watermark contracts, and outcome propagation. It is not an
  *  engine and never becomes one.
  *
@@ -21,13 +21,14 @@
  *
  *  A test double this lossy invites false confidence, so its limits are worth stating plainly.
  *  Entries are stored as @c double and @c quantization is ignored, so quantization loss is
- *  invisible and an @c i8 index round-trips exactly. Every scalar kind the ABI names is decoded,
- *  the mini-floats and the packed nibble and bit kinds among them, so a row's byte extent is
- *  computed here exactly as the engine computes it and a binding sizing rows wrongly for a narrow
- *  float or a sub-byte kind fails on the shape instead of passing quietly. The metric and the
- *  quantization are never checked against each other, so the bit-set kinds read whatever rows
- *  they are handed where the engine admits @c u1x8 alone. @c values_per_key bounds nothing - a
- *  key holds as many entries as it is handed, the header naming no failure for exceeding it.
+ *  invisible and an @c i8 index round-trips exactly. Every scalar kind the engine stores is
+ *  decoded, the mini-floats and the packed nibble and bit kinds among them, so a row's byte extent
+ *  is computed here exactly as the engine computes it and a binding sizing rows wrongly for a
+ *  narrow float or a sub-byte kind fails on the shape instead of passing quietly, while @c i32, the
+ *  geospatial coordinate, is refused as the engine refuses it. The metric and the quantization are
+ *  never checked against each other, so the bit-set kinds read whatever rows they are handed where
+ *  the engine admits @c u1x8 alone. @c values_per_key bounds nothing - a key holds as many entries
+ *  as it is handed, the header naming no failure for exceeding it.
  *  Refinement keeps no edges to re-select, so its @c changed is a constant zero rather than a
  *  settling signal, and a caller must not read it as one. Residency and huge pages are inert, a
  *  view copies its checkpoint rather than mapping it, and only the RAM verbs answer - every VRAM
@@ -115,6 +116,12 @@ struct dense_search_stream_t {
     std::atomic_flag pulling;
 };
 
+/** Rejects a kind naming no scalar, and @c i32, which only geospatial points take. */
+static bool reject_vector_scalar(usearch_scalar_t kind, usearch_outcome_t* outcome) {
+    if (reject_scalar(kind, outcome)) return true;
+    return reject_if(kind == usearch_scalar_i32_k, usearch_status_unknown_kind_k, "Vectors hold no i32", outcome);
+}
+
 /**
  *  @brief Checks a run of input rows against the frozen geometry, answering whether to refuse it.
  *
@@ -128,26 +135,10 @@ static bool reject_view(usearch_rows_view_t const& rows, std::size_t count, dens
     if (reject_if(count && rows.columns != index.options.dimensions, usearch_status_shape_mismatch_k,
                   "The rows' width differs from the frozen geometry", outcome))
         return true;
-    if (reject_scalar(rows.scalar, outcome)) return true;
+    if (reject_vector_scalar(rows.scalar, outcome)) return true;
     std::size_t const natural = row_extent(rows.scalar, index.options.dimensions);
     return reject_if(rows.stride && rows.stride < natural, usearch_status_unsupported_layout_k,
                      "The stride is shorter than one row", outcome);
-}
-
-/** The output twin of @c reject_view, whose width the verb names rather than the index, and
- *  whose zero stride is refused since every row would land in one place. */
-static bool reject_span(usearch_rows_span_t const& rows, std::size_t columns, std::size_t count,
-                        usearch_outcome_t* outcome) {
-    if (reject_if(!rows.data, usearch_status_invalid_argument_k, "The rows must name storage", outcome)) return true;
-    if (reject_if(rows.columns != columns, usearch_status_shape_mismatch_k,
-                  "The rows' width differs from the one the call writes", outcome))
-        return true;
-    if (reject_scalar(rows.scalar, outcome)) return true;
-    if (reject_if(rows.stride < row_extent(rows.scalar, columns), usearch_status_unsupported_layout_k,
-                  "The stride is shorter than one row", outcome))
-        return true;
-    return reject_if(rows.capacity < count, usearch_status_shape_mismatch_k,
-                     "The output holds fewer rows than the call writes", outcome);
 }
 
 /** Whether the geometry is frozen; a zeroed width makes every derived extent zero. */
@@ -207,42 +198,31 @@ static double dot_product(std::span<double const> first, std::span<double const>
  *  @return Queries answered, short of @p count exactly when the handler cancelled.
  */
 static std::size_t search_rows(dense_index_t& index, usearch_rows_view_t const& queries, std::size_t count,
-                               usearch_matches_span_t const& matches, std::size_t expansion_factor,
+                               ranked_landing_t const& landing, std::size_t expansion_factor,
                                usearch_dense_traversal_stats_t* stats, usearch_predicate_t predicate,
                                void* predicate_state, usearch_progress_callback_t progress, void* progress_state) {
     std::size_t const rows = index.entries.size();
     std::size_t const dimensions = index.options.dimensions;
     std::size_t const query_bytes = row_extent(queries.scalar, dimensions);
-    std::size_t const wanted = matches.wanted;
     // Let the expansion factor move the reported work, so a sweep can see it change.
     if (stats && expansion_factor) stats->computed_distances += expansion_factor * count;
 
-    // A cancelled sweep still leaves every count written, so a caller reads the whole array.
-    std::span<std::size_t> const counts {matches.counts, count};
-    std::fill(counts.begin(), counts.end(), 0);
     std::vector<double> query_row(dimensions);
     std::vector<match_t> ranked;
-    for (std::size_t query = 0; query != counts.size(); ++query) {
+    for (std::size_t query = 0; query != count; ++query) {
         read_row(row_at<std::byte>(queries.data, query, queries.stride, query_bytes), queries.scalar, query_row);
         rank<dense_payload_t>(
             std::span<dense_entry_t const>(index.entries).first(rows), admitting(predicate, predicate_state),
             [&](dense_payload_t const& payload) { return distance(index.options.metric, query_row, payload); }, ranked);
-        std::span<usearch_key_t> const keys_row = row_at<usearch_key_t>(matches.keys, query, matches.keys_stride,
-                                                                        wanted);
-        std::span<usearch_distance_t> const distances_row = row_at<usearch_distance_t>(matches.scores, query,
-                                                                                       matches.scores_stride, wanted);
-        std::size_t const found = std::min(wanted, ranked.size());
-        for (std::size_t match = 0; match != found; ++match)
-            keys_row[match] = ranked[match].key, distances_row[match] = ranked[match].distance;
-        counts[query] = found;
+        landing.write(query, ranked);
         if (stats) {
             stats->visited_members += rows;
             stats->computed_distances += ranked.size();
             stats->restarts += 1;
         }
-        if (!keep_going(progress, progress_state, query + 1, counts.size())) return query + 1;
+        if (!keep_going(progress, progress_state, query + 1, count)) return query + 1;
     }
-    return counts.size();
+    return count;
 }
 
 #pragma endregion Scoring
@@ -593,19 +573,24 @@ void usearch_dense_health(usearch_dense_health_t* arguments) {
 
 void usearch_dense_search(usearch_dense_search_t* arguments) {
     if (through_executor<usearch_dense_search>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     reset(arguments->stats);
+    *arguments->matches = {};
     usearch_dense_index_handle_t& index = *arguments->index;
     if (reject_unfrozen(index, outcome)) return;
     std::size_t const count = arguments->count;
     if (reject_view(arguments->queries, count, index, outcome)) return;
-    if (reject_matches(arguments->matches, count, outcome)) return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {arguments->queries.data},
+                                                      outcome);
+    ranked_landing_t landing {};
+    if (!arena || !carve_ranked(*arena, count, arguments->wanted, landing, outcome)) return;
 
     std::shared_lock readers(index.mutex);
-    std::size_t const answered = search_rows(
-        index, arguments->queries, count, arguments->matches, arguments->expansion_factor, arguments->stats,
-        arguments->predicate, arguments->predicate_state, arguments->progress, arguments->progress_state);
-    reject_cancelled(answered, count, outcome);
+    std::size_t const answered = search_rows(index, arguments->queries, count, landing, arguments->expansion_factor,
+                                             arguments->stats, arguments->predicate, arguments->predicate_state,
+                                             arguments->progress, arguments->progress_state);
+    if (reject_cancelled(answered, count, outcome)) return;
+    *arguments->matches = landing.view();
 }
 
 void usearch_dense_count(usearch_dense_count_t* arguments) {
@@ -619,29 +604,25 @@ void usearch_dense_count(usearch_dense_count_t* arguments) {
 
 void usearch_dense_get(usearch_dense_get_t* arguments) {
     if (through_executor<usearch_dense_get>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    *arguments->vectors = nullptr;
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
+    *arguments->vectors = {};
     if (arguments->written) *arguments->written = 0;
-    if (arguments->stride) *arguments->stride = 0;
-    if (arguments->columns) *arguments->columns = 0;
     usearch_dense_index_handle_t& index = *arguments->index;
-    usearch_scalar_t const scalar = arguments->scalar;
-    if (reject_scalar(scalar, outcome)) return;
+    usearch_scalar_t const scalar = arguments->outputs_scalar;
+    if (reject_vector_scalar(scalar, outcome)) return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
+    if (!arena) return;
     std::shared_lock readers(index.mutex);
     std::vector<std::size_t> const rows = rows_under(index, arguments->key);
     if (rows.empty()) return;
-    std::size_t const row_bytes = row_extent(scalar, index.options.dimensions);
-    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, nullptr, outcome);
-    if (!arena) return;
-    std::unique_lock const held {arena->serving, std::adopt_lock};
-    std::byte* const landing = arena->memory.allocate(rows.size() * row_bytes, default_alignment_k);
-    if (!landing) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+    std::size_t const dimensions = index.options.dimensions;
+    std::size_t const row_bytes = row_extent(scalar, dimensions);
+    std::byte* const landing = carve<std::byte>(*arena, rows.size() * row_bytes, outcome);
+    if (!landing) return;
     for (std::size_t found = 0; found != rows.size(); ++found)
         write_row(row_at<std::byte>(landing, found, row_bytes, row_bytes), scalar, index.entries[rows[found]].payload);
-    *arguments->vectors = landing;
+    *arguments->vectors = {landing, row_bytes, dimensions, scalar};
     if (arguments->written) *arguments->written = rows.size();
-    if (arguments->stride) *arguments->stride = row_bytes;
-    if (arguments->columns) *arguments->columns = index.options.dimensions;
 }
 
 void usearch_dense_merge(usearch_dense_merge_t* arguments) {
@@ -687,31 +668,41 @@ void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
 
 void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
     if (through_executor<usearch_dense_cursor_next>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     *arguments->written = 0;
+    *arguments->keys = {};
+    usearch_rows_view_t* const vectors = arguments->vectors;
+    if (vectors) *vectors = {};
     usearch_dense_cursor_handle_t& cursor = *arguments->cursor;
     if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
                   "The cursor was opened on another index", outcome))
         return;
     usearch_dense_index_handle_t& index = *arguments->index;
-    usearch_keys_span_t const& keys = arguments->keys;
-    usearch_rows_span_t const& vectors = arguments->vectors;
-    if (reject_keys_span(keys, outcome)) return;
-    if (vectors.data && reject_span(vectors, index.options.dimensions, keys.capacity, outcome)) return;
+    usearch_scalar_t const scalar = arguments->outputs_scalar;
+    if (vectors && reject_vector_scalar(scalar, outcome)) return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
+    if (!arena) return;
     if (reject_if(cursor.pulling.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
                   "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
-    std::size_t const written = std::min(keys.capacity, cursor.limit - cursor.position);
-    std::size_t const row_bytes = row_extent(vectors.scalar, index.options.dimensions);
-    for (std::size_t row = 0; row != written; ++row) {
-        dense_entry_t const& entry = index.entries[cursor.position + row];
-        row_at<usearch_key_t>(keys.data, row, keys.stride, 1).front() = entry.key;
-        if (vectors.data)
-            write_row(row_at<std::byte>(vectors.data, row, vectors.stride, row_bytes), vectors.scalar, entry.payload);
+    std::size_t const written = std::min(arguments->wanted, cursor.limit - cursor.position);
+    std::size_t const dimensions = index.options.dimensions;
+    std::size_t const row_bytes = vectors ? row_extent(scalar, dimensions) : 0;
+    usearch_key_t* const keys = carve<usearch_key_t>(*arena, written, outcome);
+    std::byte* const rows = keys && vectors ? carve<std::byte>(*arena, written * row_bytes, outcome) : nullptr;
+    // A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
+    if (keys && (rows || !vectors)) {
+        for (std::size_t row = 0; row != written; ++row) {
+            dense_entry_t const& entry = index.entries[cursor.position + row];
+            keys[row] = entry.key;
+            if (vectors) write_row(row_at<std::byte>(rows, row, row_bytes, row_bytes), scalar, entry.payload);
+        }
+        cursor.position += written;
+        *arguments->keys = {keys, sizeof(usearch_key_t)};
+        if (vectors) *vectors = {rows, row_bytes, dimensions, scalar};
+        *arguments->written = written;
     }
-    cursor.position += written;
-    *arguments->written = written;
     cursor.pulling.clear(std::memory_order_release);
 }
 
@@ -747,23 +738,22 @@ void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* argume
 
 void usearch_dense_search_stream_next(usearch_dense_search_stream_next_t* arguments) {
     if (through_executor<usearch_dense_search_stream_next>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
+    *arguments->matches = {};
     usearch_dense_search_stream_handle_t& stream = *arguments->stream;
     if (reject_if(arguments->index != stream.opened_on, usearch_status_invalid_argument_k,
                   "The stream was opened on another index", outcome))
         return;
-    usearch_matches_span_t const& matches = arguments->matches;
-    if (reject_matches(matches, 1, outcome)) return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
+    ranked_landing_t landing {};
+    if (!arena || !carve_ranked(*arena, 1, arguments->wanted, landing, outcome)) return;
     if (reject_if(stream.pulling.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
                   "Another pull is still running on the stream", outcome))
         return;
-    std::size_t const written = std::min(matches.wanted, stream.ranked.size() - stream.position);
-    for (std::size_t match = 0; match != written; ++match) {
-        matches.keys[match] = stream.ranked[stream.position + match].key;
-        matches.scores[match] = stream.ranked[stream.position + match].distance;
-    }
-    stream.position += written;
-    matches.counts[0] = written;
+    std::span<match_t const> const remaining = std::span<match_t const>(stream.ranked).subspan(stream.position);
+    landing.write(0, remaining);
+    stream.position += landing.counts[0];
+    *arguments->matches = landing.view();
     stream.pulling.clear(std::memory_order_release);
 }
 
@@ -793,10 +783,11 @@ void usearch_dense_save(usearch_dense_save_t* arguments) {
 
 void usearch_dense_save_buffer(usearch_dense_save_buffer_t* arguments) {
     if (through_executor<usearch_dense_save_buffer>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    *arguments->bytes = nullptr;
-    *arguments->length = 0;
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
+    *arguments->monolith = {};
     usearch_dense_index_handle_t& index = *arguments->index;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
+    if (!arena) return;
     std::shared_lock readers(index.mutex);
     std::size_t const rows = index.entries.size();
     std::optional<std::size_t> const length = serialized_bytes(index, rows);
@@ -804,14 +795,10 @@ void usearch_dense_save_buffer(usearch_dense_save_buffer_t* arguments) {
         return;
     if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
-    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, nullptr, outcome);
-    if (!arena) return;
-    std::unique_lock const held {arena->serving, std::adopt_lock};
-    std::byte* const landing = arena->memory.allocate(*length, default_alignment_k);
-    if (!landing) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+    std::byte* const landing = carve<std::byte>(*arena, *length, outcome);
+    if (!landing) return;
     write_into(index, rows, bytes_span_t {landing, *length});
-    *arguments->bytes = reinterpret_cast<std::uint8_t*>(landing);
-    *arguments->length = *length;
+    *arguments->monolith = as_bytes(bytes_view_t {landing, *length});
     keep_going(arguments->progress, arguments->progress_state, 1, 1);
 }
 
@@ -839,10 +826,9 @@ void usearch_dense_metadata_read_buffer(usearch_dense_metadata_read_buffer_t* ar
 
 void usearch_dense_multiply(usearch_dense_multiply_t* arguments) {
     if (through_executor<usearch_dense_multiply>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     reset(arguments->stats);
-    *arguments->keys = nullptr;
-    *arguments->scores = nullptr;
+    *arguments->products = {};
     if (arguments->written) *arguments->written = 0;
     if (arguments->required) *arguments->required = 0;
     usearch_dense_index_handle_t& index = *arguments->index;
@@ -853,8 +839,8 @@ void usearch_dense_multiply(usearch_dense_multiply_t* arguments) {
     std::size_t const rows_count = arguments->count;
     usearch_rows_view_t const& left = arguments->left;
     if (reject_view(left, rows_count, index, outcome)) return;
-    if (reject_if(!arguments->offsets, usearch_status_invalid_argument_k, "The offsets must name storage", outcome))
-        return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {left.data}, outcome);
+    if (!arena) return;
 
     std::shared_lock readers(index.mutex);
     std::size_t const indexed = index.entries.size();
@@ -863,7 +849,7 @@ void usearch_dense_multiply(usearch_dense_multiply_t* arguments) {
     // A kept row holds the first pairs its walk scored - here, the first in storage order.
     std::size_t const kept = arguments->wanted ? std::min(arguments->wanted, indexed) : indexed;
 
-    // Every row is scored before anything lands, so a cancelled call leaves the arena untouched.
+    // Every row is scored before anything lands, so a cancelled call leaves its outputs null.
     std::vector<double> left_row(dimensions);
     std::vector<usearch_distance_t> products(rows_count * kept);
     std::size_t multiplied = 0;
@@ -878,29 +864,24 @@ void usearch_dense_multiply(usearch_dense_multiply_t* arguments) {
     if (reject_cancelled(multiplied, rows_count, outcome)) return;
 
     std::size_t const pairs = rows_count * kept;
-    for (std::size_t row = 0; row <= rows_count; ++row) arguments->offsets[row] = row * kept;
-    if (!pairs) return;
-    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, left.data, outcome);
-    if (!arena) return;
-    std::unique_lock const held {arena->serving, std::adopt_lock};
-    std::byte* const landing = arena->memory.allocate(pairs * (sizeof(usearch_key_t) + sizeof(usearch_distance_t)),
-                                                      default_alignment_k);
-    if (!landing) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
-    usearch_key_t* const keys = reinterpret_cast<usearch_key_t*>(landing);
-    usearch_distance_t* const scores = reinterpret_cast<usearch_distance_t*>(landing + pairs * sizeof(usearch_key_t));
+    std::size_t* const offsets = carve<std::size_t>(*arena, rows_count + 1, outcome);
+    usearch_key_t* const keys = offsets ? carve<usearch_key_t>(*arena, pairs, outcome) : nullptr;
+    usearch_distance_t* const scores = keys ? carve<usearch_distance_t>(*arena, pairs, outcome) : nullptr;
+    if (!scores) return;
+    for (std::size_t row = 0; row <= rows_count; ++row) offsets[row] = row * kept;
     for (std::size_t pair = 0; pair != pairs; ++pair)
         keys[pair] = index.entries[pair % kept].key, scores[pair] = products[pair];
-    *arguments->keys = keys;
-    *arguments->scores = scores;
+    *arguments->products = {keys, scores, offsets};
     if (arguments->written) *arguments->written = pairs;
     if (arguments->required) *arguments->required = rows_count * indexed;
 }
 
 void usearch_dense_attend(usearch_dense_attend_t* arguments) {
     if (through_executor<usearch_dense_attend>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     usearch_dense_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
+    *arguments->outputs = {};
     usearch_dense_index_handle_t& index = *arguments->index;
     if (reject_unfrozen(index, outcome)) return;
     if (reject_if(index.options.metric != usearch_dense_metric_inner_k, usearch_status_config_mismatch_k,
@@ -910,14 +891,20 @@ void usearch_dense_attend(usearch_dense_attend_t* arguments) {
     std::size_t const queries_count = arguments->count, head_count = std::max<std::size_t>(arguments->head_count, 1);
     std::size_t const dimensions = index.options.dimensions;
     usearch_rows_view_t const& queries = arguments->queries;
-    usearch_rows_span_t const& outputs = arguments->outputs;
+    usearch_scalar_t const output_scalar = arguments->outputs_scalar ? arguments->outputs_scalar : queries.scalar;
     if (reject_view(queries, queries_count, index, outcome)) return;
-    if (reject_span(outputs, dimensions, queries_count, outcome)) return;
+    if (reject_vector_scalar(output_scalar, outcome)) return;
     if (reject_if(!arguments->value_lookup, usearch_status_invalid_argument_k, "The value lookup must be set", outcome))
         return;
     if (reject_if(queries_count % head_count, usearch_status_shape_mismatch_k, "The heads must divide the rows",
                   outcome))
         return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
+                                                      {queries.data, arguments->carry}, outcome);
+    if (!arena) return;
+    std::size_t const output_bytes = row_extent(output_scalar, dimensions);
+    std::byte* const outputs = carve<std::byte>(*arena, queries_count * output_bytes, outcome);
+    if (!outputs) return;
 
     // Exact attention weighs every entry, so every value row resolves once, up front.
     std::shared_lock readers(index.mutex);
@@ -934,7 +921,6 @@ void usearch_dense_attend(usearch_dense_attend_t* arguments) {
 
     std::size_t const query_bytes = row_extent(queries.scalar, dimensions);
     std::size_t const value_bytes = row_extent(index.options.quantization, dimensions);
-    std::size_t const output_bytes = row_extent(outputs.scalar, dimensions);
     double const scale = arguments->score_scale > 0 ? arguments->score_scale
                                                     : 1.0 / std::sqrt(std::max<double>(dimensions, 1));
     std::vector<double> query_row(dimensions), value(dimensions), accumulated(dimensions), logits(indexed);
@@ -957,21 +943,23 @@ void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                     accumulated[position] += weight * value[position];
             }
             for (double& position : accumulated) position = partition > 0 ? position / partition : 0.0;
-            write_row(row_at<std::byte>(outputs.data, row, outputs.stride, output_bytes), outputs.scalar, accumulated);
+            write_row(row_at<std::byte>(outputs, row, output_bytes, output_bytes), output_scalar, accumulated);
             if (arguments->carry) arguments->carry[row] = {static_cast<float>(maximum), static_cast<float>(partition)};
             if (stats) stats->computed_distances += indexed;
         }
         ++answered;
         if (!keep_going(arguments->progress, arguments->progress_state, answered, tokens)) break;
     }
-    reject_cancelled(answered, tokens, outcome);
+    if (reject_cancelled(answered, tokens, outcome)) return;
+    *arguments->outputs = {outputs, output_bytes, dimensions, output_scalar};
 }
 
 void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     if (through_executor<usearch_dense_maxsim>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     usearch_dense_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
+    *arguments->matches = {};
     usearch_dense_index_handle_t& index = *arguments->index;
     if (reject_unfrozen(index, outcome)) return;
     if (reject_if(index.options.metric != usearch_dense_metric_inner_k, usearch_status_config_mismatch_k,
@@ -979,20 +967,18 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
         return;
     std::size_t const queries_count = arguments->count, rows_per_query = arguments->rows_per_query;
     usearch_rows_view_t const& queries = arguments->queries;
-    usearch_matches_span_t const& matches = arguments->matches;
     if (reject_if(!rows_per_query, usearch_status_shape_mismatch_k, "A query must hold at least one row", outcome))
         return;
     if (reject_view(queries, queries_count * rows_per_query, index, outcome)) return;
-    if (reject_matches(matches, queries_count, outcome)) return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {queries.data}, outcome);
+    ranked_landing_t landing {};
+    if (!arena || !carve_ranked(*arena, queries_count, arguments->wanted, landing, outcome)) return;
     usearch_scalar_t const scalar_kind = queries.scalar;
-    std::size_t const wanted = matches.wanted;
 
     std::shared_lock readers(index.mutex);
 
     std::size_t const dimensions = index.options.dimensions;
     std::size_t const row_bytes = row_extent(scalar_kind, dimensions);
-    std::span<std::size_t> const counts_column {matches.counts, queries_count};
-    std::fill(counts_column.begin(), counts_column.end(), 0);
 
     // A document is one key holding its token rows, so the grouping happens here rather than in
     // the walk; an entry's rows need no ordering and two documents need not share a row count.
@@ -1029,14 +1015,7 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
         std::stable_sort(ranked.begin(), ranked.end(),
                          [](match_t const& first, match_t const& second) { return first.distance > second.distance; });
 
-        std::span<usearch_key_t> const keys_row = row_at<usearch_key_t>(matches.keys, query, matches.keys_stride,
-                                                                        wanted);
-        std::span<usearch_distance_t> const scores_row = row_at<usearch_distance_t>(matches.scores, query,
-                                                                                    matches.scores_stride, wanted);
-        std::size_t const found = std::min(wanted, ranked.size());
-        for (std::size_t match = 0; match != found; ++match)
-            keys_row[match] = ranked[match].key, scores_row[match] = ranked[match].distance;
-        counts_column[query] = found;
+        landing.write(query, ranked);
         if (stats) {
             stats->visited_members += index.entries.size();
             stats->computed_distances += documents.size() * rows_per_query;
@@ -1045,7 +1024,8 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
         ++answered;
         if (!keep_going(arguments->progress, arguments->progress_state, answered, queries_count)) break;
     }
-    reject_cancelled(answered, queries_count, outcome);
+    if (reject_cancelled(answered, queries_count, outcome)) return;
+    *arguments->matches = landing.view();
 }
 
 } // extern "C"

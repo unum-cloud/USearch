@@ -260,10 +260,35 @@ static double distance(sequence_index_t const& index, bytes_view_t query, bytes_
     }
 }
 
+/** Refuses a tape of anything but bytes, the one element a sequence is made of. */
+static bool reject_bytes(usearch_tape_view_t tape, usearch_outcome_t* outcome) {
+    return reject_if(tape.scalar != usearch_scalar_u8_k, usearch_status_unknown_kind_k, "A sequence tape holds u8",
+                     outcome);
+}
+
 /** Entry @p entry of a tape, as the bytes its offsets bound. */
 static bytes_view_t viewed(usearch_tape_view_t tape, std::size_t entry) {
     std::size_t const begin = tape.offsets[entry], end = tape.offsets[entry + 1];
     return bytes_of(static_cast<std::uint8_t const*>(tape.data) + begin, end - begin);
+}
+
+/** The output twin of @c viewed: lands the entries at @p rows into @p arena as one tape, writing
+ *  @p tape only once every byte landed, and answers false once @p outcome records why not. */
+static bool land_entries(sequence_index_t const& index, std::span<std::size_t const> rows,
+                         usearch_arena_handle_t& arena, usearch_tape_view_t& tape, usearch_outcome_t* outcome) {
+    std::size_t total_bytes = 0;
+    for (std::size_t row : rows) total_bytes += index.entries[row].payload.size();
+    std::size_t* const offsets = carve<std::size_t>(arena, rows.size() + 1, outcome);
+    std::byte* const bytes = offsets ? carve<std::byte>(arena, total_bytes, outcome) : nullptr;
+    if (!bytes) return false;
+    offsets[0] = 0;
+    for (std::size_t found = 0; found != rows.size(); ++found) {
+        sequence_payload_t const& payload = index.entries[rows[found]].payload;
+        std::copy(payload.begin(), payload.end(), bytes + offsets[found]);
+        offsets[found + 1] = offsets[found] + payload.size();
+    }
+    tape = {bytes, offsets, usearch_scalar_u8_k};
+    return true;
 }
 
 /**
@@ -271,38 +296,28 @@ static bytes_view_t viewed(usearch_tape_view_t tape, std::size_t entry) {
  *  @return Queries answered, short of @p count exactly when the handler cancelled.
  */
 static std::size_t search_tape(sequence_index_t& index, usearch_tape_view_t queries, std::size_t count,
-                               usearch_matches_span_t const& matches, std::size_t expansion_factor,
+                               ranked_landing_t const& landing, std::size_t expansion_factor,
                                usearch_sequence_traversal_stats_t* stats, usearch_predicate_t predicate,
                                void* predicate_state, usearch_progress_callback_t progress, void* progress_state) {
     std::size_t const rows = index.entries.size();
-    std::size_t const wanted = matches.wanted;
     if (stats && expansion_factor) stats->computed_distances += expansion_factor * count;
 
-    std::span<std::size_t> const counts {matches.counts, count};
-    std::fill(counts.begin(), counts.end(), 0);
     sequence_search_scratch_t scratch;
     std::vector<match_t> ranked;
-    for (std::size_t query = 0; query != counts.size(); ++query) {
+    for (std::size_t query = 0; query != count; ++query) {
         bytes_view_t const query_view = viewed(queries, query);
         rank<sequence_payload_t>(
             std::span<sequence_entry_t const>(index.entries).first(rows), admitting(predicate, predicate_state),
             [&](sequence_payload_t const& payload) { return distance(index, query_view, payload, scratch); }, ranked);
-        std::span<usearch_key_t> const keys_row = row_at<usearch_key_t>(matches.keys, query, matches.keys_stride,
-                                                                        wanted);
-        std::span<usearch_distance_t> const distances_row = row_at<usearch_distance_t>(matches.scores, query,
-                                                                                       matches.scores_stride, wanted);
-        std::size_t const found = std::min(wanted, ranked.size());
-        for (std::size_t match = 0; match != found; ++match)
-            keys_row[match] = ranked[match].key, distances_row[match] = ranked[match].distance;
-        counts[query] = found;
+        landing.write(query, ranked);
         if (stats) {
             stats->visited_members += rows;
             stats->computed_distances += ranked.size();
             stats->restarts += 1;
         }
-        if (!keep_going(progress, progress_state, query + 1, counts.size())) return query + 1;
+        if (!keep_going(progress, progress_state, query + 1, count)) return query + 1;
     }
-    return counts.size();
+    return count;
 }
 
 #pragma endregion Scoring
@@ -588,6 +603,7 @@ void usearch_sequence_insert(usearch_sequence_insert_t* arguments) {
     if (reject_read_only(index, outcome)) return;
     if (reject_keys(arguments->keys, outcome)) return;
     if (reject_tape(arguments->sequences, count, outcome)) return;
+    if (reject_bytes(arguments->sequences, outcome)) return;
 
     std::unique_lock writers(index.mutex);
     if (reject_oversubscribed(index, arguments->keys, count, index.options.values_per_key, outcome)) return;
@@ -636,18 +652,25 @@ void usearch_sequence_refine(usearch_sequence_refine_t* arguments) {
 
 void usearch_sequence_search(usearch_sequence_search_t* arguments) {
     if (through_executor<usearch_sequence_search>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     reset(arguments->stats);
+    *arguments->matches = {};
     usearch_sequence_index_handle_t& index = *arguments->index;
     std::size_t const count = arguments->count;
-    if (reject_tape(arguments->queries, count, outcome)) return;
-    if (reject_matches(arguments->matches, count, outcome)) return;
+    usearch_tape_view_t const& queries = arguments->queries;
+    if (reject_tape(queries, count, outcome)) return;
+    if (reject_bytes(queries, outcome)) return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
+                                                      {queries.data, queries.offsets}, outcome);
+    ranked_landing_t landing {};
+    if (!arena || !carve_ranked(*arena, count, arguments->wanted, landing, outcome)) return;
 
     std::shared_lock readers(index.mutex);
-    std::size_t const answered = search_tape(
-        index, arguments->queries, count, arguments->matches, arguments->expansion_factor, arguments->stats,
-        arguments->predicate, arguments->predicate_state, arguments->progress, arguments->progress_state);
-    reject_cancelled(answered, count, outcome);
+    std::size_t const answered = search_tape(index, queries, count, landing, arguments->expansion_factor,
+                                             arguments->stats, arguments->predicate, arguments->predicate_state,
+                                             arguments->progress, arguments->progress_state);
+    if (reject_cancelled(answered, count, outcome)) return;
+    *arguments->matches = landing.view();
 }
 
 void usearch_sequence_count(usearch_sequence_count_t* arguments) {
@@ -668,33 +691,16 @@ void usearch_sequence_count(usearch_sequence_count_t* arguments) {
 
 void usearch_sequence_get(usearch_sequence_get_t* arguments) {
     if (through_executor<usearch_sequence_get>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    *arguments->sequences = nullptr;
-    *arguments->offsets = nullptr;
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
+    *arguments->sequences = {};
     if (arguments->written) *arguments->written = 0;
     usearch_sequence_index_handle_t& index = *arguments->index;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
+    if (!arena) return;
     std::shared_lock readers(index.mutex);
     std::vector<std::size_t> const rows = rows_under(index, arguments->key);
     if (rows.empty()) return;
-    std::size_t total_bytes = 0;
-    for (std::size_t row : rows) total_bytes += index.entries[row].payload.size();
-    // The offsets lead, so they start on a word boundary however long the bytes behind them run.
-    std::size_t const offsets_bytes = (rows.size() + 1) * sizeof(std::size_t);
-    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, nullptr, outcome);
-    if (!arena) return;
-    std::unique_lock const held {arena->serving, std::adopt_lock};
-    std::byte* const landing = arena->memory.allocate(offsets_bytes + total_bytes, default_alignment_k);
-    if (!landing) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
-    std::size_t* const offsets = reinterpret_cast<std::size_t*>(landing);
-    std::byte* const tape = landing + offsets_bytes;
-    offsets[0] = 0;
-    for (std::size_t found = 0; found != rows.size(); ++found) {
-        sequence_payload_t const& payload = index.entries[rows[found]].payload;
-        std::copy(payload.begin(), payload.end(), tape + offsets[found]);
-        offsets[found + 1] = offsets[found] + payload.size();
-    }
-    *arguments->sequences = reinterpret_cast<std::uint8_t*>(tape);
-    *arguments->offsets = offsets;
+    if (!land_entries(index, rows, *arena, *arguments->sequences, outcome)) return;
     if (arguments->written) *arguments->written = rows.size();
 }
 
@@ -744,29 +750,32 @@ void usearch_sequence_cursor_init(usearch_sequence_cursor_init_t* arguments) {
 
 void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments) {
     if (through_executor<usearch_sequence_cursor_next>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     *arguments->written = 0;
+    *arguments->keys = {};
+    if (arguments->sequences) *arguments->sequences = {};
     usearch_sequence_cursor_handle_t& cursor = *arguments->cursor;
     if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
                   "The cursor was opened on another index", outcome))
         return;
     usearch_sequence_index_handle_t& index = *arguments->index;
-    usearch_keys_span_t const& keys = arguments->keys;
-    if (reject_keys_span(keys, outcome)) return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
+    if (!arena) return;
     if (reject_if(cursor.pulling.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
                   "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
-    std::size_t const written = std::min(keys.capacity, cursor.limit - cursor.position);
-    for (std::size_t row = 0; row != written; ++row) {
-        sequence_entry_t const& entry = index.entries[cursor.position + row];
-        row_at<usearch_key_t>(keys.data, row, keys.stride, 1).front() = entry.key;
-        // Views borrow the handle's own bytes, which growth relocates the row of but never the
-        // payload buffer itself, so they survive concurrent insertion.
-        if (arguments->sequences) arguments->sequences[row] = as_bytes(entry.payload);
+    std::size_t const written = std::min(arguments->wanted, cursor.limit - cursor.position);
+    std::vector<std::size_t> rows(written);
+    for (std::size_t row = 0; row != written; ++row) rows[row] = cursor.position + row;
+    usearch_key_t* const keys = carve<usearch_key_t>(*arena, written, outcome);
+    // A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
+    if (keys && (!arguments->sequences || land_entries(index, rows, *arena, *arguments->sequences, outcome))) {
+        for (std::size_t row = 0; row != written; ++row) keys[row] = index.entries[rows[row]].key;
+        cursor.position += written;
+        *arguments->keys = {keys, sizeof(usearch_key_t)};
+        *arguments->written = written;
     }
-    cursor.position += written;
-    *arguments->written = written;
     cursor.pulling.clear(std::memory_order_release);
 }
 

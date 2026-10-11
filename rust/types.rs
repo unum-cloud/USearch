@@ -10,6 +10,8 @@
 // The C mirror keeps the C spelling of every name.
 #![allow(non_camel_case_types, non_upper_case_globals)]
 
+use core::any::Any;
+use core::cell::Cell;
 use core::ffi::{c_char, c_int, c_void, CStr};
 use core::fmt;
 use core::future::{Future, IntoFuture};
@@ -21,10 +23,12 @@ use core::ptr::{self, NonNull};
 use core::str::FromStr;
 use core::sync::atomic::{AtomicI32, Ordering};
 use core::task::{Context, Poll};
+use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use numkong::{bf16, e2m3, e3m2, e4m3, e5m2, f16, i4x2, u1x8, u4x2};
-use numkong::{Allocator, Matrix, MatrixSpan, MatrixView, StorageElement, TensorMut, TensorRef};
+use numkong::{Allocator, Matrix, MatrixView, StorageElement, TensorRef};
 
 // region: Raw Declarations
 
@@ -49,7 +53,17 @@ impl From<&[u8]> for usearch_bytes_view_t {
     }
 }
 
-/// A borrowed, strided run of keys - how a batch names the identities it carries.
+impl Default for usearch_bytes_view_t {
+    fn default() -> Self {
+        usearch_bytes_view_t {
+            data: ptr::null(),
+            length: 0,
+        }
+    }
+}
+
+/// A strided run of keys - how a batch names the identities it carries, or a cursor pull the
+/// ones it wrote into its arena.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct usearch_keys_view_t {
@@ -67,23 +81,11 @@ impl usearch_keys_view_t {
     }
 }
 
-/// A caller-owned, writable run of keys - the mutable twin of `usearch_keys_view_t`, and the
-/// only bound a streaming verb has on how much it may write.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct usearch_keys_span_t {
-    pub data: *mut usearch_key_t,
-    pub stride: usize,
-    pub capacity: usize,
-}
-
-impl usearch_keys_span_t {
-    /// Lends a packed mutable slice as the span the C interface accepts.
-    pub fn of(keys: &mut [Key]) -> Self {
-        usearch_keys_span_t {
-            data: keys.as_mut_ptr(),
-            stride: core::mem::size_of::<usearch_key_t>(),
-            capacity: keys.len(),
+impl Default for usearch_keys_view_t {
+    fn default() -> Self {
+        usearch_keys_view_t {
+            data: ptr::null(),
+            stride: 0,
         }
     }
 }
@@ -112,7 +114,8 @@ impl Default for usearch_outcome_t {
 
 pub type usearch_scalar_t = c_int;
 
-/// A borrowed run of rows along a call's batch axis, carrying the width the caller laid out.
+/// A run of rows along a call's batch axis, borrowed from the caller as an input and written
+/// packed into an arena as an output.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct usearch_rows_view_t {
@@ -122,28 +125,93 @@ pub struct usearch_rows_view_t {
     pub scalar: usearch_scalar_t,
 }
 
-/// The writable twin of `usearch_rows_view_t`, for rows landing in memory the caller allocated.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct usearch_rows_span_t {
-    pub data: *mut c_void,
-    pub stride: usize,
-    pub columns: usize,
-    pub capacity: usize,
-    pub scalar: usearch_scalar_t,
+impl Default for usearch_rows_view_t {
+    fn default() -> Self {
+        usearch_rows_view_t {
+            data: ptr::null(),
+            stride: 0,
+            columns: 0,
+            scalar: 0,
+        }
+    }
 }
 
-/// Where a ranked run lands - three caller-owned outputs of the call's count of rows.
+/// A ranked run a call wrote into its arena - the call's count of rows, `columns` packed columns each.
 #[repr(C)]
 #[derive(Clone, Copy)]
-pub struct usearch_matches_span_t {
-    pub keys: *mut usearch_key_t,
-    pub keys_stride: usize,
-    pub scores: *mut usearch_distance_t,
-    pub scores_stride: usize,
-    pub counts: *mut usize,
-    pub capacity: usize,
-    pub wanted: usize,
+pub struct usearch_matches_view_t {
+    pub keys: *const usearch_key_t,
+    pub scores: *const usearch_distance_t,
+    pub counts: *const usize,
+    pub columns: usize,
+}
+
+impl Default for usearch_matches_view_t {
+    fn default() -> Self {
+        usearch_matches_view_t {
+            keys: ptr::null(),
+            scores: ptr::null(),
+            counts: ptr::null(),
+            columns: 0,
+        }
+    }
+}
+
+impl usearch_matches_view_t {
+    /// Row `query`, trimmed to the matches the call wrote; a call with nothing to report leaves
+    /// null counts, which read as empty rows.
+    ///
+    /// # Safety
+    /// The view must be a finished call's output in host memory, and `query` below its count.
+    pub(crate) unsafe fn row<'arena>(&self, query: usize) -> MatchesRow<'arena> {
+        let written = match self.counts.is_null() {
+            true => 0,
+            false => (*self.counts.add(query)).min(self.columns),
+        };
+        let start = query * self.columns;
+        MatchesRow {
+            keys: arena_slice(self.keys.wrapping_add(start), written),
+            distances: arena_slice(self.scores.wrapping_add(start), written),
+        }
+    }
+}
+
+/// A ragged run of matches a call wrote into its arena - keys and scores end to end, and one
+/// more offset than rows.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct usearch_matches_tape_view_t {
+    pub keys: *const usearch_key_t,
+    pub scores: *const usearch_distance_t,
+    pub offsets: *const usize,
+}
+
+impl Default for usearch_matches_tape_view_t {
+    fn default() -> Self {
+        usearch_matches_tape_view_t {
+            keys: ptr::null(),
+            scores: ptr::null(),
+            offsets: ptr::null(),
+        }
+    }
+}
+
+impl usearch_matches_tape_view_t {
+    /// Row `row`, spanning its two offsets; a call with nothing to report leaves null offsets,
+    /// which read as empty rows.
+    ///
+    /// # Safety
+    /// The view must be a finished call's output in host memory, and `row` below its count.
+    pub(crate) unsafe fn row<'arena>(&self, row: usize) -> MatchesRow<'arena> {
+        let (start, end) = match self.offsets.is_null() {
+            true => (0, 0),
+            false => (*self.offsets.add(row), *self.offsets.add(row + 1)),
+        };
+        MatchesRow {
+            keys: arena_slice(self.keys.wrapping_add(start), end - start),
+            distances: arena_slice(self.scores.wrapping_add(start), end - start),
+        }
+    }
 }
 
 #[repr(C)]
@@ -177,8 +245,17 @@ pub type usearch_completion_t = c_int;
 pub const usearch_completion_blocking_k: usearch_completion_t = 0;
 pub const usearch_completion_deferred_k: usearch_completion_t = 1;
 
+pub type usearch_residency_t = c_int;
+
 pub type usearch_arena_t = *mut c_void;
 pub type usearch_executor_t = *mut c_void;
+
+#[repr(C)]
+pub struct usearch_arena_init_t {
+    pub arena: *mut usearch_arena_t,
+    pub executor: usearch_executor_t,
+    pub outcome: *mut usearch_outcome_t,
+}
 
 #[repr(C)]
 pub struct usearch_executor_for_ram_t {
@@ -229,8 +306,6 @@ pub struct usearch_executor_drain_t {
 extern "C" {
     pub fn usearch_outcome_wait(outcome: *const usearch_outcome_t) -> usearch_status_t;
 
-    pub fn usearch_arena_free(arena: usearch_arena_t);
-
     pub fn usearch_executor_for_ram(arguments: *mut usearch_executor_for_ram_t);
     pub fn usearch_executor_on_pool(arguments: *mut usearch_executor_on_pool_t);
     pub fn usearch_executor_for_vram(arguments: *mut usearch_executor_for_vram_t);
@@ -238,10 +313,15 @@ extern "C" {
     pub fn usearch_executor_drain(arguments: *mut usearch_executor_drain_t);
     pub fn usearch_executor_free(executor: usearch_executor_t);
 
+    pub fn usearch_arena_init(arguments: *mut usearch_arena_init_t);
+    pub fn usearch_arena_free(arena: usearch_arena_t);
+
     pub fn usearch_status_name(status: usearch_status_t) -> *const c_char;
     pub fn usearch_status_from_name(name: usearch_bytes_view_t) -> usearch_status_t;
     pub fn usearch_scalar_name(scalar: usearch_scalar_t) -> *const c_char;
     pub fn usearch_scalar_from_name(name: usearch_bytes_view_t) -> usearch_scalar_t;
+    pub fn usearch_residency_name(residency: usearch_residency_t) -> *const c_char;
+    pub fn usearch_residency_from_name(name: usearch_bytes_view_t) -> usearch_residency_t;
     pub fn usearch_mood_name(mood: usearch_mood_t) -> *const c_char;
     pub fn usearch_mood_from_name(name: usearch_bytes_view_t) -> usearch_mood_t;
 
@@ -275,11 +355,12 @@ pub trait Calling: Sized {
     type Output;
 
     /// The arguments over the inputs and outputs this verb holds, which stays in place until the
-    /// call they feed is final.
+    /// call they feed is final, lending its handlers through `callbacks`.
     fn arguments(
         &mut self,
         outcome: *mut usearch_outcome_t,
         completion: usearch_completion_t,
+        callbacks: &Callbacks,
     ) -> Result<Self::Arguments>;
 
     /// Passes `arguments` to the verb's C entry point.
@@ -304,44 +385,23 @@ pub trait Completion: Sized {
 
 /// The inputs a completion takes: a blocking receiver takes borrows and owned values alike, while
 /// a deferring one takes only what it owns, since the library reads its inputs after the verb returns.
+/// Both borrow the arena, which no call reads as an input.
 #[doc(hidden)]
 #[diagnostic::on_unimplemented(
-    message = "a deferred receiver needs owned inputs and an owned arena",
+    message = "a deferred receiver needs owned inputs",
     label = "the library would still read this borrow after the verb returns",
-    note = "pass keys in a `Vec` or an array, rows in a NumKong `Matrix` or a `'static` `MatrixView`, an owned \
-            `Arena`, a `PathBuf`, `String` or `'static` path, and `'static` configs, handlers and value lookups"
+    note = "pass keys in a `Vec` or an array, rows in a NumKong `Matrix` or a `'static` `MatrixView`, a `PathBuf`, \
+            `String` or `'static` path, and `'static` configs, handlers and value lookups"
 )]
 pub trait Accepts<Input> {}
 
 /// A matrix a verb reads its rows from, borrowed or owned.
 #[doc(hidden)]
 pub trait RowsView {
+    /// The scalar type the rows hold.
+    type Value: Element;
     /// The rows and their count, refused when the layout cannot cross the boundary.
     fn batch(&self) -> Result<Batch>;
-}
-
-/// A matrix a verb writes its rows into, borrowed or owned, and what the call hands back of it.
-#[doc(hidden)]
-pub trait RowsSpan {
-    /// The scalar type the rows land in.
-    type Value: Element;
-    /// The matrix itself when owned, nothing when borrowed.
-    type Output;
-    /// The span the call fills, refused when the layout cannot cross the boundary.
-    fn span(&mut self) -> Result<usearch_rows_span_t>;
-    /// Hands the matrix back once the call is final.
-    fn finish(self) -> Self::Output;
-}
-
-/// Where a ranked call lands its matches, and what it hands back of them.
-#[doc(hidden)]
-pub trait Ranked {
-    /// The matches themselves when the verb allocated them, nothing when the caller lent a span.
-    type Output;
-    /// The span the call fills for `queries` rows of up to `wanted` matches.
-    fn span(&mut self, queries: usize, wanted: usize) -> Result<usearch_matches_span_t>;
-    /// Hands the matches back once the call is final.
-    fn finish(self) -> Self::Output;
 }
 
 // endregion: Sealed Traits
@@ -361,7 +421,7 @@ pub enum Status {
     Deferred = 1,
     /// An allocation or reservation could not be satisfied.
     OutOfMemory = 2,
-    /// Dimensionality, row counts, or output capacity disagree.
+    /// Dimensionality or row counts disagree.
     ShapeMismatch = 3,
     /// A stride or packing the engine cannot traverse.
     UnsupportedLayout = 4,
@@ -641,6 +701,7 @@ pub enum Scalar {
 
     I8 = 10,
     I4x2 = 11,
+    I32 = 12,
 
     U8 = 20,
     U4x2 = 21,
@@ -660,6 +721,7 @@ impl Scalar {
             8 => Scalar::E2M3,
             10 => Scalar::I8,
             11 => Scalar::I4x2,
+            12 => Scalar::I32,
             20 => Scalar::U8,
             21 => Scalar::U4x2,
             22 => Scalar::U1x8,
@@ -789,18 +851,9 @@ pub fn rows<Value: StorageElement>(data: &[Value], dimensions: usize) -> Result<
         .map_err(|_| fail(Status::ShapeMismatch, "a matrix holds two axes"))
 }
 
-/// The mutable sibling of [`rows`], for output slabs the index writes into.
-///
-/// Rust-only.
-pub fn rows_mut<Value: StorageElement>(data: &mut [Value], dimensions: usize) -> Result<MatrixSpan<'_, Value>> {
-    let (shape, strides) = packed_layout::<Value>(data.len(), dimensions)?;
-    unsafe { MatrixSpan::from_raw_parts(data.as_mut_ptr(), &shape, &strides) }
-        .map_err(|_| fail(Status::ShapeMismatch, "a matrix holds two axes"))
-}
-
 /// What a matrix supplies to a descriptor, once the layout it must satisfy is checked.
 struct MatrixLayout {
-    /// Rows the matrix spans, which a span reports as its capacity.
+    /// Rows the matrix spans, which the call reads as its count.
     rows: usize,
     /// Logical scalars per row, which the call checks against the frozen geometry.
     columns: usize,
@@ -855,65 +908,24 @@ fn batch_of<Value: Element>(matrix: &impl TensorRef<Value, 2>) -> Result<Batch> 
     })
 }
 
-/// Lowers a writable matrix as the span of rows a verb fills.
-pub(crate) fn span_of<Value: Element>(matrix: &mut impl TensorMut<Value, 2>) -> Result<usearch_rows_span_t> {
-    let layout = MatrixLayout::of(matrix)?;
-    Ok(usearch_rows_span_t {
-        data: matrix.as_mut_ptr().cast(),
-        stride: layout.stride_bytes,
-        columns: layout.columns,
-        capacity: layout.rows,
-        scalar: Value::SCALAR as usearch_scalar_t,
-    })
-}
-
 impl<Value: Element, Alloc: Allocator> RowsView for MatrixView<'_, Value, Alloc> {
+    type Value = Value;
     fn batch(&self) -> Result<Batch> { batch_of(self) }
 }
 
 impl<Value: Element, Alloc: Allocator> RowsView for Matrix<Value, Alloc> {
+    type Value = Value;
     fn batch(&self) -> Result<Batch> { batch_of(self) }
 }
 
 impl<Rows: RowsView + ?Sized> RowsView for &Rows {
+    type Value = Rows::Value;
     fn batch(&self) -> Result<Batch> { (**self).batch() }
-}
-
-impl<Value: Element, Alloc: Allocator> RowsSpan for &mut MatrixSpan<'_, Value, Alloc> {
-    type Value = Value;
-    type Output = ();
-    fn span(&mut self) -> Result<usearch_rows_span_t> { span_of(*self) }
-    fn finish(self) {}
-}
-
-impl<Value: Element, Alloc: Allocator> RowsSpan for &mut Matrix<Value, Alloc> {
-    type Value = Value;
-    type Output = ();
-    fn span(&mut self) -> Result<usearch_rows_span_t> { span_of(*self) }
-    fn finish(self) {}
-}
-
-impl<Value: Element, Alloc: Allocator> RowsSpan for Matrix<Value, Alloc> {
-    type Value = Value;
-    type Output = Self;
-    fn span(&mut self) -> Result<usearch_rows_span_t> { span_of(self) }
-    fn finish(self) -> Self { self }
 }
 
 // endregion: Matrix Views
 
 // region: Matches
-
-/// One retrieved entry.
-///
-/// Rust-only.
-#[derive(Clone, Copy, PartialEq, Debug)]
-pub struct Match {
-    /// The matched entry's key.
-    pub key: Key,
-    /// Its distance to the query, in the index's metric.
-    pub distance: Distance,
-}
 
 /// One query's matches, or one left row's pairs, trimmed to the cells the call wrote.
 ///
@@ -928,175 +940,39 @@ pub struct MatchesRow<'matches> {
     pub distances: &'matches [Distance],
 }
 
-/// Reads one row of a `wanted`-wide ranked slab.
-fn row_of<'slab>(
-    keys: &'slab [Key],
-    distances: &'slab [Distance],
-    counts: &[usize],
-    wanted: usize,
-    query: usize,
-) -> Option<MatchesRow<'slab>> {
-    let start = query * wanted;
-    let end = start + (*counts.get(query)?).min(wanted);
-    Some(MatchesRow {
-        keys: keys.get(start..end)?,
-        distances: distances.get(start..end)?,
-    })
-}
-
-/// Lends three packed `columns`-wide slabs as the span a ranked call writes, keeping up to
-/// `wanted` matches per row.
-pub(crate) fn matches_span(
-    keys: &mut [Key],
-    distances: &mut [Distance],
-    counts: &mut [usize],
-    columns: usize,
-    wanted: usize,
-) -> usearch_matches_span_t {
-    usearch_matches_span_t {
-        keys: keys.as_mut_ptr(),
-        keys_stride: columns * core::mem::size_of::<Key>(),
-        scores: distances.as_mut_ptr(),
-        scores_stride: columns * core::mem::size_of::<Distance>(),
-        counts: counts.as_mut_ptr(),
-        capacity: counts.len(),
-        wanted,
-    }
-}
-
-/// Where a ranked call writes its results - three caller-owned buffers, sized together.
-///
-/// The buffer lengths decide the row width: `keys.len() / counts.len()` columns per query, which
-/// may exceed the call's wanted count to land results inside a wider matrix.
-///
-/// Mirrors `usearch_matches_span_t`.
-pub struct MatchesSpan<'buffers> {
-    /// The `queries × wanted` key slab, rows contiguous.
-    keys: &'buffers mut [Key],
-    /// The `queries × wanted` distance slab, rows contiguous.
-    distances: &'buffers mut [Distance],
-    /// One match count per query.
-    counts: &'buffers mut [usize],
-    /// Columns per row.
-    pub(crate) wanted: usize,
-}
-
-impl<'buffers> MatchesSpan<'buffers> {
-    /// Lends three packed slabs: `counts.len()` rows of keys and distances, and one count per query.
-    pub fn new(
-        keys: &'buffers mut [Key],
-        distances: &'buffers mut [Distance],
-        counts: &'buffers mut [usize],
-    ) -> Result<Self> {
-        if counts.is_empty() {
-            return Err(fail(Status::ShapeMismatch, "a run must hold at least one query"));
-        }
-        if keys.len() != distances.len() {
-            return Err(fail(
-                Status::ShapeMismatch,
-                "the key and distance outputs are not the same shape",
-            ));
-        }
-        if keys.is_empty() || !keys.len().is_multiple_of(counts.len()) {
-            return Err(fail(
-                Status::ShapeMismatch,
-                "the outputs do not divide into one row per query",
-            ));
-        }
-        let wanted = keys.len() / counts.len();
-        Ok(MatchesSpan {
-            keys,
-            distances,
-            counts,
-            wanted,
-        })
-    }
-
-    /// Query rows the buffers were sized for.
-    pub fn queries(&self) -> usize { self.counts.len() }
-
-    /// Matches written for one query, keys and distances read together, or `None` when `query`
-    /// is not below [`MatchesSpan::queries`].
-    pub fn row(&self, query: usize) -> Option<MatchesRow<'_>> {
-        row_of(self.keys, self.distances, self.counts, self.wanted, query)
-    }
-
-    /// Every query's row, in query order.
-    pub fn rows(&self) -> impl Iterator<Item = MatchesRow<'_>> {
-        (0..self.queries()).filter_map(|query| self.row(query))
-    }
-}
-
-impl Ranked for &mut MatchesSpan<'_> {
-    type Output = ();
-
-    fn span(&mut self, _queries: usize, wanted: usize) -> Result<usearch_matches_span_t> {
-        Ok(matches_span(
-            self.keys,
-            self.distances,
-            self.counts,
-            self.wanted,
-            wanted,
-        ))
-    }
-
-    fn finish(self) {}
-}
-
-/// The matches a ranked call allocates when no span was lent to it; see
+/// The ranked rows a search, a `maxsim` or a stream pull wrote into the arena it borrows; see
 /// [`DenseVerbs::search`](crate::DenseVerbs::search).
 ///
-/// Rust-only.
-#[derive(Default)]
-pub struct Matches {
-    keys: Vec<Key>,
-    distances: Vec<Distance>,
-    counts: Vec<usize>,
-    wanted: usize,
+/// Mirrors `usearch_matches_view_t`.
+pub struct Matches<'arena> {
+    pub(crate) arena: &'arena Arena,
+    pub(crate) view: Exported<usearch_matches_view_t>,
+    pub(crate) queries: usize,
 }
 
-impl Matches {
+impl<'arena> Matches<'arena> {
     /// Query rows the call resolved.
-    pub fn queries(&self) -> usize { self.counts.len() }
+    pub fn queries(&self) -> usize { self.queries }
 
-    /// Matches written for one query, or `None` when `query` is not below [`Matches::queries`].
-    pub fn row(&self, query: usize) -> Option<MatchesRow<'_>> {
-        row_of(&self.keys, &self.distances, &self.counts, self.wanted, query)
+    /// Matches written for one query, refused with [`Status::InvalidArgument`] when `query` is not
+    /// below [`Matches::queries`] and with [`Status::Device`] over device memory.
+    pub fn row(&self, query: usize) -> Result<MatchesRow<'arena>> {
+        self.arena.host()?;
+        match query < self.queries {
+            // Safety: the arena holds a finished call's output in host memory.
+            true => Ok(unsafe { self.view.0.row(query) }),
+            false => Err(fail(Status::InvalidArgument, "the row is not below the call's count")),
+        }
     }
 
-    /// Every query's row, in query order.
-    pub fn rows(&self) -> impl Iterator<Item = MatchesRow<'_>> {
-        (0..self.queries()).filter_map(|query| self.row(query))
+    /// Every query's row, in query order, refused with [`Status::Device`] over device memory.
+    pub fn rows(&self) -> Result<impl Iterator<Item = MatchesRow<'arena>>> {
+        self.arena.host()?;
+        let view = self.view.0;
+        // Safety: the arena holds a finished call's output in host memory.
+        Ok((0..self.queries).map(move |query| unsafe { view.row(query) }))
     }
 }
-
-impl Ranked for Matches {
-    type Output = Matches;
-
-    fn span(&mut self, queries: usize, wanted: usize) -> Result<usearch_matches_span_t> {
-        let cells = queries.checked_mul(wanted).ok_or(fail(
-            Status::Overflow,
-            "the outputs would not fit an addressable buffer",
-        ))?;
-        *self = Matches {
-            keys: vec![Key::NIL; cells],
-            distances: vec![0.0; cells],
-            counts: vec![0; queries],
-            wanted,
-        };
-        Ok(matches_span(
-            &mut self.keys,
-            &mut self.distances,
-            &mut self.counts,
-            wanted,
-            wanted,
-        ))
-    }
-
-    fn finish(self) -> Matches { self }
-}
-
-impl Accepts<Matches> for Deferring {}
 
 // endregion: Matches
 
@@ -1141,53 +1017,109 @@ pub(crate) fn path_views(paths: &[impl AsRef<Path>]) -> Result<Vec<usearch_bytes
 
 // region: Callbacks
 
+/// The handlers one call lends the library, reached by every trampoline through one state pointer,
+/// and the first panic any of them raised, re-raised once the call is final since unwinding out of an
+/// `extern "C"` frame aborts.
+#[doc(hidden)]
+pub struct Callbacks {
+    pub(crate) predicate: Cell<*const c_void>,
+    pub(crate) progress: Cell<*mut c_void>,
+    pub(crate) lookup: Cell<*const c_void>,
+    panic: Mutex<Option<Box<dyn Any + Send>>>,
+}
+
+impl Default for Callbacks {
+    fn default() -> Self {
+        Callbacks {
+            predicate: Cell::new(ptr::null()),
+            progress: Cell::new(ptr::null_mut()),
+            lookup: Cell::new(ptr::null()),
+            panic: Mutex::new(None),
+        }
+    }
+}
+
+impl Callbacks {
+    /// The state every trampoline of this call receives.
+    pub(crate) fn state(&self) -> *mut c_void { ptr::from_ref(self).cast_mut().cast() }
+
+    /// Runs a handler, answering `fallback` in place of a panic and latching the first one.
+    pub(crate) fn guard<Answer>(&self, fallback: Answer, handler: impl FnOnce() -> Answer) -> Answer {
+        std::panic::catch_unwind(AssertUnwindSafe(handler)).unwrap_or_else(|panic| {
+            self.panic
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .get_or_insert(panic);
+            fallback
+        })
+    }
+
+    /// Re-raises the first panic a handler raised; called once the call is final.
+    pub(crate) fn raise(self) {
+        if let Some(panic) = self.panic.into_inner().unwrap_or_else(PoisonError::into_inner) {
+            std::panic::resume_unwind(panic)
+        }
+    }
+}
+
 /// A periodic report of finished and total units; `Break` stops the call at the next increment
 /// wherever the verb can stop, which an insertion cannot.
 ///
 /// It runs on whichever thread advanced the work, never on two at once, so it owes `Send` and may
-/// be `FnMut`. A panic inside it is caught and read as `Break`, since unwinding out of an
-/// `extern "C"` frame aborts.
+/// be `FnMut`. A panic inside it stops the call like a `Break` and is re-raised once the call is final.
 ///
 /// Mirrors `usearch_progress_callback_t`.
 pub type ProgressCallback<'a> = dyn FnMut(usize, usize) -> ControlFlow<()> + Send + 'a;
 
 /// # Safety
-/// `state` must address a live `&mut ProgressCallback` that outlives the call the callback was passed to.
+/// `state` must address the live [`Callbacks`] of the call the callback was passed to, lending a
+/// `&mut ProgressCallback`.
 unsafe extern "C" fn progress_trampoline(finished: usize, total: usize, state: *mut c_void) -> c_int {
-    let handler = &mut **state.cast::<&mut ProgressCallback>();
-    let reported = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(finished, total)));
-    reported.map_or(1, |flow| c_int::from(flow.is_break()))
+    let callbacks = &*state.cast::<Callbacks>();
+    let handler = &mut **callbacks.progress.get().cast::<&mut ProgressCallback>();
+    callbacks.guard(1, || c_int::from(handler(finished, total).is_break()))
 }
 
 /// Lends an optional handler as the callback and state pair every reporting verb takes, so the
 /// trampoline is never paired with the wrong state; `None` lends nulls.
 pub(crate) fn lower_progress(
     handler: &mut Option<&mut ProgressCallback>,
+    callbacks: &Callbacks,
 ) -> (usearch_progress_callback_t, *mut c_void) {
     match handler {
-        Some(handler) => (Some(progress_trampoline), ptr::from_mut(handler).cast()),
+        Some(handler) => {
+            callbacks.progress.set(ptr::from_mut(handler).cast());
+            (Some(progress_trampoline), callbacks.state())
+        }
         None => (None, ptr::null_mut()),
     }
 }
 
-/// A search filter, run on the executor's threads together; a panic rejects the key.
+/// A search filter, run on the executor's threads together; a panic rejects the key and is
+/// re-raised once the call is final.
 ///
 /// Mirrors `usearch_predicate_t`.
 pub type Predicate<'a> = dyn Fn(Key) -> bool + Sync + 'a;
 
 /// # Safety
-/// `state` must address a live `&Predicate` that outlives the call the callback was passed to.
+/// `state` must address the live [`Callbacks`] of the call the callback was passed to, lending a `&Predicate`.
 unsafe extern "C" fn admission_trampoline(key: Key, state: *mut c_void) -> c_int {
-    let predicate = *state.cast::<&Predicate>();
-    // Unwinding out of an `extern "C"` frame aborts, so a panic rejects the key.
-    c_int::from(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| predicate(key))).unwrap_or(false))
+    let callbacks = &*state.cast::<Callbacks>();
+    let predicate = *callbacks.predicate.get().cast::<&Predicate>();
+    callbacks.guard(0, || c_int::from(predicate(key)))
 }
 
 /// Lends an optional predicate as the callback and state pair every filtering verb takes, so the
 /// trampoline is never paired with the wrong state; `None` lends nulls.
-pub(crate) fn lower_predicate(predicate: &Option<&Predicate>) -> (usearch_predicate_t, *mut c_void) {
+pub(crate) fn lower_predicate(
+    predicate: &Option<&Predicate>,
+    callbacks: &Callbacks,
+) -> (usearch_predicate_t, *mut c_void) {
     match predicate {
-        Some(predicate) => (Some(admission_trampoline), ptr::from_ref(predicate).cast_mut().cast()),
+        Some(predicate) => {
+            callbacks.predicate.set(ptr::from_ref(predicate).cast());
+            (Some(admission_trampoline), callbacks.state())
+        }
         None => (None, ptr::null_mut()),
     }
 }
@@ -1235,6 +1167,53 @@ impl FromStr for Mood {
     }
 }
 
+/// Where an executor computes, and with it where the arenas it makes keep their memory.
+///
+/// Mirrors `usearch_residency_t`.
+#[repr(i32)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+#[non_exhaustive]
+pub enum Residency {
+    /// Volatile memory, traversed by CPU threads.
+    Ram = 0,
+    /// Accelerator memory, traversed by GPU warps on a chosen device.
+    Vram = 1,
+    /// Persisted storage, traversed through pluggable I/O engines.
+    Nvme = 2,
+}
+
+impl Residency {
+    fn from_raw(value: usearch_residency_t) -> Option<Self> {
+        match value {
+            0 => Some(Residency::Ram),
+            1 => Some(Residency::Vram),
+            2 => Some(Residency::Nvme),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for Residency {
+    /// Calls `usearch_residency_name`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(spelling(usearch_residency_name, *self as c_int))
+    }
+}
+
+impl FromStr for Residency {
+    type Err = Error;
+
+    /// Calls `usearch_residency_from_name`.
+    fn from_str(text: &str) -> Result<Self> {
+        read_spelling(
+            text,
+            usearch_residency_from_name,
+            usearch_residency_name,
+            Residency::from_raw,
+        )
+    }
+}
+
 /// The host threads or device streams an [`On`] runs its calls on, and the traversal scratch each
 /// of them walks with.
 ///
@@ -1249,12 +1228,15 @@ impl FromStr for Mood {
 /// it is `Send` but not `Sync`.
 /// Every constructor takes a `deferred_limit` sizing its table of deferred calls, where zero takes
 /// the default; a deferred submission finding the table full fails with [`Status::Contended`].
+/// [`Arena::new_in`] places an arena where it computes, and the arena may outlive it.
 /// Dropping an executor drains it.
 ///
 /// Mirrors `usearch_executor_t`; dropping it calls `usearch_executor_free`.
 #[derive(Debug)]
 pub struct Executor {
     pub(crate) handle: usearch_executor_t,
+    /// The residency of the constructor that produced it, which places the arenas it makes.
+    residency: Residency,
 }
 
 // Safety: nothing in an executor is tied to the thread that created it, so it may move to another;
@@ -1262,14 +1244,18 @@ pub struct Executor {
 unsafe impl Send for Executor {}
 
 impl Default for Executor {
-    fn default() -> Self {
-        Executor {
-            handle: ptr::null_mut(),
-        }
-    }
+    fn default() -> Self { Executor::null(Residency::Ram) }
 }
 
 impl Executor {
+    /// An executor whose handle a constructor is about to fill.
+    fn null(residency: Residency) -> Self {
+        Executor {
+            handle: ptr::null_mut(),
+            residency,
+        }
+    }
+
     /// Spawns host workers for RAM-resident indexes, interleaved across the compute domains local
     /// to `memory_domains`, which is the same list the indexes were initialized with.
     ///
@@ -1278,7 +1264,7 @@ impl Executor {
     ///
     /// Calls `usearch_executor_for_ram`.
     pub fn for_ram(memory_domains: &[i32], threads: usize, deferred_limit: usize) -> Result<Self> {
-        let mut executor = Executor::default();
+        let mut executor = Executor::null(Residency::Ram);
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_executor_for_ram(&mut usearch_executor_for_ram_t {
@@ -1300,7 +1286,7 @@ impl Executor {
     /// # Safety
     /// `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
     pub unsafe fn on_pool(memory_domains: &[i32], pool: *mut c_void, deferred_limit: usize) -> Result<Self> {
-        let mut executor = Executor::default();
+        let mut executor = Executor::null(Residency::Ram);
         let mut outcome = usearch_outcome_t::default();
         usearch_executor_on_pool(&mut usearch_executor_on_pool_t {
             executor: &mut executor.handle,
@@ -1320,7 +1306,7 @@ impl Executor {
     /// Calls `usearch_executor_for_nvme`.
     pub fn for_nvme(paths: &[impl AsRef<Path>], threads: usize, deferred_limit: usize) -> Result<Self> {
         let views = path_views(paths)?;
-        let mut executor = Executor::default();
+        let mut executor = Executor::null(Residency::Nvme);
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_executor_for_nvme(&mut usearch_executor_for_nvme_t {
@@ -1353,7 +1339,7 @@ impl Executor {
         if !streams.is_empty() && streams.len() != devices.len() {
             return Err(fail(Status::ShapeMismatch, "pass no streams or one per device"));
         }
-        let mut executor = Executor::default();
+        let mut executor = Executor::null(Residency::Vram);
         let mut outcome = usearch_outcome_t::default();
         usearch_executor_for_vram(&mut usearch_executor_for_vram_t {
             executor: &mut executor.handle,
@@ -1395,26 +1381,62 @@ impl Drop for Executor {
 
 // region: Arenas
 
-/// Memory the library allocates for the outputs only a call can size, reused across calls.
+/// Memory the library writes every output whose length scales with a call into, reused across calls.
 ///
-/// [`Arena::default`] holds nothing; the first call handed it creates the memory where that call's
-/// executor computes. Every later call rewinds and refills it, so a steady loop allocates once.
-/// A verb given `&mut arena` answers outputs that borrow it, and one given an owned `Arena`
-/// answers outputs that own it and hand it back through `into_arena`.
+/// An executor places it where it computes, host pages or its GPU's memory, decided once, and
+/// nothing is allocated until a call writes into it. Every call rewinds and refills it,
+/// invalidating the previous call's outputs, so a steady loop allocates once.
+/// Every verb, blocking or deferred, borrows it as `&mut Arena` and answers outputs that borrow it in turn.
+/// A [`Residency::Vram`] arena holds device memory, so the host accessors of its outputs refuse
+/// with [`Status::Device`].
 ///
-/// Mirrors `usearch_arena_t`; dropping it calls `usearch_arena_free`.
+/// Mirrors `usearch_arena_t`; dropping it calls `usearch_arena_free`, which waits for the calls
+/// still writing into it.
 #[derive(Debug)]
 pub struct Arena {
     pub(crate) handle: usearch_arena_t,
+    /// The residency of the executor that made it.
+    residency: Residency,
 }
 
-// Safety: an arena serves one call at a time, which the `&mut` every verb takes already enforces.
+// Safety: an arena serves one call at a time, which the `&mut` every verb takes already enforces,
+// and a shared borrow reads only its residency.
 unsafe impl Send for Arena {}
+unsafe impl Sync for Arena {}
 
-impl Default for Arena {
-    fn default() -> Self {
-        Arena {
+impl Arena {
+    /// Makes an arena of host pages for calls on the calling thread.
+    ///
+    /// Calls `usearch_arena_init`.
+    pub fn new() -> Result<Self> { Arena::new_in(&Executor::default()) }
+
+    /// Makes an arena where `executor` computes, serving the calls of its residency.
+    ///
+    /// Calls `usearch_arena_init`.
+    pub fn new_in(executor: &Executor) -> Result<Self> {
+        let mut arena = Arena {
             handle: ptr::null_mut(),
+            residency: executor.residency,
+        };
+        let mut outcome = usearch_outcome_t::default();
+        unsafe {
+            usearch_arena_init(&mut usearch_arena_init_t {
+                arena: &mut arena.handle,
+                executor: executor.handle,
+                outcome: &mut outcome,
+            })
+        };
+        check(outcome).map(|()| arena)
+    }
+
+    /// The residency of the executor that made it, whose memory it keeps.
+    pub fn residency(&self) -> Residency { self.residency }
+
+    /// Refuses device memory, which no host accessor may read.
+    pub(crate) fn host(&self) -> Result<()> {
+        match self.residency {
+            Residency::Vram => Err(fail(Status::Device, "the outputs are device memory")),
+            _ => Ok(()),
         }
     }
 }
@@ -1423,15 +1445,12 @@ impl Drop for Arena {
     fn drop(&mut self) { unsafe { usearch_arena_free(self.handle) } }
 }
 
-/// An output the library exported into an arena the verb holds, which moves with that arena.
-pub(crate) struct Exported<Value>(pub(crate) *mut Value);
+/// A view the library wrote into an arena the verb or result borrows.
+#[derive(Default)]
+pub(crate) struct Exported<View>(pub(crate) View);
 
-impl<Value> Default for Exported<Value> {
-    fn default() -> Self { Exported(ptr::null_mut()) }
-}
-
-// Safety: the pointee lives in the arena held beside it, which is `Send`.
-unsafe impl<Value: Send> Send for Exported<Value> {}
+// Safety: the pointees live in the arena borrowed beside the view, and its borrows are `Send`.
+unsafe impl<View> Send for Exported<View> {}
 
 /// Borrows `length` values the library wrote into an arena; a failed or empty call leaves null.
 ///
@@ -1479,10 +1498,12 @@ impl Completion for Blocking {
 
     fn answer<'index, Verb: Calling>(mut verb: Verb) -> Self::Answer<'index, Verb> {
         let mut outcome = usearch_outcome_t::default();
-        let mut arguments = verb.arguments(&mut outcome, usearch_completion_blocking_k)?;
-        // Safety: the arguments point into `verb` and `outcome`, which stay in place until the call
-        // returns, and a blocking call is final on return.
+        let callbacks = Callbacks::default();
+        let mut arguments = verb.arguments(&mut outcome, usearch_completion_blocking_k, &callbacks)?;
+        // Safety: the arguments point into `verb`, `outcome` and `callbacks`, which stay in place until
+        // the call returns, and a blocking call is final on return.
         unsafe { Verb::call(&mut arguments) };
+        callbacks.raise();
         check(outcome)?;
         verb.finish()
     }
@@ -1503,6 +1524,7 @@ impl Completion for Deferring {
     fn answer<'index, Verb: Calling>(verb: Verb) -> Self::Answer<'index, Verb> {
         let lent = Box::into_raw(Box::new(Lent {
             outcome: usearch_outcome_t::default(),
+            callbacks: Callbacks::default(),
             arguments: None,
             verb,
         }));
@@ -1510,7 +1532,8 @@ impl Completion for Deferring {
         // fields, where they stay until the box is freed.
         unsafe {
             let outcome = ptr::addr_of_mut!((*lent).outcome);
-            match (*lent).verb.arguments(outcome, usearch_completion_deferred_k) {
+            let (callbacks, verb) = (&(*lent).callbacks, &mut (*lent).verb);
+            match verb.arguments(outcome, usearch_completion_deferred_k, callbacks) {
                 Ok(arguments) => Verb::call((*lent).arguments.insert(arguments)),
                 Err(refusal) => {
                     drop(Box::from_raw(lent));
@@ -1525,7 +1548,6 @@ impl Completion for Deferring {
     }
 }
 
-impl Accepts<Arena> for Deferring {}
 impl Accepts<Vec<Key>> for Deferring {}
 impl<const COUNT: usize> Accepts<[Key; COUNT]> for Deferring {}
 impl<Value, Alloc: Allocator> Accepts<Matrix<Value, Alloc>> for Deferring where Value: StorageElement {}
@@ -1539,18 +1561,21 @@ impl Accepts<&'static Path> for Deferring {}
 struct Lent<Verb: Calling> {
     /// The outcome the library finishes.
     outcome: usearch_outcome_t,
+    /// The handlers the call lends, and the first panic they raised.
+    callbacks: Callbacks,
     /// The argument struct, pointing into `outcome` and `verb`, filled once the box is in place.
     arguments: Option<Verb::Arguments>,
-    /// The inputs, the outputs and the arena.
+    /// The inputs, the outputs and the arena borrow.
     verb: Verb,
 }
 
-/// A submitted call, which owns its outcome, argument struct, inputs and arena in one box the
-/// library reads until the call is final.
+/// A submitted call, which owns its outcome, argument struct and inputs in one box the library
+/// reads until the call is final, and borrows its arena as a blocking call does.
 ///
 /// [`Deferred::status`] polls without blocking, and [`Deferred::wait`] blocks until the call is
 /// final and hands back what it produced, while `.await` polls it from async code. Dropping an
 /// unfinished one waits for it, then frees the box.
+/// A panic a handler raised resurfaces from `wait`, `.await`, or a drop outside unwinding.
 /// `'index` is the borrow of the [`On`] that submitted it.
 ///
 /// Rust-only; waiting and dropping call `usearch_outcome_wait`.
@@ -1575,10 +1600,16 @@ impl<Verb: Calling> Deferred<'_, Verb> {
     pub fn wait(self) -> Result<Verb::Output> {
         let lent = ManuallyDrop::new(self).lent.as_ptr();
         // Safety: once the outcome is final the library touches the box no more, so it is freed here.
-        let Lent { outcome, verb, .. } = unsafe {
+        let Lent {
+            outcome,
+            callbacks,
+            verb,
+            ..
+        } = unsafe {
             usearch_outcome_wait(ptr::addr_of!((*lent).outcome));
             *Box::from_raw(lent)
         };
+        callbacks.raise();
         check(outcome)?;
         verb.finish()
     }
@@ -1588,9 +1619,13 @@ impl<Verb: Calling> Drop for Deferred<'_, Verb> {
     fn drop(&mut self) {
         let lent = self.lent.as_ptr();
         // Safety: once the outcome is final the library touches the box no more, and this owned it.
-        unsafe {
+        let Lent { callbacks, .. } = unsafe {
             usearch_outcome_wait(ptr::addr_of!((*lent).outcome));
-            drop(Box::from_raw(lent));
+            *Box::from_raw(lent)
+        };
+        // A second panic while unwinding would abort, so only a drop outside one re-raises.
+        if !std::thread::panicking() {
+            callbacks.raise();
         }
     }
 }
@@ -1695,6 +1730,7 @@ mod tests {
             Scalar::E2M3,
             Scalar::I8,
             Scalar::I4x2,
+            Scalar::I32,
             Scalar::U8,
             Scalar::U4x2,
             Scalar::U1x8,
@@ -1706,7 +1742,7 @@ mod tests {
         // The C enum's numbering gaps are reserved, not assigned.
         assert_eq!(Scalar::from_raw(0), None);
         assert_eq!(Scalar::from_raw(9), None);
-        assert_eq!(Scalar::from_raw(12), None);
+        assert_eq!(Scalar::from_raw(13), None);
     }
 
     /// Every C inverse answers a default for a name it does not know, which must not read back as
@@ -1718,11 +1754,14 @@ mod tests {
         assert_eq!("invalid-argument".parse(), Ok(Status::InvalidArgument));
         assert_eq!(Mood::Spinning.to_string(), "spinning");
         assert_eq!("parked".parse(), Ok(Mood::Parked));
+        assert_eq!(Residency::Vram.to_string(), "vram");
+        assert_eq!("nvme".parse(), Ok(Residency::Nvme));
 
         assert!("success".parse::<Status>().is_err(), "success names no failure");
         assert!("shape mismatch".parse::<Status>().is_err());
         assert!("unknown".parse::<Scalar>().is_err());
         assert!("parking".parse::<Mood>().is_err());
+        assert!("gpu".parse::<Residency>().is_err());
     }
 
     #[test]
@@ -1760,51 +1799,30 @@ mod tests {
 
     #[test]
     fn packed_slabs_reject_a_zero_width() {
-        // The width divides the slab, so a zero would be a division rather than an empty run -
-        // the same guard an output span of zero wanted matches trips.
-        let failure = rows_mut(&mut [1.0f32, 2.0], 0).unwrap_err();
+        // The width divides the slab, so a zero would be a division rather than an empty run.
+        let failure = rows(&[1.0f32, 2.0], 0).unwrap_err();
         assert_eq!(failure.status, Status::ShapeMismatch);
         assert_eq!(failure.to_string(), "a row needs at least one dimension");
     }
 
-    /// The row width follows from the buffer lengths, so lengths that cannot be read as one
-    /// shape are refused before any verb sees them.
+    /// An arena keeps the residency of the executor that made it, and the host reads only host pages.
     #[test]
-    fn rejects_outputs_that_are_not_one_shape() {
-        let mut found = vec![Key::NIL; 8];
-        let mut scores = vec![0.0 as Distance; 8];
-        let mut counts = vec![0usize; 3];
-        let mut queryless: [usize; 0] = [];
-        assert!(
-            matches!(
-                MatchesSpan::new(&mut found, &mut scores, &mut queryless),
-                Err(Error {
-                    status: Status::ShapeMismatch,
-                    ..
-                })
-            ),
-            "no queries to write for"
-        );
-        assert!(
-            matches!(
-                MatchesSpan::new(&mut found, &mut scores[..6], &mut counts),
-                Err(Error {
-                    status: Status::ShapeMismatch,
-                    ..
-                })
-            ),
-            "the keys and distances disagree"
-        );
-        assert!(
-            matches!(
-                MatchesSpan::new(&mut found, &mut scores, &mut counts),
-                Err(Error {
-                    status: Status::ShapeMismatch,
-                    ..
-                })
-            ),
-            "eight cells do not divide into three rows"
-        );
+    fn arenas_live_where_their_executor_computes() -> Result<()> {
+        let local = Arena::new()?;
+        assert_eq!(local.residency(), Residency::Ram);
+        assert!(local.host().is_ok());
+
+        let executor = Executor::for_ram(&[], 1, 0)?;
+        let placed = Arena::new_in(&executor)?;
+        drop(executor);
+        assert_eq!(placed.residency(), Residency::Ram, "an arena outlives its executor");
+
+        let device = Arena {
+            handle: ptr::null_mut(),
+            residency: Residency::Vram,
+        };
+        assert_eq!(device.host().unwrap_err().status, Status::Device);
+        Ok(())
     }
 
     #[test]

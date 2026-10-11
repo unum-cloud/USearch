@@ -250,11 +250,15 @@ In USearch you can simply pass a predicate function to the search method, which 
 In Rust that would look like this:
 
 ```rust
-let is_odd = |key: Key| key % 2 == 1;
-let query = vec![0.2, 0.1, 0.2, 0.1, 0.3];
-let results = index.filtered_search(&query, 10, is_odd).unwrap();
+let is_odd = |key: Key| u64::try_from(key).is_ok_and(|value| value % 2 == 1);
+let query = [0.2f32, 0.1, 0.2, 0.1, 0.3];
+let mut arena = Arena::new()?;
+let matches = index.search(&rows(&query, 5)?, DenseSearchConfig {
+    predicate: Some(&is_odd),
+    ..DenseSearchConfig::from(10)
+}, &mut arena)?;
 assert!(
-    results.keys.iter().all(|&key| key % 2 == 1),
+    matches.row(0)?.keys.iter().all(|&key| is_odd(key)),
     "All keys must be odd"
 );
 ```

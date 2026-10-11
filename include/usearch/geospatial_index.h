@@ -667,7 +667,7 @@ typedef struct usearch_geospatial_search_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Emplaced queries to resolve; the outputs have @c count rows of @c matches.wanted entries. */
+    /** Emplaced queries to resolve; the outputs have @c count rows of @c wanted entries. */
     size_t count;
 
     /** Array of @c count emplaced query handles. */
@@ -682,8 +682,14 @@ typedef struct usearch_geospatial_search_t {
     /** The radius and time window; zeroed fields derive as the type describes. */
     usearch_geospatial_tolerance_t tolerance;
 
-    /** Where the run lands. */
-    usearch_matches_span_t matches;
+    /** Output for the run, inside @c arena. */
+    usearch_matches_view_t* matches;
+
+    /** Memory for @c matches, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
+    size_t wanted;
 
     /** The @b optional candidate-pool breadth the walk explores - the @c ef of the
      *  literature; zero derives. */
@@ -716,8 +722,7 @@ typedef struct usearch_geospatial_search_t {
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
  *  the traversal, so recall does not collapse at low selectivity.
  *
- *  A cancelled search reports @c usearch_status_cancelled_k and leaves every output row
- *  indeterminate.
+ *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL.
  */
 USEARCH_EXPORT void usearch_geospatial_search(usearch_geospatial_search_t* arguments);
 
@@ -751,22 +756,15 @@ typedef struct usearch_geospatial_within_t {
     /** The radius and time window; @c metres must be positive. */
     usearch_geospatial_tolerance_t tolerance;
 
-    /** Output for @c count + 1 offsets into @c keys and @c scores, query @c i spanning entries
-     *  @c offsets[i] up to @c offsets[i+1]. */
-    size_t* offsets;
-
-    /** Output for the keys inside @c arena. */
-    usearch_key_t** keys;
-
-    /** Output for the scores inside @c arena, positionally paired with @c keys. */
-    usearch_distance_t** scores;
+    /** Output for the report inside @c arena, query @c i spanning entries @c matches->offsets[i] up
+     *  to @c matches->offsets[i+1]. */
+    usearch_matches_tape_view_t* matches;
 
     /** The @b optional output for the entries written across every query. */
     size_t* written;
 
-    /** Memory for @c keys and @c scores: reused when it points to an arena, created when it points
-     *  to @c NULL. */
-    usearch_arena_t* arena;
+    /** Memory for @c matches, rewound by the call. */
+    usearch_arena_t arena;
 
     /** The @b optional per-key admission callback; @c NULL admits everything. */
     usearch_predicate_t predicate;
@@ -794,8 +792,8 @@ typedef struct usearch_geospatial_within_t {
  *  bound before trusting it, so every candidate inside the tolerance is enumerated, at
  *  about thirty times the cost of the ball it reports. Containment sizes its own pool from that
  *  bound, so it takes no breadth a caller could make the report incomplete with. Only the walks
- *  learn how large the report is, so the keys and scores land in @c arena as a ragged output with
- *  Apache Arrow offsets, as @c usearch_dense_multiply lands its pairs. A @c predicate narrows the
+ *  learn how large the report is, so the keys, scores and Apache Arrow offsets land in @c arena as
+ *  one ragged output, as @c usearch_dense_multiply lands its pairs. A @c predicate narrows the
  *  report without stopping the walk from crossing the entries it rejects.
  *
  *  A cancelled call reports @c usearch_status_cancelled_k and leaves the outputs @c NULL.
@@ -858,28 +856,22 @@ typedef struct usearch_geospatial_get_t {
     /** The key whose entries are exported. */
     usearch_key_t key;
 
-    /** Output for the tape's coordinates inside @c arena, every set's points end to end. */
-    double** points;
-
-    /** Output for @c written + 1 point offsets into @c points, inside @c arena. */
-    size_t** offsets;
+    /** Output for the tape inside @c arena: every set's @c double coordinates end to end, as many
+     *  per point as the frozen layout carries, around @c written + 1 point offsets. */
+    usearch_tape_view_t* points;
 
     /** The @b optional output for the entries written; zero when the key is absent. */
     size_t* written;
 
-    /** The @b optional output for the values in each row the call landed. */
-    size_t* columns;
-
-    /** Memory for @c points and @c offsets: reused when it points to an arena, created when it
-     *  points to @c NULL. */
-    usearch_arena_t* arena;
+    /** Memory for @c points, rewound by the call. */
+    usearch_arena_t arena;
 } usearch_geospatial_get_t;
 
 /**
  *  @brief Retrieves every point set stored under one key as an Apache Arrow tape, as the geodetic
  *      degrees, metres, and seconds they were inserted as, in insertion order.
  *
- *  An absent key leaves both outputs @c NULL.
+ *  An absent key leaves the tape's pointers @c NULL.
  */
 USEARCH_EXPORT void usearch_geospatial_get(usearch_geospatial_get_t* arguments);
 
@@ -961,26 +953,30 @@ typedef struct usearch_geospatial_cursor_next_t {
     /** The cursor to advance. */
     usearch_geospatial_cursor_t cursor;
 
-    /** Where the identities land; its capacity bounds the batch. */
-    usearch_keys_span_t keys;
+    /** Output for the identities, inside @c arena. */
+    usearch_keys_view_t* keys;
 
-    /** The @b optional output for up to @c keys.capacity borrowed base pointers; @c NULL skips them. */
-    int32_t const** point_sets;
-
-    /** Output for up to @c keys.capacity position counts. */
-    size_t* point_counts;
+    /** The @b optional output for the point sets as a tape inside @c arena, @c int32_t coordinates
+     *  around @c written + 1 point offsets; @c NULL skips them. */
+    usearch_tape_view_t* points;
 
     /** Output for the entries written; zero when the snapshot is exhausted. */
     size_t* written;
+
+    /** Memory for @c keys and @c points, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** The upper bound on entries this pull writes. */
+    size_t wanted;
 } usearch_geospatial_cursor_next_t;
 
 /**
- *  @brief Copies the next batch of entries out of the cursor.
+ *  @brief Copies the next batch of entries out of the cursor into @c arena.
  *  @retval usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
  *
- *  The borrowed pointers reach into the index's storage and stay valid until the cursor moves
- *  or closes. Their coordinates are the internal Earth-fixed integer centimetres, three per
- *  point, not the geodetic degrees inserted.
+ *  The batch stays valid until the next call given the same arena, however the cursor moves
+ *  meanwhile. Its coordinates are the internal Earth-fixed integer centimetres, three per point,
+ *  not the geodetic degrees inserted.
  */
 USEARCH_EXPORT void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments);
 

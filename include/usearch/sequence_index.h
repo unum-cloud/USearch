@@ -481,14 +481,20 @@ typedef struct usearch_sequence_search_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Queries to resolve; the outputs have @c count rows of @c matches.wanted entries. */
+    /** Queries to resolve; the outputs have @c count rows of @c wanted entries. */
     size_t count;
 
     /** The queries, as bytes end to end around @c count + 1 offsets. */
     usearch_tape_view_t queries;
 
-    /** Where the run lands. */
-    usearch_matches_span_t matches;
+    /** Output for the run, inside @c arena. */
+    usearch_matches_view_t* matches;
+
+    /** Memory for @c matches, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
+    size_t wanted;
 
     /** The @b optional candidate-pool breadth the walk explores - the @c ef of the
      *  literature; zero derives. */
@@ -518,11 +524,10 @@ typedef struct usearch_sequence_search_t {
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
  *  the traversal rather than terminating it, so recall does not collapse at low selectivity - the
  *  walk crosses rejected regions to reach admitted ones behind them. The cost is that the
- *  predicate is called far more often than @c matches.wanted, once per scored candidate, so it
+ *  predicate is called far more often than @c wanted, once per scored candidate, so it
  *  belongs on the caller's fast path.
  *
- *  A cancelled search reports @c usearch_status_cancelled_k and leaves every output row
- *  indeterminate.
+ *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL.
  */
 USEARCH_EXPORT void usearch_sequence_search(usearch_sequence_search_t* arguments);
 
@@ -582,25 +587,22 @@ typedef struct usearch_sequence_get_t {
     /** The key whose entries are exported. */
     usearch_key_t key;
 
-    /** Output for the tape's bytes inside @c arena, entries end to end, never terminated. */
-    uint8_t** sequences;
-
-    /** Output for @c written + 1 offsets into @c sequences, inside @c arena. */
-    size_t** offsets;
+    /** Output for the tape inside @c arena: entries' bytes end to end, never terminated, around
+     *  @c written + 1 offsets. */
+    usearch_tape_view_t* sequences;
 
     /** The @b optional output for the entries written; zero when the key is absent. */
     size_t* written;
 
-    /** Memory for @c sequences and @c offsets: reused when it points to an arena, created when it
-     *  points to @c NULL. */
-    usearch_arena_t* arena;
+    /** Memory for @c sequences, rewound by the call. */
+    usearch_arena_t arena;
 } usearch_sequence_get_t;
 
 /**
  *  @brief Retrieves every sequence stored under one key as an Apache Arrow tape, in insertion order -
  *      one call, however many and however long they turn out to be.
  *
- *  An absent key leaves both outputs @c NULL.
+ *  An absent key leaves the tape's pointers @c NULL.
  */
 USEARCH_EXPORT void usearch_sequence_get(usearch_sequence_get_t* arguments);
 
@@ -682,23 +684,29 @@ typedef struct usearch_sequence_cursor_next_t {
     /** The cursor to advance. */
     usearch_sequence_cursor_t cursor;
 
-    /** Where the identities land; its capacity bounds the batch. */
-    usearch_keys_span_t keys;
+    /** Output for the identities, inside @c arena. */
+    usearch_keys_view_t* keys;
 
-    /** The @b optional output for up to @c keys.capacity borrowed views; @c NULL skips them. */
-    usearch_bytes_view_t* sequences;
+    /** The @b optional output for the entries as a tape inside @c arena, @c written + 1 offsets
+     *  around their bytes; @c NULL skips them. */
+    usearch_tape_view_t* sequences;
 
     /** Output for the entries written; zero when the snapshot is exhausted. */
     size_t* written;
+
+    /** Memory for @c keys and @c sequences, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** The upper bound on entries this pull writes. */
+    size_t wanted;
 } usearch_sequence_cursor_next_t;
 
 /**
- *  @brief Copies the next batch of entries out of the cursor.
+ *  @brief Copies the next batch of entries out of the cursor into @c arena.
  *  @retval usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
  *
- *  The views written into @c sequences borrow the index's own storage rather than copying, so
- *  they stay valid only until the cursor next advances or is freed. A caller keeping any of
- *  them past that point must copy the bytes out first.
+ *  The bytes are copied rather than borrowed from the index, so the batch stays valid until the
+ *  next call given the same arena, however the cursor moves meanwhile.
  */
 USEARCH_EXPORT void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments);
 

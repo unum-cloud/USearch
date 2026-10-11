@@ -5,12 +5,12 @@
  *  @brief Unit tests for the pure-C ABI of USearch (`usearch/dense_index.h`).
  *
  *  Exercises the dense surface through the ABI every binding consumes: initialization and
- *  reservation, batch `add`, `search`, `multiply` and `attend`, retrieval by key into an arena, the
- *  contract of `usearch_outcome_t`, and deferred calls on an executor. A blocking call's outcome is
- *  final once it returns; a deferred one is waited on or drained. Scoped to the verbs `src/`
- *  instantiates today - the header runs ahead of the implementation, and a smoke test that cannot
- *  link proves nothing. The harness is intentionally dependency-free so it can run in the same
- *  matrix as the C++ tests and on cross-compilation targets where only the C runtime is available.
+ *  reservation, batch `add`, `search`, `multiply` and `attend`, retrieval by key, the arenas every
+ *  output lands in, the contract of `usearch_outcome_t`, and deferred calls on an executor. A blocking call's outcome
+ * is final once it returns; a deferred one is waited on or drained. Scoped to the verbs `src/` instantiates today - the
+ * header runs ahead of the implementation, and a smoke test that cannot link proves nothing. The harness is
+ * intentionally dependency-free so it can run in the same matrix as the C++ tests and on cross-compilation targets
+ * where only the C runtime is available.
  *
  *  On startup we install a signal handler (see `install_crash_handlers`) that
  *  prints a native back-trace before re-raising, so CI logs pinpoint the
@@ -139,6 +139,16 @@ usearch_executor_t create_executor(size_t const deferred_limit) {
     return executor;
 }
 
+/** An arena placed where @p executor computes, or host pages for calls on this thread when it is NULL. */
+usearch_arena_t create_arena(usearch_executor_t const executor) {
+    usearch_outcome_t outcome = {0};
+    usearch_arena_t arena = NULL;
+    usearch_arena_init(&(usearch_arena_init_t) {.arena = &arena, .executor = executor, .outcome = &outcome});
+    expect(!outcome.message, outcome.message);
+    expect(arena != NULL, "Arena initialization returned no handle");
+    return arena;
+}
+
 /** Admits the keys whose integer identity is even. */
 usearch_admission_t admits_even(usearch_key_t key, void* state) {
     (void)state;
@@ -213,28 +223,25 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     expect(!outcome.message, outcome.message);
     expect_eq(description.size, collection_size, "A batch is all-or-nothing, so every row must be published");
 
-    // One match per query, so the output matrices are one column wide.
-    usearch_key_t* const found_keys = (usearch_key_t*)malloc(collection_size * sizeof(usearch_key_t));
-    usearch_distance_t* const found_distances = (usearch_distance_t*)malloc(collection_size *
-                                                                            sizeof(usearch_distance_t));
-    size_t* const counts = (size_t*)malloc(collection_size * sizeof(size_t));
-    expect(found_keys && found_distances && counts, "Failed to allocate outputs");
-
-    usearch_dense_search(
-        &(usearch_dense_search_t) {.index = index,
-                                   .executor = executor,
-                                   .outcome = &outcome,
-                                   .count = collection_size,
-                                   .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
-                                   .matches = {found_keys, sizeof(usearch_key_t), found_distances,
-                                               sizeof(usearch_distance_t), counts, collection_size, 1}});
+    // One match per query, so every row of the matches is one column wide.
+    usearch_arena_t const arena = create_arena(executor);
+    usearch_matches_view_t matches = {0};
+    usearch_dense_search(&(usearch_dense_search_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = collection_size,
+                                                    .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
+                                                    .matches = &matches,
+                                                    .arena = arena,
+                                                    .wanted = 1});
     expect(!outcome.message, outcome.message);
+    expect_eq(matches.columns, 1, "The matches must report the row width the call used");
 
     size_t recalled = 0;
     for (size_t row = 0; row != collection_size; ++row) {
-        expect(counts[row] != 0, "Every query must find something in a non-empty index");
+        expect(matches.counts[row] != 0, "Every query must find something in a non-empty index");
         usearch_key_t const expected = key_of(row);
-        recalled += memcmp(found_keys[row].bytes, expected.bytes, sizeof(expected.bytes)) == 0;
+        recalled += memcmp(matches.keys[row].bytes, expected.bytes, sizeof(expected.bytes)) == 0;
     }
     // Approximate search may miss, but a self-query missing itself often means a broken graph.
     expect(recalled * 10 >= collection_size * 9, "Self-recall collapsed below 90%");
@@ -244,27 +251,27 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
                                                     .outcome = &outcome,
                                                     .count = collection_size,
                                                     .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
-                                                    .matches = {found_keys, sizeof(usearch_key_t), found_distances,
-                                                                sizeof(usearch_distance_t), counts, collection_size, 1},
+                                                    .matches = &matches,
+                                                    .arena = arena,
+                                                    .wanted = 1,
                                                     .predicate = admits_even});
     expect(!outcome.message, outcome.message);
     for (size_t row = 0; row != collection_size; ++row)
-        expect(counts[row] == 0 || found_keys[row].bytes[15] % 2 == 0, "A predicate must narrow the matches");
+        expect(matches.counts[row] == 0 || matches.keys[row].bytes[15] % 2 == 0, "A predicate must narrow the matches");
 
-    // A zero `wanted` lands only the counts, so the key and distance outputs and their strides stay unset.
-    memset(counts, 0xFF, collection_size * sizeof(size_t));
+    // A zero `wanted` lands only the counts.
     usearch_dense_search(&(usearch_dense_search_t) {.index = index,
                                                     .executor = executor,
                                                     .outcome = &outcome,
                                                     .count = collection_size,
                                                     .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
-                                                    .matches = {.counts = counts, .capacity = collection_size}});
+                                                    .matches = &matches,
+                                                    .arena = arena});
     expect(!outcome.message, outcome.message);
-    for (size_t row = 0; row != collection_size; ++row) expect_eq(counts[row], 0, "A zero `wanted` lands zero counts");
+    for (size_t row = 0; row != collection_size; ++row)
+        expect_eq(matches.counts[row], 0, "A zero `wanted` lands zero counts");
 
-    free(counts);
-    free(found_distances);
-    free(found_keys);
+    usearch_arena_free(arena);
     free(keys);
     free(data);
     usearch_executor_free(executor);
@@ -377,24 +384,23 @@ void test_count_and_get(size_t const dimensions) {
     expect(!outcome.message, outcome.message);
     expect_eq(entries, 0, "The key was never inserted");
 
-    float* retrieved = NULL;
-    size_t written = 0, stride = 0, columns = 0;
-    usearch_arena_t arena = NULL;
+    usearch_rows_view_t vectors = {0};
+    size_t written = 0;
+    usearch_arena_t const arena = create_arena(executor);
     usearch_dense_get(&(usearch_dense_get_t) {.index = index,
                                               .executor = executor,
                                               .outcome = &outcome,
                                               .key = key_of(7),
-                                              .scalar = usearch_scalar_f32_k,
-                                              .vectors = (void**)&retrieved,
+                                              .vectors = &vectors,
                                               .written = &written,
-                                              .stride = &stride,
-                                              .columns = &columns,
-                                              .arena = &arena});
+                                              .arena = arena,
+                                              .outputs_scalar = usearch_scalar_f32_k});
     expect(!outcome.message, outcome.message);
     expect_eq(written, 1, "Retrieval must report the true entry count");
-    expect_eq(stride, row_bytes, "Retrieval must report the pitch of the rows it packed");
-    expect_eq(columns, dimensions, "Retrieval must report the width of the rows it packed");
-    expect(retrieved != NULL, "Retrieval must land the rows in the arena");
+    expect_eq(vectors.stride, row_bytes, "Retrieval must report the pitch of the rows it packed");
+    expect_eq(vectors.columns, dimensions, "Retrieval must report the width of the rows it packed");
+    expect(vectors.data != NULL, "Retrieval must land the rows in the arena");
+    float const* const retrieved = (float const*)vectors.data;
     for (size_t position = 0; position != dimensions; ++position)
         expect(fabsf(retrieved[position] - data[position]) <= fabsf(data[position]) / 128,
                "A bf16 index must return rows within its 7-bit mantissa");
@@ -437,6 +443,82 @@ void test_count_and_get(size_t const dimensions) {
     printf("Test: Count & Get - PASSED\n");
 }
 
+/** Arenas come from an executor or from none, and every verb lands its outputs in whichever one it
+ *  is given: a NULL arena is refused, one arena serves different verbs in turn, and a failed call
+ *  leaves its outputs NULL. Each call rewinds the arena, so the views of the call before it are
+ *  dead from then on; that is a contract on the caller, never read back here. */
+void test_arenas(size_t const dimensions) {
+    printf("Test: Arenas... %zu dimensions\n", dimensions);
+
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t const index = create_index(dimensions);
+    usearch_executor_t const executor = create_executor(0);
+    usearch_arena_t const placed = create_arena(executor);
+    usearch_arena_t const local = create_arena(NULL);
+    float* const data = create_vectors(2, dimensions);
+    usearch_key_t const keys[2] = {key_of(7), key_of(8)};
+    size_t const row_bytes = dimensions * sizeof(float);
+    usearch_dense_insert(&(usearch_dense_insert_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = 2,
+                                                    .keys = {keys, sizeof(usearch_key_t)},
+                                                    .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+
+    usearch_matches_view_t matches = {0};
+    usearch_dense_search_t search = {.index = index,
+                                     .executor = executor,
+                                     .outcome = &outcome,
+                                     .count = 1,
+                                     .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
+                                     .matches = &matches,
+                                     .wanted = 2};
+    usearch_dense_search(&search);
+    expect_eq(outcome.status, usearch_status_invalid_argument_k, "A NULL arena is refused, never created");
+    expect(matches.keys == NULL && matches.counts == NULL, "A refused call leaves its outputs NULL");
+
+    search.arena = placed;
+    usearch_dense_search(&search);
+    expect(!outcome.message, outcome.message);
+    expect(matches.counts[0] == 2 && memcmp(matches.keys[0].bytes, keys[0].bytes, sizeof(usearch_key_t)) == 0,
+           "A row must find itself first");
+
+    // The get rewinds the arena the search wrote into, so `matches` is dead from here on.
+    usearch_rows_view_t vectors = {0};
+    size_t written = 0;
+    usearch_dense_get_t get = {.index = index,
+                               .executor = executor,
+                               .outcome = &outcome,
+                               .key = key_of(8),
+                               .vectors = &vectors,
+                               .written = &written,
+                               .arena = placed,
+                               .outputs_scalar = usearch_scalar_f32_k};
+    usearch_dense_get(&get);
+    expect(!outcome.message, outcome.message);
+    expect(written == 1 && vectors.data != NULL, "Another verb must reuse the same arena");
+
+    get.outputs_scalar = usearch_scalar_unknown_k;
+    usearch_dense_get(&get);
+    expect_eq(outcome.status, usearch_status_unknown_kind_k, "A kind naming no scalar is refused");
+    expect(vectors.data == NULL && written == 0, "A failed call leaves its outputs NULL");
+
+    // An arena made without an executor serves calls on this thread.
+    search.executor = NULL, search.arena = local;
+    usearch_dense_search(&search);
+    expect(!outcome.message, outcome.message);
+    expect_eq(matches.counts[0], 2, "An arena of host pages serves a call on the calling thread");
+
+    usearch_arena_free(local);
+    usearch_arena_free(placed);
+    usearch_arena_free(NULL);
+    free(data);
+    usearch_executor_free(executor);
+    usearch_dense_free(index);
+    printf("Test: Arenas - PASSED\n");
+}
+
 /** A cursor or a stream keeps no hold on its index, so every pull names it, and a pull naming any
  *  other handle is refused before the walk moves. */
 void test_walks_name_their_index(size_t const dimensions) {
@@ -464,24 +546,30 @@ void test_walks_name_their_index(size_t const dimensions) {
     usearch_dense_cursor_t cursor = NULL;
     usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.cursor = &cursor, .index = index, .outcome = &outcome});
     expect(!outcome.message, outcome.message);
-    usearch_key_t walked[4] = {0};
+    usearch_arena_t const arena = create_arena(executor);
+    usearch_keys_view_t walked = {0};
     size_t written = 0;
     usearch_dense_cursor_next(&(usearch_dense_cursor_next_t) {.index = other,
                                                               .executor = executor,
                                                               .outcome = &outcome,
                                                               .cursor = cursor,
-                                                              .keys = {walked, sizeof(usearch_key_t), 4},
-                                                              .written = &written});
+                                                              .keys = &walked,
+                                                              .written = &written,
+                                                              .arena = arena,
+                                                              .wanted = 4});
     expect_eq(outcome.status, usearch_status_invalid_argument_k, "A cursor pull must name the index it was opened on");
-    expect_eq(written, 0, "A refused pull hands out nothing");
+    expect(written == 0 && walked.data == NULL, "A refused pull hands out nothing");
     usearch_dense_cursor_next(&(usearch_dense_cursor_next_t) {.index = index,
                                                               .executor = executor,
                                                               .outcome = &outcome,
                                                               .cursor = cursor,
-                                                              .keys = {walked, sizeof(usearch_key_t), 4},
-                                                              .written = &written});
+                                                              .keys = &walked,
+                                                              .written = &written,
+                                                              .arena = arena,
+                                                              .wanted = 4});
     expect(!outcome.message, outcome.message);
     expect_eq(written, 2, "A refused pull must leave the walk where it was");
+    expect(memcmp(walked.data[1].bytes, keys[1].bytes, sizeof(usearch_key_t)) == 0, "A pull lands keys in order");
     usearch_dense_cursor_free(cursor);
 
     usearch_dense_search_stream_t stream = NULL;
@@ -493,28 +581,29 @@ void test_walks_name_their_index(size_t const dimensions) {
     // An implementation that cannot stream yet says so, and has no stream to hold to the contract.
     if (outcome.status != usearch_status_unsupported_k) {
         expect(!outcome.message, outcome.message);
-        usearch_key_t found_keys[2] = {0};
-        usearch_distance_t found_distances[2] = {0};
-        size_t pulled = 0;
-        usearch_dense_search_stream_next(&(usearch_dense_search_stream_next_t) {
-            .index = other,
-            .executor = executor,
-            .outcome = &outcome,
-            .stream = stream,
-            .matches = {found_keys, sizeof(found_keys), found_distances, sizeof(found_distances), &pulled, 1, 2}});
+        usearch_matches_view_t pulled = {0};
+        usearch_dense_search_stream_next(&(usearch_dense_search_stream_next_t) {.index = other,
+                                                                                .executor = executor,
+                                                                                .outcome = &outcome,
+                                                                                .stream = stream,
+                                                                                .matches = &pulled,
+                                                                                .arena = arena,
+                                                                                .wanted = 2});
         expect_eq(outcome.status, usearch_status_invalid_argument_k,
                   "A stream pull must name the index it was opened on");
-        usearch_dense_search_stream_next(&(usearch_dense_search_stream_next_t) {
-            .index = index,
-            .executor = executor,
-            .outcome = &outcome,
-            .stream = stream,
-            .matches = {found_keys, sizeof(found_keys), found_distances, sizeof(found_distances), &pulled, 1, 2}});
+        usearch_dense_search_stream_next(&(usearch_dense_search_stream_next_t) {.index = index,
+                                                                                .executor = executor,
+                                                                                .outcome = &outcome,
+                                                                                .stream = stream,
+                                                                                .matches = &pulled,
+                                                                                .arena = arena,
+                                                                                .wanted = 2});
         expect(!outcome.message, outcome.message);
-        expect_eq(pulled, 2, "A refused pull must leave the stream where it was");
+        expect_eq(pulled.counts[0], 2, "A refused pull must leave the stream where it was");
         usearch_dense_search_stream_free(stream);
     }
 
+    usearch_arena_free(arena);
     free(data);
     usearch_executor_free(executor);
     usearch_dense_free(other);
@@ -559,30 +648,26 @@ void test_multiply_packed(void) {
                                    .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
     expect(!outcome.message, outcome.message);
 
-    size_t offsets[rows_count + 1];
-    usearch_key_t* columns = NULL;
-    usearch_distance_t* products = NULL;
-    usearch_arena_t arena = NULL;
+    usearch_matches_tape_view_t products = {0};
+    usearch_arena_t const arena = create_arena(executor);
     usearch_dense_multiply(
         &(usearch_dense_multiply_t) {.index = index,
                                      .executor = executor,
                                      .outcome = &outcome,
                                      .count = rows_count,
                                      .left = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
-                                     .offsets = offsets,
-                                     .keys = &columns,
-                                     .scores = &products,
-                                     .arena = &arena});
+                                     .products = &products,
+                                     .arena = arena});
     expect(!outcome.message, outcome.message);
 
     for (size_t row = 0; row != rows_count; ++row) {
-        expect(offsets[row + 1] > offsets[row], "Every walk scores at least its entry point");
-        for (size_t pair = offsets[row]; pair != offsets[row + 1]; ++pair) {
-            size_t const named = columns[pair].bytes[15];
+        expect(products.offsets[row + 1] > products.offsets[row], "Every walk scores at least its entry point");
+        for (size_t pair = products.offsets[row]; pair != products.offsets[row + 1]; ++pair) {
+            size_t const named = products.keys[pair].bytes[15];
             double exact = 0;
             for (size_t column = 0; column != dimensions; ++column)
                 exact += data[row * dimensions + column] * data[named * dimensions + column];
-            expect(products[pair] == exact, "A product must span every packed dimension");
+            expect(products.scores[pair] == exact, "A product must span every packed dimension");
         }
     }
 
@@ -592,21 +677,18 @@ void test_multiply_packed(void) {
                                      .outcome = &outcome,
                                      .count = 1,
                                      .left = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
-                                     .offsets = offsets,
-                                     .keys = &columns,
-                                     .scores = &products,
-                                     .arena = &arena});
+                                     .products = &products,
+                                     .arena = arena});
     expect(!outcome.message, outcome.message);
     usearch_dense_multiply(
         &(usearch_dense_multiply_t) {.index = index,
                                      .outcome = &outcome,
                                      .count = 1,
-                                     .left = {columns, sizeof(usearch_key_t), dimensions, usearch_scalar_u8_k},
-                                     .offsets = offsets,
-                                     .keys = &columns,
-                                     .scores = &products,
-                                     .arena = &arena});
+                                     .left = {products.keys, sizeof(usearch_key_t), dimensions, usearch_scalar_u8_k},
+                                     .products = &products,
+                                     .arena = arena});
     expect_eq(outcome.status, usearch_status_invalid_argument_k, "An input inside the rewound arena is refused");
+    expect(products.keys == NULL && products.offsets == NULL, "A refused call leaves its outputs NULL");
 
     usearch_arena_free(arena);
     usearch_executor_free(executor);
@@ -674,40 +756,45 @@ void test_attend(void) {
     // A logit scale of ln 2 turns the ones' dots into weights 1/8, 1/4, 1/2 and 1, and the negated
     // head's into the same weights in reverse, both summing to 1.875.
     float const queries[heads * dimensions] = {1, 1, 1, 1, -1, -1, -1, -1};
-    float attended[heads * dimensions];
+    usearch_rows_view_t outputs = {0};
     usearch_dense_softmax_state_t carry[heads];
     attend_values_t values = {table, tokens, dimensions, usearch_scalar_i8_k};
-    usearch_dense_attend_t attend = {
-        .index = index,
-        .executor = executor,
-        .outcome = &outcome,
-        .count = heads,
-        .queries = {queries, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
-        .value_lookup = attend_value_rows,
-        .value_lookup_state = &values,
-        .outputs = {attended, dimensions * sizeof(float), dimensions, heads, usearch_scalar_f32_k},
-        .carry = carry,
-        .score_scale = 0.69314718f};
+    usearch_arena_t const arena = create_arena(executor);
+    usearch_dense_attend_t attend = {.index = index,
+                                     .executor = executor,
+                                     .outcome = &outcome,
+                                     .count = heads,
+                                     .queries = {queries, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
+                                     .value_lookup = attend_value_rows,
+                                     .value_lookup_state = &values,
+                                     .outputs = &outputs,
+                                     .carry = carry,
+                                     .arena = arena,
+                                     .score_scale = 0.69314718f};
     for (size_t head_count = 1; head_count <= heads; ++head_count) {
         attend.head_count = head_count;
-        memset(attended, 0xFF, sizeof(attended));
         memset(carry, 0, sizeof(carry));
         usearch_dense_attend(&attend);
         expect(!outcome.message, outcome.message);
+        expect(outputs.scalar == usearch_scalar_f32_k && outputs.columns == dimensions,
+               "A zero output scalar lands the queries' own, as wide as the keys");
+        float const* const attended = (float const*)outputs.data;
+        size_t const pitch = outputs.stride / sizeof(float);
         expect(fabsf(carry[0].maximum_score - 3 * 0.69314718f) < 1e-5f && fabsf(carry[1].maximum_score) < 1e-5f,
                "Each head's carry must hold its own largest logit");
         expect(fabsf(carry[0].partition - 1.875f) < 1e-4f && fabsf(carry[1].partition - 1.875f) < 1e-4f,
                "Each head's carry must hold its partition over every key");
-        expect(fabsf(attended[0] - 4.25f / 1.875f) < 1e-4f && fabsf(attended[dimensions] - 1.375f / 1.875f) < 1e-4f,
+        expect(fabsf(attended[0] - 4.25f / 1.875f) < 1e-4f && fabsf(attended[pitch] - 1.375f / 1.875f) < 1e-4f,
                "Every key must weigh the value row it resolves to");
-        expect(fabsf(attended[1] - 1) < 1e-4f && fabsf(attended[dimensions + 1] - 1) < 1e-4f && attended[2] == 0 &&
-                   attended[dimensions + 3] == 0,
+        expect(fabsf(attended[1] - 1) < 1e-4f && fabsf(attended[pitch + 1] - 1) < 1e-4f && attended[2] == 0 &&
+                   attended[pitch + 3] == 0,
                "The attended rows must be normalized and as wide as the keys");
     }
 
     attend.head_count = 3;
     usearch_dense_attend(&attend);
     expect_eq(outcome.status, usearch_status_shape_mismatch_k, "Heads that do not divide the rows must refuse");
+    expect(outputs.data == NULL, "A refused call leaves its outputs NULL");
 
     attend.head_count = heads;
     values.rows = tokens - 1;
@@ -725,6 +812,7 @@ void test_attend(void) {
     usearch_dense_attend(&attend);
     expect_eq(outcome.status, usearch_status_config_mismatch_k, "A distance kind must refuse attention");
 
+    usearch_arena_free(arena);
     usearch_executor_free(executor);
     usearch_dense_free(angular);
     usearch_dense_free(index);
@@ -796,13 +884,20 @@ void test_library_probes(void) {
 
 enum { deferred_rows = 128, deferred_dimensions = 16, deferred_wanted = 4 };
 
-/** One search's outputs and outcome, which a deferred call borrows until final. */
+/** One search's outputs, the arena they land in, and its outcome, which a deferred call holds until final. */
 typedef struct search_outputs_t {
-    usearch_key_t keys[deferred_rows * deferred_wanted];
-    usearch_distance_t distances[deferred_rows * deferred_wanted];
-    size_t counts[deferred_rows];
+    usearch_matches_view_t matches;
+    usearch_arena_t arena;
     usearch_outcome_t outcome;
 } search_outputs_t;
+
+/** Whether two searches of every row landed the same matches. */
+bool same_matches(usearch_matches_view_t const* first, usearch_matches_view_t const* second) {
+    size_t const cells = deferred_rows * deferred_wanted;
+    return memcmp(first->keys, second->keys, cells * sizeof(usearch_key_t)) == 0 &&
+           memcmp(first->scores, second->scores, cells * sizeof(usearch_distance_t)) == 0 &&
+           memcmp(first->counts, second->counts, deferred_rows * sizeof(size_t)) == 0;
+}
 
 /** An index holding @p rows under keys equal to their positions, filled through @p executor. */
 usearch_dense_index_t create_filled_index(float const* rows, usearch_executor_t executor) {
@@ -831,8 +926,9 @@ void search_every_row(usearch_dense_index_t index, usearch_executor_t executor, 
         .completion = completion,
         .count = deferred_rows,
         .queries = {rows, deferred_dimensions * sizeof(float), deferred_dimensions, usearch_scalar_f32_k},
-        .matches = {outputs->keys, deferred_wanted * sizeof(usearch_key_t), outputs->distances,
-                    deferred_wanted * sizeof(usearch_distance_t), outputs->counts, deferred_rows, deferred_wanted}});
+        .matches = &outputs->matches,
+        .arena = outputs->arena,
+        .wanted = deferred_wanted});
 }
 
 /** Waits for every call submitted to @p executor. */
@@ -849,29 +945,25 @@ void test_deferred_search(void) {
     float* const rows = create_vectors(deferred_rows, deferred_dimensions);
     usearch_executor_t const executor = create_executor(0);
     usearch_dense_index_t const index = create_filled_index(rows, executor);
-    search_outputs_t* const blocking = (search_outputs_t*)calloc(1, sizeof(search_outputs_t));
-    search_outputs_t* const deferred = (search_outputs_t*)calloc(1, sizeof(search_outputs_t));
-    expect(blocking && deferred, "Failed to allocate outputs");
+    search_outputs_t blocking = {.arena = create_arena(executor)};
+    search_outputs_t deferred = {.arena = create_arena(executor)};
 
-    search_every_row(index, executor, usearch_completion_blocking_k, rows, blocking);
-    expect(!blocking->outcome.message, blocking->outcome.message);
+    search_every_row(index, executor, usearch_completion_blocking_k, rows, &blocking);
+    expect(!blocking.outcome.message, blocking.outcome.message);
 
-    search_every_row(index, executor, usearch_completion_deferred_k, rows, deferred);
-    expect_eq(deferred->outcome.status, usearch_status_deferred_k, "A submitted call is deferred until waited on");
-    expect_eq(usearch_outcome_wait(&deferred->outcome), usearch_status_success_k, "A waited search must finish");
-    expect(memcmp(blocking->keys, deferred->keys, sizeof(blocking->keys)) == 0 &&
-               memcmp(blocking->distances, deferred->distances, sizeof(blocking->distances)) == 0 &&
-               memcmp(blocking->counts, deferred->counts, sizeof(blocking->counts)) == 0,
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, &deferred);
+    expect_eq(deferred.outcome.status, usearch_status_deferred_k, "A submitted call is deferred until waited on");
+    expect_eq(usearch_outcome_wait(&deferred.outcome), usearch_status_success_k, "A waited search must finish");
+    expect(same_matches(&blocking.matches, &deferred.matches),
            "A deferred search must land the matches a blocking one does");
 
-    memset(deferred, 0, sizeof(search_outputs_t));
-    search_every_row(index, NULL, usearch_completion_deferred_k, rows, deferred);
-    expect_eq(deferred->outcome.status, usearch_status_success_k,
-              "A call without an executor is final when it returns");
-    expect(memcmp(blocking->keys, deferred->keys, sizeof(blocking->keys)) == 0, "Every receiver must agree");
+    // An arena made by an executor serves a call without one, since both compute on the host.
+    search_every_row(index, NULL, usearch_completion_deferred_k, rows, &deferred);
+    expect_eq(deferred.outcome.status, usearch_status_success_k, "A call without an executor is final when it returns");
+    expect(same_matches(&blocking.matches, &deferred.matches), "Every receiver must agree");
 
-    free(deferred);
-    free(blocking);
+    usearch_arena_free(deferred.arena);
+    usearch_arena_free(blocking.arena);
     usearch_dense_free(index);
     usearch_executor_free(executor);
     free(rows);
@@ -884,21 +976,21 @@ void test_deferred_limit(void) {
     float* const rows = create_vectors(deferred_rows, deferred_dimensions);
     usearch_executor_t const executor = create_executor(1);
     usearch_dense_index_t const index = create_filled_index(rows, executor);
-    search_outputs_t* const first = (search_outputs_t*)calloc(1, sizeof(search_outputs_t));
-    search_outputs_t* const second = (search_outputs_t*)calloc(1, sizeof(search_outputs_t));
-    expect(first && second, "Failed to allocate outputs");
+    search_outputs_t first = {.arena = create_arena(executor)};
+    search_outputs_t second = {.arena = create_arena(executor)};
 
-    search_every_row(index, executor, usearch_completion_deferred_k, rows, first);
-    search_every_row(index, executor, usearch_completion_deferred_k, rows, second);
-    expect_eq(second->outcome.status, usearch_status_contended_k, "A full deferred table must refuse at once");
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, &first);
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, &second);
+    expect_eq(second.outcome.status, usearch_status_contended_k, "A full deferred table must refuse at once");
     drain(executor);
-    expect_eq(first->outcome.status, usearch_status_success_k, "The earlier call must finish at the drain");
-    search_every_row(index, executor, usearch_completion_deferred_k, rows, second);
+    expect_eq(first.outcome.status, usearch_status_success_k, "The earlier call must finish at the drain");
+    // The refused submission let go of its arena, so the retry may claim it.
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, &second);
     drain(executor);
-    expect_eq(second->outcome.status, usearch_status_success_k, "A drained table takes a call again");
+    expect_eq(second.outcome.status, usearch_status_success_k, "A drained table takes a call again");
 
-    free(second);
-    free(first);
+    usearch_arena_free(second.arena);
+    usearch_arena_free(first.arena);
     usearch_dense_free(index);
     usearch_executor_free(executor);
     free(rows);
@@ -911,16 +1003,15 @@ void test_free_finishes_deferred(void) {
     float* const rows = create_vectors(deferred_rows, deferred_dimensions);
     usearch_executor_t const executor = create_executor(0);
     usearch_dense_index_t const index = create_filled_index(rows, executor);
-    search_outputs_t* const outputs = (search_outputs_t*)calloc(1, sizeof(search_outputs_t));
-    expect(outputs, "Failed to allocate outputs");
+    search_outputs_t outputs = {.arena = create_arena(executor)};
 
-    search_every_row(index, executor, usearch_completion_deferred_k, rows, outputs);
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, &outputs);
     usearch_dense_free(index);
-    expect_eq(outputs->outcome.status, usearch_status_success_k, "A free must finish the calls naming the handle");
+    expect_eq(outputs.outcome.status, usearch_status_success_k, "A free must finish the calls naming the handle");
     for (size_t row = 0; row != deferred_rows; ++row)
-        expect_eq(outputs->counts[row], deferred_wanted, "A call finished by a free lands its matches");
+        expect_eq(outputs.matches.counts[row], deferred_wanted, "A call finished by a free lands its matches");
 
-    free(outputs);
+    usearch_arena_free(outputs.arena);
     usearch_executor_free(executor);
     free(rows);
     printf("Test: Free Finishes Deferred - PASSED\n");
@@ -932,20 +1023,57 @@ void test_blocking_runs_after_earlier(void) {
     float* const rows = create_vectors(deferred_rows, deferred_dimensions);
     usearch_executor_t const executor = create_executor(0);
     usearch_dense_index_t const index = create_filled_index(rows, executor);
-    search_outputs_t* const earlier = (search_outputs_t*)calloc(1, sizeof(search_outputs_t));
-    search_outputs_t* const later = (search_outputs_t*)calloc(1, sizeof(search_outputs_t));
-    expect(earlier && later, "Failed to allocate outputs");
+    search_outputs_t earlier = {.arena = create_arena(executor)};
+    search_outputs_t later = {.arena = create_arena(executor)};
 
-    search_every_row(index, executor, usearch_completion_deferred_k, rows, earlier);
-    search_every_row(index, executor, usearch_completion_blocking_k, rows, later);
-    expect_eq(earlier->outcome.status, usearch_status_success_k, "An earlier deferred call must finish first");
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, &earlier);
+    search_every_row(index, executor, usearch_completion_blocking_k, rows, &later);
+    expect_eq(earlier.outcome.status, usearch_status_success_k, "An earlier deferred call must finish first");
 
-    free(later);
-    free(earlier);
+    usearch_arena_free(later.arena);
+    usearch_arena_free(earlier.arena);
     usearch_dense_free(index);
     usearch_executor_free(executor);
     free(rows);
     printf("Test: Blocking Runs After Earlier - PASSED\n");
+}
+
+/** A deferred call holds its arena from submission until final, so another call naming it meanwhile is
+ *  refused, and the arena serves again once the deferred call is waited on. */
+void test_deferred_holds_arena(void) {
+    printf("Test: Deferred Holds Arena\n");
+    float* const rows = create_vectors(deferred_rows, deferred_dimensions);
+    usearch_executor_t const executor = create_executor(0);
+    usearch_dense_index_t const index = create_filled_index(rows, executor);
+    search_outputs_t outputs = {.arena = create_arena(executor)};
+
+    search_every_row(index, executor, usearch_completion_deferred_k, rows, &outputs);
+    expect_eq(outputs.outcome.status, usearch_status_deferred_k, "A submitted call is deferred until waited on");
+
+    // Without an executor the get runs at once, draining nothing, so it meets the deferred call's hold.
+    usearch_outcome_t outcome = {0};
+    usearch_rows_view_t vectors = {0};
+    usearch_dense_get_t get = {.index = index,
+                               .outcome = &outcome,
+                               .key = key_of(3),
+                               .vectors = &vectors,
+                               .arena = outputs.arena,
+                               .outputs_scalar = usearch_scalar_f32_k};
+    usearch_dense_get(&get);
+    expect_eq(outcome.status, usearch_status_contended_k, "An arena a deferred call holds refuses another call");
+    expect(vectors.data == NULL, "A refused call leaves its outputs NULL");
+
+    expect_eq(usearch_outcome_wait(&outputs.outcome), usearch_status_success_k, "A waited search must finish");
+    expect_eq(outputs.matches.counts[0], deferred_wanted, "The deferred call lands its matches in the held arena");
+    usearch_dense_get(&get);
+    expect(!outcome.message, outcome.message);
+    expect(vectors.data != NULL, "A final call lets go of its arena");
+
+    usearch_arena_free(outputs.arena);
+    usearch_dense_free(index);
+    usearch_executor_free(executor);
+    free(rows);
+    printf("Test: Deferred Holds Arena - PASSED\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -969,6 +1097,7 @@ int main(int argc, char* argv[]) {
         }
     test_add_progress();
     test_count_and_get(dimension_counts[0]);
+    test_arenas(dimension_counts[0]);
     test_walks_name_their_index(dimension_counts[0]);
     test_multiply_packed();
     test_attend();
@@ -976,6 +1105,7 @@ int main(int argc, char* argv[]) {
     test_deferred_limit();
     test_free_finishes_deferred();
     test_blocking_runs_after_earlier();
+    test_deferred_holds_arena();
 
     printf("All tests passed!\n");
     return 0;

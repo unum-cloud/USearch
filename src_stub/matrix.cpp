@@ -17,12 +17,12 @@
  *  Only the two row-to-row kinds are implemented - Chamfer and Hausdorff - and the transport and
  *  superposition kinds are @b rejected rather than approximated by them, so a binding asking for
  *  Gromov-Wasserstein learns that here instead of receiving a plausible wrong number. Rows are
- *  stored as @c double and @c quantization is ignored, so the matrices a cursor borrows are
- *  @c f64 whatever the index froze. Refinement keeps no edges to re-select, so its @c changed is
- *  a constant zero rather than a settling signal, and a caller must not read it as one. A view
- *  copies its checkpoint rather than mapping it, and every VRAM lifecycle verb refuses. Traversal
- *  statistics are plausible fiction: shaped correctly, invented numerically. A checkpoint is a
- *  binary blob of this file's own memory image, readable by nothing else.
+ *  stored as @c double and @c quantization is ignored, so @c get and @c cursor_next convert from
+ *  @c f64 rather than from whatever the index froze. Refinement keeps no edges to re-select, so
+ *  its @c changed is a constant zero rather than a settling signal, and a caller must not read it
+ *  as one. A view copies its checkpoint rather than mapping it, and every VRAM lifecycle verb
+ *  refuses. Traversal statistics are plausible fiction: shaped correctly, invented numerically. A
+ *  checkpoint is a binary blob of this file's own memory image, readable by nothing else.
  */
 #include <cmath> // `std::sqrt`
 
@@ -157,14 +157,38 @@ static bool known_metric(usearch_matrix_metric_t metric) {
 }
 
 /** Widens entry @p entry of a tape into doubles, sized by its own row count. */
-static void read_matrix(usearch_tape_view_t tape, std::size_t entry, std::size_t columns, usearch_scalar_t scalar_kind,
-                        std::vector<double>& values) {
+static void read_matrix(usearch_tape_view_t tape, std::size_t entry, std::size_t columns, std::vector<double>& values) {
     std::size_t const first_row = tape.offsets[entry], row_count = tape.offsets[entry + 1] - first_row;
     values.resize(row_count * columns);
-    std::size_t const row_bytes = row_extent(scalar_kind, columns);
+    std::size_t const row_bytes = row_extent(tape.scalar, columns);
     for (std::size_t row = 0; row != row_count; ++row)
-        read_row(row_at<std::byte>(tape.data, first_row + row, row_bytes, row_bytes), scalar_kind,
+        read_row(row_at<std::byte>(tape.data, first_row + row, row_bytes, row_bytes), tape.scalar,
                  std::span<double>(values).subspan(row * columns, columns));
+}
+
+/** The output twin of @c read_matrix: lands the entries at @p rows into @p arena as one tape of
+ *  @p scalar_kind rows, writing @p tape only once every row landed, and answers false once
+ *  @p outcome records why not. */
+static bool land_entries(matrix_index_t const& index, std::span<std::size_t const> rows, usearch_scalar_t scalar_kind,
+                         usearch_arena_handle_t& arena, usearch_tape_view_t& tape, usearch_outcome_t* outcome) {
+    std::size_t const columns = index.options.columns;
+    std::size_t const row_bytes = row_extent(scalar_kind, columns);
+    std::size_t total_rows = 0;
+    for (std::size_t row : rows) total_rows += rows_of(index, index.entries[row]);
+    std::size_t* const offsets = carve<std::size_t>(arena, rows.size() + 1, outcome);
+    std::byte* const landing = offsets ? carve<std::byte>(arena, total_rows * row_bytes, outcome) : nullptr;
+    if (!landing) return false;
+    offsets[0] = 0;
+    for (std::size_t found = 0; found != rows.size(); ++found) {
+        matrix_entry_t const& entry = index.entries[rows[found]];
+        std::size_t const height = rows_of(index, entry);
+        for (std::size_t line = 0; line != height; ++line)
+            write_row(row_at<std::byte>(landing, offsets[found] + line, row_bytes, row_bytes), scalar_kind,
+                      std::span<double const>(entry.payload).subspan(line * columns, columns));
+        offsets[found + 1] = offsets[found] + height;
+    }
+    tape = {landing, offsets, scalar_kind};
+    return true;
 }
 
 /**
@@ -172,40 +196,29 @@ static void read_matrix(usearch_tape_view_t tape, std::size_t entry, std::size_t
  *  @return Queries answered, short of @p count exactly when the handler cancelled.
  */
 static std::size_t search_tape(matrix_index_t& index, usearch_tape_view_t queries, std::size_t count,
-                               usearch_scalar_t scalar_kind, usearch_matches_span_t const& matches,
-                               std::size_t expansion_factor, usearch_matrix_traversal_stats_t* stats,
-                               usearch_predicate_t predicate, void* predicate_state,
-                               usearch_progress_callback_t progress, void* progress_state) {
+                               ranked_landing_t const& landing, std::size_t expansion_factor,
+                               usearch_matrix_traversal_stats_t* stats, usearch_predicate_t predicate,
+                               void* predicate_state, usearch_progress_callback_t progress, void* progress_state) {
     std::size_t const rows = index.entries.size();
     std::size_t const columns = index.options.columns;
-    std::size_t const wanted = matches.wanted;
     if (stats && expansion_factor) stats->computed_distances += expansion_factor * count;
 
-    std::span<std::size_t> const counts {matches.counts, count};
-    std::fill(counts.begin(), counts.end(), 0);
     std::vector<double> query_matrix;
     std::vector<match_t> ranked;
-    for (std::size_t query = 0; query != counts.size(); ++query) {
-        read_matrix(queries, query, columns, scalar_kind, query_matrix);
+    for (std::size_t query = 0; query != count; ++query) {
+        read_matrix(queries, query, columns, query_matrix);
         rank<matrix_payload_t>(
             std::span<matrix_entry_t const>(index.entries).first(rows), admitting(predicate, predicate_state),
             [&](matrix_payload_t const& payload) { return distance(index, query_matrix, payload); }, ranked);
-        std::span<usearch_key_t> const keys_row = row_at<usearch_key_t>(matches.keys, query, matches.keys_stride,
-                                                                        wanted);
-        std::span<usearch_distance_t> const distances_row = row_at<usearch_distance_t>(matches.scores, query,
-                                                                                       matches.scores_stride, wanted);
-        std::size_t const found = std::min(wanted, ranked.size());
-        for (std::size_t match = 0; match != found; ++match)
-            keys_row[match] = ranked[match].key, distances_row[match] = ranked[match].distance;
-        counts[query] = found;
+        landing.write(query, ranked);
         if (stats) {
             stats->visited_members += rows;
             stats->computed_distances += ranked.size();
             stats->restarts += 1;
         }
-        if (!keep_going(progress, progress_state, query + 1, counts.size())) return query + 1;
+        if (!keep_going(progress, progress_state, query + 1, count)) return query + 1;
     }
-    return counts.size();
+    return count;
 }
 
 #pragma endregion Scoring
@@ -475,7 +488,7 @@ void usearch_matrix_insert(usearch_matrix_insert_t* arguments) {
     usearch_tape_view_t const& matrices = arguments->matrices;
     if (reject_read_only(index, outcome)) return;
     if (reject_unfrozen(index, outcome)) return;
-    if (reject_scalar(arguments->scalar, outcome)) return;
+    if (reject_scalar(matrices.scalar, outcome)) return;
     if (reject_keys(arguments->keys, outcome)) return;
     if (reject_tape(matrices, count, outcome)) return;
     // A frozen height is what lets row `i` of one entry pair with row `i` of another, so an
@@ -497,7 +510,7 @@ void usearch_matrix_insert(usearch_matrix_insert_t* arguments) {
     matrix_payload_t payload;
     std::size_t published = 0;
     for (std::size_t row = 0; row != count; ++row) {
-        read_matrix(matrices, row, index.options.columns, arguments->scalar, payload);
+        read_matrix(matrices, row, index.options.columns, payload);
         index.append(key_at(arguments->keys, row), payload);
         ++published;
         if (!keep_going(arguments->progress, arguments->progress_state, published, count)) break;
@@ -533,22 +546,27 @@ void usearch_matrix_refine(usearch_matrix_refine_t* arguments) {
 
 void usearch_matrix_search(usearch_matrix_search_t* arguments) {
     if (through_executor<usearch_matrix_search>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     reset(arguments->stats);
+    *arguments->matches = {};
     usearch_matrix_index_handle_t& index = *arguments->index;
     std::size_t const count = arguments->count;
+    usearch_tape_view_t const& queries = arguments->queries;
     if (reject_unfrozen(index, outcome)) return;
-    if (reject_scalar(arguments->scalar, outcome)) return;
+    if (reject_scalar(queries.scalar, outcome)) return;
     if (reject_metric(index, outcome)) return;
-    if (reject_tape(arguments->queries, count, outcome)) return;
-    if (reject_matches(arguments->matches, count, outcome)) return;
+    if (reject_tape(queries, count, outcome)) return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
+                                                      {queries.data, queries.offsets}, outcome);
+    ranked_landing_t landing {};
+    if (!arena || !carve_ranked(*arena, count, arguments->wanted, landing, outcome)) return;
 
     std::shared_lock readers(index.mutex);
-    std::size_t const answered = search_tape(index, arguments->queries, count, arguments->scalar, arguments->matches,
-                                             arguments->expansion_factor, arguments->stats, arguments->predicate,
-                                             arguments->predicate_state, arguments->progress,
-                                             arguments->progress_state);
-    reject_cancelled(answered, count, outcome);
+    std::size_t const answered = search_tape(index, queries, count, landing, arguments->expansion_factor,
+                                             arguments->stats, arguments->predicate, arguments->predicate_state,
+                                             arguments->progress, arguments->progress_state);
+    if (reject_cancelled(answered, count, outcome)) return;
+    *arguments->matches = landing.view();
 }
 
 void usearch_matrix_count(usearch_matrix_count_t* arguments) {
@@ -569,45 +587,18 @@ void usearch_matrix_count(usearch_matrix_count_t* arguments) {
 
 void usearch_matrix_get(usearch_matrix_get_t* arguments) {
     if (through_executor<usearch_matrix_get>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
-    *arguments->matrices = nullptr;
-    *arguments->offsets = nullptr;
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
+    *arguments->matrices = {};
     if (arguments->written) *arguments->written = 0;
-    if (arguments->stride) *arguments->stride = 0;
-    if (arguments->columns) *arguments->columns = 0;
     usearch_matrix_index_handle_t& index = *arguments->index;
-    usearch_scalar_t const scalar = arguments->scalar;
-    if (reject_scalar(scalar, outcome)) return;
+    if (reject_scalar(arguments->outputs_scalar, outcome)) return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
+    if (!arena) return;
     std::shared_lock readers(index.mutex);
-    std::size_t const columns = index.options.columns;
-    std::size_t const row_bytes = row_extent(scalar, columns);
     std::vector<std::size_t> const rows = rows_under(index, arguments->key);
     if (rows.empty()) return;
-    std::size_t total_rows = 0;
-    for (std::size_t row : rows) total_rows += rows_of(index, index.entries[row]);
-    // The offsets lead, so the rows behind them start on a word boundary whatever the kind.
-    std::size_t const offsets_bytes = (rows.size() + 1) * sizeof(std::size_t);
-    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, nullptr, outcome);
-    if (!arena) return;
-    std::unique_lock const held {arena->serving, std::adopt_lock};
-    std::byte* const landing = arena->memory.allocate(offsets_bytes + total_rows * row_bytes, default_alignment_k);
-    if (!landing) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
-    std::size_t* const offsets = reinterpret_cast<std::size_t*>(landing);
-    std::byte* const tape = landing + offsets_bytes;
-    offsets[0] = 0;
-    for (std::size_t found = 0; found != rows.size(); ++found) {
-        matrix_entry_t const& entry = index.entries[rows[found]];
-        std::size_t const height = rows_of(index, entry);
-        for (std::size_t line = 0; line != height; ++line)
-            write_row(row_at<std::byte>(tape, offsets[found] + line, row_bytes, row_bytes), scalar,
-                      std::span<double const>(entry.payload).subspan(line * columns, columns));
-        offsets[found + 1] = offsets[found] + height;
-    }
-    *arguments->matrices = tape;
-    *arguments->offsets = offsets;
+    if (!land_entries(index, rows, arguments->outputs_scalar, *arena, *arguments->matrices, outcome)) return;
     if (arguments->written) *arguments->written = rows.size();
-    if (arguments->stride) *arguments->stride = row_bytes;
-    if (arguments->columns) *arguments->columns = columns;
 }
 
 void usearch_matrix_merge(usearch_matrix_merge_t* arguments) {
@@ -656,32 +647,34 @@ void usearch_matrix_cursor_init(usearch_matrix_cursor_init_t* arguments) {
 
 void usearch_matrix_cursor_next(usearch_matrix_cursor_next_t* arguments) {
     if (through_executor<usearch_matrix_cursor_next>(arguments)) return;
-    deferred_outcome_t outcome(arguments->outcome);
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     *arguments->written = 0;
+    *arguments->keys = {};
+    usearch_tape_view_t* const matrices = arguments->matrices;
+    if (matrices) *matrices = {};
     usearch_matrix_cursor_handle_t& cursor = *arguments->cursor;
     if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
                   "The cursor was opened on another index", outcome))
         return;
     usearch_matrix_index_handle_t& index = *arguments->index;
-    usearch_keys_span_t const& keys = arguments->keys;
-    if (reject_keys_span(keys, outcome)) return;
-    if (reject_if(!arguments->row_counts, usearch_status_invalid_argument_k, "The row counts must name storage",
-                  outcome))
-        return;
+    if (matrices && reject_scalar(arguments->outputs_scalar, outcome)) return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
+    if (!arena) return;
     if (reject_if(cursor.pulling.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
                   "Another pull is still running on the cursor", outcome))
         return;
     std::shared_lock readers(index.mutex);
-    std::size_t const written = std::min(keys.capacity, cursor.limit - cursor.position);
-    for (std::size_t row = 0; row != written; ++row) {
-        matrix_entry_t const& entry = index.entries[cursor.position + row];
-        row_at<usearch_key_t>(keys.data, row, keys.stride, 1).front() = entry.key;
-        // Borrowed from the handle's own storage, so these are `f64` whatever the index froze.
-        if (arguments->matrices) arguments->matrices[row] = entry.payload.data();
-        arguments->row_counts[row] = rows_of(index, entry);
+    std::size_t const written = std::min(arguments->wanted, cursor.limit - cursor.position);
+    std::vector<std::size_t> rows(written);
+    for (std::size_t row = 0; row != written; ++row) rows[row] = cursor.position + row;
+    usearch_key_t* const keys = carve<usearch_key_t>(*arena, written, outcome);
+    // A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
+    if (keys && (!matrices || land_entries(index, rows, arguments->outputs_scalar, *arena, *matrices, outcome))) {
+        for (std::size_t row = 0; row != written; ++row) keys[row] = index.entries[rows[row]].key;
+        cursor.position += written;
+        *arguments->keys = {keys, sizeof(usearch_key_t)};
+        *arguments->written = written;
     }
-    cursor.position += written;
-    *arguments->written = written;
     cursor.pulling.clear(std::memory_order_release);
 }
 

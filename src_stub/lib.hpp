@@ -27,23 +27,24 @@
 #include <cstdint> // `std::uint8_t`
 #include <cstring> // `std::memcmp`
 
-#include <algorithm>     // `std::copy`, `std::sort`, `std::stable_sort`
-#include <array>         // `std::array`
-#include <atomic>        // `std::atomic_ref`
-#include <bit>           // `std::bit_cast`
-#include <functional>    // `std::function`
-#include <limits>        // `std::numeric_limits`
-#include <mutex>         // `std::mutex`, `std::unique_lock`
-#include <new>           // `std::bad_alloc`
-#include <optional>      // `std::optional`
-#include <shared_mutex>  // `std::shared_mutex`, `std::shared_lock`
-#include <span>          // `std::span`
-#include <string>        // `std::string`
-#include <string_view>   // `std::string_view` - a byte run read as text
-#include <type_traits>   // `std::is_nothrow_move_constructible_v`, `std::is_pointer_v`, `std::remove_pointer_t`
-#include <unordered_map> // `std::unordered_map`, `std::unordered_multimap`
-#include <variant>       // `std::variant`
-#include <vector>        // `std::vector`
+#include <algorithm>        // `std::copy`, `std::sort`, `std::stable_sort`, `std::min`
+#include <array>            // `std::array`
+#include <atomic>           // `std::atomic`, `std::atomic_ref`
+#include <bit>              // `std::bit_cast`
+#include <functional>       // `std::function`
+#include <initializer_list> // `std::initializer_list` - the inputs a call checks against its arena
+#include <limits>           // `std::numeric_limits`
+#include <mutex>            // `std::unique_lock`
+#include <new>              // `std::bad_alloc`
+#include <optional>         // `std::optional`
+#include <shared_mutex>     // `std::shared_mutex`, `std::shared_lock`
+#include <span>             // `std::span`
+#include <string>           // `std::string`
+#include <string_view>      // `std::string_view` - a byte run read as text
+#include <type_traits>      // `std::is_nothrow_move_constructible_v`, `std::is_pointer_v`, `std::remove_pointer_t`
+#include <unordered_map>    // `std::unordered_map`, `std::unordered_multimap`
+#include <variant>          // `std::variant`
+#include <vector>           // `std::vector`
 
 #include "usearch/usearch.h" // every argument structure a call copies
 
@@ -56,14 +57,17 @@ namespace us = unum::usearch;
 /** What @c usearch_arena_t owns: host memory that one call at a time rewinds and refills. */
 struct usearch_arena_handle_t {
     us::growing_arena<> memory {us::global_allocator};
-    std::mutex serving;
+
+    /** The outcome of the call holding the arena, from its claim or deferred submission until just
+     *  before its final status; null while free. Atomic, since a held call finishes on any thread. */
+    std::atomic<usearch_outcome_t const*> holder {nullptr};
 };
 
 namespace unum {
 namespace usearch {
 namespace stub {
 
-#pragma region Vocabulary
+#pragma region Vocabulary and Outcomes
 
 /**
  *  @brief The run read as text - a path or a spelling, which are bytes that happen to decode.
@@ -88,19 +92,10 @@ inline usearch_bytes_view_t as_bytes(bytes_view_t bytes) {
     return {reinterpret_cast<std::uint8_t const*>(bytes.data()), bytes.size()};
 }
 
-/** The writable twin, for the buffers a caller lends the engine to fill. */
-inline bytes_span_t as_writable_bytes(usearch_bytes_span_t bytes) {
-    return {reinterpret_cast<byte_t*>(bytes.data), bytes.length};
-}
-
 /** The read-only twin, for the buffers a caller lends the engine to read. */
 inline bytes_view_t as_readable_bytes(usearch_bytes_view_t bytes) {
     return {reinterpret_cast<byte_t const*>(bytes.data), bytes.length};
 }
-
-#pragma endregion Vocabulary
-
-#pragma region Outcomes
 
 /** Marks @p outcome deferred - every verb's first act, so a waiter never reads a stale status. */
 inline void propagate_deferred(usearch_outcome_t* outcome) {
@@ -121,18 +116,26 @@ inline void propagate_error(usearch_status_t status, usearch_outcome_t* outcome,
  *  @brief A verb's outcome while it runs: deferred from construction, and published once at
  *      destruction with whatever its guards recorded - success when none did.
  *
- *  Every verb declares it first, so it unwinds last: each lock the verb took is released and each
- *  output written before the final status lets a waiter free what the call named.
+ *  Every verb declares it first, so it unwinds last: each lock the verb took is released, each
+ *  output written, and the arena it was given let go before the final status lets a waiter free
+ *  or reuse what the call named.
  */
 class deferred_outcome_t {
     usearch_outcome_t* published_;
+    usearch_arena_t arena_;
     usearch_outcome_t recorded_ {usearch_status_success_k, nullptr};
 
   public:
-    explicit deferred_outcome_t(usearch_outcome_t* published) noexcept : published_(published) {
+    explicit deferred_outcome_t(usearch_outcome_t* published, usearch_arena_t arena = nullptr) noexcept
+        : published_(published), arena_(arena) {
         propagate_deferred(published_);
     }
-    ~deferred_outcome_t() noexcept { propagate_error(recorded_.status, published_, recorded_.message); }
+    ~deferred_outcome_t() noexcept {
+        // Only the holder lets go, so a call refused as contended leaves the other call's hold alone.
+        usearch_outcome_t const* holder = published_;
+        if (arena_) arena_->holder.compare_exchange_strong(holder, nullptr, std::memory_order_release);
+        propagate_error(recorded_.status, published_, recorded_.message);
+    }
     deferred_outcome_t(deferred_outcome_t const&) = delete;
     deferred_outcome_t& operator=(deferred_outcome_t const&) = delete;
 
@@ -154,7 +157,7 @@ void reset(stats_* stats) {
     if (stats) *stats = {};
 }
 
-#pragma endregion Outcomes
+#pragma endregion Vocabulary and Outcomes
 
 #pragma region Runs
 
@@ -166,30 +169,6 @@ inline bool reject_keys(usearch_keys_view_t keys, usearch_outcome_t* outcome) {
 /** The @p row -th key of a run, where a zero stride repeats the first. */
 inline usearch_key_t key_at(usearch_keys_view_t keys, std::size_t row) {
     return *reinterpret_cast<usearch_key_t const*>(reinterpret_cast<std::byte const*>(keys.data) + row * keys.stride);
-}
-
-/** The output twin of @c reject_keys, whose capacity bounds what a streaming verb writes. */
-inline bool reject_keys_span(usearch_keys_span_t keys, usearch_outcome_t* outcome) {
-    if (reject_if(!keys.data, usearch_status_invalid_argument_k, "The key run must name storage", outcome)) return true;
-    if (reject_if(keys.stride < sizeof(usearch_key_t), usearch_status_unsupported_layout_k,
-                  "The key stride is shorter than one key", outcome))
-        return true;
-    return reject_if(!keys.capacity, usearch_status_shape_mismatch_k, "A batch must hold at least one key", outcome);
-}
-
-/** Refuses a ranked output that names no storage, lands rows on one another, or holds fewer rows
- *  than the call's @p count. A zero @c wanted lands only the counts, so it needs no other storage. */
-inline bool reject_matches(usearch_matches_span_t const& matches, std::size_t count, usearch_outcome_t* outcome) {
-    bool const columns = matches.wanted != 0;
-    if (reject_if(!matches.counts || (columns && (!matches.keys || !matches.scores)), usearch_status_invalid_argument_k,
-                  "The matches span must name all three outputs", outcome))
-        return true;
-    if (reject_if(columns && (matches.keys_stride < matches.wanted * sizeof(usearch_key_t) ||
-                              matches.scores_stride < matches.wanted * sizeof(usearch_distance_t)),
-                  usearch_status_unsupported_layout_k, "A matches stride is shorter than its row", outcome))
-        return true;
-    return reject_if(matches.capacity < count, usearch_status_shape_mismatch_k,
-                     "The matches span holds fewer rows than the call's count", outcome);
 }
 
 /** Refuses a tape without its storage or offsets, or whose offsets ever decrease. */
@@ -268,8 +247,8 @@ struct call_t {
 };
 
 /** Holds a deferred @p call until its executor drains, or finishes it contended once that executor
- *  holds @c deferred_limit calls that are not yet final. */
-void submit_deferred(call_t call, usearch_outcome_t* outcome);
+ *  holds @c deferred_limit calls that are not yet final, answering whether it was held. */
+bool submit_deferred(call_t call, usearch_outcome_t* outcome);
 
 /** Runs a blocking @p call on the calling thread, listed while it runs so a free of a handle it uses waits. */
 void run_blocking(call_t call);
@@ -292,14 +271,21 @@ std::vector<void const*> handles_used_by(arguments_ const& arguments) {
     if constexpr (requires { arguments.index; }) add(arguments.index);
     if constexpr (requires { arguments.cursor; }) add(arguments.cursor);
     if constexpr (requires { arguments.stream; }) add(arguments.stream);
-    if constexpr (requires { arguments.arena; })
-        if (arguments.arena) handles.push_back(*arguments.arena);
+    if constexpr (requires { arguments.arena; }) add(arguments.arena);
     return handles;
 }
 
+/** Holds @p arena for the call whose outcome is @p call, answering whether that call holds it now:
+ *  it was free, or already that call's. A null arena holds nothing, left for the verb to refuse. */
+inline bool hold_arena(usearch_arena_t arena, usearch_outcome_t const* call) {
+    if (!arena) return true;
+    usearch_outcome_t const* holder = nullptr;
+    return arena->holder.compare_exchange_strong(holder, call, std::memory_order_acquire) || holder == call;
+}
+
 /** Every verb's first act. A call without an executor answers false and runs the verb's body in
- *  place. A call with one is copied without it and answers true: a deferred copy is held for the
- *  executor, a blocking one runs right after the deferred calls submitted before it. */
+ *  place. A call with one is copied without it and answers true: a deferred copy holds its arena
+ *  and is held for the executor, a blocking one runs right after the deferred calls submitted before it. */
 template <auto verb_, typename arguments_>
 bool through_executor(arguments_* arguments) {
     executor_t* const executor = arguments->executor;
@@ -311,27 +297,39 @@ bool through_executor(arguments_* arguments) {
     if (arguments->completion != usearch_completion_deferred_k)
         return drain(executor), run_blocking(std::move(call)), true;
     call.deferred_on = executor;
-    return submit_deferred(std::move(call), arguments->outcome), true;
+    usearch_arena_t arena = nullptr;
+    if constexpr (requires { arguments->arena; }) arena = arguments->arena;
+    if (!hold_arena(arena, arguments->outcome))
+        return propagate_error(usearch_status_contended_k, arguments->outcome, "The arena serves another call"), true;
+    // A refused submission never runs, so nothing else would let go of the arena it took.
+    usearch_outcome_t const* holder = arguments->outcome;
+    if (!submit_deferred(std::move(call), arguments->outcome) && arena)
+        arena->holder.compare_exchange_strong(holder, nullptr, std::memory_order_release);
+    return true;
 }
 
-/** Claims the caller's arena for one call: creates it behind a null pointee, else rewinds it, which
- *  frees the previous call's outputs, so an @p input still inside it is refused. The caller adopts
- *  @c serving into a lock declared after its outcome, so it is released before the final store. */
-inline usearch_arena_handle_t* claim_arena(usearch_arena_t* arena, void const* input, usearch_outcome_t* outcome) {
-    if (!arena)
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "The arena pointer must not be null"),
-               nullptr;
-    if (!*arena) *arena = new (std::nothrow) usearch_arena_handle_t {};
-    if (!*arena)
-        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the arena"), nullptr;
-    if (!(*arena)->serving.try_lock())
-        return propagate_error(usearch_status_contended_k, outcome, "The arena serves another call"), nullptr;
-    if (input && (*arena)->memory.contains(input))
-        return (*arena)->serving.unlock(),
-               propagate_error(usearch_status_invalid_argument_k, outcome, "An input lies inside the arena it rewinds"),
-               nullptr;
-    (*arena)->memory.clear();
-    return *arena;
+/** Claims @p arena for the call whose outcome is @p call and rewinds it, which frees the previous
+ *  call's outputs, so any of @p inputs still inside it is refused. A null arena is refused, never
+ *  created. The call's @c deferred_outcome_t lets go of it just before the final store. */
+inline usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcome_t const* call,
+                                           std::initializer_list<void const*> inputs, usearch_outcome_t* outcome) {
+    if (reject_if(!arena, usearch_status_invalid_argument_k, "The arena must not be null", outcome)) return nullptr;
+    if (reject_if(!hold_arena(arena, call), usearch_status_contended_k, "The arena serves another call", outcome))
+        return nullptr;
+    for (void const* input : inputs)
+        if (reject_if(input && arena->memory.contains(input), usearch_status_invalid_argument_k,
+                      "An input lies inside the arena it rewinds", outcome))
+            return nullptr;
+    arena->memory.clear();
+    return arena;
+}
+
+/** Carves @p count values of @c value_type_ out of a claimed @p arena; null once @p outcome records why not. */
+template <typename value_type_>
+value_type_* carve(usearch_arena_handle_t& arena, std::size_t count, usearch_outcome_t* outcome) {
+    std::byte* const landing = arena.memory.allocate(count * sizeof(value_type_), default_alignment_k);
+    if (!landing) propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
+    return reinterpret_cast<value_type_*>(landing);
 }
 
 #pragma endregion Executors and Arenas
@@ -351,6 +349,7 @@ inline std::size_t scalar_bytes(usearch_scalar_t kind) {
     case usearch_scalar_e2m3_k: return 1;
     case usearch_scalar_i8_k: return 1;
     case usearch_scalar_i4x2_k: return 1;
+    case usearch_scalar_i32_k: return 4;
     case usearch_scalar_u8_k: return 1;
     case usearch_scalar_u4x2_k: return 1;
     case usearch_scalar_u1x8_k: return 1;
@@ -584,6 +583,7 @@ inline void read_row(bytes_view_t row, usearch_scalar_t kind, std::span<double> 
     case usearch_scalar_f64_k: return widen_into<double>(row, values);
     case usearch_scalar_f32_k: return widen_into<float>(row, values);
     case usearch_scalar_i8_k: return widen_into<i8_t>(row, values);
+    case usearch_scalar_i32_k: return widen_into<i32_t>(row, values);
     case usearch_scalar_u8_k: return widen_into<u8_t>(row, values);
     case usearch_scalar_i4x2_k: return widen_nibbles<i8_t>(row, values);
     case usearch_scalar_u4x2_k: return widen_nibbles<u8_t>(row, values);
@@ -615,6 +615,7 @@ inline void write_row(bytes_span_t row, usearch_scalar_t kind, std::span<double 
     case usearch_scalar_f64_k: return narrow_from<double>(row, values);
     case usearch_scalar_f32_k: return narrow_from<float>(row, values);
     case usearch_scalar_i8_k: return narrow_from<i8_t>(row, values);
+    case usearch_scalar_i32_k: return narrow_from<i32_t>(row, values);
     case usearch_scalar_u8_k: return narrow_from<u8_t>(row, values);
     case usearch_scalar_i4x2_k: return narrow_nibbles<i8_t>(row, values);
     case usearch_scalar_u4x2_k: return narrow_nibbles<u8_t>(row, values);
@@ -671,9 +672,8 @@ inline uuid_t keyed(usearch_key_t const& key) noexcept { return std::bit_cast<uu
  *  @brief One handle's whole state. Readers hold @c mutex shared and writers exclusively, which
  *      is what keeps a search overlapping an insertion.
  *
- *  A cursor hands out views borrowing a payload's own bytes, and those survive a later insertion
- *  because reallocating @c entries moves each row without moving the buffer it owns - true only
- *  while the payload's move constructor stays @c noexcept, which the modality files assert.
+ *  Reallocating @c entries moves each row without copying the buffer it owns - true only while the
+ *  payload's move constructor stays @c noexcept, which the modality files assert.
  */
 template <typename payload_, typename options_>
 struct handle {
@@ -808,6 +808,34 @@ struct match_t {
     /** The key of the entry scored. */
     usearch_key_t key;
 };
+
+/** A ranked run's storage inside a claimed arena: @c wanted keys and scores per row, and a count per row. */
+struct ranked_landing_t {
+    usearch_key_t* keys;
+    usearch_distance_t* scores;
+    std::size_t* counts;
+    std::size_t wanted;
+
+    /** Lands the first @c wanted of @p ranked as row @p row, and their number as its count. */
+    void write(std::size_t row, std::span<match_t const> ranked) const noexcept {
+        std::size_t const found = std::min(wanted, ranked.size());
+        for (std::size_t match = 0; match != found; ++match)
+            keys[row * wanted + match] = ranked[match].key, scores[row * wanted + match] = ranked[match].distance;
+        counts[row] = found;
+    }
+
+    /** The view the call publishes once every row landed. */
+    usearch_matches_view_t view() const noexcept { return {keys, scores, counts, wanted}; }
+};
+
+/** Carves @p count rows of @p wanted matches out of a claimed @p arena; false once @p outcome records why not. */
+inline bool carve_ranked(usearch_arena_handle_t& arena, std::size_t count, std::size_t wanted,
+                         ranked_landing_t& landing, usearch_outcome_t* outcome) {
+    landing.wanted = wanted;
+    return (landing.keys = carve<usearch_key_t>(arena, count * wanted, outcome)) &&
+           (landing.scores = carve<usearch_distance_t>(arena, count * wanted, outcome)) &&
+           (landing.counts = carve<std::size_t>(arena, count, outcome));
+}
 
 /** Scores @p entries into @p ranked, nearest first. The sort is stable because every
  *  modality's docblock promises ties fall in insertion order. */

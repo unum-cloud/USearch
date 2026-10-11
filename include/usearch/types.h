@@ -52,28 +52,40 @@
  *
  *  @section types_memory Memory
  *
- *  Every byte has one owner, and each owner picks where its bytes live once, when it is created:
+ *  Two complications shape memory, and nothing else may: outputs whose size only the backend
+ *  knows, and memory a GPU should place itself. Arenas answer the first, executors the second, and
+ *  every binding stays one verb per operation rather than a twin per output style. Every byte has
+ *  one owner, and each owner picks where its bytes live once, when it is created:
  *
- *      Bytes                                Owner           Place chosen at
- *      Payload                              the index       its init, load or view
- *      Scratch and staging                  the executor    its creation, grown to a high-water mark
- *      Outputs whose size a call discovers  the arena       the executor of the call that created it
- *      Outputs whose size the inputs bound  the caller      the caller's own span
+ *  - Callers lend memory, never a way to allocate it. No allocator callback crosses the interface,
+ *    and every pointer a caller passes is an input, classified through the driver once per call.
+ *  - Payload belongs to the handle, placed by its constructor's residency, as @c usearch_dense_init_ram
+ *    places it in host memory.
+ *  - Scratch and staging belong to the executor, placed at its creation and grown to a high-water mark.
+ *  - Every output whose length scales with the call lands in an arena: matches, rows, products,
+ *    monoliths, offsets, cursor and stream batches, and attention outputs alike. Only fixed-size
+ *    reports, such as stats, descriptions, metadata and the scalar @c written and @c required, stay
+ *    caller fields, and so does state the caller carries between calls, like attention's @c carry.
+ *  - Executors make arenas. @c usearch_arena_init places one where its executor computes, host pages
+ *    on its memory domains or the memory of its GPU, decided once; a @c NULL executor makes host
+ *    pages for calls on the calling thread.
+ *  - A call rewinds the arena it is given, invalidating the previous call's outputs, and writes views
+ *    into it. Any verb may reuse any arena of its residency, one call at a time.
+ *  - Blocking calls borrow the arena; deferred calls hold it until final.
  *
- *  No allocator, alignment, or memory kind crosses the interface. The caller's own inputs and
- *  outputs are plain pointers the library classifies through the driver once per call, staging
- *  only to change a layout or to make pageable memory DMA-able. Outputs only a call can size land
- *  in a @c usearch_arena_t the caller passes back to the next call, which rewinds and refills it,
- *  so a steady loop allocates once. On a VRAM executor those outputs are device memory, which the
- *  caller copies out itself when it wants them elsewhere.
+ *  Outputs are views the call writes, so none carries a capacity or a stride for the caller to
+ *  pick, and an arena keeps its high-water mark, so a steady loop allocates once. The library
+ *  stages only to change a layout or to make pageable memory DMA-able. On a VRAM executor the
+ *  outputs are device memory, which the caller copies out itself when it wants them elsewhere.
  *
  *  @code{.c}
  *  usearch_arena_t arena = NULL;
+ *  usearch_arena_init(&(usearch_arena_init_t){.arena = &arena, .executor = executor, .outcome = &outcome});
  *  for (size_t i = 0; i != keys_count; ++i) {
- *      get.key = keys[i], get.vectors = &rows, get.written = &rows_count, get.arena = &arena;
+ *      get.key = keys[i], get.vectors = &rows, get.written = &rows_count, get.arena = arena;
  *      usearch_dense_get(&get);
  *      if (get.outcome->status != usearch_status_success_k) break; // blocking, so already final
- *      consume(rows, rows_count); // valid until the next call that takes `&arena`
+ *      consume(rows, rows_count); // valid until the next call given `arena`
  *  }
  *  usearch_arena_free(arena);
  *  @endcode
@@ -81,10 +93,10 @@
  *  @section types_shapes Shapes
  *
  *  A verb's @c count is its batch axis and nothing else. Inputs are views, where a zero stride
- *  repeats the first element as BLAS does; outputs are spans with a capacity, where a zero stride
- *  is refused, since every row would land in one place. Operands off the batch axis keep their
- *  own shape, and ragged inputs are tapes with Apache Arrow offsets: @c count + 1 of them
- *  around the elements laid end to end.
+ *  repeats the first element as BLAS does; outputs are views too, written packed into the arena,
+ *  so none carries a capacity. Operands off the batch axis keep their own shape, and ragged inputs
+ *  and outputs are tapes with Apache Arrow offsets: one more of them than entries, around the
+ *  elements laid end to end.
  */
 #ifndef UNUM_USEARCH_TYPES_H
 #define UNUM_USEARCH_TYPES_H
@@ -149,27 +161,12 @@ typedef struct usearch_bytes_view_t {
 } usearch_bytes_view_t;
 
 /**
- *  @brief A caller-owned, writable run of bytes - the mutable twin of @c usearch_bytes_view_t,
- *      carried by every verb that fills a buffer the caller allocated.
- *
- *  Pairing the pointer with its length in one argument is what makes a mismatched capacity
- *  unrepresentable, where two loose arguments only made it unlikely.
- */
-typedef struct usearch_bytes_span_t {
-
-    /** First byte of the run; text is bytes that happen to decode. */
-    uint8_t* data;
-
-    /** Bytes the run can hold, with no terminator assumed or written. */
-    size_t length;
-} usearch_bytes_span_t;
-
-/**
- *  @brief A borrowed, strided run of keys - how a batch names the identities it carries, one per
- *      row of the call's @c count.
+ *  @brief A strided run of keys - how a batch names the identities it carries, one per row of the
+ *      call's @c count, or one per entry a cursor pull wrote into its arena.
  *
  *  A zero @c stride repeats the first key for every row, which is how a batch of rows lands under
  *  one key without a caller materializing the copies.
+ *  An output's keys are packed, so the call writes one key's size as @c stride.
  */
 typedef struct usearch_keys_view_t {
 
@@ -179,25 +176,6 @@ typedef struct usearch_keys_view_t {
     /** Bytes between consecutive keys; zero repeats the first. */
     size_t stride;
 } usearch_keys_view_t;
-
-/**
- *  @brief A caller-owned, writable run of keys - the mutable twin of @c usearch_keys_view_t,
- *      carried by every verb that fills a key array the caller allocated.
- *
- *  Its capacity is the only bound a streaming verb has on how much it may write, so the pointer
- *  and that bound travel as one argument rather than as two a caller could contradict.
- */
-typedef struct usearch_keys_span_t {
-
-    /** First key of the run. */
-    usearch_key_t* data;
-
-    /** Bytes between consecutive keys; zero is refused, since every key would land in one place. */
-    size_t stride;
-
-    /** Keys the run can hold. */
-    size_t capacity;
-} usearch_keys_span_t;
 
 /**
  *  @brief What went wrong, in a vocabulary shared by the engine and by every binding that
@@ -219,7 +197,7 @@ typedef enum usearch_status_t {
     /** An allocation or reservation could not be satisfied. */
     usearch_status_out_of_memory_k = 2,
 
-    /** Dimensionality, row counts, or output capacity disagree. */
+    /** Dimensionality or row counts disagree. */
     usearch_status_shape_mismatch_k = 3,
 
     /** A stride or packing the engine cannot traverse. */
@@ -326,6 +304,10 @@ typedef enum usearch_scalar_t {
      *  nibble and odd ones in the high. */
     usearch_scalar_i4x2_k = 11,
 
+    /** 32-bit signed integer spanning ±2.15e9, every code a number - the Earth-fixed centimetres a
+     *  geospatial cursor exports. */
+    usearch_scalar_i32_k = 12,
+
     /** 8-bit unsigned integer spanning 0 to 255, every code a number. */
     usearch_scalar_u8_k = 20,
 
@@ -340,11 +322,13 @@ typedef enum usearch_scalar_t {
 } usearch_scalar_t;
 
 /**
- *  @brief A borrowed run of rows along a call's batch axis - the input currency of every verb
- *      whose rows share one width.
+ *  @brief A run of rows along a call's batch axis - the currency of every verb whose rows share one
+ *      width, borrowed from the caller as an input and written packed into an arena as an output.
  *
- *  The call's @c count is the row count, and the call checks @c columns against the frozen
+ *  An input's row count is the call's @c count, and the call checks @c columns against the frozen
  *  geometry. A zero @c stride repeats the first row.
+ *  An output's rows are packed: the call writes one row's bytes as @c stride, and @c columns and
+ *  @c scalar as it wrote them, so neither a repeat nor a geometry check applies.
  */
 typedef struct usearch_rows_view_t {
 
@@ -354,32 +338,12 @@ typedef struct usearch_rows_view_t {
     /** Bytes between the starts of consecutive rows; zero repeats the first row. */
     size_t stride;
 
-    /** Values per row the caller laid out; one that differs from the frozen geometry is refused. */
+    /** Values per row; an input's must match the frozen geometry, or it is refused. */
     size_t columns;
 
     /** The scalar type the rows hold, converted on the way in where it differs. */
     usearch_scalar_t scalar;
 } usearch_rows_view_t;
-
-/** The writable twin of @c usearch_rows_view_t, carried by every verb that lands rows of a
- *  known width in memory the caller allocated. */
-typedef struct usearch_rows_span_t {
-
-    /** Base pointer of the first row. */
-    void* data;
-
-    /** Bytes between the starts of consecutive rows; zero is refused. */
-    size_t stride;
-
-    /** Values per row the caller laid out; one that differs from the frozen geometry is refused. */
-    size_t columns;
-
-    /** Rows the span can hold; fewer than the call writes is refused. */
-    size_t capacity;
-
-    /** The scalar type to write, converted on the way out where it differs. */
-    usearch_scalar_t scalar;
-} usearch_rows_span_t;
 
 /**
  *  @brief A borrowed strided matrix off the batch axis - an operand whose rows and columns are its
@@ -407,8 +371,8 @@ typedef struct usearch_matrix_view_t {
 } usearch_matrix_view_t;
 
 /**
- *  @brief A borrowed ragged batch as Apache Arrow lays one out: elements end to end, and
- *      @c count + 1 offsets around them.
+ *  @brief A ragged batch as Apache Arrow lays one out: elements end to end, and one more offset
+ *      than entries around them, borrowed as an input or written into an arena as an output.
  *
  *  Entry @c i spans elements @c offsets[i] up to @c offsets[i+1], so the last offset closes the
  *  final entry. What an element is belongs to the modality: a byte of a sequence, a row of a
@@ -419,46 +383,61 @@ typedef struct usearch_tape_view_t {
     /** First element of the tape, which every offset counts from. */
     void const* data;
 
-    /** The call's @c count + 1 non-decreasing offsets, in elements. */
+    /** Entries + 1 non-decreasing offsets, in elements: the call's @c count + 1 for an input, its
+     *  @c written + 1 for an output. */
     size_t const* offsets;
+
+    /** The scalar type the elements hold: @c u8 for sequences, @c f64 degrees for geospatial inputs
+     *  and @c i32 Earth-fixed centimetres for their cursor, and any kind for matrix rows, converted on
+     *  the way in where it differs from storage. */
+    usearch_scalar_t scalar;
 } usearch_tape_view_t;
 
 /**
- *  @brief Where a ranked run lands - three caller-owned outputs of @c count rows by @c wanted
- *      columns, where @c count is the call's own.
+ *  @brief A ranked run a call wrote into its arena - @c count rows of @c columns packed columns,
+ *      where @c count is the call's own.
  *
  *  Carries no query count of its own: the call already fixed it, and a second copy is a second
- *  thing to disagree. The strides stay because a caller may land results inside a wider host
- *  matrix, which @c wanted alone cannot express, and a stride shorter than its row is refused.
- *  A zero @c wanted lands only the counts, ignoring @c keys, @c scores and both strides.
+ *  thing to disagree. Row @c i holds @c counts[i] matches from @c keys[i · columns] and
+ *  @c scores[i · columns] on, and the columns past them are unwritten.
  *
  *  What @c scores hold is each verb's own: a search writes distances nearest-first, whichever kind
  *  the index froze - the inner kind as @c 1 @c - @c dot - while the linear-algebra verbs write
  *  similarities, as their own docs state.
  */
-typedef struct usearch_matches_span_t {
+typedef struct usearch_matches_view_t {
 
-    /** First row of the key output. */
-    usearch_key_t* keys;
+    /** First row of the keys, @c columns per row. */
+    usearch_key_t const* keys;
 
-    /** Bytes between the starts of consecutive key rows. */
-    size_t keys_stride;
+    /** First row of the scores, positionally paired with @c keys. */
+    usearch_distance_t const* scores;
 
-    /** First row of the score output, positionally paired with @c keys. */
-    usearch_distance_t* scores;
+    /** Matches written per row, one entry per row. */
+    size_t const* counts;
 
-    /** Bytes between the starts of consecutive score rows. */
-    size_t scores_stride;
+    /** Columns per row the call wrote, at most its @c wanted - the "k" in "kANN". */
+    size_t columns;
+} usearch_matches_view_t;
 
-    /** Matches written per row - one entry per row, never strided. */
-    size_t* counts;
+/**
+ *  @brief A ragged run of matches a call wrote into its arena, for verbs whose rows hold as many
+ *      matches as their walks found: keys and scores end to end, and one more offset than rows.
+ *
+ *  Row @c i spans @c offsets[i] up to @c offsets[i+1] in both arrays, so the last offset is the
+ *  total. Scores follow the same per-verb meaning as in @c usearch_matches_view_t.
+ */
+typedef struct usearch_matches_tape_view_t {
 
-    /** Rows the outputs can hold; fewer than the call's @c count is refused. */
-    size_t capacity;
+    /** Every row's keys, end to end. */
+    usearch_key_t const* keys;
 
-    /** Columns per row, and the upper bound on matches - the "k" in "kANN"; zero lands only the counts. */
-    size_t wanted;
-} usearch_matches_span_t;
+    /** Every row's scores, positionally paired with @c keys. */
+    usearch_distance_t const* scores;
+
+    /** The call's @c count + 1 non-decreasing offsets into @c keys and @c scores. */
+    size_t const* offsets;
+} usearch_matches_tape_view_t;
 
 /** The CPU families USearch ships tuned variants for - dispatch reports its pick in
  *  this vocabulary, and callers may pin one. Each class bundles the compute features,
@@ -693,38 +672,6 @@ typedef enum usearch_completion_t {
 } usearch_completion_t;
 
 /**
- *  @brief Memory the library allocates for the outputs only a call can size, reused across calls.
- *      @ref types_memory
- *
- *  A call given a pointer to a @c NULL arena creates one there. Given an existing one, it rewinds
- *  it, which invalidates every output of the previous call, and refills it, growing only when the
- *  new outputs outsize everything it held, so a steady loop allocates once. The memory lives where
- *  the executor that created the arena computes: host pages on its memory domains, or the memory
- *  of its GPU, and a GPU that runs out reports @c usearch_status_out_of_memory_k rather than falling
- *  back to the host. To keep one call's outputs alive past the next call, pass the next call
- *  another arena.
- *
- *  - A call whose inputs point into the arena it is about to rewind reports
- *    @c usearch_status_invalid_argument_k.
- *  - An arena serves one call at a time; a second call naming it finishes @c usearch_status_contended_k.
- *  - A call on an executor of another residency or device than the arena's creator reports
- *    @c usearch_status_device_k.
- *  - A call that fails, is cancelled, or has nothing to report leaves its outputs @c NULL.
- */
-typedef struct usearch_arena_handle_t* usearch_arena_t;
-
-/**
- *  @brief Frees the arena and every output in it; @c NULL is safe, and it cannot fail, so takes no
- *      outcome.
- *  @param[inout] arena The arena to be freed; invalid afterwards.
- *
- *  Waits until every deferred call naming the handle is final.
- *  Free it once the caller's own device work on its outputs has finished; device memory returns in
- *  order on the stream that last used it.
- */
-USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena);
-
-/**
  *  @brief Everything a call needs to run but an index does not own: the host threads or device
  *      streams that advance the work, the traversal scratch each of them walks with, and the
  *      pinned bounce buffer staging passes through.
@@ -754,8 +701,8 @@ USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena);
  *
  *  Every verb accepts a @c NULL executor and then runs on the caller's thread, blocking whatever
  *  its @c completion says: RAM work runs single-threaded, VRAM work runs on the handle's device and
- *  default stream and synchronizes before returning, and NVMe reads are synchronous. An arena such
- *  a call creates lives where the handle's residency computes.
+ *  default stream and synchronizes before returning, and NVMe reads are synchronous. Its outputs
+ *  land in any arena of the handle's residency.
  *
  *  The library stages only to change layout on the side that computes, or to make pageable memory
  *  DMA-able, and never routes device bytes through the host:
@@ -765,9 +712,7 @@ USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena);
  *      Device inputs needing padding or a cast       a device-to-device copy or a cast kernel
  *      Pinned or managed host inputs                 a direct asynchronous upload
  *      Pageable host inputs                          the pinned bounce buffer, then an upload
- *      Device outputs                                the kernel writes them directly
- *      Pageable host outputs                         a download into the bounce buffer, then a
- *                                                    copy in the host callback before the increment
+ *      Outputs in an arena on the executor's device  the kernel writes them directly
  */
 typedef struct usearch_executor_handle_t* usearch_executor_t;
 
@@ -935,9 +880,64 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments);
  *  Waits until every deferred call naming the handle is final.
  *  Waits until every call running on the executor, blocking or deferred, is final.
  *  Never call it from inside a progress handler, a predicate, or a host function the executor
- *  runs, since it would drain itself.
+ *  runs, since it would drain itself. Arenas it made stay valid, each keeping its memory until freed.
  */
 USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor);
+
+/**
+ *  @brief Memory the library writes every output whose length scales with a call into, reused
+ *      across calls. @ref types_memory
+ *
+ *  Made by @c usearch_arena_init where its executor computes: host pages on its memory domains, or
+ *  the memory of its GPU, and a GPU that runs out reports @c usearch_status_out_of_memory_k rather
+ *  than falling back to the host. Each call given the arena rewinds it, which invalidates every
+ *  output of the previous call, and refills it, growing only when the new outputs outsize
+ *  everything it held, so a steady loop allocates once. To keep one call's outputs alive past the
+ *  next call, pass the next call another arena.
+ *
+ *  - A @c NULL arena is refused with @c usearch_status_invalid_argument_k.
+ *  - A call whose inputs point into the arena it is about to rewind reports
+ *    @c usearch_status_invalid_argument_k.
+ *  - An arena serves one call at a time; a second call naming it finishes @c usearch_status_contended_k.
+ *  - A call on another residency or device than the arena's reports @c usearch_status_device_k.
+ *  - A blocking call borrows the arena until it returns, and a deferred one holds it until final.
+ *  - A call that fails, is cancelled, or has nothing to report leaves its outputs @c NULL.
+ */
+typedef struct usearch_arena_handle_t* usearch_arena_t;
+
+/** The arguments of @c usearch_arena_init. */
+typedef struct usearch_arena_init_t {
+
+    /** Output for the new arena. */
+    usearch_arena_t* arena;
+
+    /** The executor whose calls the arena serves, which decides where it lives; @c NULL serves calls
+     *  on the calling thread from host pages. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+} usearch_arena_init_t;
+
+/**
+ *  @brief Creates an empty arena where @c executor computes, so its placement is decided once and
+ *      GPU code keeps its outputs on the device without asking.
+ *
+ *  Nothing is allocated until a call writes into it. An arena may outlive the executor that made
+ *  it: it keeps its own memory, and the device that memory lives on, until it is freed.
+ */
+USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments);
+
+/**
+ *  @brief Frees the arena and every output in it; @c NULL is safe, and it cannot fail, so takes no
+ *      outcome.
+ *  @param[inout] arena The arena to be freed; invalid afterwards.
+ *
+ *  Waits until every deferred call naming the handle is final.
+ *  Free it once the caller's own device work on its outputs has finished; device memory returns in
+ *  order on the stream that last used it.
+ */
+USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena);
 
 /**
  *  @brief The canonical lowercase, dash-separated spelling of each closed set's enumerators,

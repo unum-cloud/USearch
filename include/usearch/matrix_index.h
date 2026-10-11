@@ -473,9 +473,6 @@ typedef struct usearch_matrix_insert_t {
     /** The matrices, as rows end to end around @c count + 1 row offsets. @ref matrix_index_tape */
     usearch_tape_view_t matrices;
 
-    /** The incoming row scalar type, converted when it differs from storage. */
-    usearch_scalar_t scalar;
-
     /** The @b optional candidate-pool breadth the build walk explores; zero derives. */
     size_t expansion_factor;
 
@@ -571,17 +568,20 @@ typedef struct usearch_matrix_search_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Query matrices to resolve; the outputs have @c count rows of @c matches.wanted entries. */
+    /** Query matrices to resolve; the outputs have @c count rows of @c wanted entries. */
     size_t count;
 
     /** The query matrices, as rows end to end around @c count + 1 row offsets. */
     usearch_tape_view_t queries;
 
-    /** The scalar type of the query rows. */
-    usearch_scalar_t scalar;
+    /** Output for the run, inside @c arena. */
+    usearch_matches_view_t* matches;
 
-    /** Where the run lands. */
-    usearch_matches_span_t matches;
+    /** Memory for @c matches, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** Columns per row, and the upper bound on matches - the "k" in "kANN". */
+    size_t wanted;
 
     /** The @b optional candidate-pool breadth the walk explores; zero derives. */
     size_t expansion_factor;
@@ -613,8 +613,7 @@ typedef struct usearch_matrix_search_t {
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
  *  the traversal, so recall does not collapse at low selectivity.
  *
- *  A cancelled search reports @c usearch_status_cancelled_k and leaves every output row
- *  indeterminate.
+ *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL.
  */
 USEARCH_EXPORT void usearch_matrix_search(usearch_matrix_search_t* arguments);
 
@@ -674,34 +673,25 @@ typedef struct usearch_matrix_get_t {
     /** The key whose entries are exported. */
     usearch_key_t key;
 
-    /** The scalar type to export as, converted from storage where it differs. */
-    usearch_scalar_t scalar;
-
-    /** Output for the tape's rows inside @c arena, every entry's rows end to end. */
-    void** matrices;
-
-    /** Output for @c written + 1 row offsets into @c matrices, inside @c arena. */
-    size_t** offsets;
+    /** Output for the tape inside @c arena: every entry's rows end to end, packed at the frozen
+     *  width in @c outputs_scalar, around @c written + 1 row offsets. */
+    usearch_tape_view_t* matrices;
 
     /** The @b optional output for the entries written; zero when the key is absent. */
     size_t* written;
 
-    /** The @b optional output for the bytes between consecutive rows of @c matrices. */
-    size_t* stride;
+    /** Memory for @c matrices, rewound by the call. */
+    usearch_arena_t arena;
 
-    /** The @b optional output for the values in each row the call landed. */
-    size_t* columns;
-
-    /** Memory for @c matrices and @c offsets: reused when it points to an arena, created when it
-     *  points to @c NULL. */
-    usearch_arena_t* arena;
+    /** The scalar type to export as, converted from storage where it differs. */
+    usearch_scalar_t outputs_scalar;
 } usearch_matrix_get_t;
 
 /**
  *  @brief Retrieves every matrix stored under one key as an Apache Arrow tape, in insertion order -
  *      one call, however many and however tall they turn out to be.
  *
- *  An absent key leaves both outputs @c NULL.
+ *  An absent key leaves the tape's pointers @c NULL.
  */
 USEARCH_EXPORT void usearch_matrix_get(usearch_matrix_get_t* arguments);
 
@@ -783,25 +773,32 @@ typedef struct usearch_matrix_cursor_next_t {
     /** The cursor to advance. */
     usearch_matrix_cursor_t cursor;
 
-    /** Where the identities land; its capacity bounds the batch. */
-    usearch_keys_span_t keys;
+    /** Output for the identities, inside @c arena. */
+    usearch_keys_view_t* keys;
 
-    /** The @b optional output for up to @c keys.capacity borrowed base pointers; @c NULL skips them. */
-    void const** matrices;
-
-    /** Output for up to @c keys.capacity row counts. */
-    size_t* row_counts;
+    /** The @b optional output for the entries as a tape inside @c arena, rows packed at the frozen
+     *  width around @c written + 1 row offsets; @c NULL skips them. */
+    usearch_tape_view_t* matrices;
 
     /** Output for the entries written; zero when the snapshot is exhausted. */
     size_t* written;
+
+    /** Memory for @c keys and @c matrices, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** The upper bound on entries this pull writes. */
+    size_t wanted;
+
+    /** The scalar type to export @c matrices as, converted from storage where it differs. */
+    usearch_scalar_t outputs_scalar;
 } usearch_matrix_cursor_next_t;
 
 /**
- *  @brief Copies the next batch of entries out of the cursor.
+ *  @brief Copies the next batch of entries out of the cursor into @c arena.
  *  @retval usearch_status_invalid_argument_k @c index is not the handle the cursor was opened on.
  *
- *  The borrowed pointers reach into the index's storage and stay valid until the cursor moves or
- *  closes.
+ *  The rows are copied rather than borrowed from the index, so the batch stays valid until the
+ *  next call given the same arena, however the cursor moves meanwhile.
  */
 USEARCH_EXPORT void usearch_matrix_cursor_next(usearch_matrix_cursor_next_t* arguments);
 

@@ -50,16 +50,17 @@ struct calls_t {
 
 static calls_t calls;
 
-void submit_deferred(call_t call, usearch_outcome_t* outcome) {
+bool submit_deferred(call_t call, usearch_outcome_t* outcome) {
     executor_t const* const executor = call.deferred_on;
     auto const in_slot_of_executor = [=](call_t const& listed) { return listed.deferred_on == executor; };
     std::lock_guard<std::mutex> lock(calls.guard);
     std::size_t const slots_taken = std::count_if(calls.held.begin(), calls.held.end(), in_slot_of_executor) +
                                     std::count_if(calls.running.begin(), calls.running.end(), in_slot_of_executor);
     if (slots_taken == executor->deferred_limit)
-        return propagate_error(usearch_status_contended_k, outcome, "The deferred table is full");
+        return propagate_error(usearch_status_contended_k, outcome, "The deferred table is full"), false;
     propagate_deferred(outcome);
     calls.held.push_back(std::move(call));
+    return true;
 }
 
 /** Runs a call already listed as running, then delists it and wakes every waiter. */
@@ -139,6 +140,15 @@ usearch_status_t usearch_outcome_wait(usearch_outcome_t const* outcome) {
     for (; current == usearch_status_deferred_k; current = status.load(std::memory_order_acquire))
         status.wait(usearch_status_deferred_k, std::memory_order_acquire);
     return current;
+}
+
+void usearch_arena_init(usearch_arena_init_t* arguments) {
+    deferred_outcome_t outcome(arguments->outcome);
+    *arguments->arena = nullptr;
+    // Every stand-in executor computes on the host, so every arena is host pages whoever made it.
+    usearch_arena_handle_t* const arena = new (std::nothrow) usearch_arena_handle_t {};
+    if (reject_if(!arena, usearch_status_out_of_memory_k, "The arena could not be allocated", outcome)) return;
+    *arguments->arena = arena;
 }
 
 void usearch_arena_free(usearch_arena_t arena) {
@@ -235,6 +245,7 @@ char const* usearch_scalar_name(usearch_scalar_t scalar_kind) {
     case usearch_scalar_e2m3_k: return "e2m3";
     case usearch_scalar_i8_k: return "i8";
     case usearch_scalar_i4x2_k: return "i4x2";
+    case usearch_scalar_i32_k: return "i32";
     case usearch_scalar_u8_k: return "u8";
     case usearch_scalar_u4x2_k: return "u4x2";
     case usearch_scalar_u1x8_k: return "u1x8";
@@ -248,8 +259,8 @@ usearch_scalar_t usearch_scalar_from_name(usearch_bytes_view_t name) {
     usearch_scalar_t const kinds[] = {
         usearch_scalar_f64_k,  usearch_scalar_f32_k,  usearch_scalar_bf16_k, usearch_scalar_f16_k,
         usearch_scalar_e5m2_k, usearch_scalar_e4m3_k, usearch_scalar_e3m2_k, usearch_scalar_e2m3_k,
-        usearch_scalar_i8_k,   usearch_scalar_i4x2_k, usearch_scalar_u8_k,   usearch_scalar_u4x2_k,
-        usearch_scalar_u1x8_k,
+        usearch_scalar_i8_k,   usearch_scalar_i4x2_k, usearch_scalar_i32_k,  usearch_scalar_u8_k,
+        usearch_scalar_u4x2_k, usearch_scalar_u1x8_k,
     };
     for (usearch_scalar_t const scalar_kind : kinds)
         if (named(name, usearch_scalar_name(scalar_kind))) return scalar_kind;

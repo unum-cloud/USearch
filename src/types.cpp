@@ -20,10 +20,8 @@
 
 #include <numkong/numkong.h>
 
-namespace {
-
 /** Rendered once on first use, so the pointer the C interface hands out stays valid. */
-char const* rendered_version() {
+static char const* rendered_version() {
     static char rendered[32] = {0};
     if (!rendered[0])
         std::snprintf(rendered, sizeof(rendered), "%d.%d.%d", USEARCH_VERSION_MAJOR, USEARCH_VERSION_MINOR,
@@ -32,7 +30,7 @@ char const* rendered_version() {
 }
 
 /** The kernel families a capability mask can name, newest class last. */
-constexpr struct {
+static constexpr struct {
     nk_capability_t bit;
     char const* name;
 } capability_names_k[] = {
@@ -46,7 +44,7 @@ constexpr struct {
 };
 
 /** Composes @p mask into @p rendered as a comma-separated list, once. */
-char const* render_capabilities(char* rendered, size_t capacity, nk_capability_t mask) {
+static char const* render_capabilities(char* rendered, size_t capacity, nk_capability_t mask) {
     if (rendered[0]) return rendered;
     char* cursor = rendered;
     char* const sentinel = rendered + capacity - 1;
@@ -60,11 +58,9 @@ char const* render_capabilities(char* rendered, size_t capacity, nk_capability_t
 }
 
 /** @brief Whether @p name spells @p spelling exactly, with no terminator assumed on either side. */
-bool named(usearch_bytes_view_t name, char const* spelling) noexcept {
+static bool named(usearch_bytes_view_t name, char const* spelling) noexcept {
     return std::string_view {reinterpret_cast<char const*>(name.data), name.length} == spelling;
 }
-
-} // namespace
 
 extern "C" {
 
@@ -132,6 +128,7 @@ USEARCH_EXPORT char const* usearch_scalar_name(usearch_scalar_t scalar_kind) {
     case usearch_scalar_e2m3_k: return "e2m3";
     case usearch_scalar_i8_k: return "i8";
     case usearch_scalar_i4x2_k: return "i4x2";
+    case usearch_scalar_i32_k: return "i32";
     case usearch_scalar_u8_k: return "u8";
     case usearch_scalar_u4x2_k: return "u4x2";
     case usearch_scalar_u1x8_k: return "u1x8";
@@ -145,8 +142,8 @@ USEARCH_EXPORT usearch_scalar_t usearch_scalar_from_name(usearch_bytes_view_t na
     usearch_scalar_t const kinds[] = {
         usearch_scalar_f64_k,  usearch_scalar_f32_k,  usearch_scalar_bf16_k, usearch_scalar_f16_k,
         usearch_scalar_e5m2_k, usearch_scalar_e4m3_k, usearch_scalar_e3m2_k, usearch_scalar_e2m3_k,
-        usearch_scalar_i8_k,   usearch_scalar_i4x2_k, usearch_scalar_u8_k,   usearch_scalar_u4x2_k,
-        usearch_scalar_u1x8_k,
+        usearch_scalar_i8_k,   usearch_scalar_i4x2_k, usearch_scalar_i32_k,  usearch_scalar_u8_k,
+        usearch_scalar_u4x2_k, usearch_scalar_u1x8_k,
     };
     for (usearch_scalar_t const scalar_kind : kinds)
         if (named(name, usearch_scalar_name(scalar_kind))) return scalar_kind;

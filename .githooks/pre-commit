@@ -246,6 +246,46 @@ check_rust_modules() {
         "$file declares a module no file backs - move its items to the file root or into their own file:"
 }
 
+# A verb's argument struct reads in the order the call works: what it reads, what it writes, the arena
+# those outputs land in, then the knobs that shape the work and the handlers that observe it. So the
+# output views and `written`/`required` form one block right before `arena`, a plain `scalar` describes an
+# input and never follows it, and an `outputs_*` knob never precedes it.
+check_verb_field_order() {
+    local misordered
+    misordered=$(< "$staged_blob" awk '
+        { sub(/\/\*.*\*\//, "") }
+        /\/\*/ { commenting = 1 }
+        commenting { if (/\*\//) commenting = 0; next }
+        /^typedef struct usearch_[a-z0-9_]+_t \{/ { opened = NR; count = 0; next }
+        opened && /^\} usearch_[a-z0-9_]+_t;/ {
+            name = $2; sub(/;$/, "", name); arena = 0
+            for (field = 1; field <= count; ++field) if (names[field] == "arena" && types[field] == "usearch_arena_t") arena = field
+            if (arena) {
+                block = arena
+                while (block > 1 && output[block - 1]) block--
+                for (field = 1; field <= count; ++field) {
+                    if (output[field] && field < block)
+                        printf "line %d: %s.%s lands apart from the outputs before arena\n", opened, name, names[field]
+                    if (field > arena && (output[field] || names[field] == "scalar"))
+                        printf "line %d: %s.%s follows arena\n", opened, name, names[field]
+                    if (field < arena && names[field] ~ /^outputs_/)
+                        printf "line %d: %s.%s precedes arena\n", opened, name, names[field]
+                }
+            }
+            opened = 0; next
+        }
+        opened && /;[[:space:]]*$/ {
+            line = $0; sub(/;[[:space:]]*$/, "", line); sub(/^[[:space:]]+/, "", line)
+            field_name = line; sub(/.*[[:space:]*]/, "", field_name)
+            field_type = line; sub(/[A-Za-z0-9_]+$/, "", field_type); sub(/[[:space:]*]+$/, "", field_type)
+            pointer = line ~ /\*[[:space:]]*[A-Za-z0-9_]+$/
+            ++count; names[count] = field_name; types[count] = field_type
+            output[count] = pointer && (field_type ~ /_view_t$/ || field_type == "size_t")
+        }')
+    [ -z "$misordered" ] || fail "$misordered" \
+        "$file orders a verb's fields out of reads, writes, arena, knobs and observers:"
+}
+
 # Tests assert what a value is, not what its rendering happens to contain. A substring of a repr or a
 # message passes on a wrong value that spells the fragment and breaks on a harmless rewording; compare the
 # whole repr, the fields, the exception type or the very object raised instead.
@@ -1375,6 +1415,9 @@ judge_path() {
         check_harness_namespace
         ;;&
     # The shipped library: public headers under include/ and the ABI sources under src/.
+    include/*.h)
+        check_verb_field_order
+        ;;&
     include/*.h | include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh)
         check_stl_dynamic_containers
         check_boolean_parameters

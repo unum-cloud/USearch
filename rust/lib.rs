@@ -17,8 +17,10 @@
 //! index.reserve(1_000_000)?;
 //!
 //! let executor = Executor::for_ram(&[], 0, 0)?;
+//! let mut arena = Arena::new_in(&executor)?;
 //! let slab = vec![0.0f32; 768];
 //! index.on(&executor).insert([Key::from(42u64)], &rows(&slab, 768)?)?;
+//! let matches = index.on(&executor).search(&rows(&slab, 768)?, 10, &mut arena)?;
 //! # Ok::<(), usearch::Error>(())
 //! ```
 
@@ -27,8 +29,8 @@ mod types; // mirrors include/usearch/types.h
 
 // The C mirror items are public within their modules, so only these names leave the crate.
 pub use dense_index::{
-    DenseAttend, DenseAttendConfig, DenseCount, DenseCursor, DenseDescribe, DenseGet, DenseHealth, DenseIndex,
-    DenseIndexDescription, DenseInsert, DenseInsertConfig, DenseLoadRamBufferConfig, DenseLoadRamConfig,
+    DenseAttend, DenseAttendConfig, DenseBatch, DenseCount, DenseCursor, DenseDescribe, DenseGet, DenseHealth,
+    DenseIndex, DenseIndexDescription, DenseInsert, DenseInsertConfig, DenseLoadRamBufferConfig, DenseLoadRamConfig,
     DenseLoadVramBufferConfig, DenseLoadVramConfig, DenseMaxsim, DenseMaxsimConfig, DenseMerge, DenseMergeConfig,
     DenseMetadata, DenseMetric, DenseMultiply, DenseMultiplyConfig, DenseOptions, DenseProducts, DenseReachability,
     DenseRefine, DenseRefineConfig, DenseReserve, DenseSave, DenseSaveBuffer, DenseSaveBufferConfig, DenseSaveConfig,
@@ -36,7 +38,7 @@ pub use dense_index::{
     DenseTraversalStats, DenseVectors, DenseVerbs, DenseViewNvmeConfig, Monolith, ValueLookup,
 };
 pub use types::{
-    capabilities_available, capabilities_compiled, rows, rows_mut, version, Arena, Blocking, Deferred, Deferring,
-    Distance, Element, Error, Executor, Key, Match, Matches, MatchesRow, MatchesSpan, Mood, On, Predicate,
-    ProgressCallback, Result, Scalar, Status, Wait,
+    capabilities_available, capabilities_compiled, rows, version, Arena, Blocking, Deferred, Deferring, Distance,
+    Element, Error, Executor, Key, Matches, MatchesRow, Mood, On, Predicate, ProgressCallback, Residency, Result,
+    Scalar, Status, Wait,
 };
