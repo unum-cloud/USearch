@@ -5,8 +5,8 @@
  *  @brief The device bodies every dense VRAM index compiled by NVCC or HIP-Clang shares: the views,
  *      the greedy walk, the diversity selection, the back-linker, insertion and refinement.
  *
- *  Every body here is templated on a quads kit, which names its vendor's lanes policy as
- *  @c kit_::lanes_t; see @c vram_queue.cuh for what a lanes policy provides. The host classes, the
+ *  Every body here is templated on a quads kit, which names its vendor's warp policy as
+ *  @c kit_::warp_t; see @c vram_queue.cuh for what a warp policy provides. The host classes, the
  *  kernels that launch these bodies, the launch bounds, the attention fold and the reachability
  *  audits stay in each vendor's own @c vram_<vendor>_index file, beside the kits in
  *  @c vram_<vendor>_metric - the split @c utilities/vram_device.hpp keeps beside its vendor twins.
@@ -28,7 +28,7 @@ namespace usearch {
  *  over the @b candidate axis, never the dimension axis. */
 inline constexpr u32_t dense_vram_max_gathers_in_flight_k = 8;
 
-/** Floor of the lanes policy's sleep while retrying a held slot-0 lock. */
+/** Floor of the warp policy's sleep while retrying a held slot-0 lock. */
 inline constexpr u32_t lock_backoff_floor_ns_k = 512;
 
 /** Jitter mask added to that floor, so convoying warps spread their retries. */
@@ -44,7 +44,7 @@ inline constexpr u32_t back_link_lock_attempts_k = 256;
  *  bounding bootstrap lock contention. */
 inline constexpr u32_t admission_ramp_floor_k = 32;
 
-/** What a vendor's quads kit binds: one storage dtype on one GPU generation, with the lanes policy
+/** What a vendor's quads kit binds: one storage dtype on one GPU generation, with the warp policy
  *  its walks shuffle through. */
 template <typename kit_>
 concept dense_vram_quads_kit = requires(
@@ -52,7 +52,7 @@ concept dense_vram_quads_kit = requires(
     typename kit_::norms_accumulator_t norms_accumulator, typename kit_::norms_t norms, dense_distance_t ranked,
     nk_kernel_kind_t kernel) {
     typename kit_::scalar_t;
-    typename kit_::lanes_t;
+    typename kit_::warp_t;
     { kit_::capability_k } -> std::convertible_to<nk_capability_t>;
     { kit_::accumulate_dot(fragment, fragment, dot) } -> std::same_as<typename kit_::dot_t>;
     { kit_::accumulate_weighted(fragment, f32_t {}, weighted) } -> std::same_as<typename kit_::weighted_t>;
@@ -64,31 +64,31 @@ concept dense_vram_quads_kit = requires(
 
 /** Generic cross-lane reduction: folds sub-warp partials of width @p lanes_per_row, a warp-uniform
  *  power of two, down to the leader lane. One tree serves every kit. */
-template <typename lanes_type_, typename dot_type_>
+template <typename warp_type_, typename dot_type_>
 __device__ __forceinline__ dot_type_ dense_vram_reduce(dot_type_ partial, u32_t lanes_per_row) noexcept {
     for (u32_t offset = lanes_per_row / 2; offset; offset >>= 1)
-        partial += lanes_type_::shuffle_down(partial, offset, static_cast<int>(lanes_per_row));
+        partial += warp_type_::shuffle_down(partial, offset, static_cast<int>(lanes_per_row));
     return partial;
 }
 
 /** Full-warp reduction of a two-component norms accumulator - {sum,sumsq} for the
  *  arithmetic kits, {popcount,popcount} for the binary ones. */
-template <typename lanes_type_, typename pair_type_>
+template <typename warp_type_, typename pair_type_>
 __device__ __forceinline__ pair_type_ dense_vram_reduce_norms(pair_type_ partial) noexcept {
 #pragma unroll
-    for (u32_t offset = lanes_type_::width_k / 2; offset; offset >>= 1) {
-        partial.x += lanes_type_::shuffle_down(partial.x, offset);
-        partial.y += lanes_type_::shuffle_down(partial.y, offset);
+    for (u32_t offset = warp_type_::width_k / 2; offset; offset >>= 1) {
+        partial.x += warp_type_::shuffle_down(partial.x, offset);
+        partial.y += warp_type_::shuffle_down(partial.y, offset);
     }
     return partial;
 }
 
 /** Rebroadcasts lane 0's reduced norms to every lane - values that feed
  *  lane-divergent control flow must be warp-uniform. */
-template <typename lanes_type_, typename pair_type_>
+template <typename warp_type_, typename pair_type_>
 __device__ __forceinline__ pair_type_ dense_vram_broadcast_norms(pair_type_ reduced) noexcept {
-    reduced.x = lanes_type_::shuffle(reduced.x, 0);
-    reduced.y = lanes_type_::shuffle(reduced.y, 0);
+    reduced.x = warp_type_::shuffle(reduced.x, 0);
+    reduced.y = warp_type_::shuffle(reduced.y, 0);
     return reduced;
 }
 
@@ -163,16 +163,16 @@ struct dense_vram_planes_view {
 
 /**
  *  @brief Typed view over one node's neighbors - the only legal way to touch slots that
- *      concurrent warps may be reading, over the lanes policy's device-scope atomics.
+ *      concurrent warps may be reading, over the warp policy's device-scope atomics.
  *
  *  Slot 0 is the combined lock and first-neighbor word: the all-ones sentinel while unpublished
  *  or locked, the node's own ID when published empty, otherwise the first neighbor. Acquisition
  *  is bounded - spinning against a descheduled owner warp would livelock - and an unlinked
  *  neighbor is the telemetered cost.
  */
-template <typename lanes_type_>
+template <typename warp_type_>
 struct dense_vram_neighbors_ref {
-    using lanes_t = lanes_type_;
+    using warp_t = warp_type_;
     u32_t* row_; // Non-const even for readers: device atomic references cannot bind const words pre-P3323.
     u32_t capacity_;
 
@@ -180,25 +180,25 @@ struct dense_vram_neighbors_ref {
 
     /** Warp-ballot mask of the lanes whose index is a valid neighbor slot - a collective read
      *  reports the sentinel on the lanes outside it. */
-    __device__ __forceinline__ typename lanes_t::mask_t lane_mask() const noexcept {
-        return capacity_ >= lanes_t::width_k ? lanes_t::all_k : lanes_t::below(static_cast<int>(capacity_));
+    __device__ __forceinline__ typename warp_t::mask_t lane_mask() const noexcept {
+        return capacity_ >= warp_t::width_k ? warp_t::all_k : warp_t::below(static_cast<int>(capacity_));
     }
 
     /** Acquire read of slot @p index, pairing with the lock holder's release fence so an ID read
      *  here comes with its node's payload; slot 0 belongs to @c peek_first. */
     __device__ __forceinline__ dense_node_id_t load_slot(u32_t index) const noexcept {
-        return lanes_t::load_acquire(row_[index]);
+        return warp_t::load_acquire(row_[index]);
     }
 
     /** Relaxed atomic write of slot @p index - only for the unpublished owner or the current lock
      *  holder. */
     __device__ __forceinline__ void store_slot(u32_t index, dense_node_id_t value) const noexcept {
-        lanes_t::store_relaxed(row_[index], value);
+        warp_t::store_relaxed(row_[index], value);
     }
 
     /** Acquire-load of the lock word: the sentinel means unpublished or locked, any other value is
      *  the first neighbor ID with the last unlocker's writes visible. */
-    __device__ __forceinline__ dense_node_id_t peek_first() const noexcept { return lanes_t::load_acquire(row_[0]); }
+    __device__ __forceinline__ dense_node_id_t peek_first() const noexcept { return warp_t::load_acquire(row_[0]); }
 
     /** Bounded lock acquisition: exchanges the sentinel in with acquire order, up to
      *  @p max_attempts times with jittered backoff; an exchange that receives the sentinel
@@ -206,9 +206,9 @@ struct dense_vram_neighbors_ref {
     __device__ __forceinline__ dense_node_id_t lock_if_free(u32_t max_attempts,
                                                             splitmix64_t& random_generator) const noexcept {
         for (u32_t attempt = 0; attempt != max_attempts; ++attempt) {
-            dense_node_id_t const first_value = lanes_t::exchange_acquire(row_[0], dense_node_id_unknown_k);
+            dense_node_id_t const first_value = warp_t::exchange_acquire(row_[0], dense_node_id_unknown_k);
             if (first_value != dense_node_id_unknown_k) return first_value;
-            lanes_t::sleep(
+            warp_t::sleep(
                 static_cast<u32_t>(lock_backoff_floor_ns_k + (random_generator() & lock_backoff_jitter_mask_k)));
         }
         return dense_node_id_unknown_k;
@@ -217,7 +217,7 @@ struct dense_vram_neighbors_ref {
     /** Release-stores @p first_value into slot 0 - unlocking and simultaneously (re)publishing the
      *  edited neighbors to every future acquiring reader. */
     __device__ __forceinline__ void unlock(dense_node_id_t first_value) const noexcept {
-        lanes_t::store_release(row_[0], first_value);
+        warp_t::store_release(row_[0], first_value);
     }
 
     /** Warp-collective read of the neighbors when unlocked: lane 0 acquires slot 0, the others
@@ -250,12 +250,12 @@ struct dense_vram_telemetry_t {
 
     /** Folds the live counters into the device block; the search instantiation skips the lock and
      *  reselection atomics it never touches. */
-    template <typename lanes_type_, dense_vram_traversal_t traversal_>
+    template <typename warp_type_, dense_vram_traversal_t traversal_>
     __device__ __forceinline__ void flush(dense_vram_telemetry_block_t* counters, int lane) noexcept {
         if (lane != 0) return;
         // Tallies alone: the drain after the launch publishes them, so every add is relaxed.
         auto const add = [](u64_t& counter, u32_t value) noexcept {
-            lanes_type_::fetch_add_relaxed(counter, static_cast<u64_t>(value));
+            warp_type_::fetch_add_relaxed(counter, static_cast<u64_t>(value));
         };
         add(counters->hops, hops);
         add(counters->scored, scored);
@@ -296,10 +296,10 @@ struct dense_vram_gathered {
     u32_t ids[dense_vram_cache_rows_k];
 
     /** The scored nodes of one batch, by batch row. */
-    dense_vram_scored_node_t scored[kit_::lanes_t::width_k];
+    dense_vram_scored_node_t scored[kit_::warp_t::width_k];
 
     /** The native dots of one batch, parallel to @c scored. */
-    typename kit_::dot_t dots[kit_::lanes_t::width_k];
+    typename kit_::dot_t dots[kit_::warp_t::width_k];
 };
 
 /** Graph products of one query row as a device fold: each scored batch appends its node IDs and
@@ -352,14 +352,14 @@ __device__ __forceinline__ dense_vram_scored_node_t dense_vram_score_batch( //
     typename kit_::norms_t query_state, u32_t const* batch_ids, u32_t gathered_count,
     dense_vram_gathered<kit_>& gathered, int lane) noexcept {
 
-    using lanes_t = typename kit_::lanes_t;
+    using warp_t = typename kit_::warp_t;
     using norms_t = typename kit_::norms_t;
     // 128 concurrent random gathers saturate the memory path, so the window is 128 over the
     // resident warps.
     constexpr u32_t gathers_in_flight_k = min_of(dense_vram_max_gathers_in_flight_k,
                                                  128u / (dense_vram_warps_per_block_k * resident_blocks_));
     u32_t const lanes_log2 = 31 - __clz(planes.lanes_per_row);
-    u32_t const rows_per_gather = lanes_t::width_k >> lanes_log2;
+    u32_t const rows_per_gather = warp_t::width_k >> lanes_log2;
     u32_t const lane_in_row = static_cast<u32_t>(lane) & (planes.lanes_per_row - 1);
     u32_t const subwarp = static_cast<u32_t>(lane) >> lanes_log2;
     bool const leader = lane_in_row == 0;
@@ -399,7 +399,7 @@ __device__ __forceinline__ dense_vram_scored_node_t dense_vram_score_batch( //
         }
 #pragma unroll
         for (u32_t slot = 0; slot != gathers_in_flight_k; ++slot) {
-            typename kit_::dot_t const dot = dense_vram_reduce<lanes_t>(accumulators[slot], planes.lanes_per_row);
+            typename kit_::dot_t const dot = dense_vram_reduce<warp_t>(accumulators[slot], planes.lanes_per_row);
             u32_t const row = (group_base + slot) * rows_per_gather + subwarp;
             if (leader && group_base + slot < planes.lanes_per_row && row < gathered_count) {
                 dense_distance_t const distance = kit_::distance(planes.kernel, dot, query_state, batch_norms[slot]);
@@ -408,7 +408,7 @@ __device__ __forceinline__ dense_vram_scored_node_t dense_vram_score_batch( //
             }
         }
     }
-    lanes_t::sync();
+    warp_t::sync();
     return lane < static_cast<int>(gathered_count) ? gathered.scored[lane] : dense_vram_scored_node_t::sentinel();
 }
 
@@ -426,7 +426,7 @@ struct dense_vram_no_rescoring {
  *  1 − score, the warp scoring the batch once per head exactly as it scored the navigating query. */
 template <dense_vram_quads_kit kit_>
 struct dense_vram_indexer_rescoring {
-    using lanes_t = typename kit_::lanes_t;
+    using warp_t = typename kit_::warp_t;
     using fragment_t = typename kit_::fragment_t;
 
     /** Every query's heads as staged rows, @b [queries·heads,row_fragments], device-resident. */
@@ -461,7 +461,7 @@ struct dense_vram_indexer_rescoring {
                                          gathered_count, gathered, lane);
             if (live) indexed += weights[head] * fmaxf(static_cast<f32_t>(gathered.dots[lane]), 0.f);
             // The next head's scoring overwrites the dots, so every lane reads its own first.
-            lanes_t::sync();
+            warp_t::sync();
         }
         if (!live) return scored;
         gathered.dots[lane] = indexed;
@@ -480,15 +480,15 @@ __device__ __forceinline__ walk_demand_t dense_vram_score_into_frontier( //
     typename kit_::norms_t query_state, dense_vram_gathered<kit_>& gathered, u32_t gathered_count,
     dense_vram_warp_context<frontier_>& context, int lane, fold_&& fold,
     rescoring_ const& rescoring = rescoring_ {}) noexcept {
-    using lanes_t = typename kit_::lanes_t;
+    using warp_t = typename kit_::warp_t;
     context.telemetry.scored += gathered_count;
     if (planes.resident_end) {
         bool const counted = static_cast<u32_t>(lane) < gathered_count;
         u32_t const candidate = counted ? gathered.ids[lane] : 0;
-        typename lanes_t::mask_t const local_mask = lanes_t::ballot(counted && candidate >= planes.resident_begin &&
-                                                                    candidate < planes.resident_end);
-        context.telemetry.local_scored += lanes_t::count(local_mask);
-        context.telemetry.remote_scored += gathered_count - lanes_t::count(local_mask);
+        typename warp_t::mask_t const local_mask = warp_t::ballot(counted && candidate >= planes.resident_begin &&
+                                                                  candidate < planes.resident_end);
+        context.telemetry.local_scored += warp_t::count(local_mask);
+        context.telemetry.remote_scored += gathered_count - warp_t::count(local_mask);
     }
     dense_vram_scored_node_t staged = dense_vram_score_batch<kit_, resident_blocks_>( //
         planes, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
@@ -509,23 +509,23 @@ __device__ __forceinline__ walk_demand_t dense_vram_score_into_frontier( //
 template <dense_vram_quads_kit kit_>
 __device__ __forceinline__ u32_t dense_vram_sample_landmarks( //
     dense_vram_planes_view<kit_> const& planes, dense_node_id_t sampling_bound,
-    dense_vram_visited_set<typename kit_::lanes_t>& visited, splitmix64_t& random_generator,
+    dense_vram_visited_set<typename kit_::warp_t>& visited, splitmix64_t& random_generator,
     u32_t (&candidate_ids)[dense_vram_cache_rows_k], int lane) noexcept {
 
-    using lanes_t = typename kit_::lanes_t;
+    using warp_t = typename kit_::warp_t;
     dense_node_id_t draw = uniform_below<dense_node_id_t> {sampling_bound}(random_generator);
     bool published = false;
     for (int attempt = 0; attempt != 4 && !published; ++attempt) {
-        dense_vram_neighbors_ref<lanes_t> const row {planes.neighbors_for(draw), planes.connectivity};
+        dense_vram_neighbors_ref<warp_t> const row {planes.neighbors_for(draw), planes.connectivity};
         published = row.peek_first() != dense_node_id_unknown_k;
         if (!published) draw = draw + 1 >= sampling_bound ? 0 : draw + 1; // >=: a zero bound stays at row 0.
     }
     bool const fresh = visited.test_and_set(draw, lane, published);
-    typename lanes_t::mask_t const fresh_mask = lanes_t::ballot(fresh);
-    u32_t const ordinal = lanes_t::count(fresh_mask & lanes_t::below(lane));
+    typename warp_t::mask_t const fresh_mask = warp_t::ballot(fresh);
+    u32_t const ordinal = warp_t::count(fresh_mask & warp_t::below(lane));
     if (fresh) candidate_ids[ordinal] = draw;
-    lanes_t::sync();
-    return lanes_t::count(fresh_mask);
+    warp_t::sync();
+    return warp_t::count(fresh_mask);
 }
 
 /** Continues a greedy best-first walk toward the query over whatever the frontier holds - one warp,
@@ -538,11 +538,11 @@ template <dense_vram_quads_kit kit_, u32_t resident_blocks_ = dense_vram_residen
 __device__ __forceinline__ void dense_vram_search_ahead( //
     dense_vram_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
     typename kit_::norms_t query_state, dense_node_id_t sampling_bound, dense_node_id_t first_invisible_id,
-    dense_vram_visited_set<typename kit_::lanes_t>& visited, dense_vram_gathered<kit_>& gathered,
+    dense_vram_visited_set<typename kit_::warp_t>& visited, dense_vram_gathered<kit_>& gathered,
     dense_vram_warp_context<frontier_>& context, int lane, fold_&& fold = fold_ {},
     rescoring_ const& rescoring = rescoring_ {}) noexcept {
 
-    using lanes_t = typename kit_::lanes_t;
+    using warp_t = typename kit_::warp_t;
     constexpr u32_t restarts_cap_k = 8;
     frontier_& frontier = context.frontier;
     dense_vram_telemetry_t& telemetry = context.telemetry;
@@ -574,20 +574,20 @@ __device__ __forceinline__ void dense_vram_search_ahead( //
 
             // Only the leader polls the racing lock word: per-lane polls could disagree on one
             // unlock, and a value-dependent `continue` would fork the warp across iterations.
-            dense_vram_neighbors_ref<lanes_t> const row {planes.neighbors_for(candidate.id()), planes.connectivity};
+            dense_vram_neighbors_ref<warp_t> const row {planes.neighbors_for(candidate.id()), planes.connectivity};
             dense_node_id_t first_value = dense_node_id_unknown_k;
             if (lane == 0) {
                 first_value = row.peek_first();
                 for (u32_t attempt = 0; attempt != traversal_peek_retries_k && first_value == dense_node_id_unknown_k;
                      ++attempt) {
-                    lanes_t::sleep(512);
+                    warp_t::sleep(512);
                     first_value = row.peek_first();
                 }
             }
-            first_value = lanes_t::shuffle(first_value, 0);
+            first_value = warp_t::shuffle(first_value, 0);
             // The shuffle moves the word, not the leader's acquire; the lane barrier orders the
             // other lanes' slot loads after it.
-            lanes_t::sync();
+            warp_t::sync();
             if (first_value == dense_node_id_unknown_k) {
                 ++telemetry.locked_drops;
                 continue;
@@ -599,27 +599,27 @@ __device__ __forceinline__ void dense_vram_search_ahead( //
             // The bound never exceeds the ID space, so it rejects the sentinel too.
             bool const usable = neighbor_id < first_invisible_id && neighbor_id != candidate.id();
             bool const fresh = visited.test_and_set(neighbor_id, lane, usable);
-            typename lanes_t::mask_t const fresh_mask = lanes_t::ballot(fresh);
-            u32_t const ordinal = lanes_t::count(fresh_mask & lanes_t::below(lane));
+            typename warp_t::mask_t const fresh_mask = warp_t::ballot(fresh);
+            u32_t const ordinal = warp_t::count(fresh_mask & warp_t::below(lane));
             if (fresh) gathered.ids[ordinal] = neighbor_id;
-            lanes_t::sync();
-            u32_t const gathered_count = lanes_t::count(fresh_mask);
+            warp_t::sync();
+            u32_t const gathered_count = warp_t::count(fresh_mask);
             if (gathered_count && dense_vram_score_into_frontier<kit_, resident_blocks_>( //
                                       planes, query_span, query_state, gathered, gathered_count, context, lane, fold,
                                       rescoring) == walk_demand_t::sated_k)
                 return;
             // Wider connectivities continue a warp-width at a time; the bound is warp-uniform for the collectives.
-            for (u32_t slot_base = lanes_t::width_k; slot_base < planes.connectivity; slot_base += lanes_t::width_k) {
+            for (u32_t slot_base = warp_t::width_k; slot_base < planes.connectivity; slot_base += warp_t::width_k) {
                 u32_t const slot = slot_base + lane;
                 dense_node_id_t const wide_id = slot < planes.connectivity ? row.load_slot(slot)
                                                                            : dense_node_id_unknown_k;
                 bool const wide_usable = wide_id < first_invisible_id && wide_id != candidate.id();
                 bool const wide_fresh = visited.test_and_set(wide_id, lane, wide_usable);
-                typename lanes_t::mask_t const wide_mask = lanes_t::ballot(wide_fresh);
-                u32_t const wide_ordinal = lanes_t::count(wide_mask & lanes_t::below(lane));
+                typename warp_t::mask_t const wide_mask = warp_t::ballot(wide_fresh);
+                u32_t const wide_ordinal = warp_t::count(wide_mask & warp_t::below(lane));
                 if (wide_fresh) gathered.ids[wide_ordinal] = wide_id;
-                lanes_t::sync();
-                u32_t const wide_count = lanes_t::count(wide_mask);
+                warp_t::sync();
+                u32_t const wide_count = warp_t::count(wide_mask);
                 if (wide_count && dense_vram_score_into_frontier<kit_, resident_blocks_>( //
                                       planes, query_span, query_state, gathered, wide_count, context, lane, fold,
                                       rescoring) == walk_demand_t::sated_k)
@@ -636,7 +636,7 @@ template <dense_vram_quads_kit kit_, u32_t resident_blocks_ = dense_vram_residen
 __device__ __forceinline__ void dense_vram_search_around( //
     dense_vram_planes_view<kit_> const& planes, typename kit_::fragment_t const* query_span,
     typename kit_::norms_t query_state, dense_node_id_t sampling_bound, dense_node_id_t first_invisible_id,
-    dense_vram_visited_set<typename kit_::lanes_t>& visited, dense_vram_gathered<kit_>& gathered,
+    dense_vram_visited_set<typename kit_::warp_t>& visited, dense_vram_gathered<kit_>& gathered,
     dense_vram_warp_context<frontier_>& context, int lane, fold_&& fold = fold_ {},
     rescoring_ const& rescoring = rescoring_ {}) noexcept {
     context.frontier.reset(lane);
@@ -663,9 +663,9 @@ struct dense_vram_vector_cache {
 /** Warp-cooperative ascending buffer of scored nodes over a shared-memory span: chunks arrive
  *  pre-sorted from the lane-wide bitonic network and merge in place, entries past @c capacity_
  *  drop. */
-template <typename lanes_type_>
+template <typename warp_type_>
 struct dense_vram_sorted_buffer {
-    using lanes_t = lanes_type_;
+    using warp_t = warp_type_;
     dense_vram_scored_node_t* entries_;
     u32_t size_ = 0;
     u32_t capacity_;
@@ -673,7 +673,7 @@ struct dense_vram_sorted_buffer {
     __device__ __forceinline__ dense_vram_scored_node_t at(u32_t rank) const noexcept { return entries_[rank]; }
 
     __device__ __forceinline__ void insert_batch(dense_vram_scored_node_t value, u32_t count, int lane) noexcept {
-        constexpr u32_t span_batches_k = divide_round_up(dense_vram_cache_rows_k, lanes_t::width_k);
+        constexpr u32_t span_batches_k = divide_round_up(dense_vram_cache_rows_k, warp_t::width_k);
         bool const incoming = static_cast<u32_t>(lane) < count;
         u32_t incoming_rank = incoming ? static_cast<u32_t>(lane) : 0;
         for (u32_t i = 0; i != size_; ++i) // Warp-uniform bound: every lane walks the span.
@@ -683,22 +683,22 @@ struct dense_vram_sorted_buffer {
         dense_vram_scored_node_t moved[span_batches_k];
         u32_t moved_to[span_batches_k];
         u32_t batch = 0;
-        for (u32_t base = 0; base < size_; base += lanes_t::width_k, ++batch) {
+        for (u32_t base = 0; base < size_; base += warp_t::width_k, ++batch) {
             u32_t const index = base + lane;
             bool const active = index < size_;
             moved[batch] = active ? entries_[index] : dense_vram_scored_node_t::sentinel();
             u32_t shift = 0;
             for (u32_t source = 0; source != count; ++source) // Warp-uniform: shuffles inside.
-                shift += active && dense_shuffle_from<lanes_t>(value, static_cast<int>(source)).distance_bits() <
+                shift += active && dense_shuffle_from<warp_t>(value, static_cast<int>(source)).distance_bits() <
                                        moved[batch].distance_bits();
             moved_to[batch] = index + shift;
         }
-        lanes_t::sync(); // Every displaced entry is staged in registers before any write lands.
+        warp_t::sync(); // Every displaced entry is staged in registers before any write lands.
         batch = 0;
-        for (u32_t base = 0; base < size_; base += lanes_t::width_k, ++batch)
+        for (u32_t base = 0; base < size_; base += warp_t::width_k, ++batch)
             if (base + lane < size_ && moved_to[batch] < capacity_) entries_[moved_to[batch]] = moved[batch];
         if (incoming && incoming_rank < capacity_) entries_[incoming_rank] = value;
-        lanes_t::sync();
+        warp_t::sync();
         size_ = min_of(size_ + count, capacity_);
     }
 };
@@ -734,37 +734,37 @@ __device__ __forceinline__ u32_t dense_vram_select_diverse( //
     typename kit_::norms_t (&cache_norms)[dense_vram_cache_rows_k], u32_t (&candidate_ids)[dense_vram_cache_rows_k],
     u32_t* selected_ids, dense_vram_warp_context<frontier_>& context, int lane) noexcept {
 
-    using lanes_t = typename kit_::lanes_t;
+    using warp_t = typename kit_::warp_t;
     frontier_& frontier = context.frontier;
 
     // Stage the ascending prefix IDs & cache their vectors and norms.
     u32_t candidates_count = 0;
 #pragma unroll
-    for (u32_t base = 0; base < dense_vram_cache_rows_k; base += lanes_t::width_k) {
+    for (u32_t base = 0; base < dense_vram_cache_rows_k; base += warp_t::width_k) {
         dense_vram_scored_node_t const entry = base + lane < dense_vram_cache_rows_k
                                                    ? frontier.rank_entry(base + lane)
                                                    : dense_vram_scored_node_t::sentinel();
-        typename lanes_t::mask_t const live = lanes_t::ballot(!(entry == dense_vram_scored_node_t::sentinel()));
+        typename warp_t::mask_t const live = warp_t::ballot(!(entry == dense_vram_scored_node_t::sentinel()));
         if (!(entry == dense_vram_scored_node_t::sentinel())) candidate_ids[base + lane] = entry.id();
-        candidates_count += lanes_t::count(live);
-        if (live != lanes_t::all_k) break;
+        candidates_count += warp_t::count(live);
+        if (live != warp_t::all_k) break;
     }
-    lanes_t::sync();
-    for (u32_t word = lane; word < candidates_count * planes.row_fragments; word += lanes_t::width_k) {
+    warp_t::sync();
+    for (u32_t word = lane; word < candidates_count * planes.row_fragments; word += warp_t::width_k) {
         u32_t const row = planes.row_of_word(word), fragment = planes.fragment_of_word(word, row);
-        lanes_t::copy_async(&cache.at(row, fragment), planes.vector_span_for(candidate_ids[row]) + fragment);
+        warp_t::copy_async(&cache.at(row, fragment), planes.vector_span_for(candidate_ids[row]) + fragment);
     }
-    lanes_t::copy_wait();
-    for (u32_t row = lane; row < candidates_count; row += lanes_t::width_k)
+    warp_t::copy_wait();
+    for (u32_t row = lane; row < candidates_count; row += warp_t::width_k)
         cache_norms[row] = planes.norm_for(candidate_ids[row]);
-    lanes_t::sync();
+    warp_t::sync();
 
     u32_t selected_count = 0;
     for (u32_t candidate_index = 0; candidate_index < candidates_count && selected_count < planes.connectivity;
          ++candidate_index) {
         f32_t const to_query = frontier.rank_entry(candidate_index).distance();
         bool diverse = true;
-        for (u32_t base = 0; base < selected_count && diverse; base += lanes_t::width_k) { // Warp-uniform bounds.
+        for (u32_t base = 0; base < selected_count && diverse; base += warp_t::width_k) { // Warp-uniform bounds.
             bool lane_diverse = true;
             if (base + lane < selected_count) {
                 u32_t const kept_position = selected_ids[base + lane];
@@ -777,12 +777,12 @@ __device__ __forceinline__ u32_t dense_vram_select_diverse( //
                 lane_diverse = between >= to_query;
                 ++context.telemetry.scored;
             }
-            diverse = lanes_t::all(lane_diverse);
+            diverse = warp_t::all(lane_diverse);
         }
         if (diverse) {
             if (lane == 0) selected_ids[selected_count] = candidate_index;
             ++selected_count;
-            lanes_t::sync();
+            warp_t::sync();
         }
     }
     // The slots diversity leaves empty take the nearest rejected candidates, as the CPU's `select_diverse` does:
@@ -796,13 +796,13 @@ __device__ __forceinline__ u32_t dense_vram_select_diverse( //
         }
         if (lane == 0) selected_ids[selected_count] = candidate_index;
         ++selected_count;
-        lanes_t::sync();
+        warp_t::sync();
     }
     // Rewrite the kept positions as node IDs in place - the caller links to nodes, not cache rows.
-    lanes_t::sync();
-    for (u32_t slot = lane; slot < selected_count; slot += lanes_t::width_k)
+    warp_t::sync();
+    for (u32_t slot = lane; slot < selected_count; slot += warp_t::width_k)
         selected_ids[slot] = candidate_ids[selected_ids[slot]];
-    lanes_t::sync();
+    warp_t::sync();
     return selected_count;
 }
 
@@ -818,7 +818,7 @@ __device__ __forceinline__ void dense_vram_back_link_neighbors( //
     typename kit_::norms_t (&cache_norms)[dense_vram_cache_rows_k], dense_vram_gathered<kit_>& gathered,
     splitmix64_t& random_generator, dense_vram_telemetry_t& telemetry, int lane) noexcept {
 
-    using lanes_t = typename kit_::lanes_t;
+    using warp_t = typename kit_::warp_t;
     // The last two cache rows host the newcomer and the target, whose vector the scored batch reads as its query.
     constexpr u32_t newcomer_row_k = dense_vram_cache_rows_k - 1;
     constexpr u32_t target_row_k = dense_vram_cache_rows_k - 2;
@@ -827,11 +827,11 @@ __device__ __forceinline__ void dense_vram_back_link_neighbors( //
 
     for (u32_t selected_index = 0; selected_index < selected_count; ++selected_index) {
         dense_node_id_t const target = selection.selected_ids[selected_index];
-        dense_vram_neighbors_ref<lanes_t> const row {planes.neighbors_for(target), connectivity};
+        dense_vram_neighbors_ref<warp_t> const row {planes.neighbors_for(target), connectivity};
         dense_node_id_t first_value = dense_node_id_unknown_k;
         if (lane == 0) first_value = row.lock_if_free(back_link_lock_attempts_k, random_generator);
-        first_value = lanes_t::shuffle(first_value, 0);
-        lanes_t::sync(); // The sweep below must follow the leader's acquiring exchange on every lane.
+        first_value = warp_t::shuffle(first_value, 0);
+        warp_t::sync(); // The sweep below must follow the leader's acquiring exchange on every lane.
         ++telemetry.lock_attempts;
         if (first_value == dense_node_id_unknown_k) { // Bounded-wait policy: skip the neighbor.
             ++telemetry.lock_skips;
@@ -845,23 +845,23 @@ __device__ __forceinline__ void dense_vram_back_link_neighbors( //
         // Read every locked neighbor a warp-width at a time, remembering the first empty slot and
         // staging every live neighbor ID for the potential re-selection.
         u32_t empty_slot = connectivity;
-        for (u32_t base = 0; base < connectivity; base += lanes_t::width_k) {
+        for (u32_t base = 0; base < connectivity; base += warp_t::width_k) {
             u32_t const slot = base + lane;
             dense_node_id_t const slot_value = slot == 0             ? first_value
                                                : slot < connectivity ? row.load_slot(slot)
                                                                      : dense_node_id_unknown_k;
             if (slot < connectivity) gathered.ids[slot] = slot_value;
-            typename lanes_t::mask_t const empty_mask = lanes_t::ballot(slot < connectivity &&
-                                                                        slot_value == dense_node_id_unknown_k);
-            if (empty_mask && empty_slot == connectivity) empty_slot = base + lanes_t::first(empty_mask);
+            typename warp_t::mask_t const empty_mask = warp_t::ballot(slot < connectivity &&
+                                                                      slot_value == dense_node_id_unknown_k);
+            if (empty_mask && empty_slot == connectivity) empty_slot = base + warp_t::first(empty_mask);
         }
-        lanes_t::sync();
+        warp_t::sync();
         // Every slot store below is relaxed; this fence heads each lane's stores, so an acquiring
         // reader of any slot sees the newcomer's payload.
-        lanes_t::fence_release();
+        warp_t::fence_release();
         if (empty_slot != connectivity) { // Fast path: append into that slot, unlock unchanged.
             if (lane == 0) row.store_slot(empty_slot, new_node_id);
-            lanes_t::sync();
+            warp_t::sync();
             if (lane == 0) row.unlock(first_value);
             continue;
         }
@@ -869,29 +869,29 @@ __device__ __forceinline__ void dense_vram_back_link_neighbors( //
         // Every slot taken: re-select diversely over the neighbors plus the newcomer, ascending by
         // distance to the target itself.
         ++telemetry.reselections;
-        for (u32_t word = lane; word < planes.row_fragments; word += lanes_t::width_k)
+        for (u32_t word = lane; word < planes.row_fragments; word += warp_t::width_k)
             cache.at(target_row_k, word) = planes.vector_for(target, word);
-        lanes_t::sync();
+        warp_t::sync();
         typename kit_::norms_t const target_state = planes.norm_for(target);
 
         // The newcomer's distance to the target, from its freshly-owned vector row.
         typename kit_::dot_t accumulator {};
-        for (u32_t word = lane; word < planes.row_fragments; word += lanes_t::width_k)
+        for (u32_t word = lane; word < planes.row_fragments; word += warp_t::width_k)
             accumulator = kit_::accumulate_dot(planes.vector_for(new_node_id, word), cache.at(target_row_k, word),
                                                accumulator);
-        typename kit_::dot_t const self_dot = dense_vram_reduce<lanes_t>(accumulator, lanes_t::width_k);
-        f32_t const newcomer_distance = kit_::distance(planes.kernel, lanes_t::shuffle(self_dot, 0), target_state,
+        typename kit_::dot_t const self_dot = dense_vram_reduce<warp_t>(accumulator, warp_t::width_k);
+        f32_t const newcomer_distance = kit_::distance(planes.kernel, warp_t::shuffle(self_dot, 0), target_state,
                                                        new_norms);
         telemetry.scored += connectivity + 1;
 
         // Score the neighbors a warp-width at a time, pre-sort each batch bitonically, and merge
         // them into the ascending sorted buffer.
-        dense_vram_sorted_buffer<lanes_t> sorted_candidates {selection.scored_entries, 0, connectivity};
-        for (u32_t base = 0; base < connectivity; base += lanes_t::width_k) {
-            u32_t const batch_count = min_of(connectivity - base, lanes_t::width_k);
+        dense_vram_sorted_buffer<warp_t> sorted_candidates {selection.scored_entries, 0, connectivity};
+        for (u32_t base = 0; base < connectivity; base += warp_t::width_k) {
+            u32_t const batch_count = min_of(connectivity - base, warp_t::width_k);
             dense_vram_scored_node_t const scored = dense_vram_score_batch<kit_>( //
                 planes, cache.row(target_row_k), target_state, gathered.ids + base, batch_count, gathered, lane);
-            dense_vram_scored_node_t const sorted_batch = dense_sort_lanes<lanes_t>(
+            dense_vram_scored_node_t const sorted_batch = dense_sort_lanes<warp_t>(
                 static_cast<u32_t>(lane) < batch_count
                     ? dense_vram_scored_node_t::make(scored.distance(), base + lane) // ID = slot index.
                     : dense_vram_scored_node_t::sentinel(),
@@ -903,18 +903,18 @@ __device__ __forceinline__ void dense_vram_back_link_neighbors( //
         // which hold no registers where the device has them, then merge-walk them ascending by
         // distance to the target.
         u32_t const link_words = connectivity * planes.row_fragments;
-        for (u32_t word = lane; word < link_words; word += lanes_t::width_k) {
+        for (u32_t word = lane; word < link_words; word += warp_t::width_k) {
             u32_t const cache_row = planes.row_of_word(word), fragment = planes.fragment_of_word(word, cache_row);
-            lanes_t::copy_async(&cache.at(cache_row, fragment),
-                                planes.vector_span_for(gathered.ids[cache_row]) + fragment);
+            warp_t::copy_async(&cache.at(cache_row, fragment),
+                               planes.vector_span_for(gathered.ids[cache_row]) + fragment);
         }
-        lanes_t::copy_wait();
-        for (u32_t word = lane; word < planes.row_fragments; word += lanes_t::width_k)
+        warp_t::copy_wait();
+        for (u32_t word = lane; word < planes.row_fragments; word += warp_t::width_k)
             cache.at(newcomer_row_k, word) = planes.vector_for(new_node_id, word);
-        for (u32_t cache_row = lane; cache_row < connectivity; cache_row += lanes_t::width_k)
+        for (u32_t cache_row = lane; cache_row < connectivity; cache_row += warp_t::width_k)
             cache_norms[cache_row] = planes.norm_for(gathered.ids[cache_row]);
         if (lane == 0) cache_norms[newcomer_row_k] = new_norms;
-        lanes_t::sync();
+        warp_t::sync();
 
         // The merge walk: the sorted neighbors and the newcomer, ascending by distance to the target, as cache rows.
         constexpr u32_t walked_out_k = ~0u;
@@ -939,7 +939,7 @@ __device__ __forceinline__ void dense_vram_back_link_neighbors( //
             if (candidate_position == walked_out_k) break;
 
             bool diverse = true;
-            for (u32_t base = 0; base < refined_count && diverse; base += lanes_t::width_k) { // Warp-uniform bounds.
+            for (u32_t base = 0; base < refined_count && diverse; base += warp_t::width_k) { // Warp-uniform bounds.
                 bool lane_diverse = true;
                 if (base + lane < refined_count) {
                     u32_t const kept_position = selection.kept_positions[base + lane];
@@ -952,12 +952,12 @@ __device__ __forceinline__ void dense_vram_back_link_neighbors( //
                     lane_diverse = between >= candidate_distance;
                     ++telemetry.scored;
                 }
-                diverse = lanes_t::all(lane_diverse);
+                diverse = warp_t::all(lane_diverse);
             }
             if (diverse) {
                 if (lane == 0) selection.kept_positions[refined_count] = candidate_position;
                 ++refined_count;
-                lanes_t::sync();
+                warp_t::sync();
             }
         }
 
@@ -975,12 +975,12 @@ __device__ __forceinline__ void dense_vram_back_link_neighbors( //
             }
             if (lane == 0) selection.kept_positions[refined_count] = candidate_position;
             ++refined_count;
-            lanes_t::sync();
+            warp_t::sync();
         }
 
         // Rewrite the neighbors: tail slots relaxed, shrink sentinel-terminated, head unlocks.
-        lanes_t::sync();
-        for (u32_t slot = lane; slot < connectivity; slot += lanes_t::width_k) {
+        warp_t::sync();
+        for (u32_t slot = lane; slot < connectivity; slot += warp_t::width_k) {
             if (slot == 0) continue;
             dense_node_id_t linked = dense_node_id_unknown_k;
             if (slot < refined_count) {
@@ -989,7 +989,7 @@ __device__ __forceinline__ void dense_vram_back_link_neighbors( //
             }
             row.store_slot(slot, linked);
         }
-        lanes_t::sync();
+        warp_t::sync();
         if (lane == 0) {
             u32_t const head_position = selection.kept_positions[0];
             row.unlock(head_position == newcomer_row_k ? new_node_id : gathered.ids[head_position]);
@@ -1028,10 +1028,10 @@ struct dense_vram_warp_slice_t {
 };
 
 /** Carves the calling warp's slice out of @p view and the block's @p dynamic_scratch. */
-template <typename lanes_type_, typename view_>
+template <typename warp_type_, typename view_>
 __device__ __forceinline__ dense_vram_warp_slice_t dense_vram_carve_slice(view_ const& view,
                                                                           byte_t* dynamic_scratch) noexcept {
-    int const warp = threadIdx.x / lanes_type_::width_k, lane = threadIdx.x % lanes_type_::width_k;
+    int const warp = threadIdx.x / warp_type_::width_k, lane = threadIdx.x % warp_type_::width_k;
     std::size_t const warp_index = blockIdx.x * static_cast<std::size_t>(dense_vram_warps_per_block_k) + warp;
     byte_t* const scratch = dynamic_scratch + static_cast<std::size_t>(warp) * view.scratch_bytes_per_warp;
     return {lane, warp, warp_index, scratch, view.arena_shape.visited_span(view.arena, warp_index)};
@@ -1115,12 +1115,12 @@ struct dense_vram_search_view {
 template <dense_vram_quads_kit kit_, typename frontier_>
 __device__ __forceinline__ void dense_vram_insert_one( //
     dense_vram_build_view<kit_> const& view, dense_node_id_t new_node_id,
-    dense_vram_visited_set<typename kit_::lanes_t>& visited, typename kit_::fragment_t* query_span,
+    dense_vram_visited_set<typename kit_::warp_t>& visited, typename kit_::fragment_t* query_span,
     dense_vram_vector_cache<typename kit_::fragment_t> cache, dense_vram_selection_scratch_t selection,
     typename kit_::norms_t (&cache_norms)[dense_vram_cache_rows_k], dense_vram_gathered<kit_>& gathered,
     dense_vram_warp_context<frontier_>& context, int lane) noexcept {
 
-    using lanes_t = typename kit_::lanes_t;
+    using warp_t = typename kit_::warp_t;
     dense_vram_planes_view<kit_> const& planes = view.planes;
 
     // One pass lands the payload, derives the norms, and parks the query in its shared span.
@@ -1128,18 +1128,18 @@ __device__ __forceinline__ void dense_vram_insert_one( //
         view.staging + static_cast<std::size_t>(new_node_id - view.first_id) * planes.row_fragments;
     typename kit_::fragment_t* owned_row = planes.vector_span_for(new_node_id);
     typename kit_::norms_accumulator_t norms_accumulator {};
-    for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += lanes_t::width_k) {
+    for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += warp_t::width_k) {
         typename kit_::fragment_t const value = staging_row[fragment];
         owned_row[fragment] = value;
         query_span[fragment] = value;
         norms_accumulator = kit_::accumulate_norms(value, norms_accumulator);
     }
-    norms_accumulator = dense_vram_reduce_norms<lanes_t>(norms_accumulator);
-    norms_accumulator = dense_vram_broadcast_norms<lanes_t>(norms_accumulator);
+    norms_accumulator = dense_vram_reduce_norms<warp_t>(norms_accumulator);
+    norms_accumulator = dense_vram_broadcast_norms<warp_t>(norms_accumulator);
     typename kit_::norms_t const new_norms = kit_::partials_to_norms(norms_accumulator);
     if (lane == 0 && planes.norms) planes.norm_ref_for(new_node_id) = new_norms;
     typename kit_::norms_t const query_state = new_norms;
-    lanes_t::sync();
+    warp_t::sync();
 
     // Walk the watermark - a virgin index publishes an empty node instead.
     if (new_node_id != 0)
@@ -1150,15 +1150,15 @@ __device__ __forceinline__ void dense_vram_insert_one( //
     // The own row needs no lock: no reader arrives before the slot-0 release below flips the sentinel.
     u32_t const selected_count = dense_vram_select_diverse<kit_>( //
         planes, cache, cache_norms, gathered.ids, selection.selected_ids, context, lane);
-    dense_vram_neighbors_ref<lanes_t> const own_neighbors {planes.neighbors_for(new_node_id), planes.connectivity};
-    for (u32_t slot = lane; slot < selected_count; slot += lanes_t::width_k)
+    dense_vram_neighbors_ref<warp_t> const own_neighbors {planes.neighbors_for(new_node_id), planes.connectivity};
+    for (u32_t slot = lane; slot < selected_count; slot += warp_t::width_k)
         if (slot > 0) own_neighbors.store_slot(slot, selection.selected_ids[slot]);
-    lanes_t::sync();
+    warp_t::sync();
     dense_node_id_t const first_link = selected_count ? selection.selected_ids[0] : new_node_id;
     if (lane == 0) {
         own_neighbors.unlock(first_link); // A self-loop encodes published-empty.
         // A tally for the admission ramp; the slot-0 release above is what publishes the row.
-        lanes_t::fetch_add_relaxed(*view.published_rows, 1u);
+        warp_t::fetch_add_relaxed(*view.published_rows, 1u);
     }
 
     // Only now - published, no locks held - back-link the neighbors.
@@ -1214,42 +1214,42 @@ struct dense_vram_refine_view {
 template <dense_vram_quads_kit kit_, typename frontier_>
 __device__ __forceinline__ void dense_vram_refine_one( //
     dense_vram_refine_view<kit_> const& view, dense_node_id_t node_id,
-    dense_vram_visited_set<typename kit_::lanes_t>& visited, typename kit_::fragment_t* query_span,
+    dense_vram_visited_set<typename kit_::warp_t>& visited, typename kit_::fragment_t* query_span,
     dense_vram_vector_cache<typename kit_::fragment_t> cache, dense_vram_selection_scratch_t selection,
     typename kit_::norms_t (&cache_norms)[dense_vram_cache_rows_k], dense_vram_gathered<kit_>& gathered,
     dense_vram_warp_context<frontier_>& context, int lane) noexcept {
 
-    using lanes_t = typename kit_::lanes_t;
+    using warp_t = typename kit_::warp_t;
     dense_vram_planes_view<kit_> const& planes = view.planes;
 
     // The query is the node's own stored vector; its norms are already derived state.
-    for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += lanes_t::width_k)
+    for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += warp_t::width_k)
         query_span[fragment] = planes.vector_for(node_id, fragment);
     typename kit_::norms_t const query_state = planes.norm_for(node_id);
-    lanes_t::sync();
+    warp_t::sync();
 
     // The node itself never joins its own candidate pool - visited before anything stages.
     context.frontier.reset(lane);
     visited.test_and_set(node_id, lane, true);
 
     // Seed the frontier with the current neighbors, staged like a traversal expansion minus the hop bookkeeping.
-    dense_vram_neighbors_ref<lanes_t> const own_neighbors {planes.neighbors_for(node_id), planes.connectivity};
+    dense_vram_neighbors_ref<warp_t> const own_neighbors {planes.neighbors_for(node_id), planes.connectivity};
     dense_node_id_t first_value = dense_node_id_unknown_k;
     if (lane == 0) first_value = own_neighbors.peek_first();
-    first_value = lanes_t::shuffle(first_value, 0);
+    first_value = warp_t::shuffle(first_value, 0);
     if (first_value != dense_node_id_unknown_k && first_value != node_id)
-        for (u32_t slot_base = 0; slot_base < planes.connectivity; slot_base += lanes_t::width_k) {
+        for (u32_t slot_base = 0; slot_base < planes.connectivity; slot_base += warp_t::width_k) {
             u32_t const slot = slot_base + lane;
             dense_node_id_t const seed_id = slot == 0                    ? first_value
                                             : slot < planes.connectivity ? own_neighbors.load_slot(slot)
                                                                          : dense_node_id_unknown_k;
             bool const usable = seed_id != dense_node_id_unknown_k && seed_id != node_id;
             bool const fresh = visited.test_and_set(seed_id, lane, usable);
-            typename lanes_t::mask_t const fresh_mask = lanes_t::ballot(fresh);
-            u32_t const ordinal = lanes_t::count(fresh_mask & lanes_t::below(lane));
+            typename warp_t::mask_t const fresh_mask = warp_t::ballot(fresh);
+            u32_t const ordinal = warp_t::count(fresh_mask & warp_t::below(lane));
             if (fresh) gathered.ids[ordinal] = seed_id;
-            lanes_t::sync();
-            u32_t const gathered_count = lanes_t::count(fresh_mask);
+            warp_t::sync();
+            u32_t const gathered_count = warp_t::count(fresh_mask);
             if (gathered_count)
                 dense_vram_score_into_frontier<kit_>( //
                     planes, query_span, query_state, gathered, gathered_count, context, lane, dummy_fold_t {});
@@ -1263,11 +1263,11 @@ __device__ __forceinline__ void dense_vram_refine_one( //
 
     // The insertion's slot convention: neighbors ascending, sentinel tail, a slot-0 self-loop meaning published-empty.
     u32_t* const shadow_slots = view.shadow_neighbors + static_cast<std::size_t>(node_id) * planes.connectivity;
-    for (u32_t slot = lane; slot < planes.connectivity; slot += lanes_t::width_k)
+    for (u32_t slot = lane; slot < planes.connectivity; slot += warp_t::width_k)
         shadow_slots[slot] = slot < selected_count ? selection.selected_ids[slot]
                              : slot == 0           ? node_id
                                                    : dense_node_id_unknown_k;
-    lanes_t::sync();
+    warp_t::sync();
 }
 
 /** Writes each query's nearest @c count IDs and distances out of a search walk, ascending, with
@@ -1298,7 +1298,7 @@ struct dense_vram_search_sink {
                                           int lane) const noexcept {
         // The rank extraction shuffles - every lane participates, only in-range ones store.
         context.frontier.finalize_ranks(lane);
-        for (u32_t rank_base = 0; rank_base < count; rank_base += kit_::lanes_t::width_k) {
+        for (u32_t rank_base = 0; rank_base < count; rank_base += kit_::warp_t::width_k) {
             u32_t const rank = rank_base + lane;
             dense_vram_scored_node_t const ranked_entry = context.frontier.rank_entry(rank);
             if (rank < count) {
@@ -1338,7 +1338,7 @@ struct dense_vram_multiply_sink {
     template <typename frontier_>
     __device__ __forceinline__ void close(fold_t const& fold, dense_vram_warp_context<frontier_>&, u32_t query_index,
                                           int lane) const noexcept {
-        for (u32_t slot = fold.written + lane; slot < wanted; slot += kit_::lanes_t::width_k)
+        for (u32_t slot = fold.written + lane; slot < wanted; slot += kit_::warp_t::width_k)
             fold.ids[slot] = dense_node_id_unknown_k;
         if (lane == 0) counts[query_index] = fold.scored;
     }
@@ -1350,22 +1350,22 @@ struct dense_vram_multiply_sink {
 template <dense_vram_quads_kit kit_, u32_t resident_blocks_, typename sink_, typename rescoring_, typename frontier_>
 __device__ __forceinline__ void dense_vram_walk_one( //
     dense_vram_search_view<kit_> const& view, sink_ const& sink, rescoring_ const& rescorings, u32_t query_index,
-    typename kit_::fragment_t* query_span, dense_vram_visited_set<typename kit_::lanes_t>& visited, frontier_ frontier,
+    typename kit_::fragment_t* query_span, dense_vram_visited_set<typename kit_::warp_t>& visited, frontier_ frontier,
     dense_vram_gathered<kit_>& gathered, int lane) noexcept {
 
-    using lanes_t = typename kit_::lanes_t;
+    using warp_t = typename kit_::warp_t;
     typename kit_::fragment_t const* query_row = view.queries +
                                                  static_cast<std::size_t>(query_index) * view.planes.row_fragments;
     typename kit_::norms_accumulator_t norms_accumulator {};
-    for (u32_t fragment = lane; fragment < view.planes.row_fragments; fragment += lanes_t::width_k) {
+    for (u32_t fragment = lane; fragment < view.planes.row_fragments; fragment += warp_t::width_k) {
         typename kit_::fragment_t const value = query_row[fragment];
         query_span[fragment] = value;
         norms_accumulator = kit_::accumulate_norms(value, norms_accumulator);
     }
-    norms_accumulator = dense_vram_reduce_norms<lanes_t>(norms_accumulator);
-    norms_accumulator = dense_vram_broadcast_norms<lanes_t>(norms_accumulator);
+    norms_accumulator = dense_vram_reduce_norms<warp_t>(norms_accumulator);
+    norms_accumulator = dense_vram_broadcast_norms<warp_t>(norms_accumulator);
     typename kit_::norms_t const query_state = kit_::partials_to_norms(norms_accumulator);
-    lanes_t::sync();
+    warp_t::sync();
 
     dense_vram_warp_context<frontier_> context;
     context.frontier = frontier;
@@ -1379,7 +1379,7 @@ __device__ __forceinline__ void dense_vram_walk_one( //
     sink.close(fold, context, query_index, lane);
     context.telemetry.tail_drops = context.frontier.dropped();
     context.telemetry.visited_saturations = visited.saturations_;
-    context.telemetry.template flush<lanes_t, dense_vram_traversal_t::searching_k>(view.telemetry, lane);
+    context.telemetry.template flush<warp_t, dense_vram_traversal_t::searching_k>(view.telemetry, lane);
 }
 
 } // namespace usearch

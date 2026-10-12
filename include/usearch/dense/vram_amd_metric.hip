@@ -1,0 +1,1024 @@
+/**
+ *  @file include/usearch/dense/vram_amd_metric.hip
+ *  @author Ash Vardanian
+ *  @date October 11, 2026
+ *  @brief Device metric kits for the dense VRAM indexes on AMD GPUs - the HIP twin of
+ *      @c vram_nvidia_metric.cuh.
+ *
+ *  A kit binds one storage dtype to one AMD generation, named @b dtype_generation_quads_kit_t, and
+ *  the generation slot names the oldest tier whose instructions the kit needs: @c rocm for what
+ *  every ROCm device runs, @c cdna3 for @c v_dot4_i32_i8 and @c v_dot2_f32_f16, which MI400
+ *  dropped, @c cdna4 for @c v_dot2_f32_bf16 and the OCP fp8 conversions, and @c cdna5 for
+ *  @c v_dot4_i32_iu8. Each class unit compiles for its own processor with that tier's
+ *  @c NUMKONG_TARGET_* alone, so a tier's kits compile only where its instructions exist, and the
+ *  chains pick among them under the class's ceiling. MI300's fp8 conversions read the FNUZ
+ *  encodings rather than the OCP ones the planes store, so CDNA3 widens fp8 in software, through
+ *  NumKong's converters.
+ *
+ *  Fragments are 16 bytes, rows and the metric are runtime state of the planes view, and the
+ *  cross-lane reductions live in @c vram_index.cuh over @ref hip_warp_t, exactly as on NVIDIA; the
+ *  arithmetic lives in named device primitives, and a kit binds them. Only HIP-Clang's device pass
+ *  sees past the guard: the host classes take their scalar layouts from the dtype alone.
+ */
+#pragma once
+
+#include <array> // `std::array` - a fragment's weighted sums
+#include <bit>   // `std::bit_cast` - a packed pair as the vector the dot instructions take
+
+#include <numkong/capabilities.h> // `nk_kernel_kind_t` - the epilogues switch on it
+#include <numkong/types.hpp>      // `nk::bf16_t` & the other scalars the kits load
+
+#include "usearch/utilities/types.hpp"
+#include "usearch/utilities/vram_amd_device.hpp" // `hip_warp_t` - every kit walks one wavefront
+#include "usearch/dense/types.hpp"
+
+#if NUMKONG_ARCH_ROCM_
+
+#include <hip/hip_fp16.h>        // `__half2` packed math
+#include <numkong/cast/simt.cuh> // `nk_e4m3_to_f32_simt_` & the other software widenings
+
+namespace unum {
+namespace usearch {
+
+/** Two halves or two brain floats, as the dot-of-pairs instructions take them. */
+using dense_hip_f16x2_t = _Float16 __attribute__((ext_vector_type(2)));
+using dense_hip_bf16x2_t = __bf16 __attribute__((ext_vector_type(2)));
+
+#pragma region Metrics
+
+/** Angular distance from a dot and both sides' squared norms, finalized exactly like the CPU's
+ *  @c nk_angular_through_f32_from_dot: clamped at zero, and a zero-norm side scores zero against a
+ *  vanishing dot and one otherwise. */
+__device__ __forceinline__ dense_distance_t dense_hip_angular_through_dot(f32_t dot, f32_t query_sumsq,
+                                                                          f32_t target_sumsq) noexcept {
+    if (query_sumsq > 0.0f && target_sumsq > 0.0f)
+        return fmaxf(1.0f - dot * (rsqrtf(query_sumsq) * rsqrtf(target_sumsq)), 0.0f);
+    return dot == 0.0f ? 0.0f : 1.0f;
+}
+
+/** A numeric kit's distance for @p kernel "through the dot": @b 1-dot for the inner product, the
+ *  clamped angular, and the squared Euclidean the walk ranks by. */
+template <typename dot_type_>
+__device__ __forceinline__ dense_distance_t dense_hip_distance(nk_kernel_kind_t kernel, dot_type_ dot,
+                                                               vector_norms<dot_type_> query,
+                                                               vector_norms<dot_type_> target) noexcept {
+    f32_t const dot_value = static_cast<f32_t>(dot);
+    switch (kernel) {
+    case nk_kernel_dot_k: return 1.0f - dot_value;
+    case nk_kernel_angular_k:
+        return dense_hip_angular_through_dot(dot_value, static_cast<f32_t>(query.sumsq),
+                                             static_cast<f32_t>(target.sumsq));
+    default: return static_cast<f32_t>(query.sumsq) + static_cast<f32_t>(target.sumsq) - 2.0f * dot_value;
+    }
+}
+
+/** Output-boundary finalize: identity unless a metric owes a monotone transform, like Euclidean's
+ *  square root. */
+__device__ __forceinline__ dense_distance_t dense_hip_convert_to_distance(nk_kernel_kind_t kernel,
+                                                                          dense_distance_t ranked) noexcept {
+    return kernel == nk_kernel_euclidean_k ? sqrtf(fmaxf(ranked, 0.0f)) : ranked;
+}
+
+#pragma endregion Metrics
+
+/** The kits every chain names, declared whether or not their tier is compiled in. */
+struct f16_rocm_quads_kit_t;
+struct f16_cdna3_quads_kit_t;
+struct bf16_rocm_quads_kit_t;
+struct bf16_cdna4_quads_kit_t;
+struct i8_cdna3_quads_kit_t;
+struct i8_cdna5_quads_kit_t;
+struct u8_rocm_quads_kit_t;
+struct e5m2_rocm_quads_kit_t;
+struct e5m2_cdna4_quads_kit_t;
+struct e4m3_rocm_quads_kit_t;
+struct e4m3_cdna4_quads_kit_t;
+struct e3m2_rocm_quads_kit_t;
+struct e2m3_rocm_quads_kit_t;
+struct i4x2_cdna3_quads_kit_t;
+struct i4x2_cdna5_quads_kit_t;
+struct u4x2_rocm_quads_kit_t;
+struct u1x8_rocm_quads_kit_t;
+
+#pragma region Half Precision Floats
+
+/** A packed @c f16 pair widened to two floats, exactly. */
+__device__ __forceinline__ float2 dense_hip_f16x2_to_f32x2(u32_t pair) noexcept {
+    return __half22float2(std::bit_cast<__half2>(pair));
+}
+
+/** A packed @c bf16 pair widened to two floats, exactly: each is the high half of its float. */
+__device__ __forceinline__ float2 dense_hip_bf16x2_to_f32x2(u32_t pair) noexcept {
+    return {__uint_as_float(pair << 16), __uint_as_float(pair & 0xFFFF0000u)};
+}
+
+/** Eight 16-bit float products of a fragment pair, each pair widened by @p widen_ and fused into
+ *  the f32 sum - exact products, since an 11-bit significand squared fits in a float's 24. */
+template <float2 (*widen_)(u32_t)>
+__device__ __forceinline__ f32_t dense_hip_dot_halves_rocm(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        float2 const values_a = widen_(words_a[word]), values_b = widen_(words_b[word]);
+        sum = fmaf(values_a.x, values_b.x, sum);
+        sum = fmaf(values_a.y, values_b.y, sum);
+    }
+    return sum;
+}
+
+/** A 16-bit float fragment's sum & sum of squares, each pair widened by @p widen_. */
+template <float2 (*widen_)(u32_t)>
+__device__ __forceinline__ float2 dense_hip_moments_halves_rocm(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        float2 const values = widen_(words[word]);
+        moments.x += values.x + values.y;
+        moments.y += values.x * values.x + values.y * values.y;
+    }
+    return moments;
+}
+
+/** Returns @p sums plus @p weight times each of a 16-bit float fragment's eight values. */
+template <float2 (*widen_)(u32_t)>
+__device__ __forceinline__ std::array<f32_t, 8> dense_hip_weighted_halves_rocm( //
+    uint4 a, f32_t weight, std::array<f32_t, 8> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        float2 const values = widen_(words[word]);
+        sums[2 * word] += weight * values.x;
+        sums[2 * word + 1] += weight * values.y;
+    }
+    return sums;
+}
+
+/** f16 kit - every ROCm device, widening into f32 multiply-adds. */
+struct f16_rocm_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
+    using warp_t = hip_warp_t;
+    using scalar_t = nk::f16_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 8>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_hip_dot_halves_rocm<dense_hip_f16x2_to_f32x2>(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_hip_moments_halves_rocm<dense_hip_f16x2_to_f32x2>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_hip_weighted_halves_rocm<dense_hip_f16x2_to_f32x2>(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_hip_convert_to_distance(kernel, ranked);
+    }
+};
+
+/** bf16 kit - every ROCm device, widening into f32 multiply-adds. */
+struct bf16_rocm_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
+    using warp_t = hip_warp_t;
+    using scalar_t = nk::bf16_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 8>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_hip_dot_halves_rocm<dense_hip_bf16x2_to_f32x2>(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_hip_moments_halves_rocm<dense_hip_bf16x2_to_f32x2>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_hip_weighted_halves_rocm<dense_hip_bf16x2_to_f32x2>(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_hip_convert_to_distance(kernel, ranked);
+    }
+};
+
+#if NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
+
+/** Eight @c f16 products of a fragment pair, two per @c v_dot2_f32_f16 into the f32 sum. */
+__device__ __forceinline__ f32_t dense_hip_dot_f16x8_cdna3(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+        sum = __builtin_amdgcn_fdot2(std::bit_cast<dense_hip_f16x2_t>(words_a[word]),
+                                     std::bit_cast<dense_hip_f16x2_t>(words_b[word]), sum, false);
+    return sum;
+}
+
+/** f16 kit - CDNA3 and CDNA4, @c v_dot2_f32_f16. */
+struct f16_cdna3_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
+    using warp_t = hip_warp_t;
+    using scalar_t = nk::f16_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 8>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_hip_dot_f16x8_cdna3(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_hip_moments_halves_rocm<dense_hip_f16x2_to_f32x2>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_hip_weighted_halves_rocm<dense_hip_f16x2_to_f32x2>(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_hip_convert_to_distance(kernel, ranked);
+    }
+};
+
+#endif // NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
+
+#if NUMKONG_TARGET_CDNA4
+
+/** Eight @c bf16 products of a fragment pair, two per @c v_dot2_f32_bf16 into the f32 sum. */
+__device__ __forceinline__ f32_t dense_hip_dot_bf16x8_cdna4(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+        sum = __builtin_amdgcn_fdot2_f32_bf16(std::bit_cast<dense_hip_bf16x2_t>(words_a[word]),
+                                              std::bit_cast<dense_hip_bf16x2_t>(words_b[word]), sum, false);
+    return sum;
+}
+
+/** bf16 kit - CDNA4, @c v_dot2_f32_bf16. */
+struct bf16_cdna4_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna4_k;
+    using warp_t = hip_warp_t;
+    using scalar_t = nk::bf16_t;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 8>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_hip_dot_bf16x8_cdna4(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_hip_moments_halves_rocm<dense_hip_bf16x2_to_f32x2>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_hip_weighted_halves_rocm<dense_hip_bf16x2_to_f32x2>(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_hip_convert_to_distance(kernel, ranked);
+    }
+};
+
+#endif // NUMKONG_TARGET_CDNA4
+
+#pragma endregion Half Precision Floats
+
+#pragma region Byte Sized Integers
+
+/*  The signed byte dots differ by tier: CDNA3 and CDNA4 multiply signed bytes with
+ *  @c v_dot4_i32_i8, and MI400 marks each operand's signedness on @c v_dot4_i32_iu8 instead. A kit
+ *  names its dot as a policy, so the moments and the nibble unpacking are written once. */
+
+/** Sixteen unsigned byte products of a fragment pair, one @c v_dot4_u32_u8 per word. */
+__device__ __forceinline__ u32_t dense_hip_dot_u8x16_rocm(uint4 a, uint4 b, u32_t sum) noexcept {
+    sum = __builtin_amdgcn_udot4(a.x, b.x, sum, false);
+    sum = __builtin_amdgcn_udot4(a.y, b.y, sum, false);
+    sum = __builtin_amdgcn_udot4(a.z, b.z, sum, false);
+    return __builtin_amdgcn_udot4(a.w, b.w, sum, false);
+}
+
+/** A @c u8 fragment's sum & sum of squares, through the same dot against splat-one and self. */
+__device__ __forceinline__ uint2 dense_hip_moments_u8x16_rocm(uint4 a, uint2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        moments.x = __builtin_amdgcn_udot4(words[word], 0x01010101u, moments.x, false);
+        moments.y = __builtin_amdgcn_udot4(words[word], words[word], moments.y, false);
+    }
+    return moments;
+}
+
+/** Sixteen signed byte products of a fragment pair, four per call of @p dot_. */
+template <int (*dot_)(u32_t, u32_t, int)>
+__device__ __forceinline__ int dense_hip_dot_i8x16(uint4 a, uint4 b, int sum) noexcept {
+    sum = dot_(a.x, b.x, sum);
+    sum = dot_(a.y, b.y, sum);
+    sum = dot_(a.z, b.z, sum);
+    return dot_(a.w, b.w, sum);
+}
+
+/** An @c i8 fragment's sum & sum of squares, through @p dot_ against splat-one and self. */
+template <int (*dot_)(u32_t, u32_t, int)>
+__device__ __forceinline__ int2 dense_hip_moments_i8x16(uint4 a, int2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        moments.x = dot_(words[word], 0x01010101u, moments.x);
+        moments.y = dot_(words[word], words[word], moments.y);
+    }
+    return moments;
+}
+
+/** Returns @p sums plus @p weight times each of an @c i8 fragment's sixteen values. */
+__device__ __forceinline__ std::array<f32_t, 16> dense_hip_weighted_i8x16_rocm( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t byte = 0; byte != 16; ++byte)
+        sums[byte] += weight * static_cast<f32_t>(static_cast<i8_t>(words[byte / 4] >> (8 * (byte % 4))));
+    return sums;
+}
+
+/** Returns @p sums plus @p weight times each of a @c u8 fragment's sixteen values. */
+__device__ __forceinline__ std::array<f32_t, 16> dense_hip_weighted_u8x16_rocm( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t byte = 0; byte != 16; ++byte)
+        sums[byte] += weight * static_cast<f32_t>(static_cast<u8_t>(words[byte / 4] >> (8 * (byte % 4))));
+    return sums;
+}
+
+#if NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
+
+/** Four signed byte products added to @p sum by @c v_dot4_i32_i8. */
+__device__ __forceinline__ int dense_hip_dot_i8x4_cdna3(u32_t a, u32_t b, int sum) noexcept {
+    return __builtin_amdgcn_sdot4(static_cast<int>(a), static_cast<int>(b), sum, false);
+}
+
+/** i8 kit - CDNA3 and CDNA4, @c v_dot4_i32_i8. */
+struct i8_cdna3_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna3_k;
+    using warp_t = hip_warp_t;
+    using scalar_t = nk::i8_t;
+    using fragment_t = uint4;
+    using dot_t = int;
+    using weighted_t = std::array<f32_t, 16>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = int2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_hip_dot_i8x16<dense_hip_dot_i8x4_cdna3>(a, b, sum);
+    }
+    static __device__ __forceinline__ int2 accumulate_norms(fragment_t a, int2 moments) noexcept {
+        return dense_hip_moments_i8x16<dense_hip_dot_i8x4_cdna3>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_hip_weighted_i8x16_rocm(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(int2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_hip_convert_to_distance(kernel, ranked);
+    }
+};
+
+#endif // NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
+
+#if NUMKONG_TARGET_CDNA5
+
+/** Four signed byte products added to @p sum by @c v_dot4_i32_iu8, both operands marked signed. */
+__device__ __forceinline__ int dense_hip_dot_i8x4_cdna5(u32_t a, u32_t b, int sum) noexcept {
+    return __builtin_amdgcn_sudot4(true, static_cast<int>(a), true, static_cast<int>(b), sum, false);
+}
+
+/** i8 kit - CDNA5, @c v_dot4_i32_iu8. */
+struct i8_cdna5_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_cdna5_k;
+    using warp_t = hip_warp_t;
+    using scalar_t = nk::i8_t;
+    using fragment_t = uint4;
+    using dot_t = int;
+    using weighted_t = std::array<f32_t, 16>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = int2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_hip_dot_i8x16<dense_hip_dot_i8x4_cdna5>(a, b, sum);
+    }
+    static __device__ __forceinline__ int2 accumulate_norms(fragment_t a, int2 moments) noexcept {
+        return dense_hip_moments_i8x16<dense_hip_dot_i8x4_cdna5>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_hip_weighted_i8x16_rocm(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(int2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_hip_convert_to_distance(kernel, ranked);
+    }
+};
+
+#endif // NUMKONG_TARGET_CDNA5
+
+/** u8 kit - every ROCm device, @c v_dot4_u32_u8. */
+struct u8_rocm_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
+    using warp_t = hip_warp_t;
+    using scalar_t = nk::u8_t;
+    using fragment_t = uint4;
+    using dot_t = u32_t;
+    using weighted_t = std::array<f32_t, 16>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = uint2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_hip_dot_u8x16_rocm(a, b, sum);
+    }
+    static __device__ __forceinline__ uint2 accumulate_norms(fragment_t a, uint2 moments) noexcept {
+        return dense_hip_moments_u8x16_rocm(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_hip_weighted_u8x16_rocm(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(uint2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_hip_convert_to_distance(kernel, ranked);
+    }
+};
+
+#pragma endregion Byte Sized Integers
+
+#pragma region Minifloats
+
+/*  No generation has fp8 or fp6 arithmetic outside the matrix cores, so every minifloat kit widens
+ *  byte pairs and accumulates in f32, and the tiers' kits differ only in the widening. */
+
+/** Sixteen minifloat products of a fragment pair, each byte pair widened by @p widening_type_. */
+template <typename widening_type_>
+__device__ __forceinline__ f32_t dense_hip_dot_minifloats(uint4 a, uint4 b, f32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values_a = widening_type_::pair_to_floats(words_a[word] >> (16 * pair));
+            float2 const values_b = widening_type_::pair_to_floats(words_b[word] >> (16 * pair));
+            sum = fmaf(values_a.x, values_b.x, sum);
+            sum = fmaf(values_a.y, values_b.y, sum);
+        }
+    return sum;
+}
+
+/** A minifloat fragment's sum & sum of squares, each byte pair widened by @p widening_type_. */
+template <typename widening_type_>
+__device__ __forceinline__ float2 dense_hip_moments_minifloats(uint4 a, float2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = widening_type_::pair_to_floats(words[word] >> (16 * pair));
+            moments.x += values.x + values.y;
+            moments.y += values.x * values.x + values.y * values.y;
+        }
+    return moments;
+}
+
+/** Returns @p sums plus @p weight times each of a minifloat fragment's sixteen values. */
+template <typename widening_type_>
+__device__ __forceinline__ std::array<f32_t, 16> dense_hip_weighted_minifloats( //
+    uint4 a, f32_t weight, std::array<f32_t, 16> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word)
+#pragma unroll
+        for (u32_t pair = 0; pair != 2; ++pair) {
+            float2 const values = widening_type_::pair_to_floats(words[word] >> (16 * pair));
+            sums[4 * word + 2 * pair] += weight * values.x;
+            sums[4 * word + 2 * pair + 1] += weight * values.y;
+        }
+    return sums;
+}
+
+/** Every ROCm device widens a minifloat pair in software, one byte at a time through @p convert_, a
+ *  NumKong converter, so CDNA3's FNUZ conversions never misread an OCP code. */
+template <void (*convert_)(unsigned char const*, nk_f32_t*)>
+struct dense_hip_software_widening {
+    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
+        unsigned char const codes[2] = {static_cast<unsigned char>(packed_pair),
+                                        static_cast<unsigned char>(packed_pair >> 8)};
+        float2 values;
+        convert_(&codes[0], &values.x);
+        convert_(&codes[1], &values.y);
+        return values;
+    }
+};
+
+using e5m2_rocm_widening_t = dense_hip_software_widening<nk_e5m2_to_f32_simt_>;
+using e4m3_rocm_widening_t = dense_hip_software_widening<nk_e4m3_to_f32_simt_>;
+using e3m2_rocm_widening_t = dense_hip_software_widening<nk_e3m2_to_f32_simt_>;
+using e2m3_rocm_widening_t = dense_hip_software_widening<nk_e2m3_to_f32_simt_>;
+
+/** The quads kit of a minifloat scalar @p scalar_type_ widened by @p widening_type_ at
+ *  @p capability_. */
+template <typename scalar_type_, typename widening_type_, nk_capability_t capability_>
+struct dense_hip_minifloats_quads_kit {
+    inline static constexpr nk_capability_t capability_k = capability_;
+    using warp_t = hip_warp_t;
+    using scalar_t = scalar_type_;
+    using fragment_t = uint4;
+    using dot_t = f32_t;
+    using weighted_t = std::array<f32_t, 16>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = float2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_hip_dot_minifloats<widening_type_>(a, b, sum);
+    }
+    static __device__ __forceinline__ float2 accumulate_norms(fragment_t a, float2 moments) noexcept {
+        return dense_hip_moments_minifloats<widening_type_>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_hip_weighted_minifloats<widening_type_>(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(float2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_hip_convert_to_distance(kernel, ranked);
+    }
+};
+
+/** e5m2 kit - every ROCm device, widening in software. */
+struct e5m2_rocm_quads_kit_t : dense_hip_minifloats_quads_kit<nk::e5m2_t, e5m2_rocm_widening_t, nk_cap_rocm_k> {};
+
+/** e4m3 kit - every ROCm device, widening in software. */
+struct e4m3_rocm_quads_kit_t : dense_hip_minifloats_quads_kit<nk::e4m3_t, e4m3_rocm_widening_t, nk_cap_rocm_k> {};
+
+/** e3m2 kit - every ROCm device, widening in software. */
+struct e3m2_rocm_quads_kit_t : dense_hip_minifloats_quads_kit<nk::e3m2_t, e3m2_rocm_widening_t, nk_cap_rocm_k> {};
+
+/** e2m3 kit - every ROCm device, widening in software. */
+struct e2m3_rocm_quads_kit_t : dense_hip_minifloats_quads_kit<nk::e2m3_t, e2m3_rocm_widening_t, nk_cap_rocm_k> {};
+
+#if NUMKONG_TARGET_CDNA4 || NUMKONG_TARGET_CDNA5
+
+/** CDNA4 and every tier since widen an OCP @c e4m3 pair in one @c v_cvt_pk_f32_fp8. */
+struct e4m3_cdna4_widening_t {
+    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
+        auto const values = __builtin_amdgcn_cvt_pk_f32_fp8(static_cast<int>(packed_pair), false);
+        return {values[0], values[1]};
+    }
+};
+
+/** The @c e5m2 twin of @ref e4m3_cdna4_widening_t, through @c v_cvt_pk_f32_bf8. */
+struct e5m2_cdna4_widening_t {
+    static __device__ __forceinline__ float2 pair_to_floats(u32_t packed_pair) noexcept {
+        auto const values = __builtin_amdgcn_cvt_pk_f32_bf8(static_cast<int>(packed_pair), false);
+        return {values[0], values[1]};
+    }
+};
+
+/** e5m2 kit - CDNA4 and CDNA5, widening through the conversion. */
+struct e5m2_cdna4_quads_kit_t : dense_hip_minifloats_quads_kit<nk::e5m2_t, e5m2_cdna4_widening_t, nk_cap_cdna4_k> {};
+
+/** e4m3 kit - CDNA4 and CDNA5, widening through the conversion. */
+struct e4m3_cdna4_quads_kit_t : dense_hip_minifloats_quads_kit<nk::e4m3_t, e4m3_cdna4_widening_t, nk_cap_cdna4_k> {};
+
+#endif // NUMKONG_TARGET_CDNA4 || NUMKONG_TARGET_CDNA5
+
+#pragma endregion Minifloats
+
+#pragma region Packed Nibbles
+
+/** Unpacks a word of eight signed nibbles into two byte-lane words, sign-extended through an
+ *  xor-add-xor bias, since a word-wide subtraction would borrow across lanes. */
+__device__ __forceinline__ uint2 dense_hip_unpack_i4x8_rocm(u32_t word) noexcept {
+    u32_t const low = (((word & 0x0F0F0F0Fu) ^ 0x08080808u) + 0x78787878u) ^ 0x80808080u;
+    u32_t const high = ((((word >> 4) & 0x0F0F0F0Fu) ^ 0x08080808u) + 0x78787878u) ^ 0x80808080u;
+    return {low, high};
+}
+
+/** Unpacks a word of eight unsigned nibbles into two byte-lane words. */
+__device__ __forceinline__ uint2 dense_hip_unpack_u4x8_rocm(u32_t word) noexcept {
+    return {word & 0x0F0F0F0Fu, (word >> 4) & 0x0F0F0F0Fu};
+}
+
+/** Thirty-two signed @c i4 products of a fragment pair, two calls of @p dot_ per source word. */
+template <int (*dot_)(u32_t, u32_t, int)>
+__device__ __forceinline__ int dense_hip_dot_i4x32(uint4 a, uint4 b, int sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked_a = dense_hip_unpack_i4x8_rocm(words_a[word]);
+        uint2 const unpacked_b = dense_hip_unpack_i4x8_rocm(words_b[word]);
+        sum = dot_(unpacked_a.x, unpacked_b.x, sum);
+        sum = dot_(unpacked_a.y, unpacked_b.y, sum);
+    }
+    return sum;
+}
+
+/** An @c i4 fragment's sum & sum of squares. */
+template <int (*dot_)(u32_t, u32_t, int)>
+__device__ __forceinline__ int2 dense_hip_moments_i4x32(uint4 a, int2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked = dense_hip_unpack_i4x8_rocm(words[word]);
+        moments.x = dot_(unpacked.x, 0x01010101u, moments.x);
+        moments.x = dot_(unpacked.y, 0x01010101u, moments.x);
+        moments.y = dot_(unpacked.x, unpacked.x, moments.y);
+        moments.y = dot_(unpacked.y, unpacked.y, moments.y);
+    }
+    return moments;
+}
+
+/** Thirty-two unsigned @c u4 products of a fragment pair, two @c v_dot4_u32_u8 per source word. */
+__device__ __forceinline__ u32_t dense_hip_dot_u4x32_rocm(uint4 a, uint4 b, u32_t sum) noexcept {
+    u32_t const words_a[4] = {a.x, a.y, a.z, a.w}, words_b[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked_a = dense_hip_unpack_u4x8_rocm(words_a[word]);
+        uint2 const unpacked_b = dense_hip_unpack_u4x8_rocm(words_b[word]);
+        sum = __builtin_amdgcn_udot4(unpacked_a.x, unpacked_b.x, sum, false);
+        sum = __builtin_amdgcn_udot4(unpacked_a.y, unpacked_b.y, sum, false);
+    }
+    return sum;
+}
+
+/** A @c u4 fragment's sum & sum of squares. */
+__device__ __forceinline__ uint2 dense_hip_moments_u4x32_rocm(uint4 a, uint2 moments) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked = dense_hip_unpack_u4x8_rocm(words[word]);
+        moments.x = __builtin_amdgcn_udot4(unpacked.x, 0x01010101u, moments.x, false);
+        moments.x = __builtin_amdgcn_udot4(unpacked.y, 0x01010101u, moments.x, false);
+        moments.y = __builtin_amdgcn_udot4(unpacked.x, unpacked.x, moments.y, false);
+        moments.y = __builtin_amdgcn_udot4(unpacked.y, unpacked.y, moments.y, false);
+    }
+    return moments;
+}
+
+/** Returns @p sums plus @p weight times each of an @c i4 fragment's thirty-two values, through the
+ *  same unpacking; the even column of a byte is its high nibble. */
+__device__ __forceinline__ std::array<f32_t, 32> dense_hip_weighted_i4x32_rocm( //
+    uint4 a, f32_t weight, std::array<f32_t, 32> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked = dense_hip_unpack_i4x8_rocm(words[word]);
+#pragma unroll
+        for (u32_t byte = 0; byte != 4; ++byte) {
+            sums[8 * word + 2 * byte] += weight * static_cast<f32_t>(static_cast<i8_t>(unpacked.y >> (8 * byte)));
+            sums[8 * word + 2 * byte + 1] += weight * static_cast<f32_t>(static_cast<i8_t>(unpacked.x >> (8 * byte)));
+        }
+    }
+    return sums;
+}
+
+/** The @c u4 twin of @ref dense_hip_weighted_i4x32_rocm. */
+__device__ __forceinline__ std::array<f32_t, 32> dense_hip_weighted_u4x32_rocm( //
+    uint4 a, f32_t weight, std::array<f32_t, 32> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t word = 0; word != 4; ++word) {
+        uint2 const unpacked = dense_hip_unpack_u4x8_rocm(words[word]);
+#pragma unroll
+        for (u32_t byte = 0; byte != 4; ++byte) {
+            sums[8 * word + 2 * byte] += weight * static_cast<f32_t>(static_cast<u8_t>(unpacked.y >> (8 * byte)));
+            sums[8 * word + 2 * byte + 1] += weight * static_cast<f32_t>(static_cast<u8_t>(unpacked.x >> (8 * byte)));
+        }
+    }
+    return sums;
+}
+
+/** The quads kit of signed nibbles over the signed byte dot @p dot_, at @p capability_. */
+template <int (*dot_)(u32_t, u32_t, int), nk_capability_t capability_>
+struct dense_hip_i4x2_quads_kit {
+    inline static constexpr nk_capability_t capability_k = capability_;
+    using warp_t = hip_warp_t;
+    using scalar_t = nk::i4x2_t;
+    using fragment_t = uint4;
+    using dot_t = int;
+    using weighted_t = std::array<f32_t, 32>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = int2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_hip_dot_i4x32<dot_>(a, b, sum);
+    }
+    static __device__ __forceinline__ int2 accumulate_norms(fragment_t a, int2 moments) noexcept {
+        return dense_hip_moments_i4x32<dot_>(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_hip_weighted_i4x32_rocm(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(int2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_hip_convert_to_distance(kernel, ranked);
+    }
+};
+
+#if NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
+
+/** i4x2 kit - CDNA3 and CDNA4, the byte engine over unpacked nibbles. */
+struct i4x2_cdna3_quads_kit_t : dense_hip_i4x2_quads_kit<dense_hip_dot_i8x4_cdna3, nk_cap_cdna3_k> {};
+
+#endif // NUMKONG_TARGET_CDNA3 || NUMKONG_TARGET_CDNA4
+
+#if NUMKONG_TARGET_CDNA5
+
+/** i4x2 kit - CDNA5, the byte engine over unpacked nibbles. */
+struct i4x2_cdna5_quads_kit_t : dense_hip_i4x2_quads_kit<dense_hip_dot_i8x4_cdna5, nk_cap_cdna5_k> {};
+
+#endif // NUMKONG_TARGET_CDNA5
+
+/** u4x2 kit - every ROCm device, the byte engine over unpacked nibbles. */
+struct u4x2_rocm_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
+    using warp_t = hip_warp_t;
+    using scalar_t = nk::u4x2_t;
+    using fragment_t = uint4;
+    using dot_t = u32_t;
+    using weighted_t = std::array<f32_t, 32>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = uint2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return dense_hip_dot_u4x32_rocm(a, b, sum);
+    }
+    static __device__ __forceinline__ uint2 accumulate_norms(fragment_t a, uint2 moments) noexcept {
+        return dense_hip_moments_u4x32_rocm(a, moments);
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_hip_weighted_u4x32_rocm(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(uint2 moments) noexcept {
+        return {moments.x, moments.y};
+    }
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        return dense_hip_distance(kernel, dot, query, target);
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t kernel,
+                                                                           dense_distance_t ranked) noexcept {
+        return dense_hip_convert_to_distance(kernel, ranked);
+    }
+};
+
+#pragma endregion Packed Nibbles
+
+#pragma region Packed Bits
+
+/** The intersection popcount of a fragment pair via two 64-bit popcounts. */
+__device__ __forceinline__ u32_t dense_hip_intersect_u1x128_rocm(uint4 a, uint4 b) noexcept {
+    u64_t const low = (static_cast<u64_t>(a.y) << 32 | a.x) & (static_cast<u64_t>(b.y) << 32 | b.x);
+    u64_t const high = (static_cast<u64_t>(a.w) << 32 | a.z) & (static_cast<u64_t>(b.w) << 32 | b.z);
+    return static_cast<u32_t>(std::popcount(low) + std::popcount(high));
+}
+
+/** Returns @p sums plus @p weight times each of a fragment's 128 bits, most significant bit of each
+ *  byte first, as NumKong's casts order them. */
+__device__ __forceinline__ std::array<f32_t, 128> dense_hip_weighted_u1x128_rocm( //
+    uint4 a, f32_t weight, std::array<f32_t, 128> sums) noexcept {
+    u32_t const words[4] = {a.x, a.y, a.z, a.w};
+#pragma unroll
+    for (u32_t bit = 0; bit != 128; ++bit)
+        sums[bit] += weight * static_cast<f32_t>((words[bit / 32] >> (8 * (bit / 8 % 4) + 7 - bit % 8)) & 1u);
+    return sums;
+}
+
+/** u1x8 kit - every ROCm device: the "dot" is the intersection popcount, and the norms store each
+ *  row's set-bit count, the currency of Jaccard's union, mirrored into both fields. */
+struct u1x8_rocm_quads_kit_t {
+    inline static constexpr nk_capability_t capability_k = nk_cap_rocm_k;
+    using warp_t = hip_warp_t;
+    using scalar_t = nk::u1x8_t;
+    using fragment_t = uint4;
+    using dot_t = u32_t;
+    using weighted_t = std::array<f32_t, 128>;
+    using norms_t = vector_norms<dot_t>;
+    using norms_accumulator_t = uint2;
+
+    static __device__ __forceinline__ dot_t accumulate_dot(fragment_t a, fragment_t b, dot_t sum) noexcept {
+        return sum + dense_hip_intersect_u1x128_rocm(a, b);
+    }
+    static __device__ __forceinline__ uint2 accumulate_norms(fragment_t a, uint2 moments) noexcept {
+        moments.x += dense_hip_intersect_u1x128_rocm(a, a);
+        return moments;
+    }
+    static __device__ __forceinline__ weighted_t accumulate_weighted(fragment_t a, f32_t weight,
+                                                                     weighted_t sums) noexcept {
+        return dense_hip_weighted_u1x128_rocm(a, weight, sums);
+    }
+    static __device__ __forceinline__ norms_t partials_to_norms(uint2 moments) noexcept {
+        return {moments.x, moments.x};
+    }
+
+    /** Hamming is |a| + |b| - 2·intersection; Jaccard is 1 - intersection / union, and two empty
+     *  sets are identical, distance zero. */
+    static __device__ __forceinline__ dense_distance_t distance(nk_kernel_kind_t kernel, dot_t dot, norms_t query,
+                                                                norms_t target) noexcept {
+        switch (kernel) {
+        case nk_kernel_dot_k: return 1.0f - static_cast<f32_t>(dot);
+        case nk_kernel_hamming_k: return static_cast<f32_t>(query.sum + target.sum - 2 * dot);
+        default: {
+            u32_t const unions = query.sum + target.sum - dot;
+            return unions ? 1.0f - static_cast<f32_t>(dot) / static_cast<f32_t>(unions) : 0.0f;
+        }
+        }
+    }
+    static __device__ __forceinline__ dense_distance_t convert_to_distance(nk_kernel_kind_t,
+                                                                           dense_distance_t ranked) noexcept {
+        return ranked;
+    }
+};
+
+#pragma endregion Packed Bits
+
+#pragma region Chains
+
+/*  A class's ceiling carries every older tier's bit, so each chain lists the newest tier first:
+ *  MI400 keeps the CDNA4 conversions but drops CDNA3's signed byte and half dots, and its unit
+ *  compiles none of CDNA3's kits. */
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct dense_quads_chain<nk::f16_t, caps_> {
+    using kit_t = typename first_available_kit<                                                    //
+        f16_rocm_quads_kit_t,                                                                      //
+        chain_layer<NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0, f16_rocm_quads_kit_t>,  //
+        chain_layer<NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0, f16_cdna3_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_CDNA3 && (caps_ & nk_cap_cdna3_k) != 0, f16_cdna3_quads_kit_t>  //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct dense_quads_chain<nk::bf16_t, caps_> {
+    using kit_t = typename first_available_kit<                                                    //
+        bf16_rocm_quads_kit_t,                                                                     //
+        chain_layer<NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0, bf16_cdna4_quads_kit_t> //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct dense_quads_chain<nk::i8_t, caps_> {
+    using kit_t = typename first_available_kit<                                                  //
+        i8_cdna3_quads_kit_t,                                                                    //
+        chain_layer<NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0, i8_cdna5_quads_kit_t> //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct dense_quads_chain<nk::u8_t, caps_> {
+    using kit_t = u8_rocm_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct dense_quads_chain<nk::e5m2_t, caps_> {
+    using kit_t = typename first_available_kit<                                                     //
+        e5m2_rocm_quads_kit_t,                                                                      //
+        chain_layer<NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0, e5m2_cdna4_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0, e5m2_cdna4_quads_kit_t>  //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct dense_quads_chain<nk::e4m3_t, caps_> {
+    using kit_t = typename first_available_kit<                                                     //
+        e4m3_rocm_quads_kit_t,                                                                      //
+        chain_layer<NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0, e4m3_cdna4_quads_kit_t>, //
+        chain_layer<NUMKONG_TARGET_CDNA4 && (caps_ & nk_cap_cdna4_k) != 0, e4m3_cdna4_quads_kit_t>  //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct dense_quads_chain<nk::e3m2_t, caps_> {
+    using kit_t = e3m2_rocm_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct dense_quads_chain<nk::e2m3_t, caps_> {
+    using kit_t = e2m3_rocm_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct dense_quads_chain<nk::i4x2_t, caps_> {
+    using kit_t = typename first_available_kit<                                                    //
+        i4x2_cdna3_quads_kit_t,                                                                    //
+        chain_layer<NUMKONG_TARGET_CDNA5 && (caps_ & nk_cap_cdna5_k) != 0, i4x2_cdna5_quads_kit_t> //
+        >::type;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct dense_quads_chain<nk::u4x2_t, caps_> {
+    using kit_t = u4x2_rocm_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+template <nk_capability_t caps_>
+    requires((caps_ & nk_cap_rocm_k) != 0)
+struct dense_quads_chain<nk::u1x8_t, caps_> {
+    using kit_t = u1x8_rocm_quads_kit_t;
+    static constexpr nk_capability_t picked_k = kit_t::capability_k;
+};
+
+#pragma endregion Chains
+
+} // namespace usearch
+} // namespace unum
+
+#endif // NUMKONG_ARCH_ROCM_

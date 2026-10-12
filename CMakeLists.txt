@@ -78,8 +78,8 @@ set(USEARCH_CUDA_ARCHITECTURES
     CACHE STRING "GPU architectures the CUDA tests, benchmarks & dispatch unit compile for"
 )
 
-# The AMD units embed one code object per listed processor: every unit compiles for the processors of its own class, and
-# the CDNA3 floor for every listed one, so it serves a GPU without a class as the NVIDIA floor's PTX does.
+# The AMD units embed one code object per listed processor of their class, and the CDNA3 floor also for CDNA4, which
+# keeps every instruction its kits use; CDNA5 drops `v_dot4_i32_i8` and `v_dot2_f32_f16`, so only its own unit runs it.
 set(USEARCH_ROCM_ARCHITECTURES
     "gfx942;gfx950;gfx1250"
     CACHE STRING "AMD processors the code objects compile for: gfx942 for CDNA3, gfx950 for CDNA4, gfx1250 for CDNA5"

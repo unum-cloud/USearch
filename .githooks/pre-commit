@@ -1108,13 +1108,13 @@ check_cuda_raw_atomics() {
         "$file calls a CUDA atomic intrinsic - use cuda_atomic_ref with an explicit memory order:"
 }
 
-# A file every GPU vendor compiles names no vendor: its symbols are `dense_vram_*`, and its lanes come from the
-# policy a kit names, never from one vendor's own.
+# A file every GPU vendor compiles names no vendor: its symbols are `dense_vram_*`, and its collectives come from the
+# warp policy a kit names, never from one vendor's own.
 check_vendor_neutral() {
     local named
-    named=$(printf '%s\n' "$added" | grep -E 'dense_cuda_|dense_hip_|dense_metal_|cuda_lanes_t|hip_lanes_t' || true)
+    named=$(printf '%s\n' "$added" | grep -E 'dense_cuda_|dense_hip_|dense_metal_|cuda_warp_t|hip_warp_t' || true)
     [ -z "$named" ] || fail "$named" \
-        "$file is shared by every GPU vendor - name its symbols dense_vram_* and its lanes the policy:"
+        "$file is shared by every GPU vendor - name its symbols dense_vram_* and its warp the kit's policy:"
 }
 
 # Calling a call's result the same way: `vectors.view()(range, slice)` reads as a typo and hides which object

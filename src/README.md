@@ -72,7 +72,7 @@ The dispatch unit visits every arm yet compiles at the baseline instruction set.
   `src/CMakeLists.txt` restates the lineage row for row: `usearch_dense_ram_variant(<class> OVER <parent> <kits>...)` unions the parent's flags with those of every delta kit that compiled, and the unit exists only when its parent does and some delta compiled.
 - `usearch_dense_nvme_variants` reuses those flags for the classes whose kits a storage walk tells apart, so `aws_g5`, `alibaba_c930` and the WebAssembly classes take none.
 - `usearch_dense_vram_variants_nvidia_<class>` compiles one NVIDIA class for its own architecture alone: `sm_80` with its PTX, `sm_89`, `sm_90a`, `sm_100f` and `sm_120f`.
-- `usearch_dense_vram_variants_amd_<class>` embeds one AMD class's code object, compiled for its own processors, and the CDNA3 floor for every listed one.
+- `usearch_dense_vram_variants_amd_<class>` embeds one AMD class's code object, compiled for its own processors, and the CDNA3 floor for CDNA4 too.
 - `usearch_dense_vram_variants_apple` compiles the Apple arms as plain C++, their kernels compiled from embedded source at first use.
 - `usearch_punned` - `types.cpp`, `sequence.cpp` & the dense dispatch unit, `dense_index.cpp`, or `dense_index.cu` under `USEARCH_BUILD_CUDA`.
 

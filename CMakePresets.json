@@ -222,6 +222,36 @@
       }
     },
     {
+      "name": "rocm_relwithdebinfo",
+      "inherits": "base",
+      "displayName": "ROCm RelWithDebInfo - everything, the AMD arms included",
+      "description": "ROCm's Clang compiles every unit, the AMD ones device-only into embedded code objects and host-only around them, so the library still loads without `libamdhip64`. Narrowed to MI300's gfx942.",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "/opt/rocm/llvm/bin/clang",
+        "CMAKE_CXX_COMPILER": "/opt/rocm/llvm/bin/clang++",
+        "CMAKE_CXX_SCAN_FOR_MODULES": "OFF",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -gline-tables-only -DNDEBUG",
+        "USEARCH_BUILD_TEST": "ON",
+        "USEARCH_BUILD_BENCH": "OFF",
+        "USEARCH_BUILD_LIB_C": "ON",
+        "USEARCH_BUILD_CUDA": "OFF",
+        "USEARCH_BUILD_ROCM": "ON",
+        "USEARCH_ROCM_ARCHITECTURES": "gfx942"
+      }
+    },
+    {
+      "name": "rocm_release",
+      "inherits": "rocm_relwithdebinfo",
+      "displayName": "ROCm Release - every AMD class, CDNA3 through CDNA5",
+      "description": "Same targets as `rocm_relwithdebinfo`, at Release and embedding code objects for every AMD class - what shipping artifacts need.",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "USEARCH_ROCM_ARCHITECTURES": "gfx942;gfx950;gfx1250"
+      }
+    },
+    {
       "name": "host_library",
       "inherits": [
         "base",
@@ -369,6 +399,16 @@
     {
       "name": "cuda_release",
       "configurePreset": "cuda_release",
+      "jobs": 0
+    },
+    {
+      "name": "rocm_relwithdebinfo",
+      "configurePreset": "rocm_relwithdebinfo",
+      "jobs": 0
+    },
+    {
+      "name": "rocm_release",
+      "configurePreset": "rocm_release",
       "jobs": 0
     },
     {

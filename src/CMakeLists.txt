@@ -260,6 +260,74 @@ else ()
     target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_CUDA_=0")
 endif ()
 
+# The AMD arms join beside the NVIDIA ones, so one dispatch unit carries both vendors. Each class unit compiles twice
+# through ROCm's Clang, never through CMake's HIP language, whose fat binaries would register with `libamdhip64`: once
+# device-only over every compiled dtype, into an offload bundle of the class's listed processors that links in as raw
+# bytes, and once host-only into the arms, which name no kernel, so they register nothing and link no HIP runtime.
+if (USEARCH_BUILD_ROCM)
+    if (NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "USEARCH_BUILD_ROCM compiles with ROCm's Clang - set CMAKE_CXX_COMPILER to its clang++")
+    endif ()
+    enable_language(ASM)
+    function (usearch_dense_vram_amd_variant class target_macro)
+        set(processors_)
+        foreach (processor_ IN LISTS ARGN)
+            if (processor_ IN_LIST USEARCH_ROCM_ARCHITECTURES)
+                list(APPEND processors_ --offload-arch=${processor_})
+            endif ()
+        endforeach ()
+        if (NOT processors_)
+            return()
+        endif ()
+        set(target_ usearch_dense_vram_variants_${class})
+        set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_variants_${class}.hip)
+        set(bundles_dir_ ${CMAKE_CURRENT_BINARY_DIR}/rocm)
+        set(bundle_ ${bundles_dir_}/dense_${class}.hipfb)
+        add_custom_command(
+            OUTPUT ${bundle_}
+            COMMAND
+                ${CMAKE_CXX_COMPILER} -x hip -std=c++20 -O3 --cuda-device-only ${processors_}
+                "-I$<JOIN:$<TARGET_PROPERTY:${target_},INCLUDE_DIRECTORIES>,;-I>"
+                "-D$<JOIN:$<TARGET_PROPERTY:${target_},COMPILE_DEFINITIONS>,;-D>" -MD -MF ${bundle_}.d -c ${source_} -o
+                ${bundle_}
+            DEPENDS ${source_}
+            DEPFILE ${bundle_}.d
+            COMMENT "Compiling the ${class} kernels"
+            COMMAND_EXPAND_LISTS VERBATIM
+        )
+        # The bytes land page-aligned in a read-only section, under the names the unit declares, through an assembler
+        # stub, so the code object travels with the unit's own objects into archives too.
+        set(bundle_stub_ ${bundles_dir_}/dense_${class}_bundle.S)
+        file(
+            WRITE ${bundle_stub_}
+            ".section .rodata\n.balign 4096\n.globl dense_${class}_bundle_start\ndense_${class}_bundle_start:\n"
+            ".incbin \"${bundle_}\"\n.globl dense_${class}_bundle_end\ndense_${class}_bundle_end:\n"
+            ".section .note.GNU-stack,\"\",@progbits\n"
+        )
+        set_source_files_properties(${bundle_stub_} PROPERTIES LANGUAGE ASM OBJECT_DEPENDS ${bundle_})
+        add_library(${target_} OBJECT ${source_} ${bundle_stub_})
+        usearch_setup_target(${target_})
+        target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+        target_compile_definitions(${target_} PRIVATE "USEARCH_ARCH_ROCM_=1" "NUMKONG_TARGET_${target_macro}=1")
+        target_link_libraries(
+            ${target_}
+            PRIVATE yyjson forkunion::static
+            PUBLIC ${CMAKE_DL_LIBS}
+        )
+        set_source_files_properties(
+            ${source_} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xhip;--cuda-host-only;-nogpulib"
+        )
+        set(USEARCH_PUNNED_LIBRARIES
+            ${USEARCH_PUNNED_LIBRARIES} ${target_}
+            PARENT_SCOPE
+        )
+    endfunction ()
+    usearch_dense_vram_amd_variant(amd_cdna3 CDNA3 gfx942 gfx950)
+    usearch_dense_vram_amd_variant(amd_cdna4 CDNA4 gfx950)
+    usearch_dense_vram_amd_variant(amd_cdna5 CDNA5 gfx1250 gfx1251)
+    target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_ROCM_=1")
+endif ()
+
 # The Apple arms: one plain C++ unit serving every Apple class until a family's kernels differ, whose kernels compile
 # from embedded source at first use, so no Metal toolchain is needed to build it. The dispatch unit and the Apple unit
 # see `USEARCH_ARCH_METAL_=1`.

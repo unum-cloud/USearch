@@ -18,7 +18,7 @@
  *  dimensions are frozen by the first @c reserve, never by a type, and the metric only steers the
  *  scalar epilogue, so one kernel serves every metric of a dtype. The cross-lane reduction is
  *  deliberately not a kit member - one shuffle tree in @c vram_index.cuh serves every kit, over the
- *  lanes policy each kit names. Distances take both sides' norms, as the CPU finalizers do, so a
+ *  warp policy each kit names. Distances take both sides' norms, as the CPU finalizers do, so a
  *  symmetric candidate-to-candidate distance is the same call.
  *
  *  Families sort from the widest numeric types to the smallest & most exotic: 16-bit floats, 8-bit
@@ -45,12 +45,12 @@ namespace unum {
 namespace usearch {
 
 /**
- *  @brief The NVIDIA lanes policy the shared walk code is written against: 32-lane warps with
+ *  @brief The NVIDIA warp policy the shared walk code is written against: 32-lane warps with
  *      32-bit lane masks, device-scope atomics, and the @c cp.async staging copies.
  *
  *  Every collective takes the full-warp mask, since the walks keep their warps converged.
  */
-struct cuda_lanes_t {
+struct cuda_warp_t {
     using mask_t = u32_t;
     inline static constexpr u32_t width_k = 32;
     inline static constexpr mask_t all_k = 0xFFFFFFFFu;
@@ -286,7 +286,7 @@ __device__ __forceinline__ std::array<f32_t, 8> dense_cuda_weighted_bf16x8_amper
 /** f16 kit - the sm_80 floor. */
 struct f16_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -320,7 +320,7 @@ struct f16_ampere_quads_kit_t {
 /** bf16 kit - the sm_80 floor. */
 struct bf16_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -399,7 +399,7 @@ __device__ __forceinline__ f32_t dense_cuda_dot_bf16x8_blackwell(uint4 a, uint4 
 /** f16 kit - Blackwell, @c fma.rn.f32.f16. */
 struct f16_blackwell_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::f16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -433,7 +433,7 @@ struct f16_blackwell_quads_kit_t {
 /** bf16 kit - Blackwell, @c fma.rn.f32.bf16. */
 struct bf16_blackwell_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::bf16_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -537,7 +537,7 @@ __device__ __forceinline__ std::array<f32_t, 16> dense_cuda_weighted_u8x16_amper
 /** i8 kit - the sm_80 floor. */
 struct i8_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::i8_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -571,7 +571,7 @@ struct i8_ampere_quads_kit_t {
 /** u8 kit - the sm_80 floor. */
 struct u8_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::u8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -714,7 +714,7 @@ struct e2m3_ampere_widening_t {
 /** e5m2 kit - the sm_80 floor, widening by shifts. */
 struct e5m2_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -748,7 +748,7 @@ struct e5m2_ampere_quads_kit_t {
 /** e4m3 kit - the sm_80 floor, widening by hand. */
 struct e4m3_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -782,7 +782,7 @@ struct e4m3_ampere_quads_kit_t {
 /** e3m2 kit - the sm_80 floor, widening by hand. */
 struct e3m2_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::e3m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -816,7 +816,7 @@ struct e3m2_ampere_quads_kit_t {
 /** e2m3 kit - the sm_80 floor, widening by hand. */
 struct e2m3_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::e2m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -878,7 +878,7 @@ struct e5m2_ada_widening_t {
 /** e5m2 kit - Ada, widening through the conversion. */
 struct e5m2_ada_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ada_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -912,7 +912,7 @@ struct e5m2_ada_quads_kit_t {
 /** e4m3 kit - Ada, widening through the conversion. */
 struct e4m3_ada_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ada_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -992,7 +992,7 @@ struct e2m3_blackwell_widening_t {
 /** e5m2 kit - Blackwell, converted halves through @c fma.rn.f32.f16. */
 struct e5m2_blackwell_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::e5m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1026,7 +1026,7 @@ struct e5m2_blackwell_quads_kit_t {
 /** e4m3 kit - Blackwell, converted halves through @c fma.rn.f32.f16. */
 struct e4m3_blackwell_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::e4m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1060,7 +1060,7 @@ struct e4m3_blackwell_quads_kit_t {
 /** e3m2 kit - Blackwell, the one-instruction conversion into @c fma.rn.f32.f16. */
 struct e3m2_blackwell_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::e3m2_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1094,7 +1094,7 @@ struct e3m2_blackwell_quads_kit_t {
 /** e2m3 kit - Blackwell, the one-instruction conversion into @c fma.rn.f32.f16. */
 struct e2m3_blackwell_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_blackwell_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::e2m3_t;
     using fragment_t = uint4;
     using dot_t = f32_t;
@@ -1234,7 +1234,7 @@ __device__ __forceinline__ std::array<f32_t, 32> dense_cuda_weighted_u4x32_amper
 /** i4x2 kit - the sm_80 floor, the byte engine over unpacked nibbles. */
 struct i4x2_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::i4x2_t;
     using fragment_t = uint4;
     using dot_t = int;
@@ -1268,7 +1268,7 @@ struct i4x2_ampere_quads_kit_t {
 /** u4x2 kit - the sm_80 floor, the byte engine over unpacked nibbles. */
 struct u4x2_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::u4x2_t;
     using fragment_t = uint4;
     using dot_t = u32_t;
@@ -1326,7 +1326,7 @@ __device__ __forceinline__ std::array<f32_t, 128> dense_cuda_weighted_u1x128_amp
  *  row's set-bit count, the currency of Jaccard's union, mirrored into both fields. */
 struct u1x8_ampere_quads_kit_t {
     inline static constexpr nk_capability_t capability_k = nk_cap_ampere_k;
-    using lanes_t = cuda_lanes_t;
+    using warp_t = cuda_warp_t;
     using scalar_t = nk::u1x8_t;
     using fragment_t = uint4;
     using dot_t = u32_t;

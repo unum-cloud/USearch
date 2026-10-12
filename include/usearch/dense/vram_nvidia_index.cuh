@@ -29,8 +29,8 @@ namespace unum {
 namespace usearch {
 
 static_assert(sizeof(dense_vram_scored_node_t) == dense_cuda_scored_node_bytes_k);
-static_assert(dense_cuda_widest_pool_k == dense_vram_sorted_pool<16, cuda_lanes_t>::capacity_k);
-static_assert(dense_cuda_ranked_head_k == dense_vram_sorted_pool<2, cuda_lanes_t>::capacity_k);
+static_assert(dense_cuda_widest_pool_k == dense_vram_sorted_pool<16, cuda_warp_t>::capacity_k);
+static_assert(dense_cuda_ranked_head_k == dense_vram_sorted_pool<2, cuda_warp_t>::capacity_k);
 static_assert(sizeof(dense_cuda_arena_shape_t) == sizeof(dense_vram_arena_shape_t));
 
 /** The quads kit @c dense_quads_chain picks for @p vector_dtype_ under @p capability_, checked
@@ -121,8 +121,8 @@ struct dense_cuda_heads_rescoring {
                 fragment_t const key = loads ? planes.vector_for(gathered.ids[row], fragment_index) : fragment_t {};
                 for (u32_t head = 1; head != heads_count; ++head) {
                     fragment_t const query = loads ? heads[head * row_fragments + fragment_index] : fragment_t {};
-                    dot_t const dot = dense_vram_reduce<cuda_lanes_t>(kit_::accumulate_dot(key, query, dot_t {}),
-                                                                      planes.lanes_per_row);
+                    dot_t const dot = dense_vram_reduce<cuda_warp_t>(kit_::accumulate_dot(key, query, dot_t {}),
+                                                                     planes.lanes_per_row);
                     f32_t& slot = dots[head * 32 + row];
                     if (lane_in_row == 0 && row < gathered_count) slot = (step ? slot : 0.f) + static_cast<f32_t>(dot);
                 }
@@ -190,7 +190,7 @@ __global__ void __launch_bounds__(dense_vram_warps_per_block_k * 32, dense_vram_
     __shared__ typename kit_::norms_t cache_norms[dense_vram_warps_per_block_k][dense_vram_cache_rows_k];
     __shared__ dense_vram_gathered<kit_> gathered[dense_vram_warps_per_block_k];
 
-    dense_vram_warp_slice_t const slice = dense_vram_carve_slice<cuda_lanes_t>(view, dynamic_scratch);
+    dense_vram_warp_slice_t const slice = dense_vram_carve_slice<cuda_warp_t>(view, dynamic_scratch);
     int const warp = slice.warp, lane = slice.lane;
     std::size_t const warp_index = slice.warp_index;
     u64_t* const visited_slots = slice.visited_slots;
@@ -215,15 +215,15 @@ __global__ void __launch_bounds__(dense_vram_warps_per_block_k * 32, dense_vram_
             __nanosleep(2048);
         }
 
-        dense_vram_warp_context<dense_vram_register_frontier<pool_slots_, cuda_lanes_t>> context;
+        dense_vram_warp_context<dense_vram_register_frontier<pool_slots_, cuda_warp_t>> context;
         context.random_generator = splitmix64_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(new_node_id) * 33 + lane)};
-        dense_vram_visited_set<cuda_lanes_t> visited {visited_slots, view.arena_shape.visited_hash_shift,
-                                                      view.epoch_base + (new_node_id - view.first_id) + 1};
+        dense_vram_visited_set<cuda_warp_t> visited {visited_slots, view.arena_shape.visited_hash_shift,
+                                                     view.epoch_base + (new_node_id - view.first_id) + 1};
         dense_vram_insert_one<kit_>( //
             view, new_node_id, visited, query_span, cache, selection, cache_norms[warp], gathered[warp], context, lane);
         context.telemetry.tail_drops = context.frontier.dropped();
         context.telemetry.visited_saturations = visited.saturations_;
-        context.telemetry.template flush<cuda_lanes_t, dense_vram_traversal_t::inserting_k>(view.telemetry, lane);
+        context.telemetry.template flush<cuda_warp_t, dense_vram_traversal_t::inserting_k>(view.telemetry, lane);
     }
 }
 
@@ -236,7 +236,7 @@ __global__ void __launch_bounds__(dense_vram_warps_per_block_k * 32, dense_vram_
     __shared__ typename kit_::norms_t cache_norms[dense_vram_warps_per_block_k][dense_vram_cache_rows_k];
     __shared__ dense_vram_gathered<kit_> gathered[dense_vram_warps_per_block_k];
 
-    dense_vram_warp_slice_t const slice = dense_vram_carve_slice<cuda_lanes_t>(view, dynamic_scratch);
+    dense_vram_warp_slice_t const slice = dense_vram_carve_slice<cuda_warp_t>(view, dynamic_scratch);
     int const warp = slice.warp, lane = slice.lane;
     u64_t* const visited_slots = slice.visited_slots;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
@@ -253,15 +253,15 @@ __global__ void __launch_bounds__(dense_vram_warps_per_block_k * 32, dense_vram_
         if (view.first_id + offset >= view.end_id) return;
         u32_t const node_id = view.node_ids ? view.node_ids[offset] : view.first_id + offset;
 
-        dense_vram_warp_context<dense_vram_register_frontier<pool_slots_, cuda_lanes_t>> context;
+        dense_vram_warp_context<dense_vram_register_frontier<pool_slots_, cuda_warp_t>> context;
         context.random_generator = splitmix64_t {0xA5A5A5A5ull ^ (static_cast<u64_t>(node_id) * 33 + lane)};
-        dense_vram_visited_set<cuda_lanes_t> visited {visited_slots, view.arena_shape.visited_hash_shift,
-                                                      view.epoch_base + offset + 1};
+        dense_vram_visited_set<cuda_warp_t> visited {visited_slots, view.arena_shape.visited_hash_shift,
+                                                     view.epoch_base + offset + 1};
         dense_vram_refine_one<kit_>( //
             view, node_id, visited, query_span, cache, selection, cache_norms[warp], gathered[warp], context, lane);
         context.telemetry.tail_drops = context.frontier.dropped();
         context.telemetry.visited_saturations = visited.saturations_;
-        context.telemetry.template flush<cuda_lanes_t, dense_vram_traversal_t::searching_k>(view.telemetry, lane);
+        context.telemetry.template flush<cuda_warp_t, dense_vram_traversal_t::searching_k>(view.telemetry, lane);
     }
 }
 
@@ -355,12 +355,12 @@ __device__ __forceinline__ void dense_cuda_merge_links_one( //
 
     // Score every candidate against the node & sort ascending; IDs are cache-row indices.
     telemetry.scored += candidates_count;
-    dense_vram_sorted_buffer<cuda_lanes_t> sorted_candidates {sorted_span, 0, query_row_k};
+    dense_vram_sorted_buffer<cuda_warp_t> sorted_candidates {sorted_span, 0, query_row_k};
     for (u32_t base = 0; base < candidates_count; base += 32) {
         u32_t const batch_count = min_of(candidates_count - base, 32u);
         dense_vram_scored_node_t const scored = dense_vram_score_batch<kit_>( //
             planes, cache.row(query_row_k), query_state, gathered.ids + base, batch_count, gathered, lane);
-        dense_vram_scored_node_t const sorted_batch = dense_sort_lanes<cuda_lanes_t>(
+        dense_vram_scored_node_t const sorted_batch = dense_sort_lanes<cuda_warp_t>(
             static_cast<u32_t>(lane) < batch_count
                 ? dense_vram_scored_node_t::make(scored.distance(), base + lane) // ID = candidate index.
                 : dense_vram_scored_node_t::sentinel(),
@@ -455,7 +455,7 @@ __global__ void __launch_bounds__(dense_vram_warps_per_block_k * 32, dense_vram_
     __shared__ typename kit_::norms_t cache_norms[dense_vram_warps_per_block_k][dense_vram_cache_rows_k];
     __shared__ dense_vram_gathered<kit_> gathered[dense_vram_warps_per_block_k];
 
-    dense_vram_warp_slice_t const slice = dense_vram_carve_slice<cuda_lanes_t>(view, dynamic_scratch);
+    dense_vram_warp_slice_t const slice = dense_vram_carve_slice<cuda_warp_t>(view, dynamic_scratch);
     int const warp = slice.warp, lane = slice.lane;
     dense_vram_vector_cache<typename kit_::fragment_t> const cache {
         reinterpret_cast<typename kit_::fragment_t*>(slice.scratch), view.planes.row_fragments};
@@ -481,7 +481,7 @@ __global__ void __launch_bounds__(dense_vram_warps_per_block_k * 32, dense_vram_
         dense_cuda_merge_links_one<kit_>( //
             view, bucket_ids, bucket_counts, bucket_width, node_id, cache, sorted_span, kept_positions,
             cache_norms[warp], gathered[warp], telemetry, lane);
-        telemetry.template flush<cuda_lanes_t, dense_vram_traversal_t::searching_k>(view.telemetry, lane);
+        telemetry.template flush<cuda_warp_t, dense_vram_traversal_t::searching_k>(view.telemetry, lane);
     }
 }
 
@@ -699,18 +699,18 @@ __global__ void __launch_bounds__(dense_vram_warps_per_block_k * 32, pool_slots_
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ dense_vram_gathered<kit_> gathered[dense_vram_warps_per_block_k];
 
-    dense_vram_warp_slice_t const slice = dense_vram_carve_slice<cuda_lanes_t>(view, dynamic_scratch);
+    dense_vram_warp_slice_t const slice = dense_vram_carve_slice<cuda_warp_t>(view, dynamic_scratch);
     int const warp = slice.warp, lane = slice.lane;
     std::size_t const warp_index = slice.warp_index;
     u64_t* const visited_slots = slice.visited_slots;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
     for (u32_t query_index = static_cast<u32_t>(warp_index); query_index < view.queries_count;
          query_index += gridDim.x * dense_vram_warps_per_block_k) {
-        dense_vram_visited_set<cuda_lanes_t> visited {visited_slots, view.arena_shape.visited_hash_shift,
-                                                      view.epoch_base + query_index + 1};
+        dense_vram_visited_set<cuda_warp_t> visited {visited_slots, view.arena_shape.visited_hash_shift,
+                                                     view.epoch_base + query_index + 1};
         dense_vram_walk_one<kit_, (pool_slots_ <= 4 ? 4u : 3u)>( //
             view, sink, rescorings, query_index, query_span, visited,
-            dense_vram_register_frontier<pool_slots_, cuda_lanes_t> {}, gathered[warp], lane);
+            dense_vram_register_frontier<pool_slots_, cuda_warp_t> {}, gathered[warp], lane);
     }
 }
 
@@ -723,19 +723,19 @@ __global__ void __launch_bounds__(dense_vram_warps_per_block_k * 32, 4)
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ dense_vram_gathered<kit_> gathered[dense_vram_warps_per_block_k];
 
-    dense_vram_warp_slice_t const slice = dense_vram_carve_slice<cuda_lanes_t>(view, dynamic_scratch);
+    dense_vram_warp_slice_t const slice = dense_vram_carve_slice<cuda_warp_t>(view, dynamic_scratch);
     int const warp = slice.warp, lane = slice.lane;
     std::size_t const warp_index = slice.warp_index;
     u64_t* const visited_slots = slice.visited_slots;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
-    dense_vram_arena_frontier<cuda_lanes_t> frontier;
+    dense_vram_arena_frontier<cuda_warp_t> frontier;
     frontier.tail_.entries_ = view.arena_shape.tail_span(view.arena, warp_index);
     frontier.tail_.capacity_ = view.arena_shape.tail_entries;
     frontier.expansion_target_ = view.expansion;
     for (u32_t query_index = static_cast<u32_t>(warp_index); query_index < view.queries_count;
          query_index += gridDim.x * dense_vram_warps_per_block_k) {
-        dense_vram_visited_set<cuda_lanes_t> visited {visited_slots, view.arena_shape.visited_hash_shift,
-                                                      view.epoch_base + query_index + 1};
+        dense_vram_visited_set<cuda_warp_t> visited {visited_slots, view.arena_shape.visited_hash_shift,
+                                                     view.epoch_base + query_index + 1};
         dense_vram_walk_one<kit_, 4u>(view, sink, rescorings, query_index, query_span, visited, frontier,
                                       gathered[warp], lane);
     }
@@ -753,7 +753,7 @@ __global__ void dense_cuda_derive_norms_kernel(dense_vram_planes_view<kit_> plan
         for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += 32)
             accumulator = kit_::accumulate_norms(planes.vector_for(static_cast<dense_node_id_t>(row), fragment),
                                                  accumulator);
-        accumulator = dense_vram_reduce_norms<cuda_lanes_t>(accumulator);
+        accumulator = dense_vram_reduce_norms<cuda_warp_t>(accumulator);
         if (lane == 0) planes.norm_ref_for(static_cast<dense_node_id_t>(row)) = kit_::partials_to_norms(accumulator);
     }
 }

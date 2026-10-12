@@ -119,3 +119,21 @@ if (USEARCH_BUILD_METAL)
         usearch_test_vram PRIVATE usearch_test_vram_apple "-framework Metal" "-framework Foundation" objc
     )
 endif ()
+
+# The AMD object compiles everything with the host compiler and links the CDNA3 floor unit, whose code object CDNA3 and
+# CDNA4 run.
+if (USEARCH_BUILD_ROCM)
+    add_library(usearch_test_vram_amd OBJECT ${usearch_test_vram_shards_} dense/vram_amd.cpp)
+    usearch_keep_dense_dtypes(usearch_test_vram_amd)
+    usearch_setup_target(usearch_test_vram_amd HOST)
+    target_include_directories(
+        usearch_test_vram_amd PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/dense
+    )
+    target_compile_definitions(usearch_test_vram_amd PRIVATE "USEARCH_ARCH_ROCM_=1")
+    target_link_libraries(usearch_test_vram_amd PRIVATE fmt::fmt yyjson forkunion::static)
+    target_compile_definitions(usearch_test_vram PRIVATE "USEARCH_ARCH_ROCM_=1")
+    target_link_libraries(
+        usearch_test_vram PRIVATE usearch_test_vram_amd $<TARGET_OBJECTS:usearch_dense_vram_variants_amd_cdna3>
+                                  ${CMAKE_DL_LIBS}
+    )
+endif ()

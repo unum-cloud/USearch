@@ -5,7 +5,7 @@
  *  @brief Host-side vocabulary for driving one NVIDIA device - specs, streams, allocators.
  *
  *  Host-side driver & runtime API code only, hence the @c .hpp extension, so the layer compiles
- *  under a plain host compiler with the toolkit headers on the include path; the lanes policy the
+ *  under a plain host compiler with the toolkit headers on the include path; the warp policy the
  *  shared walk code is written against lives beside the kits in @c vram_nvidia_metric.cuh. The flat
  *  @c cuda_allocator carries @c std::allocator's call surface with the stream bound at
  *  construction; the @c cuda_reservable_allocator is the plane backend, a reserve-once /
