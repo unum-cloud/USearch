@@ -55,7 +55,8 @@ static std::size_t test_ram_index_configuration(char const* name, u64_t seed) {
     if (!dense_cell_admitted<caps_, atomic_ref_>()) return report(name, "capabilities missing at runtime");
 
     auto make_index = [](allocation_ledger_t& ledger) {
-        return index_t {kernel_, counting_allocator_t(ledger), counting_allocator_t(ledger)};
+        return std::unique_ptr<index_t>(
+            new (std::nothrow) index_t(kernel_, counting_allocator_t(ledger), counting_allocator_t(ledger)));
     };
 
     // The suite is composed here, not reflected: every call below is a capability claim
@@ -99,7 +100,8 @@ static std::size_t test_starved_configuration(char const* name, u64_t seed) {
         ram_index<dtype_, nk_cap_serial_k, dummy_waiter_t, fu::standard_atomic_ref, fu::standard_cache_hints_t,
                   counting_allocator_t, counting_allocator_t, counting_allocator_t>;
     auto make_index = [](allocation_ledger_t& ledger) {
-        return index_t {kernel_, counting_allocator_t(ledger), counting_allocator_t(ledger)};
+        return std::unique_ptr<index_t>(
+            new (std::nothrow) index_t(kernel_, counting_allocator_t(ledger), counting_allocator_t(ledger)));
     };
     return report(name, test_dense_saturated<index_t>(make_index, seed));
 }

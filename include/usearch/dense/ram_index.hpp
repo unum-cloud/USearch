@@ -651,15 +651,9 @@ struct ram_index {
     using selection_t = typename traversal_context_t::selection_t;
     using ids_tensor_t = typename traversal_context_t::ids_tensor_t;
 
-    using norms_allocator_t =
-        typename std::allocator_traits<vectors_allocator_type_>::template rebind_alloc<vector_norms_t>;
-
-    using vectors_chunk_t = nk::matrix<scalar_t, vectors_allocator_t>;
-    using norms_chunk_t = nk::tensor<vector_norms_t, norms_allocator_t, 1>;
-    using neighbors_chunk_t = nk::matrix<u32_t, neighbors_allocator_t>;
-
-    /** The growth schedule of every chunk directory - 1'024 rows first, doubling up to 1'048'576-row slabs - shared
-     *  with the owner columns that grow beside the index. @ref dense_ram_index_malloc */
+    /** The growth schedule of the vectors, norms & neighbors - 1'024 rows first, doubling up to
+     *  1'048'576-row slabs - shared with the owner columns that grow beside the index.
+     *  @ref dense_ram_index_malloc */
     using chunk_schedule_t = chunk_schedule<10, 20>;
 
     /** A row's chunk and its offset within that chunk. */
@@ -705,11 +699,9 @@ struct ram_index {
     static_assert(std::atomic_ref<geometry_t>::is_always_lock_free,
                   "Every geometry load must stay one plain instruction, never a library call");
 
-    /** Allocator instance handed to every vectors & norms chunk. */
+    /** The allocator the vectors & norms grow through, whose memory domain the sharded index
+     *  places by. */
     [[no_unique_address]] vectors_allocator_t vectors_allocator_;
-
-    /** Allocator instance handed to every neighbors chunk. */
-    [[no_unique_address]] neighbors_allocator_t neighbors_allocator_;
 
     ram_index(ram_index const&) noexcept = delete;
     ram_index& operator=(ram_index const&) noexcept = delete;
@@ -717,22 +709,13 @@ struct ram_index {
     ram_index(ram_index&&) noexcept = delete;
     ram_index& operator=(ram_index&&) noexcept = delete;
 
-    /**
-     *  @brief Constructs an empty index walking by @p kernel, remembering the allocators to hand to
-     *      every future chunk; a @p kernel the dtype's kits cannot finalize is refused at the first
-     *      @c reserve.
-     *
-     *  The chunk directories pad every header to @c default_alignment_k, so a grower's
-     *  half-built header never shares a cache line with the ones readers dereference. Their
-     *  storage is allocated lazily, ahead of the first chunk.
-     */
+    /** Constructs an empty index walking by @p kernel, its vectors & norms growing through
+     *  @p vectors_allocator and its neighbors through @p neighbors_allocator; a @p kernel the
+     *  dtype's kits cannot finalize is refused at the first @c reserve. */
     explicit ram_index(nk_kernel_kind_t kernel, vectors_allocator_type_ const& vectors_allocator = {},
                        neighbors_allocator_type_ const& neighbors_allocator = {}) noexcept
-        : vectors_allocator_(vectors_allocator), neighbors_allocator_(neighbors_allocator),
-          vectors_chunks_(vectors_allocator, round_up_to_multiple(sizeof(vectors_chunk_t), default_alignment_k)),
-          norms_chunks_(vectors_allocator, round_up_to_multiple(sizeof(norms_chunk_t), default_alignment_k)),
-          neighbors_chunks_(neighbors_allocator, round_up_to_multiple(sizeof(neighbors_chunk_t), default_alignment_k)),
-          kernel_(kernel) {}
+        : vectors_allocator_(vectors_allocator), vectors_(vectors_allocator), norms_(vectors_allocator),
+          neighbors_(neighbors_allocator), kernel_(kernel) {}
 
 #pragma region Measures
 
@@ -779,7 +762,7 @@ struct ram_index {
     }
 
     /** Bytes the materialized chunks span - vectors, norms & neighbors - derived from the hosted
-     *  capacity and the growth schedule rather than from the chunk directories, so it stays safe
+     *  capacity and the growth schedule rather than from the chunks themselves, so it stays safe
      *  under concurrent growth. Reserved-but-empty rows count from the moment they are granted. */
     std::size_t memory_usage() const noexcept {
         geometry_t const frozen = geometry();
@@ -2033,16 +2016,14 @@ struct ram_index {
                 return status_t::config_mismatch_k;
 
             location_t const location = chunk_schedule_t::locate(rows.first);
-            vectors_view_t const vectors = index_->vectors_chunks_[location.chunk](
-                nk::range(location.offset, location.offset + rows.size()), nk::slice);
             for (std::size_t row = 0; row != rows.size(); ++row)
-                std::memcpy(vectors_rows.data() + row * row_bytes, vectors.row(row).data(), row_bytes);
+                std::memcpy(vectors_rows.data() + row * row_bytes,
+                            index_->vectors_[location_t {location.chunk, location.offset + row}], row_bytes);
             if (index_->stores_norms() && !norms_rows.empty())
-                std::memcpy(norms_rows.data(), index_->norms_chunks_[location.chunk].data() + location.offset,
-                            norms_rows.size());
+                std::memcpy(norms_rows.data(), &index_->norms_[location], norms_rows.size());
             atomic_ref<std::size_t>(covered_vectors).add(rows.size(), std::memory_order_release);
 
-            node_id_t const* source = index_->neighbors_chunks_[location.chunk].view().row(location.offset).data();
+            node_id_t const* source = index_->neighbors_[location];
             node_id_t* staged = scratch.data();
             if (synchronization == synchronization_t::concurrent_k)
                 for (std::size_t row = 0; row != rows.size(); ++row) {
@@ -2272,14 +2253,11 @@ struct ram_index {
                 return status_t::config_mismatch_k;
 
             location_t const location = chunk_schedule_t::locate(range.first);
-            nk::matrix_span<scalar_t> const vectors = index_->vectors_chunks_[location.chunk](
-                nk::range(location.offset, location.offset + range.size()), nk::slice);
             for (std::size_t row = 0; row != range.size(); ++row)
-                std::memcpy(vectors.row(row).data(), vectors_rows.data() + row * row_bytes, row_bytes);
+                std::memcpy(index_->vectors_[location_t {location.chunk, location.offset + row}],
+                            vectors_rows.data() + row * row_bytes, row_bytes);
             if (index_->stores_norms()) {
-                if (!norms_rows.empty())
-                    std::memcpy(index_->norms_chunks_[location.chunk].data() + location.offset, norms_rows.data(),
-                                norms_rows.size());
+                if (!norms_rows.empty()) std::memcpy(&index_->norms_[location], norms_rows.data(), norms_rows.size());
                 else
                     for (std::size_t offset_in_chunk = 0; offset_in_chunk != range.size(); ++offset_in_chunk) {
                         location_t const row {location.chunk, location.offset + offset_in_chunk};
@@ -2288,10 +2266,9 @@ struct ram_index {
             }
             atomic_ref<std::size_t>(covered_vectors).add(range.size(), std::memory_order_release);
 
-            nk::matrix_span<node_id_t> const neighbors = index_->neighbors_chunks_[location.chunk](
-                nk::range(location.offset, location.offset + range.size()), nk::slice);
-            std::memcpy(neighbors.data(), neighbors_rows.data(), neighbors_rows.size());
-            std::span<node_id_t> const landed {neighbors.data(), step_slots};
+            node_id_t* const neighbors = index_->neighbors_[location];
+            std::memcpy(neighbors, neighbors_rows.data(), neighbors_rows.size());
+            std::span<node_id_t> const landed {neighbors, step_slots};
             rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
             atomic_ref<std::size_t>(covered_neighbors).add(range.size(), std::memory_order_release);
@@ -2524,7 +2501,7 @@ struct ram_index {
 
     /** Immutable view of the vector stored at @p location. */
     inline vector_view_t vector_for(location_t const& location) const noexcept {
-        return vectors_chunks_[location.chunk].row(location.offset).as_vector();
+        return {vectors_[location], vectors_.columns() * nk::dimensions_per_value<scalar_t>()};
     }
 
     /** The vectors behind the four neighbor slots from @p start, for the current quad's scoring to stream in;
@@ -2548,31 +2525,29 @@ struct ram_index {
 
     /** Mutable span over the vector slot at @p location - only for the slot's unpublished owner. */
     inline vector_span_t vector_span_for(location_t const& location) noexcept {
-        return vectors_chunks_[location.chunk].row(location.offset).as_vector();
+        return {vectors_[location], vectors_.columns() * nk::dimensions_per_value<scalar_t>()};
     }
 
     /** Copy of the pre-computed norms of the vector stored at @p location - zeroed moments, without
      *  touching memory, when the rows keep none. */
     inline vector_norms_t norm_for(location_t const& location) const noexcept {
         if (!stores_norms()) return {};
-        return norms_chunks_[location.chunk][location.offset];
+        return norms_[location];
     }
 
     /** Mutable reference to the norms slot at @p location - only for the slot's unpublished owner. */
-    inline vector_norms_t& norm_ref_for(location_t const& location) noexcept {
-        return norms_chunks_[location.chunk][location.offset];
-    }
+    inline vector_norms_t& norm_ref_for(location_t const& location) noexcept { return norms_[location]; }
 
     /** Typed view over the fixed-capacity neighbors at @p location - atomic by default, plain
      *  under a mutation-free contract. @ref dense_ram_index_concurrency */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k>
     inline neighbors_ref<synchronization_> neighbors_for(location_t const& location) noexcept {
-        return {neighbors_chunks_[location.chunk].row(location.offset).as_vector()};
+        return {node_ids_span_t {neighbors_[location], neighbors_.columns()}};
     }
 
     /** Immutable view of the fixed-capacity neighbors at @p location. */
     inline node_ids_view_t neighbors_for(location_t const& location) const noexcept {
-        return neighbors_chunks_[location.chunk].row(location.offset).as_vector();
+        return {neighbors_[location], neighbors_.columns()};
     }
 
     /**
@@ -2583,45 +2558,30 @@ struct ram_index {
      *
      *  Only one thread may run this at a time - the one that dropped @c remaining_capacity_ below
      *  zero. Successive growers are ordered by the acquire/release pair on that counter, which is
-     *  also what publishes the non-atomic @c chunks_count_ and the directory writes. Readers reach
-     *  a chunk only once a node inside it becomes visible, which chains through the same atomics.
+     *  also what publishes the non-atomic @c chunks_count_. Readers reach a chunk only once a node
+     *  inside it becomes visible, which chains through the same atomics.
      */
     expected<std::size_t> create_next_chunk(std::size_t minimal_capacity) noexcept {
         // Growing before the geometry is frozen is a usage error, not an allocation failure.
         geometry_t const frozen = geometry();
         if (!frozen) return {0, status_t::uninitialized_k};
-        std::size_t const chunk_dimensions = padded_row_values(frozen) * nk::dimensions_per_value<scalar_t>();
-        std::size_t const chunk_connectivity = frozen.connectivity();
-
-        // Size the never-reallocating chunk directories ahead of the very first chunk - safe
-        // without any locks, because growth is provably single-threaded via the grower election.
-        if (!vectors_chunks_.size() &&
-            (fu::failed(vectors_chunks_.resize(max_chunks_k)) || fu::failed(norms_chunks_.resize(max_chunks_k)) ||
-             fu::failed(neighbors_chunks_.resize(max_chunks_k))))
-            return {0, status_t::bad_alloc_k};
 
         std::size_t added_capacity = 0;
         while (added_capacity < minimal_capacity) {
             if (chunks_count_ == max_chunks_k) return {added_capacity, status_t::overflow_k};
 
-            std::size_t const chunk_rows = chunk_schedule_t::rows_in(chunks_count_);
+            std::size_t const covered_rows = chunk_schedule_t::rows_before(chunks_count_ + 1u);
+            // Norms exist only when the finalize reads them, which a dot does on compensated kits
+            // alone. The all-ones neighbors fill is load-bearing: a sentinel leading slot reads as
+            // unpublished, and sentinel tails terminate short rows, so no counts are stored.
+            static_assert(node_id_unknown_k == static_cast<node_id_t>(~node_id_t {0}));
+            status_t covered = vectors_.cover(covered_rows, padded_row_values(frozen));
+            if (succeeded(covered) && stores_norms()) covered = norms_.cover(covered_rows);
+            if (succeeded(covered)) covered = neighbors_.cover(covered_rows, frozen.connectivity(), 0xFF);
+            if (failed(covered)) return {added_capacity, covered};
 
-            auto vectors_chunk = vectors_chunk_t::zeros({chunk_rows, chunk_dimensions}, vectors_allocator_);
-            // Norms chunks exist only when the finalize reads them, which a dot does on compensated
-            // kits alone.
-            nk::expected<norms_chunk_t> norms_chunk {{}, nk::status_t::success_k};
-            if (stores_norms()) norms_chunk = norms_chunk_t::zeros({chunk_rows}, norms_allocator_t(vectors_allocator_));
-            // The all-ones fill is load-bearing: a sentinel leading slot reads as unpublished, and
-            // sentinel tails terminate short rows, so no neighbor counts are stored anywhere.
-            auto neighbors_chunk = neighbors_chunk_t::full( //
-                {chunk_rows, chunk_connectivity}, node_id_unknown_k, neighbors_allocator_);
-            if (!vectors_chunk || !norms_chunk || !neighbors_chunk) return {added_capacity, status_t::bad_alloc_k};
-
-            vectors_chunks_[chunks_count_] = std::move(vectors_chunk.value);
-            norms_chunks_[chunks_count_] = std::move(norms_chunk.value);
-            neighbors_chunks_[chunks_count_] = std::move(neighbors_chunk.value);
+            added_capacity += chunk_schedule_t::rows_in(chunks_count_);
             ++chunks_count_;
-            added_capacity += chunk_rows;
             // The all-ones ID is the sentinel: account one row less in the final chunk, so no
             // claim can dispense it and the dispenser never wraps.
             if (chunks_count_ == max_chunks_k) added_capacity -= 1;
@@ -2665,7 +2625,7 @@ struct ram_index {
                     return {node_id_unknown_k, chunk_status};
                 }
                 // The take releases too: a claimer that fit on the counter before the growth but whose rows this
-                // take pushes into the new chunk reaches the directory through this word alone.
+                // take pushes into the new chunk reaches its pointer through this word alone.
                 node_id_t const first_id =
                     atomic_ref<node_id_t>(last_allocated_id_).fetch_add(count, std::memory_order_acq_rel);
                 atomic_ref<std::ptrdiff_t>(remaining_capacity_).add(added_capacity, std::memory_order_release);
@@ -3281,7 +3241,8 @@ struct ram_index {
             std::size_t const chunk_rows = min_of(chunk_schedule_t::rows_in(chunk), first_invisible_id - first);
             // Chunk rows are padded to whole kit steps, while the queries were packed at
             // the logical width.
-            vectors_view_t const padded = vectors_chunks_[chunk].view();
+            vectors_view_t const padded {vectors_[location_t {chunk, 0}], chunk_schedule_t::rows_in(chunk),
+                                         vectors_.columns() * nk::dimensions_per_value<scalar_t>()};
             nk::shape_storage_<2> const logical {{chunk_rows, dimensions},
                                                  {padded.stride_bytes(0), padded.stride_bytes(1)},
                                                  2};
@@ -3607,23 +3568,14 @@ struct ram_index {
 
 #pragma endregion Search
 
-    /**
-     *  @brief Separately allocated matrix slabs, one row per vector entry; slot indexes are global
-     *      and grow transparently across the matrices.
-     *
-     *  Sized once to @c max_chunks_k entries and never reallocated, so readers dereference chunk
-     *  headers with zero synchronization while one writer constructs the next in place.
-     *  @ref dense_ram_index_malloc
-     */
-    fu::dynamic_padded_array<vectors_chunk_t, vectors_allocator_type_> vectors_chunks_;
+    /** One row per vector, padded to whole kit steps. @ref dense_ram_index_malloc */
+    chunked_matrix<scalar_t, chunk_schedule_t, max_node_count_k, vectors_allocator_type_> vectors_;
 
-    /** Separately allocated array slabs, one entry per vector's pre-computed norms; slot indexes
-     *  are global and grow transparently across the arrays. @ref dense_ram_index_malloc */
-    fu::dynamic_padded_array<norms_chunk_t, vectors_allocator_type_> norms_chunks_;
+    /** One entry per vector's pre-computed norms, covered only when @ref stores_norms. */
+    chunked_column<vector_norms_t, chunk_schedule_t, max_node_count_k, vectors_allocator_type_> norms_;
 
-    /** Separately allocated matrix slabs, one row per vector's fixed-capacity neighbors; slot
-     *  indexes are global and grow transparently across the matrices. @ref dense_ram_index_malloc */
-    fu::dynamic_padded_array<neighbors_chunk_t, neighbors_allocator_type_> neighbors_chunks_;
+    /** One row per vector's fixed-capacity neighbors, sentinel-filled. */
+    chunked_matrix<node_id_t, chunk_schedule_t, max_node_count_k, neighbors_allocator_type_> neighbors_;
 
     /**
      *  @brief Signed integer describing "unsigned capacity", so concurrent under- and overflow stay
@@ -3654,9 +3606,9 @@ struct ram_index {
      *  read it. */
     nk_kernel_kind_t kernel_;
 
-    /** Constructed chunks per directory. Deliberately non-atomic: only the elected grower mutates
-     *  it, and successive growers are ordered by the acquire/release pair on
-     *  @c remaining_capacity_, which no release lifts while one is inside. @ref create_next_chunk */
+    /** Chunks every column covers. Deliberately non-atomic: only the elected grower mutates it,
+     *  and successive growers are ordered by the acquire/release pair on @c remaining_capacity_,
+     *  which no release lifts while one is inside. @ref create_next_chunk */
     small_size_t chunks_count_ = 0;
 };
 

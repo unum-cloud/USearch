@@ -15,7 +15,8 @@
  */
 #include <array>       // `std::array` - stored tags & batch overloads
 #include <bit>         // `std::bit_cast` - uuid keys from words
-#include <memory>      // `std::allocator` - every container names its allocator
+#include <memory>      // `std::allocator` - every container names its allocator, `std::unique_ptr` - the indexes
+#include <new>         // `std::nothrow` - indexes live on the heap
 #include <span>        // `std::span` - metric & codec surfaces
 #include <string_view> // `std::string_view` - the status vocabulary probe
 #include <type_traits> // `std::is_same_v` - the columns' witness
@@ -182,7 +183,9 @@ int main() {
     hints(&random_generator, fu::demote_line_t {});
 
     // The basic index, narrow instantiation: the whole public surface, existence-level.
-    narrow_index_t index;
+    std::unique_ptr<narrow_index_t> const index_ptr {new (std::nothrow) narrow_index_t};
+    if (!index_ptr) return 1;
+    narrow_index_t& index = *index_ptr;
     if (failed(index.reserve(16).status) || index.capacity() != 16) return 1;
     std::array<std::array<char, 8>, 8> tags {};
     std::array<u64_t, 8> keys {};
@@ -241,7 +244,9 @@ int main() {
     std::vector<std::byte> values(extents.value_bytes);
     narrow_index_t::columns_t const columns {keys_column, neighbor_offsets, neighbor_ids, value_offsets, values};
     if (index.save(columns, codec) != status_t::success_k) return 1;
-    narrow_index_t restored;
+    std::unique_ptr<narrow_index_t> const restored_ptr {new (std::nothrow) narrow_index_t};
+    if (!restored_ptr) return 1;
+    narrow_index_t& restored = *restored_ptr;
     if (failed(restored.reserve(16).status)) return 1;
     if (restored.load(columns.view(), codec) != status_t::success_k) return 1;
     if (restored.size() != index.size()) return 1;
@@ -249,7 +254,9 @@ int main() {
     if (restored.degree_of(3).value != index.degree_of(3).value) return 1;
 
     // The wide instantiation: uuid keys through `std::hash<utilities::uuid_t>`, 64-bit IDs.
-    wide_index_t wide_index;
+    std::unique_ptr<wide_index_t> const wide_index_ptr {new (std::nothrow) wide_index_t};
+    if (!wide_index_ptr) return 1;
+    wide_index_t& wide_index = *wide_index_ptr;
     if (failed(wide_index.reserve(4).status)) return 1;
     std::array<utilities::uuid_t, 2> const wide_keys {std::bit_cast<utilities::uuid_t>(std::array<u64_t, 2> {1, 2}),
                                                       std::bit_cast<utilities::uuid_t>(std::array<u64_t, 2> {3, 4})};

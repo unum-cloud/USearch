@@ -912,7 +912,8 @@ std::size_t test_nvme_index_search(u64_t seed) {
     reference.view(whole, checkpoint_layout_t::monolith_k);
     dense_indexes_executor<nvme_type_> driver;
     std::size_t failures = reference.failures;
-    index_t part {kernel_};
+    std::unique_ptr<index_t> const part_ptr {new (std::nothrow) index_t(kernel_)};
+    index_t& part = *part_ptr;
     failures += expect_eq(part.view(reference.checkpoint.monolith.data()), status_t::success_k);
     failures += expect_eq(part.size(), rows_count);
     if (failed(driver.status) || failures) return failures + expect(false);
@@ -1351,8 +1352,9 @@ std::size_t test_nvme_rewrites_build(u64_t seed) {
     std::vector<byte_t> probed(16u << 20);
     bytes_span_t left {probed};
     {
-        block_index_t probe {kernel_, nvme_workspace_allocator<byte_t>(left), nvme_workspace_allocator<byte_t>(left)};
-        fixture.failures += expect(succeeded(probe.reserve({1, connectivity_16_k, dimensions}).status));
+        std::unique_ptr<block_index_t> const probe {new (std::nothrow) block_index_t(
+            kernel_, nvme_workspace_allocator<byte_t>(left), nvme_workspace_allocator<byte_t>(left))};
+        fixture.failures += expect(probe && succeeded(probe->reserve({1, connectivity_16_k, dimensions}).status));
     }
     std::size_t const fixed = probed.size() - left.size();
     std::size_t const value_bytes = dense_rows_bytes(fixture.vectors.view(), 1), neighbors_bytes = 16 * sizeof(u32_t);

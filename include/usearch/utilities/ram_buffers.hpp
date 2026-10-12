@@ -1050,6 +1050,7 @@ class chunked_column {
   public:
     using value_t = value_type_;
     using schedule_t = schedule_type_;
+    using location_t = typename schedule_t::location_t;
     using allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<value_t>;
     template <typename word_type_>
     using atomic_ref = atomic_ref_template_<word_type_>;
@@ -1088,17 +1089,20 @@ class chunked_column {
         return status_t::success_k;
     }
 
+    /** The row at @p location, which a @ref cover already reached - for callers that located it
+     *  once for several columns. */
+    value_t& operator[](location_t location) noexcept {
+        value_t* const rows = atomic_ref<value_t*>(chunks_[location.chunk]).load(std::memory_order_relaxed);
+        return rows[location.offset];
+    }
+    value_t const& operator[](location_t location) const noexcept {
+        value_t* const rows = atomic_ref<value_t* const>(chunks_[location.chunk]).load(std::memory_order_relaxed);
+        return rows[location.offset];
+    }
+
     /** Row @p row, which a @ref cover already reached. */
-    value_t& operator[](std::size_t row) noexcept {
-        auto const at = schedule_t::locate(row);
-        value_t* const rows = atomic_ref<value_t*>(chunks_[at.chunk]).load(std::memory_order_relaxed);
-        return rows[at.offset];
-    }
-    value_t const& operator[](std::size_t row) const noexcept {
-        auto const at = schedule_t::locate(row);
-        value_t* const rows = atomic_ref<value_t* const>(chunks_[at.chunk]).load(std::memory_order_relaxed);
-        return rows[at.offset];
-    }
+    value_t& operator[](std::size_t row) noexcept { return (*this)[schedule_t::locate(row)]; }
+    value_t const& operator[](std::size_t row) const noexcept { return (*this)[schedule_t::locate(row)]; }
 
     /** The rows of chunk @p index, acquired with its contents; empty until a cover publishes it. */
     std::span<value_t> chunk(std::size_t index) noexcept {
@@ -1152,6 +1156,90 @@ class chunked_column {
 
     /** One pointer per chunk, sized once and never reallocated; a null entry is a chunk no cover reached yet. */
     std::array<value_t*, max_chunks_k> chunks_ {};
+
+    [[no_unique_address]] allocator_t allocator_;
+};
+
+/**
+ *  @brief The matrix twin of @ref chunked_column: rows of one width, addressed by ID, that never
+ *      move, each chunk allocated, filled and published by the first @ref cover reaching it, under
+ *      the column's contract.
+ *
+ *  The first @ref cover fixes the width, before any reader can learn of a row, and every later one
+ *  repeats it.
+ */
+template <typename value_type_, typename schedule_type_, std::size_t max_rows_, typename allocator_type_,
+          template <typename> class atomic_ref_template_ = standard_atomic_ref>
+class chunked_matrix {
+    static_assert(std::is_trivially_copyable_v<value_type_>, "Rows are written in place, never constructed");
+
+  public:
+    using value_t = value_type_;
+    using schedule_t = schedule_type_;
+    using location_t = typename schedule_t::location_t;
+    using allocator_t = typename std::allocator_traits<allocator_type_>::template rebind_alloc<value_t>;
+    template <typename word_type_>
+    using atomic_ref = atomic_ref_template_<word_type_>;
+
+    /** Chunks the directory holds - enough for @p max_rows_ rows. */
+    inline static constexpr std::size_t max_chunks_k = schedule_t::chunks_for(max_rows_);
+
+    explicit chunked_matrix(allocator_t allocator) noexcept : allocator_(std::move(allocator)) {}
+    chunked_matrix(chunked_matrix const&) = delete;
+    chunked_matrix& operator=(chunked_matrix const&) = delete;
+    ~chunked_matrix() noexcept { reset(); }
+
+    /** Allocates every chunk the first @p rows rows of @p columns values need and is missing, sets
+     *  each of its bytes to @p fill, and publishes it - safe on any thread. */
+    status_t cover(std::size_t rows, std::size_t columns, std::uint8_t fill = 0) noexcept {
+        if (rows > max_rows_) return status_t::overflow_k;
+        if (columns_ != columns) columns_ = columns;
+        for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(rows); chunk != chunks; ++chunk) {
+            atomic_ref<value_t*> slot {chunks_[chunk]};
+            if (slot.load(std::memory_order_acquire)) continue;
+            std::size_t const values = schedule_t::rows_in(chunk) * columns;
+            value_t* const fresh = allocator_.allocate(values);
+            if (!fresh) return status_t::bad_alloc_k;
+            std::memset(static_cast<void*>(fresh), fill, values * sizeof(value_t));
+            value_t* expected_empty = nullptr;
+            // A peer covering the same chunk first keeps its own; this one goes back.
+            if (!slot.compare_exchange_strong(expected_empty, fresh, std::memory_order_release,
+                                              std::memory_order_acquire))
+                allocator_.deallocate(fresh, values);
+        }
+        return status_t::success_k;
+    }
+
+    /** Values per row, fixed by the first @ref cover; zero before it. */
+    std::size_t columns() const noexcept { return columns_; }
+
+    /** The first of the @ref columns values of the row at @p location, which a @ref cover already
+     *  reached. */
+    value_t* operator[](location_t location) noexcept {
+        value_t* const rows = atomic_ref<value_t*>(chunks_[location.chunk]).load(std::memory_order_relaxed);
+        return rows + location.offset * columns_;
+    }
+    value_t const* operator[](location_t location) const noexcept {
+        value_t* const rows = atomic_ref<value_t* const>(chunks_[location.chunk]).load(std::memory_order_relaxed);
+        return rows + location.offset * columns_;
+    }
+
+    /** Frees every chunk - single-threaded: the caller certifies no concurrent readers or
+     *  writers. */
+    void reset() noexcept {
+        for (std::size_t index = 0; index != max_chunks_k; ++index)
+            if (value_t* const rows = std::exchange(chunks_[index], nullptr))
+                allocator_.deallocate(rows, schedule_t::rows_in(index) * columns_);
+    }
+
+  private:
+
+    /** One pointer per chunk, sized once and never reallocated; a null entry is a chunk no cover
+     *  reached yet. */
+    std::array<value_t*, max_chunks_k> chunks_ {};
+
+    /** Values per row, fixed by the first cover; zero before it. */
+    std::size_t columns_ = 0;
 
     [[no_unique_address]] allocator_t allocator_;
 };

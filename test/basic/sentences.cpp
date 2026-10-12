@@ -98,7 +98,9 @@ template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic
 struct sentences_fixture {
     using index_t = ram_index<std::string, u64_t, u32_t, u64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;
 
-    static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
+    static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
+        return std::unique_ptr<index_t>(new (std::nothrow) index_t(counting_allocator_t {ledger}));
+    }
     static levenshtein_metric_t make_metric() { return {}; }
     static sentence_codec_t make_codec() { return {}; }
     static u64_t make_key(std::size_t ordinal) { return 0xC0FFEE00000000ull + ordinal; }
@@ -165,7 +167,8 @@ static std::size_t check_sentences_transparent_search(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        auto index = sentences_fixture_t::make_index(ledger);
+        auto const index_ptr = sentences_fixture_t::make_index(ledger);
+        auto& index = *index_ptr;
         auto metric = sentences_fixture_t::make_metric();
         sentences_fixture_t::index_t::traversal_context_t context {stream_key(seed, "transparent_search"),
                                                                    counting_allocator_t {ledger}};
@@ -191,7 +194,8 @@ static std::size_t check_sentences_codec_poison(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        auto index = sentences_fixture_t::make_index(ledger);
+        auto const index_ptr = sentences_fixture_t::make_index(ledger);
+        auto& index = *index_ptr;
         auto metric = sentences_fixture_t::make_metric();
         auto const codec = sentences_fixture_t::make_codec();
         sentences_fixture_t::index_t::traversal_context_t context {stream_key(seed, "codec_poison"),
@@ -205,7 +209,8 @@ static std::size_t check_sentences_codec_poison(u64_t seed) {
         failures += expect(succeeded(status));
         columns.values.back() = std::byte {0xFF}; // Poisons the last value's final byte.
 
-        auto poisoned = sentences_fixture_t::make_index(ledger);
+        auto const poisoned_ptr = sentences_fixture_t::make_index(ledger);
+        auto& poisoned = *poisoned_ptr;
         failures += expect(bool(poisoned.reserve(values.size())));
         failures += expect_eq(poisoned.load(columns.view(), codec), status_t::malformed_k);
 
@@ -233,7 +238,8 @@ static std::size_t check_sentences_whole_batch(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = sentences_fixture_t::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = sentences_fixture_t::make_index(ledger);
+        index_t& index = *index_ptr;
         auto values = sentences_fixture_t::make_values(2, stream_key(seed, "whole_batch"));
         std::array<u64_t, 2> const keys {sentences_fixture_t::make_key(0), sentences_fixture_t::make_key(1)};
         failures += expect(bool(index.reserve(values.size())));

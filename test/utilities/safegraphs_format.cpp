@@ -86,7 +86,9 @@ struct embeddings_fixture_t {
     static constexpr char const* metric_k = "angular";
     static constexpr char const* key_dtype_k = "u64";
 
-    static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
+    static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
+        return std::unique_ptr<index_t>(new (std::nothrow) index_t(counting_allocator_t {ledger}));
+    }
     static angular_metric_t make_metric() { return {}; }
     static embedding_codec_t make_codec() { return {}; }
     static u64_t make_key(std::size_t ordinal) { return 0x5EED000000000000ull + ordinal; }

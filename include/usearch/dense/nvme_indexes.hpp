@@ -50,7 +50,7 @@
 #include <bit>         // `std::popcount`, `std::countr_zero`
 #include <chrono>      // `std::chrono::steady_clock`, for a scan's latencies
 #include <limits>      // `std::numeric_limits`
-#include <memory>      // `std::uninitialized_value_construct_n`
+#include <memory>      // `std::uninitialized_value_construct_n`, `std::unique_ptr` - the RAM index a block builds in
 #include <mutex>       // `std::unique_lock`
 #include <new>         // placement `new`
 #include <span>        // `std::span`
@@ -2428,22 +2428,17 @@ struct [[nodiscard]] nvme_rewrite_plan {
                heal_slices_k * default_alignment_k;
     }
 
-    /** Bytes a RAM index of @p rows rows takes from the workspace: its three chunk directories and
-     *  every chunk the rows reach, a slice per column, each slice padded to the alignment. */
+    /** Bytes a RAM index of @p rows rows takes from the workspace: every chunk the rows reach, a
+     *  slice per column, each slice padded to the alignment. */
     std::size_t ram_bytes_(std::size_t rows) const noexcept {
         using schedule_t = typename ram_index_t::chunk_schedule_t;
         std::size_t const chunks = schedule_t::chunks_for(rows);
         typename ram_index_t::geometry_t const geometry {dimensions_, static_cast<connectivity_t>(connectivity_)};
         std::size_t const row_bytes = ram_index_t::padded_row_values(geometry) * sizeof(scalar_t) + norms_bytes_ +
                                       neighbors_row_bytes_();
-        std::size_t const directory = round_up_to_multiple(
-            max_of(max_of(sizeof(typename ram_index_t::vectors_chunk_t), sizeof(typename ram_index_t::norms_chunk_t)),
-                   sizeof(typename ram_index_t::neighbors_chunk_t)),
-            default_alignment_k);
         // A chunk without norms allocates only its values and neighbors.
         std::size_t const chunk_slices = norms_bytes_ ? 3 : 2;
-        return 3 * (ram_index_t::max_chunks_k * directory + default_alignment_k) +
-               chunks * chunk_slices * default_alignment_k + schedule_t::rows_before(chunks) * row_bytes;
+        return chunks * chunk_slices * default_alignment_k + schedule_t::rows_before(chunks) * row_bytes;
     }
 
     /** Whether a RAM index of @p rows rows fits the workspace beside @p staging bytes carved as
@@ -3058,7 +3053,10 @@ struct [[nodiscard]] nvme_rewrite_plan {
         if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
             return read;
 
-        ram_index_t index {kernel_, nvme_workspace_allocator<byte_t>(space), nvme_workspace_allocator<byte_t>(space)};
+        std::unique_ptr<ram_index_t> const index_ptr {new (std::nothrow) ram_index_t(
+            kernel_, nvme_workspace_allocator<byte_t>(space), nvme_workspace_allocator<byte_t>(space))};
+        if (!index_ptr) return status_t::bad_alloc_k;
+        ram_index_t& index = *index_ptr;
         if (status_t const reserved =
                 index.reserve({count, static_cast<connectivity_t>(connectivity_), dimensions_}).status;
             failed(reserved))
@@ -3106,7 +3104,10 @@ struct [[nodiscard]] nvme_rewrite_plan {
                                                             header.data_of(bytes, header.neighbors),
                                                             {}};
         bytes_span_t space = workspace_;
-        ram_index_t index {kernel_, nvme_workspace_allocator<byte_t>(space), nvme_workspace_allocator<byte_t>(space)};
+        std::unique_ptr<ram_index_t> const index_ptr {new (std::nothrow) ram_index_t(
+            kernel_, nvme_workspace_allocator<byte_t>(space), nvme_workspace_allocator<byte_t>(space))};
+        if (!index_ptr) return status_t::bad_alloc_k;
+        ram_index_t& index = *index_ptr;
         if (status_t const reserved =
                 index.reserve({nodes, static_cast<connectivity_t>(connectivity_), dimensions_}).status;
             failed(reserved))

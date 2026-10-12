@@ -167,7 +167,9 @@ struct meshes_fixture {
     using index_t =
         ram_index<mesh_t, us::utilities::uuid_t, u64_t, f64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;
 
-    static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
+    static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) {
+        return std::unique_ptr<index_t>(new (std::nothrow) index_t(counting_allocator_t {ledger}));
+    }
     static spectra_metric_t make_metric() { return {}; }
     static mesh_codec_t make_codec() { return {}; }
     static us::utilities::uuid_t make_key(std::size_t ordinal) {

@@ -346,7 +346,8 @@ std::size_t test_basic_guards(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         context_t context {stream_key(seed, "guards"), counting_allocator_t {ledger}};
         auto values = fixture_type_::make_values(ceiling_k + 1, stream_key(seed, "guards"));
@@ -413,7 +414,7 @@ std::size_t test_basic_guards(u64_t seed) {
             status_t::overflow_k);
         failures += expect_eq(index.size(), ceiling_k);
 
-        // The index's planes are provably on the ledger, not the plain heap.
+        // The index's storage is provably on the ledger, not the plain heap.
         failures += expect(ledger.live_bytes.load() > 0);
         failures += expect(ledger.total_allocations.load() > 0);
     }
@@ -430,7 +431,8 @@ std::size_t test_basic_handmade(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         context_t context {stream_key(seed, "handmade"), counting_allocator_t {ledger}};
         auto handmade = fixture_type_::make_handmade();
@@ -474,7 +476,8 @@ std::size_t test_basic_growth_and_recall(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         context_t context {stream_key(seed, "growth"), counting_allocator_t {ledger}};
         auto values = fixture_type_::make_values(basic_growth_nodes_k + basic_recall_samples_k,
@@ -546,7 +549,8 @@ std::size_t test_basic_selectors(u64_t seed) {
                                       typename index_t::graph_health_t& health) {
         allocation_ledger_t ledger;
         {
-            index_t index = fixture_type_::make_index(ledger);
+            std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+            index_t& index = *index_ptr;
             auto metric = fixture_type_::make_metric();
             context_t context {stream_key(seed, "selectors"), counting_allocator_t {ledger}};
             // Queries split off the same draw as the stored values: a separate generator
@@ -603,7 +607,8 @@ std::size_t test_basic_keys(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         context_t context {stream_key(seed, "keys"), counting_allocator_t {ledger}};
         auto values = fixture_type_::make_values(nodes_k, stream_key(seed, "keys"));
@@ -673,7 +678,8 @@ std::size_t test_basic_wiring(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         auto const codec = fixture_type_::make_codec();
         context_t context {stream_key(seed, "wiring"), counting_allocator_t {ledger}};
@@ -713,7 +719,8 @@ std::size_t test_basic_wiring(u64_t seed) {
         // Variable degrees survive the snapshot as they are - each row's own prefix sums say its degree.
         auto const [columns, save_status] = basic_saved_columns(index, codec);
         failures += expect(succeeded(save_status));
-        index_t restored = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const restored_ptr = fixture_type_::make_index(ledger);
+        index_t& restored = *restored_ptr;
         failures += expect(bool(restored.reserve(nodes_k)));
         failures += expect_eq(restored.load(columns.view(), codec), status_t::success_k);
         failures += basic_expect_mirrored<fixture_type_>(restored, index, nodes_k);
@@ -736,7 +743,8 @@ std::size_t test_basic_allocation_budget(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         context_t context {stream_key(seed, "budget"), counting_allocator_t {ledger}};
 
@@ -784,7 +792,8 @@ std::size_t basic_warm_staging_capacity(u64_t seed, std::size_t nodes_count, all
                                         std::size_t& failures) {
     using index_t = typename fixture_type_::index_t;
     using context_t = typename index_t::traversal_context_t;
-    index_t index = fixture_type_::make_index(ledger);
+    std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+    index_t& index = *index_ptr;
     auto metric = fixture_type_::make_metric();
     context_t context {stream_key(seed, "starved"), counting_allocator_t {ledger}};
     auto values = fixture_type_::make_values(nodes_count, stream_key(seed, "starved"));
@@ -814,7 +823,8 @@ std::size_t test_basic_starved(u64_t seed) {
     std::size_t const nodes_count = max_of(
         base_nodes_k, basic_warm_staging_capacity<fixture_type_>(seed, base_nodes_k, ledger, failures) + 2);
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         auto const codec = fixture_type_::make_codec();
         context_t warm_context {stream_key(seed, "starved"), counting_allocator_t {ledger}};
@@ -883,7 +893,8 @@ std::size_t test_basic_starved(u64_t seed) {
         // A starved load fails mid-decode with the watermark unpublished, then retries.
         auto const [columns, status] = basic_saved_columns(index, codec);
         failures += expect(succeeded(status));
-        index_t restored = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const restored_ptr = fixture_type_::make_index(ledger);
+        index_t& restored = *restored_ptr;
         failures += expect(bool(restored.reserve(nodes_count + 2)));
         ledger.byte_budget.store(ledger.live_bytes.load());
         failures += expect_eq(restored.load(columns.view(), codec), status_t::bad_alloc_k);
@@ -912,7 +923,8 @@ std::size_t test_basic_snapshot_roundtrip(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         auto const codec = fixture_type_::make_codec();
         context_t context {stream_key(seed, "snapshot"), counting_allocator_t {ledger}};
@@ -946,7 +958,8 @@ std::size_t test_basic_snapshot_roundtrip(u64_t seed) {
         failures += expect_eq(index.save(long_keys, codec), status_t::config_mismatch_k);
         failures += expect_eq(index.save(columns, codec), status_t::success_k);
 
-        index_t restored = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const restored_ptr = fixture_type_::make_index(ledger);
+        index_t& restored = *restored_ptr;
         failures += expect_eq(restored.load(storage.view(), codec), status_t::uninitialized_k);
         failures += expect(bool(restored.reserve(nodes_k)));
         failures += expect_eq(restored.load(storage.view(), codec), status_t::success_k);
@@ -990,7 +1003,8 @@ std::size_t test_basic_snapshot_hostile(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         auto const codec = fixture_type_::make_codec();
         context_t context {stream_key(seed, "hostile"), counting_allocator_t {ledger}};
@@ -1009,7 +1023,8 @@ std::size_t test_basic_snapshot_hostile(u64_t seed) {
         failures += expect(storage.values.size() > 0u);
 
         auto expect_refused = [&](auto mutate, status_t wanted) {
-            index_t fresh = fixture_type_::make_index(ledger);
+            std::unique_ptr<index_t> const fresh_ptr = fixture_type_::make_index(ledger);
+            index_t& fresh = *fresh_ptr;
             failures += expect(bool(fresh.reserve(nodes_k)));
             storage_t corrupted = storage;
             mutate(corrupted);
@@ -1037,7 +1052,8 @@ std::size_t test_basic_snapshot_hostile(u64_t seed) {
         expect_refused([](storage_t& c) { c.keys.push_back(c.keys.back()); }, status_t::overflow_k);
 
         // The one row that needs an unreserved target instead of a fresh reserved one.
-        index_t unreserved = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const unreserved_ptr = fixture_type_::make_index(ledger);
+        index_t& unreserved = *unreserved_ptr;
         failures += expect_eq(unreserved.load(storage.view(), codec), status_t::uninitialized_k);
     }
     failures += expect_eq(ledger.live_bytes.load(), 0);
@@ -1058,7 +1074,8 @@ std::size_t test_basic_snapshot_regions(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         auto const codec = fixture_type_::make_codec();
         context_t context {stream_key(seed, "regions"), counting_allocator_t {ledger}};
@@ -1107,7 +1124,8 @@ std::size_t test_basic_snapshot_regions(u64_t seed) {
         failures += expect(bool(index.columns_extents(codec)));
 
         // The load mirror: uneven regions decode concurrently, publication waits for finish.
-        index_t restored = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const restored_ptr = fixture_type_::make_index(ledger);
+        index_t& restored = *restored_ptr;
         failures += expect(bool(restored.reserve(nodes_k)));
         {
             auto [plan, status] = restored.plan_load(single.view());
@@ -1135,7 +1153,8 @@ std::size_t test_basic_snapshot_regions(u64_t seed) {
         failures += expect(resaved == single);
 
         // A dropped load plan publishes nothing and leaves a clean retry behind.
-        index_t abandoned = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const abandoned_ptr = fixture_type_::make_index(ledger);
+        index_t& abandoned = *abandoned_ptr;
         failures += expect(bool(abandoned.reserve(nodes_k)));
         {
             auto [plan, status] = abandoned.plan_load(single.view());
@@ -1169,7 +1188,8 @@ std::size_t test_basic_plan_race(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         auto const codec = fixture_type_::make_codec();
         context_t context {stream_key(seed, "plan_race"), counting_allocator_t {ledger}};
@@ -1305,7 +1325,8 @@ std::size_t test_basic_plan_contention(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         auto const codec = fixture_type_::make_codec();
         context_t context {stream_key(seed, "plan_contention"), counting_allocator_t {ledger}};
@@ -1379,7 +1400,8 @@ std::size_t test_basic_plan_contention(u64_t seed) {
 
         // Phase C - the shared side alone: a gated two-value batch parks an inserter with
         // the shared gate provably held, and every try-unique verb refuses meanwhile.
-        index_t target = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const target_ptr = fixture_type_::make_index(ledger);
+        index_t& target = *target_ptr;
         failures += expect(bool(target.reserve(nodes_k)));
         auto pair_values = fixture_type_::make_values(2, stream_key(seed, "plan_contention", 2));
         std::array<key_t, 2> const pair_keys {fixture_type_::make_key(nodes_k), fixture_type_::make_key(nodes_k + 1)};
@@ -1433,7 +1455,8 @@ std::size_t test_basic_health(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         auto const codec = fixture_type_::make_codec();
         context_t context {stream_key(seed, "health"), counting_allocator_t {ledger}};
@@ -1518,8 +1541,10 @@ std::size_t test_basic_certified(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t exclusive_index = fixture_type_::make_index(ledger);
-        index_t concurrent_index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const exclusive_index_ptr = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const concurrent_index_ptr = fixture_type_::make_index(ledger);
+        index_t& exclusive_index = *exclusive_index_ptr;
+        index_t& concurrent_index = *concurrent_index_ptr;
         failures += expect(bool(exclusive_index.reserve(nodes_k + 1)));
         failures += expect(bool(concurrent_index.reserve(nodes_k + 1)));
         auto exclusive_values = fixture_type_::make_values(nodes_k, stream_key(seed, "certified"));
@@ -1629,7 +1654,8 @@ std::size_t test_basic_torn_bracket(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         context_t context {stream_key(seed, "torn_bracket"), counting_allocator_t {ledger}};
         auto values = fixture_type_::make_values(nodes_k, stream_key(seed, "torn_bracket"));
@@ -1728,7 +1754,8 @@ std::size_t test_basic_metric_contract(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         basic_auditing_metric<metric_t, distance_t> metric {fixture_type_::make_metric()};
         context_t context {stream_key(seed, "contract"), counting_allocator_t {ledger}};
         auto values = fixture_type_::make_values(nodes_k, stream_key(seed, "contract"));
@@ -1805,7 +1832,8 @@ std::size_t test_basic_restarts(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         context_t context {stream_key(seed, "restarts"), counting_allocator_t {ledger}};
         auto values = fixture_type_::make_values(nodes_k + 1, stream_key(seed, "restarts"));
@@ -1857,7 +1885,8 @@ std::size_t test_basic_concurrent_build(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         failures += expect(bool(index.reserve(nodes_count)));
 
         auto threads = basic_make_threads<fixture_type_>(ledger, basic_threads_k, basic_thread_nodes_k, seed,
@@ -1914,7 +1943,8 @@ std::size_t test_basic_concurrent_search(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         failures += expect(bool(index.reserve(nodes_count)));
         auto prefill_metric = fixture_type_::make_metric();
         context_t prefill_context {stream_key(seed, "search_thread"), counting_allocator_t {ledger}};
@@ -1991,7 +2021,8 @@ std::size_t test_basic_wiring_race(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         auto const codec = fixture_type_::make_codec();
         context_t context {stream_key(seed, "wiring_race"), counting_allocator_t {ledger}};
@@ -2131,7 +2162,8 @@ std::size_t test_basic_wiring_race(u64_t seed) {
             std::sort(row.begin(), row.end());
             failures += expect(std::unique(row.begin(), row.end()) == row.end());
         }
-        index_t restored = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const restored_ptr = fixture_type_::make_index(ledger);
+        index_t& restored = *restored_ptr;
         failures += expect(bool(restored.reserve(nodes_k + inserts_k)));
         failures += expect_eq(restored.load(columns.view(), codec), status_t::success_k);
     }
@@ -2152,7 +2184,8 @@ std::size_t test_basic_overflow_race(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         failures += expect(bool(index.reserve(capacity_k)));
         auto threads = basic_make_threads<fixture_type_>(ledger, threads_k, per_thread_k, seed, "overflow_race", 0);
         std::vector<node_id_t> assigned_ids(threads_k * per_thread_k);
@@ -2210,7 +2243,8 @@ std::size_t test_basic_cursor(u64_t seed) {
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         context_t context {stream_key(seed, "cursor"), counting_allocator_t {ledger}};
         auto values = fixture_type_::make_values(nodes_k + 1 + racing_inserts_k, stream_key(seed, "cursor"));
@@ -2350,7 +2384,8 @@ std::size_t test_basic_safegraphs_roundtrip(u64_t seed, std::string_view key_dty
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         auto const codec = fixture_type_::make_codec();
         context_t context {stream_key(seed, "safegraphs"), counting_allocator_t {ledger}};
@@ -2412,7 +2447,8 @@ std::size_t test_basic_safegraphs_roundtrip(u64_t seed, std::string_view key_dty
             failures += expect(summary.value_dtype == codec_t::value_dtype_k);
             failures += expect(summary.metric.view() == metric_token);
 
-            index_t restored = fixture_type_::make_index(ledger);
+            std::unique_ptr<index_t> const restored_ptr = fixture_type_::make_index(ledger);
+            index_t& restored = *restored_ptr;
             failures += expect_eq(safegraphs_read_index(source, restored, codec, executor, load_config_t {}),
                                   status_t::success_k);
             failures += basic_expect_mirrored<fixture_type_>(restored, index, nodes_k);
@@ -2446,7 +2482,8 @@ std::size_t test_basic_safegraphs_roundtrip(u64_t seed, std::string_view key_dty
             failures += expect_eq(mapping.size(), monolith.size());
             bytes_view_t const read_back = mapping.view();
             failures += expect(std::equal(read_back.begin(), read_back.end(), monolith.begin(), monolith.end()));
-            index_t restored = fixture_type_::make_index(ledger);
+            std::unique_ptr<index_t> const restored_ptr = fixture_type_::make_index(ledger);
+            index_t& restored = *restored_ptr;
             failures += expect_eq(safegraphs_read_index(read_back, restored, codec, serial, load_config_t {}),
                                   status_t::success_k);
             failures += basic_expect_mirrored<fixture_type_>(restored, index, nodes_k);
@@ -2454,7 +2491,8 @@ std::size_t test_basic_safegraphs_roundtrip(u64_t seed, std::string_view key_dty
         std::remove(path);
 
         // The reservation comes from the config when the index has none.
-        index_t roomy = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const roomy_ptr = fixture_type_::make_index(ledger);
+        index_t& roomy = *roomy_ptr;
         load_config_t roomy_config;
         roomy_config.capacity = nodes_k * 2;
         failures += expect_eq(safegraphs_read_index(bytes_view_t {monolith}, roomy, codec, serial, roomy_config),
@@ -2489,13 +2527,14 @@ std::size_t test_basic_safegraphs_distributed(u64_t seed, std::string_view metri
                                                           std::vector<value_t>(values.begin() + half_k, values.end())};
         // An index holds atomics and never moves; each element is initialized straight from a
         // prvalue, which elides rather than moves, so the parts sit in the array itself.
-        std::array<index_t, parts_k> indexes {fixture_type_::make_index(ledger), fixture_type_::make_index(ledger)};
+        std::array<std::unique_ptr<index_t>, parts_k> const indexes {fixture_type_::make_index(ledger),
+                                                                     fixture_type_::make_index(ledger)};
         for (std::size_t part = 0; part != parts_k; ++part) {
             auto metric = fixture_type_::make_metric();
             context_t context {stream_key(seed, "safegraphs", part), counting_allocator_t {ledger}};
             std::vector<node_id_t> assigned_ids;
-            failures += expect(bool(indexes[part].reserve(half_k)));
-            failures += basic_build<fixture_type_>(indexes[part], metric, halves[part], assigned_ids, context,
+            failures += expect(bool(indexes[part]->reserve(half_k)));
+            failures += basic_build<fixture_type_>(*indexes[part], metric, halves[part], assigned_ids, context,
                                                    keep_diverse_t {4});
         }
 
@@ -2514,13 +2553,13 @@ std::size_t test_basic_safegraphs_distributed(u64_t seed, std::string_view metri
             auto const [named_path, name_status] = safegraphs_part_path(formatted, stem, part, parts_k);
             failures += expect(succeeded(name_status));
             part_paths[part] = std::string {named_path};
-            auto const [part_size, measure_status] = safegraphs_storage_requirements(indexes[part], codec, config,
+            auto const [part_size, measure_status] = safegraphs_storage_requirements(*indexes[part], codec, config,
                                                                                      metric_token);
             failures += expect(succeeded(measure_status));
             auto [mapping, map_status] = mapped_file_t::write(part_paths[part], part_size);
             failures += expect(succeeded(map_status));
             failures += expect_eq(
-                safegraphs_write_index(mapping.span(), indexes[part], codec, serial, config, metric_token),
+                safegraphs_write_index(mapping.span(), *indexes[part], codec, serial, config, metric_token),
                 status_t::success_k);
             part_bytes[part] = mapping.size();
             failures += expect_eq(mapping.sync(), status_t::success_k);
@@ -2552,10 +2591,11 @@ std::size_t test_basic_safegraphs_distributed(u64_t seed, std::string_view metri
             failures += expect(std::string_view {part_path} == part_paths[part]);
             auto [mapping, map_status] = mapped_file_t::read(part_path);
             failures += expect(succeeded(map_status));
-            index_t restored = fixture_type_::make_index(ledger);
+            std::unique_ptr<index_t> const restored_ptr = fixture_type_::make_index(ledger);
+            index_t& restored = *restored_ptr;
             failures += expect_eq(safegraphs_read_index(mapping.view(), restored, codec, serial, load_config_t {}),
                                   status_t::success_k);
-            failures += basic_expect_mirrored<fixture_type_>(restored, indexes[part], half_k);
+            failures += basic_expect_mirrored<fixture_type_>(restored, *indexes[part], half_k);
         }
 
         std::remove(manifest_path);
@@ -2579,7 +2619,8 @@ std::size_t test_basic_safegraphs_hostile(u64_t seed, std::string_view metric_to
     std::size_t failures = 0;
     allocation_ledger_t ledger;
     {
-        index_t index = fixture_type_::make_index(ledger);
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
         auto metric = fixture_type_::make_metric();
         auto const codec = fixture_type_::make_codec();
         context_t context {stream_key(seed, "safegraphs", 1), counting_allocator_t {ledger}};
@@ -2604,7 +2645,8 @@ std::size_t test_basic_safegraphs_hostile(u64_t seed, std::string_view metric_to
         auto expect_refused = [&](auto mutate, status_t wanted) {
             std::vector<std::byte> corrupted = monolith;
             mutate(corrupted);
-            index_t fresh = fixture_type_::make_index(ledger);
+            std::unique_ptr<index_t> const fresh_ptr = fixture_type_::make_index(ledger);
+            index_t& fresh = *fresh_ptr;
             failures += expect_eq(
                 safegraphs_read_index(bytes_view_t {corrupted}, fresh, codec, serial, load_config_t {}), wanted);
             // Every refusal must leave the same index loadable - the retryability contract.
