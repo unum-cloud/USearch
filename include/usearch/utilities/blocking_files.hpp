@@ -41,6 +41,7 @@
 #include <unistd.h>   // `pread`, `pwrite`, `ftruncate`, `close`
 #endif
 #if !USEARCH_OS_WINDOWS_ && !USEARCH_OS_WASI_
+#include <dlfcn.h>    // `dlopen`, `dlsym` - GPU runtimes opened at first use
 #include <sys/mman.h> // `mmap`, `munmap`, `msync`
 #endif
 
@@ -238,6 +239,38 @@ inline status_t seekable_file_t::close() noexcept {
 }
 
 #endif
+
+/** A shared library opened by path and kept open for the process's life, as the entry points
+ *  resolved from it are never unloaded; empty where the system has no such library or, as on
+ *  WASI, no loader. */
+struct shared_library_t {
+    void* handle = nullptr;
+
+    /** Opens the library at @p path, or answers the empty one. */
+    static shared_library_t open(char const* path) noexcept {
+#if USEARCH_OS_WINDOWS_
+        return {reinterpret_cast<void*>(LoadLibraryA(path))};
+#elif USEARCH_OS_WASI_
+        return {};
+#else
+        return {dlopen(path, RTLD_NOW | RTLD_LOCAL)};
+#endif
+    }
+
+    /** Points @p entry at the symbol exported as @p name, answering whether there is one. */
+    template <typename function_type_>
+    bool resolve(char const* name, function_type_& entry) const noexcept {
+        if (!handle) return false;
+#if USEARCH_OS_WINDOWS_
+        entry = reinterpret_cast<function_type_>(GetProcAddress(static_cast<HMODULE>(handle), name));
+#elif !USEARCH_OS_WASI_
+        entry = reinterpret_cast<function_type_>(dlsym(handle, name));
+#endif
+        return entry != nullptr;
+    }
+
+    explicit operator bool() const noexcept { return handle != nullptr; }
+};
 
 #pragma endregion Descriptors
 

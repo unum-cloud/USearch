@@ -863,7 +863,6 @@ struct usearch_dense_index_handle_t {
 #endif
 #endif // USEARCH_ARCH_CUDA_
 #if USEARCH_ARCH_ROCM_
-#if USEARCH_ARCH_CDNA5_
         // amd_cdna5 over amd_cdna3 by "gfx1250", 32-wide waves: every cell, 11 arms
         vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna5_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
@@ -896,8 +895,6 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna5_k>, //
 #endif
-#endif // USEARCH_ARCH_CDNA5_
-#if USEARCH_ARCH_CDNA4_
         // amd_cdna4 over amd_cdna3 by "gfx950": every cell, 11 arms
         vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna4_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
@@ -930,7 +927,6 @@ struct usearch_dense_index_handle_t {
 #if USEARCH_DENSE_DTYPES >= 11
         vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna4_k>, //
 #endif
-#endif // USEARCH_ARCH_CDNA4_
 
         // amd_cdna3, the AMD floor by "gfx942": every cell, 11 arms
         vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna3_k>, //
@@ -1663,7 +1659,6 @@ extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_clas
 #endif
 #endif // USEARCH_ARCH_CUDA_
 #if USEARCH_ARCH_ROCM_
-#if USEARCH_ARCH_CDNA5_
 /* amd_cdna5 over amd_cdna3 by "gfx1250", 32-wide waves: every cell, 11 arms */
 extern template struct specialized_index<vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna5_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
@@ -1696,8 +1691,6 @@ extern template struct specialized_index<vram_amd_indexes<nk_e3m2_k, gpu_class_t
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna5_k>>;
 #endif
-#endif // USEARCH_ARCH_CDNA5_
-#if USEARCH_ARCH_CDNA4_
 /* amd_cdna4 over amd_cdna3 by "gfx950": every cell, 11 arms */
 extern template struct specialized_index<vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna4_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
@@ -1730,7 +1723,6 @@ extern template struct specialized_index<vram_amd_indexes<nk_e3m2_k, gpu_class_t
 #if USEARCH_DENSE_DTYPES >= 11
 extern template struct specialized_index<vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna4_k>>;
 #endif
-#endif // USEARCH_ARCH_CDNA4_
 /* amd_cdna3, the AMD floor by "gfx942": every cell, 11 arms */
 extern template struct specialized_index<vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna3_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
@@ -2420,16 +2412,12 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
                                                                                                   kernel, outcome);
 #endif
 #if USEARCH_ARCH_ROCM_
-#if USEARCH_ARCH_CDNA5_
     case gpu_class_t::amd_cdna5_k:
         return make_punned_dense_index<vram_amd_indexes<dtype_, gpu_class_t::amd_cdna5_k>>(geometry, vram, kernel,
                                                                                            outcome);
-#endif
-#if USEARCH_ARCH_CDNA4_
     case gpu_class_t::amd_cdna4_k:
         return make_punned_dense_index<vram_amd_indexes<dtype_, gpu_class_t::amd_cdna4_k>>(geometry, vram, kernel,
                                                                                            outcome);
-#endif
     case gpu_class_t::amd_cdna3_k:
         return make_punned_dense_index<vram_amd_indexes<dtype_, gpu_class_t::amd_cdna3_k>>(geometry, vram, kernel,
                                                                                            outcome);
@@ -2442,9 +2430,7 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
 #endif
     default:
         return propagate_error(usearch_status_device_k, outcome,
-                               std::variant_size_v<gpu_executor_t> == 1
-                                   ? "This build carries no GPU backends"
-                                   : "The devices are not listed, or this build carries no kernels for them"),
+                               "The devices are not listed, or this build carries no kernels for them"),
                nullptr;
     }
 }
@@ -4171,8 +4157,6 @@ USEARCH_EXPORT void usearch_executor_on_pool(usearch_executor_on_pool_t* argumen
 USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->executor = nullptr;
-    if (std::variant_size_v<gpu_executor_t> == 1)
-        return propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends"), void();
     usearch_vram_options_t const& vram = arguments->vram;
     if (arguments->streams)
         return propagate_error(usearch_status_unsupported_k, outcome, "Borrowed streams are not wired yet"), void();

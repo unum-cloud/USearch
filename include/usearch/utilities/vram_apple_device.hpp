@@ -6,48 +6,48 @@
  *      pipelines.
  *
  *  Metal's API is Objective-C, reached here through @c objc_msgSend cast to each call's exact
- *  prototype, so a plain C++ unit drives it. Nothing links Metal, Foundation or the Objective-C
- *  runtime: @ref metal_api opens them at first use and resolves the few C entry points USearch
- *  calls into one table, which stays empty where any is absent, so Apple then lists no devices and
- *  the binary still loads. Kernels travel as source and compile on the device at first use, so no
- *  Metal toolchain is needed to build. Memory is unified and every buffer is shared, so the host
- *  reads and writes a matrix in place and a launch binds the same buffer by handle.
+ *  prototype, so a plain C++ unit drives it, with no SDK header: the few runtime prototypes are
+ *  spelled here. Nothing links Metal, Foundation or the Objective-C runtime: @ref metal_api opens
+ *  them at first use and resolves the few C entry points USearch calls into one table, which stays
+ *  empty where any is absent, so Apple then lists no devices and the binary still loads. Kernels
+ *  travel as source and compile on the device at first use, so no Metal toolchain is needed to
+ *  build. Memory is unified and every buffer is shared, so the host reads and writes a matrix in
+ *  place and a launch binds the same buffer by handle.
  */
 #pragma once
 
 #include <cstddef> // `std::size_t`
 #include <cstring> // `std::strcmp`, `std::strncpy`, `std::memcpy`
 
-#include <dlfcn.h> // `dlopen`, `dlsym` - Metal, Foundation and the Objective-C runtime opened at first use
-
 #include <mutex>   // `std::unique_lock`, `std::adopt_lock` - the pipeline registry and the executor's hold
 #include <span>    // `std::span` - the device list an executor opens over
 #include <utility> // `std::exchange`, `std::move`
 
-#include <objc/message.h> // `objc_msgSend` - declared only, for the table's type
-#include <objc/runtime.h> // `sel_registerName`, `objc_getClass`, `SEL` - declared only, for the table's types
-
 #include <forkunion/types.hpp> // `fu::spin_mutex_t` - the pipeline registry and the executor's hold
 
-#include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - an executor's queues and the pipeline registry
+#include "usearch/utilities/blocking_files.hpp" // `shared_library_t` - Metal opened at first use
+#include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer` - an executor's queues and the pipeline registry
 #include "usearch/utilities/types.hpp"
 
 namespace unum::usearch::utilities {
+
+/** The Objective-C runtime's selector, @c SEL, opaque to everyone but the runtime. */
+using metal_selector_t = struct metal_selector_opaque_t*;
 
 /**
  *  @brief The Metal and Objective-C runtime entry points USearch calls, resolved on first use from
  *      the system's own Metal, Foundation and @c libobjc.
  *
  *  Every entry is null when any library is absent or lacks any of them, which leaves Apple with no
- *  devices. Foundation is opened for @c NSString alone, which no entry names. @c MTLCopyAllDevices
- *  is declared only to Objective-C and the pool entries in no public header, so those three spell
- *  their prototypes.
+ *  devices. Foundation is opened for @c NSString alone, which no entry names. Each entry spells the
+ *  C prototype of its symbol; @c objc_msgSend takes none of its own, so every send casts it to the
+ *  call's exact one.
  */
 struct metal_api_t {
     void* (*copy_all_devices)() = nullptr;
-    decltype(&::objc_msgSend) send = nullptr;
-    decltype(&::sel_registerName) register_selector = nullptr;
-    decltype(&::objc_getClass) get_class = nullptr;
+    void (*send)() = nullptr;
+    metal_selector_t (*register_selector)(char const*) = nullptr;
+    void* (*get_class)(char const*) = nullptr;
     void* (*autorelease_pool_push)() = nullptr;
     void (*autorelease_pool_pop)(void*) = nullptr;
 
@@ -57,30 +57,18 @@ struct metal_api_t {
     /** Opens the libraries and resolves every entry, or answers the empty table. The libraries stay
      *  open for the life of the process, as the table points into them. */
     static metal_api_t load() noexcept {
-        void* const metal = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_NOW | RTLD_LOCAL);
-        void* const foundation = dlopen("/System/Library/Frameworks/Foundation.framework/Foundation",
-                                        RTLD_NOW | RTLD_LOCAL);
-        void* const runtime = dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_LOCAL);
+        shared_library_t const metal = shared_library_t::open("/System/Library/Frameworks/Metal.framework/Metal");
+        shared_library_t const foundation = shared_library_t::open(
+            "/System/Library/Frameworks/Foundation.framework/Foundation");
+        shared_library_t const runtime = shared_library_t::open("/usr/lib/libobjc.A.dylib");
         metal_api_t api;
         bool const resolved = //
-            metal && foundation && runtime && resolve_(metal, "MTLCopyAllDevices", api.copy_all_devices) &&
-            resolve_(runtime, "objc_msgSend", api.send) &&
-            resolve_(runtime, "sel_registerName", api.register_selector) &&
-            resolve_(runtime, "objc_getClass", api.get_class) &&
-            resolve_(runtime, "objc_autoreleasePoolPush", api.autorelease_pool_push) &&
-            resolve_(runtime, "objc_autoreleasePoolPop", api.autorelease_pool_pop);
-        if (resolved) return api;
-        if (metal) dlclose(metal);
-        if (foundation) dlclose(foundation);
-        if (runtime) dlclose(runtime);
-        return {};
-    }
-
-  private:
-    template <typename function_type_>
-    static bool resolve_(void* library, char const* name, function_type_& entry) noexcept {
-        entry = reinterpret_cast<function_type_>(dlsym(library, name));
-        return entry != nullptr;
+            foundation && metal.resolve("MTLCopyAllDevices", api.copy_all_devices) &&
+            runtime.resolve("objc_msgSend", api.send) && runtime.resolve("sel_registerName", api.register_selector) &&
+            runtime.resolve("objc_getClass", api.get_class) &&
+            runtime.resolve("objc_autoreleasePoolPush", api.autorelease_pool_push) &&
+            runtime.resolve("objc_autoreleasePoolPop", api.autorelease_pool_pop);
+        return resolved ? api : metal_api_t {};
     }
 };
 
@@ -95,7 +83,7 @@ inline metal_api_t const& metal_api() noexcept {
 template <typename result_type_ = void*, typename... argument_types_>
 inline result_type_ metal_send(void* target, char const* selector, argument_types_... arguments) noexcept {
     metal_api_t const& api = metal_api();
-    using function_t = result_type_ (*)(void*, SEL, argument_types_...);
+    using function_t = result_type_ (*)(void*, metal_selector_t, argument_types_...);
     return reinterpret_cast<function_t>(api.send)(target, api.register_selector(selector), arguments...);
 }
 

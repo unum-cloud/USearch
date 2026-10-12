@@ -397,7 +397,7 @@ struct vram_nvidia_indexes {
             if (share.launched + taking > share.rows) return status_t::config_mismatch_k;
             shard_t& one = owner_->shards_[shard];
             traversal_context_t& traversal = traversals_[shard];
-            if (cuda_set_device(traversal.device()) != CUDA_SUCCESS) return status_t::device_error_k;
+            if (cuda_set_device(traversal.device()) != cuda_success_k) return status_t::device_error_k;
             node_id_t const first_node = static_cast<node_id_t>(share.first_id + share.launched);
             for (std::size_t taken = 0; taken != taking; ++taken)
                 one.keys[first_node + static_cast<node_id_t>(taken)] = keys[first + taken * shards];
@@ -509,7 +509,7 @@ struct vram_nvidia_indexes {
             std::size_t const taking = rows_from_(rows, first_row_of_shard_(shard, shards, plan.rotation_), shards);
             plan.shares_.push_back_reserved({static_cast<node_id_t>(first_id), taking, 0});
             if (!taking) continue;
-            if (cuda_set_device(one.index->device_specs().ordinal) != CUDA_SUCCESS)
+            if (cuda_set_device(one.index->device_specs().ordinal) != cuda_success_k)
                 return {{}, status_t::device_error_k};
             reserve_capacity_t const grown {first_id + taking, static_cast<connectivity_t>(connectivity()),
                                             dimensions()};
@@ -595,7 +595,7 @@ struct vram_nvidia_indexes {
         std::size_t const published = size();
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
-            if (cuda_set_device(one.device_specs().ordinal) != CUDA_SUCCESS) return {{}, status_t::device_error_k};
+            if (cuda_set_device(one.device_specs().ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
             auto const [part, status] = one.refine({0, node_id_unknown_k}, traversals[shard], config);
             combine_refinement_(result, part);
             if (failed(status)) return {result, status};
@@ -625,7 +625,7 @@ struct vram_nvidia_indexes {
         health_result_t result;
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
-            if (cuda_set_device(one.device_specs().ordinal) != CUDA_SUCCESS) return {{}, status_t::device_error_k};
+            if (cuda_set_device(one.device_specs().ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
             auto const [shard_health, status] = one.health(traversals[shard]);
             if (failed(status)) return {{}, status};
             combine_health_(result, shard_health);
@@ -901,7 +901,7 @@ struct vram_nvidia_indexes {
             // On the shard's own stream, so the copy follows its walks; unified addressing tells
             // the two devices apart.
             return cuda_copy_async(blocks + shard * block_bytes, landed.value, block_bytes, traversal.stream()) ==
-                           CUDA_SUCCESS
+                           cuda_success_k
                        ? status_t::success_k
                        : status_t::device_error_k;
         };
@@ -914,14 +914,14 @@ struct vram_nvidia_indexes {
             // The last shard landed, so every block did; the merge and the landing ride shard 0's
             // stream.
             typename executor_t::stream_t const& first = executor.stream(stream_of_(executor, 0));
-            CUstream const stream = first.handle;
+            cuda_stream_handle_t const stream = first.handle;
             u32_t const rows = static_cast<u32_t>(rows_count);
-            if (cuda_set_device(first.device) != CUDA_SUCCESS ||
+            if (cuda_set_device(first.device) != cuda_success_k ||
                 failed(shards_[0].index->launch_merge_attention_(blocks, rows, static_cast<u32_t>(dimensions()),
                                                                  static_cast<u32_t>(shards), stream)) ||
-                cuda_copy_async(outputs.data(), blocks, outputs_bytes, stream) != CUDA_SUCCESS ||
-                cuda_copy_async(carry.data(), blocks + outputs_bytes, carry.size_bytes(), stream) != CUDA_SUCCESS ||
-                cuda_api().stream_synchronize(stream) != CUDA_SUCCESS)
+                cuda_copy_async(outputs.data(), blocks, outputs_bytes, stream) != cuda_success_k ||
+                cuda_copy_async(carry.data(), blocks + outputs_bytes, carry.size_bytes(), stream) != cuda_success_k ||
+                cuda_api().stream_synchronize(stream) != cuda_success_k)
                 merged = status_t::device_error_k;
         };
         expected<search_result_t> attended = for_each_shard_(executor, rows_count, config, attend_shard, merge_shard,
@@ -1318,7 +1318,7 @@ struct vram_nvidia_indexes {
                 }
                 // Every plan finishes, an empty one included, since finishing releases the claim.
                 // The keys ride the shard plan's stream, which its finish drains before publishing.
-                if (cuda_set_device(owner_->shards_[shard].index->device_specs().ordinal) != CUDA_SUCCESS)
+                if (cuda_set_device(owner_->shards_[shard].index->device_specs().ordinal) != cuda_success_k)
                     return status_t::device_error_k;
                 if (status_t const uploaded = upload_keys_(owner_->shards_[shard], {plans_[shard].base, first},
                                                            plans_[shard].stream);
@@ -1625,12 +1625,12 @@ struct vram_nvidia_indexes {
 
     /** Copies @p rows of @p one's host key column into its device twin on @p stream, run by run,
      *  since the host column is chunked. */
-    static status_t upload_keys_(shard_t& one, iota_view<std::size_t> rows, CUstream stream) noexcept {
+    static status_t upload_keys_(shard_t& one, iota_view<std::size_t> rows, cuda_stream_handle_t stream) noexcept {
         status_t uploaded = status_t::success_k;
         std::size_t row = rows.first;
         one.keys.for_each_span(rows, [&](std::span<key_t> run) noexcept {
             if (succeeded(uploaded) &&
-                cuda_copy_async(one.device_keys.base() + row, run.data(), run.size_bytes(), stream) != CUDA_SUCCESS)
+                cuda_copy_async(one.device_keys.base() + row, run.data(), run.size_bytes(), stream) != cuda_success_k)
                 uploaded = status_t::device_error_k;
             row += run.size();
         });
@@ -1790,7 +1790,7 @@ struct vram_nvidia_indexes {
         for (; queued != shards; ++queued) {
             pending.push_back_reserved(queued);
             // A launch fails on a stream of any device but the current one.
-            if (status_t const submitted = cuda_set_device(traversals[queued].device()) == CUDA_SUCCESS
+            if (status_t const submitted = cuda_set_device(traversals[queued].device()) == cuda_success_k
                                                ? submit(queued, traversals[queued], visible[queued])
                                                : status_t::device_error_k;
                 failed(submitted)) {
@@ -1929,7 +1929,7 @@ struct vram_nvidia_indexes {
                               safegraphs_header_t const& header, std::size_t first_row, std::size_t nodes,
                               save_config_t const& config, executor_t& executor) noexcept {
         index_t& one = *shards_[shard].index;
-        if (cuda_set_device(one.device_specs().ordinal) != CUDA_SUCCESS) return status_t::device_error_k;
+        if (cuda_set_device(one.device_specs().ordinal) != cuda_success_k) return status_t::device_error_k;
         typename index_t::columns_t const columns {header.rows_of(target, header.value, first_row, nodes),
                                                    header.rows_of(target, header.neighbors, first_row, nodes),
                                                    header.rows_of(target, header.norms, first_row, nodes)};
@@ -2159,7 +2159,7 @@ struct vram_nvidia_indexes {
         if (failed(plan.plans_.reserve_exactly(shards))) return status_t::bad_alloc_k;
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
-            if (cuda_set_device(one.device_specs().ordinal) != CUDA_SUCCESS) return status_t::device_error_k;
+            if (cuda_set_device(one.device_specs().ordinal) != cuda_success_k) return status_t::device_error_k;
             auto [inner, status] = one.plan_load(shard_rows[shard],
                                                  executor.stream(stream_of_(executor, shard)).handle);
             if (failed(status)) return status;

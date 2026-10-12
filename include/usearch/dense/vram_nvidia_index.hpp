@@ -25,13 +25,10 @@
 #include <utility>     // `std::exchange` - a moved-from plan forgets its index
 #include <numbers>     // `std::numbers::log2e_v` - the base-2 softmax
 
-#include <vector_types.h> // `uint4` - the fragment every NVIDIA kit loads, a plain type declaration
-
 #include <forkunion/types.hpp> // `fu::round_up_to_multiple` & friends
 
 #include <numkong/capabilities.h> // `nk_kernel_kind_t` & the kernel-kind constants
 #include <numkong/tensor.hpp>     // `nk::matrix_span`, `nk::range` & `nk::slice` - the batches' views
-#include <numkong/types.h>        // `NUMKONG_TARGET_*` - the tiers a kit chain may pick
 #include <numkong/types.hpp>      // `nk::type_for` - the stored scalar of a dtype
 #include <numkong/vector.hpp>
 
@@ -71,6 +68,12 @@ inline constexpr std::size_t cuda_attend_scratch_bytes(std::size_t heads_count, 
     return round_up_to_multiple<std::size_t>(heads_count * (32 + 3 + columns) * sizeof(f32_t), 16);
 }
 
+/** Sixteen bytes every NVIDIA kit loads at once - the host's spelling of the kernels' @c uint4,
+ *  which only the CUDA SDK declares. */
+struct alignas(16) cuda_fragment_t {
+    u32_t x, y, z, w;
+};
+
 /**
  *  @brief The host-visible half of the quads kit @c quads_chain picks for @p vector_dtype_
  *      under @p capability_: the types and record sizes the host sizes launches by.
@@ -82,7 +85,7 @@ template <nk_dtype_t vector_dtype_, nk_capability_t capability_>
 struct cuda_kit_traits {
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using dot_t = typename scalar_t::dot_result_t::raw_t;
-    using fragment_t = uint4;
+    using fragment_t = cuda_fragment_t;
     using norms_t = vector_norms<dot_t>;
 
     /** Bytes of one warp's staged batch, the kernels' @c vram_gathered: a cache of candidate
@@ -90,17 +93,19 @@ struct cuda_kit_traits {
     inline static constexpr std::size_t gathered_bytes_k = vram_cache_rows_k * sizeof(u32_t) +
                                                            32 * (cuda_scored_node_bytes_k + sizeof(dot_t));
 
+    /** Bytes of one warp's static schedule state: Hopper's and Blackwell's barrier stages, or the
+     *  Ampere schedule's one flag. */
+    inline static constexpr std::size_t schedule_bytes_k =
+        (capability_ & (nk_cap_hopper_k | nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0 ? 16 : 1;
+
     /** The capability of the kit the chain picks: Blackwell's for the half floats and minifloats
-     *  where that tier is compiled and allowed, Ada's for the fp8 pair, and the Ampere floor
-     *  otherwise. */
+     *  where that tier is allowed, Ada's for the fp8 pair, and the Ampere floor otherwise. */
     inline static constexpr nk_capability_t picked_k =
         (vector_dtype_ == nk_f16_k || vector_dtype_ == nk_bf16_k || vector_dtype_ == nk_e5m2_k ||
          vector_dtype_ == nk_e4m3_k || vector_dtype_ == nk_e3m2_k || vector_dtype_ == nk_e2m3_k) &&
-                ((NUMKONG_TARGET_BLACKWELLRTX && (capability_ & nk_cap_blackwellrtx_k) != 0) ||
-                 (NUMKONG_TARGET_BLACKWELL && (capability_ & nk_cap_blackwell_k) != 0))
+                (capability_ & (nk_cap_blackwellrtx_k | nk_cap_blackwell_k)) != 0
             ? nk_cap_blackwell_k
-        : (vector_dtype_ == nk_e5m2_k || vector_dtype_ == nk_e4m3_k) && NUMKONG_TARGET_ADA &&
-                (capability_ & nk_cap_ada_k) != 0
+        : (vector_dtype_ == nk_e5m2_k || vector_dtype_ == nk_e4m3_k) && (capability_ & nk_cap_ada_k) != 0
             ? nk_cap_ada_k
             : nk_cap_ampere_k;
 };
@@ -426,7 +431,7 @@ struct cuda_traversal_context {
     cuda_traversal_context(cuda_traversal_context&&) noexcept = default;
     ~cuda_traversal_context() noexcept = default;
 
-    CUstream stream() const noexcept { return allocator_.stream(); }
+    cuda_stream_handle_t stream() const noexcept { return allocator_.stream(); }
     int device() const noexcept { return allocator_.device(); }
 
     /** Whether this context can walk at all: every device-side word claimed. */
@@ -436,7 +441,7 @@ struct cuda_traversal_context {
      *  completion, the executor's @c drain being the fleet's. Selects the context's device first,
      *  since a null stream is the current device's. */
     status_t drain() noexcept {
-        return cuda_set_device(device()) == CUDA_SUCCESS && cuda_api().stream_synchronize(stream()) == CUDA_SUCCESS
+        return cuda_set_device(device()) == cuda_success_k && cuda_api().stream_synchronize(stream()) == cuda_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
     }
@@ -445,11 +450,11 @@ struct cuda_traversal_context {
      *  has, @c deferred_k while any of it runs - without blocking, so one host thread awaits
      *  whichever of several streams lands first. */
     status_t landed() noexcept {
-        if (cuda_set_device(device()) != CUDA_SUCCESS) return status_t::device_error_k;
-        CUresult const queried = cuda_api().stream_query(stream());
-        return queried == CUDA_SUCCESS           ? status_t::success_k
-               : queried == CUDA_ERROR_NOT_READY ? status_t::deferred_k
-                                                 : status_t::device_error_k;
+        if (cuda_set_device(device()) != cuda_success_k) return status_t::device_error_k;
+        cuda_result_t const queried = cuda_api().stream_query(stream());
+        return queried == cuda_success_k           ? status_t::success_k
+               : queried == cuda_error_not_ready_k ? status_t::deferred_k
+                                                   : status_t::device_error_k;
     }
 
     /** The telemetry of the last submission, zeroed when it was queued; read once it landed. */
@@ -722,10 +727,12 @@ struct vram_nvidia_index {
     }
 
     /** Whether an insert or refine launch seats on this device: its per-warp candidate cache beside
-     *  the static norms and batch buffers - wide rows can serve walks yet refuse building. */
+     *  the static norms, batch buffers and schedule state - wide rows can serve walks yet refuse
+     *  building. */
     bool build_scratch_fits() const noexcept {
         std::size_t const statics = std::size_t {vram_warps_per_block_k} *
-                                    (vram_cache_rows_k * sizeof(norms_t) + kit_traits_t::gathered_bytes_k);
+                                    (vram_cache_rows_k * sizeof(norms_t) + kit_traits_t::gathered_bytes_k +
+                                     kit_traits_t::schedule_bytes_k);
         return statics + std::size_t {vram_warps_per_block_k} *
                              max_of(insert_scratch_bytes_per_warp(), merge_scratch_bytes_per_warp()) <=
                device_.shared_memory_per_block_bytes;
@@ -783,7 +790,7 @@ struct vram_nvidia_index {
         if (!destination.is_contiguous()) return status_t::unsupported_layout_k;
         std::size_t const scalar_row_bytes = packed_row_bytes();
         return cuda_copy(destination.byte_data(), vectors_matrix_.base() + static_cast<std::size_t>(node) * row_bytes(),
-                         scalar_row_bytes) == CUDA_SUCCESS
+                         scalar_row_bytes) == cuda_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
     }
@@ -792,7 +799,7 @@ struct vram_nvidia_index {
      *  Call it only with no batch in flight. */
     status_t validate() const noexcept {
         u32_t published = 0;
-        if (cuda_copy(&published, published_rows_.get(), sizeof(u32_t)) != CUDA_SUCCESS)
+        if (cuda_copy(&published, published_rows_.get(), sizeof(u32_t)) != cuda_success_k)
             return status_t::device_error_k;
         return published == claimed_() ? status_t::success_k : status_t::device_error_k;
     }
@@ -850,7 +857,7 @@ struct vram_nvidia_index {
         if (!vectors_matrix_.reserved_bytes()) { // First reservation: bind the device, size the ceiling.
             // The primary context must be current before any mapping, since the storage lives
             // in it.
-            if (cuda_set_device(device_.ordinal) != CUDA_SUCCESS) return {0, status_t::device_error_k};
+            if (cuda_set_device(device_.ordinal) != cuda_success_k) return {0, status_t::device_error_k};
             auto const [specs, status] = cuda_device_specs_t::query(device_.ordinal);
             if (failed(status)) return {0, status};
             device_ = specs;
@@ -881,7 +888,7 @@ struct vram_nvidia_index {
             counter_allocator_t counter_allocator {nullptr, device_.ordinal};
             published_rows_ = cuda_make_unique(counter_allocator, 1);
             if (!published_rows_ ||
-                cuda_api().fill(cuda_address(published_rows_.get()), 0, sizeof(u32_t)) != CUDA_SUCCESS)
+                cuda_api().fill(cuda_address(published_rows_.get()), 0, sizeof(u32_t)) != cuda_success_k)
                 return {0, status_t::device_error_k};
         }
         status_t const grown = grow_rows_(config.capacity, nullptr);
@@ -956,7 +963,7 @@ struct vram_nvidia_index {
         // add up.
         if (context && context.device() == device_.ordinal &&
             cuda_fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream()) !=
-                CUDA_SUCCESS)
+                cuda_success_k)
             return {{}, status_t::device_error_k};
         expected<insert_result_t> inserted = submit_insert_(new_vectors, assigned_ids, context, config);
         if (!inserted || !new_vectors.extent(0)) return inserted;
@@ -1180,9 +1187,9 @@ struct vram_nvidia_index {
         expected<f32_t*> const landed = submit_attend_(queries, head_count, value_lookup, score_scale, context, config,
                                                        1, size());
         if (!landed || !rows_count) return {{}, landed.status};
-        CUstream const stream = context.stream();
-        if (cuda_copy_async(outputs.data(), landed.value, outputs.numel() * sizeof(f32_t), stream) != CUDA_SUCCESS ||
-            cuda_copy_async(carry.data(), landed.value + outputs.numel(), carry.size_bytes(), stream) != CUDA_SUCCESS)
+        cuda_stream_handle_t const stream = context.stream();
+        if (cuda_copy_async(outputs.data(), landed.value, outputs.numel() * sizeof(f32_t), stream) != cuda_success_k ||
+            cuda_copy_async(carry.data(), landed.value + outputs.numel(), carry.size_bytes(), stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
         expected<search_result_t> const attended = settle_({{rows_count}, status_t::success_k}, rows_count, context,
                                                            completion);
@@ -1264,7 +1271,7 @@ struct vram_nvidia_index {
             if (!islands) break;
             // The reached in-links first, so no reconnection takes the last link a reached node is
             // found through.
-            if (cuda_fill_async(audit.in_links, 0, rows * sizeof(u32_t), context.stream()) != CUDA_SUCCESS)
+            if (cuda_fill_async(audit.in_links, 0, rows * sizeof(u32_t), context.stream()) != cuda_success_k)
                 return {result, status_t::device_error_k};
             if (status_t const launched = launch_reconnect_islands_(audit, islands, rows, context.stream());
                 failed(launched))
@@ -1319,7 +1326,7 @@ struct vram_nvidia_index {
         node_id_t id_shift = 0;
 
         /** The stream every device-to-host copy queues on, drained before its bytes move. */
-        CUstream stream = nullptr;
+        cuda_stream_handle_t stream = nullptr;
 
         /** Page-locked host bytes: one batch of packed vector rows, then its neighbor IDs, then its
          *  norms. */
@@ -1342,7 +1349,7 @@ struct vram_nvidia_index {
         /** The index snapshotted into @p columns on @p stream under the watermark at @p visible,
          *  its IDs shifted by @p id_shift; only @ref plan_save calls it, and sizes the bounce
          *  afterwards. */
-        save_plan_t(vram_nvidia_index const& index, columns_t columns, node_id_t id_shift, CUstream stream,
+        save_plan_t(vram_nvidia_index const& index, columns_t columns, node_id_t id_shift, cuda_stream_handle_t stream,
                     node_id_t visible) noexcept
             : columns(columns), id_shift(id_shift), stream(stream),
               bounce(cuda_pinned_allocator_t {stream, index.device_.ordinal}), visible(visible),
@@ -1419,9 +1426,9 @@ struct vram_nvidia_index {
             if (cuda_copy_2d_async(
                     bounce.data(), scalar_row_bytes,
                     index_->vectors_matrix_.base() + static_cast<std::size_t>(rows.first) * index_->row_bytes(),
-                    index_->row_bytes(), scalar_row_bytes, rows.size(), stream) != CUDA_SUCCESS)
+                    index_->row_bytes(), scalar_row_bytes, rows.size(), stream) != cuda_success_k)
                 return status_t::device_error_k;
-            if (api.stream_synchronize(stream) != CUDA_SUCCESS) return status_t::device_error_k;
+            if (api.stream_synchronize(stream) != cuda_success_k) return status_t::device_error_k;
             [[maybe_unused]] status_t const copied_vectors = copy_bytes(vectors_rows,
                                                                         bytes_of(bounce.data(), vectors_rows.size()));
             // The norms count with the vectors, so a refused copy of either leaves the step
@@ -1432,9 +1439,9 @@ struct vram_nvidia_index {
                 if (cuda_copy_async(
                         bounce_norms.data(),
                         index_->norms_column_.base() + static_cast<std::size_t>(rows.first) * sizeof(norms_t),
-                        bounce_norms.size(), stream) != CUDA_SUCCESS)
+                        bounce_norms.size(), stream) != cuda_success_k)
                     return status_t::device_error_k;
-                if (api.stream_synchronize(stream) != CUDA_SUCCESS) return status_t::device_error_k;
+                if (api.stream_synchronize(stream) != cuda_success_k) return status_t::device_error_k;
                 [[maybe_unused]] status_t const copied_norms = copy_bytes(norms_rows, bounce_norms);
             }
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
@@ -1443,9 +1450,9 @@ struct vram_nvidia_index {
             if (cuda_copy_async(
                     bounce_neighbors.data(),
                     index_->neighbors_matrix_.base() + static_cast<std::size_t>(rows.first) * neighbors_row_bytes,
-                    rows.size() * neighbors_row_bytes, stream) != CUDA_SUCCESS)
+                    rows.size() * neighbors_row_bytes, stream) != cuda_success_k)
                 return status_t::device_error_k;
-            if (api.stream_synchronize(stream) != CUDA_SUCCESS) return status_t::device_error_k;
+            if (api.stream_synchronize(stream) != cuda_success_k) return status_t::device_error_k;
             std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(bounce_neighbors.data()), step_slots};
             for (node_id_t& neighbor : landed)
                 neighbor = neighbor < visible ? static_cast<node_id_t>(neighbor + id_shift) : node_id_unknown_k;
@@ -1486,8 +1493,8 @@ struct vram_nvidia_index {
      *  @param[in] stream The stream every copy queues on.
      *  @param[in] id_shift What an ID under the watermark moves by - the row this shard starts at.
      */
-    expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization, CUstream stream = nullptr,
-                                    node_id_t id_shift = 0) const noexcept {
+    expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
+                                    cuda_stream_handle_t stream = nullptr, node_id_t id_shift = 0) const noexcept {
         if (synchronization == synchronization_t::concurrent_k) return {{}, status_t::config_mismatch_k};
         if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         std::size_t const rows = size();
@@ -1505,7 +1512,7 @@ struct vram_nvidia_index {
     /** Serializes every row under the watermark into @p columns on the calling thread - the
      *  one-shot over @ref plan_save for a caller with no streams to fan the steps out over. */
     status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch,
-                  CUstream stream = nullptr) const noexcept {
+                  cuda_stream_handle_t stream = nullptr) const noexcept {
         auto [plan, status] = plan_save(columns, synchronization, stream);
         if (failed(status)) return status;
         for (typename save_plan_t::step_t const step : plan.steps())
@@ -1533,7 +1540,7 @@ struct vram_nvidia_index {
         iota_view<node_id_t> source_range {};
 
         /** The stream every host-to-device copy and the norms kernel queue on. */
-        CUstream stream = nullptr;
+        cuda_stream_handle_t stream = nullptr;
 
         /** Page-locked host bytes: one batch of packed vector rows, then its neighbor IDs, then its
          *  norms. */
@@ -1563,7 +1570,7 @@ struct vram_nvidia_index {
         /** The index appended to at @p base on @p stream, and the claim held meanwhile - unowned
          *  for a plan of no rows; only @ref plan_load calls it, and sizes the bounce afterwards. */
         load_plan_t(vram_nvidia_index& index, columns_view_t columns, iota_view<node_id_t> source_range,
-                    CUstream stream, std::unique_lock<fu::spin_mutex_t>&& claiming, node_id_t base,
+                    cuda_stream_handle_t stream, std::unique_lock<fu::spin_mutex_t>&& claiming, node_id_t base,
                     std::size_t rows) noexcept
             : columns(columns), source_range(source_range), stream(stream),
               bounce(cuda_pinned_allocator_t {stream, index.device_.ordinal}), base(base), rows(rows),
@@ -1659,7 +1666,7 @@ struct vram_nvidia_index {
             if (cuda_copy_2d_async(
                     index_->vectors_matrix_.base() + static_cast<std::size_t>(range.first) * index_->row_bytes(),
                     index_->row_bytes(), bounce.data(), scalar_row_bytes, scalar_row_bytes, range.size(),
-                    stream) != CUDA_SUCCESS)
+                    stream) != cuda_success_k)
                 return index_->fail_(status_t::device_error_k);
             // Dot reserves no norms column, so a part's column has nowhere to land.
             if (index_->stores_norms() && !norms_rows.empty()) {
@@ -1668,13 +1675,13 @@ struct vram_nvidia_index {
                 [[maybe_unused]] status_t const staged_norms = copy_bytes(bounce_norms, norms_rows);
                 if (cuda_copy_async(
                         index_->norms_column_.base() + static_cast<std::size_t>(range.first) * sizeof(norms_t),
-                        bounce_norms.data(), bounce_norms.size(), stream) != CUDA_SUCCESS)
+                        bounce_norms.data(), bounce_norms.size(), stream) != cuda_success_k)
                     return index_->fail_(status_t::device_error_k);
                 // Tallied ahead of the drain: a failed one keeps the vectors short, which `finish`
                 // refuses.
                 standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(range.size(), std::memory_order_acq_rel);
             }
-            if (api.stream_synchronize(stream) != CUDA_SUCCESS) return index_->fail_(status_t::device_error_k);
+            if (api.stream_synchronize(stream) != cuda_success_k) return index_->fail_(status_t::device_error_k);
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
 
             bytes_span_t const bounce_neighbors = to_writable_span(bounce).subspan(batch_rows * scalar_row_bytes);
@@ -1685,9 +1692,9 @@ struct vram_nvidia_index {
             compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
             if (cuda_copy_async(
                     index_->neighbors_matrix_.base() + static_cast<std::size_t>(range.first) * neighbors_row_bytes,
-                    bounce_neighbors.data(), range.size() * neighbors_row_bytes, stream) != CUDA_SUCCESS)
+                    bounce_neighbors.data(), range.size() * neighbors_row_bytes, stream) != cuda_success_k)
                 return index_->fail_(status_t::device_error_k);
-            if (api.stream_synchronize(stream) != CUDA_SUCCESS) return index_->fail_(status_t::device_error_k);
+            if (api.stream_synchronize(stream) != cuda_success_k) return index_->fail_(status_t::device_error_k);
             standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
@@ -1712,8 +1719,8 @@ struct vram_nvidia_index {
                     return index_->fail_(status_t::device_error_k);
                 u32_t const restored = static_cast<u32_t>(base + rows);
                 if (cuda_copy_async(index_->published_rows_.get(), &restored, sizeof(restored), stream) !=
-                        CUDA_SUCCESS ||
-                    cuda_api().stream_synchronize(stream) != CUDA_SUCCESS)
+                        cuda_success_k ||
+                    cuda_api().stream_synchronize(stream) != cuda_success_k)
                     return index_->fail_(status_t::device_error_k);
                 standard_atomic_ref<std::size_t>(index_->claimed_rows_).store(base + rows, std::memory_order_release);
                 claiming_.unlock();
@@ -1747,7 +1754,7 @@ struct vram_nvidia_index {
      *  @param[in] stream The stream every copy and the norms kernel queue on.
      */
     expected<load_plan_t> plan_load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
-                                    CUstream stream = nullptr) noexcept {
+                                    cuda_stream_handle_t stream = nullptr) noexcept {
         if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (columns.vectors.size() < rows * packed_row_bytes() ||
             columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
@@ -1762,7 +1769,7 @@ struct vram_nvidia_index {
 
     /** Opens a load of @p rows the caller sources per step - what a sharded plan drives, its parts
      *  arriving one slice at a time rather than as one pair of columns. */
-    expected<load_plan_t> plan_load(std::size_t rows, CUstream stream = nullptr) noexcept {
+    expected<load_plan_t> plan_load(std::size_t rows, cuda_stream_handle_t stream = nullptr) noexcept {
         if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (!rows)
@@ -1785,7 +1792,7 @@ struct vram_nvidia_index {
     /** Appends the whole source on the calling thread - the one-shot over @ref plan_load for a
      *  caller with no streams to fan the steps out over. */
     status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
-                  CUstream stream = nullptr) noexcept {
+                  cuda_stream_handle_t stream = nullptr) noexcept {
         auto [plan, status] = plan_load(columns, rows, source_range, stream);
         if (failed(status)) return status;
         for (typename load_plan_t::step_t const step : plan.steps())
@@ -1821,17 +1828,18 @@ struct vram_nvidia_index {
         std::size_t const scalar_row_bytes = packed_row_bytes();
         if (new_vectors.stride_bytes(0) < static_cast<std::ptrdiff_t>(scalar_row_bytes))
             return {{}, status_t::unsupported_layout_k};
-        CUstream const stream = context.stream();
+        cuda_stream_handle_t const stream = context.stream();
         // Every fallible preparation precedes the claim: a claimed range that never publishes would
         // starve every later batch's admission ramp.
         byte_t* const staging = context.ensure_staging(rows * row_bytes());
         if (!staging) return {{}, status_t::bad_alloc_k};
-        if (scalar_row_bytes != row_bytes() && cuda_fill_async(staging, 0, rows * row_bytes(), stream) != CUDA_SUCCESS)
+        if (scalar_row_bytes != row_bytes() &&
+            cuda_fill_async(staging, 0, rows * row_bytes(), stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
         // The source pitch is the caller's stride, so a strided view uploads without being gathered
         // first.
         if (cuda_copy_2d_async(staging, row_bytes(), new_vectors.byte_data(), new_vectors.stride_bytes(0),
-                               scalar_row_bytes, rows, stream) != CUDA_SUCCESS)
+                               scalar_row_bytes, rows, stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
 
         // Every inserting warp owns an arena slice for its exact visited set.
@@ -1854,7 +1862,7 @@ struct vram_nvidia_index {
             // Only a fresh allocation or a wrapped 32-bit epoch space warrants zeroing, never a
             // warm arena.
             if (context.arena_bytes_ != arena_bytes_before || context.epoch_floor_ + rows > 0xFFFFFFFEull) {
-                if (cuda_fill_async(arena, 0, context.arena_bytes_, stream) != CUDA_SUCCESS) {
+                if (cuda_fill_async(arena, 0, context.arena_bytes_, stream) != cuda_success_k) {
                     claimed = status_t::device_error_k;
                     context.arena_bytes_ = 0; // Spent: a retry must re-zero, never walk epoch garbage.
                 }
@@ -1863,7 +1871,7 @@ struct vram_nvidia_index {
             u32_t const epoch_base = static_cast<u32_t>(context.epoch_floor_);
             context.epoch_floor_ += rows; // Monotone; an un-claim below only forfeits epoch space.
             if (claimed == status_t::success_k &&
-                cuda_fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream) != CUDA_SUCCESS)
+                cuda_fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream) != cuda_success_k)
                 claimed = status_t::device_error_k;
             // The launch is the last fallible step; reading its verdict here keeps the claim
             // reversible.
@@ -1971,7 +1979,7 @@ struct vram_nvidia_index {
             if (heads.rows.stride_bytes(0) < static_cast<std::ptrdiff_t>(packed_row_bytes()))
                 return {{}, status_t::unsupported_layout_k};
         }
-        CUstream const stream = context.stream();
+        cuda_stream_handle_t const stream = context.stream();
 
         // Past the register ladder's widest pool the arena-backed walk serves.
         frontier_kind_t const frontier = expansion > cuda_widest_pool_k ? frontier_kind_t::wide_arena_k
@@ -1994,7 +2002,7 @@ struct vram_nvidia_index {
         // Only a fresh allocation or a wrapped 32-bit epoch space warrants zeroing, never a warm
         // arena.
         if (context.arena_bytes_ != arena_bytes_before || context.epoch_floor_ + queries_count > 0xFFFFFFFEull) {
-            if (cuda_fill_async(arena, 0, context.arena_bytes_, stream) != CUDA_SUCCESS) {
+            if (cuda_fill_async(arena, 0, context.arena_bytes_, stream) != cuda_success_k) {
                 context.arena_bytes_ = 0; // Spent: a retry must re-zero, never walk epoch garbage.
                 return {{}, status_t::device_error_k};
             }
@@ -2005,14 +2013,14 @@ struct vram_nvidia_index {
         // Pitched uploads: device rows pad to whole fragments, and the pad bytes must be zero for
         // the zero-tail distance identity to hold.
         std::size_t const scalar_row_bytes = packed_row_bytes();
-        if (scalar_row_bytes != row_bytes() && cuda_fill_async(staging, 0, rows_bytes, stream) != CUDA_SUCCESS)
+        if (scalar_row_bytes != row_bytes() && cuda_fill_async(staging, 0, rows_bytes, stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
         auto upload_rows = [&](byte_t* destination, vectors_view_t rows) noexcept {
             return cuda_copy_2d_async(destination, row_bytes(), rows.byte_data(), rows.stride_bytes(0),
-                                      scalar_row_bytes, rows.extent(0), stream) == CUDA_SUCCESS;
+                                      scalar_row_bytes, rows.extent(0), stream) == cuda_success_k;
         };
         if (!upload_rows(staging, queries)) return {{}, status_t::device_error_k};
-        if (cuda_fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) != CUDA_SUCCESS)
+        if (cuda_fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
 
         walk_launch_t walk;
@@ -2034,7 +2042,7 @@ struct vram_nvidia_index {
             if (!upload_rows(staged_heads, heads.heads) ||
                 cuda_copy_2d_async(staged_weights, weights_row_bytes, heads.weights.byte_data(),
                                    heads.weights.stride_bytes(0), weights_row_bytes, queries_count,
-                                   stream) != CUDA_SUCCESS)
+                                   stream) != cuda_success_k)
                 return {{}, status_t::device_error_k};
             walk.heads = reinterpret_cast<fragment_t const*>(staged_heads);
             walk.weights = reinterpret_cast<f32_t const*>(staged_weights);
@@ -2130,7 +2138,7 @@ struct vram_nvidia_index {
         distance_t* const device_distances = wants_distances
                                                  ? reinterpret_cast<distance_t*>(staged.value.outputs + ids_bytes)
                                                  : nullptr;
-        CUstream const stream = context.stream();
+        cuda_stream_handle_t const stream = context.stream();
         if (status_t const launched = launch_search_(staged.value, device_ids, device_distances, config.count, context);
             failed(launched))
             return {{}, launched};
@@ -2138,12 +2146,12 @@ struct vram_nvidia_index {
         // columns of one results matrix.
         if (cuda_copy_2d_async(result_ids.data(), result_ids.stride_bytes(0), device_ids,
                                config.count * sizeof(node_id_t), config.count * sizeof(node_id_t), queries_count,
-                               stream) != CUDA_SUCCESS)
+                               stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
         if (wants_distances &&
             cuda_copy_2d_async(result_distances.data(), result_distances.stride_bytes(0), device_distances,
                                config.count * sizeof(distance_t), config.count * sizeof(distance_t), queries_count,
-                               stream) != CUDA_SUCCESS)
+                               stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
         return {{config.count}, status_t::success_k};
     }
@@ -2172,18 +2180,18 @@ struct vram_nvidia_index {
         node_id_t* const device_ids = reinterpret_cast<node_id_t*>(staged.value.outputs);
         dot_t* const device_products = reinterpret_cast<dot_t*>(staged.value.outputs + ids_bytes);
         u32_t* const device_counts = reinterpret_cast<u32_t*>(staged.value.outputs + ids_bytes + products_bytes);
-        CUstream const stream = context.stream();
+        cuda_stream_handle_t const stream = context.stream();
         if (status_t const launched = launch_multiply_(staged.value, device_ids, device_products, device_counts,
                                                        static_cast<u32_t>(wanted), context);
             failed(launched))
             return {{}, launched};
         if (wanted &&
             (cuda_copy_2d_async(node_ids.data(), node_ids.stride_bytes(0), device_ids, wanted * sizeof(node_id_t),
-                                wanted * sizeof(node_id_t), rows_count, stream) != CUDA_SUCCESS ||
+                                wanted * sizeof(node_id_t), rows_count, stream) != cuda_success_k ||
              cuda_copy_2d_async(products.data(), products.stride_bytes(0), device_products, wanted * sizeof(dot_t),
-                                wanted * sizeof(dot_t), rows_count, stream) != CUDA_SUCCESS))
+                                wanted * sizeof(dot_t), rows_count, stream) != cuda_success_k))
             return {{}, status_t::device_error_k};
-        if (cuda_copy_async(counts.data(), device_counts, rows_count * sizeof(u32_t), stream) != CUDA_SUCCESS)
+        if (cuda_copy_async(counts.data(), device_counts, rows_count * sizeof(u32_t), stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
         return {{}, status_t::success_k};
     }
@@ -2209,7 +2217,7 @@ struct vram_nvidia_index {
                                   blocks * (outputs_bytes + rows_count * sizeof(softmax_state_t)), visible);
         if (!staged) return {nullptr, staged.status};
         staged.value.scratch_bytes_per_warp += static_cast<u32_t>(scratch_bytes);
-        if (cuda_fill_async(context.missed_.get(), 0, sizeof(u32_t), context.stream()) != CUDA_SUCCESS)
+        if (cuda_fill_async(context.missed_.get(), 0, sizeof(u32_t), context.stream()) != cuda_success_k)
             return {nullptr, status_t::device_error_k};
         f32_t* const device_outputs = reinterpret_cast<f32_t*>(staged.value.outputs);
         if (status_t const launched = launch_attend_(
@@ -2274,7 +2282,7 @@ struct vram_nvidia_index {
         if (node_ids.empty()) nodes.bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, nodes_count));
         if (nodes.first >= nodes.bound) return {{}, status_t::success_k};
         std::size_t const walk_count = nodes.size();
-        CUstream const stream = context.stream();
+        cuda_stream_handle_t const stream = context.stream();
         cuda_api_t const& api = cuda_api();
         // Pass-local buffers no reader observes: the shadow neighbors, the reverse buckets, their
         // counters, and the bitset of rows the merge re-selects; the bucket width is the
@@ -2292,7 +2300,7 @@ struct vram_nvidia_index {
         std::span<u32_t> const counters {reinterpret_cast<u32_t*>(shadow.get() + shadow_bytes * 2),
                                          counters_bytes / sizeof(u32_t)};
         std::span<u32_t> const bucket_counts = counters.first(nodes_count);
-        if (cuda_fill_async(counters.data(), 0, counters.size_bytes(), stream) != CUDA_SUCCESS)
+        if (cuda_fill_async(counters.data(), 0, counters.size_bytes(), stream) != cuda_success_k)
             return {{}, status_t::device_error_k};
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the pool sizes the
@@ -2333,14 +2341,15 @@ struct vram_nvidia_index {
         // neighbors with the new reverse links.
         if (!node_ids.empty() || walk_count != nodes_count)
             if (cuda_copy_async(shadow_neighbors.data(), neighbors_matrix_.base(), shadow_bytes, stream) !=
-                CUDA_SUCCESS)
+                cuda_success_k)
                 return {{}, status_t::device_error_k};
         if (status_t const launched = launch_refine_(launch, context); failed(launched)) return {{}, launched};
-        if (api.stream_synchronize(stream) != CUDA_SUCCESS) return {{}, status_t::device_error_k};
+        if (api.stream_synchronize(stream) != cuda_success_k) return {{}, status_t::device_error_k};
         // The assigned count is the completion oracle: every offset assigned means every shadow row
         // landed.
         u32_t assigned = 0;
-        if (cuda_copy(&assigned, context.assigned_rows_.get(), sizeof(u32_t)) != CUDA_SUCCESS || assigned < walk_count)
+        if (cuda_copy(&assigned, context.assigned_rows_.get(), sizeof(u32_t)) != cuda_success_k ||
+            assigned < walk_count)
             return {{}, status_t::device_error_k};
 
         // Scatter the walked rows' shadow neighbors in reverse, then merge each touched node's
@@ -2349,8 +2358,9 @@ struct vram_nvidia_index {
         // links that reconnected earlier islands.
         cuda_fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream);
         if (status_t const launched = launch_merge_(launch, context); failed(launched)) return {{}, launched};
-        if (api.stream_synchronize(stream) != CUDA_SUCCESS) return {{}, status_t::device_error_k};
-        if (cuda_copy(&assigned, context.assigned_rows_.get(), sizeof(u32_t)) != CUDA_SUCCESS || assigned < nodes_count)
+        if (api.stream_synchronize(stream) != cuda_success_k) return {{}, status_t::device_error_k};
+        if (cuda_copy(&assigned, context.assigned_rows_.get(), sizeof(u32_t)) != cuda_success_k ||
+            assigned < nodes_count)
             return {{}, status_t::device_error_k};
 
         vram_telemetry_block_t const spent = context.spent();
@@ -2403,7 +2413,7 @@ struct vram_nvidia_index {
         audit.reconnected = audit.unreached + 1;
         audit.island_ids = island_slots ? audit.reconnected + 1 : nullptr;
         audit.in_links = island_slots ? audit.island_ids + island_slots : nullptr;
-        if (cuda_fill_async(audit.reconnected, 0, sizeof(u32_t), context.stream()) != CUDA_SUCCESS)
+        if (cuda_fill_async(audit.reconnected, 0, sizeof(u32_t), context.stream()) != cuda_success_k)
             return {std::move(audit), status_t::device_error_k};
         return {std::move(audit), status_t::success_k};
     }
@@ -2415,10 +2425,10 @@ struct vram_nvidia_index {
         std::size_t const rows = size();
         if (!vectors_matrix_.reserved_bytes()) return {0, status_t::uninitialized_k};
         if (context.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
-        CUstream const stream = context.stream();
+        cuda_stream_handle_t const stream = context.stream();
         std::size_t const seed_count = min_of<std::size_t>(connectivity(), rows);
         // The bitsets, the expanded counter and the unreached counter lie back to back.
-        if (cuda_fill_async(audit.reached, 0, (audit.words * 3 + 2) * sizeof(u32_t), stream) != CUDA_SUCCESS)
+        if (cuda_fill_async(audit.reached, 0, (audit.words * 3 + 2) * sizeof(u32_t), stream) != cuda_success_k)
             return {0, status_t::device_error_k};
         u32_t* frontier = audit.frontier;
         u32_t* next_frontier = audit.next_frontier;
@@ -2430,8 +2440,8 @@ struct vram_nvidia_index {
         // eccentricity, capped defensively.
         constexpr std::size_t sweeps_cap_k = 256;
         for (audit.sweeps = 1; audit.sweeps != sweeps_cap_k; ++audit.sweeps) {
-            if (cuda_fill_async(audit.expanded, 0, sizeof(u32_t), stream) != CUDA_SUCCESS ||
-                cuda_fill_async(next_frontier, 0, audit.words * sizeof(u32_t), stream) != CUDA_SUCCESS)
+            if (cuda_fill_async(audit.expanded, 0, sizeof(u32_t), stream) != cuda_success_k ||
+                cuda_fill_async(next_frontier, 0, audit.words * sizeof(u32_t), stream) != cuda_success_k)
                 return {0, status_t::device_error_k};
             if (status_t const launched = launch_audit_sweep_(audit.reached, frontier, next_frontier, audit.expanded,
                                                               rows, stream);
@@ -2450,10 +2460,10 @@ struct vram_nvidia_index {
     }
 
     /** One device counter read back once the stream drains. */
-    static expected<u32_t> read_counter_(u32_t const* counter, CUstream stream) noexcept {
+    static expected<u32_t> read_counter_(u32_t const* counter, cuda_stream_handle_t stream) noexcept {
         u32_t value = 0;
-        if (cuda_copy_async(&value, counter, sizeof(u32_t), stream) != CUDA_SUCCESS ||
-            cuda_api().stream_synchronize(stream) != CUDA_SUCCESS)
+        if (cuda_copy_async(&value, counter, sizeof(u32_t), stream) != cuda_success_k ||
+            cuda_api().stream_synchronize(stream) != cuda_success_k)
             return {0, status_t::device_error_k};
         return {value, status_t::success_k};
     }
@@ -2504,7 +2514,7 @@ struct vram_nvidia_index {
     /** Maps every matrix and column up to @p rows and sentinel-fills the fresh neighbor rows -
      *  always ahead of any launch that could assign new_node_ids into them. Callers hold
      *  @c claiming_, or run exclusively like @c reserve and @c load. */
-    status_t grow_rows_(std::size_t rows, CUstream stream) noexcept {
+    status_t grow_rows_(std::size_t rows, cuda_stream_handle_t stream) noexcept {
         if (rows <= capacity()) return status_t::success_k;
         std::size_t const neighbors_before = neighbors_matrix_.committed_bytes();
         if (status_t status = vectors_matrix_.commit(rows * row_bytes()); status != status_t::success_k) return status;
@@ -2520,9 +2530,9 @@ struct vram_nvidia_index {
         std::size_t const fresh_bytes = neighbors_matrix_.committed_bytes() - neighbors_before;
         cuda_api_t const& api = cuda_api();
         if (fresh_bytes && api.fill_words_async(cuda_address(neighbors_matrix_.base() + neighbors_before),
-                                                node_id_unknown_k, fresh_bytes / 4, stream) != CUDA_SUCCESS)
+                                                node_id_unknown_k, fresh_bytes / 4, stream) != cuda_success_k)
             return fail_(status_t::device_error_k);
-        if (api.stream_synchronize(stream) != CUDA_SUCCESS) return fail_(status_t::device_error_k);
+        if (api.stream_synchronize(stream) != cuda_success_k) return fail_(status_t::device_error_k);
         return status_t::success_k;
     }
 
@@ -2542,24 +2552,24 @@ struct vram_nvidia_index {
         char name[cuda_kernel_name_capacity_k];
         for (cuda_rung_t const rung : cuda_rungs) {
             cuda_kernel_name(name, rung, capability_, vector_dtype_);
-            CUfunction& function = kernels_[static_cast<u32_t>(rung.kernel)][cuda_rung_index(rung.slots)];
+            cuda_function_handle_t& function = kernels_[static_cast<u32_t>(rung.kernel)][cuda_rung_index(rung.slots)];
             if (!(function = module_.function(name))) return status_t::device_error_k;
         }
         return status_t::success_k;
     }
 
     /** The loaded @p kernel on its @p slots rung. */
-    CUfunction kernel_function_(cuda_kernel_t kernel, u32_t slots) const noexcept {
+    cuda_function_handle_t kernel_function_(cuda_kernel_t kernel, u32_t slots) const noexcept {
         return kernels_[static_cast<u32_t>(kernel)][cuda_rung_index(slots)];
     }
 
     /** Launches @p function over @p blocks of the standard warp complement on @p stream, raising
      *  its dynamic-shared ceiling first when @p shared_bytes outgrow the static window. */
-    static status_t launch_(CUfunction function, u32_t blocks, u32_t shared_bytes, CUstream stream,
-                            cuda_arguments_t const& arguments) noexcept {
+    static status_t launch_(cuda_function_handle_t function, u32_t blocks, u32_t shared_bytes,
+                            cuda_stream_handle_t stream, cuda_arguments_t const& arguments) noexcept {
         if (shared_bytes > cuda_static_scratch_limit_k &&
-            (!function || cuda_api().function_set_attribute(function, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
-                                                            static_cast<int>(shared_bytes)) != CUDA_SUCCESS))
+            (!function || cuda_api().function_set_attribute(function, cuda_function_dynamic_shared_bytes_k,
+                                                            static_cast<int>(shared_bytes)) != cuda_success_k))
             return status_t::device_error_k;
         return cuda_launch(function, blocks, block_threads_k, shared_bytes, stream, arguments);
     }
@@ -2609,7 +2619,7 @@ struct vram_nvidia_index {
     /** Scatters the walked rows' shadow neighbors into the reverse buckets, then merges every
      *  touched row's forward and reverse candidates into its live neighbors. */
     status_t launch_merge_(refine_launch_t const& launch, traversal_context_t& context) noexcept {
-        CUstream const stream = context.stream();
+        cuda_stream_handle_t const stream = context.stream();
         u32_t const blocks = static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k;
         cuda_arguments_t arguments {};
         cuda_graph_t& graph = arguments.graph;
@@ -2665,7 +2675,7 @@ struct vram_nvidia_index {
 
     /** Launches one walk per query of @p walk through @p function over @p arguments, and reports
      *  the launch's own verdict. */
-    status_t launch_walk_(CUfunction function, walk_launch_t const& walk, cuda_arguments_t const& arguments,
+    status_t launch_walk_(cuda_function_handle_t function, walk_launch_t const& walk, cuda_arguments_t const& arguments,
                           traversal_context_t& context) noexcept {
         return launch_(function, static_cast<u32_t>(device_.multiprocessor_count) * search_blocks_per_multiprocessor_k,
                        vram_warps_per_block_k * walk.scratch_bytes_per_warp, context.stream(), arguments);
@@ -2727,7 +2737,7 @@ struct vram_nvidia_index {
     }
 
     /** Rebuilds the norms of rows @b [first_row,first_row+rows) from their vectors. */
-    status_t launch_derive_norms_(std::size_t first_row, std::size_t rows, CUstream stream) noexcept {
+    status_t launch_derive_norms_(std::size_t first_row, std::size_t rows, cuda_stream_handle_t stream) noexcept {
         cuda_arguments_t arguments {};
         arguments.graph.storage = storage();
         arguments.graph.first_id = static_cast<u32_t>(first_row);
@@ -2739,7 +2749,7 @@ struct vram_nvidia_index {
 
     /** Marks the audit's stride-spread landmarks over @p rows rows reached and in @p frontier. */
     status_t launch_audit_seeds_(u32_t* reached, u32_t* frontier, std::size_t rows, std::size_t seed_count,
-                                 CUstream stream) noexcept {
+                                 cuda_stream_handle_t stream) noexcept {
         cuda_arguments_t arguments {};
         arguments.graph.reached = {reached};
         arguments.graph.frontier = {frontier};
@@ -2752,7 +2762,7 @@ struct vram_nvidia_index {
     /** Expands one level of reachability from @p frontier into @p next_frontier, counting the rows
      *  it expanded in @p expanded. */
     status_t launch_audit_sweep_(u32_t* reached, u32_t* frontier, u32_t* next_frontier, u32_t* expanded,
-                                 std::size_t rows, CUstream stream) noexcept {
+                                 std::size_t rows, cuda_stream_handle_t stream) noexcept {
         cuda_arguments_t arguments {};
         cuda_graph_t& graph = arguments.graph;
         graph.neighbors = reinterpret_cast<u32_t*>(neighbors_matrix_.base());
@@ -2770,7 +2780,7 @@ struct vram_nvidia_index {
     /** Counts the rows @p reached lacks in @p islands_cursor, collecting them into @p island_ids
      *  when it is given. */
     status_t launch_audit_islands_(u32_t* reached, std::size_t rows, u32_t* island_ids, u32_t* islands_cursor,
-                                   CUstream stream) noexcept {
+                                   cuda_stream_handle_t stream) noexcept {
         cuda_arguments_t arguments {};
         arguments.graph.reached = {reached};
         arguments.graph.rows_count = static_cast<u32_t>(rows);
@@ -2783,7 +2793,7 @@ struct vram_nvidia_index {
     /** Counts the reached in-links of every row, then reconnects the audit's @p islands islands
      *  into reached picks or their landmarks. */
     status_t launch_reconnect_islands_(audit_t const& audit, u32_t islands, std::size_t rows,
-                                       CUstream stream) noexcept {
+                                       cuda_stream_handle_t stream) noexcept {
         cuda_arguments_t arguments {};
         cuda_graph_t& graph = arguments.graph;
         graph.neighbors = reinterpret_cast<u32_t*>(neighbors_matrix_.base());
@@ -2808,7 +2818,7 @@ struct vram_nvidia_index {
     /** Merges the attended rows and carries of @p shards walks into the first's on @p stream - the
      *  sharded attend's gather. */
     status_t launch_merge_attention_(byte_t* blocks, u32_t rows, u32_t columns, u32_t shards,
-                                     CUstream stream) noexcept {
+                                     cuda_stream_handle_t stream) noexcept {
         cuda_arguments_t arguments {};
         arguments.attend.outputs = reinterpret_cast<f32_t*>(blocks);
         arguments.attend.rows = rows;
@@ -2832,7 +2842,7 @@ struct vram_nvidia_index {
     /** This ceiling's fatbin on this device, and its kernels in @ref cuda_kernel_t order, the
      *  attends left to their launches. */
     cuda_module_t module_;
-    CUfunction kernels_[static_cast<u32_t>(cuda_kernel_t::count_k)][cuda_rungs_per_kernel_k] = {};
+    cuda_function_handle_t kernels_[static_cast<u32_t>(cuda_kernel_t::count_k)][cuda_rungs_per_kernel_k] = {};
 
     /** Hardware identity: the ordinal comes from the vectors allocator at construction, the
      *  remaining specs fill at the first @c reserve. */

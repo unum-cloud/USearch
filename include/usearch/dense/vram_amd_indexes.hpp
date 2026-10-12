@@ -395,7 +395,7 @@ struct vram_amd_indexes {
             if (share.launched + taking > share.rows) return status_t::config_mismatch_k;
             shard_t& one = owner_->shards_[shard];
             traversal_context_t& traversal = traversals_[shard];
-            if (hip_set_device(traversal.device()) != hipSuccess) return status_t::device_error_k;
+            if (hip_set_device(traversal.device()) != hip_success_k) return status_t::device_error_k;
             node_id_t const first_node = static_cast<node_id_t>(share.first_id + share.launched);
             for (std::size_t taken = 0; taken != taking; ++taken)
                 one.keys[first_node + static_cast<node_id_t>(taken)] = keys[first + taken * shards];
@@ -507,7 +507,8 @@ struct vram_amd_indexes {
             std::size_t const taking = rows_from_(rows, first_row_of_shard_(shard, shards, plan.rotation_), shards);
             plan.shares_.push_back_reserved({static_cast<node_id_t>(first_id), taking, 0});
             if (!taking) continue;
-            if (hip_set_device(one.index->device_specs().ordinal) != hipSuccess) return {{}, status_t::device_error_k};
+            if (hip_set_device(one.index->device_specs().ordinal) != hip_success_k)
+                return {{}, status_t::device_error_k};
             reserve_capacity_t const grown {first_id + taking, static_cast<connectivity_t>(connectivity()),
                                             dimensions()};
             if (status_t const reserved = one.index->reserve(grown).status; failed(reserved)) return {{}, reserved};
@@ -592,7 +593,7 @@ struct vram_amd_indexes {
         std::size_t const published = size();
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
-            if (hip_set_device(one.device_specs().ordinal) != hipSuccess) return {{}, status_t::device_error_k};
+            if (hip_set_device(one.device_specs().ordinal) != hip_success_k) return {{}, status_t::device_error_k};
             auto const [part, status] = one.refine({0, node_id_unknown_k}, traversals[shard], config);
             combine_refinement_(result, part);
             if (failed(status)) return {result, status};
@@ -622,7 +623,7 @@ struct vram_amd_indexes {
         health_result_t result;
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
-            if (hip_set_device(one.device_specs().ordinal) != hipSuccess) return {{}, status_t::device_error_k};
+            if (hip_set_device(one.device_specs().ordinal) != hip_success_k) return {{}, status_t::device_error_k};
             auto const [shard_health, status] = one.health(traversals[shard]);
             if (failed(status)) return {{}, status};
             combine_health_(result, shard_health);
@@ -1263,7 +1264,7 @@ struct vram_amd_indexes {
                 }
                 // Every plan finishes, an empty one included, since finishing releases the claim.
                 // The keys ride the shard plan's stream, which its finish drains before publishing.
-                if (hip_set_device(owner_->shards_[shard].index->device_specs().ordinal) != hipSuccess)
+                if (hip_set_device(owner_->shards_[shard].index->device_specs().ordinal) != hip_success_k)
                     return status_t::device_error_k;
                 if (status_t const uploaded = upload_keys_(owner_->shards_[shard], {plans_[shard].base, first},
                                                            plans_[shard].stream);
@@ -1579,12 +1580,12 @@ struct vram_amd_indexes {
 
     /** Copies @p rows of @p one's host key column into its device twin on @p stream, run by run,
      *  since the host column is chunked. */
-    static status_t upload_keys_(shard_t& one, iota_view<std::size_t> rows, hipStream_t stream) noexcept {
+    static status_t upload_keys_(shard_t& one, iota_view<std::size_t> rows, hip_stream_handle_t stream) noexcept {
         status_t uploaded = status_t::success_k;
         std::size_t row = rows.first;
         one.keys.for_each_span(rows, [&](std::span<key_t> run) noexcept {
             if (succeeded(uploaded) && hip_api().copy_async(one.device_keys.base() + row, run.data(), run.size_bytes(),
-                                                            hipMemcpyHostToDevice, stream) != hipSuccess)
+                                                            hip_copy_host_to_device_k, stream) != hip_success_k)
                 uploaded = status_t::device_error_k;
             row += run.size();
         });
@@ -1743,7 +1744,7 @@ struct vram_amd_indexes {
         for (; queued != shards; ++queued) {
             pending.push_back_reserved(queued);
             // A launch fails on a stream of any device but the current one.
-            if (status_t const submitted = hip_set_device(traversals[queued].device()) == hipSuccess
+            if (status_t const submitted = hip_set_device(traversals[queued].device()) == hip_success_k
                                                ? submit(queued, traversals[queued], visible[queued])
                                                : status_t::device_error_k;
                 failed(submitted)) {
@@ -1881,7 +1882,7 @@ struct vram_amd_indexes {
                               safegraphs_header_t const& header, std::size_t first_row, std::size_t nodes,
                               save_config_t const& config, executor_t& executor) noexcept {
         index_t& one = *shards_[shard].index;
-        if (hip_set_device(one.device_specs().ordinal) != hipSuccess) return status_t::device_error_k;
+        if (hip_set_device(one.device_specs().ordinal) != hip_success_k) return status_t::device_error_k;
         typename index_t::columns_t const columns {header.rows_of(target, header.value, first_row, nodes),
                                                    header.rows_of(target, header.neighbors, first_row, nodes),
                                                    header.rows_of(target, header.norms, first_row, nodes)};
@@ -2111,7 +2112,7 @@ struct vram_amd_indexes {
         if (failed(plan.plans_.reserve_exactly(shards))) return status_t::bad_alloc_k;
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
-            if (hip_set_device(one.device_specs().ordinal) != hipSuccess) return status_t::device_error_k;
+            if (hip_set_device(one.device_specs().ordinal) != hip_success_k) return status_t::device_error_k;
             auto [inner, status] = one.plan_load(shard_rows[shard],
                                                  executor.stream(stream_of_(executor, shard)).handle);
             if (failed(status)) return status;

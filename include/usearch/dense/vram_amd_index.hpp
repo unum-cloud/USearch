@@ -42,6 +42,9 @@ namespace unum::usearch::dense {
 inline constexpr std::size_t amd_fragment_bytes_k = 16;
 inline constexpr std::size_t amd_scored_node_bytes_k = 8;
 
+/** Bytes of one wavefront's static schedule state: the plain schedule's one flag. */
+inline constexpr std::size_t amd_schedule_bytes_k = 1;
+
 /** Bytes of one wavefront's staged batch over @p wave_lanes lanes: the candidate IDs, then a
  *  lane-width of scored nodes and four-byte dots. */
 constexpr std::size_t amd_gathered_bytes(u32_t wave_lanes) noexcept {
@@ -344,7 +347,7 @@ struct hip_traversal_context {
     hip_traversal_context(hip_traversal_context&&) noexcept = default;
     ~hip_traversal_context() noexcept = default;
 
-    hipStream_t stream() const noexcept { return allocator_.stream(); }
+    hip_stream_handle_t stream() const noexcept { return allocator_.stream(); }
     int device() const noexcept { return allocator_.device(); }
 
     /** Whether this context can walk at all: every device-side word claimed. */
@@ -354,7 +357,7 @@ struct hip_traversal_context {
      *  completion, the executor's @c drain being the fleet's. Selects the context's device first,
      *  since a null stream is the current device's. */
     status_t drain() noexcept {
-        return hip_set_device(device()) == hipSuccess && hip_api().stream_synchronize(stream()) == hipSuccess
+        return hip_set_device(device()) == hip_success_k && hip_api().stream_synchronize(stream()) == hip_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
     }
@@ -363,17 +366,17 @@ struct hip_traversal_context {
      *  has, @c deferred_k while any of it runs - without blocking, so one host thread awaits
      *  whichever of several streams lands first. */
     status_t landed() noexcept {
-        if (hip_set_device(device()) != hipSuccess) return status_t::device_error_k;
-        hipError_t const queried = hip_api().stream_query(stream());
-        return queried == hipSuccess         ? status_t::success_k
-               : queried == hipErrorNotReady ? status_t::deferred_k
-                                             : status_t::device_error_k;
+        if (hip_set_device(device()) != hip_success_k) return status_t::device_error_k;
+        hip_result_t const queried = hip_api().stream_query(stream());
+        return queried == hip_success_k           ? status_t::success_k
+               : queried == hip_error_not_ready_k ? status_t::deferred_k
+                                                  : status_t::device_error_k;
     }
 
     /** The telemetry of the last submission, zeroed when it was queued; read once it landed. */
     vram_telemetry_block_t spent() const noexcept {
         vram_telemetry_block_t snapshot = {};
-        hip_api().copy(&snapshot, telemetry_.get(), sizeof(snapshot), hipMemcpyDeviceToHost);
+        hip_api().copy(&snapshot, telemetry_.get(), sizeof(snapshot), hip_copy_device_to_host_k);
         return snapshot;
     }
 
@@ -381,7 +384,7 @@ struct hip_traversal_context {
      *  once it landed. */
     bool missed() const noexcept {
         u32_t word = 0;
-        hip_api().copy(&word, missed_.get(), sizeof(word), hipMemcpyDeviceToHost);
+        hip_api().copy(&word, missed_.get(), sizeof(word), hip_copy_device_to_host_k);
         return word != 0;
     }
 
@@ -640,10 +643,12 @@ struct vram_amd_index {
     }
 
     /** Whether an insert or refine launch seats on this device: its per-warp candidate cache beside
-     *  the static norms and batch buffers - wide rows can serve walks yet refuse building. */
+     *  the static norms, batch buffers and schedule state - wide rows can serve walks yet refuse
+     *  building. */
     bool build_scratch_fits() const noexcept {
         std::size_t const statics = std::size_t {vram_warps_per_block_k} *
-                                    (vram_cache_rows_k * sizeof(norms_t) + amd_gathered_bytes(wave_lanes()));
+                                    (vram_cache_rows_k * sizeof(norms_t) + amd_gathered_bytes(wave_lanes()) +
+                                     amd_schedule_bytes_k);
         return statics + std::size_t {vram_warps_per_block_k} *
                              max_of(insert_scratch_bytes_per_warp(), merge_scratch_bytes_per_warp()) <=
                device_.shared_memory_per_block_bytes;
@@ -702,7 +707,7 @@ struct vram_amd_index {
         std::size_t const scalar_row_bytes = packed_row_bytes();
         return hip_api().copy(destination.byte_data(),
                               vectors_matrix_.base() + static_cast<std::size_t>(node) * row_bytes(), scalar_row_bytes,
-                              hipMemcpyDeviceToHost) == hipSuccess
+                              hip_copy_device_to_host_k) == hip_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
     }
@@ -711,7 +716,8 @@ struct vram_amd_index {
      *  Call it only with no batch in flight. */
     status_t validate() const noexcept {
         u32_t published = 0;
-        if (hip_api().copy(&published, published_rows_.get(), sizeof(u32_t), hipMemcpyDeviceToHost) != hipSuccess)
+        if (hip_api().copy(&published, published_rows_.get(), sizeof(u32_t), hip_copy_device_to_host_k) !=
+            hip_success_k)
             return status_t::device_error_k;
         return published == claimed_() ? status_t::success_k : status_t::device_error_k;
     }
@@ -765,7 +771,7 @@ struct vram_amd_index {
         connectivity_t const connectivity = config.connectivity;
         if (config.capacity > max_node_count_k) return {capacity(), status_t::overflow_k};
         if (!vectors_matrix_.reserved_bytes()) { // First reservation: bind the device, size the ceiling.
-            if (hip_set_device(device_.ordinal) != hipSuccess) return {0, status_t::device_error_k};
+            if (hip_set_device(device_.ordinal) != hip_success_k) return {0, status_t::device_error_k};
             auto const [specs, status] = hip_device_specs_t::query(device_.ordinal);
             if (failed(status)) return {0, status};
             device_ = specs;
@@ -795,7 +801,7 @@ struct vram_amd_index {
                 return {0, status_t::bad_alloc_k};
             counter_allocator_t counter_allocator {nullptr, device_.ordinal};
             published_rows_ = hip_make_unique(counter_allocator, 1);
-            if (!published_rows_ || hip_api().fill(published_rows_.get(), 0, sizeof(u32_t)) != hipSuccess)
+            if (!published_rows_ || hip_api().fill(published_rows_.get(), 0, sizeof(u32_t)) != hip_success_k)
                 return {0, status_t::device_error_k};
         }
         status_t const grown = grow_rows_(config.capacity, nullptr);
@@ -870,7 +876,7 @@ struct vram_amd_index {
         // add up.
         if (context && context.device() == device_.ordinal &&
             hip_api().fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream()) !=
-                hipSuccess)
+                hip_success_k)
             return {{}, status_t::device_error_k};
         expected<insert_result_t> inserted = submit_insert_(new_vectors, assigned_ids, context, config);
         if (!inserted || !new_vectors.extent(0)) return inserted;
@@ -1135,7 +1141,7 @@ struct vram_amd_index {
             // The reached in-links first, so no reconnection takes the last link a reached node is
             // found through.
             u32_t* const neighbors = reinterpret_cast<u32_t*>(neighbors_matrix_.base());
-            if (hip_api().fill_async(audit.in_links, 0, rows * sizeof(u32_t), context.stream()) != hipSuccess)
+            if (hip_api().fill_async(audit.in_links, 0, rows * sizeof(u32_t), context.stream()) != hip_success_k)
                 return {result, status_t::device_error_k};
             amd_arguments_t heal {};
             heal.graph.neighbors = neighbors;
@@ -1208,7 +1214,7 @@ struct vram_amd_index {
         node_id_t id_shift = 0;
 
         /** The stream every device-to-host copy queues on, drained before its bytes move. */
-        hipStream_t stream = nullptr;
+        hip_stream_handle_t stream = nullptr;
 
         /** Page-locked host bytes: one batch of packed vector rows, then its neighbor IDs, then its
          *  norms. */
@@ -1231,7 +1237,7 @@ struct vram_amd_index {
         /** The index snapshotted into @p columns on @p stream under the watermark at @p visible,
          *  its IDs shifted by @p id_shift; only @ref plan_save calls it, and sizes the bounce
          *  afterwards. */
-        save_plan_t(vram_amd_index const& index, columns_t columns, node_id_t id_shift, hipStream_t stream,
+        save_plan_t(vram_amd_index const& index, columns_t columns, node_id_t id_shift, hip_stream_handle_t stream,
                     node_id_t visible) noexcept
             : columns(columns), id_shift(id_shift), stream(stream),
               bounce(hip_pinned_allocator_t {stream, index.device_.ordinal}), visible(visible),
@@ -1307,9 +1313,10 @@ struct vram_amd_index {
             if (hip_api().copy_2d_async(
                     bounce.data(), scalar_row_bytes,
                     index_->vectors_matrix_.base() + static_cast<std::size_t>(rows.first) * index_->row_bytes(),
-                    index_->row_bytes(), scalar_row_bytes, rows.size(), hipMemcpyDeviceToHost, stream) != hipSuccess)
+                    index_->row_bytes(), scalar_row_bytes, rows.size(), hip_copy_device_to_host_k,
+                    stream) != hip_success_k)
                 return status_t::device_error_k;
-            if (hip_api().stream_synchronize(stream) != hipSuccess) return status_t::device_error_k;
+            if (hip_api().stream_synchronize(stream) != hip_success_k) return status_t::device_error_k;
             [[maybe_unused]] status_t const copied_vectors = copy_bytes(vectors_rows,
                                                                         bytes_of(bounce.data(), vectors_rows.size()));
             // The norms count with the vectors, so a refused copy of either leaves the step
@@ -1320,9 +1327,9 @@ struct vram_amd_index {
                 if (hip_api().copy_async(
                         bounce_norms.data(),
                         index_->norms_column_.base() + static_cast<std::size_t>(rows.first) * sizeof(norms_t),
-                        bounce_norms.size(), hipMemcpyDeviceToHost, stream) != hipSuccess)
+                        bounce_norms.size(), hip_copy_device_to_host_k, stream) != hip_success_k)
                     return status_t::device_error_k;
-                if (hip_api().stream_synchronize(stream) != hipSuccess) return status_t::device_error_k;
+                if (hip_api().stream_synchronize(stream) != hip_success_k) return status_t::device_error_k;
                 [[maybe_unused]] status_t const copied_norms = copy_bytes(norms_rows, bounce_norms);
             }
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
@@ -1331,9 +1338,9 @@ struct vram_amd_index {
             if (hip_api().copy_async(
                     bounce_neighbors.data(),
                     index_->neighbors_matrix_.base() + static_cast<std::size_t>(rows.first) * neighbors_row_bytes,
-                    rows.size() * neighbors_row_bytes, hipMemcpyDeviceToHost, stream) != hipSuccess)
+                    rows.size() * neighbors_row_bytes, hip_copy_device_to_host_k, stream) != hip_success_k)
                 return status_t::device_error_k;
-            if (hip_api().stream_synchronize(stream) != hipSuccess) return status_t::device_error_k;
+            if (hip_api().stream_synchronize(stream) != hip_success_k) return status_t::device_error_k;
             std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(bounce_neighbors.data()), step_slots};
             for (node_id_t& neighbor : landed)
                 neighbor = neighbor < visible ? static_cast<node_id_t>(neighbor + id_shift) : node_id_unknown_k;
@@ -1374,8 +1381,8 @@ struct vram_amd_index {
      *  @param[in] stream The stream every copy queues on.
      *  @param[in] id_shift What an ID under the watermark moves by - the row this shard starts at.
      */
-    expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization, hipStream_t stream = nullptr,
-                                    node_id_t id_shift = 0) const noexcept {
+    expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
+                                    hip_stream_handle_t stream = nullptr, node_id_t id_shift = 0) const noexcept {
         if (synchronization == synchronization_t::concurrent_k) return {{}, status_t::config_mismatch_k};
         if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         std::size_t const rows = size();
@@ -1393,7 +1400,7 @@ struct vram_amd_index {
     /** Serializes every row under the watermark into @p columns on the calling thread - the
      *  one-shot over @ref plan_save for a caller with no streams to fan the steps out over. */
     status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch,
-                  hipStream_t stream = nullptr) const noexcept {
+                  hip_stream_handle_t stream = nullptr) const noexcept {
         auto [plan, status] = plan_save(columns, synchronization, stream);
         if (failed(status)) return status;
         for (typename save_plan_t::step_t const step : plan.steps())
@@ -1421,7 +1428,7 @@ struct vram_amd_index {
         iota_view<node_id_t> source_range {};
 
         /** The stream every host-to-device copy and the norms kernel queue on. */
-        hipStream_t stream = nullptr;
+        hip_stream_handle_t stream = nullptr;
 
         /** Page-locked host bytes: one batch of packed vector rows, then its neighbor IDs, then its
          *  norms. */
@@ -1451,7 +1458,7 @@ struct vram_amd_index {
         /** The index appended to at @p base on @p stream, and the claim held meanwhile - unowned
          *  for a plan of no rows; only @ref plan_load calls it, and sizes the bounce afterwards. */
         load_plan_t(vram_amd_index& index, columns_view_t columns, iota_view<node_id_t> source_range,
-                    hipStream_t stream, std::unique_lock<fu::spin_mutex_t>&& claiming, node_id_t base,
+                    hip_stream_handle_t stream, std::unique_lock<fu::spin_mutex_t>&& claiming, node_id_t base,
                     std::size_t rows) noexcept
             : columns(columns), source_range(source_range), stream(stream),
               bounce(hip_pinned_allocator_t {stream, index.device_.ordinal}), base(base), rows(rows),
@@ -1548,7 +1555,7 @@ struct vram_amd_index {
             if (hip_api().copy_2d_async(
                     index_->vectors_matrix_.base() + static_cast<std::size_t>(range.first) * index_->row_bytes(),
                     index_->row_bytes(), bounce.data(), scalar_row_bytes, scalar_row_bytes, range.size(),
-                    hipMemcpyHostToDevice, stream) != hipSuccess)
+                    hip_copy_host_to_device_k, stream) != hip_success_k)
                 return index_->fail_(status_t::device_error_k);
             // Dot reserves no norms column, so a part's column has nowhere to land.
             if (index_->stores_norms() && !norms_rows.empty()) {
@@ -1557,13 +1564,13 @@ struct vram_amd_index {
                 [[maybe_unused]] status_t const staged_norms = copy_bytes(bounce_norms, norms_rows);
                 if (hip_api().copy_async(
                         index_->norms_column_.base() + static_cast<std::size_t>(range.first) * sizeof(norms_t),
-                        bounce_norms.data(), bounce_norms.size(), hipMemcpyHostToDevice, stream) != hipSuccess)
+                        bounce_norms.data(), bounce_norms.size(), hip_copy_host_to_device_k, stream) != hip_success_k)
                     return index_->fail_(status_t::device_error_k);
                 // Tallied ahead of the drain: a failed one keeps the vectors short, which `finish`
                 // refuses.
                 standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(range.size(), std::memory_order_acq_rel);
             }
-            if (hip_api().stream_synchronize(stream) != hipSuccess) return index_->fail_(status_t::device_error_k);
+            if (hip_api().stream_synchronize(stream) != hip_success_k) return index_->fail_(status_t::device_error_k);
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
 
             bytes_span_t const bounce_neighbors = to_writable_span(bounce).subspan(batch_rows * scalar_row_bytes);
@@ -1574,10 +1581,10 @@ struct vram_amd_index {
             compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
             if (hip_api().copy_async(
                     index_->neighbors_matrix_.base() + static_cast<std::size_t>(range.first) * neighbors_row_bytes,
-                    bounce_neighbors.data(), range.size() * neighbors_row_bytes, hipMemcpyHostToDevice,
-                    stream) != hipSuccess)
+                    bounce_neighbors.data(), range.size() * neighbors_row_bytes, hip_copy_host_to_device_k,
+                    stream) != hip_success_k)
                 return index_->fail_(status_t::device_error_k);
-            if (hip_api().stream_synchronize(stream) != hipSuccess) return index_->fail_(status_t::device_error_k);
+            if (hip_api().stream_synchronize(stream) != hip_success_k) return index_->fail_(status_t::device_error_k);
             standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
@@ -1605,8 +1612,8 @@ struct vram_amd_index {
                     return index_->fail_(status_t::device_error_k);
                 u32_t const restored = static_cast<u32_t>(base + rows);
                 if (hip_api().copy_async(index_->published_rows_.get(), &restored, sizeof(restored),
-                                         hipMemcpyHostToDevice, stream) != hipSuccess ||
-                    hip_api().stream_synchronize(stream) != hipSuccess)
+                                         hip_copy_host_to_device_k, stream) != hip_success_k ||
+                    hip_api().stream_synchronize(stream) != hip_success_k)
                     return index_->fail_(status_t::device_error_k);
                 standard_atomic_ref<std::size_t>(index_->claimed_rows_).store(base + rows, std::memory_order_release);
                 claiming_.unlock();
@@ -1640,7 +1647,7 @@ struct vram_amd_index {
      *  @param[in] stream The stream every copy and the norms kernel queue on.
      */
     expected<load_plan_t> plan_load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
-                                    hipStream_t stream = nullptr) noexcept {
+                                    hip_stream_handle_t stream = nullptr) noexcept {
         if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (columns.vectors.size() < rows * packed_row_bytes() ||
             columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
@@ -1655,7 +1662,7 @@ struct vram_amd_index {
 
     /** Opens a load of @p rows the caller sources per step - what a sharded plan drives, its parts
      *  arriving one slice at a time rather than as one pair of columns. */
-    expected<load_plan_t> plan_load(std::size_t rows, hipStream_t stream = nullptr) noexcept {
+    expected<load_plan_t> plan_load(std::size_t rows, hip_stream_handle_t stream = nullptr) noexcept {
         if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (!rows)
@@ -1678,7 +1685,7 @@ struct vram_amd_index {
     /** Appends the whole source on the calling thread - the one-shot over @ref plan_load for a
      *  caller with no streams to fan the steps out over. */
     status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
-                  hipStream_t stream = nullptr) noexcept {
+                  hip_stream_handle_t stream = nullptr) noexcept {
         auto [plan, status] = plan_load(columns, rows, source_range, stream);
         if (failed(status)) return status;
         for (typename load_plan_t::step_t const step : plan.steps())
@@ -1714,18 +1721,18 @@ struct vram_amd_index {
         std::size_t const scalar_row_bytes = packed_row_bytes();
         if (new_vectors.stride_bytes(0) < static_cast<std::ptrdiff_t>(scalar_row_bytes))
             return {{}, status_t::unsupported_layout_k};
-        hipStream_t const stream = context.stream();
+        hip_stream_handle_t const stream = context.stream();
         // Every fallible preparation precedes the claim: a claimed range that never publishes would
         // starve every later batch's admission ramp.
         byte_t* const staging = context.ensure_staging(rows * row_bytes());
         if (!staging) return {{}, status_t::bad_alloc_k};
         if (scalar_row_bytes != row_bytes() &&
-            hip_api().fill_async(staging, 0, rows * row_bytes(), stream) != hipSuccess)
+            hip_api().fill_async(staging, 0, rows * row_bytes(), stream) != hip_success_k)
             return {{}, status_t::device_error_k};
         // The source pitch is the caller's stride, so a strided view uploads without being gathered
         // first.
         if (hip_api().copy_2d_async(staging, row_bytes(), new_vectors.byte_data(), new_vectors.stride_bytes(0),
-                                    scalar_row_bytes, rows, hipMemcpyHostToDevice, stream) != hipSuccess)
+                                    scalar_row_bytes, rows, hip_copy_host_to_device_k, stream) != hip_success_k)
             return {{}, status_t::device_error_k};
 
         // Every inserting warp owns an arena slice for its exact visited set.
@@ -1748,7 +1755,7 @@ struct vram_amd_index {
             // Only a fresh allocation or a wrapped 32-bit epoch space warrants zeroing, never a
             // warm arena.
             if (context.arena_bytes_ != arena_bytes_before || context.epoch_floor_ + rows > 0xFFFFFFFEull) {
-                if (hip_api().fill_async(arena, 0, context.arena_bytes_, stream) != hipSuccess) {
+                if (hip_api().fill_async(arena, 0, context.arena_bytes_, stream) != hip_success_k) {
                     claimed = status_t::device_error_k;
                     context.arena_bytes_ = 0; // Spent: a retry must re-zero, never walk epoch garbage.
                 }
@@ -1757,7 +1764,7 @@ struct vram_amd_index {
             u32_t const epoch_base = static_cast<u32_t>(context.epoch_floor_);
             context.epoch_floor_ += rows; // Monotone; an un-claim below only forfeits epoch space.
             if (claimed == status_t::success_k &&
-                hip_api().fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream) != hipSuccess)
+                hip_api().fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream) != hip_success_k)
                 claimed = status_t::device_error_k;
             if (claimed == status_t::success_k) {
                 amd_build_t view {storage(), //
@@ -1858,7 +1865,7 @@ struct vram_amd_index {
             if (heads.rows.stride_bytes(0) < static_cast<std::ptrdiff_t>(packed_row_bytes()))
                 return {{}, status_t::unsupported_layout_k};
         }
-        hipStream_t const stream = context.stream();
+        hip_stream_handle_t const stream = context.stream();
 
         // Past the register ladder's widest pool the arena-backed walk serves.
         frontier_kind_t const frontier = expansion > 16 * wave_lanes() ? frontier_kind_t::wide_arena_k
@@ -1881,7 +1888,7 @@ struct vram_amd_index {
         // Only a fresh allocation or a wrapped 32-bit epoch space warrants zeroing, never a warm
         // arena.
         if (context.arena_bytes_ != arena_bytes_before || context.epoch_floor_ + queries_count > 0xFFFFFFFEull) {
-            if (hip_api().fill_async(arena, 0, context.arena_bytes_, stream) != hipSuccess) {
+            if (hip_api().fill_async(arena, 0, context.arena_bytes_, stream) != hip_success_k) {
                 context.arena_bytes_ = 0; // Spent: a retry must re-zero, never walk epoch garbage.
                 return {{}, status_t::device_error_k};
             }
@@ -1892,15 +1899,15 @@ struct vram_amd_index {
         // Pitched uploads: device rows pad to whole fragments, and the pad bytes must be zero for
         // the zero-tail distance identity to hold.
         std::size_t const scalar_row_bytes = packed_row_bytes();
-        if (scalar_row_bytes != row_bytes() && hip_api().fill_async(staging, 0, rows_bytes, stream) != hipSuccess)
+        if (scalar_row_bytes != row_bytes() && hip_api().fill_async(staging, 0, rows_bytes, stream) != hip_success_k)
             return {{}, status_t::device_error_k};
         auto upload_rows = [&](byte_t* destination, vectors_view_t rows) noexcept {
             return hip_api().copy_2d_async(destination, row_bytes(), rows.byte_data(), rows.stride_bytes(0),
-                                           scalar_row_bytes, rows.extent(0), hipMemcpyHostToDevice,
-                                           stream) == hipSuccess;
+                                           scalar_row_bytes, rows.extent(0), hip_copy_host_to_device_k,
+                                           stream) == hip_success_k;
         };
         if (!upload_rows(staging, queries)) return {{}, status_t::device_error_k};
-        if (hip_api().fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) != hipSuccess)
+        if (hip_api().fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) != hip_success_k)
             return {{}, status_t::device_error_k};
 
         walk_rescoring<heads_type_> rescoring {};
@@ -1911,7 +1918,7 @@ struct vram_amd_index {
             if (!upload_rows(staged_heads, heads.heads) ||
                 hip_api().copy_2d_async(staged_weights, weights_row_bytes, heads.weights.byte_data(),
                                         heads.weights.stride_bytes(0), weights_row_bytes, queries_count,
-                                        hipMemcpyDefault, stream) != hipSuccess)
+                                        hip_copy_default_k, stream) != hip_success_k)
                 return {{}, status_t::device_error_k};
             rescoring = {staged_heads, reinterpret_cast<f32_t const*>(staged_weights),
                          static_cast<u32_t>(heads.weights.extent(1)), row_fragments()};
@@ -2014,7 +2021,7 @@ struct vram_amd_index {
         distance_t* const device_distances = wants_distances
                                                  ? reinterpret_cast<distance_t*>(staged.value.outputs + ids_bytes)
                                                  : nullptr;
-        hipStream_t const stream = context.stream();
+        hip_stream_handle_t const stream = context.stream();
         if (status_t const launched = launch_walk_(
                 staged.value, amd_search_sink_t {device_ids, device_distances, config.count, kernel_}, stream);
             failed(launched))
@@ -2023,12 +2030,12 @@ struct vram_amd_index {
         // columns of one results matrix.
         if (hip_api().copy_2d_async(result_ids.data(), result_ids.stride_bytes(0), device_ids,
                                     config.count * sizeof(node_id_t), config.count * sizeof(node_id_t), queries_count,
-                                    hipMemcpyDefault, stream) != hipSuccess)
+                                    hip_copy_default_k, stream) != hip_success_k)
             return {{}, status_t::device_error_k};
         if (wants_distances &&
             hip_api().copy_2d_async(result_distances.data(), result_distances.stride_bytes(0), device_distances,
                                     config.count * sizeof(distance_t), config.count * sizeof(distance_t), queries_count,
-                                    hipMemcpyDefault, stream) != hipSuccess)
+                                    hip_copy_default_k, stream) != hip_success_k)
             return {{}, status_t::device_error_k};
         return {{config.count}, status_t::success_k};
     }
@@ -2057,17 +2064,18 @@ struct vram_amd_index {
         node_id_t* const device_ids = reinterpret_cast<node_id_t*>(staged.value.outputs);
         byte_t* const device_products = staged.value.outputs + ids_bytes;
         u32_t* const device_counts = reinterpret_cast<u32_t*>(staged.value.outputs + ids_bytes + products_bytes);
-        hipStream_t const stream = context.stream();
+        hip_stream_handle_t const stream = context.stream();
         amd_multiply_sink_t const sink {device_ids, device_products, device_counts, static_cast<u32_t>(wanted)};
         if (status_t const launched = launch_walk_(staged.value, sink, stream); failed(launched)) return {{}, launched};
         if (wanted &&
             (hip_api().copy_2d_async(node_ids.data(), node_ids.stride_bytes(0), device_ids, wanted * sizeof(node_id_t),
-                                     wanted * sizeof(node_id_t), rows_count, hipMemcpyDefault, stream) != hipSuccess ||
+                                     wanted * sizeof(node_id_t), rows_count, hip_copy_default_k,
+                                     stream) != hip_success_k ||
              hip_api().copy_2d_async(products.data(), products.stride_bytes(0), device_products, wanted * sizeof(dot_t),
-                                     wanted * sizeof(dot_t), rows_count, hipMemcpyDefault, stream) != hipSuccess))
+                                     wanted * sizeof(dot_t), rows_count, hip_copy_default_k, stream) != hip_success_k))
             return {{}, status_t::device_error_k};
-        if (hip_api().copy_async(counts.data(), device_counts, rows_count * sizeof(u32_t), hipMemcpyDefault, stream) !=
-            hipSuccess)
+        if (hip_api().copy_async(counts.data(), device_counts, rows_count * sizeof(u32_t), hip_copy_default_k,
+                                 stream) != hip_success_k)
             return {{}, status_t::device_error_k};
         return {{}, status_t::success_k};
     }
@@ -2097,7 +2105,7 @@ struct vram_amd_index {
         if (node_ids.empty()) nodes.bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, nodes_count));
         if (nodes.first >= nodes.bound) return {{}, status_t::success_k};
         std::size_t const walk_count = nodes.size();
-        hipStream_t const stream = context.stream();
+        hip_stream_handle_t const stream = context.stream();
         // Pass-local buffers no reader observes: the shadow neighbors, the reverse buckets, their
         // counters, and the bitset of rows the merge re-selects; the bucket width is the
         // connectivity.
@@ -2115,7 +2123,7 @@ struct vram_amd_index {
                                          counters_bytes / sizeof(u32_t)};
         std::span<u32_t> const bucket_counts = counters.first(nodes_count);
         hip_bitset_t const touched {counters.subspan(nodes_count).data()};
-        if (hip_api().fill_async(counters.data(), 0, counters.size_bytes(), stream) != hipSuccess)
+        if (hip_api().fill_async(counters.data(), 0, counters.size_bytes(), stream) != hip_success_k)
             return {{}, status_t::device_error_k};
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the pool sizes the
@@ -2155,15 +2163,15 @@ struct vram_amd_index {
         // neighbors with the new reverse links.
         if (!node_ids.empty() || walk_count != nodes_count)
             if (hip_api().copy_async(shadow_neighbors.data(), neighbors_matrix_.base(), shadow_bytes,
-                                     hipMemcpyDeviceToDevice, stream) != hipSuccess)
+                                     hip_copy_device_to_device_k, stream) != hip_success_k)
                 return {{}, status_t::device_error_k};
         if (status_t const launched = launch_refine_(view, pool_slots, stream); failed(launched)) return {{}, launched};
-        if (hip_api().stream_synchronize(stream) != hipSuccess) return {{}, status_t::device_error_k};
+        if (hip_api().stream_synchronize(stream) != hip_success_k) return {{}, status_t::device_error_k};
         // The assigned count is the completion oracle: every offset assigned means every shadow row
         // landed.
         u32_t assigned = 0;
-        if (hip_api().copy(&assigned, context.assigned_rows_.get(), sizeof(u32_t), hipMemcpyDeviceToHost) !=
-                hipSuccess ||
+        if (hip_api().copy(&assigned, context.assigned_rows_.get(), sizeof(u32_t), hip_copy_device_to_host_k) !=
+                hip_success_k ||
             assigned < walk_count)
             return {{}, status_t::device_error_k};
 
@@ -2198,9 +2206,9 @@ struct vram_amd_index {
         if (status_t const launched = launch_merge_(merge_view, buckets, bucket_counts, touched, stream);
             failed(launched))
             return {{}, launched};
-        if (hip_api().stream_synchronize(stream) != hipSuccess) return {{}, status_t::device_error_k};
-        if (hip_api().copy(&assigned, context.assigned_rows_.get(), sizeof(u32_t), hipMemcpyDeviceToHost) !=
-                hipSuccess ||
+        if (hip_api().stream_synchronize(stream) != hip_success_k) return {{}, status_t::device_error_k};
+        if (hip_api().copy(&assigned, context.assigned_rows_.get(), sizeof(u32_t), hip_copy_device_to_host_k) !=
+                hip_success_k ||
             assigned < nodes_count)
             return {{}, status_t::device_error_k};
 
@@ -2250,7 +2258,7 @@ struct vram_amd_index {
         audit.reconnected = audit.unreached + 1;
         audit.island_ids = island_slots ? audit.reconnected + 1 : nullptr;
         audit.in_links = island_slots ? audit.island_ids + island_slots : nullptr;
-        if (hip_api().fill_async(audit.reconnected, 0, sizeof(u32_t), context.stream()) != hipSuccess)
+        if (hip_api().fill_async(audit.reconnected, 0, sizeof(u32_t), context.stream()) != hip_success_k)
             return {std::move(audit), status_t::device_error_k};
         return {std::move(audit), status_t::success_k};
     }
@@ -2262,10 +2270,11 @@ struct vram_amd_index {
         std::size_t const rows = size();
         if (!vectors_matrix_.reserved_bytes()) return {0, status_t::uninitialized_k};
         if (context.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
-        hipStream_t const stream = context.stream();
+        hip_stream_handle_t const stream = context.stream();
         std::size_t const seed_count = min_of<std::size_t>(connectivity(), rows);
         // The bitsets, the expanded counter and the unreached counter lie back to back.
-        if (hip_api().fill_async(audit.reached.words, 0, (audit.words * 3 + 2) * sizeof(u32_t), stream) != hipSuccess)
+        if (hip_api().fill_async(audit.reached.words, 0, (audit.words * 3 + 2) * sizeof(u32_t), stream) !=
+            hip_success_k)
             return {0, status_t::device_error_k};
         amd_arguments_t sweep {};
         sweep.graph.neighbors = reinterpret_cast<u32_t*>(neighbors_matrix_.base());
@@ -2288,9 +2297,9 @@ struct vram_amd_index {
         constexpr std::size_t sweeps_cap_k = 256;
         u32_t const grid = static_cast<u32_t>(device_.multiprocessor_count) * search_blocks_per_multiprocessor_k;
         for (audit.sweeps = 1; audit.sweeps != sweeps_cap_k; ++audit.sweeps) {
-            if (hip_api().fill_async(audit.expanded, 0, sizeof(u32_t), stream) != hipSuccess ||
+            if (hip_api().fill_async(audit.expanded, 0, sizeof(u32_t), stream) != hip_success_k ||
                 hip_api().fill_async(sweep.graph.next_frontier.words, 0, audit.words * sizeof(u32_t), stream) !=
-                    hipSuccess)
+                    hip_success_k)
                 return {0, status_t::device_error_k};
             if (status_t const launched = launch_(amd_kernel_t::reachability_sweep_k, 0, grid, 0, stream, sweep);
                 failed(launched))
@@ -2310,10 +2319,10 @@ struct vram_amd_index {
     }
 
     /** One device counter read back once the stream drains. */
-    static expected<u32_t> read_counter_(u32_t const* counter, hipStream_t stream) noexcept {
+    static expected<u32_t> read_counter_(u32_t const* counter, hip_stream_handle_t stream) noexcept {
         u32_t value = 0;
-        if (hip_api().copy_async(&value, counter, sizeof(u32_t), hipMemcpyDeviceToHost, stream) != hipSuccess ||
-            hip_api().stream_synchronize(stream) != hipSuccess)
+        if (hip_api().copy_async(&value, counter, sizeof(u32_t), hip_copy_device_to_host_k, stream) != hip_success_k ||
+            hip_api().stream_synchronize(stream) != hip_success_k)
             return {0, status_t::device_error_k};
         return {value, status_t::success_k};
     }
@@ -2361,7 +2370,7 @@ struct vram_amd_index {
     /** Maps every matrix and column up to @p rows and sentinel-fills the fresh neighbor rows -
      *  always ahead of any launch that could assign new_node_ids into them. Callers hold
      *  @c claiming_, or run exclusively like @c reserve and @c load. */
-    status_t grow_rows_(std::size_t rows, hipStream_t stream) noexcept {
+    status_t grow_rows_(std::size_t rows, hip_stream_handle_t stream) noexcept {
         if (rows <= capacity()) return status_t::success_k;
         std::size_t const neighbors_before = neighbors_matrix_.committed_bytes();
         if (status_t status = vectors_matrix_.commit(rows * row_bytes()); status != status_t::success_k) return status;
@@ -2377,9 +2386,9 @@ struct vram_amd_index {
         std::size_t const fresh_bytes = neighbors_matrix_.committed_bytes() - neighbors_before;
         if (fresh_bytes &&
             hip_api().fill_words_async(neighbors_matrix_.base() + neighbors_before, static_cast<int>(node_id_unknown_k),
-                                       fresh_bytes / 4, stream) != hipSuccess)
+                                       fresh_bytes / 4, stream) != hip_success_k)
             return fail_(status_t::device_error_k);
-        if (hip_api().stream_synchronize(stream) != hipSuccess) return fail_(status_t::device_error_k);
+        if (hip_api().stream_synchronize(stream) != hip_success_k) return fail_(status_t::device_error_k);
         return status_t::success_k;
     }
 
@@ -2399,27 +2408,27 @@ struct vram_amd_index {
         char name[amd_kernel_name_capacity_k];
         for (amd_rung_t const rung : amd_rungs) {
             amd_kernel_name(name, rung, amd_class_of(capability_), vector_dtype_);
-            hipFunction_t& function = kernels_[static_cast<u32_t>(rung.kernel)][amd_rung_index(rung.slots)];
+            hip_function_handle_t& function = kernels_[static_cast<u32_t>(rung.kernel)][amd_rung_index(rung.slots)];
             if (!(function = module_.function(name))) return status_t::device_error_k;
         }
         return status_t::success_k;
     }
 
     /** Launches @p kernel on its @p slots rung over @p blocks of four wavefronts on @p stream. */
-    status_t launch_(amd_kernel_t kernel, u32_t slots, u32_t blocks, u32_t shared_bytes, hipStream_t stream,
+    status_t launch_(amd_kernel_t kernel, u32_t slots, u32_t blocks, u32_t shared_bytes, hip_stream_handle_t stream,
                      amd_arguments_t const& arguments) noexcept {
         return hip_launch(kernels_[static_cast<u32_t>(kernel)][amd_rung_index(slots)], blocks, block_threads(),
                           shared_bytes, stream, arguments);
     }
 
-    status_t launch_insert_(amd_build_t const& view, u32_t pool_slots, hipStream_t stream) noexcept {
+    status_t launch_insert_(amd_build_t const& view, u32_t pool_slots, hip_stream_handle_t stream) noexcept {
         amd_arguments_t arguments {};
         arguments.build = view;
         return launch_(amd_kernel_t::insert_k, pool_slots,
                        static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k,
                        vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
     }
-    status_t launch_refine_(amd_refine_t const& view, u32_t pool_slots, hipStream_t stream) noexcept {
+    status_t launch_refine_(amd_refine_t const& view, u32_t pool_slots, hip_stream_handle_t stream) noexcept {
         amd_arguments_t arguments {};
         arguments.refine = view;
         return launch_(amd_kernel_t::refine_k, pool_slots,
@@ -2427,7 +2436,8 @@ struct vram_amd_index {
                        vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
     }
     status_t launch_merge_(amd_refine_t const& view, nk::matrix_view<u32_t> buckets,
-                           std::span<u32_t const> bucket_counts, hip_bitset_t touched, hipStream_t stream) noexcept {
+                           std::span<u32_t const> bucket_counts, hip_bitset_t touched,
+                           hip_stream_handle_t stream) noexcept {
         amd_arguments_t arguments {};
         arguments.refine = view;
         arguments.graph.bucket_ids = const_cast<u32_t*>(buckets.data());
@@ -2438,7 +2448,7 @@ struct vram_amd_index {
                        static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k,
                        vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
     }
-    status_t launch_derive_norms_(u32_t first_row, u32_t rows, u32_t blocks, hipStream_t stream) noexcept {
+    status_t launch_derive_norms_(u32_t first_row, u32_t rows, u32_t blocks, hip_stream_handle_t stream) noexcept {
         amd_arguments_t arguments {};
         arguments.graph.storage = storage();
         arguments.graph.first_id = first_row;
@@ -2449,7 +2459,7 @@ struct vram_amd_index {
     /** Launches one walk per query of @p launch, each written out through @p sink: the search,
      *  indexed search and multiply families, each on its register rung or the arena frontier. */
     template <typename sink_, typename rescoring_>
-    status_t launch_walk_(walk_launch<rescoring_> const& launch, sink_ sink, hipStream_t stream) noexcept {
+    status_t launch_walk_(walk_launch<rescoring_> const& launch, sink_ sink, hip_stream_handle_t stream) noexcept {
         u32_t const blocks = static_cast<u32_t>(device_.multiprocessor_count) * search_blocks_per_multiprocessor_k;
         amd_arguments_t arguments {};
         arguments.search = launch.view;
@@ -2479,7 +2489,7 @@ struct vram_amd_index {
     /** This class's code object on this device, and its kernels in @ref amd_kernel_t
      *  order. */
     hip_module_t module_;
-    hipFunction_t kernels_[static_cast<u32_t>(amd_kernel_t::count_k)][amd_rungs_per_kernel_k] = {};
+    hip_function_handle_t kernels_[static_cast<u32_t>(amd_kernel_t::count_k)][amd_rungs_per_kernel_k] = {};
 
     /** The published-row counter is plain stream-ordered device memory on the legacy stream. */
     using counter_allocator_t = hip_device_allocator<u32_t>;

@@ -3,13 +3,13 @@
  *  @author Ash Vardanian
  *  @date July 22, 2026
  *  @brief The vendor-neutral face of the GPU residency: the process-wide device listing every
- *      VRAM call numbers its devices by, one executor and one arena over whichever vendors this
- *      unit was built with.
+ *      VRAM call numbers its devices by, one executor and one arena over every vendor.
  *
  *  One binary drives NVIDIA, AMD and Apple GPUs at once, each vendor through a runtime loaded on
- *  first use, so this header is the one place the compiled vendors are named: NVIDIA devices come
+ *  first use and declared without its SDK, so every unit names all three: NVIDIA devices come
  *  first, then AMD, then Apple, and a device's position in the listing is its USearch ordinal. A
- *  vendor this unit was built without, or whose runtime is absent, contributes no devices.
+ *  vendor whose runtime is absent contributes no devices; one whose kernels this build lacks still
+ *  lists them, and placing an index there refuses.
  *
  *  Every vendor's device header provides the same surface: @c <vendor>_gpu_devices, an executor
  *  with static @c spawn and @c on_default_streams over vendor ordinals, @c device, @c vendor_k and
@@ -21,55 +21,28 @@
 
 #include <mutex>   // `std::call_once` - the listing is taken once per process
 #include <span>    // `std::span` - the listing handed out
-#include <variant> // `std::variant`, `std::monostate` - one alternative per compiled vendor
+#include <variant> // `std::variant`, `std::monostate` - one alternative per vendor
 
-#include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the ordinals an executor opens over
-#include "usearch/utilities/types.hpp"       // `gpu_device_t`, `USEARCH_ARCH_CUDA_` & its siblings
-
-#if USEARCH_ARCH_CUDA_
+#include "usearch/utilities/ram_buffers.hpp"        // `growing_buffer` - the ordinals an executor opens over
+#include "usearch/utilities/types.hpp"              // `gpu_device_t`
+#include "usearch/utilities/vram_amd_device.hpp"    // `amd_gpu_devices`, `hip_executor_t`
+#include "usearch/utilities/vram_apple_device.hpp"  // `apple_gpu_devices`, `metal_executor_t`
 #include "usearch/utilities/vram_nvidia_device.hpp" // `nvidia_gpu_devices`, `cuda_executor_t`
-#endif
-#if USEARCH_ARCH_ROCM_
-#include "usearch/utilities/vram_amd_device.hpp" // `amd_gpu_devices`, `hip_executor_t`
-#endif
-#if USEARCH_ARCH_METAL_
-#include "usearch/utilities/vram_apple_device.hpp" // `apple_gpu_devices`, `metal_executor_t`
-#endif
 
 namespace unum::usearch::utilities {
 
-/** A variant over @c std::monostate, the state of no GPU, then each compiled vendor's
- *  @p selector_type_ applied to its executor, in listing order. */
+/** A variant over @c std::monostate, the state of no GPU, then each vendor's @p selector_type_
+ *  applied to its executor, in listing order. */
 template <template <typename> typename selector_type_>
-using gpu_vendors_variant = std::variant<std::monostate
-#if USEARCH_ARCH_CUDA_
-                                         ,
-                                         typename selector_type_<cuda_executor_t>::type
-#endif
-#if USEARCH_ARCH_ROCM_
-                                         ,
-                                         typename selector_type_<hip_executor_t>::type
-#endif
-#if USEARCH_ARCH_METAL_
-                                         ,
-                                         typename selector_type_<metal_executor_t>::type
-#endif
-                                         >;
+using gpu_vendors_variant =
+    std::variant<std::monostate, typename selector_type_<cuda_executor_t>::type,
+                 typename selector_type_<hip_executor_t>::type, typename selector_type_<metal_executor_t>::type>;
 
-/** Visits each compiled vendor's executor type in listing order until @p visitor answers true. */
+/** Visits each vendor's executor type in listing order until @p visitor answers true. */
 template <typename visitor_type_>
 bool for_each_gpu_vendor(visitor_type_&& visitor) noexcept {
-    return false
-#if USEARCH_ARCH_CUDA_
-           || visitor(std::type_identity<cuda_executor_t> {})
-#endif
-#if USEARCH_ARCH_ROCM_
-           || visitor(std::type_identity<hip_executor_t> {})
-#endif
-#if USEARCH_ARCH_METAL_
-           || visitor(std::type_identity<metal_executor_t> {})
-#endif
-        ;
+    return visitor(std::type_identity<cuda_executor_t> {}) || visitor(std::type_identity<hip_executor_t> {}) ||
+           visitor(std::type_identity<metal_executor_t> {});
 }
 
 template <typename executor_type_>
@@ -92,20 +65,7 @@ inline std::span<gpu_device_t const> gpu_devices() noexcept {
     static std::size_t count = 0;
     static std::once_flag listed;
     std::call_once(listed, [] {
-        std::span<gpu_device_t const> const vendors[] = {{}
-#if USEARCH_ARCH_CUDA_
-                                                         ,
-                                                         nvidia_gpu_devices()
-#endif
-#if USEARCH_ARCH_ROCM_
-                                                             ,
-                                                         amd_gpu_devices()
-#endif
-#if USEARCH_ARCH_METAL_
-                                                             ,
-                                                         apple_gpu_devices()
-#endif
-        };
+        std::span<gpu_device_t const> const vendors[] = {nvidia_gpu_devices(), amd_gpu_devices(), apple_gpu_devices()};
         for (std::span<gpu_device_t const> vendor : vendors)
             for (gpu_device_t const& device : vendor) listing[count++] = device;
     });
@@ -115,7 +75,7 @@ inline std::span<gpu_device_t const> gpu_devices() noexcept {
 /** Spawns the executor of the one vendor every device in @p devices belongs to, one stream per
  *  distinct device over their vendor ordinals, which every shard there shares:
  *  @c config_mismatch_k when they span vendors, @c device_error_k when none is named or their
- *  vendor was not compiled in. */
+ *  runtime refuses. */
 inline expected<gpu_executor_t> spawn_gpu_executor(std::span<gpu_device_t const> devices) noexcept {
     if (devices.empty()) return {{}, status_t::device_error_k};
     growing_buffer<int> ordinals {global_allocator};
