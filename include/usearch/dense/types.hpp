@@ -209,6 +209,16 @@ inline constexpr u32_t vram_resident_blocks_per_multiprocessor_k = 3;
  *  and the staging arrays. */
 inline constexpr u32_t vram_cache_rows_k = 64;
 
+/** IDs the first insert wave over an empty shard admits at once; every later wave doubles, as wide
+ *  as the rows already below it. */
+inline constexpr u32_t vram_admission_ramp_floor_k = 32;
+
+/** Slots of the widest register pool on the walks' rung ladder, @c vram_sorted_pool<16,warp_t>:
+ *  as many ranks per lane. A walk expanding past that pool's width - this times the warp's lanes,
+ *  512 on 32-lane warps - takes the arena frontier instead, so no expansion or count is capped by
+ *  it. */
+inline constexpr u32_t vram_widest_pool_slots_k = 16;
+
 /** Device-resident telemetry counters, one block per driving context, zeroed at each submission
  *  and read after its drain. */
 struct vram_telemetry_block_t {

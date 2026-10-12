@@ -16,8 +16,9 @@
  *  derive from its @c width_k, 32 or 64 lanes. A policy names @c mask_t, @c width_k, the
  *  @c shuffle, @c shuffle_xor, @c shuffle_up and @c shuffle_down moves, the @c ballot, @c any,
  *  @c all and @c match_any votes, @c sync, the @c count, @c first and @c below mask arithmetic,
- *  @c sleep, the relaxed, acquire and release atomics, the @c fence_release fence, and the
- *  @c copy_async and @c copy_wait staging copies.
+ *  the relaxed, acquire and release atomics, and the @c fence_release fence. Lanes are @c u32_t
+ *  throughout. Staging candidate rows into shared memory is the vendor's schedule, not the warp
+ *  policy, and no policy sleeps: contended rows are revisited after other work instead.
  */
 #pragma once
 
@@ -75,22 +76,22 @@ static_assert(std::is_trivially_copyable_v<vram_scored_node_t>);
 
 /** Lane shuffles have no user-type overloads - an entry shuffles its raw word. */
 template <typename warp_type_>
-__device__ __forceinline__ vram_scored_node_t shuffle_xor(vram_scored_node_t value, int lane_mask) noexcept {
+__device__ __forceinline__ vram_scored_node_t shuffle_xor(vram_scored_node_t value, u32_t lane_mask) noexcept {
     return {warp_type_::shuffle_xor(value.bits_, lane_mask)};
 }
 template <typename warp_type_>
-__device__ __forceinline__ vram_scored_node_t shuffle_from(vram_scored_node_t value, int source_lane) noexcept {
+__device__ __forceinline__ vram_scored_node_t shuffle_from(vram_scored_node_t value, u32_t source_lane) noexcept {
     return {warp_type_::shuffle(value.bits_, source_lane)};
 }
 
 /** Full bitonic sort of one lane-wide entry vector, ascending by lane - fifteen shuffle-exchange
  *  stages on 32 lanes, twenty-one on 64, all in registers. */
 template <typename warp_type_>
-__device__ __forceinline__ vram_scored_node_t sort_lanes(vram_scored_node_t value, int lane) noexcept {
+__device__ __forceinline__ vram_scored_node_t sort_lanes(vram_scored_node_t value, u32_t lane) noexcept {
 #pragma unroll
-    for (int stage_width = 2; stage_width <= static_cast<int>(warp_type_::width_k); stage_width <<= 1)
+    for (u32_t stage_width = 2; stage_width <= warp_type_::width_k; stage_width <<= 1)
 #pragma unroll
-        for (int partner_stride = stage_width >> 1; partner_stride; partner_stride >>= 1) {
+        for (u32_t partner_stride = stage_width >> 1; partner_stride; partner_stride >>= 1) {
             vram_scored_node_t const partner = shuffle_xor<warp_type_>(value, partner_stride);
             bool const ascending = (lane & stage_width) == 0;
             bool const lower = (lane & partner_stride) == 0;
@@ -131,7 +132,7 @@ struct vram_sorted_pool {
      *  [ascending pool | sentinel pad | descending batch] is one bitonic sequence: a single fold
      *  absorbs the batch, log2 of @c slots_ in-lane stages plus log2 of @c width_k shuffle stages
      *  restore ascending order. */
-    __device__ __forceinline__ void insert_batch(vram_scored_node_t staged, int lane) noexcept {
+    __device__ __forceinline__ void insert_batch(vram_scored_node_t staged, u32_t lane) noexcept {
         (void)insert_batch_spilling(staged, lane);
     }
 
@@ -139,7 +140,8 @@ struct vram_sorted_pool {
      *  element-wise @b max of the last slot and the descending batch is exactly the
      *  union's worst lane-width - sentinels while the pool still has room. @return This
      *  lane's displaced entry, for the caller to spill onward or drop. */
-    __device__ __forceinline__ vram_scored_node_t insert_batch_spilling(vram_scored_node_t staged, int lane) noexcept {
+    __device__ __forceinline__ vram_scored_node_t insert_batch_spilling(vram_scored_node_t staged,
+                                                                        u32_t lane) noexcept {
         vram_scored_node_t const descending = shuffle_xor<warp_t>(sort_lanes<warp_t>(staged, lane), width_k - 1);
         vram_scored_node_t const displaced = entries_[slots_ - 1] < descending ? descending : entries_[slots_ - 1];
         entries_[slots_ - 1] = entries_[slots_ - 1] < descending ? entries_[slots_ - 1] : descending;
@@ -154,7 +156,7 @@ struct vram_sorted_pool {
                     entries_[base | stride] = lower_entry < upper_entry ? upper_entry : lower_entry;
                 }
 #pragma unroll
-        for (int partner_stride = width_k / 2; partner_stride; partner_stride >>= 1) {
+        for (u32_t partner_stride = width_k / 2; partner_stride; partner_stride >>= 1) {
             bool const lower = (lane & partner_stride) == 0;
 #pragma unroll
             for (u32_t slot = 0; slot < slots_; ++slot) {
@@ -169,7 +171,7 @@ struct vram_sorted_pool {
     __device__ __forceinline__ u32_t capacity() const noexcept { return capacity_k; }
 
     /** The nearest entry not yet expanded - the frontier's @c top() - or the sentinel. */
-    __device__ __forceinline__ vram_scored_node_t nearest_unexpanded(int lane) const noexcept {
+    __device__ __forceinline__ vram_scored_node_t nearest_unexpanded() const noexcept {
 #pragma unroll
         for (u32_t slot = 0; slot < slots_; ++slot) {
             typename warp_t::mask_t const mask = warp_t::ballot(!entries_[slot].expanded());
@@ -201,11 +203,11 @@ struct vram_sorted_pool {
      *  itself never needs this - the exact visited set stages every ID once - but the
      *  arena frontier's final fold does: a node promoted out of the tail and later
      *  snapshotted back leaves two arena copies of one ID. */
-    __device__ __forceinline__ vram_scored_node_t deduplicate(vram_scored_node_t staged, int lane) const noexcept {
+    __device__ __forceinline__ vram_scored_node_t deduplicate(vram_scored_node_t staged, u32_t lane) const noexcept {
         node_id_t const staged_id = staged.id();
         bool resident = false;
 #pragma unroll
-        for (int probe = 0; probe < static_cast<int>(width_k); ++probe) {
+        for (u32_t probe = 0; probe < width_k; ++probe) {
             node_id_t const probe_id = warp_t::shuffle(staged_id, probe);
             bool holds = false;
 #pragma unroll
@@ -239,7 +241,7 @@ struct vram_tail_pool {
     u32_t capacity_ = 0;
     u32_t dropped_ = 0;
 
-    __device__ __forceinline__ void append(vram_scored_node_t value, int lane) noexcept {
+    __device__ __forceinline__ void append(vram_scored_node_t value, u32_t lane) noexcept {
         bool const live = !(value == vram_scored_node_t::sentinel());
         typename warp_t::mask_t const live_mask = warp_t::ballot(live);
         u32_t const ordinal = warp_t::count(live_mask & warp_t::below(lane));
@@ -261,12 +263,12 @@ struct vram_register_frontier {
     using warp_t = warp_type_;
     vram_sorted_pool<slots_, warp_t> ranks_;
 
-    __device__ __forceinline__ void reset(int) noexcept { ranks_.clear(); }
+    __device__ __forceinline__ void reset(u32_t) noexcept { ranks_.clear(); }
     __device__ __forceinline__ u32_t hops_budget() const noexcept { return ranks_.capacity() * 4; }
 
     /** Nothing to shed: the pool keeps the nearest of every union by construction. */
     __device__ __forceinline__ u32_t dropped() const noexcept { return 0; }
-    __device__ __forceinline__ void push_batch(vram_scored_node_t staged, int lane) noexcept {
+    __device__ __forceinline__ void push_batch(vram_scored_node_t staged, u32_t lane) noexcept {
         // A full pool keeps the nearest of the union, so a batch with no entry inside the
         // radius is a guaranteed no-op - one ballot skips the whole bitonic merge. Only
         // the narrow pools take the gate: past them the extra live radius dependency
@@ -278,8 +280,8 @@ struct vram_register_frontier {
 
     /** The nearest undiscovered-from candidate, already marked expanded - or the
      *  sentinel when every rank is spent. */
-    __device__ __forceinline__ vram_scored_node_t pop_nearest(int lane) noexcept {
-        vram_scored_node_t const nearest = ranks_.nearest_unexpanded(lane);
+    __device__ __forceinline__ vram_scored_node_t pop_nearest(u32_t lane) noexcept {
+        vram_scored_node_t const nearest = ranks_.nearest_unexpanded();
         if (!(nearest == vram_scored_node_t::sentinel())) ranks_.mark_expanded_at(nearest);
         return nearest;
     }
@@ -292,10 +294,16 @@ struct vram_register_frontier {
         return ranks_.full() && candidate.distance_bits() > ranks_.radius();
     }
 
-    /** Ranked results are the container itself - nothing to fold. */
-    __device__ __forceinline__ void finalize_ranks(int) noexcept {}
     __device__ __forceinline__ vram_scored_node_t rank_entry(u32_t rank) const noexcept {
         return ranks_.rank_entry(rank);
+    }
+
+    /** Hands @p emit the nearest @p count entries ascending, a warp-width per call, rank
+     *  @b base+lane on each lane; ranks past the pool are sentinels. The ranks are the container
+     *  itself, so nothing is folded. */
+    template <typename emit_type_>
+    __device__ __forceinline__ void for_each_rank(u32_t count, u32_t lane, emit_type_&& emit) const noexcept {
+        for (u32_t base = 0; base < count; base += warp_t::width_k) emit(base + lane, ranks_.rank_entry(base + lane));
     }
 };
 
@@ -313,7 +321,7 @@ struct vram_arena_frontier {
     u32_t expansion_target_ = 0;
     u32_t expansions_ = 0;
 
-    __device__ __forceinline__ void reset(int) noexcept {
+    __device__ __forceinline__ void reset(u32_t) noexcept {
         head_.clear();
         tail_.size_ = 0;
         expansions_ = 0;
@@ -322,21 +330,21 @@ struct vram_arena_frontier {
 
     /** Tail entries shed past the slice's capacity - the walk's one lossy step, receipted. */
     __device__ __forceinline__ u32_t dropped() const noexcept { return tail_.dropped_; }
-    __device__ __forceinline__ void push_batch(vram_scored_node_t staged, int lane) noexcept {
+    __device__ __forceinline__ void push_batch(vram_scored_node_t staged, u32_t lane) noexcept {
         // When every staged entry sits at or past the head's radius the merge displaces
         // nothing - the batch goes straight to the tail, which by construction only holds
         // entries farther than everything head-resident, and staged >= radius keeps that.
         if (head_.full() && !warp_t::ballot(staged.distance_bits() < head_.radius())) return tail_.append(staged, lane);
         tail_.append(head_.insert_batch_spilling(staged, lane), lane);
     }
-    __device__ __forceinline__ vram_scored_node_t pop_nearest(int lane) noexcept {
+    __device__ __forceinline__ vram_scored_node_t pop_nearest(u32_t lane) noexcept {
         // A consumed expansion budget IS the frontier's edge: reporting starvation here
         // routes the walk into its drained-frontier exit, where exhausted() seals it.
         if (exhausted()) return vram_scored_node_t::sentinel();
-        vram_scored_node_t nearest = head_.nearest_unexpanded(lane);
+        vram_scored_node_t nearest = head_.nearest_unexpanded();
         if (nearest == vram_scored_node_t::sentinel()) {
             refill(lane);
-            nearest = head_.nearest_unexpanded(lane);
+            nearest = head_.nearest_unexpanded();
         }
         if (!(nearest == vram_scored_node_t::sentinel())) {
             head_.mark_expanded_at(nearest);
@@ -346,9 +354,6 @@ struct vram_arena_frontier {
     }
     __device__ __forceinline__ bool exhausted() const noexcept { return expansions_ >= expansion_target_; }
     __device__ __forceinline__ bool beyond_radius(vram_scored_node_t) const noexcept { return false; }
-    __device__ __forceinline__ vram_scored_node_t rank_entry(u32_t rank) const noexcept {
-        return head_.rank_entry(rank);
-    }
 
     /** Promotes the nearest unexpanded tail entries into the head. Every tail entry is farther
      *  than everything head-resident - that is the spill invariant - so a merge could never admit
@@ -356,7 +361,7 @@ struct vram_arena_frontier {
      *  final compaction, and the champions take it over as the fresh frontier. Lane champions are
      *  not the global top lane-width, but refills recur on every drain, so promotion order only
      *  affects scheduling, never membership. */
-    __device__ __forceinline__ void refill(int lane) noexcept {
+    __device__ __forceinline__ void refill(u32_t lane) noexcept {
         vram_scored_node_t best = vram_scored_node_t::sentinel();
         u32_t best_index = 0;
         for (u32_t index = lane; index < tail_.size_; index += warp_t::width_k) {
@@ -375,23 +380,37 @@ struct vram_arena_frontier {
         head_.insert_batch(best, lane);
     }
 
-    /** Rebuilds the exact nearest two lane-widths from everything the walk has seen - the last
-     *  head generation plus every tail entry - and parks them in the head for ranked
-     *  extraction. Single residency by construction: promotion tombstones its tail
-     *  slot, so no ID ever holds two live entries and the fold needs no dedup pass.
-     *  Call once, after the walk. */
-    __device__ __forceinline__ void finalize_ranks(int lane) noexcept {
-        vram_sorted_pool<2, warp_t> results;
-        results.clear();
-        results.insert_batch(head_.entries_[0], lane);
-        results.insert_batch(head_.entries_[1], lane);
-        for (u32_t base = 0; base < tail_.size_; base += warp_t::width_k) {
-            u32_t const index = base + lane;
-            vram_scored_node_t const entry = index < tail_.size_ ? tail_.entries_[index]
-                                                                 : vram_scored_node_t::sentinel();
-            results.insert_batch(entry, lane);
+    /** Hands @p emit the nearest @p count entries of everything the walk has seen - the last head
+     *  generation plus every tail entry - ascending, a warp-width per call, rank @b base+lane on
+     *  each lane; ranks past what the walk saw are sentinels. Each round folds every entry ranked
+     *  after the previous round's last into a fresh two-slot pool, so the ranks stream out with no
+     *  scratch and only as many rounds as @p count asks for. Single residency by construction:
+     *  promotion tombstones its tail slot, so the entries' words are distinct and every one ranks
+     *  exactly once. Call once, after the walk. */
+    template <typename emit_type_>
+    __device__ __forceinline__ void for_each_rank(u32_t count, u32_t lane, emit_type_&& emit) const noexcept {
+        using round_t = vram_sorted_pool<2, warp_t>;
+        vram_scored_node_t last = vram_scored_node_t::sentinel();
+        for (u32_t base = 0; base < count; base += round_t::capacity_k) {
+            auto const unranked = [&](vram_scored_node_t entry) noexcept {
+                return base == 0 || last < entry ? entry : vram_scored_node_t::sentinel();
+            };
+            round_t round;
+            round.clear();
+            // A short round means the walk saw nothing more: every later rank is a sentinel.
+            if (base == 0 || !(last == vram_scored_node_t::sentinel())) {
+                round.insert_batch(unranked(head_.entries_[0]), lane);
+                round.insert_batch(unranked(head_.entries_[1]), lane);
+                for (u32_t tail_base = 0; tail_base < tail_.size_; tail_base += warp_t::width_k) {
+                    u32_t const index = tail_base + lane;
+                    round.insert_batch(
+                        index < tail_.size_ ? unranked(tail_.entries_[index]) : vram_scored_node_t::sentinel(), lane);
+                }
+            }
+            emit(base + lane, round.entries_[0]);
+            emit(base + warp_t::width_k + lane, round.entries_[1]);
+            last = round.rank_entry(round_t::capacity_k - 1);
         }
-        head_ = results;
     }
 };
 
@@ -431,8 +450,10 @@ struct vram_visited_set {
 
     inline static constexpr u32_t probe_budget_k = 64;
 
-    /** Marks @p node_id visited; @c true when it was fresh. */
-    __device__ __forceinline__ bool test_and_set(node_id_t node_id, int lane, bool active) noexcept {
+    /** Marks @p node_id visited; @c true when it was fresh. A lane with nothing to claim passes the
+     *  sentinel, which no walk visits. */
+    __device__ __forceinline__ bool test_and_set(node_id_t node_id, u32_t lane) noexcept {
+        bool const active = node_id != node_id_unknown_k;
         typename warp_t::mask_t const peers = warp_t::match_any(active ? node_id : 0xFFFFFFFFu ^ lane);
         bool fresh = active && (peers & warp_t::below(lane)) == 0;
         bool probing = fresh;

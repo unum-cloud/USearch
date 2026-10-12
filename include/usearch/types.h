@@ -646,7 +646,7 @@ typedef struct usearch_ram_options_t {
  *  part @c p on device @c p modulo their count, and shards sharing a device queue on its stream
  *  in order.
  *
- *  Planes are device-resident, never migratable: an index outgrowing the named devices
+ *  Flat matrices are device-resident, never migratable: an index outgrowing the named devices
  *  fails rather than paging to the host, and the answer is to name more devices.
  *
  *  One index spans one vendor and one class, so naming devices of two vendors or two generations

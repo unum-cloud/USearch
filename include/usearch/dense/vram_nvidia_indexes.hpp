@@ -1713,16 +1713,18 @@ struct vram_nvidia_indexes {
         if (!queries_count) return {{}, status_t::success_k};
         // Vetted before anything is claimed or carved; the shards would refuse only after the
         // landing and the runs had been sized for a doomed call.
-        if (queries.extent(1) != dimensions() || config.count > cuda_widest_pool_k)
-            return {{}, status_t::config_mismatch_k};
+        if (queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
 
         // The host landing: every shard's matches, one wide matrix each, shard columns side by
-        // side; never zeroed, since only columns a drained shard wrote are ever read.
+        // side; never zeroed, since only columns a drained shard wrote are ever read. One row of
+        // them repacks into the merge's frame at a time.
         std::size_t const landing_entries = queries_count * shards * config.count;
         growing_buffer<node_id_t, forkunion_allocator_t> ids_landing {allocator_};
         growing_buffer<distance_t, forkunion_allocator_t> distances_landing {allocator_};
+        growing_buffer<scored_node_t, forkunion_allocator_t> frame {allocator_};
         if (failed(ids_landing.resize_uninitialized(landing_entries)) ||
-            failed(distances_landing.resize_uninitialized(landing_entries)))
+            failed(distances_landing.resize_uninitialized(landing_entries)) ||
+            failed(frame.resize_uninitialized(config.count)))
             return {{}, status_t::bad_alloc_k};
         nk::matrix_span<node_id_t> const ids_wide {ids_landing.data(), queries_count, shards * config.count};
         nk::matrix_span<distance_t> const distances_wide {distances_landing.data(), queries_count,
@@ -1743,11 +1745,10 @@ struct vram_nvidia_indexes {
             nk::matrix_view<node_id_t> const shard_ids = ids_wide(nk::all, shard_columns(shard), nk::slice);
             nk::matrix_view<distance_t> const shard_distances = distances_wide(nk::all, shard_columns(shard),
                                                                                nk::slice);
-            scored_node_t frame[cuda_widest_pool_k];
             for (std::size_t query = 0; query != queries_count; ++query) {
-                std::size_t const live = repack_landed_matches_(shard_ids.row(query).as_vector(),
-                                                                shard_distances.row(query).as_vector(), frame);
-                counts[query] = merge_search_results(std::span<scored_node_t const> {frame}.first(live),
+                std::size_t const live = repack_landed_matches_(
+                    shard_ids.row(query).as_vector(), shard_distances.row(query).as_vector(), to_writable_span(frame));
+                counts[query] = merge_search_results(std::span<scored_node_t const> {frame.data(), live},
                                                      shards_[shard].keys, to_span(keys.row(query).as_vector()),
                                                      to_span(distances.row(query).as_vector()), counts[query]);
             }

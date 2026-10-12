@@ -7,10 +7,14 @@
  *  A kit binds one storage dtype to one GPU generation, named like the CPU kits -
  *  @b dtype_generation_quads_kit_t. The generation slot names the oldest tier whose instructions
  *  the kit needs: @c ampere for the sm_80 floor, @c ada for the fp8 conversions, @c blackwell for
- *  the mixed-precision multiply-adds and the fp6 conversions. Each tier's kits sit behind its
- *  @c NUMKONG_TARGET_* gate and a chain picks among them under the caller's ceiling, exactly like
- *  the CPU chains, so a unit compiled for one architecture compiles the kits that architecture
- *  runs. The arithmetic lives in named device primitives; a kit binds them.
+ *  the mixed-precision multiply-adds and the fp6 conversions. A chain picks among them under the
+ *  class's ceiling alone, never under a @c NUMKONG_TARGET_* switch, and only the picked kit's
+ *  instructions are emitted, so a unit compiled for one architecture carries no newer one's. The
+ *  arithmetic lives in named device primitives; a kit binds them.
+ *
+ *  Kits stay pure arithmetic. How a warp's candidate rows reach shared memory is a separate
+ *  @b schedule, picked under the same ceiling: @c cp.async commit groups through Ada, whole-row
+ *  Tensor Memory Accelerator copies from Hopper on.
  *
  *  Fragments are 16 bytes of scalars held in registers, and metrics with precomputable norms
  *  finalize "through the dot". Row geometry - how many fragments span one vector, how many lanes
@@ -33,7 +37,7 @@
 #include <cuda/atomic>     // `cuda::atomic_ref` - the device twin of `std::atomic_ref`
 #include <cuda_bf16.h>     // `__nv_bfloat162` packed math, sm_80+
 #include <cuda_fp16.h>     // `__half2` packed math
-#include <cuda_pipeline.h> // `__pipeline_memcpy_async` - register-free global-to-shared copies
+#include <cuda_pipeline.h> // `__pipeline_memcpy_async` - the Ampere schedule's register-free copies
 
 #include <numkong/capabilities.h> // `nk_kernel_kind_t` - the epilogues switch on it
 #include <numkong/types.hpp>      // `nk::bf16_t` & the other scalars the kits load
@@ -43,9 +47,20 @@
 
 namespace unum::usearch::dense {
 
+/** The device-scope atomic reference the NVIDIA kernels reach a shared word through, so each
+ *  access names its memory order - relaxed wherever the launch boundary is what publishes the
+ *  result. */
+template <typename value_type_>
+using cuda_atomic_ref = cuda::atomic_ref<value_type_, cuda::thread_scope_device>;
+
+/** The shared-window address of @p pointer, the one the asynchronous copies and barriers take. */
+__device__ __forceinline__ u32_t cuda_shared_address(void const* pointer) noexcept {
+    return static_cast<u32_t>(__cvta_generic_to_shared(pointer));
+}
+
 /**
  *  @brief The NVIDIA warp policy the shared walk code is written against: 32-lane warps with
- *      32-bit lane masks, device-scope atomics, and the @c cp.async staging copies.
+ *      32-bit lane masks and device-scope atomics.
  *
  *  Every collective takes the full-warp mask, since the walks keep their warps converged.
  */
@@ -55,11 +70,11 @@ struct cuda_warp_t {
     inline static constexpr mask_t all_k = 0xFFFFFFFFu;
 
     template <typename value_type_>
-    static __device__ __forceinline__ value_type_ shuffle(value_type_ value, int source_lane) noexcept {
+    static __device__ __forceinline__ value_type_ shuffle(value_type_ value, u32_t source_lane) noexcept {
         return __shfl_sync(all_k, value, source_lane);
     }
     template <typename value_type_>
-    static __device__ __forceinline__ value_type_ shuffle_xor(value_type_ value, int lane_mask) noexcept {
+    static __device__ __forceinline__ value_type_ shuffle_xor(value_type_ value, u32_t lane_mask) noexcept {
         return __shfl_xor_sync(all_k, value, lane_mask);
     }
     template <typename value_type_>
@@ -68,7 +83,7 @@ struct cuda_warp_t {
     }
     template <typename value_type_>
     static __device__ __forceinline__ value_type_ shuffle_down(value_type_ value, u32_t delta,
-                                                               int width = width_k) noexcept {
+                                                               u32_t width = width_k) noexcept {
         return __shfl_down_sync(all_k, value, delta, width);
     }
     // The predicates are `int`, as the warp intrinsics take them, so any nonzero lane votes.
@@ -83,38 +98,34 @@ struct cuda_warp_t {
     static __device__ __forceinline__ u32_t count(mask_t mask) noexcept { return __popc(mask); }
 
     /** The lowest lane of a non-empty @p mask. */
-    static __device__ __forceinline__ int first(mask_t mask) noexcept { return __ffs(mask) - 1; }
+    static __device__ __forceinline__ u32_t first(mask_t mask) noexcept { return __ffs(mask) - 1; }
 
     /** The lanes strictly below @p lane. */
-    static __device__ __forceinline__ mask_t below(int lane) noexcept { return (1u << lane) - 1; }
-
-    static __device__ __forceinline__ void sleep(u32_t nanoseconds) noexcept { __nanosleep(nanoseconds); }
+    static __device__ __forceinline__ mask_t below(u32_t lane) noexcept { return (1u << lane) - 1; }
 
     template <typename value_type_>
     static __device__ __forceinline__ value_type_ load_relaxed(value_type_& word) noexcept {
-        return cuda::atomic_ref<value_type_, cuda::thread_scope_device>(word).load(cuda::memory_order_relaxed);
+        return cuda_atomic_ref<value_type_>(word).load(cuda::memory_order_relaxed);
     }
     template <typename value_type_>
     static __device__ __forceinline__ value_type_ load_acquire(value_type_& word) noexcept {
-        return cuda::atomic_ref<value_type_, cuda::thread_scope_device>(word).load(cuda::memory_order_acquire);
+        return cuda_atomic_ref<value_type_>(word).load(cuda::memory_order_acquire);
     }
     template <typename value_type_>
     static __device__ __forceinline__ void store_relaxed(value_type_& word, value_type_ value) noexcept {
-        cuda::atomic_ref<value_type_, cuda::thread_scope_device>(word).store(value, cuda::memory_order_relaxed);
+        cuda_atomic_ref<value_type_>(word).store(value, cuda::memory_order_relaxed);
     }
     template <typename value_type_>
     static __device__ __forceinline__ void store_release(value_type_& word, value_type_ value) noexcept {
-        cuda::atomic_ref<value_type_, cuda::thread_scope_device>(word).store(value, cuda::memory_order_release);
+        cuda_atomic_ref<value_type_>(word).store(value, cuda::memory_order_release);
     }
     template <typename value_type_>
     static __device__ __forceinline__ value_type_ exchange_acquire(value_type_& word, value_type_ value) noexcept {
-        return cuda::atomic_ref<value_type_, cuda::thread_scope_device>(word).exchange(value,
-                                                                                       cuda::memory_order_acquire);
+        return cuda_atomic_ref<value_type_>(word).exchange(value, cuda::memory_order_acquire);
     }
     template <typename value_type_>
     static __device__ __forceinline__ value_type_ fetch_add_relaxed(value_type_& word, value_type_ value) noexcept {
-        return cuda::atomic_ref<value_type_, cuda::thread_scope_device>(word).fetch_add(value,
-                                                                                        cuda::memory_order_relaxed);
+        return cuda_atomic_ref<value_type_>(word).fetch_add(value, cuda::memory_order_relaxed);
     }
 
     /** Orders every store before it ahead of any store after it, for readers anywhere on the
@@ -122,24 +133,7 @@ struct cuda_warp_t {
     static __device__ __forceinline__ void fence_release() noexcept {
         cuda::atomic_thread_fence(cuda::memory_order_release, cuda::thread_scope_device);
     }
-
-    /** Queues one register-free copy of @p source into @p destination; @ref copy_wait lands
-     *  them. */
-    template <typename value_type_>
-    static __device__ __forceinline__ void copy_async(value_type_* destination, value_type_ const* source) noexcept {
-        __pipeline_memcpy_async(destination, source, sizeof(value_type_));
-    }
-    static __device__ __forceinline__ void copy_wait() noexcept {
-        __pipeline_commit();
-        __pipeline_wait_prior(0);
-    }
 };
-
-/** The device-scope atomic reference the NVIDIA-only kernels reach a shared word through, so each
- *  access names its memory order - relaxed wherever the launch boundary is what publishes the
- *  result. */
-template <typename value_type_>
-using cuda_atomic_ref = cuda::atomic_ref<value_type_, cuda::thread_scope_device>;
 
 #pragma region Metrics
 
@@ -179,27 +173,6 @@ __device__ __forceinline__ distance_t cuda_convert_to_distance(nk_kernel_kind_t 
 }
 
 #pragma endregion Metrics
-
-/** The kits every chain names, declared whether or not their tier is compiled in. */
-struct f16_ampere_quads_kit_t;
-struct f16_blackwell_quads_kit_t;
-struct bf16_ampere_quads_kit_t;
-struct bf16_blackwell_quads_kit_t;
-struct i8_ampere_quads_kit_t;
-struct u8_ampere_quads_kit_t;
-struct e5m2_ampere_quads_kit_t;
-struct e5m2_ada_quads_kit_t;
-struct e5m2_blackwell_quads_kit_t;
-struct e4m3_ampere_quads_kit_t;
-struct e4m3_ada_quads_kit_t;
-struct e4m3_blackwell_quads_kit_t;
-struct e3m2_ampere_quads_kit_t;
-struct e3m2_blackwell_quads_kit_t;
-struct e2m3_ampere_quads_kit_t;
-struct e2m3_blackwell_quads_kit_t;
-struct i4x2_ampere_quads_kit_t;
-struct u4x2_ampere_quads_kit_t;
-struct u1x8_ampere_quads_kit_t;
 
 #pragma region Half Precision Floats
 
@@ -348,8 +321,6 @@ struct bf16_ampere_quads_kit_t {
     }
 };
 
-#if NUMKONG_TARGET_BLACKWELL || NUMKONG_TARGET_BLACKWELLRTX
-
 /** Both halves of two @c f16x2 words multiplied straight into an f32 sum by @c fma.rn.f32.f16 -
  *  exact products, so none rounds to half or overflows its range. */
 __device__ __forceinline__ f32_t cuda_fma_f16x2_blackwell(u32_t first_pair, u32_t second_pair, f32_t sum) noexcept {
@@ -458,8 +429,6 @@ struct bf16_blackwell_quads_kit_t {
         return cuda_convert_to_distance(kernel, ranked);
     }
 };
-
-#endif // NUMKONG_TARGET_BLACKWELL || NUMKONG_TARGET_BLACKWELLRTX
 
 #pragma endregion Half Precision Floats
 
@@ -842,8 +811,6 @@ struct e2m3_ampere_quads_kit_t {
     }
 };
 
-#if NUMKONG_TARGET_ADA
-
 /** Ada and every tier since widens an fp8 pair in one @c cvt.rn.f16x2.e4m3x2. */
 struct e4m3_ada_widening_t {
     static __device__ __forceinline__ u32_t pair_to_halves(u32_t packed_pair) noexcept {
@@ -937,10 +904,6 @@ struct e4m3_ada_quads_kit_t {
         return cuda_convert_to_distance(kernel, ranked);
     }
 };
-
-#endif // NUMKONG_TARGET_ADA
-
-#if NUMKONG_TARGET_BLACKWELL || NUMKONG_TARGET_BLACKWELLRTX
 
 /** Sixteen minifloat products of a fragment pair, each byte pair widened by @p widening_type_ into
  *  halves and multiplied straight into the f32 sum, so the dot never widens to f32 - the norms
@@ -1119,8 +1082,6 @@ struct e2m3_blackwell_quads_kit_t {
         return cuda_convert_to_distance(kernel, ranked);
     }
 };
-
-#endif // NUMKONG_TARGET_BLACKWELL || NUMKONG_TARGET_BLACKWELLRTX
 
 #pragma endregion Minifloats
 
@@ -1365,15 +1326,156 @@ struct u1x8_ampere_quads_kit_t {
 
 #pragma endregion Packed Bits
 
+#pragma region Schedules
+
+/**
+ *  @brief The Ampere and Ada staging: every lane queues register-free @c cp.async copies of the
+ *      fragments it strides over, one commit group per stage, so a consumer walking the rows in
+ *      order starts on the first stage while the later ones land.
+ *
+ *  A @c cp.async lands only for the lane that queued it, so every await ends in a warp barrier.
+ */
+struct ampere_cp_async_schedule_t {
+    inline static constexpr u32_t stages_k = 2;
+
+    /** Nothing shared: the commit groups live in each lane's own pipeline. */
+    struct shared_t {};
+
+    /** Rows per stage of the latest staging, and the leading rows landed for every lane. */
+    u32_t rows_per_stage_ = 0, landed_rows_ = 0;
+
+    __device__ __forceinline__ ampere_cp_async_schedule_t(shared_t&, u32_t) noexcept {}
+
+    template <typename storage_, typename cache_>
+    __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
+                                               u32_t lane) noexcept {
+        rows_per_stage_ = divide_round_up(rows, stages_k), landed_rows_ = 0;
+        // Every stage commits, empty or not, so the groups a stage waits behind are a constant.
+        for (u32_t stage = 0; stage != stages_k; ++stage) {
+            u32_t const end_word = min_of((stage + 1) * rows_per_stage_, rows) * storage.row_fragments;
+            for (u32_t word = min_of(stage * rows_per_stage_, rows) * storage.row_fragments + lane; word < end_word;
+                 word += cuda_warp_t::width_k) {
+                u32_t const row = storage.row_of_word(word), fragment = storage.fragment_of_word(word, row);
+                __pipeline_memcpy_async(&cache.at(row, fragment), storage.vector_span_for(ids[row]) + fragment,
+                                        sizeof(typename storage_::fragment_t));
+            }
+            __pipeline_commit();
+        }
+    }
+
+    __device__ __forceinline__ void await_rows(u32_t rows) noexcept {
+        if (rows <= landed_rows_) return;
+        u32_t const stages = divide_round_up(rows, rows_per_stage_);
+        wait_pending_(stages_k - stages);
+        landed_rows_ = stages * rows_per_stage_;
+        __syncwarp();
+    }
+
+  private:
+
+    /** Waits until at most @p pending of this lane's newest commit groups remain in flight, through
+     *  the immediate @c cp.async.wait_group takes. */
+    template <u32_t ceiling_ = stages_k - 1>
+    static __device__ __forceinline__ void wait_pending_(u32_t pending) noexcept {
+        if constexpr (ceiling_ == 0) __pipeline_wait_prior(0);
+        else if (pending >= ceiling_) __pipeline_wait_prior(ceiling_);
+        else wait_pending_<ceiling_ - 1>(pending);
+    }
+};
+
+/**
+ *  @brief The Hopper and Blackwell staging: the Tensor Memory Accelerator copies every row whole in
+ *      one @c cp.async.bulk, and each stage's bytes complete on that stage's @c mbarrier, so the
+ *      copies hold no registers and every lane waits on the barrier, not on its own copies.
+ *
+ *  A row is one contiguous span of whole 16-byte fragments, so no tensor map is needed and no row
+ *  length is capped. Each barrier advances one phase per staging that fills its stage.
+ */
+struct hopper_tma_schedule_t {
+    inline static constexpr u32_t stages_k = 2;
+
+    /** One barrier per stage, in the warp's static shared memory. */
+    struct shared_t {
+        u64_t barriers[stages_k];
+    };
+
+    /** The stages' barriers. */
+    u64_t* barriers_;
+
+    /** Rows per stage of the latest staging, and the leading rows landed. */
+    u32_t rows_per_stage_ = 0, landed_rows_ = 0;
+
+    /** Bit @b s is the parity of the phase stage @b s is filling. */
+    u32_t phases_ = 0;
+
+    __device__ __forceinline__ hopper_tma_schedule_t(shared_t& shared, u32_t lane) noexcept
+        : barriers_(shared.barriers) {
+        if (lane == 0) {
+            for (u32_t stage = 0; stage != stages_k; ++stage)
+                asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(barrier_(stage)), "r"(1u) : "memory");
+            asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+        }
+        __syncwarp();
+    }
+
+    template <typename storage_, typename cache_>
+    __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
+                                               u32_t lane) noexcept {
+        u32_t const row_bytes = storage.row_fragments * sizeof(typename storage_::fragment_t);
+        rows_per_stage_ = divide_round_up(rows, stages_k), landed_rows_ = 0;
+        // The cache rows' earlier generic reads must precede the copies' asynchronous writes.
+        asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
+        if (lane == 0)
+            for (u32_t first_row = 0; first_row < rows; first_row += rows_per_stage_) {
+                u32_t const barrier = barrier_(first_row / rows_per_stage_);
+                u32_t const stage_bytes = (min_of(first_row + rows_per_stage_, rows) - first_row) * row_bytes;
+                asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(barrier), "r"(stage_bytes)
+                             : "memory");
+            }
+        __syncwarp();
+        for (u32_t row = lane; row < rows; row += cuda_warp_t::width_k) {
+            u32_t const destination = cuda_shared_address(cache.row(row));
+            u32_t const barrier = barrier_(row / rows_per_stage_);
+            asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" //
+                         ::"r"(destination),
+                         "l"(storage.vector_span_for(ids[row])), "r"(row_bytes), "r"(barrier)
+                         : "memory");
+        }
+    }
+
+    __device__ __forceinline__ void await_rows(u32_t rows) noexcept {
+        for (; landed_rows_ < rows; landed_rows_ += rows_per_stage_) {
+            u32_t const stage = landed_rows_ / rows_per_stage_;
+            u32_t landed;
+            do {
+                asm volatile("{\n.reg .pred ready;\n"                                      //
+                             "mbarrier.try_wait.parity.shared::cta.b64 ready, [%1], %2;\n" //
+                             "selp.u32 %0, 1, 0, ready;\n}\n"
+                             : "=r"(landed)
+                             : "r"(barrier_(stage)), "r"((phases_ >> stage) & 1u)
+                             : "memory");
+            } while (!landed);
+            phases_ ^= 1u << stage;
+        }
+    }
+
+  private:
+    __device__ __forceinline__ u32_t barrier_(u32_t stage) const noexcept {
+        return cuda_shared_address(barriers_ + stage);
+    }
+};
+
+#pragma endregion Schedules
+
 #pragma region Chains
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_chain<nk::f16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                      //
-        f16_ampere_quads_kit_t,                                                                                      //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, f16_blackwell_quads_kit_t>, //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, f16_blackwell_quads_kit_t>        //
+    using kit_t = typename first_available_kit<                                       //
+        f16_ampere_quads_kit_t,                                                       //
+        chain_layer<(caps_ & nk_cap_blackwellrtx_k) != 0, f16_blackwell_quads_kit_t>, //
+        chain_layer<(caps_ & nk_cap_blackwell_k) != 0, f16_blackwell_quads_kit_t>     //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
@@ -1381,10 +1483,10 @@ struct quads_chain<nk::f16_t, caps_> {
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_chain<nk::bf16_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                       //
-        bf16_ampere_quads_kit_t,                                                                                      //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, bf16_blackwell_quads_kit_t>, //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, bf16_blackwell_quads_kit_t>        //
+    using kit_t = typename first_available_kit<                                        //
+        bf16_ampere_quads_kit_t,                                                       //
+        chain_layer<(caps_ & nk_cap_blackwellrtx_k) != 0, bf16_blackwell_quads_kit_t>, //
+        chain_layer<(caps_ & nk_cap_blackwell_k) != 0, bf16_blackwell_quads_kit_t>     //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
@@ -1406,11 +1508,11 @@ struct quads_chain<nk::u8_t, caps_> {
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_chain<nk::e5m2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                       //
-        e5m2_ampere_quads_kit_t,                                                                                      //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, e5m2_blackwell_quads_kit_t>, //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, e5m2_blackwell_quads_kit_t>,       //
-        chain_layer<NUMKONG_TARGET_ADA && (caps_ & nk_cap_ada_k) != 0, e5m2_ada_quads_kit_t>                          //
+    using kit_t = typename first_available_kit<                                        //
+        e5m2_ampere_quads_kit_t,                                                       //
+        chain_layer<(caps_ & nk_cap_blackwellrtx_k) != 0, e5m2_blackwell_quads_kit_t>, //
+        chain_layer<(caps_ & nk_cap_blackwell_k) != 0, e5m2_blackwell_quads_kit_t>,    //
+        chain_layer<(caps_ & nk_cap_ada_k) != 0, e5m2_ada_quads_kit_t>                 //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
@@ -1418,11 +1520,11 @@ struct quads_chain<nk::e5m2_t, caps_> {
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_chain<nk::e4m3_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                       //
-        e4m3_ampere_quads_kit_t,                                                                                      //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, e4m3_blackwell_quads_kit_t>, //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, e4m3_blackwell_quads_kit_t>,       //
-        chain_layer<NUMKONG_TARGET_ADA && (caps_ & nk_cap_ada_k) != 0, e4m3_ada_quads_kit_t>                          //
+    using kit_t = typename first_available_kit<                                        //
+        e4m3_ampere_quads_kit_t,                                                       //
+        chain_layer<(caps_ & nk_cap_blackwellrtx_k) != 0, e4m3_blackwell_quads_kit_t>, //
+        chain_layer<(caps_ & nk_cap_blackwell_k) != 0, e4m3_blackwell_quads_kit_t>,    //
+        chain_layer<(caps_ & nk_cap_ada_k) != 0, e4m3_ada_quads_kit_t>                 //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
@@ -1430,10 +1532,10 @@ struct quads_chain<nk::e4m3_t, caps_> {
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_chain<nk::e3m2_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                       //
-        e3m2_ampere_quads_kit_t,                                                                                      //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, e3m2_blackwell_quads_kit_t>, //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, e3m2_blackwell_quads_kit_t>        //
+    using kit_t = typename first_available_kit<                                        //
+        e3m2_ampere_quads_kit_t,                                                       //
+        chain_layer<(caps_ & nk_cap_blackwellrtx_k) != 0, e3m2_blackwell_quads_kit_t>, //
+        chain_layer<(caps_ & nk_cap_blackwell_k) != 0, e3m2_blackwell_quads_kit_t>     //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
@@ -1441,10 +1543,10 @@ struct quads_chain<nk::e3m2_t, caps_> {
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cuda_k) != 0)
 struct quads_chain<nk::e2m3_t, caps_> {
-    using kit_t = typename first_available_kit<                                                                       //
-        e2m3_ampere_quads_kit_t,                                                                                      //
-        chain_layer<NUMKONG_TARGET_BLACKWELLRTX && (caps_ & nk_cap_blackwellrtx_k) != 0, e2m3_blackwell_quads_kit_t>, //
-        chain_layer<NUMKONG_TARGET_BLACKWELL && (caps_ & nk_cap_blackwell_k) != 0, e2m3_blackwell_quads_kit_t>        //
+    using kit_t = typename first_available_kit<                                        //
+        e2m3_ampere_quads_kit_t,                                                       //
+        chain_layer<(caps_ & nk_cap_blackwellrtx_k) != 0, e2m3_blackwell_quads_kit_t>, //
+        chain_layer<(caps_ & nk_cap_blackwell_k) != 0, e2m3_blackwell_quads_kit_t>     //
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
@@ -1469,6 +1571,15 @@ struct quads_chain<nk::u1x8_t, caps_> {
     using kit_t = u1x8_ampere_quads_kit_t;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
+
+/** The staging schedule under @p caps_: whole-row Tensor Memory Accelerator copies on every class
+ *  that has one, Hopper on, and the @c cp.async ring below. */
+template <nk_capability_t caps_>
+using cuda_schedule_chain = typename first_available_kit<                                      //
+    ampere_cp_async_schedule_t,                                                                //
+    chain_layer<(caps_ & (nk_cap_hopper_k | nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0, //
+                hopper_tma_schedule_t>                                                         //
+    >::type;
 
 #pragma endregion Chains
 

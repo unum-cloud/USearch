@@ -41,12 +41,6 @@ namespace unum::usearch::dense {
 /** Bytes of one packed traversal candidate on the device, the kernels' scored node. */
 inline constexpr std::size_t cuda_scored_node_bytes_k = sizeof(u64_t);
 
-/** Matches the register ladder's widest pool holds: past it the arena frontier walks. */
-inline constexpr u32_t cuda_widest_pool_k = 512;
-
-/** Matches the arena frontier's head ranks, so a walk past the ladder lands at most this many. */
-inline constexpr u32_t cuda_ranked_head_k = 64;
-
 /** Layout of one warp's slice of the traversal arena, computed on the host: the exact visited set,
  *  then the wide frontier's spill tail when it has one. The kernels carry it as their own
  *  @c vram_arena_shape_t. */
@@ -393,8 +387,9 @@ template <cuda_allocator allocator_type_ = cuda_device_allocator_t>
 struct cuda_traversal_context {
     using allocator_t = allocator_type_;
 
-    /** Matches the single-query verb lands at most - the arena frontier's head width. */
-    inline static constexpr u32_t results_capacity_k = cuda_ranked_head_k;
+    /** Matches the single-query verb lands at most, in inline storage; the batched verbs land any
+     *  count into the caller's rows. */
+    inline static constexpr u32_t results_capacity_k = 64;
 
     /** The single-query verb's landing: ascending matches in inline storage. */
     struct results_t {
@@ -903,7 +898,7 @@ struct vram_nvidia_index {
     struct insert_config_t {
 
         /** Breadth of the construction candidate pool; rounded up to a multiple of 32, clamped to
-         *  512. Larger pools trade build speed for graph quality. */
+         *  the widest register pool. Larger pools trade build speed for graph quality. */
         small_size_t expansion_factor = 0;
     };
 
@@ -920,8 +915,8 @@ struct vram_nvidia_index {
         std::size_t const arena_warps = static_cast<std::size_t>(device_.multiprocessor_count) *
                                         max_of(insert_blocks_per_multiprocessor_k, search_blocks_per_multiprocessor_k) *
                                         vram_warps_per_block_k;
-        std::size_t const results_bytes = // The widest single-query result landing.
-            cuda_widest_pool_k * (sizeof(node_id_t) + sizeof(distance_t));
+        std::size_t const results_bytes = // The single-query result landing.
+            traversal_context_t::results_capacity_k * (sizeof(node_id_t) + sizeof(distance_t));
         return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
                aligned(arena_warps * arena_shape.slice_bytes()) + aligned(rows * row_bytes() + results_bytes);
     }
@@ -992,7 +987,8 @@ struct vram_nvidia_index {
          *  automatically when @c count needs a wider pool. */
         small_size_t expansion_factor = 0;
 
-        /** Matches reported per query, up to the widest supported pool of 512. */
+        /** Matches reported per query; the walk expands at least twice as many, and a walk past the
+         *  widest register pool ranks every candidate its arena frontier kept. */
         small_size_t count = 10;
 
         /** The caller's mutation contract; every level shares one code path, since the walk is
@@ -1024,7 +1020,7 @@ struct vram_nvidia_index {
         u32_t const expansion = max_of<u32_t>(
             config.expansion_factor > config.count ? config.expansion_factor : config.count * 2,
             static_cast<u32_t>(non_zero_expansion_factor(config)));
-        bool const wide = expansion > cuda_widest_pool_k;
+        bool const wide = expansion > vram_widest_pool_slots_k * 32;
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
         u32_t const pool_slots = pool_slots_for_(expansion, count_slots > 2 ? count_slots : 2);
         cuda_arena_shape_t const arena_shape = arena_shape_for(
@@ -1205,8 +1201,8 @@ struct vram_nvidia_index {
     /** Optional tuning knobs of @c refine(); zeros mean "derive from connectivity". */
     struct refine_config_t {
 
-        /** Breadth of the re-selection pool, rounded up to a multiple of 32 and clamped to 512;
-         *  zero takes twice the connectivity, like the CPU's. */
+        /** Breadth of the re-selection pool, rounded up to a multiple of 32 and clamped to the
+         *  widest register pool, 512 ranks; zero takes twice the connectivity, like the CPU's. */
         small_size_t expansion_factor = 0;
     };
 
@@ -1870,15 +1866,20 @@ struct vram_nvidia_index {
             }
             u32_t const epoch_base = static_cast<u32_t>(context.epoch_floor_);
             context.epoch_floor_ += rows; // Monotone; an un-claim below only forfeits epoch space.
-            if (claimed == status_t::success_k &&
-                cuda_fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream) != cuda_success_k)
-                claimed = status_t::device_error_k;
+            cuda_build_t const build {storage(),
+                                      staging,
+                                      static_cast<u32_t>(total_rows),
+                                      insert_scratch_bytes_per_warp(),
+                                      static_cast<node_id_t>(first_id),
+                                      arena,
+                                      arena_shape,
+                                      epoch_base,
+                                      published_rows_.get(),
+                                      context.telemetry_.get(),
+                                      context.assigned_rows_.get()};
             // The launch is the last fallible step; reading its verdict here keeps the claim
             // reversible.
-            if (claimed == status_t::success_k &&
-                failed(launch_insert_(reinterpret_cast<fragment_t const*>(staging), static_cast<node_id_t>(first_id),
-                                      static_cast<u32_t>(total_rows), arena, arena_shape, epoch_base, pool_slots,
-                                      context)))
+            if (claimed == status_t::success_k && failed(launch_insert_(build, pool_slots, context)))
                 claimed = status_t::device_error_k;
             if (claimed == status_t::success_k)
                 standard_atomic_ref<std::size_t>(claimed_rows_).store(total_rows, std::memory_order_release);
@@ -1982,8 +1983,8 @@ struct vram_nvidia_index {
         cuda_stream_handle_t const stream = context.stream();
 
         // Past the register ladder's widest pool the arena-backed walk serves.
-        frontier_kind_t const frontier = expansion > cuda_widest_pool_k ? frontier_kind_t::wide_arena_k
-                                                                        : frontier_kind_t::register_ladder_k;
+        frontier_kind_t const frontier = expansion > vram_widest_pool_slots_k * 32 ? frontier_kind_t::wide_arena_k
+                                                                                   : frontier_kind_t::register_ladder_k;
         u32_t const pool_slots = pool_slots_for_(expansion, minimum_slots);
         cuda_arena_shape_t const arena_shape = arena_shape_for(
             frontier == frontier_kind_t::wide_arena_k ? expansion : pool_slots * 32, frontier);
@@ -2113,7 +2114,6 @@ struct vram_nvidia_index {
         if (!queries_count) return {{}, status_t::success_k};
         bool const wants_distances = result_distances.extent(0) != 0;
         if (result_ids.extent(0) != queries_count || result_ids.extent(1) < config.count ||
-            config.count > cuda_widest_pool_k ||
             (wants_distances &&
              (result_distances.extent(0) != queries_count || result_distances.extent(1) < config.count)))
             return {{}, status_t::config_mismatch_k};
@@ -2122,10 +2122,9 @@ struct vram_nvidia_index {
              result_distances.stride_bytes(0) < static_cast<std::ptrdiff_t>(config.count * sizeof(distance_t))))
             return {{}, status_t::unsupported_layout_k};
 
-        // Past the register ladder's widest pool the ranks cover the arena frontier's head of 64.
+        // The expansion covers the count, so the ladder's pool holds every rank, and past it the
+        // arena frontier ranks everything it saw.
         u32_t const expansion = config.expansion_factor > config.count ? config.expansion_factor : config.count * 2;
-        if (expansion > cuda_widest_pool_k && config.count > cuda_ranked_head_k)
-            return {{}, status_t::config_mismatch_k};
         // The pool must cover the requested count, whatever the expansion asked for.
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
         std::size_t const results_count = queries_count * config.count;
@@ -2540,7 +2539,7 @@ struct vram_nvidia_index {
     static u32_t pool_slots_for_(u32_t expansion_factor, u32_t default_slots) noexcept {
         if (!expansion_factor) return default_slots;
         u32_t const slots = std::bit_ceil(divide_round_up<u32_t>(expansion_factor, 32));
-        return min_of(max_of(slots, 2u), 16u);
+        return min_of(max_of(slots, 2u), vram_widest_pool_slots_k);
     }
 
     /** Loads this ceiling's fatbin onto the device and finds every kernel this dtype exports bar
@@ -2574,26 +2573,34 @@ struct vram_nvidia_index {
         return cuda_launch(function, blocks, block_threads_k, shared_bytes, stream, arguments);
     }
 
-    /** Inserts the staged rows under @b [first_id,end_id) with one warp per node on @p context's
-     *  stream, over the register ladder of @p pool_slots. */
-    status_t launch_insert_(fragment_t const* staging, node_id_t first_id, u32_t end_id, byte_t* arena,
-                            cuda_arena_shape_t arena_shape, u32_t epoch_base, u32_t pool_slots,
-                            traversal_context_t& context) noexcept {
+    /** Launches the rows of @p build in waves, each queued behind the last and as wide as the IDs
+     *  below it, never narrower than @c vram_admission_ramp_floor_k, so every ID a wave admits
+     *  walks rows already published. A wave failing after an earlier one launched keeps the
+     *  failure, since those rows can no longer be un-claimed. */
+    status_t launch_insert_(cuda_build_t const& build, u32_t pool_slots, traversal_context_t& context) noexcept {
         cuda_arguments_t arguments {};
-        arguments.build = {storage(),
-                           reinterpret_cast<byte_t const*>(staging),
-                           end_id,
-                           insert_scratch_bytes_per_warp(),
-                           first_id,
-                           arena,
-                           arena_shape,
-                           epoch_base,
-                           published_rows_.get(),
-                           context.telemetry_.get(),
-                           context.assigned_rows_.get()};
-        return launch_(kernel_function_(cuda_kernel_t::insert_k, pool_slots),
-                       static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k,
-                       vram_warps_per_block_k * arguments.build.scratch_bytes_per_warp, context.stream(), arguments);
+        cuda_function_handle_t const function = kernel_function_(cuda_kernel_t::insert_k, pool_slots);
+        u32_t const blocks = static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k;
+        for (u32_t wave_first = build.first_id; wave_first != build.end_id;) {
+            u32_t const wave_end = static_cast<u32_t>(
+                min_of<u64_t>(build.end_id, u64_t {wave_first} + max_of(wave_first, vram_admission_ramp_floor_k)));
+            u32_t const offset = wave_first - build.first_id;
+            arguments.build = build;
+            arguments.build.staging = build.staging + std::size_t {offset} * row_bytes();
+            arguments.build.first_id = wave_first;
+            arguments.build.end_id = wave_end;
+            arguments.build.epoch_base = build.epoch_base + offset;
+            status_t launched = cuda_fill_async(build.assigned_rows, 0, sizeof(u32_t), context.stream()) ==
+                                        cuda_success_k
+                                    ? status_t::success_k
+                                    : status_t::device_error_k;
+            if (succeeded(launched))
+                launched = launch_(function, blocks, vram_warps_per_block_k * build.scratch_bytes_per_warp,
+                                   context.stream(), arguments);
+            if (failed(launched)) return offset ? fail_(launched) : launched;
+            wave_first = wave_end;
+        }
+        return status_t::success_k;
     }
 
     /** Walks the rows of @p launch, landing their re-selected neighbors in its shadow matrix. */
