@@ -5,7 +5,7 @@
  *  @brief Throughput benchmarks for @c dense/ram_metric.hpp distance functions for 1-to-1, 1-to-4,
  *      and tiled kernels against NumKong's monolithic 1-to-1 reference.
  *
- *  Mirrors the structure of @c test/dense/ram_metric.hpp - the @c dense_quads_supported concept
+ *  Mirrors the structure of @c test/dense/ram_metric.hpp - the @c dense::quads_supported concept
  *  gates each cell so unadapted (kernel, scalar, caps) tuples never run, and new kits or
  *  chains light up matching rows automatically. Three flavors per supported tuple: USearch's
  *  @c distance (1-to-1), USearch's @c distances (1-to-4 fan-out), and NumKong's @c nk::dot /
@@ -53,6 +53,7 @@
 #include "bench.hpp"
 
 namespace unum::usearch::bench {
+using namespace unum::usearch::dense;
 
 #pragma region Harness
 
@@ -281,13 +282,12 @@ constexpr std::array<std::size_t, 3> dimensions_to_bench = {256, 768, 1536};
 /** True iff USearch has any kit for this (kernel, scalar) pair across capability
  *  tiers - serial is the always-available floor, so checking it covers the matrix. */
 template <nk_kernel_kind_t kernel_, typename scalar_>
-concept quads_in_scope = dense_quads_supported<kernel_, scalar_, nk_cap_serial_k>;
+concept quads_in_scope = quads_supported<kernel_, scalar_, nk_cap_serial_k>;
 
 /** True iff a tile engine is compiled for this tuple - the tiles chain always names
  *  a kit, so the gate is its @c has_tiles_k verdict, never the alias's existence. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-concept tiles_supported = dense_quads_supported<kernel_, scalar_, caps_> &&
-                          dense_tiles_chain<scalar_, caps_>::has_tiles_k;
+concept tiles_supported = quads_supported<kernel_, scalar_, caps_> && tiles_chain<scalar_, caps_>::has_tiles_k;
 
 /** Whether this machine runs every bit of @p caps_; serial always runs. */
 template <nk_capability_t caps_>
@@ -377,7 +377,7 @@ static candidate_pool<scalar_> make_candidate_pool(std::size_t dim) {
     for (std::size_t row = 0; row < row_count; ++row) fill_cyclic(pool.matrix.span().row(row).as_vector(), row);
     pool.norms.reserve(row_count);
     for (std::size_t row = 0; row < row_count; ++row)
-        pool.norms.push_back(dense_norms<nk_cap_serial_k>(pool.matrix.view().row(row).as_vector()));
+        pool.norms.push_back(norms<nk_cap_serial_k>(pool.matrix.view().row(row).as_vector()));
     return pool;
 }
 
@@ -404,7 +404,7 @@ static void measure_distance(loop_t& loop, environment_t const& env, std::size_t
     fill_cyclic(query.span(), 0);
     auto pool = make_candidate_pool<scalar_>(dim);
     auto query_view = query.view();
-    auto query_norms = dense_norms<caps_>(query_view);
+    auto query_norms = norms<caps_>(query_view);
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
     splitmix64_t random_generator {stream_key(env.settings.seed, rows_family_k)};
@@ -427,7 +427,7 @@ static void measure_distances_quad(loop_t& loop, environment_t const& env, std::
     fill_cyclic(query.span(), 0);
     auto pool = make_candidate_pool<scalar_>(dim);
     auto query_view = query.view();
-    auto query_norms = dense_norms<caps_>(query_view);
+    auto query_norms = norms<caps_>(query_view);
 
     std::size_t const row_index_mask = pool.matrix.extent(0) - 1;
     splitmix64_t random_generator {stream_key(env.settings.seed, rows_family_k)};
@@ -504,8 +504,8 @@ static void measure_distances_tile(loop_t& loop, environment_t const& env, std::
     nk_capability_t available = 0;
     if (nk_cpu_capabilities_enabled(&available) != nk_success_k || nk_cpu_configure_thread(available) != nk_success_k)
         return loop.skip("the thread cannot run these capabilities");
-    using tiles_kit_t = typename dense_tiles_chain<scalar_, caps_>::kit_t;
-    using quads_kit_t = typename dense_quads_chain<scalar_, caps_>::kit_t;
+    using tiles_kit_t = typename tiles_chain<scalar_, caps_>::kit_t;
+    using quads_kit_t = typename quads_chain<scalar_, caps_>::kit_t;
     using raw_dot_t = typename scalar_::dot_result_t::raw_t;
     constexpr std::size_t queries_k = tiles_kit_t::tile_columns_k, rows_k = 256;
 
@@ -525,13 +525,12 @@ static void measure_distances_tile(loop_t& loop, environment_t const& env, std::
     // The finalizer takes queries four lanes at a time, so the per-query sums regroup into lanes.
     std::array<typename scalar_::dot_result_t, queries_k> query_sumsqs;
     for (std::size_t query = 0; query != queries_k; ++query)
-        query_sumsqs[query] = dense_norms<caps_>(queries.row(query).as_vector()).sumsq;
+        query_sumsqs[query] = norms<caps_>(queries.row(query).as_vector()).sumsq;
     lanes_t query_lanes;
     static_assert(sizeof(query_lanes) == sizeof(query_sumsqs), "four sums fill one finalizer lane group");
     std::memcpy(query_lanes.data(), query_sumsqs.data(), sizeof(query_lanes));
     std::array<typename scalar_::dot_result_t, rows_k> row_sumsqs;
-    for (std::size_t row = 0; row != rows_k; ++row)
-        row_sumsqs[row] = dense_norms<caps_>(rows.row(row).as_vector()).sumsq;
+    for (std::size_t row = 0; row != rows_k; ++row) row_sumsqs[row] = norms<caps_>(rows.row(row).as_vector()).sumsq;
     auto dots = nk::matrix<raw_dot_t>::zeros({rows_k, queries_k}).value;
     std::array<std::array<std::array<f32_t, 4>, queries_k / 4>, rows_k> distances;
 
@@ -555,7 +554,7 @@ static void measure_distances_tile(loop_t& loop, environment_t const& env, std::
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
 static void bench_quads(environment_t const& env, std::string_view kernel_name, std::string_view scalar_name,
                         std::string_view caps_name) {
-    if constexpr (dense_quads_supported<kernel_, scalar_, caps_>)
+    if constexpr (quads_supported<kernel_, scalar_, caps_>)
         for (std::size_t const dim : dimensions_to_bench) {
             run_benchmark(env, fmt::format("{}/{}/{}/1to1/{}d", kernel_name, scalar_name, caps_name, dim),
                           measure_distance<kernel_, scalar_, caps_>, dim);

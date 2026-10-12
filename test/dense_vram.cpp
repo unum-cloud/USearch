@@ -21,7 +21,7 @@ using namespace unum::usearch;
 using namespace unum::usearch::test;
 
 /** The devices @p settings names, or the first listed one of every vendor when it names none. An
- *  ordinal past the listing prints the listing and exits with status 1. */
+ *  ordinal past the listing exits with status 1, after @c main printed the listing. */
 static std::vector<gpu_device_t> selected_devices(settings_t const& settings) {
     std::span<gpu_device_t const> const listed = gpu_devices();
     std::vector<gpu_device_t> selected;
@@ -30,11 +30,7 @@ static std::vector<gpu_device_t> selected_devices(settings_t const& settings) {
             selected.push_back(listed[ordinal]);
             continue;
         }
-        fmt::println(stderr, "USEARCH_DEVICES names device {}, past the {} listed:", ordinal, listed.size());
-        for (std::size_t position = 0; position != listed.size(); ++position)
-            fmt::println(stderr, "- {}: {} #{}", position,
-                         usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(listed[position].gpu_class)),
-                         listed[position].vendor_ordinal);
+        fmt::println(stderr, "USEARCH_DEVICES names device {}, past the {} listed", ordinal, listed.size());
         std::exit(1);
     }
     if (settings.devices.empty())
@@ -47,6 +43,12 @@ int main() {
     settings_t const settings = read_settings();
     print(probe_machine());
     print(settings);
+    std::span<gpu_device_t const> const listed = gpu_devices();
+    for (std::size_t position = 0; position != listed.size(); ++position)
+        fmt::println("- GPU {}: {}, {} #{}, {} compute units, {} MiB", position, listed[position].name,
+                     usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(listed[position].gpu_class)),
+                     listed[position].vendor_ordinal, listed[position].compute_units,
+                     listed[position].memory_bytes >> 20);
     std::vector<gpu_device_t> const devices = selected_devices(settings);
     if (devices.empty()) return fmt::println("- GPU: none listed"), 0;
     std::size_t failures_count = 0;
@@ -55,9 +57,7 @@ int main() {
         for (vram_suite_t const& registered : vram_suites())
             if (registered.vendor == device.vendor) suite = &registered;
         if (!suite) {
-            fmt::println("- GPU: {} #{} has no suite linked",
-                         usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device.gpu_class)),
-                         device.vendor_ordinal);
+            fmt::println("- GPU: {} #{} has no suite linked", device.name, device.vendor_ordinal);
             continue;
         }
         failures_count += suite->check(settings, device);

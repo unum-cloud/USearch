@@ -17,52 +17,52 @@
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the reducer's staging
 #include "usearch/utilities/ram_sorts.hpp"   // `radix_group`, `partial_sort` - the reducer's grouping & selection
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::dense {
+using namespace unum::usearch::utilities;
 
 /** Capability cascade for every scalar, shared by all its metrics: each capability group - the
  *  CPU's in @c ram_metric.hpp, NVIDIA's in @c vram_nvidia_metric.cuh - specializes it under a
  *  constraint on @p caps_. Reading order is the priority order; the first row whose @c available
  *  flag is true wins, else the fallback does. */
 template <nk::numeric_dtype scalar_, nk_capability_t caps_>
-struct dense_quads_chain;
+struct quads_chain;
 
 /** Dense node identifier within one sub-index - 32 bits, matching the 4-billion ceiling. */
-using dense_node_id_t = u32_t;
+using node_id_t = u32_t;
 
 /** Distance representation shared by all metrics, regardless of the stored dtype. */
-using dense_distance_t = f32_t;
+using distance_t = f32_t;
 
 /** Reserved all-ones value, never a valid node ID within a sub-index. Doubles as the
  *  lock & empty-slot sentinel in neighbor lists of every index design. */
-inline constexpr dense_node_id_t dense_node_id_unknown_k = 0xFFFFFFFFu;
+inline constexpr node_id_t node_id_unknown_k = 0xFFFFFFFFu;
 
 /** One traversal candidate: a node ID paired with its distance to the query. */
-struct dense_scored_node_t {
+struct scored_node_t {
 
     /** Identifier of the scored node within its sub-index. */
-    dense_node_id_t node_id;
+    node_id_t node_id;
 
     /** Distance to the query, in the instantiated kernel's metric. */
-    dense_distance_t distance;
+    distance_t distance;
 };
 
 /** Orders scored nodes nearest-first; the comparator of the sorted results pool. */
-struct dense_closer_scored_node_t {
-    inline bool operator()(dense_scored_node_t first, dense_scored_node_t second) const noexcept {
+struct closer_scored_node_t {
+    inline bool operator()(scored_node_t first, scored_node_t second) const noexcept {
         return first.distance < second.distance;
     }
 };
 
 /** Orders scored nodes furthest-first; the comparator of the max-heap frontier. */
-struct dense_further_scored_node_t {
-    inline bool operator()(dense_scored_node_t first, dense_scored_node_t second) const noexcept {
+struct further_scored_node_t {
+    inline bool operator()(scored_node_t first, scored_node_t second) const noexcept {
         return first.distance > second.distance;
     }
 };
 
 /** Outcome of one reachability audit, the same on every dense layer and residency. */
-struct dense_health_result_t {
+struct health_result_t {
 
     /** Nodes published when the audit started - the population it judges; later insertions are not counted. */
     std::size_t audited_nodes = 0;
@@ -75,7 +75,7 @@ struct dense_health_result_t {
 };
 
 /** Outcome of one refinement or heal pass: every count means the same on every dense layer and residency. */
-struct [[nodiscard]] dense_refine_result_t {
+struct [[nodiscard]] refine_result_t {
 
     /** Nodes re-selected: the planned range, then the islands of every round. */
     std::size_t visited_nodes = 0;
@@ -118,13 +118,13 @@ struct [[nodiscard]] dense_refine_result_t {
  *  islands sharing a row land apart: the farther half, keeping the nearer half that carries search
  *  and slot 0, and nothing in a single-neighbor row. */
 template <typename size_type_>
-constexpr size_type_ dense_heal_spread(size_type_ connectivity) noexcept {
+constexpr size_type_ heal_spread(size_type_ connectivity) noexcept {
     return connectivity / 2;
 }
 
 /** The online-softmax carry of one attended row, in natural-log units - the C++ face of
  *  @c usearch_dense_softmax_state_t. */
-struct dense_softmax_state_t {
+struct softmax_state_t {
 
     /** Largest logit seen so far. */
     f32_t maximum_score;
@@ -137,7 +137,7 @@ struct dense_softmax_state_t {
  *  in-RAM snapshots, GPU-resident uploads, and persisted on-NVMe layouts alike. It describes
  *  the graph & its frozen geometry, never the residency: what sections follow and how they
  *  are laid out is the per-storage contract versioned by @c version_k. */
-struct dense_index_header_t {
+struct index_header_t {
 
     /** The expected @c magic contents: "usearch3" read as a little-endian word. */
     inline static constexpr u64_t magic_k = usearch_magic_k;
@@ -166,17 +166,17 @@ struct dense_index_header_t {
     /** Published nodes in the payload; the chunk layout re-derives from it. */
     u32_t node_count;
 };
-static_assert(sizeof(dense_index_header_t) == 32 && std::is_trivially_copyable_v<dense_index_header_t>);
+static_assert(sizeof(index_header_t) == 32 && std::is_trivially_copyable_v<index_header_t>);
 
 /** Whether @p scalar_type_ stores real numbers, as indexer scoring needs of its keys. */
 template <typename scalar_type_>
-concept dense_floating_scalar = !nk::is_integral_dtype<scalar_type_>();
+concept floating_scalar = !nk::is_integral_dtype<scalar_type_>();
 
 /** A lightning indexer, as DeepSeek V4 and GLM 5 pick sparse-attention keys: a node scores `Σₕ wₕ·ReLU(qₕ·k)`
  *  against these heads, and its distance is `1 − score`, while the walk navigates by the query rows,
  *  conventionally `Σₕ wₕ·qₕ`. */
 template <typename scalar_type_>
-struct dense_indexer_heads {
+struct indexer_heads {
 
     /** Every query's heads back to back, @b [queries·heads,dimensions], in the index's own dtype. */
     nk::matrix_view<scalar_type_> heads;
@@ -185,7 +185,7 @@ struct dense_indexer_heads {
     nk::matrix_view<f32_t> weights;
 
     /** The heads of query row @p query alone. */
-    dense_indexer_heads row(std::size_t query) const noexcept {
+    indexer_heads row(std::size_t query) const noexcept {
         std::size_t const heads_count = weights.extent(1);
         return {heads(nk::range(query * heads_count, (query + 1) * heads_count), nk::slice),
                 weights(nk::range(query, query + 1), nk::slice)};
@@ -199,19 +199,19 @@ struct dummy_heads_t {
 
 /** Warps per thread block across every kernel of the VRAM design - four schedulers per
  *  multiprocessor on every modern GPU, one lane group each. */
-inline constexpr u32_t dense_vram_warps_per_block_k = 4;
+inline constexpr u32_t vram_warps_per_block_k = 4;
 
 /** Resident blocks per multiprocessor - shared by the launch grids and the kernels' launch
  *  bounds, so the register allocator sizes to it; small-pool search kernels fit four. */
-inline constexpr u32_t dense_vram_resident_blocks_per_multiprocessor_k = 3;
+inline constexpr u32_t vram_resident_blocks_per_multiprocessor_k = 3;
 
 /** Rows of the per-warp shared candidate cache; also bounds the diversity-selection pool prefix
  *  and the staging arrays. */
-inline constexpr u32_t dense_vram_cache_rows_k = 64;
+inline constexpr u32_t vram_cache_rows_k = 64;
 
 /** Device-resident telemetry counters, one block per driving context, zeroed at each submission
  *  and read after its drain. */
-struct dense_vram_telemetry_block_t {
+struct vram_telemetry_block_t {
     u64_t hops, scored, lock_attempts, lock_skips, reselections, restarts, locked_drops;
 
     /** Scored candidates split by plane residency; zero unless the view names a resident range. */
@@ -227,8 +227,8 @@ struct dense_vram_telemetry_block_t {
 /** Why @p keys and @p scores cannot hold @p rows rankings side by side with contiguous rows, or
  *  success. */
 template <typename key_type_, typename score_type_>
-status_t dense_rankings_refusal(std::size_t rows, nk::matrix_span<key_type_> keys,
-                                nk::matrix_span<score_type_> scores) noexcept {
+status_t rankings_refusal(std::size_t rows, nk::matrix_span<key_type_> keys,
+                          nk::matrix_span<score_type_> scores) noexcept {
     if (keys.extent(0) != rows || scores.extent(0) != rows || scores.extent(1) != keys.extent(1))
         return status_t::config_mismatch_k;
     if (keys.stride_bytes(1) != sizeof(key_type_) || scores.stride_bytes(1) != sizeof(score_type_))
@@ -239,15 +239,15 @@ status_t dense_rankings_refusal(std::size_t rows, nk::matrix_span<key_type_> key
 /** Why @p span cannot take @p rows copied rows of @p columns values each, packed within a row, or
  *  success; rows may stride past @p columns, and wider rows keep their tails. */
 template <typename value_type_>
-status_t dense_rows_refusal(std::size_t rows, nk::matrix_span<value_type_> span, std::size_t columns) noexcept {
+status_t rows_refusal(std::size_t rows, nk::matrix_span<value_type_> span, std::size_t columns) noexcept {
     if (span.extent(0) != rows || (rows && span.extent(1) < columns)) return status_t::config_mismatch_k;
     if (rows && span.stride_bytes(1) != sizeof(value_type_)) return status_t::unsupported_layout_k;
     return status_t::success_k;
 }
 
-/** One ranked hit while @c dense_maxsim_reducer folds a query, then one document's summed maxima. */
+/** One ranked hit while @c maxsim_reducer folds a query, then one document's summed maxima. */
 template <typename key_type_>
-struct dense_maxsim_entry {
+struct maxsim_entry {
 
     /** The document the ranked token belongs to. */
     key_type_ key;
@@ -268,13 +268,13 @@ struct dense_maxsim_entry {
  *  grouping and the selection run in place, so a reduction never allocates.
  */
 template <typename key_type_, typename distance_type_, typename allocator_type_>
-class dense_maxsim_reducer {
+class maxsim_reducer {
   public:
     using key_t = key_type_;
     using distance_t = distance_type_;
-    using entry_t = dense_maxsim_entry<key_t>;
+    using entry_t = maxsim_entry<key_t>;
 
-    explicit dense_maxsim_reducer(allocator_type_ allocator) noexcept : staged_(allocator), row_best_(allocator) {}
+    explicit maxsim_reducer(allocator_type_ allocator) noexcept : staged_(allocator), row_best_(allocator) {}
 
     /** Sizes the staging for queries of @p rows_per_query rankings, each @p width hits wide; a
      *  query wider than @c u32_t hits refuses with @c config_mismatch_k. */
@@ -355,5 +355,4 @@ class dense_maxsim_reducer {
     std::size_t rows_per_query_ = 0;
 };
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::dense

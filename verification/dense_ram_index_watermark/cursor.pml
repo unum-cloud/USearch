@@ -1,5 +1,5 @@
 /**
- *  @brief `dense_ram_cursor` beside two inserters: the constructor's acquire of the watermark,
+ *  @brief `dense::ram_cursor` beside two inserters: the constructor's acquire of the watermark,
  *      `seek`, `follow` refused past the snapshot, `refresh`, and the same follow admitted.
  *
  *  `seek` acquires slot zero exactly once per try and waits out a sentinel on the index's monitor,

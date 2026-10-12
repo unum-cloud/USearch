@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 10, 2026
  *  @brief Profiling harness for graph products and graph attention over the sharded
- *      @c dense_nvme_indexes, shared by the per-dtype algebra shards.
+ *      @c dense::nvme_indexes, shared by the per-dtype algebra shards.
  *
  *  The view, the cascade and the process setup are the NVMe search harness's, from
  *  @c dense/nvme_indexes_search.hpp; this header swaps its search phase for the batched @c multiply
@@ -141,7 +141,7 @@ bool run_nvme_algebra(streamed_dataset_type_& streamed, algebra_settings_t const
     };
     std::size_t const token_count = query_count / head_count;
     std::vector<f32_t> outputs(query_count * columns);
-    std::vector<dense_softmax_state_t> carry(query_count);
+    std::vector<softmax_state_t> carry(query_count);
     std::vector<u64_t> token_latencies_ns(token_count);
     started = steady_clock_t::now();
     nk::matrix_span<f32_t> const attended_rows {outputs.data(), query_count, columns};

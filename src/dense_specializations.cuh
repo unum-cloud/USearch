@@ -16,7 +16,7 @@
 
 #include <array>       // `std::array` - the value lookup's batch
 #include <atomic>      // `std::atomic_ref` - the outcome's status word
-#include <bit>         // `std::bit_cast` - the C key struct & `us::uuid_t` share sixteen bytes
+#include <bit>         // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
 #include <mutex>       // `std::lock_guard` over the ticks' lock
 #include <span>        // `std::span` - the search verbs' landing planes
 #include <string_view> // `std::string_view` - kernel tokens & checkpoint paths
@@ -49,6 +49,7 @@
 #endif
 
 using namespace unum::usearch;
+using namespace unum::usearch::utilities;
 namespace us = unum::usearch;
 namespace nk = ashvardanian::numkong;
 namespace fu = ashvardanian::forkunion;
@@ -518,8 +519,8 @@ inline bool crossed(expected<value_type_> const& result, usearch_dense_traversal
     return result || propagate_error(result.status, outcome, message);
 }
 
-/** The C key struct and the engine's @c us::uuid_t share sixteen bytes - one bit cast in. */
-inline us::uuid_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<us::uuid_t>(key); }
+/** The C key struct and the engine's @c utilities::uuid_t share sixteen bytes - one bit cast in. */
+inline us::utilities::uuid_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<us::utilities::uuid_t>(key); }
 
 /** One strided C matrix's rank-2 shape: NumKong counts the last extent in logical dimensions, so
  *  a packed row is as wide as the index; a zero stride means contiguous rows. */
@@ -548,7 +549,7 @@ inline nk::matrix_view<typename multi_type_::scalar_t> stored_rows_of( //
     if (!stages_rows<multi_type_>(source_dtype, row_bytes))
         return {rows, rows_shape_of<scalar_t>(rows_count, row_bytes, dimensions)};
     for (std::size_t row = 0; row != rows_count; ++row) {
-        [[maybe_unused]] nk_status_t const cast = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
+        [[maybe_unused]] nk_status_t const cast = us::dense::elementwise_chain<nk_cap_any_k>::kit_t::cast(
             rows + row * row_bytes, source_dtype, staged.span().row(staged_first + row).as_vector().byte_data(),
             multi_type_::vector_dtype_k, dimensions, nullptr);
         assert(cast == nk_success_k && "The serial tier casts every dtype pair");
@@ -586,33 +587,35 @@ inline constexpr bool is_nvme_index = std::is_same_v<typename multi_type_::execu
 /** One RAM alternative: the CPU class alone names the rung, lowering onto its NumKong mask, its waiter,
  *  its atomic reference and its cache hints. */
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
-using ram_index = dense_ram_indexes<us::uuid_t, dtype_, numkong_capabilities_of(cpu_class_), waiter_of<cpu_class_>,
-                                    atomic_ref_for_cpu_class<cpu_class_>::template type,
-                                    typename cache_hints_for_cpu_class<cpu_class_>::type>;
+using ram_indexes = us::dense::ram_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(cpu_class_),
+                                           waiter_of<cpu_class_>, atomic_ref_for_cpu_class<cpu_class_>::template type,
+                                           typename cache_hints_for_cpu_class<cpu_class_>::type>;
 
 /** One NVMe alternative: scoring compiles per CPU class, while the metric comes from the parts'
  *  headers and the transport is the executor's runtime choice. */
 template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
-using nvme_index = dense_nvme_indexes<us::uuid_t, dtype_, numkong_capabilities_of(cpu_class_)>;
+using nvme_indexes = us::dense::nvme_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(cpu_class_)>;
 
 /** One NVIDIA alternative: the class names the rung and its capability ceiling; its unit holds the
  *  kernels. */
 #if USEARCH_ARCH_CUDA_
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
-using vram_nvidia_index = dense_vram_nvidia_indexes<us::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
+using vram_nvidia_indexes =
+    us::dense::vram_nvidia_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
 #endif
 
 /** One AMD alternative: the class names the rung and its capability ceiling; its unit holds the
  *  code object. */
 #if USEARCH_ARCH_ROCM_
 template <nk_dtype_t dtype_, gpu_class_t gpu_class_>
-using vram_amd_index = dense_vram_amd_indexes<us::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
+using vram_amd_indexes =
+    us::dense::vram_amd_indexes<us::utilities::uuid_t, dtype_, numkong_capabilities_of(gpu_class_)>;
 #endif
 
 /** One Apple alternative, serving every Apple class until a family's kernels differ. */
 #if USEARCH_ARCH_METAL_
 template <nk_dtype_t dtype_>
-using vram_apple_index = dense_vram_apple_indexes<us::uuid_t, dtype_>;
+using vram_apple_indexes = us::dense::vram_apple_indexes<us::utilities::uuid_t, dtype_>;
 #endif
 
 /** The C predicate lifted onto the index's key vocabulary. */
@@ -620,7 +623,7 @@ struct key_predicate_t {
     usearch_predicate_t callback;
     void* state;
 
-    admission_t operator()(us::uuid_t key) const noexcept {
+    admission_t operator()(us::utilities::uuid_t key) const noexcept {
         return static_cast<admission_t>(callback(std::bit_cast<usearch_key_t>(key), state));
     }
 };
@@ -634,7 +637,8 @@ struct value_lookup_t {
     std::size_t dimensions;
 
     template <typename scalar_type_>
-    void operator()(std::span<us::uuid_t const> keys, std::span<nk::vector_view<scalar_type_>> rows) const noexcept {
+    void operator()(std::span<us::utilities::uuid_t const> keys,
+                    std::span<nk::vector_view<scalar_type_>> rows) const noexcept {
         std::array<usearch_key_t, 4> batch;
         std::array<void const*, 4> found;
         for (std::size_t lane = 0; lane != keys.size(); ++lane) batch[lane] = std::bit_cast<usearch_key_t>(keys[lane]);
@@ -648,13 +652,17 @@ struct value_lookup_t {
 
 /** The C value lookup called on the device, one scored key at a time inside a GPU walk. */
 struct device_value_lookup_t {
+
+    /** Names the lookup to the NVIDIA attend kernels the class units instantiate over it. */
+    inline static constexpr u32_t device_lookup_k = 1;
+
     usearch_value_lookup_t callback;
     void* state;
     usearch_scalar_t scalar;
     std::size_t dimensions;
 
-#if USEARCH_ARCH_CUDA_
-    __device__ void const* operator()(us::uuid_t key) const noexcept {
+#if defined(__CUDACC__)
+    __device__ void const* operator()(us::utilities::uuid_t key) const noexcept {
         usearch_key_t const scored = std::bit_cast<usearch_key_t>(key);
         void const* row = nullptr;
         callback(state, &scored, 1, scalar, dimensions, &row);
@@ -662,6 +670,17 @@ struct device_value_lookup_t {
     }
 #endif
 };
+
+#if USEARCH_ARCH_CUDA_
+
+/** What each shard of a VRAM attend resolves rows through: the C lookup behind the shard's keys. */
+using nvidia_attend_lookup_t = us::dense::cuda_keyed_lookup<us::utilities::uuid_t, device_value_lookup_t>;
+
+template <>
+struct us::dense::cuda_value_lookup_of<nvidia_attend_lookup_t::device_lookup_k> {
+    using type = nvidia_attend_lookup_t;
+};
+#endif
 
 /** Serializes shard ticks from the executor's threads onto the C handler, which the contract
  *  promises is never concurrent. */
@@ -794,7 +813,7 @@ struct specialized_index {
                                      counts_span_t counts) noexcept;
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
                                      f32_t score_scale, nk::matrix_span<f32_t> outputs,
-                                     std::span<us::dense_softmax_state_t> carry, executor_t& executor,
+                                     std::span<us::dense::softmax_state_t> carry, executor_t& executor,
                                      search_config_t config) noexcept;
     status_t save(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
     status_t save(bytes_span_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept;
@@ -943,7 +962,7 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
     vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale,
-    nk::matrix_span<f32_t> outputs, std::span<us::dense_softmax_state_t> carry, executor_t& executor,
+    nk::matrix_span<f32_t> outputs, std::span<us::dense::softmax_state_t> carry, executor_t& executor,
     search_config_t config) noexcept {
     return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
 }
@@ -1019,7 +1038,7 @@ struct specialized_index<index_type_> {
                                      counts_span_t counts) noexcept;
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
                                      f32_t score_scale, nk::matrix_span<f32_t> outputs,
-                                     std::span<us::dense_softmax_state_t> carry, executor_t& executor,
+                                     std::span<us::dense::softmax_state_t> carry, executor_t& executor,
                                      search_config_t config) noexcept;
 };
 
@@ -1108,7 +1127,7 @@ template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
     vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale,
-    nk::matrix_span<f32_t> outputs, std::span<us::dense_softmax_state_t> carry, executor_t& executor,
+    nk::matrix_span<f32_t> outputs, std::span<us::dense::softmax_state_t> carry, executor_t& executor,
     search_config_t config) noexcept {
     return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
 }

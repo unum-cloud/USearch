@@ -2,8 +2,9 @@
  *  @file test/dense/nvme_indexes.cpp
  *  @author Ash Vardanian
  *  @date October 10, 2026
- *  @brief Every read verb of @c dense_nvme_indexes against the RAM group its parts came from, and
- *      every rewrite against a fresh RAM build of its rows, once per I/O engine the host admits.
+ *  @brief Every read verb of @c dense::nvme_indexes against the RAM group its parts came from,
+ *      and every rewrite against a fresh RAM build of its rows, once per I/O engine the host
+ *      admits.
  */
 #include "nvme_indexes.hpp"
 

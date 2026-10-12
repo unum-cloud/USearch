@@ -9,35 +9,34 @@
  *  do, so a graph saved on one GPU reads back on another with the same norms. No Apple GPU this
  *  runtime reaches has fp8 or fp6 arithmetic, so the minifloats widen to @c half per byte, as
  *  NumKong's @c apple10.metal does. The host prepends this file to @c vram_apple_index.metal with a
- *  @c dense_metal_kit_t alias naming the kit, and compiles the pair at first use.
+ *  @c metal_kit_t alias naming the kit, and compiles the pair at first use.
  */
 #include <metal_stdlib>
 using namespace metal;
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::dense {
 
 /** The metrics the host lowers its kernel kind onto: the walk ranks Euclidean by its square. */
-enum dense_metal_metric_t : uint {
-    dense_metal_dot_k = 0,
-    dense_metal_angular_k = 1,
-    dense_metal_sqeuclidean_k = 2,
-    dense_metal_euclidean_k = 3,
-    dense_metal_hamming_k = 4,
-    dense_metal_jaccard_k = 5,
+enum metal_metric_t : uint {
+    metal_dot_k = 0,
+    metal_angular_k = 1,
+    metal_sqeuclidean_k = 2,
+    metal_euclidean_k = 3,
+    metal_hamming_k = 4,
+    metal_jaccard_k = 5,
 };
 
 /** The four bytes of @p word as the codes a minifloat widening takes. */
-inline ushort4 dense_metal_bytes(uint word) {
+inline ushort4 metal_bytes(uint word) {
     return ushort4(word & 0xFFu, (word >> 8) & 0xFFu, (word >> 16) & 0xFFu, word >> 24);
 }
 
 /** A numeric kit's distance "through the dot", the CUDA kits' formulas line for line. */
 template <typename dot_type_, typename norms_type_>
-inline float dense_metal_distance(uint metric, dot_type_ dot, norms_type_ query, norms_type_ target) {
+inline float metal_distance(uint metric, dot_type_ dot, norms_type_ query, norms_type_ target) {
     float const dot_value = float(dot);
-    if (metric == dense_metal_dot_k) return 1.0f - dot_value;
-    if (metric == dense_metal_angular_k) {
+    if (metric == metal_dot_k) return 1.0f - dot_value;
+    if (metric == metal_angular_k) {
         float const query_sumsq = float(query.y), target_sumsq = float(target.y);
         if (query_sumsq > 0.0f && target_sumsq > 0.0f)
             return max(1.0f - dot_value * (rsqrt(query_sumsq) * rsqrt(target_sumsq)), 0.0f);
@@ -47,8 +46,8 @@ inline float dense_metal_distance(uint metric, dot_type_ dot, norms_type_ query,
 }
 
 /** The output-boundary finalize: identity unless a metric owes a monotone transform. */
-inline float dense_metal_convert(uint metric, float ranked) {
-    return metric == dense_metal_euclidean_k ? sqrt(max(ranked, 0.0f)) : ranked;
+inline float metal_convert(uint metric, float ranked) {
+    return metric == metal_euclidean_k ? sqrt(max(ranked, 0.0f)) : ranked;
 }
 
 /** The shape every floating kit shares: widen each word to four floats, then multiply-add. */
@@ -71,7 +70,7 @@ struct metal_floats_quads_kit {
     }
     static float2 norms(float2 moments) { return moments; }
     static float distance(uint metric, float dot, float2 query, float2 target) {
-        return dense_metal_distance(metric, dot, query, target);
+        return metal_distance(metric, dot, query, target);
     }
 };
 
@@ -88,7 +87,7 @@ struct bf16_metal_widening_t {
 /** E4M3FN: bias 7, the all-ones codes NaN. */
 struct e4m3_metal_widening_t {
     static float4 widen(uint word) {
-        ushort4 const codes = dense_metal_bytes(word);
+        ushort4 const codes = metal_bytes(word);
         ushort4 const bits = ((codes & ushort(0x7F)) << ushort(7)) | ((codes & ushort(0x80)) << ushort(8));
         return float4(select(as_type<half4>(bits) * half(256), half4(NAN), (codes & ushort(0x7F)) == ushort(0x7F)));
     }
@@ -96,13 +95,13 @@ struct e4m3_metal_widening_t {
 
 /** E5M2 is the top byte of an IEEE half. */
 struct e5m2_metal_widening_t {
-    static float4 widen(uint word) { return float4(as_type<half4>(dense_metal_bytes(word) << ushort(8))); }
+    static float4 widen(uint word) { return float4(as_type<half4>(metal_bytes(word) << ushort(8))); }
 };
 
 /** E3M2, OCP FP6 in the low six bits of a byte: bias 3. */
 struct e3m2_metal_widening_t {
     static float4 widen(uint word) {
-        ushort4 const codes = dense_metal_bytes(word);
+        ushort4 const codes = metal_bytes(word);
         ushort4 const bits = ((codes & ushort(0x1F)) << ushort(8)) | ((codes & ushort(0x20)) << ushort(10));
         return float4(as_type<half4>(bits) * half(4096));
     }
@@ -111,7 +110,7 @@ struct e3m2_metal_widening_t {
 /** E2M3, OCP FP6 in the low six bits of a byte: bias 1. */
 struct e2m3_metal_widening_t {
     static float4 widen(uint word) {
-        ushort4 const codes = dense_metal_bytes(word);
+        ushort4 const codes = metal_bytes(word);
         ushort4 const bits = ((codes & ushort(0x1F)) << ushort(7)) | ((codes & ushort(0x20)) << ushort(10));
         return float4(as_type<half4>(bits) * half(16384));
     }
@@ -146,7 +145,7 @@ struct i8_metal_quads_kit_t {
     }
     static int2 norms(int2 moments) { return moments; }
     static float distance(uint metric, int dot, int2 query, int2 target) {
-        return dense_metal_distance(metric, dot, query, target);
+        return metal_distance(metric, dot, query, target);
     }
 };
 
@@ -172,7 +171,7 @@ struct u8_metal_quads_kit_t {
     }
     static uint2 norms(uint2 moments) { return moments; }
     static float distance(uint metric, uint dot, uint2 query, uint2 target) {
-        return dense_metal_distance(metric, dot, query, target);
+        return metal_distance(metric, dot, query, target);
     }
 };
 
@@ -197,7 +196,7 @@ struct i4x2_metal_quads_kit_t {
     }
     static int2 norms(int2 moments) { return moments; }
     static float distance(uint metric, int dot, int2 query, int2 target) {
-        return dense_metal_distance(metric, dot, query, target);
+        return metal_distance(metric, dot, query, target);
     }
 };
 
@@ -222,7 +221,7 @@ struct u4x2_metal_quads_kit_t {
     }
     static uint2 norms(uint2 moments) { return moments; }
     static float distance(uint metric, uint dot, uint2 query, uint2 target) {
-        return dense_metal_distance(metric, dot, query, target);
+        return metal_distance(metric, dot, query, target);
     }
 };
 
@@ -243,12 +242,11 @@ struct u1x8_metal_quads_kit_t {
     }
     static uint2 norms(uint2 moments) { return uint2(moments.x, moments.x); }
     static float distance(uint metric, uint dot, uint2 query, uint2 target) {
-        if (metric == dense_metal_dot_k) return 1.0f - float(dot);
-        if (metric == dense_metal_hamming_k) return float(query.x + target.x - 2 * dot);
+        if (metric == metal_dot_k) return 1.0f - float(dot);
+        if (metric == metal_hamming_k) return float(query.x + target.x - 2 * dot);
         uint const unions = query.x + target.x - dot;
         return unions ? 1.0f - float(dot) / float(unions) : 0.0f;
     }
 };
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::dense

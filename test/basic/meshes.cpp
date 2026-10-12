@@ -89,8 +89,8 @@ struct spectra_metric_t {
         query_spectrum_ = query.spectrum;
         staged_.clear();
     }
-    basic_metric_staging_t push(mesh_t const& value) noexcept {
-        return staged_.push_back(value.spectrum), basic_metric_staging_t::staged_k;
+    metric_staging_t push(mesh_t const& value) noexcept {
+        return staged_.push_back(value.spectrum), metric_staging_t::staged_k;
     }
     void drain(std::span<f64_t> distances, f64_t) noexcept {
         for (std::size_t lane = 0; lane != distances.size(); ++lane)
@@ -165,13 +165,13 @@ struct meshes_handmade_t {
 template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = standard_atomic_ref>
 struct meshes_fixture {
     using index_t =
-        basic_ram_index<mesh_t, us::uuid_t, u64_t, f64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;
+        ram_index<mesh_t, us::utilities::uuid_t, u64_t, f64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;
 
     static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
     static spectra_metric_t make_metric() { return {}; }
     static mesh_codec_t make_codec() { return {}; }
-    static us::uuid_t make_key(std::size_t ordinal) {
-        return std::bit_cast<us::uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal ^ 0x3D3D3Dull), ordinal});
+    static us::utilities::uuid_t make_key(std::size_t ordinal) {
+        return std::bit_cast<us::utilities::uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal ^ 0x3D3D3Dull), ordinal});
     }
     static f64_t oracle(mesh_t const& query, mesh_t const& stored) noexcept {
         return scalar_spectra_distance(query.spectrum, stored.spectrum);
@@ -236,10 +236,10 @@ struct meshes_fixture {
 
 using meshes_fixture_t = meshes_fixture<>;
 
-static_assert(basic_value<mesh_t>);
-static_assert(basic_metric<spectra_metric_t, mesh_t, f64_t>);
+static_assert(value<mesh_t>);
+static_assert(metric<spectra_metric_t, mesh_t, f64_t>);
 static_assert(!transparent_metric<spectra_metric_t>);
-static_assert(basic_value_codec<mesh_codec_t, mesh_t>);
+static_assert(value_codec<mesh_codec_t, mesh_t>);
 
 /** The invariance arm: a rigidly moved cloud must sit at spectra distance zero
  *  from its original - the property that makes the metric a GW lower bound. */

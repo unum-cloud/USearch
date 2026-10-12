@@ -16,7 +16,7 @@ int main() {
     print(settings);
     std::size_t failures_count = 0;
 
-    if (settings.selects("safegraphs_format")) failures_count += utilities::check_safegraphs_format(settings);
+    if (settings.selects("safegraphs_format")) failures_count += test::utilities::check_safegraphs_format(settings);
     failures_count += check_dense(settings);
 
     return report("total", failures_count) ? 1 : 0;

@@ -2,8 +2,8 @@
  *  @file test/dense/ram_index_i8.cpp
  *  @author Ash Vardanian
  *  @date July 23, 2026
- *  @brief Smoke & concurrency tests for the CPU-resident @c dense_ram_index over i8 cells, repeated
- *      under a deliberately flaky waiter to widen the interleaving windows.
+ *  @brief Smoke & concurrency tests for the CPU-resident @c dense::ram_index over i8 cells,
+ *      repeated under a deliberately flaky waiter to widen the interleaving windows.
  */
 #include "dense/ram_index.hpp"
 

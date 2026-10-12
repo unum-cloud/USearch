@@ -42,8 +42,7 @@
 #include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer` - path formatting & header images
 #include "usearch/utilities/types.hpp"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::utilities {
 
 #pragma region Configs
 
@@ -1429,5 +1428,4 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
 
 #pragma endregion Columned Indexes
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::utilities

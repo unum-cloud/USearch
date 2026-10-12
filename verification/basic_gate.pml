@@ -1,5 +1,5 @@
 /**
- *  The unique side of `basic_shared_mutex` from `include/usearch/basic/ram_index.hpp`, as the
+ *  The unique side of `basic::shared_mutex` from `include/usearch/basic/ram_index.hpp`, as the
  *  basic index's stop-the-world calls take it: `try_lock`'s acquire compare-exchange, only from a
  *  free word, and `unlock`'s release clear. A component includes this file after the memory model
  *  and passes its gate word.

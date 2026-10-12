@@ -13,17 +13,17 @@
  *  @section File Organization
  *
  *  @b Norms - @c vector_norms carries per-vector @c sum (DPBUSD compensation) and @c sumsq
- *  (L2 norm, used by angular/euclidean). @c dense_norms<scalar, caps> dispatches to
- *  NumKong's @c nk_reduce_moments_* family at construction-time of the index.
+ *  (L2 norm, used by angular/euclidean). @c norms<scalar, caps> dispatches to NumKong's
+ *  @c nk_reduce_moments_* family at construction-time of the index.
  *
  *  @b Kits - one struct per @c (scalar,capability), e.g. @c bf16_genoa_quads_kit_t, bundling
  *  every piece of the inner-product engine - NumKong state type, operand vec type, finalized
  *  vec type, load/update/finalize function pointers, step-dimensions count - plus the
  *  @c *_from_dot throughs each derived metric finalizes with. The metric is a runtime value
  *  that reaches only @c convert_to_distances, so one kit serves every metric of its scalar.
- *  The shape is uniform - the @c dense_quads_kit concept enforces it.
+ *  The shape is uniform - the @c quads_kit concept enforces it.
  *
- *  @b Chains - one @c dense_quads_chain<scalar,caps> per supported scalar. A linear list of
+ *  @b Chains - one @c quads_chain<scalar,caps> per supported scalar. A linear list of
  *  @c chain_layer rows fed to @c first_available_kit picks the first kit whose @c NUMKONG_TARGET_*
  *  is on AND whose runtime-caps bit is set, else falls back to serial. Unsupported scalars simply
  *  have no specialization. Adding an ISA tier is one row and zero preprocessor lines.
@@ -41,7 +41,7 @@
  *  sites read @c distance<caps>(nk_kernel_angular_k,...) - no per-spec method, no per-spec class.
  *
  *  @b Tiles - a second engine axis over the same capability bitmask, for scans rather than walks.
- *  Each @c dense_tiles_chain<scalar,caps> names a matrix-engine kit - @c no_tiles_kit_t where the
+ *  Each @c tiles_chain<scalar,caps> names a matrix-engine kit - @c no_tiles_kit_t where the
  *  platform has none for the scalar - and its @c has_tiles_k verdict gates the tiled scan. A tiles
  *  kit, like @c bf16_sapphireamx_tiles_kit_t, packs a batch of queries into the engine's operand
  *  layout once and streams stored rows against the pack where they lie, answering raw dots; the
@@ -106,8 +106,7 @@
 #include "usearch/utilities/ram_tables.hpp"
 #include "usearch/dense/types.hpp"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::dense {
 
 /** Per-lane @c 1 - dot in NumKong vec form. Exists to match the
  *  @c nk_*_through_*_from_dot_* signature so the trampoline routes every metric uniformly. */
@@ -145,7 +144,7 @@ inline void inner_product_distance_(finalized_inners_type_ const* dots_vec, norm
 
 /** Whether @p kit_ finalizes the bit metrics, hamming & jaccard, instead of angular & euclidean. */
 template <typename kit_>
-concept dense_bits_kit = requires {
+concept bits_kit = requires {
     kit_::hamming_from_dot;
     kit_::jaccard_from_dot;
 };
@@ -154,7 +153,7 @@ concept dense_bits_kit = requires {
  *  either the numeric metrics or the bit ones. The trampoline takes only a kit, so substitution
  *  errors land at the call site as a one-line constraint-not-satisfied. */
 template <typename kit_>
-concept dense_quads_kit = requires {
+concept quads_kit = requires {
     typename kit_::scalar_t;
     typename kit_::accumulator_t;
     typename kit_::step_vec_t;
@@ -166,10 +165,10 @@ concept dense_quads_kit = requires {
     kit_::reduce_accumulators;
     kit_::compute_norms;
     { kit_::step_dimensions } -> std::convertible_to<std::size_t>;
-} && (dense_bits_kit<kit_> || requires {
-                              kit_::angular_from_dot;
-                              kit_::euclidean_from_dot;
-                          });
+} && (bits_kit<kit_> || requires {
+                        kit_::angular_from_dot;
+                        kit_::euclidean_from_dot;
+                    });
 
 /**
  *  @brief Internal trampoline for using @c nk_reduce_moments NumKong APIs to compute L2 vector norms.
@@ -200,7 +199,7 @@ inline vector_norms<typename scalar_type_::dot_result_t> invoke_dense_norms_( //
 }
 
 /** Forward declarations for every "kit" regardless of @c NUMKONG_TARGET_* availability,
- *  so @c dense_quads_chain backend resolution chains name-resolve on every build. */
+ *  so @c quads_chain backend resolution chains name-resolve on every build. */
 struct bf16_serial_quads_kit_t;
 struct bf16_haswell_quads_kit_t;
 struct bf16_skylake_quads_kit_t;
@@ -1976,7 +1975,7 @@ struct u1x8_powervsx_quads_kit_t {
 /** The visited set's kit for one capability ceiling: the Skylake group scan where the
  *  class carries AVX-512, the serial walk otherwise. */
 template <nk_capability_t caps_>
-struct dense_visits_hash_set_chain {
+struct visits_hash_set_chain {
     using kit_t = typename first_available_kit<                                                                   //
         serial_visits_hash_set_kit_t,                                                                             //
         chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, u32_skylake_visits_hash_set_kit_t> //
@@ -1985,7 +1984,7 @@ struct dense_visits_hash_set_chain {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_quads_chain<nk::bf16_t, caps_> {
+struct quads_chain<nk::bf16_t, caps_> {
     using kit_t = typename first_available_kit<                                                                       //
         bf16_serial_quads_kit_t,                                                                                      //
         chain_layer<NUMKONG_TARGET_GENOA && (caps_ & nk_cap_genoa_k) != 0, bf16_genoa_quads_kit_t>,                   //
@@ -2004,7 +2003,7 @@ struct dense_quads_chain<nk::bf16_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_quads_chain<nk::f16_t, caps_> {
+struct quads_chain<nk::f16_t, caps_> {
     using kit_t = typename first_available_kit<                                                                      //
         f16_serial_quads_kit_t,                                                                                      //
         chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, f16_skylake_quads_kit_t>,             //
@@ -2021,7 +2020,7 @@ struct dense_quads_chain<nk::f16_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_quads_chain<nk::e5m2_t, caps_> {
+struct quads_chain<nk::e5m2_t, caps_> {
     using kit_t = typename first_available_kit< //
         e5m2_serial_quads_kit_t,                //
         chain_layer<NUMKONG_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e5m2_diamond_quads_kit_t>,
@@ -2039,7 +2038,7 @@ struct dense_quads_chain<nk::e5m2_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_quads_chain<nk::e4m3_t, caps_> {
+struct quads_chain<nk::e4m3_t, caps_> {
     using kit_t = typename first_available_kit< //
         e4m3_serial_quads_kit_t,                //
         chain_layer<NUMKONG_TARGET_DIAMOND && (caps_ & nk_cap_diamond_k) != 0, e4m3_diamond_quads_kit_t>,
@@ -2057,7 +2056,7 @@ struct dense_quads_chain<nk::e4m3_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_quads_chain<nk::e3m2_t, caps_> {
+struct quads_chain<nk::e3m2_t, caps_> {
     using kit_t = typename first_available_kit<                                                                      //
         e3m2_serial_quads_kit_t,                                                                                     //
         chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e3m2_skylake_quads_kit_t>,            //
@@ -2073,7 +2072,7 @@ struct dense_quads_chain<nk::e3m2_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_quads_chain<nk::e2m3_t, caps_> {
+struct quads_chain<nk::e2m3_t, caps_> {
     using kit_t = typename first_available_kit<                                                                      //
         e2m3_serial_quads_kit_t,                                                                                     //
         chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e2m3_skylake_quads_kit_t>,            //
@@ -2091,7 +2090,7 @@ struct dense_quads_chain<nk::e2m3_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_quads_chain<nk::i8_t, caps_> {
+struct quads_chain<nk::i8_t, caps_> {
     using kit_t = typename first_available_kit<                                                                     //
         i8_serial_quads_kit_t,                                                                                      //
         chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i8_icelake_quads_kit_t>,             //
@@ -2110,7 +2109,7 @@ struct dense_quads_chain<nk::i8_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_quads_chain<nk::u8_t, caps_> {
+struct quads_chain<nk::u8_t, caps_> {
     using kit_t = typename first_available_kit<                                                                     //
         u8_serial_quads_kit_t,                                                                                      //
         chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u8_icelake_quads_kit_t>,             //
@@ -2129,7 +2128,7 @@ struct dense_quads_chain<nk::u8_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_quads_chain<nk::u4x2_t, caps_> {
+struct quads_chain<nk::u4x2_t, caps_> {
     using kit_t = typename first_available_kit<                                                                      //
         u4x2_serial_quads_kit_t,                                                                                     //
         chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u4x2_icelake_quads_kit_t>,            //
@@ -2144,7 +2143,7 @@ struct dense_quads_chain<nk::u4x2_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_quads_chain<nk::i4x2_t, caps_> {
+struct quads_chain<nk::i4x2_t, caps_> {
     using kit_t = typename first_available_kit<                                                                      //
         i4x2_serial_quads_kit_t,                                                                                     //
         chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, i4x2_icelake_quads_kit_t>,            //
@@ -2159,7 +2158,7 @@ struct dense_quads_chain<nk::i4x2_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_quads_chain<nk::u1x8_t, caps_> {
+struct quads_chain<nk::u1x8_t, caps_> {
     using kit_t = typename first_available_kit<                                                             //
         u1x8_serial_quads_kit_t,                                                                            //
         chain_layer<NUMKONG_TARGET_ICELAKE && (caps_ & nk_cap_icelake_k) != 0, u1x8_icelake_quads_kit_t>,   //
@@ -2286,7 +2285,7 @@ struct powervsx_elementwise_kit_t : serial_elementwise_kit_t {
 
 /** The values kit for one capability ceiling. Reading order is the priority order. */
 template <nk_capability_t caps_>
-struct dense_elementwise_chain {
+struct elementwise_chain {
     using kit_t = typename first_available_kit<                                                               //
         serial_elementwise_kit_t,                                                                             //
         chain_layer<NUMKONG_TARGET_SAPPHIRE && (caps_ & nk_cap_sapphire_k) != 0, sapphire_elementwise_kit_t>, //
@@ -2306,10 +2305,10 @@ struct dense_elementwise_chain {
  *  row's weights one tile over the heads. Each chunk of the rows widens once and stays in L1 while every head
  *  blends it. */
 template <nk::numeric_dtype scalar_type_, nk_capability_t caps_>
-void dense_values_step(f32_t* outputs, std::size_t heads, std::size_t columns, char const* const* rows,
-                       std::array<f32_t, 8> const* weights, std::array<f32_t, 8> const& corrections,
-                       std::size_t count) noexcept {
-    using kit_t = typename dense_elementwise_chain<caps_>::kit_t;
+void values_step(f32_t* outputs, std::size_t heads, std::size_t columns, char const* const* rows,
+                 std::array<f32_t, 8> const* weights, std::array<f32_t, 8> const& corrections,
+                 std::size_t count) noexcept {
+    using kit_t = typename elementwise_chain<caps_>::kit_t;
     // A multiple of eight columns, so every chunk starts on a byte even for the packed kinds.
     constexpr std::size_t chunk_columns_k = 64;
     std::size_t const bits = nk_dtype_bits(scalar_type_::dtype());
@@ -2339,7 +2338,7 @@ void dense_values_step(f32_t* outputs, std::size_t heads, std::size_t columns, c
 
 /** One finalize read two ways: the native dots, and the distances derived from them. */
 template <typename dot_result_type_, std::size_t fan_out_>
-struct dense_scores {
+struct scores_result {
 
     /** Native dot products in kernel lane order, before any distance conversion. */
     std::array<dot_result_type_, fan_out_> dots;
@@ -2351,8 +2350,8 @@ struct dense_scores {
 /** Whether @p kit_ 's finalize subtracts the candidates' row sums - the DPBUSD compensation - so
  *  even a dot reads the stored norms. Detected on the raw function pointer, so kits keep
  *  @c reduce_accumulators as a direct @c nk_* alias rather than a wrapper. */
-template <dense_quads_kit kit_>
-inline constexpr bool dense_quads_compensated = std::is_invocable_v<                           //
+template <quads_kit kit_>
+inline constexpr bool quads_compensated = std::is_invocable_v<                                 //
     decltype(kit_::reduce_accumulators),                                                       //
     typename kit_::accumulator_t const*, typename kit_::accumulator_t const*,                  //
     typename kit_::accumulator_t const*, typename kit_::accumulator_t const*,                  //
@@ -2360,9 +2359,9 @@ inline constexpr bool dense_quads_compensated = std::is_invocable_v<            
     typename kit_::finalized_vec_t*>;
 
 /** Whether @p kit_ finalizes @p kernel: dot, and the metrics its throughs derive from it. */
-template <dense_quads_kit kit_>
-constexpr bool dense_kernel_supported(nk_kernel_kind_t kernel) noexcept {
-    if constexpr (dense_bits_kit<kit_>)
+template <quads_kit kit_>
+constexpr bool kernel_supported(nk_kernel_kind_t kernel) noexcept {
+    if constexpr (bits_kit<kit_>)
         return kernel == nk_kernel_dot_k || kernel == nk_kernel_hamming_k || kernel == nk_kernel_jaccard_k;
     else return kernel == nk_kernel_dot_k || kernel == nk_kernel_angular_k || kernel == nk_kernel_euclidean_k;
 }
@@ -2370,12 +2369,12 @@ constexpr bool dense_kernel_supported(nk_kernel_kind_t kernel) noexcept {
 /** Whether a quads kit covers @p scalar_ under @p caps_ - the chains specialize only the scalars
  *  they adapt. */
 template <typename scalar_, nk_capability_t caps_>
-concept dense_quads_adapted = requires { typename dense_quads_chain<scalar_, caps_>::kit_t; };
+concept quads_adapted = requires { typename quads_chain<scalar_, caps_>::kit_t; };
 
 /** Whether that kit's epilogue also finalizes @p kernel_. */
 template <nk_kernel_kind_t kernel_, typename scalar_, nk_capability_t caps_>
-concept dense_quads_supported = dense_quads_adapted<scalar_, caps_> &&
-                                dense_kernel_supported<typename dense_quads_chain<scalar_, caps_>::kit_t>(kernel_);
+concept quads_supported = quads_adapted<scalar_, caps_> &&
+                          kernel_supported<typename quads_chain<scalar_, caps_>::kit_t>(kernel_);
 
 /** Widens the four lanes an epilogue wrote as @p lane_type_ into distances. */
 template <typename lane_type_, typename finalized_vec_type_>
@@ -2394,13 +2393,13 @@ template <typename lane_type_, typename finalized_vec_type_>
  *  quad. Each through writes its own lane type - the dot one the dots' width, Hamming @c u32, the
  *  rest @c f32.
  */
-template <dense_quads_kit kit_>
+template <quads_kit kit_>
 [[gnu::always_inline]] inline std::array<f32_t, 4> convert_to_distances(
     nk_kernel_kind_t kernel, typename kit_::finalized_vec_t const& dots,
     typename kit_::scalar_t::dot_result_t query_sumsq, typename kit_::finalized_vec_t const& sumsqs) noexcept {
     using dot_result_t = typename kit_::scalar_t::dot_result_t;
     alignas(16) typename kit_::finalized_vec_t distances;
-    if constexpr (dense_bits_kit<kit_>) switch (kernel) {
+    if constexpr (bits_kit<kit_>) switch (kernel) {
         case nk_kernel_hamming_k:
             kit_::hamming_from_dot(&dots, query_sumsq, &sumsqs, &distances);
             return distances_of_<nk_u32_t>(distances);
@@ -2430,14 +2429,14 @@ template <dense_quads_kit kit_>
  *  finalize is hardcoded fan-out-4); for 1-to-1 the bottom three slots are left as
  *  register noise and the resulting lanes 1-3 are dropped at extract time.
  */
-template <std::size_t fan_out_, dense_quads_kit kit_, typename cache_hints_type_>
-[[gnu::always_inline]] inline dense_scores<typename kit_::scalar_t::dot_result_t, fan_out_> invoke_scores_( //
-    nk_kernel_kind_t kernel,                                                                                //
-    nk::vector_view<typename kit_::scalar_t> query,                                                         //
-    vector_norms<typename kit_::scalar_t::dot_result_t> query_norms,                                        //
-    std::array<nk::vector_view<typename kit_::scalar_t>, fan_out_> candidates,                              //
-    std::array<vector_norms<typename kit_::scalar_t::dot_result_t>, fan_out_> candidates_norms,             //
-    std::array<nk::vector_view<typename kit_::scalar_t>, fan_out_> next_candidates,                         //
+template <std::size_t fan_out_, quads_kit kit_, typename cache_hints_type_>
+[[gnu::always_inline]] inline scores_result<typename kit_::scalar_t::dot_result_t, fan_out_> invoke_scores_( //
+    nk_kernel_kind_t kernel,                                                                                 //
+    nk::vector_view<typename kit_::scalar_t> query,                                                          //
+    vector_norms<typename kit_::scalar_t::dot_result_t> query_norms,                                         //
+    std::array<nk::vector_view<typename kit_::scalar_t>, fan_out_> candidates,                               //
+    std::array<vector_norms<typename kit_::scalar_t::dot_result_t>, fan_out_> candidates_norms,              //
+    std::array<nk::vector_view<typename kit_::scalar_t>, fan_out_> next_candidates,                          //
     [[maybe_unused]] cache_hints_type_ hints) noexcept {
 
     static_assert(fan_out_ == 1 || fan_out_ == 4, "Only 1-to-1 and 1-to-4 fan-outs are supported");
@@ -2512,7 +2511,7 @@ template <std::size_t fan_out_, dense_quads_kit kit_, typename cache_hints_type_
     // u8/i8 finalize takes 8 args (DPBUSD bias correction); float-path takes 6.
     using finalized_vec_t = typename kit_::finalized_vec_t;
     alignas(64) finalized_vec_t dot_products_vec;
-    if constexpr (dense_quads_compensated<kit_>) {
+    if constexpr (quads_compensated<kit_>) {
         alignas(16) std::array<dot_result_t, 4> candidates_sums_array {};
         [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
             ((candidates_sums_array[lane_index] = candidates_norms[lane_index].sum), ...);
@@ -2538,7 +2537,7 @@ template <std::size_t fan_out_, dense_quads_kit kit_, typename cache_hints_type_
     static_assert(sizeof(finalized_vec_t) == 4 * sizeof(dot_result_t), "A finalize holds four dot lanes");
     std::array<dot_result_t, 4> const& dots_array = *reinterpret_cast<std::array<dot_result_t, 4> const*>(
         &dot_products_vec);
-    dense_scores<dot_result_t, fan_out_> scores;
+    scores_result<dot_result_t, fan_out_> scores;
     [&]<std::size_t... lane_index>(std::index_sequence<lane_index...>) {
         ((scores.dots[lane_index] = dots_array[lane_index]), ...);
         ((scores.distances[lane_index] = distances_array[lane_index]), ...);
@@ -2549,9 +2548,9 @@ template <std::size_t fan_out_, dense_quads_kit kit_, typename cache_hints_type_
 /** Compute @c (sum,sumsq) of @p vec via the kit's @c compute_norms - one source of truth, the
  *  kit. */
 template <nk_capability_t caps_, nk::numeric_dtype scalar_>
-[[gnu::always_inline]] inline vector_norms<typename scalar_::dot_result_t> dense_norms(
+[[gnu::always_inline]] inline vector_norms<typename scalar_::dot_result_t> norms(
     nk::vector_view<scalar_> vec) noexcept {
-    using kit_t = typename dense_quads_chain<scalar_, caps_>::kit_t;
+    using kit_t = typename quads_chain<scalar_, caps_>::kit_t;
     return invoke_dense_norms_(kit_t::compute_norms, vec);
 }
 
@@ -2568,7 +2567,7 @@ template <nk_capability_t caps_, nk::numeric_dtype scalar_>
     vector_norms<typename scalar_::dot_result_t> query_norms, //
     nk::vector_view<scalar_> candidate,                       //
     vector_norms<typename scalar_::dot_result_t> candidate_norms) noexcept {
-    using kit_t = typename dense_quads_chain<scalar_, caps_>::kit_t;
+    using kit_t = typename quads_chain<scalar_, caps_>::kit_t;
     return invoke_scores_<1, kit_t>( //
                kernel, query, query_norms, std::array<nk::vector_view<scalar_>, 1> {candidate},
                std::array {candidate_norms}, std::array<nk::vector_view<scalar_>, 1> {candidate},
@@ -2584,7 +2583,7 @@ template <nk_capability_t caps_, nk::numeric_dtype scalar_>
     vector_norms<typename scalar_::dot_result_t> query_norms, //
     std::array<nk::vector_view<scalar_>, 4> candidates,       //
     std::array<vector_norms<typename scalar_::dot_result_t>, 4> candidates_norms) noexcept {
-    using kit_t = typename dense_quads_chain<scalar_, caps_>::kit_t;
+    using kit_t = typename quads_chain<scalar_, caps_>::kit_t;
     return invoke_scores_<4, kit_t>(kernel, query, query_norms, candidates, candidates_norms, candidates,
                                     fu::standard_cache_hints_t {})
         .distances;
@@ -2592,13 +2591,13 @@ template <nk_capability_t caps_, nk::numeric_dtype scalar_>
 
 /** 1-to-4 native dots and the distances derived from them, from one finalize, under @p kernel. */
 template <nk_capability_t caps_, nk::numeric_dtype scalar_>
-[[gnu::always_inline]] inline dense_scores<typename scalar_::dot_result_t, 4> scores( //
-    nk_kernel_kind_t kernel,                                                          //
-    nk::vector_view<scalar_> query,                                                   //
-    vector_norms<typename scalar_::dot_result_t> query_norms,                         //
-    std::array<nk::vector_view<scalar_>, 4> candidates,                               //
+[[gnu::always_inline]] inline scores_result<typename scalar_::dot_result_t, 4> scores( //
+    nk_kernel_kind_t kernel,                                                           //
+    nk::vector_view<scalar_> query,                                                    //
+    vector_norms<typename scalar_::dot_result_t> query_norms,                          //
+    std::array<nk::vector_view<scalar_>, 4> candidates,                                //
     std::array<vector_norms<typename scalar_::dot_result_t>, 4> candidates_norms) noexcept {
-    using kit_t = typename dense_quads_chain<scalar_, caps_>::kit_t;
+    using kit_t = typename quads_chain<scalar_, caps_>::kit_t;
     return invoke_scores_<4, kit_t>(kernel, query, query_norms, candidates, candidates_norms, candidates,
                                     fu::standard_cache_hints_t {});
 }
@@ -2606,15 +2605,15 @@ template <nk_capability_t caps_, nk::numeric_dtype scalar_>
 /** As @c scores, while streaming @p next_candidates toward L2 one line per line scored, so the walk's next quad
  *  arrives as this one finishes. */
 template <nk_capability_t caps_, nk::numeric_dtype scalar_, typename cache_hints_type_>
-[[gnu::always_inline]] inline dense_scores<typename scalar_::dot_result_t, 4> scores( //
-    nk_kernel_kind_t kernel,                                                          //
-    nk::vector_view<scalar_> query,                                                   //
-    vector_norms<typename scalar_::dot_result_t> query_norms,                         //
-    std::array<nk::vector_view<scalar_>, 4> candidates,                               //
-    std::array<vector_norms<typename scalar_::dot_result_t>, 4> candidates_norms,     //
-    std::array<nk::vector_view<scalar_>, 4> next_candidates,                          //
+[[gnu::always_inline]] inline scores_result<typename scalar_::dot_result_t, 4> scores( //
+    nk_kernel_kind_t kernel,                                                           //
+    nk::vector_view<scalar_> query,                                                    //
+    vector_norms<typename scalar_::dot_result_t> query_norms,                          //
+    std::array<nk::vector_view<scalar_>, 4> candidates,                                //
+    std::array<vector_norms<typename scalar_::dot_result_t>, 4> candidates_norms,      //
+    std::array<nk::vector_view<scalar_>, 4> next_candidates,                           //
     cache_hints_type_ hints) noexcept {
-    using kit_t = typename dense_quads_chain<scalar_, caps_>::kit_t;
+    using kit_t = typename quads_chain<scalar_, caps_>::kit_t;
     return invoke_scores_<4, kit_t>(kernel, query, query_norms, candidates, candidates_norms, next_candidates, hints);
 }
 
@@ -2909,10 +2908,10 @@ struct u1x8_smebi32_tiles_kit_t {
 #endif // NUMKONG_TARGET_SMEBI32
 
 /** Matrix-engine capability cascade for every scalar, over the same @p caps_ bitmask as
- *  @c dense_quads_chain. The primary template resolves to @c no_tiles_kit_t, and only the scalars
+ *  @c quads_chain. The primary template resolves to @c no_tiles_kit_t, and only the scalars
  *  some engine multiplies specialize it. */
 template <nk::numeric_dtype scalar_, nk_capability_t caps_>
-struct dense_tiles_chain {
+struct tiles_chain {
     using kit_t = no_tiles_kit_t;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
     static constexpr bool has_tiles_k = false;
@@ -2920,7 +2919,7 @@ struct dense_tiles_chain {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_tiles_chain<nk::bf16_t, caps_> {
+struct tiles_chain<nk::bf16_t, caps_> {
     using kit_t = typename first_available_kit<                                                                      //
         no_tiles_kit_t,                                                                                              //
         chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, bf16_sme_tiles_kit_t>,                        //
@@ -2932,7 +2931,7 @@ struct dense_tiles_chain<nk::bf16_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_tiles_chain<nk::u1x8_t, caps_> {
+struct tiles_chain<nk::u1x8_t, caps_> {
     using kit_t = typename first_available_kit<                                                          //
         no_tiles_kit_t,                                                                                  //
         chain_layer<NUMKONG_TARGET_SMEBI32 && (caps_ & nk_cap_smebi32_k) != 0, u1x8_smebi32_tiles_kit_t> //
@@ -2943,7 +2942,7 @@ struct dense_tiles_chain<nk::u1x8_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_tiles_chain<nk::i8_t, caps_> {
+struct tiles_chain<nk::i8_t, caps_> {
     using kit_t = typename first_available_kit<                                                                    //
         no_tiles_kit_t,                                                                                            //
         chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, i8_sme_tiles_kit_t>,                        //
@@ -2955,7 +2954,7 @@ struct dense_tiles_chain<nk::i8_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_tiles_chain<nk::e4m3_t, caps_> {
+struct tiles_chain<nk::e4m3_t, caps_> {
     using kit_t = typename first_available_kit<                                                                      //
         no_tiles_kit_t,                                                                                              //
         chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, e4m3_sme_tiles_kit_t>,                        //
@@ -2967,7 +2966,7 @@ struct dense_tiles_chain<nk::e4m3_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_tiles_chain<nk::f16_t, caps_> {
+struct tiles_chain<nk::f16_t, caps_> {
     using kit_t = typename first_available_kit<                                                                  //
         no_tiles_kit_t,                                                                                          //
         chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, f16_sme_tiles_kit_t>,                     //
@@ -2979,7 +2978,7 @@ struct dense_tiles_chain<nk::f16_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_tiles_chain<nk::u8_t, caps_> {
+struct tiles_chain<nk::u8_t, caps_> {
     using kit_t = typename first_available_kit<                                                                    //
         no_tiles_kit_t,                                                                                            //
         chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, u8_sme_tiles_kit_t>,                        //
@@ -2991,7 +2990,7 @@ struct dense_tiles_chain<nk::u8_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_tiles_chain<nk::e5m2_t, caps_> {
+struct tiles_chain<nk::e5m2_t, caps_> {
     using kit_t = typename first_available_kit<                                                                      //
         no_tiles_kit_t,                                                                                              //
         chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, e5m2_sme_tiles_kit_t>,                        //
@@ -3004,7 +3003,7 @@ struct dense_tiles_chain<nk::e5m2_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_tiles_chain<nk::i4x2_t, caps_> {
+struct tiles_chain<nk::i4x2_t, caps_> {
     using kit_t = typename first_available_kit<                                              //
         no_tiles_kit_t,                                                                      //
         chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, i4x2_sme_tiles_kit_t> //
@@ -3015,7 +3014,7 @@ struct dense_tiles_chain<nk::i4x2_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_tiles_chain<nk::u4x2_t, caps_> {
+struct tiles_chain<nk::u4x2_t, caps_> {
     using kit_t = typename first_available_kit<                                              //
         no_tiles_kit_t,                                                                      //
         chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, u4x2_sme_tiles_kit_t> //
@@ -3026,7 +3025,7 @@ struct dense_tiles_chain<nk::u4x2_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_tiles_chain<nk::e3m2_t, caps_> {
+struct tiles_chain<nk::e3m2_t, caps_> {
     using kit_t = typename first_available_kit<                                                                      //
         no_tiles_kit_t,                                                                                              //
         chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, e3m2_sme_tiles_kit_t>,                        //
@@ -3038,7 +3037,7 @@ struct dense_tiles_chain<nk::e3m2_t, caps_> {
 
 template <nk_capability_t caps_>
     requires((caps_ & nk_cap_cpus_k) != 0)
-struct dense_tiles_chain<nk::e2m3_t, caps_> {
+struct tiles_chain<nk::e2m3_t, caps_> {
     using kit_t = typename first_available_kit<                                                                      //
         no_tiles_kit_t,                                                                                              //
         chain_layer<NUMKONG_TARGET_SME && (caps_ & nk_cap_sme_k) != 0, e2m3_sme_tiles_kit_t>,                        //
@@ -3048,5 +3047,4 @@ struct dense_tiles_chain<nk::e2m3_t, caps_> {
     static constexpr bool has_tiles_k = !std::is_same_v<kit_t, no_tiles_kit_t>;
 };
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::dense

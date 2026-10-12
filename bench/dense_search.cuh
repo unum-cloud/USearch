@@ -22,11 +22,12 @@
 #include <fmt/format.h>
 #include <fmt/ranges.h> // `fmt::join`
 
-#include "usearch/dense/types.hpp" // `dense_indexer_heads`
+#include "usearch/dense/types.hpp" // `dense::indexer_heads`
 
 #include "dense.cuh"
 
 namespace unum::usearch::bench {
+using namespace unum::usearch::dense;
 
 #pragma region Telemetry and Judgment
 
@@ -75,7 +76,7 @@ struct bench_results_t {
     nk::matrix<u32_t> hit_rows;
 
     /** The @b [queries,top_k] distances matching @c hit_rows entry-for-entry. */
-    nk::matrix<dense_distance_t> hit_distances;
+    nk::matrix<distance_t> hit_distances;
 
     /** Merged hits per query, sizing each row for the post-clock judgment. */
     std::vector<u32_t> hit_counts;
@@ -90,7 +91,7 @@ struct bench_results_t {
 /** Sizes the per-query hit matrices for @p queries_count queries of @p top_k matches each. */
 inline bool reserve_results(bench_results_t& results, std::size_t queries_count, std::size_t top_k) {
     results.hit_rows = nk::matrix<u32_t>::zeros({queries_count, top_k}).value;
-    results.hit_distances = nk::matrix<dense_distance_t>::zeros({queries_count, top_k}).value;
+    results.hit_distances = nk::matrix<distance_t>::zeros({queries_count, top_k}).value;
     if (results.hit_rows.empty() || results.hit_distances.empty())
         return fmt::println("Failed to allocate the per-query hit matrices"), false;
     results.hit_counts.resize(queries_count);
@@ -324,7 +325,7 @@ struct bench_indexer_heads {
     std::size_t count() const noexcept { return weights.extent(1); }
 
     /** The stored heads of queries @b [first,first+queries), as the search verbs take them. */
-    dense_indexer_heads<scalar_type_> rows(std::size_t first, std::size_t queries) const noexcept {
+    indexer_heads<scalar_type_> rows(std::size_t first, std::size_t queries) const noexcept {
         nk::matrix_view<scalar_type_> const stored {heads.data(), widened_heads.extent(0), widened_heads.extent(1)};
         return {stored(nk::range(first * count(), (first + queries) * count()), nk::slice),
                 weights(nk::range(first, first + queries), nk::slice)};

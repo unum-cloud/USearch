@@ -53,6 +53,7 @@
 namespace us = unum::usearch;
 
 namespace unum::usearch::test {
+using namespace unum::usearch::utilities;
 
 #define expect(cond) expect_((bool)(cond), #cond, __FILE__, __LINE__)
 inline std::size_t expect_(bool condition, char const* expression, char const* file, int line) {
@@ -482,8 +483,8 @@ std::size_t check_meshes(settings_t const& settings);
 /** Teaches the expect verbs to print statuses by name - @c status_t is the most
  *  compared enum in the suite, and {fmt} refuses unknown enums at compile time. */
 template <>
-struct fmt::formatter<unum::usearch::status_t> : fmt::formatter<char const*> {
-    auto format(us::status_t status, format_context& context) const {
-        return fmt::formatter<char const*>::format(us::status_to_string(status), context);
+struct fmt::formatter<unum::usearch::utilities::status_t> : fmt::formatter<char const*> {
+    auto format(us::utilities::status_t status, format_context& context) const {
+        return fmt::formatter<char const*>::format(us::utilities::status_to_string(status), context);
     }
 };

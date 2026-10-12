@@ -2,7 +2,7 @@
  *  @file bench/dense/vram_indexes_search.cuh
  *  @author Ash Vardanian
  *  @date October 7, 2026
- *  @brief Profiling harness for searching the sharded @c dense_vram_nvidia_indexes over real
+ *  @brief Profiling harness for searching the sharded @c dense::vram_nvidia_indexes over real
  *      persisted datasets, shared by the per-dtype benchmark shards.
  *
  *  The multi-device category: one sharded index holding a shard per @c USEARCH_DEVICES ordinal,
@@ -306,8 +306,8 @@ bool run_indexes_search(streamed_dataset_type_& streamed) {
                                                            {count, dimensions}}
                                          : stage_batch(streamed, searched_rows(streamed), base, count);
         nk::matrix_span<key_t> const keys = bench.results.hit_rows(nk::range(base, base + count), nk::slice);
-        nk::matrix_span<dense_distance_t> const distances = bench.results.hit_distances(nk::range(base, base + count),
-                                                                                        nk::slice);
+        nk::matrix_span<distance_t> const distances = bench.results.hit_distances(nk::range(base, base + count),
+                                                                                  nk::slice);
         auto search = [&](auto const&... ranking) noexcept {
             return bench.indexes.search(batch, ranking..., bench.executor, config, keys, distances,
                                         std::span<std::size_t> {counts.data(), count});
@@ -364,8 +364,7 @@ struct indexes_search_workload_t {
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
 int stage_indexes_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                           std::span<int const> devices, nk_kernel_kind_t kernel, workload_type_ const& workload) {
-    cuda_indexes_context<dense_vram_nvidia_indexes<u32_t, stored_dtype_, capability_>> bench {settings, devices,
-                                                                                              kernel};
+    cuda_indexes_context<vram_nvidia_indexes<u32_t, stored_dtype_, capability_>> bench {settings, devices, kernel};
     return stream_and_run(dataset, bench, [&](auto& streamed) {
         return prepare_indexes(streamed) && run_indexes_insertion(streamed) && run_indexes_refinement(streamed) &&
                (settings.save_name.empty() || save_indexes(streamed)) && workload.run(streamed);

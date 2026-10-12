@@ -33,8 +33,7 @@
 #include "usearch/utilities/types.hpp"      // `status_t`, `succeeded`, `failed`
 #include "usearch/utilities/sanitizers.hpp" // `annotate_container`
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::utilities {
 
 /** Assigns @p new_value to @p old_value and returns its previous contents -
  *  @c std::exchange respelled as unconditionally @c noexcept. */
@@ -817,8 +816,8 @@ class growing_buffer {
     /** Qualified, since an element type from @c std drags @c std::exchange into the
      *  overload set through argument-dependent lookup and makes the call ambiguous. */
     growing_buffer(growing_buffer&& other) noexcept
-        : elements_(usearch::exchange(other.elements_, nullptr)), size_(usearch::exchange(other.size_, 0)),
-          capacity_(usearch::exchange(other.capacity_, 0)), allocator_(std::move(other.allocator_)) {}
+        : elements_(utilities::exchange(other.elements_, nullptr)), size_(utilities::exchange(other.size_, 0)),
+          capacity_(utilities::exchange(other.capacity_, 0)), allocator_(std::move(other.allocator_)) {}
 
     growing_buffer& operator=(growing_buffer&& other) noexcept {
         std::swap(elements_, other.elements_);
@@ -1314,5 +1313,4 @@ static_assert(buffer_allocator<arena_allocator<std::byte>>);
 static_assert(std::same_as<std::allocator_traits<arena_allocator<std::byte>>::rebind_alloc<int>, //
                            arena_allocator<int>>);
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::utilities

@@ -2,8 +2,8 @@
  *  @file test/dense/ram_indexes.hpp
  *  @author Ash Vardanian
  *  @date August 31, 2026
- *  @brief The CPU-side suite composer for @c dense_ram_indexes - the sharded index over one shard
- *      per memory domain - shared by its translation unit.
+ *  @brief The CPU-side suite composer for @c dense::ram_indexes - the sharded index over one
+ *      shard per memory domain - shared by its translation unit.
  *
  *  The scenarios live in @c dense.cuh, templated over the sharded-index type; this composer
  *  names a curated handful of cells rather than the per-dtype grid, since the routing, key
@@ -30,7 +30,7 @@ template <                                       //
     nk_capability_t caps_ = nk_cap_serial_k,     //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
 static std::size_t test_ram_indexes_configuration(char const* name, u64_t) {
-    if constexpr (!dense_quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>)
+    if constexpr (!quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>)
         return report(name, "serial kernels not adapted yet");
     else return report(name, "kit not compiled for this target");
 }
@@ -43,7 +43,7 @@ template <                                       //
     requires dense_cell_testable<dtype_, kernel_, caps_>
 static std::size_t test_ram_indexes_configuration(char const* name, u64_t seed) {
 
-    using indexes_t = dense_ram_indexes<u32_t, dtype_, caps_, waiter_type_, atomic_ref_>;
+    using indexes_t = ram_indexes<u32_t, dtype_, caps_, waiter_type_, atomic_ref_>;
     if (!dense_cell_admitted<caps_, atomic_ref_>()) return report(name, "capabilities missing at runtime");
 
     // The suite is composed here, not reflected: every call below is a capability claim

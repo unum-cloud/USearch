@@ -30,25 +30,25 @@
 #include "usearch/utilities/ram_buffers.hpp"
 #include "usearch/utilities/ram_tables.hpp"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::basic {
+using namespace unum::usearch::utilities;
 
 /** One traversal candidate; both halves are the caller's chosen widths. */
 template <typename node_id_type_ = u64_t, typename distance_type_ = f64_t>
-struct basic_scored_node {
+struct scored_node {
     node_id_type_ node_id;
     distance_type_ distance;
 
     /** Orders scored nodes nearest-first; the comparator of the sorted results pool. */
     struct closer_t {
-        bool operator()(basic_scored_node first, basic_scored_node second) const noexcept {
+        bool operator()(scored_node first, scored_node second) const noexcept {
             return first.distance < second.distance;
         }
     };
 
     /** Orders scored nodes furthest-first; the comparator of the frontier heap. */
     struct further_t {
-        bool operator()(basic_scored_node first, basic_scored_node second) const noexcept {
+        bool operator()(scored_node first, scored_node second) const noexcept {
             return first.distance > second.distance;
         }
     };
@@ -58,13 +58,13 @@ struct basic_scored_node {
  *  content through one move-assignment at publication, are read as @c const& after, and
  *  are destroyed only at teardown - that is the whole lifecycle. */
 template <typename value_type_>
-concept basic_value = std::is_nothrow_default_constructible_v<value_type_> && //
-                      std::is_nothrow_move_assignable_v<value_type_> &&       //
-                      std::is_nothrow_destructible_v<value_type_>;
+concept value = std::is_nothrow_default_constructible_v<value_type_> && //
+                std::is_nothrow_move_assignable_v<value_type_> &&       //
+                std::is_nothrow_destructible_v<value_type_>;
 
 /** A batched metric's answer to one @c push: whether the candidate entered the
  *  staging of the current scoring round - a capacity answer, never a failure. */
-enum class basic_metric_staging_t : bool {
+enum class metric_staging_t : bool {
 
     /** The staging is full; the round should drain before anything else stages. */
     refused_k = false,
@@ -99,13 +99,12 @@ constexpr distance_type_ unbounded_radius() noexcept {
  *  to take converting parameters - @c std::string_view for @c std::string values.
  */
 template <typename metric_type_, typename value_type_, typename distance_type_>
-concept basic_metric = basic_value<value_type_> &&
-                       requires(metric_type_& metric, value_type_ const& value, distance_type_ radius,
-                                std::span<distance_type_> distances) {
-                           { metric.reset(value) } noexcept;
-                           { metric.push(value) } noexcept -> std::same_as<basic_metric_staging_t>;
-                           { metric.drain(distances, radius) } noexcept;
-                       };
+concept metric = value<value_type_> && requires(metric_type_& metric, value_type_ const& value, distance_type_ radius,
+                                                std::span<distance_type_> distances) {
+    { metric.reset(value) } noexcept;
+    { metric.push(value) } noexcept -> std::same_as<metric_staging_t>;
+    { metric.drain(distances, radius) } noexcept;
+};
 
 /** Marks a metric whose @c reset also accepts query forms other than the stored
  *  value - the standard @c is_transparent convention. */
@@ -115,25 +114,25 @@ concept transparent_metric = requires { typename metric_type_::is_transparent; }
 /** A query form @p metric_type_ opens rounds for: the stored value itself, or -
  *  on a @c transparent_metric - any other type its @c reset accepts. */
 template <typename query_type_, typename metric_type_, typename value_type_>
-concept basic_query = (std::same_as<query_type_, value_type_> || transparent_metric<metric_type_>) &&
-                      requires(metric_type_& metric, query_type_ const& query) {
-                          { metric.reset(query) } noexcept;
-                      };
+concept query = (std::same_as<query_type_, value_type_> || transparent_metric<metric_type_>) &&
+                requires(metric_type_& metric, query_type_ const& query) {
+                    { metric.reset(query) } noexcept;
+                };
 
 /** Reads every round a walk scores - the staged node IDs in push order beside their drained
  *  distances, both valid only for the call and exact only within the round's radius - and answers
  *  whether the walk should go on. */
 template <typename fold_type_, typename node_id_type_, typename distance_type_>
-concept basic_fold = requires(fold_type_& fold, std::span<node_id_type_ const> node_ids,
-                              std::span<distance_type_ const> distances) {
+concept fold = requires(fold_type_& fold, std::span<node_id_type_ const> node_ids,
+                        std::span<distance_type_ const> distances) {
     { fold.absorb(node_ids, distances) } noexcept -> std::same_as<walk_demand_t>;
 };
 
 /** Serializes stored values into caller-owned buffers and back - the payload half
  *  of @c save & @c load, supplied by the caller because values are arbitrary objects. */
 template <typename codec_type_, typename value_type_>
-concept basic_value_codec = requires(codec_type_ const& codec, value_type_ const& immutable_value,
-                                     value_type_& mutable_value, bytes_span_t output, bytes_view_t input) {
+concept value_codec = requires(codec_type_ const& codec, value_type_ const& immutable_value, value_type_& mutable_value,
+                               bytes_span_t output, bytes_view_t input) {
     { codec.storage_requirements(immutable_value) } noexcept -> std::same_as<std::size_t>;
     { codec.save(immutable_value, output) } noexcept -> std::same_as<status_t>;
     { codec.load(input, mutable_value) } noexcept -> std::same_as<status_t>;
@@ -141,7 +140,7 @@ concept basic_value_codec = requires(codec_type_ const& codec, value_type_ const
 
 /** The four per-walk counters every traversal accumulates; results report one
  *  call's share as the difference of two snapshots. */
-struct basic_traversal_telemetry_t {
+struct traversal_telemetry_t {
 
     /** Metric invocations, batched rounds counted once per scored candidate. */
     std::size_t computed_distances = 0;
@@ -155,7 +154,7 @@ struct basic_traversal_telemetry_t {
     /** Walks a scratch refusal ended early - ranked short, and on insertion wired thinner. */
     std::size_t saturated_walks = 0;
 
-    basic_traversal_telemetry_t operator-(basic_traversal_telemetry_t const& before) const noexcept {
+    traversal_telemetry_t operator-(traversal_telemetry_t const& before) const noexcept {
         return {computed_distances - before.computed_distances, visited_members - before.visited_members,
                 restarts - before.restarts, saturated_walks - before.saturated_walks};
     }
@@ -172,7 +171,7 @@ void drain_round(metric_type_& metric, std::size_t staged_count, context_type_& 
 }
 
 /** Plain NSW selection: the nearest @c connectivity candidates, no pruning. */
-struct basic_keep_closest_t {
+struct keep_closest_t {
 
     /** The neighbors-per-node budget this selector prunes to. */
     std::size_t connectivity = connectivity_32_k;
@@ -190,7 +189,7 @@ struct basic_keep_closest_t {
 /** Relative-neighborhood pruning: a candidate survives only if closer to the
  *  query than to every already-kept neighbor - pair distances drawn through the same
  *  metric in shrinking rounds, exiting each candidate on its first violation. */
-struct basic_keep_diverse_t {
+struct keep_diverse_t {
 
     /** The neighbors-per-node budget this selector prunes to. */
     std::size_t connectivity = connectivity_32_k;
@@ -212,7 +211,7 @@ struct basic_keep_diverse_t {
                 std::size_t staged_count = 0;
                 for (; staged_count != kept_count; ++staged_count)
                     if (metric.push(index.published_value_of(selected[staged_count].node_id)) ==
-                        basic_metric_staging_t::refused_k)
+                        metric_staging_t::refused_k)
                         break;
                 drain_round(metric, staged_count, context, candidate.distance);
                 if (staged_count != kept_count) return; // Staging refused - keep what survived so far.
@@ -231,8 +230,8 @@ struct basic_keep_diverse_t {
  *  may also write @c context.staged_distances - and nothing else: @c staged_ids and
  *  @c reverse_ids belong to the calling traversal. */
 template <typename selector_type_, typename index_type_, typename metric_type_>
-concept basic_selector = requires(selector_type_ const& selector, index_type_ const& index, metric_type_& metric,
-                                  typename index_type_::traversal_context_t& context) {
+concept selector = requires(selector_type_ const& selector, index_type_ const& index, metric_type_& metric,
+                            typename index_type_::traversal_context_t& context) {
     { selector(index, metric, context) } noexcept;
     { selector.connectivity } -> std::convertible_to<std::size_t>;
 };
@@ -287,7 +286,7 @@ value_type_ atomic_fetch_add_if_at_most(reference_type_ reference, value_type_ o
  *  plug in without this header naming them; the claiming exchange is the loop's only
  *  store, so a monitored waiter wakes once per @c unlock rather than on every attempt. */
 template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = standard_atomic_ref>
-struct basic_mutex {
+struct mutex {
     template <typename word_type_>
     using atomic_ref = atomic_ref_template_<word_type_>;
 
@@ -337,7 +336,7 @@ struct basic_mutex {
  *  free word.
  */
 template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = standard_atomic_ref>
-struct basic_shared_mutex {
+struct shared_mutex {
     template <typename word_type_>
     using atomic_ref = atomic_ref_template_<word_type_>;
 
@@ -421,9 +420,9 @@ struct basic_shared_mutex {
  *  the staging surfaces of batched metric rounds, and running telemetry. */
 template <typename node_id_type_ = u64_t, typename distance_type_ = f64_t,
           typename allocator_type_ = std::allocator<byte_t>>
-struct basic_traversal_context {
+struct traversal_context {
 
-    using scored_node_t = basic_scored_node<node_id_type_, distance_type_>;
+    using scored_node_t = scored_node<node_id_type_, distance_type_>;
     using allocator_t = allocator_type_;
     using scored_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<scored_node_t>;
     using visits_allocator_t = typename std::allocator_traits<allocator_t>::template rebind_alloc<std::byte>;
@@ -463,18 +462,18 @@ struct basic_traversal_context {
     scratch_buffer<node_id_type_> reverse_ids;
 
     /** Running per-walk counters; calls report their share as snapshot deltas. */
-    basic_traversal_telemetry_t telemetry;
+    traversal_telemetry_t telemetry;
 
     /** Every container gets a rebound copy of @p allocator, so scratch lands where
      *  the caller places it; seed distinctly per thread to decorrelate the walks. */
-    explicit basic_traversal_context(u64_t seed = 0, allocator_t allocator = {}) noexcept
+    explicit traversal_context(u64_t seed = 0, allocator_t allocator = {}) noexcept
         : results(scored_allocator_t(allocator)), frontier(scored_allocator_t(allocator)),
           visited(visits_allocator_t(allocator)), random_generator {seed}, staged_ids(allocator),
           staged_distances(allocator), selected_neighbors(allocator), reverse_ids(allocator) {}
 };
 
 /** Row & element counts of the five columns a snapshot needs - what a container sizes. */
-struct basic_columns_extents_t {
+struct columns_extents_t {
 
     /** Published nodes, the row count of every node-sized column. */
     std::size_t nodes = 0;
@@ -491,7 +490,7 @@ struct basic_columns_extents_t {
  *  container lays them out wherever it likes. Both prefix-sum columns hold @b nodes+1 sums
  *  from zero, so row @c i owns the slice between sums @c i and @c i+1. */
 template <typename key_type_, typename node_id_type_, typename byte_type_, typename offset_type_ = u64_t>
-struct basic_columns {
+struct columns {
 
     /** One key per row. */
     std::span<key_type_> keys;
@@ -509,14 +508,14 @@ struct basic_columns {
     std::span<byte_type_> values;
 
     /** The read-only view of the same columns, so a saved set loads as it is. */
-    basic_columns<key_type_ const, node_id_type_ const, byte_type_ const, offset_type_ const> view() const noexcept {
+    columns<key_type_ const, node_id_type_ const, byte_type_ const, offset_type_ const> view() const noexcept {
         return {keys, neighbor_offsets, neighbor_ids, value_offsets, values};
     }
 };
 
 template <typename index_type_, synchronization_t synchronization_ = synchronization_t::concurrent_k,
           typename allocator_type_ = typename index_type_::allocator_t>
-struct basic_ram_cursor;
+struct ram_cursor;
 
 /**
  *  @brief Similarity Search index baseline for arbitrary values & similarity measures.
@@ -540,7 +539,7 @@ struct basic_ram_cursor;
  *  Node IDs are never recycled and removals are deleted, keeping every reader's stale ID
  *  valid forever.
  *
- *  @tparam value_type_ any payload satisfying @c basic_value; immovable once published.
+ *  @tparam value_type_ any payload satisfying @c basic::value; immovable once published.
  *  @tparam key_type_ trivially-copyable caller-visible identity.
  *  @tparam node_id_type_ graph-local identity, dense from zero; @c u32_t or @c u64_t.
  *  @tparam distance_type_ the metrics' result element.
@@ -559,8 +558,8 @@ template <                                                                //
     template <typename> class atomic_ref_template_ = standard_atomic_ref, //
     typename allocator_type_ = std::allocator<byte_t>                     //
     >
-    requires basic_value<value_type_> && (std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>)
-struct basic_ram_index {
+    requires value<value_type_> && (std::same_as<node_id_type_, u32_t> || std::same_as<node_id_type_, u64_t>)
+struct ram_index {
 
     using value_t = value_type_;
     using key_t = key_type_;
@@ -571,18 +570,18 @@ struct basic_ram_index {
     template <typename word_type_>
     using atomic_ref = atomic_ref_template_<word_type_>;
 
-    using scored_node_t = basic_scored_node<node_id_t, distance_t>;
-    using traversal_context_t = basic_traversal_context<node_id_t, distance_t, allocator_t>;
+    using scored_node_t = scored_node<node_id_t, distance_t>;
+    using traversal_context_t = traversal_context<node_id_t, distance_t, allocator_t>;
 
     /** The five caller-placed columns a save fills. */
-    using columns_t = basic_columns<key_t, node_id_t, byte_t, u64_t>;
+    using columns_t = columns<key_t, node_id_t, byte_t, u64_t>;
 
     /** The read-only columns a load consumes. */
-    using columns_view_t = basic_columns<key_t const, node_id_t const, byte_t const, u64_t const>;
+    using columns_view_t = columns<key_t const, node_id_t const, byte_t const, u64_t const>;
 
   private:
     template <typename cursor_index_type_, synchronization_t cursor_synchronization_, typename cursor_allocator_type_>
-    friend struct basic_ram_cursor;
+    friend struct ram_cursor;
 
     using neighbors_buffer_t = growing_buffer<node_id_t, allocator_t>;
 
@@ -595,7 +594,7 @@ struct basic_ram_index {
 
         /** Mutable so ID-addressed const readers, like @c degree_of, may briefly
          *  hold it - locking never mutates the record's logical state. */
-        mutable basic_mutex<wait_t, atomic_ref_template_> mutex;
+        mutable basic::mutex<wait_t, atomic_ref_template_> mutex;
         value_t value {};
         key_t key {};
         neighbors_buffer_t neighbors;
@@ -621,25 +620,25 @@ struct basic_ram_index {
 
     using key_map_t = chunked_multimap<key_t, node_id_t, std::hash<key_t>, allocator_t, atomic_ref_template_>;
 
-    using shared_mutex_t = basic_shared_mutex<wait_t, atomic_ref_template_>;
+    using shared_mutex_t = shared_mutex<wait_t, atomic_ref_template_>;
     using shared_lock_t = std::shared_lock<shared_mutex_t>;
     using unique_lock_t = std::unique_lock<shared_mutex_t>;
 
   public:
 #pragma region Lifecycle
 
-    basic_ram_index(basic_ram_index const&) noexcept = delete;
-    basic_ram_index& operator=(basic_ram_index const&) noexcept = delete;
-    basic_ram_index(basic_ram_index&&) noexcept = delete;
-    basic_ram_index& operator=(basic_ram_index&&) noexcept = delete;
+    ram_index(ram_index const&) noexcept = delete;
+    ram_index& operator=(ram_index const&) noexcept = delete;
+    ram_index(ram_index&&) noexcept = delete;
+    ram_index& operator=(ram_index&&) noexcept = delete;
 
     /** Constructs an empty index; allocates nothing - storage arrives in @c reserve. */
-    basic_ram_index(allocator_t allocator = {}) noexcept
+    ram_index(allocator_t allocator = {}) noexcept
         : nodes_array_(allocator), key_map_(allocator), allocator_(std::move(allocator)) {}
 
     /** Exclusive: the record array destroys every value in place, the key multimap
      *  frees its columns wholesale. */
-    ~basic_ram_index() noexcept = default;
+    ~ram_index() noexcept = default;
 
     /** Sizes the node records & the key multimap for @p capacity entries - once:
      *  the capacity is frozen by the first success, and later calls answer
@@ -685,7 +684,7 @@ struct basic_ram_index {
     struct [[nodiscard]] insert_result_t {
 
         /** This batch's share of the context's running counters. */
-        basic_traversal_telemetry_t telemetry;
+        traversal_telemetry_t telemetry;
     };
 
     /**
@@ -720,9 +719,8 @@ struct basic_ram_index {
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, typename metric_type_,
-              typename selector_type_ = basic_keep_diverse_t>
-        requires basic_metric<metric_type_, value_t, distance_t> &&
-                 basic_selector<selector_type_, basic_ram_index, metric_type_>
+              typename selector_type_ = keep_diverse_t>
+        requires metric<metric_type_, value_t, distance_t> && selector<selector_type_, ram_index, metric_type_>
     expected<insert_result_t> insert(std::span<value_t> incoming_values, std::span<key_t const> keys,
                                      metric_type_& metric, std::span<node_id_t> assigned_ids,
                                      traversal_context_t& context, selector_type_ selector = {},
@@ -769,7 +767,7 @@ struct basic_ram_index {
                                                       std::memory_order_acq_rel);
         iota_view<node_id_t> const range {first_new_id, static_cast<node_id_t>(first_new_id + incoming_count)};
 
-        basic_traversal_telemetry_t const telemetry_before = context.telemetry;
+        traversal_telemetry_t const telemetry_before = context.telemetry;
         for (node_id_t const new_node_id : range) {
             std::size_t const incoming_index = new_node_id - range.first;
             value_t& incoming = incoming_values[incoming_index];
@@ -911,7 +909,7 @@ struct basic_ram_index {
         std::size_t count = 0;
 
         /** This walk's share of the context's running counters. */
-        basic_traversal_telemetry_t telemetry;
+        traversal_telemetry_t telemetry;
     };
 
     /**
@@ -938,7 +936,7 @@ struct basic_ram_index {
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, //
               typename metric_type_, typename query_type_ = value_t>
-        requires basic_metric<metric_type_, value_t, distance_t> && basic_query<query_type_, metric_type_, value_t>
+        requires metric<metric_type_, value_t, distance_t> && query<query_type_, metric_type_, value_t>
     expected<search_result_t> search(query_type_ const& query, metric_type_& metric, //
                                      traversal_context_t& context, search_config_t config = {}) noexcept {
         return search<synchronization_>(query, metric, dummy_fold_t {}, context, config);
@@ -950,15 +948,15 @@ struct basic_ram_index {
      *
      *  @param[in] query The similarity target, alive for the whole call.
      *  @param[inout] metric This thread's scoring instance.
-     *  @param[inout] fold The reader of every scored round - see @c basic_fold. A @c sated_k ends the
-     *      walk successfully, before that round reaches the pool.
+     *  @param[inout] fold The reader of every scored round - see @c basic::fold. A @c sated_k ends
+     *      the walk successfully, before that round reaches the pool.
      *  @param[inout] context The calling thread's scratch & telemetry; holds the matches.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
     template <synchronization_t synchronization_ = synchronization_t::concurrent_k, //
               typename metric_type_, typename fold_type_, typename query_type_ = value_t>
-        requires basic_metric<metric_type_, value_t, distance_t> && basic_query<query_type_, metric_type_, value_t> &&
-                 basic_fold<std::remove_cvref_t<fold_type_>, node_id_t, distance_t>
+        requires metric<metric_type_, value_t, distance_t> && query<query_type_, metric_type_, value_t> &&
+                 fold<std::remove_cvref_t<fold_type_>, node_id_t, distance_t>
     expected<search_result_t> search(query_type_ const& query, metric_type_& metric, fold_type_&& fold, //
                                      traversal_context_t& context, search_config_t config = {}) noexcept {
         if (!capacity()) return {{}, status_t::uninitialized_k};
@@ -988,7 +986,7 @@ struct basic_ram_index {
         }
         if (!first_invisible_id) return {};
 
-        basic_traversal_telemetry_t const telemetry_before = context.telemetry;
+        traversal_telemetry_t const telemetry_before = context.telemetry;
         search_around_<synchronization_>(query, metric, snapshot_admission_t {first_invisible_id}, expansion_factor,
                                          fan_out, connectivity_32_k, context, fold);
 
@@ -1239,7 +1237,7 @@ struct basic_ram_index {
         std::size_t covered = 0;
 
         save_plan_t() noexcept = default;
-        save_plan_t(basic_ram_index const* index, columns_t columns, unique_lock_t&& hold) noexcept
+        save_plan_t(ram_index const* index, columns_t columns, unique_lock_t&& hold) noexcept
             : columns(columns), index_(index), hold_(std::move(hold)) {}
         save_plan_t(save_plan_t&& other) noexcept
             : columns(other.columns), covered(other.covered), index_(std::exchange(other.index_, nullptr)),
@@ -1253,7 +1251,7 @@ struct basic_ram_index {
          *  disjoint slices, so any number of caller threads run their steps concurrently;
          *  every slice starts where the plan's prefix sums say. */
         template <typename value_codec_type_>
-            requires basic_value_codec<value_codec_type_, value_t>
+            requires value_codec<value_codec_type_, value_t>
         status_t save(iota_view<node_id_t> node_range, value_codec_type_ const& codec) noexcept {
             if (!index_) return status_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
@@ -1297,7 +1295,7 @@ struct basic_ram_index {
 
         /** The index being serialized, whose unique side @c hold_ occupies; null in the
          *  empty plan a refused @ref plan_save returns, and once @c finish succeeded. */
-        basic_ram_index const* index_ = nullptr;
+        ram_index const* index_ = nullptr;
 
         /** The unique hold spanning the plan's whole lifetime. */
         unique_lock_t hold_;
@@ -1315,7 +1313,7 @@ struct basic_ram_index {
      *  A column shorter than its count answers @c overflow_k and a longer one
      *  @c config_mismatch_k, so the key column's length always names the row count. */
     template <typename value_codec_type_>
-        requires basic_value_codec<value_codec_type_, value_t>
+        requires value_codec<value_codec_type_, value_t>
     expected<save_plan_t> plan_save(columns_t columns, value_codec_type_ const& codec) const noexcept {
         unique_lock_t hold {shared_mutex_, std::try_to_lock};
         if (!hold) return {{}, status_t::contended_k};
@@ -1354,13 +1352,13 @@ struct basic_ram_index {
      *  @param[in] codec Sizes each stored value's encoded form.
      */
     template <typename value_codec_type_>
-        requires basic_value_codec<value_codec_type_, value_t>
-    expected<basic_columns_extents_t> columns_extents(value_codec_type_ const& codec) const noexcept {
+        requires value_codec<value_codec_type_, value_t>
+    expected<columns_extents_t> columns_extents(value_codec_type_ const& codec) const noexcept {
         unique_lock_t unique_lock {shared_mutex_, std::try_to_lock};
         if (!unique_lock) return {{}, status_t::contended_k};
         auto const [visible, status] = watermark_();
         if (failed(status)) return {{}, status};
-        basic_columns_extents_t extents {static_cast<std::size_t>(visible), 0, 0};
+        columns_extents_t extents {static_cast<std::size_t>(visible), 0, 0};
         for (std::size_t node = 0; node != extents.nodes; ++node) {
             node_t const& record = nodes_array_[node];
             extents.neighbors += record.neighbors.size();
@@ -1379,7 +1377,7 @@ struct basic_ram_index {
      *  @param[out] columns Caller-placed destinations sized from @ref columns_extents.
      *  @param[in] codec Encodes each stored value into its slice. */
     template <typename value_codec_type_>
-        requires basic_value_codec<value_codec_type_, value_t>
+        requires value_codec<value_codec_type_, value_t>
     status_t save(columns_t columns, value_codec_type_ const& codec) const noexcept {
         auto [plan, status] = plan_save(columns, codec);
         if (failed(status)) return status;
@@ -1400,7 +1398,7 @@ struct basic_ram_index {
         std::size_t covered = 0;
 
         load_plan_t() noexcept = default;
-        load_plan_t(basic_ram_index* index, columns_view_t columns, unique_lock_t&& hold) noexcept
+        load_plan_t(ram_index* index, columns_view_t columns, unique_lock_t&& hold) noexcept
             : columns(columns), index_(index), hold_(std::move(hold)) {}
         load_plan_t(load_plan_t&& other) noexcept
             : columns(other.columns), covered(other.covered), index_(std::exchange(other.index_, nullptr)),
@@ -1418,7 +1416,7 @@ struct basic_ram_index {
          *  pre-constructed records and registers the keys - the multimap inserts are
          *  concurrency-safe, so any number of caller threads run their steps. */
         template <typename value_codec_type_>
-            requires basic_value_codec<value_codec_type_, value_t>
+            requires value_codec<value_codec_type_, value_t>
         status_t load(iota_view<node_id_t> node_range, value_codec_type_ const& codec) noexcept {
             if (!index_) return status_t::uninitialized_k;
             std::size_t const node_count = columns.keys.size();
@@ -1476,7 +1474,7 @@ struct basic_ram_index {
 
         /** The index being repopulated, whose unique side @c hold_ occupies; null in the
          *  empty plan a refused @ref plan_load returns, and once @c finish published. */
-        basic_ram_index* index_ = nullptr;
+        ram_index* index_ = nullptr;
 
         /** The unique hold spanning the plan's whole lifetime. */
         unique_lock_t hold_;
@@ -1517,7 +1515,7 @@ struct basic_ram_index {
      *  @param[in] columns The five columns a prior @c save filled.
      *  @param[in] codec Decodes each value slice into its record. */
     template <typename value_codec_type_>
-        requires basic_value_codec<value_codec_type_, value_t>
+        requires value_codec<value_codec_type_, value_t>
     status_t load(columns_view_t columns, value_codec_type_ const& codec) noexcept {
         auto [plan, status] = plan_load(columns);
         if (failed(status)) return status;
@@ -1601,7 +1599,7 @@ struct basic_ram_index {
     struct dispensed_admission_t {
 
         /** The index the walk reads. */
-        basic_ram_index const* index = nullptr;
+        ram_index const* index = nullptr;
 
         /** The watermark snapshot. */
         node_id_t first_invisible_id = 0;
@@ -1654,7 +1652,7 @@ struct basic_ram_index {
                 if (++unwired_draws == sampling_bound - admission.first_invisible_id) break;
                 continue;
             }
-            if (metric.push(published_value_of(draw)) == basic_metric_staging_t::refused_k)
+            if (metric.push(published_value_of(draw)) == metric_staging_t::refused_k)
                 break; // Unmarked, so a later round may retry it.
             [[maybe_unused]] membership_t const marked = context.visited.insert(draw);
             context.staged_ids.push_back_reserved(draw);
@@ -1712,7 +1710,7 @@ struct basic_ram_index {
                 // happens-before edge to its record, so a later query picks it up.
                 if (!admission.admits(neighbor_id)) continue;
                 if (context.visited.contains(neighbor_id)) continue;
-                if (metric.push(published_value_of(neighbor_id)) == basic_metric_staging_t::refused_k) {
+                if (metric.push(published_value_of(neighbor_id)) == metric_staging_t::refused_k) {
                     context.staged_ids.resize_reserved(kept);
                     return walk_step_t::saturated_k;
                 }
@@ -1834,10 +1832,9 @@ struct basic_ram_index {
             metric.reset(published_value_of(neighbor_id));
             std::size_t staged_count = 0;
             for (; staged_count != degree; ++staged_count)
-                if (metric.push(published_value_of(context.staged_ids[staged_count])) ==
-                    basic_metric_staging_t::refused_k)
+                if (metric.push(published_value_of(context.staged_ids[staged_count])) == metric_staging_t::refused_k)
                     break;
-            bool const complete = staged_count == degree && metric.push(new_value) == basic_metric_staging_t::staged_k;
+            bool const complete = staged_count == degree && metric.push(new_value) == metric_staging_t::staged_k;
             staged_count += complete;
             drain_round(metric, staged_count, context, unbounded_radius<distance_t>());
             if (!complete) continue; // Staging refused - keep the old row, lose one reverse link.
@@ -1964,7 +1961,7 @@ struct basic_ram_index {
 };
 
 /**
- *  @brief External reader's cursor over the watermark of one @c basic_ram_index:
+ *  @brief External reader's cursor over the watermark of one @c basic::ram_index:
  *      ID-order iteration, random seeks, and edge-following through a privately staged
  *      copy of the current node's row.
  *
@@ -1977,7 +1974,7 @@ struct basic_ram_index {
  *  past the end; @c seek(0) enters the graph.
  */
 template <typename index_type_, synchronization_t synchronization_, typename allocator_type_>
-struct basic_ram_cursor {
+struct ram_cursor {
     using index_t = index_type_;
     template <typename word_type_>
     using atomic_ref = typename index_t::template atomic_ref<word_type_>;
@@ -1986,14 +1983,14 @@ struct basic_ram_cursor {
     using value_t = typename index_t::value_t;
     using allocator_t = allocator_type_;
 
-    basic_ram_cursor(basic_ram_cursor const&) = delete;
-    basic_ram_cursor& operator=(basic_ram_cursor const&) = delete;
-    basic_ram_cursor(basic_ram_cursor&&) noexcept = default;
-    basic_ram_cursor& operator=(basic_ram_cursor&&) = delete;
+    ram_cursor(ram_cursor const&) = delete;
+    ram_cursor& operator=(ram_cursor const&) = delete;
+    ram_cursor(ram_cursor&&) noexcept = default;
+    ram_cursor& operator=(ram_cursor&&) = delete;
 
     /** Binds the index & captures the watermark snapshot; allocates nothing - the
      *  staged-row buffer grows on the first @c seek through @p allocator. */
-    explicit basic_ram_cursor(index_t const& index, allocator_t allocator = {}) noexcept
+    explicit ram_cursor(index_t const& index, allocator_t allocator = {}) noexcept
         : index_(index), staged_row_(allocator),
           visible_count_(atomic_ref<node_id_t const>(index.last_visible_id_).load(watermark_order_k)),
           current_(visible_count_) {}
@@ -2039,7 +2036,7 @@ struct basic_ram_cursor {
     /** Advances to the next published ID, staging its row; past the last one the
      *  cursor turns false. A staging refusal parks on the new ID with an empty row -
      *  a later @c seek to the same ID retries the staging. */
-    basic_ram_cursor& operator++() noexcept {
+    ram_cursor& operator++() noexcept {
         node_id_t const next = current_ + 1;
         if (static_cast<std::size_t>(next) >= static_cast<std::size_t>(visible_count_)) {
             current_ = visible_count_;
@@ -2054,7 +2051,7 @@ struct basic_ram_cursor {
     }
 
     /** Deleted: it would copy the staged row - an allocation in disguise. */
-    basic_ram_cursor operator++(int) = delete;
+    ram_cursor operator++(int) = delete;
 
     /** Hops to the staged row's @p position -th neighbor: @c malformed_k past the
      *  staged degree or when the neighbor sits at or past the snapshot. */
@@ -2082,5 +2079,4 @@ struct basic_ram_cursor {
     node_id_t current_;
 };
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::basic

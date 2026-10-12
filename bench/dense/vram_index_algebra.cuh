@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date September 27, 2026
  *  @brief Profiling harness for graph products and graph attention over the GPU-resident
- *      @c dense_vram_nvidia_index, shared by the per-dtype algebra shards.
+ *      @c dense::vram_nvidia_index, shared by the per-dtype algebra shards.
  *
  *  The build phases and the cascade below the stored dtype come from @c dense/vram_index_search.cuh, and the value
  * tables and the oracle from @c dense_algebra.cuh. Both verbs score dot products only, so the workload pins the kernel
@@ -16,7 +16,6 @@
 #include <span>      // `std::span`
 #include <vector>    // `std::vector`
 
-#include <cuda_runtime.h>
 #include <fmt/format.h>
 
 #include "dense/vram_index_search.cuh"
@@ -30,12 +29,18 @@ namespace unum::usearch::bench::dense {
  *  @c pitch bytes apart. */
 template <typename fragment_type_>
 struct attention_value_lookup {
+
+    /** Names the lookup to the attend kernels the binary's fatbin carries. */
+    inline static constexpr u32_t device_lookup_k = 1;
+
     byte_t const* rows;
     std::size_t pitch;
 
+#if defined(__CUDACC__)
     __device__ fragment_type_ const* operator()(std::size_t id) const noexcept {
         return reinterpret_cast<fragment_type_ const*>(rows + id * pitch);
     }
+#endif
 };
 
 /** Both phases over every query, batched: graph products landed on the host, then attention of each token's
@@ -90,13 +95,14 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
     auto device_outputs = cuda_make_unique(cuda_device_allocator_t {nullptr, bench.device},
                                            attend_rows * columns * sizeof(f32_t));
     if (!device_values || !device_outputs ||
-        cudaMemcpy2D(device_values.get(), pitch, inputs.node_values.data(), row_bytes, row_bytes, nodes_count,
-                     cudaMemcpyHostToDevice) != cudaSuccess) {
+        cuda_copy_2d_async(device_values.get(), pitch, inputs.node_values.data(), row_bytes, row_bytes, nodes_count,
+                           nullptr) != CUDA_SUCCESS ||
+        cuda_api().stream_synchronize(nullptr) != CUDA_SUCCESS) {
         fmt::println("Failed to place {:.2f} GB of values on device {}", gigabytes(nodes_count * pitch), bench.device);
         return false;
     }
     attention_value_lookup<typename index_t::fragment_t> const lookup {device_values.get(), pitch};
-    std::vector<dense_softmax_state_t> carry(attend_rows);
+    std::vector<softmax_state_t> carry(attend_rows);
     auto judged_outputs = nk::matrix<f32_t>::zeros({judged, columns}).value;
     nk::matrix_span<f32_t> const outputs {reinterpret_cast<f32_t*>(device_outputs.get()), attend_rows, columns};
     bench.lane = telemetry_lane_t {};
@@ -116,8 +122,8 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
         }
         bench.lane.computed_distances += result.computed_distances;
         std::size_t const judged_rows = offset < judged ? std::min(batch, judged - offset) : 0;
-        if (judged_rows && cudaMemcpy(judged_outputs.row(offset).data(), outputs.data(),
-                                      judged_rows * columns * sizeof(f32_t), cudaMemcpyDeviceToHost) != cudaSuccess) {
+        if (judged_rows && cuda_copy(judged_outputs.row(offset).data(), outputs.data(),
+                                     judged_rows * columns * sizeof(f32_t)) != CUDA_SUCCESS) {
             fmt::println("Failed to read back the attended rows");
             return false;
         }
@@ -159,3 +165,8 @@ int run_algebra_with_stored_dtype(utilities::persisted_dataset<dataset_scalar_ty
 #pragma endregion
 
 } // namespace unum::usearch::bench::dense
+
+template <>
+struct us::dense::cuda_value_lookup_of<us::bench::dense::attention_value_lookup<uint4>::device_lookup_k> {
+    using type = us::bench::dense::attention_value_lookup<uint4>;
+};

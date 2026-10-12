@@ -62,13 +62,13 @@ struct sequence_index_options_t {
     std::size_t values_per_key = 0;
 
     /** Row-major @c alphabet_k × @c alphabet_k scores; empty under a uniform metric. */
-    std::vector<us::i8_t> substitution;
+    std::vector<us::utilities::i8_t> substitution;
 
     /** Cost of opening a gap, and the flat gap cost of the linear kind. */
-    us::i8_t gap_open = 0;
+    us::utilities::i8_t gap_open = 0;
 
     /** Cost of extending an open gap; the linear kind ignores it. */
-    us::i8_t gap_extend = 0;
+    us::utilities::i8_t gap_extend = 0;
 };
 
 using sequence_payload_t = std::vector<std::byte>;
@@ -117,18 +117,18 @@ static bool known_metric(usearch_sequence_metric_t metric) {
 #pragma region Scoring
 
 /** Decodes UTF-8 into code points, treating a malformed byte as its own code point. */
-static void decode_utf8(bytes_view_t bytes, std::vector<us::u32_t>& points) {
+static void decode_utf8(bytes_view_t bytes, std::vector<us::utilities::u32_t>& points) {
     points.clear();
     for (std::size_t position = 0; position != bytes.size();) {
-        us::u8_t const leading = std::to_integer<us::u8_t>(bytes[position]);
+        us::utilities::u8_t const leading = std::to_integer<us::utilities::u8_t>(bytes[position]);
         std::size_t width = 1;
-        us::u32_t point = leading;
+        us::utilities::u32_t point = leading;
         if ((leading & 0xE0) == 0xC0) width = 2, point = leading & 0x1F;
         else if ((leading & 0xF0) == 0xE0) width = 3, point = leading & 0x0F;
         else if ((leading & 0xF8) == 0xF0) width = 4, point = leading & 0x07;
         if (position + width > bytes.size()) width = 1, point = leading;
         for (std::size_t continuation = 1; continuation != width; ++continuation) {
-            us::u8_t const following = std::to_integer<us::u8_t>(bytes[position + continuation]);
+            us::utilities::u8_t const following = std::to_integer<us::utilities::u8_t>(bytes[position + continuation]);
             if ((following & 0xC0) != 0x80) {
                 width = 1, point = leading;
                 break;
@@ -161,30 +161,30 @@ static double levenshtein(std::span<unit_ const> first, std::span<unit_ const> s
  *  Three recurrences run together: an aligned pair, a gap in the first, a gap in the second.
  *  An @p extend equal to @c gap_open collapses it to the flat-gap Needleman-Wunsch kind. */
 static double global_alignment(bytes_view_t first, bytes_view_t second, sequence_index_options_t const& parameters,
-                               us::i64_t extend, std::vector<us::i64_t>& scratch) {
-    us::i64_t const open = parameters.gap_open;
-    us::i64_t const unreachable = std::numeric_limits<us::i64_t>::min() / 4;
+                               us::utilities::i64_t extend, std::vector<us::utilities::i64_t>& scratch) {
+    us::utilities::i64_t const open = parameters.gap_open;
+    us::utilities::i64_t const unreachable = std::numeric_limits<us::utilities::i64_t>::min() / 4;
     std::size_t const width = second.size() + 1;
     scratch.assign(width * 3, 0);
-    std::span<us::i64_t> const rows {scratch};
-    std::span<us::i64_t> aligned = rows.subspan(0, width);
-    std::span<us::i64_t> gap_in_first = rows.subspan(width, width);
-    std::span<us::i64_t> gap_in_second = rows.subspan(width * 2, width);
+    std::span<us::utilities::i64_t> const rows {scratch};
+    std::span<us::utilities::i64_t> aligned = rows.subspan(0, width);
+    std::span<us::utilities::i64_t> gap_in_first = rows.subspan(width, width);
+    std::span<us::utilities::i64_t> gap_in_second = rows.subspan(width * 2, width);
 
     for (std::size_t column = 0; column != width; ++column) {
-        aligned[column] = column ? -(open + static_cast<us::i64_t>(column - 1) * extend) : 0;
+        aligned[column] = column ? -(open + static_cast<us::utilities::i64_t>(column - 1) * extend) : 0;
         gap_in_first[column] = column ? aligned[column] : unreachable;
         gap_in_second[column] = unreachable;
     }
     for (std::size_t above = 0; above != first.size(); ++above) {
-        us::i64_t diagonal = aligned[0];
-        aligned[0] = -(open + static_cast<us::i64_t>(above) * extend);
+        us::utilities::i64_t diagonal = aligned[0];
+        aligned[0] = -(open + static_cast<us::utilities::i64_t>(above) * extend);
         gap_in_first[0] = unreachable;
         gap_in_second[0] = aligned[0];
         for (std::size_t column = 0; column != second.size(); ++column) {
             std::size_t const cell = std::to_integer<std::size_t>(first[above]) * alphabet_k +
                                      std::to_integer<std::size_t>(second[column]);
-            us::i64_t const carried = diagonal + parameters.substitution[cell];
+            us::utilities::i64_t const carried = diagonal + parameters.substitution[cell];
             diagonal = aligned[column + 1];
 
             gap_in_first[column + 1] = std::max(aligned[column] - open, gap_in_first[column] - extend);
@@ -199,29 +199,29 @@ static double global_alignment(bytes_view_t first, bytes_view_t second, sequence
  *  The same three recurrences under a zero floor, reporting the best cell anywhere in the
  *  table. An @p extend equal to @c gap_open collapses it to the flat-gap Smith-Waterman kind. */
 static double local_alignment(bytes_view_t first, bytes_view_t second, sequence_index_options_t const& parameters,
-                              us::i64_t extend, std::vector<us::i64_t>& scratch) {
-    us::i64_t const open = parameters.gap_open;
+                              us::utilities::i64_t extend, std::vector<us::utilities::i64_t>& scratch) {
+    us::utilities::i64_t const open = parameters.gap_open;
     std::size_t const width = second.size() + 1;
     scratch.assign(width * 3, 0);
-    std::span<us::i64_t> const rows {scratch};
-    std::span<us::i64_t> aligned = rows.subspan(0, width);
-    std::span<us::i64_t> gap_in_first = rows.subspan(width, width);
-    std::span<us::i64_t> gap_in_second = rows.subspan(width * 2, width);
+    std::span<us::utilities::i64_t> const rows {scratch};
+    std::span<us::utilities::i64_t> aligned = rows.subspan(0, width);
+    std::span<us::utilities::i64_t> gap_in_first = rows.subspan(width, width);
+    std::span<us::utilities::i64_t> gap_in_second = rows.subspan(width * 2, width);
 
-    us::i64_t best = 0;
+    us::utilities::i64_t best = 0;
     for (std::size_t above = 0; above != first.size(); ++above) {
-        us::i64_t diagonal = 0;
+        us::utilities::i64_t diagonal = 0;
         aligned[0] = 0;
         gap_in_first[0] = 0;
         for (std::size_t column = 0; column != second.size(); ++column) {
             std::size_t const cell = std::to_integer<std::size_t>(first[above]) * alphabet_k +
                                      std::to_integer<std::size_t>(second[column]);
-            us::i64_t const carried = diagonal + parameters.substitution[cell];
+            us::utilities::i64_t const carried = diagonal + parameters.substitution[cell];
             diagonal = aligned[column + 1];
 
             gap_in_first[column + 1] = std::max(aligned[column] - open, gap_in_first[column] - extend);
             gap_in_second[column + 1] = std::max(aligned[column + 1] - open, gap_in_second[column + 1] - extend);
-            us::i64_t const cell_best = std::max<us::i64_t>(
+            us::utilities::i64_t const cell_best = std::max<us::utilities::i64_t>(
                 0, std::max(carried, std::max(gap_in_first[column + 1], gap_in_second[column + 1])));
             aligned[column + 1] = cell_best;
             best = std::max(best, cell_best);
@@ -232,10 +232,10 @@ static double local_alignment(bytes_view_t first, bytes_view_t second, sequence_
 
 /** Reusable buffers, so scoring a whole corpus allocates once rather than per pair. */
 struct sequence_search_scratch_t {
-    std::vector<us::u32_t> query_points;
-    std::vector<us::u32_t> entry_points;
+    std::vector<us::utilities::u32_t> query_points;
+    std::vector<us::utilities::u32_t> entry_points;
     std::vector<std::size_t> unsigned_row;
-    std::vector<us::i64_t> signed_row;
+    std::vector<us::utilities::i64_t> signed_row;
 };
 
 /** Scores one pair under the frozen kind. The constructor and @c adopt refuse a kind
@@ -247,7 +247,7 @@ static double distance(sequence_index_t const& index, bytes_view_t query, bytes_
     case usearch_sequence_metric_levenshtein_utf8_k:
         decode_utf8(query, scratch.query_points);
         decode_utf8(stored, scratch.entry_points);
-        return levenshtein<us::u32_t>(scratch.query_points, scratch.entry_points, scratch.unsigned_row);
+        return levenshtein<us::utilities::u32_t>(scratch.query_points, scratch.entry_points, scratch.unsigned_row);
     case usearch_sequence_metric_needleman_wunsch_k:
         return global_alignment(query, stored, parameters, parameters.gap_open, scratch.signed_row);
     case usearch_sequence_metric_needleman_wunsch_gotoh_k:
@@ -346,10 +346,10 @@ struct sequence_checkpoint_prefix_t {
     usearch_sequence_metric_t metric;
 
     /** Cost of opening a gap, and the flat gap cost of the linear kinds. */
-    us::i8_t gap_open;
+    us::utilities::i8_t gap_open;
 
     /** Cost of extending an open gap. */
-    us::i8_t gap_extend;
+    us::utilities::i8_t gap_extend;
 };
 
 /** The per-entry overhead of the blob: the key, then the byte length that follows it. */
@@ -512,7 +512,7 @@ void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments) {
     usearch_sequence_index_handle_t* const index = new (std::nothrow) usearch_sequence_index_handle_t();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return;
     index->options.metric = metric;
-    index->options.connectivity = arguments->connectivity ? arguments->connectivity : us::connectivity_16_k;
+    index->options.connectivity = arguments->connectivity ? arguments->connectivity : us::utilities::connectivity_16_k;
     index->options.values_per_key = arguments->values_per_key;
     if (weights) {
         // Copied rather than borrowed, so a binding whose matrix dies after this call still scores.

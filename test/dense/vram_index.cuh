@@ -16,24 +16,6 @@
 
 #include "dense.cuh"
 
-namespace unum::usearch::test::dense {
-
-/**
- *  @brief One vendor's (dtype, kernel) cell: @c index_t over ledgered planes, the sharded
- *      @c indexes_t, @c make_index building the index on a ledger, and the @c vendor_prefix_k its
- *      reports carry.
- *
- *  A cell whose vendor runs device attention names @c attends_k and covers it in its own unit;
- *  every other cell's index must refuse attention with @c unsupported_k.
- */
-template <gpu_vendor_t vendor_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-struct vram_cell;
-
-/** The vendor ordinal of the device under test, which the vendor's entry selects first. */
-inline int selected_device = 0;
-
-} // namespace unum::usearch::test::dense
-
 // The one place the test objects name a vendor: the cell this object library composes over.
 #if USEARCH_ARCH_CUDA_
 #include "vram_nvidia.hpp"
@@ -65,12 +47,12 @@ std::size_t dense_expect_vram_multiply(make_index_type_ const& make_index, alloc
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
     index_type_ index = make_index(ledger);
-    typename index_type_::dense_traversal_context_t context {{}};
+    typename index_type_::traversal_context_t context {{}};
     failures += expect(index.reserve({rows_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "multiply"));
     auto const left = vectors(nk::range(std::size_t {0}, left_count), nk::slice);
 
-    auto node_ids = nk::matrix<dense_node_id_t>::zeros({left_count, rows_count}).value;
+    auto node_ids = nk::matrix<node_id_t>::zeros({left_count, rows_count}).value;
     auto products = nk::matrix<dot_result_t>::zeros({left_count, rows_count}).value;
     std::array<u32_t, left_count> counts;
     // A narrow call writes the leading columns, so its output rows stride past their width.
@@ -83,12 +65,12 @@ std::size_t dense_expect_vram_multiply(make_index_type_ const& make_index, alloc
     // An empty index scores nothing, and every row it leaves short ends in sentinels.
     auto const empty = multiply(4, 4, {});
     failures += expect(empty.status == status_t::success_k && empty.value.count == 0);
-    nk::matrix_view<dense_node_id_t> const short_rows = node_ids(nk::all, nk::range(std::size_t {0}, std::size_t {4}),
-                                                                 nk::slice);
+    nk::matrix_view<node_id_t> const short_rows = node_ids(nk::all, nk::range(std::size_t {0}, std::size_t {4}),
+                                                           nk::slice);
     failures += expect(std::all_of(short_rows.begin(), short_rows.end(),
-                                   [](auto const& entry) { return entry.second == dense_node_id_unknown_k; }));
+                                   [](auto const& entry) { return entry.second == node_id_unknown_k; }));
 
-    auto assigned_ids = nk::vector<dense_node_id_t>::zeros(rows_count).value;
+    auto assigned_ids = nk::vector<node_id_t>::zeros(rows_count).value;
     failures += expect(index.insert(vectors.view(), assigned_ids.span(), context).status == status_t::success_k);
     failures += expect_eq(index.size(), rows_count);
 
@@ -98,17 +80,17 @@ std::size_t dense_expect_vram_multiply(make_index_type_ const& make_index, alloc
         failures += expect(status == status_t::success_k);
         failures += expect_eq(multiplied.count, multiplied.computed_distances);
         std::size_t scored_count = 0;
-        nk::matrix_view<dense_node_id_t> const kept_ids = node_ids.view();
+        nk::matrix_view<node_id_t> const kept_ids = node_ids.view();
         nk::matrix_view<dot_result_t> const kept_products = products.view();
         for (std::size_t row = 0; row != left_count; ++row) {
             scored_count += counts[row];
             failures += expect(counts[row] > 0 && counts[row] <= rows_count);
             if (wanted < rows_count) failures += expect(counts[row] > wanted);
             nk::range_t const kept = nk::range(std::size_t {0}, min_of<std::size_t>(counts[row], wanted));
-            failures += dense_expect_product_row<rows_count>(
-                left.row(row).as_vector(), vectors.view(), kept_ids(row, kept, nk::slice).as_vector(),
-                kept_products(row, kept, nk::slice).as_vector(),
-                [](dense_node_id_t id) noexcept { return std::size_t {id}; });
+            failures += dense_expect_product_row<rows_count>(left.row(row).as_vector(), vectors.view(),
+                                                             kept_ids(row, kept, nk::slice).as_vector(),
+                                                             kept_products(row, kept, nk::slice).as_vector(),
+                                                             [](node_id_t id) noexcept { return std::size_t {id}; });
         }
         failures += expect_eq(multiplied.count, scored_count);
     }
@@ -136,10 +118,10 @@ std::size_t test_dense_vram_attend_refused(make_index_type_ const& make_index) {
     std::size_t failures = 0;
     {
         index_type_ index = make_index(ledger);
-        typename index_type_::dense_traversal_context_t context {{}};
+        typename index_type_::traversal_context_t context {{}};
         failures += expect_eq(index
                                   .attend(typename index_type_::vectors_view_t {}, 1, nullptr, 1.f,
-                                          nk::matrix_span<f32_t> {}, std::span<dense_softmax_state_t> {}, context)
+                                          nk::matrix_span<f32_t> {}, std::span<softmax_state_t> {}, context)
                                   .status,
                               status_t::unsupported_k);
     }
@@ -165,10 +147,10 @@ std::size_t dense_expect_vram_indexer_search(make_index_type_ const& make_index,
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
     index_type_ index = make_index(ledger);
-    typename index_type_::dense_traversal_context_t context {{}};
+    typename index_type_::traversal_context_t context {{}};
     failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     auto const vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexer"));
-    std::vector<dense_node_id_t> assigned_ids(nodes_count);
+    std::vector<node_id_t> assigned_ids(nodes_count);
     if (failed(index.insert(vectors.view(), {assigned_ids.data(), nodes_count}, context).status))
         return failures + expect(false);
     failures += expect_contiguous_ids(std::span {assigned_ids}, 0);
@@ -176,8 +158,8 @@ std::size_t dense_expect_vram_indexer_search(make_index_type_ const& make_index,
     auto const queries = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
     dense_indexer_inputs<scalar_t> const inputs = dense_make_indexer_inputs(vectors.view(), queries_count);
     typename index_type_::search_config_t const exhaustive {nodes_count, wanted};
-    auto node_ids = nk::matrix<dense_node_id_t>::zeros({queries_count, wanted}).value;
-    auto distances = nk::matrix<dense_distance_t>::zeros({queries_count, wanted}).value;
+    auto node_ids = nk::matrix<node_id_t>::zeros({queries_count, wanted}).value;
+    auto distances = nk::matrix<distance_t>::zeros({queries_count, wanted}).value;
     failures += expect(
         index.search(queries, inputs.heads(), node_ids.span(), distances.span(), context, exhaustive).status ==
         status_t::success_k);

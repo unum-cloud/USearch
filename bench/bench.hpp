@@ -24,6 +24,7 @@
 #include "usearch/utilities/types.hpp"
 
 namespace unum::usearch::bench {
+using namespace unum::usearch::utilities;
 
 /** A count or rate rendered as "1.23 G" / "45.6 M" / "789 k" for scannable tables. */
 template <typename value_type_>

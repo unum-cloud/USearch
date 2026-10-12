@@ -14,11 +14,11 @@ namespace unum::usearch::test::dense {
 
 std::size_t check_vram_amd(settings_t const& settings, gpu_device_t const& device) {
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    auto const [specs, status] = hip_device_specs_t::query(ordinal);
-    if (failed(status) || hip_runtime().set_device(ordinal) != hip_success_k)
+    if (hip_api().set_device(ordinal) != hipSuccess)
         return fmt::println("- ROCm: device #{} does not answer", ordinal), 1;
-    fmt::println("- ROCm: device #{} {}", ordinal,
-                 usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(specs.gpu_class)));
+    fmt::println("- ROCm: device #{} {}, {}, {} compute units, {} MiB", ordinal, device.name,
+                 usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device.gpu_class)), device.compute_units,
+                 device.memory_bytes >> 20);
     selected_device = ordinal;
     std::size_t failures_count = check_vram_index_cells<gpu_vendor_t::amd_k>(settings);
     if (settings.selects("vram_indexes")) failures_count += check_vram_indexes<gpu_vendor_t::amd_k>(settings);

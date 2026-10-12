@@ -287,17 +287,37 @@ check_region_lengths() {
 # Namespaces mirror directories. A nameless `namespace {` hides helpers in a scope no path names, and a
 # namespace no directory backs, like `stub::matrix` for `src_stub/matrix.cpp`, invents structure the tree
 # does not have. Allowed names: `unum`, `usearch`, the sibling libraries' roots, a directory on the file's
-# path (`src_stub` answers for `stub`), and a directory beside the file.
+# path (`src_stub` answers for `stub`), and a directory beside the file. A header under
+# `include/usearch/<dir>/` opens exactly `unum::usearch::<dir>`; only `utilities/types.hpp` also opens the
+# parent and the sibling roots, to declare the `nk`, `fu`, `sz` & `st` aliases every directory shares.
 check_namespace_directories() {
-    local directory=${file%/*} allowed name misplaced=""
+    local directory=${file%/*} allowed name misplaced="" modality=""
     [ "$directory" = "$file" ] && directory=.
     allowed=" unum usearch ashvardanian numkong stringzilla forkunion smashtable "
     for name in $(printf '%s\n' "$directory" | tr '/' '\n'); do allowed="$allowed$name ${name##*_} "; done
     for name in $(git ls-tree -d --name-only HEAD "$directory/" 2> /dev/null); do allowed="$allowed${name##*/} "; done
+    case "$file" in
+    include/usearch/*/*)
+        modality=${file#include/usearch/}
+        modality=${modality%%/*}
+        ;;
+    esac
     while IFS=: read -r line opened; do
         if [ -z "$opened" ]; then
             misplaced="${misplaced}line $line: a nameless namespace
 "
+            continue
+        fi
+        if [ -n "$modality" ]; then
+            case "$opened" in
+            "unum::usearch::$modality") ;;
+            unum::usearch | ashvardanian | numkong | stringzilla | forkunion | smashtable)
+                [ "$file" = include/usearch/utilities/types.hpp ] ||
+                    misplaced="${misplaced}line $line: namespace $opened, not unum::usearch::$modality
+" ;;
+            *) misplaced="${misplaced}line $line: namespace $opened, not unum::usearch::$modality
+" ;;
+            esac
             continue
         fi
         for name in $(printf '%s\n' "$opened" | tr ':' '\n'); do
@@ -718,20 +738,20 @@ check_bare_member_docs() {
 # region Naming and Vocabulary
 
 # The full `unum::usearch::` spelling belongs to three places: the alias and `using` lines, the lines
-# opening and closing a nested namespace, and the specializations of foreign templates -
-# `std::hash<unum::usearch::uuid_t>`, `fmt::formatter<...>` - which have to name the type from outside.
-# Everywhere else the name is already in scope - through the `us::` alias, the directive a translation
-# unit opened with, or the enclosing namespace itself.
+# opening and closing a nested `unum::usearch::<dir>` namespace, and the specializations of foreign
+# templates - `std::hash<unum::usearch::utilities::uuid_t>` and its call operator, `fmt::formatter<...>` -
+# which have to name the type from outside. Everywhere else the name is already in scope - through an
+# alias like `us::` or `dense::`, the directive a translation unit opened with, or the enclosing namespace.
 check_qualified_namespace() {
     local spelled
     spelled=$(printf '%s\n' "$added" |
         grep -vE '^\+[[:space:]]*(\*|//|/\*)' |
-        grep -vE 'namespace us = unum::usearch;|(using )?namespace unum::usearch(::[a-z_]+)*( \{|;)$|^\+\} // namespace unum::usearch' |
-        grep -vE 'struct (std|fmt)::[A-Za-z_]+<unum::usearch::' |
+        grep -vE 'namespace [a-z_]+ = unum::usearch(::[a-z_]+)*;|(using )?namespace unum::usearch(::[a-z_]+)*( \{|;)$|^\+\} // namespace unum::usearch' |
+        grep -vE 'struct (std|fmt)::[A-Za-z_]+<unum::usearch::|operator\(\)\(unum::usearch::' |
         grep -E 'unum::usearch::' || true)
     [ -z "$spelled" ] || fail "$spelled" \
-        "$file spells unum::usearch:: in full - the name is already in scope through the \`us\` alias," \
-        "            a \`using\` directive, or the enclosing namespace; only std::hash<unum::usearch::uuid_t> earns it:"
+        "$file spells unum::usearch:: in full - the name is already in scope through an alias like \`us\`," \
+        "            a \`using\` directive, or the enclosing namespace; only std::hash<unum::usearch::utilities::uuid_t> earns it:"
 }
 
 # The namespaces a C++ source opens at file scope, as `line:name`, reading past comments, literals, and
@@ -784,6 +804,58 @@ check_harness_namespace() {
     [ -z "$misplaced" ] || fail "$misplaced" \
         "$file is a harness header outside \`namespace $expected\` - its directory names the namespace," \
         "            and no other opens at file scope:"
+}
+
+# Inside `unum::usearch::test::<dir>` or `unum::usearch::bench::<dir>` the library's `unum::usearch::<dir>` is already
+# visible through the directive the shared harness header opens, so `usearch::<dir>::` or `us::<dir>::` there only
+# repeats it; lines past the closing brace, like specializations of library templates, still qualify. The whole
+# staged file, since the namespace is context, reporting only the lines the commit added.
+check_harness_library_qualified() {
+    grep -qE '^namespace unum::usearch::(test|bench)::[a-z_]+ \{' "$staged_blob" || return 0
+    local spelled
+    spelled=$(awk -v path="$file" '
+        NR == FNR { added[$1 + 0]; next }
+        /^namespace unum::usearch::(test|bench)::[a-z_]+ \{/ {
+            inside = $2; sub(/^unum::usearch::/, "", inside)
+            directory = inside; sub(/^[a-z]+::/, "", directory)
+            next
+        }
+        /^\} \/\/ namespace / { inside = ""; next }
+        inside != "" && (FNR in added) && $0 !~ /^[[:space:]]*(\*|\/\/|\/\*)/ &&
+            (" " $0) ~ ("[^A-Za-z0-9_:](unum::usearch|usearch|us)::" directory "::") {
+            printf "%s:%d: spells usearch::%s:: inside %s\n", path, FNR, directory, inside
+        }' "$staged_lines_path" "$staged_blob")
+    local first=${spelled%%$'\n'*}
+    [ -z "$spelled" ] || fail "$spelled" "$file ${first#*: } - the library namespace is already visible:"
+}
+
+# A namespace opens once per file: closing it only to reopen it splits its body around whatever sits between,
+# usually an include that belongs in the preamble. The one gap allowed holds a `fmt::` or `std::` specialization,
+# which has to follow the type it formats or hashes and precede the first use, all outside the namespace. The whole
+# staged file, since the namespace is context.
+check_namespace_reopened() {
+    local namespaces reopened
+    namespaces=$(top_level_namespaces < "$staged_blob")
+    [ -n "$namespaces" ] || return 0
+    reopened=$(printf '%s\n' "$namespaces" |
+        awk -F: -v path="$file" '
+            NR == FNR {
+                name = substr($0, index($0, ":") + 1)
+                if (name in opened) reopening[$1 + 0] = name
+                opened[name]
+                next
+            }
+            { lines[FNR] = $0 }
+            END {
+                for (line in reopening) {
+                    foreign = 0
+                    for (gap = line - 1; gap > 0 && lines[gap] !~ ("^\\} // namespace " reopening[line] "$"); --gap)
+                        if (lines[gap] ~ /^struct (fmt|std)::[a-z_]+</) foreign = 1
+                    if (!foreign) printf "%s:%d: reopens namespace %s\n", path, line, reopening[line]
+                }
+            }' - "$staged_blob")
+    [ -z "$reopened" ] || fail "$reopened" \
+        "$file reopens namespace ${reopened##*namespace } - keep includes in the preamble and open each namespace once:"
 }
 
 # A class template never takes the `_t` suffix, nor a variable template `_k`: `_t` marks a concrete type or the alias a
@@ -1108,13 +1180,13 @@ check_cuda_raw_atomics() {
         "$file calls a CUDA atomic intrinsic - use cuda_atomic_ref with an explicit memory order:"
 }
 
-# A file every GPU vendor compiles names no vendor: its symbols are `dense_vram_*`, and its collectives come from the
-# warp policy a kit names, never from one vendor's own.
+# A file every GPU vendor compiles names no vendor: its symbols are `dense::vram_*`, never a `cuda_`, `hip_` or
+# `metal_` one, and its collectives come from the warp policy a kit names, never from one vendor's own.
 check_vendor_neutral() {
     local named
-    named=$(printf '%s\n' "$added" | grep -E 'dense_cuda_|dense_hip_|dense_metal_|cuda_warp_t|hip_warp_t' || true)
+    named=$(printf '%s\n' "$added" | grep -E '(^|[^A-Za-z0-9_])(cuda|hip|metal)_[A-Za-z0-9_]' || true)
     [ -z "$named" ] || fail "$named" \
-        "$file is shared by every GPU vendor - name its symbols dense_vram_* and its warp the kit's policy:"
+        "$file is shared by every GPU vendor - name its symbols dense::vram_* and its warp the kit's policy:"
 }
 
 # Calling a call's result the same way: `vectors.view()(range, slice)` reads as a typo and hides which object
@@ -1440,6 +1512,32 @@ check_python_version_probe() {
         "            comparisons or \`platform.python_version()\` for display:"
 }
 
+# A bare `np.ndarray` annotation hides the dtype a caller must pass or gets back.
+check_python_array_annotations() {
+    local bare
+    bare=$(printf '%s\n' "$added" | grep -vE '^\+[[:space:]]*#' |
+        grep -E '(->|:)[^=#]*\b(np|numpy)\.ndarray\b' || true)
+    [ -z "$bare" ] || fail "$bare" \
+        "$file annotates a bare np.ndarray - name the dtype, as npt.NDArray[np.float32], or take" \
+        "            npt.ArrayLike for inputs:"
+}
+
+# A module constant documents itself with a docstring on the line below, which documentation tools and
+# editors show on hover, rather than a comment above that none of them read.
+check_python_constant_comments() {
+    local commented
+    commented=$(awk '
+        NR == FNR { added[$1 + 0]; next }
+        /^[A-Z_][A-Z0-9_]*(: [^=]+)? *= / && previous ~ /^#/ && previous !~ /^# (region|endregion)/ &&
+            ((FNR in added) || ((FNR - 1) in added)) {
+            printf "line %d: %s\n", FNR, $0
+        }
+        { previous = $0 }' "$staged_lines_path" "$staged_blob")
+    [ -z "$commented" ] || fail "$commented" \
+        "$file documents a module constant with a comment above it - move the text into a docstring on" \
+        "            the line below the assignment:"
+}
+
 # endregion Build CI and Packaging
 
 # region Dispatch
@@ -1625,12 +1723,17 @@ judge_path() {
         check_cuda_raw_atomics
         ;;&
     # The device code NVCC and HIP-Clang share.
-    include/usearch/dense/vram_index.cuh | include/usearch/utilities/vram_queue.cuh)
+    include/usearch/dense/vram_index.cuh | include/usearch/dense/vram_queue.cuh)
         check_vendor_neutral
         ;;&
     # The test and benchmark harness headers, whose directories name their namespaces.
     test/*.hpp | test/*.cuh | test/*.h | bench/*.hpp | bench/*.cuh | bench/*.h)
         check_harness_namespace
+        ;;&
+    # Every C++ source of the harnesses, whose modality namespaces already see the library's.
+    test/*.hpp | test/*.cpp | test/*.cuh | test/*.cu | bench/*.hpp | bench/*.cpp | bench/*.cuh | bench/*.cu)
+        check_harness_library_qualified
+        check_namespace_reopened
         ;;&
     # The shipped library: public headers under include/ and the ABI sources under src/.
     include/*.h)
@@ -1659,6 +1762,8 @@ judge_path() {
     *.py | *.pyi)
         check_sibling_justification
         check_python_version_probe
+        check_python_array_annotations
+        check_python_constant_comments
         check_substring_assertions
         ;;
     python/*.c | python/*.h) check_cpython_format_shortcuts ;;
@@ -1682,7 +1787,7 @@ judge_path() {
     case "$file" in
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cu | *.cuh)
         if command -v clang-format > /dev/null 2>&1 && [ -f .clang-format ] &&
-            ! clang-format --dry-run -Werror "$file" > /dev/null 2>&1; then
+            ! git show ":$file" | clang-format --dry-run -Werror --assume-filename="$file" > /dev/null 2>&1; then
             echo "pre-commit: $file is not clang-format clean - run \`clang-format -i $file\` (the pip-installed 22.x)"
             rejection_count=$((rejection_count + 1))
         fi

@@ -2,7 +2,7 @@
  *  @file verification/basic_shared_mutex.cpp
  *  @author Ash Vardanian
  *  @date September 9, 2026
- *  @brief GenMC client for `basic_shared_mutex` from `include/usearch/basic/ram_index.hpp`, the
+ *  @brief GenMC client for `basic::shared_mutex` from `include/usearch/basic/ram_index.hpp`, the
  *      real header: one mutator takes the shared side and writes a pair of rows inside it, one
  *      prober brackets its reads with the wait-free snapshots.
  *
@@ -23,11 +23,11 @@
 
 #include <genmc.hpp> // `spawn`, `join`, `verify` - the threads and the assertion GenMC intercepts
 
-#include "usearch/basic/ram_index.hpp" // `basic_shared_mutex` - the gate under test
+#include "usearch/basic/ram_index.hpp" // `basic::shared_mutex` - the gate under test
 
 namespace us = unum::usearch;
-using us::u64_t;
-using gate_t = us::basic_shared_mutex<us::dummy_waiter_t>;
+using us::utilities::u64_t;
+using gate_t = us::basic::shared_mutex<us::utilities::dummy_waiter_t>;
 
 /** The header's choices; each mutant entry changes one. */
 struct knobs_t {

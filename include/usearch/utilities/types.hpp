@@ -112,13 +112,14 @@ namespace forkunion {}
 namespace smashtable {}
 } // namespace ashvardanian
 
-namespace unum {
-namespace usearch {
-
+namespace unum::usearch {
 namespace nk = ashvardanian::numkong;
 namespace fu = ashvardanian::forkunion;
 namespace sz = ashvardanian::stringzilla;
 namespace st = ashvardanian::smashtable;
+} // namespace unum::usearch
+
+namespace unum::usearch::utilities {
 
 using f64_t = double;
 using f32_t = float;
@@ -1111,11 +1112,22 @@ enum class gpu_class_t : u32_t {
     apple_metal10_k,
 };
 
-/** One GPU as USearch numbers it: the vendor, that vendor's own ordinal, and its class. */
+/** One GPU as USearch numbers it - the vendor, that vendor's own ordinal and its class - with what
+ *  a banner or a benchmark row reports, filled once by the vendor's listing, so no harness calls a
+ *  vendor SDK. */
 struct gpu_device_t {
     gpu_vendor_t vendor = gpu_vendor_t::unknown_k;
     u32_t vendor_ordinal = 0;
     gpu_class_t gpu_class = gpu_class_t::unknown_k;
+
+    /** Streaming multiprocessors, compute units or GPU cores. */
+    u32_t compute_units = 0;
+
+    /** Device memory, or the working set Metal recommends for unified memory. */
+    u64_t memory_bytes = 0;
+
+    /** The vendor's own name for the device, NUL-terminated and truncated to fit. */
+    char name[64] = {};
 };
 
 /** Devices one vendor's listing holds at most, so the process-wide listing needs no heap. */
@@ -1270,18 +1282,18 @@ struct uniform_below<u64_t> {
     }
 };
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::utilities
 
-/** Makes @c uuid_t a first-class key of standard-hash-keyed containers: fold one
- *  mixed half into the other, then mix again - @ref unum::usearch::mix_bits twice. */
+/** Makes @c uuid_t a first-class key of standard-hash-keyed containers: fold one mixed
+ *  half into the other, then mix again - @ref unum::usearch::utilities::mix_bits twice. */
 template <>
-struct std::hash<unum::usearch::uuid_t> {
-    std::size_t operator()(unum::usearch::uuid_t const& key) const noexcept {
+struct std::hash<unum::usearch::utilities::uuid_t> {
+    std::size_t operator()(unum::usearch::utilities::uuid_t const& key) const noexcept {
+        namespace utilities = unum::usearch::utilities;
         struct halves_t {
-            unum::usearch::u64_t low, high;
+            utilities::u64_t low, high;
         };
         auto const halves = std::bit_cast<halves_t>(key);
-        return static_cast<std::size_t>(unum::usearch::mix_bits(halves.low ^ unum::usearch::mix_bits(halves.high)));
+        return static_cast<std::size_t>(utilities::mix_bits(halves.low ^ utilities::mix_bits(halves.high)));
     }
 };

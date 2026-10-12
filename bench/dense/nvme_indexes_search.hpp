@@ -2,7 +2,7 @@
  *  @file bench/dense/nvme_indexes_search.hpp
  *  @author Ash Vardanian
  *  @date October 10, 2026
- *  @brief Profiling harness for searching the sharded @c dense_nvme_indexes over parts a RAM or
+ *  @brief Profiling harness for searching the sharded @c dense::nvme_indexes over parts a RAM or
  *      VRAM bench saved, shared by the per-dtype benchmark shards.
  *
  *  No graph is built or loaded in RAM: `--view` names the manifest or the monolith, and the first
@@ -290,13 +290,12 @@ void report_storage_metrics(std::string_view unit, std::size_t rows_count, doubl
         std::nth_element(latencies_ns.begin(), latencies_ns.begin() + rank, latencies_ns.end());
         return double(latencies_ns[rank]) / 1000.0;
     };
-    auto per_row = [&](dense_nvme_reads_t const& purpose) {
+    auto per_row = [&](nvme_reads_t const& purpose) {
         return fmt::format("{} · {:.1f} KB", humanized(double(purpose.count) / double(rows_count)),
                            double(purpose.bytes) / double(rows_count) / 1024.0);
     };
-    dense_nvme_reads_t total;
-    for (dense_nvme_reads_t const& purpose :
-         {reads.neighbor_reads, reads.value_reads, reads.key_reads, reads.scan_reads})
+    nvme_reads_t total;
+    for (nvme_reads_t const& purpose : {reads.neighbor_reads, reads.value_reads, reads.key_reads, reads.scan_reads})
         total += purpose;
     fmt::println("  reads/{}: neighbors {} · values {} · keys {} · scans {}", unit, per_row(reads.neighbor_reads),
                  per_row(reads.value_reads), per_row(reads.key_reads), per_row(reads.scan_reads));
@@ -339,7 +338,7 @@ bool run_nvme_search(streamed_dataset_type_& streamed) {
     typename nvme_t::search_config_t config;
     config.expansion_factor = static_cast<u32_t>(settings.expansion_search.value);
     nk::matrix_span<key_t> const keys = nvme.results.hit_rows.span();
-    nk::matrix_span<dense_distance_t> const distances = nvme.results.hit_distances.span();
+    nk::matrix_span<distance_t> const distances = nvme.results.hit_distances.span();
     std::vector<std::size_t> counts(search_count);
     std::vector<u64_t> latencies_ns(search_count);
     auto search = [&](auto const&... ranking) noexcept {
@@ -397,10 +396,10 @@ int view_and_run(bench_launch<dataset_scalar_type_> const& launch, nvme_settings
 /** The innermost hop: binds the concrete sharded NVMe instantiation, views the parts under the
  *  metric their headers name, and hands them, the queries and their truth to @p workload. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename workload_type_>
-    requires dense_quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>
+    requires quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>
 int view_and_run(bench_launch<dataset_scalar_type_> const& launch, nvme_settings_t const& nvme,
                  workload_type_ const& workload) {
-    using nvme_t = dense_nvme_indexes<u32_t, stored_dtype_, capability_>;
+    using nvme_t = nvme_indexes<u32_t, stored_dtype_, capability_>;
     using context_t = nvme_context<nvme_t>;
     using vectors_t = nk::matrix_view<dataset_scalar_type_>;
     utilities::persisted_dataset<dataset_scalar_type_> const& dataset = launch.dataset;

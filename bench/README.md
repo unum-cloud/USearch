@@ -16,19 +16,19 @@ The `ram` and `vram` binaries of both families build the index the same way, fro
 
 The search family searches the built index, by plain rows or by a lightning indexer's heads, and judges the hits.
 
-- `usearch_bench_dense_ram_index_search` builds one `dense_ram_index` on one memory domain and isolates kernel kits, wait instructions, connectivity and expansion, per-thread staging and latency percentiles.
-- `usearch_bench_dense_ram_indexes_search` builds one `dense_ram_indexes` over every memory domain and isolates what the C interface drives: admission, rotation across shards, batched verbs and SafeGraphs checkpoints.
-- `usearch_bench_dense_vram_index_search` builds one `dense_vram_nvidia_index` on one device and isolates batch-per-launch build and search, the kit generation ceiling and managed-memory planes.
-- `usearch_bench_dense_vram_indexes_search` builds one `dense_vram_nvidia_indexes` with a shard per `USEARCH_DEVICES` ordinal and isolates what the C interface drives across GPUs: rotation across devices, scatter-gather search merged on the host, and SafeGraphs checkpoints.
-- `usearch_bench_dense_nvme_indexes_search` views the parts a sharded RAM or VRAM binary saved as one `dense_nvme_indexes`, building nothing in RAM, and isolates what storage adds to the batched search: the I/O transport, the queue depth, and the reads and bytes each query costs.
+- `usearch_bench_dense_ram_index_search` builds one `dense::ram_index` on one memory domain and isolates kernel kits, wait instructions, connectivity and expansion, per-thread staging and latency percentiles.
+- `usearch_bench_dense_ram_indexes_search` builds one `dense::ram_indexes` over every memory domain and isolates what the C interface drives: admission, rotation across shards, batched verbs and SafeGraphs checkpoints.
+- `usearch_bench_dense_vram_index_search` builds one `dense::vram_nvidia_index` on one device and isolates batch-per-launch build and search, the kit generation ceiling and managed-memory planes.
+- `usearch_bench_dense_vram_indexes_search` builds one `dense::vram_nvidia_indexes` with a shard per `USEARCH_DEVICES` ordinal and isolates what the C interface drives across GPUs: rotation across devices, scatter-gather search merged on the host, and SafeGraphs checkpoints.
+- `usearch_bench_dense_nvme_indexes_search` views the parts a sharded RAM or VRAM binary saved as one `dense::nvme_indexes`, building nothing in RAM, and isolates what storage adds to the batched search: the I/O transport, the queue depth, and the reads and bytes each query costs.
 
 The algebra family measures the graph products `multiply` and the graph attention `attend` over the built index instead of searching it.
 
-- `usearch_bench_dense_ram_index_algebra` builds one `dense_ram_index` on one memory domain and isolates graph products and grouped-query graph attention over every key a walk scores, pair dumps and an exact softmax oracle.
-- `usearch_bench_dense_ram_indexes_algebra` builds one `dense_ram_indexes` over every memory domain and isolates the same verbs batched through the executor, every token's walks crossing every shard.
-- `usearch_bench_dense_vram_index_algebra` builds one `dense_vram_nvidia_index` on one device and isolates the same graph products and graph attention on the device, judged against the same oracle.
-- `usearch_bench_dense_vram_indexes_algebra` builds one `dense_vram_nvidia_indexes` with a shard per `USEARCH_DEVICES` ordinal and isolates the same verbs across GPUs, the shards' attention merged on the first device.
-- `usearch_bench_dense_nvme_indexes_algebra` views the same saved parts as one `dense_nvme_indexes` and isolates the same verbs answered from storage, with the reads and bytes each row costs.
+- `usearch_bench_dense_ram_index_algebra` builds one `dense::ram_index` on one memory domain and isolates graph products and grouped-query graph attention over every key a walk scores, pair dumps and an exact softmax oracle.
+- `usearch_bench_dense_ram_indexes_algebra` builds one `dense::ram_indexes` over every memory domain and isolates the same verbs batched through the executor, every token's walks crossing every shard.
+- `usearch_bench_dense_vram_index_algebra` builds one `dense::vram_nvidia_index` on one device and isolates the same graph products and graph attention on the device, judged against the same oracle.
+- `usearch_bench_dense_vram_indexes_algebra` builds one `dense::vram_nvidia_indexes` with a shard per `USEARCH_DEVICES` ordinal and isolates the same verbs across GPUs, the shards' attention merged on the first device.
+- `usearch_bench_dense_nvme_indexes_algebra` views the same saved parts as one `dense::nvme_indexes` and isolates the same verbs answered from storage, with the reads and bytes each row costs.
 
 Each search binary prints a `Machine` block, an `Insertions` block and a `Queries` block to standard output and nothing else, so a run is its transcript; the `nvme` one prints a `Storage` block in place of `Insertions`.
 The `Insertions` block reports the wall time, the throughput in IPS, the distances computed with the shares spent in refinement, the visited members and the restarts.
@@ -90,7 +90,7 @@ build_host_release/usearch_bench_dense_ram_indexes_search \
 - `--first-vector` defaults to `0`: first dataset row viewed, to slice one file across runs; CPU only.
 - `--huge-pages` defaults to `0`: huge pages provisioned before launch; the run fails rather than measuring base pages; CPU only.
 - `USEARCH_DEVICES` - an environment variable, not a flag - names USearch device ordinals, positions in `usearch_gpu_devices`, like `0` or `0,1`; the single-device binaries take the first, the sharded ones place one shard per ordinal, and unset takes the first NVIDIA device; GPU only.
-- `--merge` and `--expansion-merge` are reserved for stitching the device shards into one graph, and `usearch_bench_dense_vram_indexes_search` refuses them until `dense_vram_nvidia_indexes` has a merge verb.
+- `--merge` and `--expansion-merge` are reserved for stitching the device shards into one graph, and `usearch_bench_dense_vram_indexes_search` refuses them until `dense::vram_nvidia_indexes` has a merge verb.
 - `--managed-memory` defaults to off: managed-memory planes oversubscribing VRAM; GPU only, refused by both `vram_indexes` binaries.
 - `--batch` defaults to `65536`: rows and queries per launch; GPU only.
 
@@ -248,22 +248,28 @@ Unless a row says otherwise the configuration is the default: connectivity 32, e
 
 SIFT, `u8`, euclidean, 10,000,000 rows of 128 dimensions.
 
-| Machine                                            | Class      |  Insertions |     Queries | Recall@10 | Date       |
-| :------------------------------------------------- | :--------- | ----------: | ----------: | --------: | :--------- |
-| Intel i9-13950HX, 8P+16E cores, 1 domain, 4K pages | `haswell`  |  12.8 k IPS |  46.9 k QPS |     98.5% | 2026-09-02 |
-| NVIDIA RTX 4060 Laptop, 24 SMs, 8 GB               | `ada`      | 114.5 k IPS | 210.9 k QPS |     98.6% | 2026-09-02 |
-| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages  | `neonsdot` | 23.05 k IPS | 75.15 k QPS |   98.800% | 2026-10-11 |
+| Machine                                            | Class      |  Insertions |      Queries | Recall@10 | Date       |
+| :------------------------------------------------- | :--------- | ----------: | -----------: | --------: | :--------- |
+| Intel i9-13950HX, 8P+16E cores, 1 domain, 4K pages | `haswell`  |  12.8 k IPS |   46.9 k QPS |     98.5% | 2026-09-02 |
+| NVIDIA RTX 4060 Laptop, 24 SMs, 8 GB               | `ada`      | 114.5 k IPS |  210.9 k QPS |     98.6% | 2026-09-02 |
+| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages  | `neonsdot` | 23.05 k IPS |  75.15 k QPS |   98.800% | 2026-10-11 |
+| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory   | `metal`    | 72.96 k IPS | 176.48 k QPS |   98.860% | 2026-10-11 |
 
 The Apple M5 Pro run recovered 96.703% of the true top-10 entries; three checkpoint reloads measured 71.62–76.97 k QPS at 98.800% Recall@10.
+The Metal run used batches of 4096 & expansion 256/96 (a 128-entry search pool), recovering 97.336% of the true top-10 entries; Queries is the median of three passes after a 100-query warmup.
 
 ### 100M
 
 SIFT, `u8`, euclidean, 100,000,000 rows of 128 dimensions, and SpaceV, `i8`, euclidean, 100,000,000 rows of 100 dimensions.
-A 100M build needs about 50 GB resident at connectivity 32, so it belongs on a dual-socket machine with huge pages provisioned.
 
-| Machine | Class | Dataset | Insertions | Queries | Recall@10 | Date |
-| :------ | :---- | :------ | ---------: | ------: | --------: | :--- |
-| - | - | - | - | - | - | - |
+| Machine                                           | Class      | Dataset |  Insertions |      Queries | Recall@10 | Date       |
+| :------------------------------------------------ | :--------- | :------ | ----------: | -----------: | --------: | :--------- |
+| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages | `neonsdot` | SIFT    | 16.86 k IPS |   5.63 k QPS |   96.410% | 2026-10-11 |
+| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory  | `metal`    | SIFT    | 61.99 k IPS | 146.82 k QPS |   97.650% | 2026-10-11 |
+
+The CPU build took 1h 38m 51s & queries recovered 93.205% of the true top-10 entries.
+Three checkpoint reloads measured 4.52–4.98 k QPS at 96.410–96.440% Recall@10.
+The Metal run used the same batching & timing as the 10M run, taking 26m 53s to build & recovering 94.688% of the true top-10 entries.
 
 ### 1B
 

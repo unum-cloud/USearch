@@ -4,8 +4,8 @@
  *  @date August 28, 2026
  *  @brief Similarity Search over variable-length byte sequences - text, DNA, or protein.
  *
- *  A stored payload is a @c sz_string_view_t into a @ref sequence_tape the caller reserves
- *  once, so a node costs sixteen bytes and no insertion ever allocates. Scoring is batched:
+ *  A stored payload is a @c sz_string_view_t into a @ref tape the caller reserves once,
+ *  so a node costs sixteen bytes and no insertion ever allocates. Scoring is batched:
  *  one @c reset → @c push → @c drain round becomes a single sweep over the whole graph
  *  fan-out, through the metrics of @c ram_metric.hpp.
  *
@@ -43,8 +43,7 @@
 #include "usearch/basic/ram_index.hpp"
 #include "usearch/sequence/ram_metric.hpp"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::sequence {
 
 #pragma region Storage
 
@@ -59,7 +58,7 @@ namespace usearch {
  *  answers @c overflow_k rather than growing.
  */
 template <typename allocator_type_ = std::allocator<byte_t>>
-class sequence_tape {
+class tape {
   public:
     using allocator_t = allocator_type_;
 
@@ -81,15 +80,14 @@ class sequence_tape {
     alignas(default_alignment_k) std::size_t taken_ = 0;
 
   public:
-    sequence_tape(allocator_t const& allocator = {}) noexcept : bytes_(allocator) {}
-    sequence_tape(sequence_tape const&) = delete;
-    sequence_tape& operator=(sequence_tape const&) = delete;
+    tape(allocator_t const& allocator = {}) noexcept : bytes_(allocator) {}
+    tape(tape const&) = delete;
+    tape& operator=(tape const&) = delete;
 
     /** @note Moving keeps every handed-out view valid - the buffer's address travels with it. */
-    sequence_tape(sequence_tape&& other) noexcept
-        : bytes_(std::move(other.bytes_)), taken_(std::exchange(other.taken_, 0)) {}
+    tape(tape&& other) noexcept : bytes_(std::move(other.bytes_)), taken_(std::exchange(other.taken_, 0)) {}
 
-    sequence_tape& operator=(sequence_tape&& other) noexcept {
+    tape& operator=(tape&& other) noexcept {
         bytes_ = std::move(other.bytes_);
         taken_ = std::exchange(other.taken_, 0);
         return *this;
@@ -127,7 +125,7 @@ class sequence_tape {
     std::size_t reserved_bytes() const noexcept { return bytes_.size(); }
 };
 
-using sequence_tape_t = sequence_tape<>;
+using tape_t = tape<>;
 
 #pragma endregion Storage
 
@@ -141,10 +139,10 @@ using sequence_tape_t = sequence_tape<>;
  *  value views that copy.
  */
 template <typename allocator_type_ = std::allocator<byte_t>>
-class sequence_codec {
+class codec {
   public:
     using allocator_t = allocator_type_;
-    using tape_t = sequence_tape<allocator_t>;
+    using tape_t = sequence::tape<allocator_t>;
 
   private:
     tape_t* tape_ = nullptr;
@@ -154,7 +152,7 @@ class sequence_codec {
     /** The interchange token of the elements a value emits: raw UTF-8 bytes. */
     inline static constexpr dtype_t value_dtype_k = dtype_t::utf8_k;
 
-    explicit sequence_codec(tape_t& tape) noexcept : tape_(&tape) {}
+    explicit codec(tape_t& tape) noexcept : tape_(&tape) {}
 
     /** The tape restored values are appended into. */
     tape_t& tape() const noexcept { return *tape_; }
@@ -177,7 +175,7 @@ class sequence_codec {
     }
 };
 
-using sequence_codec_t = sequence_codec<>;
+using codec_t = codec<>;
 
 /**
  *  @brief Frames a sequence index as one SafeGraphs monolith over @p monolith - keys, @c utf8
@@ -195,9 +193,9 @@ using sequence_codec_t = sequence_codec<>;
  */
 template <typename index_type_, typename allocator_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t>
-status_t sequence_save(bytes_span_t monolith, index_type_ const& index, sequence_codec<allocator_type_> const& codec,
-                       executor_type_& executor, save_config_t const& config, std::string_view metric,
-                       progress_type_&& progress = {}) noexcept {
+status_t save(bytes_span_t monolith, index_type_ const& index, codec<allocator_type_> const& codec,
+              executor_type_& executor, save_config_t const& config, std::string_view metric,
+              progress_type_&& progress = {}) noexcept {
     return safegraphs_write_index(monolith, index, codec, executor, config, metric,
                                   std::forward<progress_type_>(progress));
 }
@@ -206,15 +204,15 @@ status_t sequence_save(bytes_span_t monolith, index_type_ const& index, sequence
  *  flushed once every region landed. */
 template <typename index_type_, typename allocator_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t>
-status_t sequence_save(std::string_view path, index_type_ const& index, sequence_codec<allocator_type_> const& codec,
-                       executor_type_& executor, save_config_t const& config, std::string_view metric,
-                       progress_type_&& progress = {}) noexcept {
+status_t save(std::string_view path, index_type_ const& index, codec<allocator_type_> const& codec,
+              executor_type_& executor, save_config_t const& config, std::string_view metric,
+              progress_type_&& progress = {}) noexcept {
     auto const [bytes, measured] = safegraphs_storage_requirements(index, codec, config, metric);
     if (failed(measured)) return measured;
     auto [mapping, mapped] = mapped_file_t::write(path, bytes);
     if (failed(mapped)) return mapped;
-    if (status_t const saved = sequence_save(mapping.span(), index, codec, executor, config, metric,
-                                             std::forward<progress_type_>(progress));
+    if (status_t const saved = save(mapping.span(), index, codec, executor, config, metric,
+                                    std::forward<progress_type_>(progress));
         failed(saved))
         return saved;
     return mapping.sync();
@@ -234,12 +232,12 @@ status_t sequence_save(std::string_view path, index_type_ const& index, sequence
  */
 template <typename index_type_, typename allocator_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t>
-status_t sequence_load(bytes_view_t monolith, index_type_& index, sequence_codec<allocator_type_> const& codec,
-                       executor_type_& executor, load_config_t const& config, progress_type_&& progress = {}) noexcept {
+status_t load(bytes_view_t monolith, index_type_& index, codec<allocator_type_> const& codec, executor_type_& executor,
+              load_config_t const& config, progress_type_&& progress = {}) noexcept {
     auto const [metadata, described] = safegraphs_read_index_metadata(monolith);
     if (failed(described)) return described;
     if (metadata.value_dtype != dtype_t::utf8_k) return status_t::config_mismatch_k;
-    typename sequence_codec<allocator_type_>::tape_t& tape = codec.tape();
+    typename sequence::codec<allocator_type_>::tape_t& tape = codec.tape();
     std::size_t const needed = metadata.value_bytes;
     if (tape.used_bytes() != 0 && tape.reserved_bytes() - tape.used_bytes() < needed) return status_t::overflow_k;
     if (tape.used_bytes() == 0 && tape.reserved_bytes() < needed)
@@ -250,28 +248,24 @@ status_t sequence_load(bytes_view_t monolith, index_type_& index, sequence_codec
 /** Restores the index from the monolith at @p path, mapped read-only. */
 template <typename index_type_, typename allocator_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t>
-status_t sequence_load(std::string_view path, index_type_& index, sequence_codec<allocator_type_> const& codec,
-                       executor_type_& executor, load_config_t const& config, progress_type_&& progress = {}) noexcept {
+status_t load(std::string_view path, index_type_& index, codec<allocator_type_> const& codec, executor_type_& executor,
+              load_config_t const& config, progress_type_&& progress = {}) noexcept {
     auto [mapping, mapped] = mapped_file_t::read(path);
     if (failed(mapped)) return mapped;
-    return sequence_load(mapping.view(), index, codec, executor, config, std::forward<progress_type_>(progress));
+    return load(mapping.view(), index, codec, executor, config, std::forward<progress_type_>(progress));
 }
 
 /** What the monolith @p monolith holds says about itself, the tape's byte need included. */
-inline expected<safegraphs_index_metadata_t> sequence_metadata(bytes_view_t monolith) noexcept {
+inline expected<safegraphs_index_metadata_t> metadata(bytes_view_t monolith) noexcept {
     return safegraphs_read_index_metadata(monolith);
 }
 
 /** The metadata of the monolith at @p path, mapped read-only. */
-inline expected<safegraphs_index_metadata_t> sequence_metadata(std::string_view path) noexcept {
+inline expected<safegraphs_index_metadata_t> metadata(std::string_view path) noexcept {
     auto [mapping, mapped] = mapped_file_t::read(path);
     if (failed(mapped)) return {safegraphs_index_metadata_t {}, mapped};
-    return sequence_metadata(mapping.view());
+    return metadata(mapping.view());
 }
-
-#pragma endregion Serialization
-
-#pragma region Index
 
 /** Similarity Search over byte sequences: tape-backed views, integer distances, and a metric
  *  chosen per call - so a graph built under one kernel is queried under another without
@@ -279,12 +273,11 @@ inline expected<safegraphs_index_metadata_t> sequence_metadata(std::string_view 
 template <typename key_type_ = uuid_t, typename node_id_type_ = u32_t, typename wait_type_ = dummy_waiter_t,
           template <typename> class atomic_ref_template_ = standard_atomic_ref,
           typename allocator_type_ = std::allocator<byte_t>>
-using sequence_ram_index = basic_ram_index<sz_string_view_t, key_type_, node_id_type_, i64_t, wait_type_,
-                                           atomic_ref_template_, allocator_type_>;
+using ram_index = basic::ram_index<sz_string_view_t, key_type_, node_id_type_, i64_t, wait_type_, atomic_ref_template_,
+                                   allocator_type_>;
 
-using sequence_ram_index_t = sequence_ram_index<>;
+using ram_index_t = ram_index<>;
 
-#pragma endregion Index
+#pragma endregion Serialization
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::sequence

@@ -18,6 +18,8 @@ endif ()
 # LibraryLink is a C API declared entirely by one header, so the SDK contributes an include directory and no library to
 # link.
 add_library(usearch_wolfram SHARED lib.c)
+# Probed intrinsics use function target attributes, which Clang's builtin modules cannot represent.
+set_source_files_properties(lib.c PROPERTIES COMPILE_OPTIONS "$<$<C_COMPILER_ID:Clang,AppleClang>:-fno-modules>")
 usearch_setup_target(usearch_wolfram)
 target_include_directories(usearch_wolfram SYSTEM PRIVATE "${WOLFRAM_PATH}/SystemFiles/IncludeFiles/C/")
 target_link_libraries(usearch_wolfram PRIVATE ${USEARCH_WOLFRAM_LIBRARY})

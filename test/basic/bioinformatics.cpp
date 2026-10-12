@@ -5,8 +5,8 @@
  *  @brief The bioinformatics unit of the basic-index suite.
  *
  *  ACGT reads under an alignment distance with transition/transversion-weighted substitutions - the
- *  non-transparent, integer-exact, wide-ID, @c unum::usearch::uuid_t-keyed corner, and the only
- *  unit whose serialized bytes differ from the in-RAM form.
+ *  non-transparent, integer-exact, wide-ID, @c utilities::uuid_t-keyed corner, and the only unit
+ *  whose serialized bytes differ from the in-RAM form.
  *
  *  Reads are drawn from planted reference sequences with a few point mutations & indels
  *  each, so alignment distances bimodalize the way real read-vs-reference data does. The
@@ -57,7 +57,7 @@ static u64_t alignment_distance(std::string_view first, std::string_view second,
 }
 
 /** The unit's batched metric - deliberately non-transparent: queries must be
- *  stored-form reads, proving the same-type fallback of @c basic_query. */
+ *  stored-form reads, proving the same-type fallback of @c basic::query. */
 struct alignment_metric_t {
     std::string_view query_;
     std::vector<std::string_view> staged_;
@@ -65,9 +65,7 @@ struct alignment_metric_t {
     std::vector<u64_t> current_row_;
 
     void reset(dna_t const& query) noexcept { query_ = query, staged_.clear(); }
-    basic_metric_staging_t push(dna_t const& value) noexcept {
-        return staged_.push_back(value), basic_metric_staging_t::staged_k;
-    }
+    metric_staging_t push(dna_t const& value) noexcept { return staged_.push_back(value), metric_staging_t::staged_k; }
     void drain(std::span<u64_t> distances, u64_t) noexcept {
         for (std::size_t lane = 0; lane != distances.size(); ++lane)
             distances[lane] = alignment_distance(query_, staged_[lane], previous_row_, current_row_);
@@ -132,13 +130,13 @@ struct bioinformatics_handmade_t {
 template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = standard_atomic_ref>
 struct bioinformatics_fixture {
     using index_t =
-        basic_ram_index<dna_t, us::uuid_t, u64_t, u64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;
+        ram_index<dna_t, us::utilities::uuid_t, u64_t, u64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;
 
     static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
     static alignment_metric_t make_metric() { return {}; }
     static packed_dna_codec_t make_codec() { return {}; }
-    static us::uuid_t make_key(std::size_t ordinal) {
-        return std::bit_cast<us::uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal), 0xB10B10B1ull ^ ordinal});
+    static us::utilities::uuid_t make_key(std::size_t ordinal) {
+        return std::bit_cast<us::utilities::uuid_t>(std::array<u64_t, 2> {mix_bits(ordinal), 0xB10B10B1ull ^ ordinal});
     }
     static u64_t oracle(dna_t const& query, dna_t const& stored) noexcept {
         std::vector<u64_t> previous_row, current_row;
@@ -184,11 +182,11 @@ struct bioinformatics_fixture {
 
 using bioinformatics_fixture_t = bioinformatics_fixture<>;
 
-static_assert(basic_value<dna_t>);
-static_assert(basic_metric<alignment_metric_t, dna_t, u64_t>);
+static_assert(value<dna_t>);
+static_assert(metric<alignment_metric_t, dna_t, u64_t>);
 static_assert(!transparent_metric<alignment_metric_t>);
-static_assert(basic_query<dna_t, alignment_metric_t, dna_t>);
-static_assert(basic_value_codec<packed_dna_codec_t, dna_t>);
+static_assert(query<dna_t, alignment_metric_t, dna_t>);
+static_assert(value_codec<packed_dna_codec_t, dna_t>);
 
 /** The codec on its own: a bit-exact pack/unpack roundtrip at every length modulo
  *  four, and a length prefix disagreeing with its slice refused as malformed. */

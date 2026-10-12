@@ -35,6 +35,7 @@
 #include "usearch/utilities/types.hpp"
 
 namespace unum::usearch::bench::utilities {
+using namespace unum::usearch::utilities;
 
 /** Infers the payload dtype from the RetriEval extension family: `.fbin` → f32,
  *  `.bf16bin` / `.f16bin` / `.i8bin` / `.u8bin` accordingly, `.u1x8bin` → packed bits, `.ibin` → u32 neighbor IDs. */

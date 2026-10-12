@@ -4,7 +4,7 @@
  *  @date October 11, 2026
  *  @brief Vector Search index for the unified memory of one Apple GPU.
  *
- *  The Apple twin of @c dense_vram_nvidia_index: the same planes, the same walk, insert and refine
+ *  The Apple twin of @c vram_nvidia_index: the same planes, the same walk, insert and refine
  *  kernels ported to Metal in @c vram_apple_index.metal, and the same verbs. Memory is unified, so
  *  every plane is a shared buffer the host reads and writes in place: checkpoints copy without a
  *  bounce, and the reachability audit and the island reconnection run on the host over the planes
@@ -38,8 +38,7 @@
 #include "usearch/utilities/vram_apple_device.hpp"
 #include "usearch/dense/types.hpp"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::dense {
 
 #if defined(__clang__)
 #pragma clang diagnostic push
@@ -47,12 +46,12 @@ namespace usearch {
 #endif
 
 /** The MSL kits, embedded so the kernels compile on the device without a Metal toolchain. */
-inline constexpr char dense_metal_metric_source_k[] = {
+inline constexpr char metal_metric_source_k[] = {
 #embed "vram_apple_metric.metal" suffix(, 0)
 };
 
 /** The MSL walk, insert, refine and search kernels, compiled after the kits. */
-inline constexpr char dense_metal_index_source_k[] = {
+inline constexpr char metal_index_source_k[] = {
 #embed "vram_apple_index.metal" suffix(, 0)
 };
 
@@ -62,7 +61,7 @@ inline constexpr char dense_metal_index_source_k[] = {
 
 /** The kit name @c vram_apple_metric.metal gives @p dtype, or null for a dtype it carries none
  *  for. */
-constexpr char const* dense_metal_kit_name(nk_dtype_t dtype) noexcept {
+constexpr char const* metal_kit_name(nk_dtype_t dtype) noexcept {
     switch (dtype) {
     case nk_bf16_k: return "bf16_metal_quads_kit_t";
     case nk_f16_k: return "f16_metal_quads_kit_t";
@@ -82,30 +81,31 @@ constexpr char const* dense_metal_kit_name(nk_dtype_t dtype) noexcept {
 /** The whole MSL source for @p dtype_ - the kits, the alias naming its kit, then the kernels -
  *  assembled once per process; its address keys the pipelines built from it. */
 template <nk_dtype_t dtype_>
-char const* dense_metal_source() noexcept {
+char const* metal_source() noexcept {
     constexpr std::size_t alias_capacity_k = 128;
-    static char source[sizeof(dense_metal_metric_source_k) + sizeof(dense_metal_index_source_k) + alias_capacity_k];
+    static char source[sizeof(metal_metric_source_k) + sizeof(metal_index_source_k) + alias_capacity_k];
     static std::once_flag assembled;
     std::call_once(assembled, [] {
-        std::size_t length = sizeof(dense_metal_metric_source_k) - 1;
-        std::memcpy(source, dense_metal_metric_source_k, length);
-        length += static_cast<std::size_t>(std::snprintf(
-            source + length, alias_capacity_k, "\nnamespace unum::usearch {\nusing dense_metal_kit_t = %s;\n}\n",
-            dense_metal_kit_name(dtype_)));
-        std::memcpy(source + length, dense_metal_index_source_k, sizeof(dense_metal_index_source_k));
+        std::size_t length = sizeof(metal_metric_source_k) - 1;
+        std::memcpy(source, metal_metric_source_k, length);
+        length += static_cast<std::size_t>(
+            std::snprintf(source + length, alias_capacity_k,
+                          "\nnamespace unum { namespace usearch { namespace dense {\nusing metal_kit_t = %s;\n}}}\n",
+                          metal_kit_name(dtype_)));
+        std::memcpy(source + length, metal_index_source_k, sizeof(metal_index_source_k));
     });
     return source;
 }
 
 /** The walking kernels @c vram_apple_index.metal instantiates once per pool width. */
-enum class dense_metal_kernel_t : u32_t {
+enum class metal_kernel_t : u32_t {
     insert_k,
     refine_k,
     search_k,
 };
 
-/** Every scalar a launch carries, word for word the @c dense_metal_arguments_t of the kernels. */
-struct dense_metal_arguments_t {
+/** Every scalar a launch carries, word for word the @c metal_arguments_t of the kernels. */
+struct metal_arguments_t {
     u32_t row_fragments = 0, lanes_per_row = 0, steps_per_row = 0, connectivity = 0;
     u32_t metric = 0, has_norms = 0, first_id = 0, end_id = 0;
     u32_t sampling_bound = 0, queries_count = 0, count = 0, epoch_base = 0;
@@ -115,7 +115,7 @@ struct dense_metal_arguments_t {
 
 /** The counter words a launch binds: the batch's assigned rows, the published rows, then the walks'
  *  telemetry. */
-enum class dense_metal_counter_t : u32_t {
+enum class metal_counter_t : u32_t {
     assigned_k = 0,
     published_k,
     hops_k,
@@ -131,65 +131,59 @@ enum class dense_metal_counter_t : u32_t {
 };
 
 /** What a search launch lands: ranked distances, or every scored pair of a product. */
-enum class dense_metal_output_t : bool { distances_k, products_k };
-
-/** The queue a context submits to: an executor's own, or the device's default one when @c queue is
- *  null. Named an allocator because the residency-level harnesses build every context from its
- *  @c allocator_t. */
-struct dense_metal_queue_t {
-    int device = 0;
-    void* queue = nullptr;
-};
+enum class metal_output_t : bool { distances_k, products_k };
 
 /** One caller's scratch for driving an Apple index: the walks' arena, the staging of one batch, the
  *  telemetry counters and the single-query landing. Two contexts on one index share only the
  *  planes. */
-struct dense_metal_traversal_context_t {
-    using allocator_t = dense_metal_queue_t;
+struct metal_traversal_context_t {
+
+    /** The queue the context submits to, named an allocator because the residency-level harnesses
+     *  build every context from its @c allocator_t. */
+    using allocator_t = metal_queue_t;
 
     /** Matches the single-query verb lands at most. */
     inline static constexpr u32_t results_capacity_k = 64;
 
     /** The single-query verb's landing: ascending matches in inline storage. */
     struct results_t {
-        dense_scored_node_t entries_[results_capacity_k];
+        scored_node_t entries_[results_capacity_k];
         std::size_t count_ = 0;
 
-        dense_scored_node_t* data() noexcept { return entries_; }
-        dense_scored_node_t const* data() const noexcept { return entries_; }
-        dense_scored_node_t& operator[](std::size_t rank) noexcept { return entries_[rank]; }
-        dense_scored_node_t const& operator[](std::size_t rank) const noexcept { return entries_[rank]; }
+        scored_node_t* data() noexcept { return entries_; }
+        scored_node_t const* data() const noexcept { return entries_; }
+        scored_node_t& operator[](std::size_t rank) noexcept { return entries_[rank]; }
+        scored_node_t const& operator[](std::size_t rank) const noexcept { return entries_[rank]; }
         std::size_t size() const noexcept { return count_; }
     };
 
     results_t results;
 
     /** Binds the context to @p queue's device; buffers wait for the first verb. */
-    dense_metal_traversal_context_t(allocator_t queue = {}) noexcept
-        : queue_(queue), context_(metal_context(queue.device)) {
-        if (context_)
-            counters_ = metal_allocate(*context_, static_cast<std::size_t>(dense_metal_counter_t::count_k) * 4);
+    metal_traversal_context_t(allocator_t queue = {}) noexcept
+        : queue_(std::move(queue)), context_(metal_context(queue_.device)) {
+        if (context_) counters_ = metal_allocate(*context_, static_cast<std::size_t>(metal_counter_t::count_k) * 4);
     }
-    dense_metal_traversal_context_t(dense_metal_traversal_context_t&&) noexcept = default;
-    dense_metal_traversal_context_t(dense_metal_traversal_context_t const&) = delete;
-    dense_metal_traversal_context_t& operator=(dense_metal_traversal_context_t const&) = delete;
+    metal_traversal_context_t(metal_traversal_context_t&&) noexcept = default;
+    metal_traversal_context_t(metal_traversal_context_t const&) = delete;
+    metal_traversal_context_t& operator=(metal_traversal_context_t const&) = delete;
 
     int device() const noexcept { return queue_.device; }
-    void* queue() const noexcept { return queue_.queue ? queue_.queue : context_->queue; }
+    void* queue() const noexcept { return queue_.handle() ? queue_.handle() : context_->queue; }
     explicit operator bool() const noexcept { return context_ && counters_; }
 
     /** Every verb waits for its command buffers, so a context never has work left to drain. */
     status_t drain() noexcept { return status_t::success_k; }
 
     /** The telemetry word @p counter of the last call, read in place from shared memory. */
-    u32_t spent(dense_metal_counter_t counter) const noexcept {
+    u32_t spent(metal_counter_t counter) const noexcept {
         u32_t const* const words = reinterpret_cast<u32_t const*>(counters_.host);
         return words[static_cast<u32_t>(counter)];
     }
 
   private:
     template <nk_dtype_t, nk_capability_t, typename>
-    friend struct dense_vram_apple_index;
+    friend struct vram_apple_index;
 
     allocator_t queue_;
     metal_context_t* context_ = nullptr;
@@ -215,19 +209,19 @@ struct dense_metal_traversal_context_t {
 /**
  *  @brief Vector Search index for the unified memory of one Apple GPU.
  *
- *  Speaks @c dense_vram_nvidia_index 's verbs: a batch's IDs are one contiguous range turning
- *  visible a whole batch at a time, and the first successful @c reserve freezes the geometry.
- *  Attention is refused with @c unsupported_k until its value-lookup ABI is designed for Metal, and
- *  walks past the widest register pool of 512 clamp to it.
+ *  Speaks @c vram_nvidia_index 's verbs: a batch's IDs are one contiguous range turning visible a
+ *  whole batch at a time, and the first successful @c reserve freezes the geometry. Attention is
+ *  refused with @c unsupported_k until its value-lookup ABI is designed for Metal, and walks past
+ *  the widest register pool of 512 clamp to it.
  */
 template <                                                      //
     nk_dtype_t vector_dtype_ = nk_i8_k,                         //
     nk_capability_t capability_ = nk_cap_metal_k,               //
     typename planes_allocator_type_ = metal_shared_allocator_t> //
-struct dense_vram_apple_index {
+struct vram_apple_index {
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
-    static_assert(dense_metal_kit_name(vector_dtype_) != nullptr, "No Metal kit stores this dtype");
+    static_assert(metal_kit_name(vector_dtype_) != nullptr, "No Metal kit stores this dtype");
 
     using planes_allocator_t = planes_allocator_type_;
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
@@ -236,13 +230,13 @@ struct dense_vram_apple_index {
     using norms_t = vector_norms<dot_t>;
     using vectors_view_t = nk::matrix_view<scalar_t>;
     using vector_view_t = nk::vector_view<scalar_t>;
-    using node_id_t = dense_node_id_t;
+    using node_id_t = dense::node_id_t;
     using node_ids_span_t = nk::vector_span<node_id_t>;
-    using distance_t = dense_distance_t;
+    using distance_t = dense::distance_t;
     using small_size_t = u32_t;
-    using dense_traversal_context_t = dense_metal_traversal_context_t;
-    using refine_result_t = dense_refine_result_t;
-    using health_result_t = dense_health_result_t;
+    using traversal_context_t = metal_traversal_context_t;
+    using refine_result_t = dense::refine_result_t;
+    using health_result_t = dense::health_result_t;
     static_assert(sizeof(norms_t) == 8, "The kernels address norms as two 32-bit words");
 
     inline static constexpr synchronization_t synchronization_ceiling_k = synchronization_t::concurrent_k;
@@ -261,11 +255,11 @@ struct dense_vram_apple_index {
 
     /** The @p kernel every walk scores by, checked against the dtype at the first @c reserve, and
      *  the backend whose device the planes live on. */
-    explicit dense_vram_apple_index(nk_kernel_kind_t kernel, planes_allocator_t const& planes_allocator = {}) noexcept
+    explicit vram_apple_index(nk_kernel_kind_t kernel, planes_allocator_t const& planes_allocator = {}) noexcept
         : device_ {planes_allocator.device()}, kernel_ {kernel}, planes_allocator_ {planes_allocator} {}
-    dense_vram_apple_index(dense_vram_apple_index const&) = delete;
-    dense_vram_apple_index& operator=(dense_vram_apple_index const&) = delete;
-    ~dense_vram_apple_index() noexcept {
+    vram_apple_index(vram_apple_index const&) = delete;
+    vram_apple_index& operator=(vram_apple_index const&) = delete;
+    ~vram_apple_index() noexcept {
         planes_allocator_.deallocate(vectors_plane_);
         planes_allocator_.deallocate(norms_plane_);
         planes_allocator_.deallocate(neighbors_plane_);
@@ -309,7 +303,7 @@ struct dense_vram_apple_index {
 
     /** Bytes this index occupies: its planes and its counters. */
     std::size_t memory_usage() const noexcept {
-        return sizeof(dense_vram_apple_index) + vectors_plane_.bytes + norms_plane_.bytes + neighbors_plane_.bytes +
+        return sizeof(vram_apple_index) + vectors_plane_.bytes + norms_plane_.bytes + neighbors_plane_.bytes +
                counters_.bytes;
     }
 
@@ -384,7 +378,7 @@ struct dense_vram_apple_index {
             device_ = specs;
             metal_context_t* const context = metal_context(device_.ordinal);
             if (!context) return {0, status_t::device_error_k};
-            counters_ = metal_allocate(*context, static_cast<std::size_t>(dense_metal_counter_t::count_k) * 4);
+            counters_ = metal_allocate(*context, static_cast<std::size_t>(metal_counter_t::count_k) * 4);
             if (!counters_) return {0, status_t::bad_alloc_k};
             dimensions_ = config.dimensions;
             connectivity_ = static_cast<std::size_t>(config.connectivity);
@@ -405,7 +399,7 @@ struct dense_vram_apple_index {
     /** Telemetry of one @c insert() batch over the contiguous IDs @b [first_id,first_id+count). */
     struct [[nodiscard]] insert_result_t {
         std::size_t new_size = 0;
-        dense_node_id_t first_id = dense_node_id_unknown_k;
+        node_id_t first_id = node_id_unknown_k;
         std::size_t visited_members = 0;
         std::size_t computed_distances = 0;
         std::size_t restarts = 0;
@@ -419,7 +413,7 @@ struct dense_vram_apple_index {
     /** Inserts @p new_vectors under the next contiguous IDs, waits for the device, publishes them
      *  once every earlier batch has, and reports telemetry. */
     expected<insert_result_t> insert(vectors_view_t new_vectors, node_ids_span_t assigned_ids,
-                                     dense_traversal_context_t& context, insert_config_t config = {}) noexcept {
+                                     traversal_context_t& context, insert_config_t config = {}) noexcept {
         expected<insert_result_t> inserted = submit_insert_(new_vectors, assigned_ids, context, config);
         if (!inserted || !new_vectors.extent(0)) return inserted;
         if (status_t const published = publish_(inserted.value.first_id, new_vectors.extent(0)); failed(published))
@@ -450,37 +444,35 @@ struct dense_vram_apple_index {
 
     /** The nearest published neighbors of every query row, ascending, with sentinel IDs past the
      *  live matches. */
-    expected<search_result_t> search(vectors_view_t queries, nk::matrix_span<dense_node_id_t> result_ids,
-                                     nk::matrix_span<dense_distance_t> result_distances,
-                                     dense_traversal_context_t& context, search_config_t config = {},
-                                     completion_t = completion_t::blocking_k) noexcept {
+    expected<search_result_t> search(vectors_view_t queries, nk::matrix_span<node_id_t> result_ids,
+                                     nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
+                                     search_config_t config = {}, completion_t = completion_t::blocking_k) noexcept {
         return search_(queries, result_ids, result_distances, context, config, size(), dummy_heads_t {});
     }
 
     /** The batched @c search ranked by a lightning indexer; a dot verb, refusing every other
      *  metric. */
-    expected<search_result_t> search(vectors_view_t queries, dense_indexer_heads<scalar_t> const& heads,
-                                     nk::matrix_span<dense_node_id_t> result_ids,
-                                     nk::matrix_span<dense_distance_t> result_distances,
-                                     dense_traversal_context_t& context, search_config_t config = {},
-                                     completion_t = completion_t::blocking_k) noexcept
-        requires dense_floating_scalar<scalar_t>
+    expected<search_result_t> search(vectors_view_t queries, indexer_heads<scalar_t> const& heads,
+                                     nk::matrix_span<node_id_t> result_ids,
+                                     nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
+                                     search_config_t config = {}, completion_t = completion_t::blocking_k) noexcept
+        requires floating_scalar<scalar_t>
     {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         return search_(queries, result_ids, result_distances, context, config, size(), heads);
     }
 
     /** One query in, the nearest matches ascending in @c context.results. */
-    expected<search_result_t> search(vector_view_t query_vector, dense_traversal_context_t& context,
+    expected<search_result_t> search(vector_view_t query_vector, traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
         return search_one_(query_vector, context, config, size());
     }
 
     /** Graph products of every left-hand row: each keeps the pairs its walk scored, until its
      *  output row fills. */
-    expected<search_result_t> multiply(vectors_view_t left, nk::matrix_span<dense_node_id_t> node_ids,
+    expected<search_result_t> multiply(vectors_view_t left, nk::matrix_span<node_id_t> node_ids,
                                        nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
-                                       dense_traversal_context_t& context, search_config_t config = {},
+                                       traversal_context_t& context, search_config_t config = {},
                                        completion_t = completion_t::blocking_k) noexcept {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         return multiply_(left, node_ids, products, counts, context, config, size());
@@ -489,7 +481,7 @@ struct dense_vram_apple_index {
     /** Device attention is NVIDIA's alone until its value lookup has a Metal ABI. */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(vectors_view_t, std::size_t, value_lookup_type_&&, f32_t, nk::matrix_span<f32_t>,
-                                     std::span<dense_softmax_state_t>, dense_traversal_context_t&, search_config_t = {},
+                                     std::span<softmax_state_t>, traversal_context_t&, search_config_t = {},
                                      completion_t = completion_t::blocking_k) noexcept {
         return {{}, status_t::unsupported_k};
     }
@@ -512,7 +504,7 @@ struct dense_vram_apple_index {
      *  reconnection, run on the host over unified memory, restore whatever a re-selection strands.
      *  Demands an exclusive caller.
      */
-    expected<refine_result_t> refine(iota_view<dense_node_id_t> nodes, dense_traversal_context_t& context,
+    expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
                                      refine_config_t config = {}) noexcept {
         std::unique_lock batch {batch_};
         std::size_t const rows = size();
@@ -524,7 +516,7 @@ struct dense_vram_apple_index {
             result.computed_distances += walked.computed_distances;
             result.restarts += walked.restarts;
         };
-        dense_node_id_t const bound = static_cast<dense_node_id_t>(min_of<std::size_t>(nodes.bound, rows));
+        node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
         if (nodes.first < bound) {
             auto const [walked, status] = refine_pass_(context, config, {nodes.first, bound}, {});
             if (failed(status)) return {result, status};
@@ -541,7 +533,7 @@ struct dense_vram_apple_index {
         result.islands_found = audit.islands.size();
         for (std::size_t islands_before = audit.islands.size(); !audit.islands.empty();) {
             auto const [healed, healed_status] = refine_pass_(
-                context, config, {0, static_cast<dense_node_id_t>(audit.islands.size())}, to_span(audit.islands));
+                context, config, {0, static_cast<node_id_t>(audit.islands.size())}, to_span(audit.islands));
             if (failed(healed_status)) return {result, healed_status};
             add_walks(healed);
             audit_(audit);
@@ -561,7 +553,7 @@ struct dense_vram_apple_index {
 
     /** Measures forward reachability from as many stride-spread landmarks as one search draws, on
      *  the host. */
-    expected<health_result_t> health(dense_traversal_context_t&) noexcept {
+    expected<health_result_t> health(traversal_context_t&) noexcept {
         std::size_t const rows = size();
         if (!rows) return {{}, status_t::success_k};
         audit_t audit;
@@ -588,8 +580,7 @@ struct dense_vram_apple_index {
         std::size_t covered_neighbors = 0;
 
         save_plan_t() noexcept = default;
-        save_plan_t(dense_vram_apple_index const& index, columns_t columns, node_id_t id_shift,
-                    node_id_t visible) noexcept
+        save_plan_t(vram_apple_index const& index, columns_t columns, node_id_t id_shift, node_id_t visible) noexcept
             : columns(columns), id_shift(id_shift), visible(visible),
               batch_rows(min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(20))), index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
@@ -650,7 +641,7 @@ struct dense_vram_apple_index {
             node_id_t* const landed = reinterpret_cast<node_id_t*>(neighbors_rows.data());
             for (std::size_t slot = 0; slot != rows.size() * connectivity; ++slot)
                 landed[slot] = source[slot] < visible ? static_cast<node_id_t>(source[slot] + id_shift)
-                                                      : dense_node_id_unknown_k;
+                                                      : node_id_unknown_k;
             standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(rows.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
@@ -666,7 +657,7 @@ struct dense_vram_apple_index {
         }
 
       private:
-        dense_vram_apple_index const* index_ = nullptr;
+        vram_apple_index const* index_ = nullptr;
     };
 
     /** Opens a save into @p columns; @c concurrent_k refuses, since the planes cannot be probed for
@@ -706,7 +697,7 @@ struct dense_vram_apple_index {
         std::size_t covered_norms = 0;
 
         load_plan_t() noexcept = default;
-        load_plan_t(dense_vram_apple_index& index, std::unique_lock<std::mutex>&& batch, node_id_t base,
+        load_plan_t(vram_apple_index& index, std::unique_lock<std::mutex>&& batch, node_id_t base,
                     std::size_t rows) noexcept
             : base(base), rows(rows), batch_rows(min_of(rows, power_of_two<std::size_t>(20))), index_(&index),
               batch_(std::move(batch)) {}
@@ -777,8 +768,8 @@ struct dense_vram_apple_index {
                                                    static_cast<std::size_t>(range.first) * connectivity,
                                                range.size() * connectivity};
             std::memcpy(landed.data(), neighbors_rows.data(), neighbors_rows.size());
-            rebase_neighbors(landed, source_range, shift, dense_node_id_unknown_k);
-            compact_neighbors(landed, connectivity, range.first, dense_node_id_unknown_k);
+            rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
+            compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
             standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
@@ -796,17 +787,16 @@ struct dense_vram_apple_index {
                     if (status_t const derived = index_->derive_norms_(base, rows); failed(derived))
                         return index_->fail_(derived);
                 index_->claimed_rows_ = base + rows;
-                reinterpret_cast<u32_t*>(
-                    index_->counters_.host)[static_cast<u32_t>(dense_metal_counter_t::published_k)] =
-                    static_cast<u32_t>(base + rows);
+                u32_t* const counters = reinterpret_cast<u32_t*>(index_->counters_.host);
+                counters[static_cast<u32_t>(metal_counter_t::published_k)] = static_cast<u32_t>(base + rows);
                 batch_.unlock();
             }
-            dense_vram_apple_index* const index = std::exchange(index_, nullptr);
+            vram_apple_index* const index = std::exchange(index_, nullptr);
             return rows ? index->publish_(base, rows) : status_t::success_k;
         }
 
       private:
-        dense_vram_apple_index* index_ = nullptr;
+        vram_apple_index* index_ = nullptr;
         std::unique_lock<std::mutex> batch_;
     };
 
@@ -853,7 +843,7 @@ struct dense_vram_apple_index {
     /** The sharded twin publishes and fails its shard's batches, and walks under its own
      *  snapshot. */
     template <typename, nk_dtype_t, nk_capability_t, typename>
-    friend struct dense_vram_apple_indexes;
+    friend struct vram_apple_indexes;
 
   private:
 
@@ -872,9 +862,9 @@ struct dense_vram_apple_index {
      *  with the IDs, the rows invisible until the caller publishes them - which the sharded twin
      *  does for every step at once. */
     expected<insert_result_t> submit_insert_(vectors_view_t new_vectors, node_ids_span_t assigned_ids,
-                                             dense_traversal_context_t& context, insert_config_t config) noexcept {
+                                             traversal_context_t& context, insert_config_t config) noexcept {
         std::size_t const rows = new_vectors.extent(0);
-        if (!rows) return {{claimed_rows_, static_cast<dense_node_id_t>(claimed_rows_)}, status_t::success_k};
+        if (!rows) return {{claimed_rows_, static_cast<node_id_t>(claimed_rows_)}, status_t::success_k};
         if (!dimensions_) return {{}, status_t::uninitialized_k};
         if (new_vectors.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
         if (assigned_ids.size() && assigned_ids.size() != rows) return {{}, status_t::config_mismatch_k};
@@ -892,7 +882,7 @@ struct dense_vram_apple_index {
             return {{}, staged};
         stage_rows_(context.staging_.host, new_vectors);
         u32_t const pool_slots = pool_slots_for_(config.expansion_factor, 4);
-        dense_metal_arguments_t arguments = arguments_();
+        metal_arguments_t arguments = arguments_();
         if (status_t const sized = shape_arena_(context, arguments, pool_slots * 32, cache_rows_k, rows); failed(sized))
             return {{}, sized};
         arguments.first_id = static_cast<u32_t>(first_id);
@@ -903,7 +893,7 @@ struct dense_vram_apple_index {
         status_t launched = status_t::device_error_k;
         {
             std::shared_lock planes {planes_};
-            void* const pipeline = pipeline_(name_of_(dense_metal_kernel_t::insert_k, pool_slots));
+            void* const pipeline = pipeline_(name_of_(metal_kernel_t::insert_k, pool_slots));
             metal_launch_t launch {context.queue(), pipeline};
             if (pipeline && launch) {
                 bind_planes_(launch, arguments);
@@ -913,18 +903,18 @@ struct dense_vram_apple_index {
                 launched = launch.run(groups_for_(rows), simdgroups_per_group_k * 32);
             }
         }
-        if (failed(launched)) return {{first_id, static_cast<dense_node_id_t>(first_id)}, fail_(launched)};
+        if (failed(launched)) return {{first_id, static_cast<node_id_t>(first_id)}, fail_(launched)};
 
         insert_result_t result;
-        result.first_id = static_cast<dense_node_id_t>(first_id);
+        result.first_id = static_cast<node_id_t>(first_id);
         result.new_size = first_id + rows;
-        result.visited_members = counter_(counters_, dense_metal_counter_t::hops_k);
-        result.computed_distances = counter_(counters_, dense_metal_counter_t::scored_k);
-        result.restarts = counter_(counters_, dense_metal_counter_t::restarts_k);
-        result.unlinked_neighbors = counter_(counters_, dense_metal_counter_t::lock_skips_k);
-        result.visited_saturations = counter_(counters_, dense_metal_counter_t::saturations_k);
+        result.visited_members = counter_(counters_, metal_counter_t::hops_k);
+        result.computed_distances = counter_(counters_, metal_counter_t::scored_k);
+        result.restarts = counter_(counters_, metal_counter_t::restarts_k);
+        result.unlinked_neighbors = counter_(counters_, metal_counter_t::lock_skips_k);
+        result.visited_saturations = counter_(counters_, metal_counter_t::saturations_k);
         for (std::size_t row = 0; row != assigned_ids.size(); ++row)
-            assigned_ids[row] = static_cast<dense_node_id_t>(first_id + row);
+            assigned_ids[row] = static_cast<node_id_t>(first_id + row);
         return {result, status_t::success_k};
     }
 
@@ -933,10 +923,10 @@ struct dense_vram_apple_index {
 #pragma region Launches
 
     /** The scalars every launch shares. */
-    dense_metal_arguments_t arguments_() const noexcept {
+    metal_arguments_t arguments_() const noexcept {
         u32_t const fragments = row_fragments();
         u32_t const lanes_per_row = min_of(std::bit_ceil(fragments), 32u);
-        dense_metal_arguments_t arguments;
+        metal_arguments_t arguments;
         arguments.row_fragments = fragments;
         arguments.lanes_per_row = lanes_per_row;
         arguments.steps_per_row = divide_round_up(fragments, lanes_per_row);
@@ -967,7 +957,7 @@ struct dense_vram_apple_index {
     /** Sizes @p context 's arena for @p work walks over pools of @p expansion with @p cache_rows
      *  cache rows, zeroing it when fresh or when the epochs wrap, and fills the slice shape and the
      *  epoch base into @p arguments. */
-    status_t shape_arena_(dense_traversal_context_t& context, dense_metal_arguments_t& arguments, u32_t expansion,
+    status_t shape_arena_(traversal_context_t& context, metal_arguments_t& arguments, u32_t expansion,
                           std::size_t cache_rows, std::size_t work) noexcept {
         u32_t const visited_slots = std::bit_ceil(64 * expansion);
         std::size_t const slice_bytes = round_up_to_multiple<std::size_t>(
@@ -1004,18 +994,18 @@ struct dense_vram_apple_index {
     /** Zeroes @p counters' assigned row and telemetry, keeping the published row. */
     static void reset_counters_(metal_buffer_t& counters) noexcept {
         u32_t* const words = reinterpret_cast<u32_t*>(counters.host);
-        u32_t const published = words[static_cast<u32_t>(dense_metal_counter_t::published_k)];
+        u32_t const published = words[static_cast<u32_t>(metal_counter_t::published_k)];
         std::memset(words, 0, counters.bytes);
-        words[static_cast<u32_t>(dense_metal_counter_t::published_k)] = published;
+        words[static_cast<u32_t>(metal_counter_t::published_k)] = published;
     }
-    static u32_t counter_(metal_buffer_t const& counters, dense_metal_counter_t counter) noexcept {
+    static u32_t counter_(metal_buffer_t const& counters, metal_counter_t counter) noexcept {
         u32_t const* const words = reinterpret_cast<u32_t const*>(counters.host);
         return words[static_cast<u32_t>(counter)];
     }
 
     /** Binds the arguments and the three planes, the vectors standing in for an empty norms
      *  plane. */
-    void bind_planes_(metal_launch_t& launch, dense_metal_arguments_t const& arguments) const noexcept {
+    void bind_planes_(metal_launch_t& launch, metal_arguments_t const& arguments) const noexcept {
         launch.bind_bytes(&arguments, sizeof(arguments), 0);
         launch.bind(vectors_plane_, 1);
         launch.bind(stores_norms() ? norms_plane_ : vectors_plane_, 2);
@@ -1025,18 +1015,15 @@ struct dense_vram_apple_index {
     /** The pipeline of kernel @p name for this dtype, built at first use. */
     void* pipeline_(char const* name) const noexcept {
         metal_context_t* const context = metal_context(device_.ordinal);
-        return context ? context->pipeline(dense_metal_source<vector_dtype_>(), name) : nullptr;
+        return context ? context->pipeline(metal_source<vector_dtype_>(), name) : nullptr;
     }
 
     /** The name of @p kernel's instantiation at @p pool_slots slots, a power of two up to 16. */
-    static char const* name_of_(dense_metal_kernel_t kernel, u32_t pool_slots) noexcept {
+    static char const* name_of_(metal_kernel_t kernel, u32_t pool_slots) noexcept {
         static constexpr char const* names_k[][4] = {
-            {"dense_metal_insert_kernel_2", "dense_metal_insert_kernel_4", "dense_metal_insert_kernel_8",
-             "dense_metal_insert_kernel_16"},
-            {"dense_metal_refine_kernel_2", "dense_metal_refine_kernel_4", "dense_metal_refine_kernel_8",
-             "dense_metal_refine_kernel_16"},
-            {"dense_metal_search_kernel_2", "dense_metal_search_kernel_4", "dense_metal_search_kernel_8",
-             "dense_metal_search_kernel_16"},
+            {"metal_insert_kernel_2", "metal_insert_kernel_4", "metal_insert_kernel_8", "metal_insert_kernel_16"},
+            {"metal_refine_kernel_2", "metal_refine_kernel_4", "metal_refine_kernel_8", "metal_refine_kernel_16"},
+            {"metal_search_kernel_2", "metal_search_kernel_4", "metal_search_kernel_8", "metal_search_kernel_16"},
         };
         return names_k[static_cast<u32_t>(kernel)][std::countr_zero(pool_slots) - 1];
     }
@@ -1050,11 +1037,11 @@ struct dense_vram_apple_index {
 
     /** Recomputes the norms of rows @b [first,first+rows) on the device. */
     status_t derive_norms_(std::size_t first, std::size_t rows) noexcept {
-        dense_metal_arguments_t arguments = arguments_();
+        metal_arguments_t arguments = arguments_();
         arguments.first_id = static_cast<u32_t>(first);
         arguments.end_id = static_cast<u32_t>(first + rows);
         metal_context_t* const context = metal_context(device_.ordinal);
-        void* const pipeline = pipeline_("dense_metal_derive_norms_kernel");
+        void* const pipeline = pipeline_("metal_derive_norms_kernel");
         if (!context || !pipeline) return status_t::device_error_k;
         std::shared_lock planes {planes_};
         metal_launch_t launch {context->queue, pipeline};
@@ -1071,11 +1058,10 @@ struct dense_vram_apple_index {
 
     /** The batched search over the @p visible rows, under any indexer @p heads. */
     template <typename heads_type_>
-    expected<search_result_t> search_(vectors_view_t queries, nk::matrix_span<dense_node_id_t> result_ids,
-                                      nk::matrix_span<dense_distance_t> result_distances,
-                                      dense_traversal_context_t& context, search_config_t config, std::size_t visible,
-                                      heads_type_ const& heads) noexcept {
-        constexpr bool indexer_k = std::is_same_v<heads_type_, dense_indexer_heads<scalar_t>>;
+    expected<search_result_t> search_(vectors_view_t queries, nk::matrix_span<node_id_t> result_ids,
+                                      nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
+                                      search_config_t config, std::size_t visible, heads_type_ const& heads) noexcept {
+        constexpr bool indexer_k = std::is_same_v<heads_type_, indexer_heads<scalar_t>>;
         std::size_t const queries_count = queries.extent(0);
         bool const wants_distances = result_distances.extent(0) != 0;
         if (!queries_count) return {{}, status_t::success_k};
@@ -1096,10 +1082,10 @@ struct dense_vram_apple_index {
         std::size_t const results = queries_count * config.count;
         std::size_t const rows_bytes = (queries_count + queries_count * heads_count) * row_bytes();
         std::size_t const weights_bytes = queries_count * heads_count * sizeof(f32_t);
-        std::size_t const outputs_bytes = results * (sizeof(dense_node_id_t) + sizeof(dense_distance_t));
+        std::size_t const outputs_bytes = results * (sizeof(node_id_t) + sizeof(distance_t));
         auto staged = stage_walk_(queries, context, pool_slots, rows_bytes + weights_bytes + outputs_bytes, visible);
         if (!staged) return {{}, staged.status};
-        dense_metal_arguments_t arguments = staged.value;
+        metal_arguments_t arguments = staged.value;
         arguments.count = config.count;
         arguments.heads_count = static_cast<u32_t>(heads_count);
         byte_t* const staging = context.staging_.host;
@@ -1111,14 +1097,14 @@ struct dense_vram_apple_index {
                             heads_count * sizeof(f32_t));
         }
         std::size_t const ids_offset = rows_bytes + weights_bytes;
-        std::size_t const distances_offset = ids_offset + results * sizeof(dense_node_id_t);
+        std::size_t const distances_offset = ids_offset + results * sizeof(node_id_t);
         if (status_t const walked = launch_walk_(context, arguments, pool_slots, ids_offset, distances_offset,
                                                  distances_offset, queries_count * row_bytes(), rows_bytes,
-                                                 dense_metal_output_t::distances_k);
+                                                 metal_output_t::distances_k);
             failed(walked))
             return {{}, walked};
-        auto const* const ids = reinterpret_cast<dense_node_id_t const*>(staging + ids_offset);
-        auto const* const distances = reinterpret_cast<dense_distance_t const*>(staging + distances_offset);
+        auto const* const ids = reinterpret_cast<node_id_t const*>(staging + ids_offset);
+        auto const* const distances = reinterpret_cast<distance_t const*>(staging + distances_offset);
         for (std::size_t query = 0; query != queries_count; ++query)
             for (std::size_t rank = 0; rank != config.count; ++rank) {
                 result_ids(query, rank) = ids[query * config.count + rank];
@@ -1128,9 +1114,9 @@ struct dense_vram_apple_index {
     }
 
     /** The graph products over the @p visible rows. */
-    expected<search_result_t> multiply_(vectors_view_t left, nk::matrix_span<dense_node_id_t> node_ids,
+    expected<search_result_t> multiply_(vectors_view_t left, nk::matrix_span<node_id_t> node_ids,
                                         nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
-                                        dense_traversal_context_t& context, search_config_t config,
+                                        traversal_context_t& context, search_config_t config,
                                         std::size_t visible) noexcept {
         std::size_t const rows_count = left.extent(0), wanted = node_ids.extent(1);
         if (node_ids.extent(0) != rows_count || products.extent(0) != rows_count || products.extent(1) != wanted ||
@@ -1139,21 +1125,21 @@ struct dense_vram_apple_index {
         if (!rows_count) return {{}, status_t::success_k};
         u32_t const pool_slots = pool_slots_for_(static_cast<u32_t>(non_zero_expansion_factor(config)), 2);
         std::size_t const rows_bytes = rows_count * row_bytes();
-        std::size_t const ids_bytes = rows_count * wanted * sizeof(dense_node_id_t);
+        std::size_t const ids_bytes = rows_count * wanted * sizeof(node_id_t);
         std::size_t const products_bytes = rows_count * wanted * sizeof(dot_t);
         auto staged = stage_walk_(left, context, pool_slots, rows_bytes + ids_bytes + products_bytes + rows_count * 4,
                                   visible);
         if (!staged) return {{}, staged.status};
-        dense_metal_arguments_t arguments = staged.value;
+        metal_arguments_t arguments = staged.value;
         arguments.count = static_cast<u32_t>(wanted);
         std::size_t const products_offset = rows_bytes + ids_bytes;
         std::size_t const counts_offset = products_offset + products_bytes;
         if (status_t const walked = launch_walk_(context, arguments, pool_slots, rows_bytes, products_offset,
-                                                 counts_offset, 0, 0, dense_metal_output_t::products_k);
+                                                 counts_offset, 0, 0, metal_output_t::products_k);
             failed(walked))
             return {{}, walked};
         byte_t const* const staging = context.staging_.host;
-        auto const* const ids = reinterpret_cast<dense_node_id_t const*>(staging + rows_bytes);
+        auto const* const ids = reinterpret_cast<node_id_t const*>(staging + rows_bytes);
         auto const* const dots = reinterpret_cast<dot_t const*>(staging + products_offset);
         auto const* const scored = reinterpret_cast<u32_t const*>(staging + counts_offset);
         search_result_t result = spent_(context, 0);
@@ -1169,25 +1155,25 @@ struct dense_vram_apple_index {
     }
 
     /** The single-query search over the @p visible rows. */
-    expected<search_result_t> search_one_(vector_view_t query_vector, dense_traversal_context_t& context,
+    expected<search_result_t> search_one_(vector_view_t query_vector, traversal_context_t& context,
                                           search_config_t config, std::size_t visible) noexcept {
         context.results.count_ = 0;
         if (!visible) return {{}, status_t::success_k};
         if (query_vector.size() != dimensions()) return {{}, status_t::config_mismatch_k};
         u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
-        u32_t const count = min_of<u32_t>(min_of<u32_t>(dense_traversal_context_t::results_capacity_k, expansion),
+        u32_t const count = min_of<u32_t>(min_of<u32_t>(traversal_context_t::results_capacity_k, expansion),
                                           static_cast<u32_t>(visible));
-        dense_node_id_t staged_ids[dense_traversal_context_t::results_capacity_k];
-        dense_distance_t staged_distances[dense_traversal_context_t::results_capacity_k];
+        node_id_t staged_ids[traversal_context_t::results_capacity_k];
+        distance_t staged_distances[traversal_context_t::results_capacity_k];
         vectors_view_t const one_query {query_vector.data(), {1, query_vector.size()}};
         config.count = count;
-        expected<search_result_t> result = search_(one_query, nk::matrix_span<dense_node_id_t> {staged_ids, {1, count}},
-                                                   nk::matrix_span<dense_distance_t> {staged_distances, {1, count}},
-                                                   context, config, visible, dummy_heads_t {});
+        expected<search_result_t> result = search_(one_query, nk::matrix_span<node_id_t> {staged_ids, {1, count}},
+                                                   nk::matrix_span<distance_t> {staged_distances, {1, count}}, context,
+                                                   config, visible, dummy_heads_t {});
         if (!result) return result;
         std::size_t live = 0;
-        for (; live != count && staged_ids[live] != dense_node_id_unknown_k; ++live)
-            context.results.entries_[live] = dense_scored_node_t {staged_ids[live], staged_distances[live]};
+        for (; live != count && staged_ids[live] != node_id_unknown_k; ++live)
+            context.results.entries_[live] = scored_node_t {staged_ids[live], staged_distances[live]};
         context.results.count_ = live;
         result.value.count = live;
         return result;
@@ -1195,15 +1181,14 @@ struct dense_vram_apple_index {
 
     /** Validates @p queries, sizes the arena and the staging, and stages the query rows: what every
      *  walking verb does before its kernel. */
-    expected<dense_metal_arguments_t> stage_walk_(vectors_view_t queries, dense_traversal_context_t& context,
-                                                  u32_t pool_slots, std::size_t staging_bytes,
-                                                  std::size_t visible) noexcept {
+    expected<metal_arguments_t> stage_walk_(vectors_view_t queries, traversal_context_t& context, u32_t pool_slots,
+                                            std::size_t staging_bytes, std::size_t visible) noexcept {
         if (!dimensions_) return {{}, status_t::uninitialized_k};
         if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
         if (queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
         if (queries.stride_bytes(0) < static_cast<std::ptrdiff_t>(packed_row_bytes()))
             return {{}, status_t::unsupported_layout_k};
-        dense_metal_arguments_t arguments = arguments_();
+        metal_arguments_t arguments = arguments_();
         if (status_t const sized = shape_arena_(context, arguments, pool_slots * 32, 0, queries.extent(0));
             failed(sized))
             return {{}, sized};
@@ -1219,21 +1204,21 @@ struct dense_vram_apple_index {
 
     /** Launches the search kernel over the staged queries, its outputs at the given staging
      *  offsets. */
-    status_t launch_walk_(dense_traversal_context_t& context, dense_metal_arguments_t const& arguments,
-                          u32_t pool_slots, std::size_t ids_offset, std::size_t second_offset, std::size_t third_offset,
-                          std::size_t heads_offset, std::size_t weights_offset, dense_metal_output_t output) noexcept {
-        bool const keeps = output == dense_metal_output_t::products_k;
+    status_t launch_walk_(traversal_context_t& context, metal_arguments_t const& arguments, u32_t pool_slots,
+                          std::size_t ids_offset, std::size_t second_offset, std::size_t third_offset,
+                          std::size_t heads_offset, std::size_t weights_offset, metal_output_t output) noexcept {
+        bool const keeps = output == metal_output_t::products_k;
         if (!arguments.sampling_bound) {
             // An empty index matches nothing: every rank is a sentinel and every row scored none.
-            auto* const ids = reinterpret_cast<dense_node_id_t*>(context.staging_.host + ids_offset);
+            auto* const ids = reinterpret_cast<node_id_t*>(context.staging_.host + ids_offset);
             for (std::size_t slot = 0; slot != std::size_t {arguments.queries_count} * arguments.count; ++slot)
-                ids[slot] = dense_node_id_unknown_k;
+                ids[slot] = node_id_unknown_k;
             if (keeps) std::memset(context.staging_.host + third_offset, 0, arguments.queries_count * sizeof(u32_t));
             return status_t::success_k;
         }
         u32_t const keeps_word = keeps ? 1 : 0;
         std::shared_lock planes {planes_};
-        void* const pipeline = pipeline_(name_of_(dense_metal_kernel_t::search_k, pool_slots));
+        void* const pipeline = pipeline_(name_of_(metal_kernel_t::search_k, pool_slots));
         if (!pipeline) return status_t::device_error_k;
         metal_launch_t launch {context.queue(), pipeline};
         if (!launch) return status_t::device_error_k;
@@ -1252,13 +1237,13 @@ struct dense_vram_apple_index {
     }
 
     /** The telemetry the last walk on @p context spent, with @p count matches per query. */
-    static search_result_t spent_(dense_traversal_context_t const& context, std::size_t count) noexcept {
+    static search_result_t spent_(traversal_context_t const& context, std::size_t count) noexcept {
         search_result_t result;
         result.count = count;
-        result.visited_members = context.spent(dense_metal_counter_t::hops_k);
-        result.computed_distances = context.spent(dense_metal_counter_t::scored_k);
-        result.restarts = context.spent(dense_metal_counter_t::restarts_k);
-        result.visited_saturations = context.spent(dense_metal_counter_t::saturations_k);
+        result.visited_members = context.spent(metal_counter_t::hops_k);
+        result.computed_distances = context.spent(metal_counter_t::scored_k);
+        result.restarts = context.spent(metal_counter_t::restarts_k);
+        result.visited_saturations = context.spent(metal_counter_t::saturations_k);
         return result;
     }
 
@@ -1269,8 +1254,8 @@ struct dense_vram_apple_index {
     /** Re-selects @p nodes, or the IDs @p node_ids lists with @p nodes spanning its offsets, into a
      *  shadow plane on the device, then lands every walked row in the live plane and counts the
      *  rows that changed. */
-    expected<refine_result_t> refine_pass_(dense_traversal_context_t& context, refine_config_t config,
-                                           iota_view<dense_node_id_t> nodes, std::span<u32_t const> node_ids) noexcept {
+    expected<refine_result_t> refine_pass_(traversal_context_t& context, refine_config_t config,
+                                           iota_view<node_id_t> nodes, std::span<u32_t const> node_ids) noexcept {
         std::size_t const rows = size();
         if (!rows || nodes.first >= nodes.bound) return {{}, status_t::success_k};
         if (!dimensions_) return {{}, status_t::uninitialized_k};
@@ -1285,7 +1270,7 @@ struct dense_vram_apple_index {
             return {{}, staged};
         if (ids_bytes) std::memcpy(context.staging_.host, node_ids.data(), ids_bytes);
         u32_t const pool_slots = pool_slots_for_(static_cast<u32_t>(non_zero_expansion_factor(config)), 4);
-        dense_metal_arguments_t arguments = arguments_();
+        metal_arguments_t arguments = arguments_();
         if (status_t const sized = shape_arena_(context, arguments, pool_slots * 32, cache_rows_k, walk_count);
             failed(sized))
             return {{}, sized};
@@ -1298,7 +1283,7 @@ struct dense_vram_apple_index {
         status_t launched = status_t::device_error_k;
         {
             std::shared_lock planes {planes_};
-            void* const pipeline = pipeline_(name_of_(dense_metal_kernel_t::refine_k, pool_slots));
+            void* const pipeline = pipeline_(name_of_(metal_kernel_t::refine_k, pool_slots));
             metal_launch_t launch {context.queue(), pipeline};
             if (pipeline && launch) {
                 bind_planes_(launch, arguments);
@@ -1324,9 +1309,9 @@ struct dense_vram_apple_index {
             ++result.changed_nodes;
         }
         result.visited_nodes = walk_count;
-        result.visited_members = counter_(counters_, dense_metal_counter_t::hops_k);
-        result.computed_distances = counter_(counters_, dense_metal_counter_t::scored_k);
-        result.restarts = counter_(counters_, dense_metal_counter_t::restarts_k);
+        result.visited_members = counter_(counters_, metal_counter_t::hops_k);
+        result.computed_distances = counter_(counters_, metal_counter_t::scored_k);
+        result.restarts = counter_(counters_, metal_counter_t::restarts_k);
         return {result, status_t::success_k};
     }
 
@@ -1351,7 +1336,7 @@ struct dense_vram_apple_index {
                 expanded = true;
                 for (std::size_t slot = 0; slot != connectivity; ++slot) {
                     u32_t const target = neighbors[row * connectivity + slot];
-                    if (target == dense_node_id_unknown_k || target == row || target >= rows || audit.reached[target])
+                    if (target == node_id_unknown_k || target == row || target >= rows || audit.reached[target])
                         continue;
                     audit.reached[target] = audit.next_frontier[target] = 1;
                 }
@@ -1371,7 +1356,7 @@ struct dense_vram_apple_index {
     std::size_t reconnect_(audit_t& audit) noexcept {
         std::size_t const rows = size(), connectivity = this->connectivity();
         std::size_t const seed_count = min_of(connectivity, rows);
-        std::size_t const spread = dense_heal_spread(connectivity);
+        std::size_t const spread = heal_spread(connectivity);
         u32_t* const neighbors = reinterpret_cast<u32_t*>(neighbors_plane_.host);
         growing_buffer<u32_t> in_links {global_allocator};
         if (failed(in_links.resize(rows))) return 0;
@@ -1379,7 +1364,7 @@ struct dense_vram_apple_index {
             if (!audit.reached[row]) continue;
             for (std::size_t slot = 0; slot != connectivity; ++slot) {
                 u32_t const target = neighbors[row * connectivity + slot];
-                if (target != dense_node_id_unknown_k && target != row && target < rows) ++in_links[target];
+                if (target != node_id_unknown_k && target != row && target < rows) ++in_links[target];
             }
         }
         std::size_t reconnected = 0;
@@ -1389,7 +1374,7 @@ struct dense_vram_apple_index {
                 u32_t* const target_row = neighbors + static_cast<std::size_t>(target) * connectivity;
                 for (std::size_t slot = 0; slot != connectivity; ++slot) {
                     if (target_row[slot] == island) return true;
-                    if (target_row[slot] != dense_node_id_unknown_k && target_row[slot] != target) continue;
+                    if (target_row[slot] != node_id_unknown_k && target_row[slot] != target) continue;
                     target_row[slot] = island, ++reconnected;
                     return true;
                 }
@@ -1397,8 +1382,8 @@ struct dense_vram_apple_index {
                     std::size_t const landing = connectivity - 1 - (island_index + attempt) % spread;
                     u32_t const resident = target_row[landing];
                     if (resident == island) return true;
-                    if (resident != dense_node_id_unknown_k && (resident >= rows || !audit.reached[resident])) continue;
-                    bool const evicting = resident != dense_node_id_unknown_k && resident != target;
+                    if (resident != node_id_unknown_k && (resident >= rows || !audit.reached[resident])) continue;
+                    bool const evicting = resident != node_id_unknown_k && resident != target;
                     if (evicting && in_links[resident] <= 1) continue;
                     if (evicting) --in_links[resident];
                     target_row[landing] = island, ++reconnected;
@@ -1410,7 +1395,7 @@ struct dense_vram_apple_index {
             u32_t const* const island_row = neighbors + static_cast<std::size_t>(island) * connectivity;
             for (std::size_t slot = 0; slot != connectivity && !landed; ++slot) {
                 u32_t const pick = island_row[slot];
-                if (pick != dense_node_id_unknown_k && pick != island && pick < rows && audit.reached[pick])
+                if (pick != node_id_unknown_k && pick != island && pick < rows && audit.reached[pick])
                     landed = land(pick);
             }
             if (landed || !seed_count) continue;
@@ -1434,7 +1419,7 @@ struct dense_vram_apple_index {
     }
 
     std::size_t claimed_() const noexcept { return claimed_rows_; }
-    u32_t published_() const noexcept { return counter_(counters_, dense_metal_counter_t::published_k); }
+    u32_t published_() const noexcept { return counter_(counters_, metal_counter_t::published_k); }
 
     /** Turns the watermark from @p first over @p rows once every batch claimed before has turned
      *  it. */
@@ -1499,5 +1484,4 @@ struct dense_vram_apple_index {
 #pragma endregion State
 };
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::dense

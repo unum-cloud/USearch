@@ -2,9 +2,9 @@
  *  @file test/dense/ram_index.hpp
  *  @author Ash Vardanian
  *  @date July 17, 2026
- *  @brief The CPU-side suite composer for @c dense_ram_index smoke & concurrency tests, shared by
- *      the per-dtype shards - each names a curated set of (dtype, kernel) cells, never the whole
- *      combinatorial space.
+ *  @brief The CPU-side suite composer for @c dense::ram_index smoke & concurrency tests, shared
+ *      by the per-dtype shards - each names a curated set of (dtype, kernel) cells, never the
+ *      whole combinatorial space.
  *
  *  The scenarios themselves live in @c dense_index.cuh, templated over the index type;
  *  each shard names its instantiations, their compile-time & runtime gates, and composes
@@ -36,7 +36,7 @@ template <                                       //
     nk_capability_t caps_ = nk_cap_serial_k,     //
     template <typename> class atomic_ref_ = fu::standard_atomic_ref>
 static std::size_t test_ram_index_configuration(char const* name, u64_t) {
-    if constexpr (!dense_quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>)
+    if constexpr (!quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>)
         return report(name, "serial kernels not adapted yet");
     else return report(name, "kit not compiled for this target");
 }
@@ -49,8 +49,8 @@ template <                                       //
     requires dense_cell_testable<dtype_, kernel_, caps_>
 static std::size_t test_ram_index_configuration(char const* name, u64_t seed) {
 
-    using index_t = dense_ram_index<dtype_, caps_, waiter_type_, atomic_ref_, fu::standard_cache_hints_t,
-                                    counting_allocator_t, counting_allocator_t, std::allocator<byte_t>>;
+    using index_t = ram_index<dtype_, caps_, waiter_type_, atomic_ref_, fu::standard_cache_hints_t,
+                              counting_allocator_t, counting_allocator_t, std::allocator<byte_t>>;
 
     if (!dense_cell_admitted<caps_, atomic_ref_>()) return report(name, "capabilities missing at runtime");
 
@@ -79,10 +79,10 @@ static std::size_t test_ram_index_configuration(char const* name, u64_t seed) {
     failures_count += test_dense_concurrent_search<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_save_race<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_immutable_parity<index_t, kernel_>(make_index, seed);
-    using concurrent_cursor_t = dense_ram_cursor<index_t, synchronization_t::concurrent_k, //
-                                                 counting_allocator_t>;
-    using immutable_cursor_t = dense_ram_cursor<index_t, synchronization_t::immutable_k, //
-                                                counting_allocator_t>;
+    using concurrent_cursor_t = ram_cursor<index_t, synchronization_t::concurrent_k, //
+                                           counting_allocator_t>;
+    using immutable_cursor_t = ram_cursor<index_t, synchronization_t::immutable_k, //
+                                          counting_allocator_t>;
     failures_count += test_dense_cursor<index_t, concurrent_cursor_t, immutable_cursor_t>(make_index, seed);
     failures_count += test_dense_allocation_budget<index_t, kernel_>(make_index, seed);
     failures_count += test_dense_frontier_shedding<index_t>(make_index, seed);
@@ -93,11 +93,11 @@ static std::size_t test_ram_index_configuration(char const* name, u64_t seed) {
 /** The starved cell: the same index over ledgered traversal scratch, so a refused re-table
  *  has somewhere to come from, walked by the saturation scenario alone. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-    requires dense_quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>
+    requires quads_supported<kernel_, typename nk::type_for<dtype_>::type, nk_cap_serial_k>
 static std::size_t test_starved_configuration(char const* name, u64_t seed) {
     using index_t =
-        dense_ram_index<dtype_, nk_cap_serial_k, dummy_waiter_t, fu::standard_atomic_ref, fu::standard_cache_hints_t,
-                        counting_allocator_t, counting_allocator_t, counting_allocator_t>;
+        ram_index<dtype_, nk_cap_serial_k, dummy_waiter_t, fu::standard_atomic_ref, fu::standard_cache_hints_t,
+                  counting_allocator_t, counting_allocator_t, counting_allocator_t>;
     auto make_index = [](allocation_ledger_t& ledger) {
         return index_t {kernel_, counting_allocator_t(ledger), counting_allocator_t(ledger)};
     };

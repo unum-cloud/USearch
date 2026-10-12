@@ -7,12 +7,18 @@
  *
  *  The workload lives in @c dense/vram_indexes_algebra.cuh, over the cascade of @c dense/vram_indexes_search.cuh and
  *  the process setup of @c dense/vram_index_search.cuh; this translation unit stays dtype-free by extern-declaring
- *  the @c run_indexes_algebra_with_stored_dtype instantiations the per-dtype shards carry, so the heavy device
- *  instantiation grids build in parallel and this unit recompiles in seconds.
+ *  the @c run_indexes_algebra_with_stored_dtype instantiations the per-dtype host shards carry, so
+ *  they build in parallel. Its NVCC device-only pass compiles the binary's fatbin, with the attends
+ *  over the keyed value lookup.
  */
 #include <fmt/format.h>
 
 #include "dense/vram_indexes_algebra.cuh"
+
+#if defined(__CUDACC__)
+template void us::bench::dense::instantiate_cuda_kernels<us::dense::cuda_keyed_lookup<
+    us::utilities::u32_t, us::bench::dense::attention_value_lookup<uint4>>::device_lookup_k>();
+#endif
 
 namespace unum::usearch::bench {
 

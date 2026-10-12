@@ -165,7 +165,7 @@ inline search(t, watermark) {
     fi
 }
 
-// `dense_ram_cursor::follow` of a staged ID: `seek` refuses it at or past the cursor's snapshot,
+// `dense::ram_cursor::follow` of a staged ID: `seek` refuses it at or past the cursor's snapshot,
 // else locates its row through the chunk directory, which a reader reaches only behind the ID's
 // dispense, and reads it as a traversal does
 inline follow(t, staged, visible_count, seen) {

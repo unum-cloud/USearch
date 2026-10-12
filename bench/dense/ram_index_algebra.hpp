@@ -2,8 +2,8 @@
  *  @file bench/dense/ram_index_algebra.hpp
  *  @author Ash Vardanian
  *  @date September 27, 2026
- *  @brief Profiling harness for graph products and graph attention over the CPU-resident @c dense_ram_index,
- *      shared by the per-dtype algebra shards.
+ *  @brief Profiling harness for graph products and graph attention over the CPU-resident
+ *      @c dense::ram_index, shared by the per-dtype algebra shards.
  *
  *  The build phases and the compile-time cascade are the search harness's, from @c dense/ram_index_search.hpp; this
  *  header swaps its search phase for @c multiply and @c attend, pinned to the dot kernel both are defined over. Every
@@ -64,13 +64,13 @@ bool run_algebra(streamed_dataset_type_& streamed, fu_pool_t pool, algebra_setti
     config.synchronization = synchronization_t::immutable_k;
     // A pair dump keeps every scored pair, not just the breadth's worth.
     std::size_t const wanted = algebra.pairs_path.empty() ? settings.expansion_search.value : std::size_t {1} << 18;
-    auto node_ids = nk::matrix<dense_node_id_t>::zeros({threads, wanted}).value;
+    auto node_ids = nk::matrix<node_id_t>::zeros({threads, wanted}).value;
     auto products = nk::matrix<dot_result_t>::zeros({threads, wanted}).value;
     std::vector<std::vector<scored_pair_t>> pairs(algebra.pairs_path.empty() ? 0 : judged);
     auto outputs = nk::matrix<f32_t>::zeros({query_count, columns}).value;
-    auto carry = nk::matrix<dense_softmax_state_t>::zeros({threads, head_count}).value;
+    auto carry = nk::matrix<softmax_state_t>::zeros({threads, head_count}).value;
     auto const values = inputs.node_values_view();
-    auto const value_of = [&](std::span<dense_node_id_t const> nodes,
+    auto const value_of = [&](std::span<node_id_t const> nodes,
                               std::span<typename index_t::vector_view_t> rows) noexcept {
         for (std::size_t lane = 0; lane != nodes.size(); ++lane) rows[lane] = values.row(nodes[lane]).as_vector();
     };

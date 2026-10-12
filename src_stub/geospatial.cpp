@@ -327,7 +327,7 @@ struct geospatial_checkpoint_prefix_t {
 };
 
 /** The per-entry overhead of the blob: the key, then the point count that follows it. */
-constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(us::u64_t);
+constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(us::utilities::u64_t);
 
 static std::size_t payload_extent(geospatial_index_t const& index, std::size_t rows) {
     std::size_t extent = 0;
@@ -452,7 +452,7 @@ void usearch_geospatial_init_ram(usearch_geospatial_init_ram_t* arguments) {
     usearch_geospatial_index_handle_t* const index = new (std::nothrow) usearch_geospatial_index_handle_t();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return;
     index->options = {arguments->layout, arguments->structure,
-                      arguments->connectivity ? arguments->connectivity : us::connectivity_16_k,
+                      arguments->connectivity ? arguments->connectivity : us::utilities::connectivity_16_k,
                       arguments->values_per_key};
     *arguments->index = index;
 }
@@ -818,7 +818,8 @@ void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments)
         points_total += width ? index.entries[cursor.position + row].payload.size() / width : 0;
     usearch_key_t* const keys = carve<usearch_key_t>(*arena, written, outcome);
     std::size_t* const offsets = keys && points ? carve<std::size_t>(*arena, written + 1, outcome) : nullptr;
-    us::i32_t* const centimetres = offsets ? carve<us::i32_t>(*arena, points_total * 3, outcome) : nullptr;
+    us::utilities::i32_t* const centimetres = offsets ? carve<us::utilities::i32_t>(*arena, points_total * 3, outcome)
+                                                      : nullptr;
 
     // A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
     if (keys && (centimetres || !points)) {
@@ -836,7 +837,7 @@ void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments)
                     std::span<double const>(widened).subspan(point * width, width), index.options.layout,
                     usearch_geospatial_axes_full_k, 0.0);
                 for (std::size_t axis = 0; axis != 3; ++axis)
-                    centimetres[(filled + point) * 3 + axis] = static_cast<us::i32_t>(fixed[axis] * 100.0);
+                    centimetres[(filled + point) * 3 + axis] = static_cast<us::utilities::i32_t>(fixed[axis] * 100.0);
             }
             filled += points;
             offsets[row + 1] = filled;

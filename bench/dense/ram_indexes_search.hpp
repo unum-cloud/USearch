@@ -2,7 +2,7 @@
  *  @file bench/dense/ram_indexes_search.hpp
  *  @author Ash Vardanian
  *  @date August 30, 2026
- *  @brief Profiling harness for searching the sharded @c dense_ram_indexes over real persisted
+ *  @brief Profiling harness for searching the sharded @c dense::ram_indexes over real persisted
  *      datasets, shared by the per-dtype benchmark shards.
  *
  *  The multi-index category: one sharded index holding a shard per engaged memory domain,
@@ -419,8 +419,8 @@ bool run_search(streamed_dataset_type_& streamed) {
         }
 
         nk::matrix_span<key_t> const keys = bench.results.hit_rows(nk::range(base, base + count), nk::slice);
-        nk::matrix_span<dense_distance_t> const distances = bench.results.hit_distances(nk::range(base, base + count),
-                                                                                        nk::slice);
+        nk::matrix_span<distance_t> const distances = bench.results.hit_distances(nk::range(base, base + count),
+                                                                                  nk::slice);
         auto search = [&](auto const&... ranking) noexcept {
             return bench.indexes.search(batch, ranking..., bench.executor, config, keys, distances,
                                         std::span<std::size_t> {counts.data(), count});
@@ -481,10 +481,10 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const&, nk_kernel_kind_t ke
  *  its rows follow the thread count. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_,
           typename workload_type_>
-    requires dense_quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>
+    requires quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>
 int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_kind_t kernel,
                   workload_type_ const& workload) {
-    using indexes_t = dense_ram_indexes<u32_t, stored_dtype_, capability_, wait_type_, fu::preferred_atomic_ref>;
+    using indexes_t = ram_indexes<u32_t, stored_dtype_, capability_, wait_type_, fu::preferred_atomic_ref>;
     using bench_context_type_ = bench_indexes_context<indexes_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_type_>;
     using scalar_t = typename bench_context_type_::scalar_t;

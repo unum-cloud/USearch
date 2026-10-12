@@ -8,6 +8,7 @@
 #include "vram_indexes.cuh"
 
 using namespace unum::usearch;
+using namespace unum::usearch::utilities;
 
 template <gpu_vendor_t vendor_>
 std::size_t test::dense::check_vram_indexes(settings_t const& settings) {

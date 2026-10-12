@@ -2,14 +2,14 @@
  *  @file bench/dense/ram_index_search.hpp
  *  @author Ash Vardanian
  *  @date July 17, 2026
- *  @brief Profiling harness for searching the CPU-resident @c dense_ram_index over real persisted
+ *  @brief Profiling harness for searching the CPU-resident @c dense::ram_index over real persisted
  *      datasets, shared by the per-dtype benchmark shards.
  *
  *  The backend-neutral surface - settings, checkpoints, dataset streaming and the process setup -
  *  lives in @c dense.cuh, the telemetry and result judgment in @c dense_search.cuh; this header owns
  *  everything CPU: the ForkUnion run loops streaming one row or query per task, the NUMA-domain
  *  placement, the waiter dispatch, and the compile-time cascade resolving the CLI into one concrete
- *  @c dense_ram_index instantiation, sharded per stored dtype. The cascade ends in the workload
+ *  @c dense::ram_index instantiation, sharded per stored dtype. The cascade ends in the workload
  *  its entry hop names, the timed search for this binary.
  *
  *  This binary holds exactly one index; plurality belongs to the operating system or to the
@@ -87,7 +87,7 @@ struct bench_context {
     using index_t = index_type_;
     using scalar_t = typename index_t::scalar_t;
     using small_size_t = typename index_t::small_size_t;
-    using traversal_t = typename index_t::dense_traversal_context_t;
+    using traversal_t = typename index_t::traversal_context_t;
     using vector_view_t = typename index_t::vector_view_t;
     using vectors_view_t = typename index_t::vectors_view_t;
     using distance_t = typename index_t::distance_t;
@@ -212,7 +212,7 @@ void insertion_callback(fu_lambda_context_t punned, std::size_t task, std::size_
     if constexpr (streamed_dataset_type_::zero_copy_k) vector = streamed.vectors.row(row).as_vector();
     else vector = streamed.stage(streamed.vectors.row(row).as_vector(), thread, task);
 
-    dense_node_id_t local_id = 0;
+    node_id_t local_id = 0;
     vectors_view_t const one_row {vector.data(), 1, streamed.vectors.extent(1)};
     auto const [result, status] = bench.index->insert(one_row, {&local_id, std::size_t {1}}, *bench.traversals[thread],
                                                       config);
@@ -425,7 +425,7 @@ void search_callback(fu_lambda_context_t punned, std::size_t query, std::size_t 
     // The index stores no keys, so matches translate through the ID → row map on the way out.
     typename bench_t::traversal_t& traversal = *bench.traversals[thread];
     std::span<u32_t> const rows_span {merged_rows, bench.settings.top_k.value};
-    std::span<dense_distance_t> const distances_span {merged_distances, bench.settings.top_k.value};
+    std::span<distance_t> const distances_span {merged_distances, bench.settings.top_k.value};
     auto search = [&]() noexcept {
         if constexpr (!nk::is_integral_dtype<typename index_t::scalar_t>())
             if (task.heads.engaged())
@@ -507,12 +507,12 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const&, nk_kernel_kind_t ke
  *  @p kernel, and hands it to @p workload. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_,
           typename workload_type_>
-    requires dense_quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>
+    requires quads_adapted<typename nk::type_for<stored_dtype_>::type, capability_>
 int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_kind_t kernel,
                   workload_type_ const& workload) {
     using allocator_t = forkunion_allocator<std::byte>;
-    using index_t = dense_ram_index<stored_dtype_, capability_, wait_type_, fu::preferred_atomic_ref,
-                                    fu::preferred_cache_hints_t, allocator_t, allocator_t, allocator_t>;
+    using index_t = ram_index<stored_dtype_, capability_, wait_type_, fu::preferred_atomic_ref,
+                              fu::preferred_cache_hints_t, allocator_t, allocator_t, allocator_t>;
     using bench_context_type_ = bench_context<index_t>;
     using streamed_t = streamed_dataset<dataset_scalar_type_, bench_context_type_>;
     using scalar_t = typename bench_context_type_::scalar_t;

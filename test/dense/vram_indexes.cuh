@@ -11,13 +11,13 @@
 #pragma once
 
 #include "dense.cuh"
-#include "vram_index.cuh" // `vram_cell`, `selected_device`
+#include "vram_index.cuh" // the vendor's `vram_cell`
 
 namespace unum::usearch::test::dense {
 
 /** Whether a sharded index places its shards on GPUs - the VRAM residency, whichever vendor's. */
 template <typename indexes_type_>
-concept vram_indexes = requires { indexes_type_::vendor_k; };
+concept vram_collection = requires { indexes_type_::vendor_k; };
 
 /** The VRAM reading of the search race: the index admits no search during a mutation,
  *  so the exclusion is the executor's - a search on a claimed executor is refused, and the
@@ -166,14 +166,14 @@ std::size_t test_dense_vram_indexes_indexer_search(u64_t seed) {
         dense_indexer_inputs<scalar_t> const inputs = dense_make_indexer_inputs(vectors.view(), queries_count);
         typename indexes_type_::search_config_t const exhaustive {rows_count, wanted};
         auto found_keys = nk::matrix<key_t>::zeros({queries_count, wanted}).value;
-        auto found_distances = nk::matrix<dense_distance_t>::zeros({queries_count, wanted}).value;
+        auto found_distances = nk::matrix<distance_t>::zeros({queries_count, wanted}).value;
         std::array<std::size_t, queries_count> counts;
         failures += expect(succeeded(indexes
                                          .search(queries, inputs.heads(), driver.executor, exhaustive,
                                                  found_keys.span(), found_distances.span(), std::span {counts})
                                          .status));
         nk::matrix_view<key_t> const ranked_keys = found_keys.view();
-        nk::matrix_view<dense_distance_t> const ranked_distances = found_distances.view();
+        nk::matrix_view<distance_t> const ranked_distances = found_distances.view();
         for (std::size_t query = 0; query != queries_count; ++query) {
             nk::range_t const kept = nk::range(std::size_t {0}, counts[query]);
             failures += dense_expect_indexer_matches(inputs, query, ranked_keys(query, kept, nk::slice).as_vector(),
@@ -221,12 +221,12 @@ std::size_t check_vram_indexes(settings_t const& settings);
  *  scope enclosing it may do, so they follow the namespace at file scope and qualify what they name. */
 
 /** The VRAM form: one stream or queue on the device under test. */
-template <us::test::dense::vram_indexes indexes_type_>
+template <us::test::dense::vram_collection indexes_type_>
 struct us::test::dense_indexes_executor<indexes_type_> {
     using executor_t = typename indexes_type_::executor_t;
 
     executor_t executor;
-    us::status_t status = us::status_t::uninitialized_k;
+    us::utilities::status_t status = us::utilities::status_t::uninitialized_k;
 
     dense_indexes_executor() noexcept {
         int const device = us::test::dense::selected_device;
@@ -239,17 +239,17 @@ struct us::test::dense_indexes_executor<indexes_type_> {
 
     /** Places the shards one sharded scenario drives: one VRAM shard on the device under test,
      *  since the index refuses two on one device. */
-    static us::status_t place_shards(indexes_type_& indexes) noexcept {
+    static us::utilities::status_t place_shards(indexes_type_& indexes) noexcept {
         return indexes.emplace(us::test::dense::selected_device);
     }
 };
 
 /** The VRAM form: the one-row verbs take the executor itself, as no single context can
  *  walk every device. */
-template <us::test::dense::vram_indexes indexes_type_>
+template <us::test::dense::vram_collection indexes_type_>
 struct us::test::dense_indexes_row_driver<indexes_type_> {
     typename indexes_type_::executor_t& executor;
-    us::status_t status = us::status_t::success_k;
+    us::utilities::status_t status = us::utilities::status_t::success_k;
 
     dense_indexes_row_driver(indexes_type_&, us::test::dense_indexes_executor<indexes_type_>& driver) noexcept
         : executor(driver.executor) {}

@@ -23,8 +23,7 @@
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the arenas' storage
 #include "usearch/utilities/types.hpp"       // `status_t`, `expected`
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::utilities {
 
 /*  The two projects derive their padding width from the same target facts in two headers that
  *  cannot see each other - `utilities/types.hpp` forward-declares the sister namespaces rather
@@ -286,5 +285,4 @@ struct forkunion_executor_t {
 
 #pragma endregion Executor
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::utilities

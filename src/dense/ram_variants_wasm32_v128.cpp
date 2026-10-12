@@ -6,13 +6,13 @@
  */
 #include "dense_specializations.cuh"
 
-template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::wasm32_v128_k>>;
+template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::wasm32_v128_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-template struct specialized_index<ram_index<nk_u1_k, cpu_class_t::wasm32_v128_k>>;
+template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::wasm32_v128_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-template struct specialized_index<ram_index<nk_i8_k, cpu_class_t::wasm32_v128_k>>;
+template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::wasm32_v128_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-template struct specialized_index<ram_index<nk_u8_k, cpu_class_t::wasm32_v128_k>>;
+template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::wasm32_v128_k>>;
 #endif

@@ -32,8 +32,7 @@
 #include <immintrin.h> // `_mm512_cmpeq_epi32_mask` - the sixteen-slot group scan
 #endif
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::utilities {
 
 /**
  *  @brief Returns the sentinel that marks an unused slot in @ref growing_hash_set.
@@ -497,5 +496,4 @@ class chunked_multimap {
     [[no_unique_address]] hash_t hash_;
 };
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::utilities

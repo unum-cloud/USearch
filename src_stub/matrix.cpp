@@ -252,7 +252,7 @@ struct matrix_checkpoint_prefix_t {
 };
 
 /** The per-entry overhead of the blob: the key, then the row count that follows it. */
-constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(us::u64_t);
+constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(us::utilities::u64_t);
 
 static std::size_t payload_extent(matrix_index_t const& index, std::size_t rows) {
     std::size_t extent = 0;
@@ -389,7 +389,7 @@ void usearch_matrix_init_ram(usearch_matrix_init_ram_t* arguments) {
                       arguments->quantization,
                       arguments->columns,
                       arguments->rows,
-                      arguments->connectivity ? arguments->connectivity : us::connectivity_16_k,
+                      arguments->connectivity ? arguments->connectivity : us::utilities::connectivity_16_k,
                       arguments->values_per_key};
     *arguments->index = index;
 }

@@ -49,10 +49,10 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp"
-#include "usearch/basic/ram_index.hpp" // `basic_metric_staging_t`
+#include "usearch/basic/ram_index.hpp" // `basic::metric_staging_t`
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::sequence {
+using namespace unum::usearch::utilities;
 
 #pragma region Levenshtein Kernels
 
@@ -393,7 +393,7 @@ void overlap_window_hashes(f64_t const* prefix_hashes, std::size_t windows, std:
  *  @tparam allocator_type_ places every buffer, one set per metric.
  */
 template <sz_capability_t capability_ = sz_cap_any_k, typename allocator_type_ = std::allocator<byte_t>>
-class sequence_levenshtein_metric {
+class levenshtein_metric {
   public:
     using kit_t = levenshtein_kit<capability_>;
     using allocator_t = allocator_type_;
@@ -419,12 +419,12 @@ class sequence_levenshtein_metric {
     status_t last_status_ = status_t::uninitialized_k;
 
   public:
-    sequence_levenshtein_metric(allocator_t const& allocator = {}) noexcept
+    levenshtein_metric(allocator_t const& allocator = {}) noexcept
         : masks_(allocator), verticals_(allocator), staged_(allocator), order_(allocator) {}
-    sequence_levenshtein_metric(sequence_levenshtein_metric const&) = delete;
-    sequence_levenshtein_metric& operator=(sequence_levenshtein_metric const&) = delete;
-    sequence_levenshtein_metric(sequence_levenshtein_metric&&) noexcept = default;
-    sequence_levenshtein_metric& operator=(sequence_levenshtein_metric&&) noexcept = default;
+    levenshtein_metric(levenshtein_metric const&) = delete;
+    levenshtein_metric& operator=(levenshtein_metric const&) = delete;
+    levenshtein_metric(levenshtein_metric&&) noexcept = default;
+    levenshtein_metric& operator=(levenshtein_metric&&) noexcept = default;
 
     /**
      *  @brief Sizes the staging and the ordering.
@@ -467,10 +467,10 @@ class sequence_levenshtein_metric {
     }
 
     /** @brief Stages one candidate, or refuses once the round is full. */
-    basic_metric_staging_t push(sz_string_view_t const& value) noexcept {
-        if (staged_.size() == staged_.capacity()) return basic_metric_staging_t::refused_k;
+    basic::metric_staging_t push(sz_string_view_t const& value) noexcept {
+        if (staged_.size() == staged_.capacity()) return basic::metric_staging_t::refused_k;
         staged_.push_back_reserved(value);
-        return basic_metric_staging_t::staged_k;
+        return basic::metric_staging_t::staged_k;
     }
 
     /**
@@ -549,7 +549,7 @@ class sequence_levenshtein_metric {
     }
 };
 
-using sequence_levenshtein_metric_t = sequence_levenshtein_metric<>;
+using levenshtein_metric_t = levenshtein_metric<>;
 
 #pragma endregion Levenshtein Metric
 
@@ -572,7 +572,7 @@ using sequence_levenshtein_metric_t = sequence_levenshtein_metric<>;
  *  @tparam allocator_type_ places every buffer, one set per metric.
  */
 template <sz_capability_t capability_ = sz_cap_any_k, typename allocator_type_ = std::allocator<byte_t>>
-class sequence_overlap_metric {
+class overlap_metric {
   public:
     using kit_t = overlap_kit<capability_>;
     using allocator_t = allocator_type_;
@@ -601,13 +601,13 @@ class sequence_overlap_metric {
     status_t last_status_ = status_t::uninitialized_k;
 
   public:
-    sequence_overlap_metric(allocator_t const& allocator = {}) noexcept
+    overlap_metric(allocator_t const& allocator = {}) noexcept
         : staged_(allocator), window_widths_(allocator), window_powers_(allocator), nodes_(allocator),
           prefix_hashes_(allocator), window_hashes_(allocator) {}
-    sequence_overlap_metric(sequence_overlap_metric const&) = delete;
-    sequence_overlap_metric& operator=(sequence_overlap_metric const&) = delete;
-    sequence_overlap_metric(sequence_overlap_metric&&) noexcept = default;
-    sequence_overlap_metric& operator=(sequence_overlap_metric&&) noexcept = default;
+    overlap_metric(overlap_metric const&) = delete;
+    overlap_metric& operator=(overlap_metric const&) = delete;
+    overlap_metric(overlap_metric&&) noexcept = default;
+    overlap_metric& operator=(overlap_metric&&) noexcept = default;
 
     /**
      *  @brief Sizes the staging and records the window widths a round scores over.
@@ -674,10 +674,10 @@ class sequence_overlap_metric {
     }
 
     /** Stages one candidate, or refuses once the round is full. */
-    basic_metric_staging_t push(sz_string_view_t const& value) noexcept {
-        if (staged_.size() == staged_.capacity()) return basic_metric_staging_t::refused_k;
+    basic::metric_staging_t push(sz_string_view_t const& value) noexcept {
+        if (staged_.size() == staged_.capacity()) return basic::metric_staging_t::refused_k;
         staged_.push_back_reserved(value);
-        return basic_metric_staging_t::staged_k;
+        return basic::metric_staging_t::staged_k;
     }
 
     /**
@@ -742,9 +742,8 @@ class sequence_overlap_metric {
     }
 };
 
-using sequence_overlap_metric_t = sequence_overlap_metric<>;
+using overlap_metric_t = overlap_metric<>;
 
 #pragma endregion Overlap Metric
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::sequence

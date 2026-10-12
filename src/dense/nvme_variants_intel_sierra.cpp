@@ -8,11 +8,11 @@
 #include "dense_specializations.cuh"
 
 #if USEARCH_DENSE_DTYPES >= 3
-template struct specialized_index<nvme_index<nk_i8_k, cpu_class_t::intel_sierra_k>>;
+template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-template struct specialized_index<nvme_index<nk_u8_k, cpu_class_t::intel_sierra_k>>;
+template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-template struct specialized_index<nvme_index<nk_e2m3_k, cpu_class_t::intel_sierra_k>>;
+template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::intel_sierra_k>>;
 #endif

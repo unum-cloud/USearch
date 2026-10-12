@@ -73,7 +73,7 @@ Both lists come from the C interface, the same strings the bindings report.
 "Compiled for" is `usearch_capabilities_compiled()`, the NumKong capability levels this build carries kernels for, and "This machine" is `usearch_capabilities_available()`, those of them this processor can also run.
 `usearch_test_vram` runs on the GPUs `USEARCH_DEVICES` names, comma-separated USearch device ordinals like `0` or `0,2`, positions in the listing `usearch_gpu_devices` reports: NVIDIA devices first, then AMD, then Apple.
 Unset, it takes the first device of every vendor present, and an ordinal past the listing prints the listing and exits 1.
-It links one object library per vendor the build carries, and each device opens with its vendor's line: `- CUDA: <device> sm_<major><minor> #<ordinal>`, `- ROCm: device #<ordinal> amd-cdna<N>` or `- Metal: device #<ordinal> apple-metal<N>`.
+It links one object library per vendor the build carries, and each device opens with its vendor's line: `- CUDA: <device> nvidia-<class> #<ordinal>, <N> SMs, <M> MiB`, `- ROCm: device #<ordinal> amd-cdna<N>` or `- Metal: device #<ordinal> apple-metal<N>`.
 Without any GPU it prints `- GPU: none listed` and exits 0, skipping every GPU test.
 
 Those three configurations, and the benchmarking one from [bench/README.md](bench/README.md), are also packaged as CMake presets, so the flag soup below is optional:
@@ -124,9 +124,10 @@ The CMakeLists.txt file has a number of options you can pass:
   - `USEARCH_DENSE_DTYPES` - how many dense storage dtypes the library, tests and benchmarks compile, from the front of bf16, u1, i8, e4m3, f16, u8, e5m2, i4, u4, e3m2, e2m3, `4` by default and `11` wherever a prebuilt package comes from: the `library`, `wasm` and `windows_x64_release` presets, `pyproject.toml`, the npm scripts, `build.gradle`, `pixi.toml` and the per-binding recipes below. Binding suites skip the kinds a narrower build refuses.
     The C interface refuses a dtype the build left out with `usearch_status_unsupported_k`; the Rust crate builds from source and keeps the default four.
 - Which GPUs to target:
-  - `USEARCH_CUDA_ARCHITECTURES` - the architectures the CUDA tests, benchmarks and the C interface's dispatch unit compile for, `80-real;90a-real;100f-real;120f-real` by default: the Ampere floor, then Hopper, architecture-specific, and both Blackwell lines, family-specific so they carry the fp6 and fp4 conversions.
+  - `USEARCH_CUDA_ARCHITECTURES` - the architectures the fatbins of the CUDA tests and benchmarks compile for, `80-real;90a-real;100f-real;120f-real` by default: the Ampere floor, then Hopper, architecture-specific, and both Blackwell lines, family-specific so they carry the fp6 and fp4 conversions.
     The `-real` suffix skips the PTX, which triples the test objects; the `cuda_release` preset keeps it.
     The library itself ignores the list and compiles one unit per GPU class, each for its own code alone - `80` with its PTX for every GPU outside the other classes, `89`, `90a`, `100f`, which B300 runs as well, and `120f` - and picks the unit by the device's generation at runtime.
+    NVCC compiles only device code, into fatbins the binaries embed; nothing links `libcuda` or the CUDA runtime, as the library opens the driver at first use.
     A NumKong GPU tier turns on in those targets only when every listed architecture runs it, so the default list exercises the Ampere kits alone; iterate on one GPU with its family code, like `100f-real`, to test that generation's kits.
 - Which other dependencies to use:
   - `USEARCH_USE_JEMALLOC` - use Jemalloc for memory management

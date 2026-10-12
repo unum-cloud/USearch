@@ -2,16 +2,20 @@
  *  @file bench/dense/vram_index_search.cuh
  *  @author Ash Vardanian
  *  @date July 22, 2026
- *  @brief Profiling harness for searching the GPU-resident @c dense_vram_nvidia_index over real
+ *  @brief Profiling harness for searching the GPU-resident @c dense::vram_nvidia_index over real
  *      persisted datasets, shared by the per-dtype benchmark shards.
  *
  *  The backend-neutral surface - settings, checkpoints and dataset streaming - lives in @c dense.cuh,
  *  the telemetry and result judgment in @c dense_search.cuh; this header owns everything CUDA: the
  *  device options and the process setup every CUDA binary runs, one device, one
- *  @c dense_vram_nvidia_index instantiation, batch-shaped run loops, and the compile-time cascade
+ *  @c dense::vram_nvidia_index instantiation, batch-shaped run loops, and the compile-time cascade
  *  lowering memory space, generation ceiling, and metric below the stored dtype - the axis the
  *  shard translation units split. The cascade ends in a workload, so one pipeline serves the search
  *  and algebra families, and the multi-device binaries reuse its streaming.
+ *
+ *  The shards compile with the host compiler alone; each binary's entry unit compiles once more
+ *  with NVCC device-only, into the binary's own fatbin of every ceiling's kernels, which every unit
+ *  finds through the @c dense::cuda_fatbin specializations below.
  */
 #pragma once
 
@@ -19,17 +23,23 @@
 #include <chrono>    // `std::chrono::steady_clock`
 #include <memory>    // `std::unique_ptr`
 #include <span>      // `std::span`
+#include <utility>   // `std::index_sequence` - every compiled dtype of the device pass
 #include <vector>    // `std::vector`
 
-#include <cuda_runtime.h> // `cudaGetDeviceCount`, `cudaGetDeviceProperties`
 #include <fmt/format.h>
 
-#include "usearch/dense/vram_nvidia_index.cuh"
 #include "usearch/dense/vram_nvidia_indexes.hpp"
 #include "usearch/utilities/vram_device.hpp"
 
+#if defined(__CUDACC__)
+#include "usearch/dense/vram_nvidia_index.cuh"
+#endif
+
 #include "dense_search.cuh"
 #include "utilities/persisted_dataset.hpp"
+
+/** The binary's own fatbin, linked in as raw bytes from its entry unit's device pass. */
+extern "C" us::utilities::byte_t const bench_vram_nvidia_bundle_start[], bench_vram_nvidia_bundle_end[];
 
 namespace unum::usearch::bench::dense {
 
@@ -51,6 +61,40 @@ constexpr nk_capability_t cuda_ceiling_of(nk_capability_t generation) noexcept {
     nk_capability_t const ampere = nk_cap_cuda_k | nk_cap_ampere_k;
     return generation == nk_cap_ampere_k ? ampere : ampere | nk_cap_ada_k | generation;
 }
+
+/** The binary's fatbin, which carries every ceiling's kernels. */
+inline bytes_view_t cuda_bench_fatbin() noexcept {
+    return {bench_vram_nvidia_bundle_start,
+            static_cast<std::size_t>(bench_vram_nvidia_bundle_end - bench_vram_nvidia_bundle_start)};
+}
+
+/** The storage dtypes in the library's ladder order, of which a build compiles the first
+ *  @c USEARCH_DENSE_DTYPES. */
+inline constexpr nk_dtype_t cuda_dtypes_ladder_k[] = {nk_bf16_k, nk_u1_k, nk_i8_k, nk_e4m3_k, nk_f16_k, nk_u8_k,
+                                                      nk_e5m2_k, nk_i4_k, nk_u4_k, nk_e3m2_k, nk_e2m3_k};
+
+#if defined(__CUDACC__)
+
+/** Instantiates every ceiling's kernels for @p dtype_, with the attends over each of
+ *  @p lookups_. */
+template <nk_dtype_t dtype_, u32_t... lookups_>
+void instantiate_cuda_ceilings() noexcept {
+    cuda_instantiate<cuda_ceiling_of(nk_cap_ampere_k), dtype_, lookups_...>();
+    [&]<std::size_t... rows_>(std::index_sequence<rows_...>) {
+        (cuda_instantiate<cuda_ceiling_of(cuda_compute_choices_k[rows_].bit), dtype_, lookups_...>(), ...);
+    }(std::make_index_sequence<std::size(cuda_compute_choices_k)> {});
+}
+
+/** Instantiates the kernels of every compiled dtype under every ceiling, with the attends over each
+ *  of @p lookups_ - what a binary's entry unit compiles into its fatbin. */
+template <u32_t... lookups_>
+void instantiate_cuda_kernels() noexcept {
+    [&]<std::size_t... dtypes_>(std::index_sequence<dtypes_...>) {
+        (instantiate_cuda_ceilings<cuda_dtypes_ladder_k[dtypes_], lookups_...>(), ...);
+    }(std::make_index_sequence<USEARCH_DENSE_DTYPES> {});
+}
+
+#endif // defined(__CUDACC__)
 
 /** The device knobs the CUDA binaries parse beside @c settings_t, before any dtype is known; the
  *  devices themselves come from @c USEARCH_DEVICES. */
@@ -98,7 +142,7 @@ struct cuda_bench_context {
     using index_t = index_type_;
     using scalar_t = typename index_t::scalar_t;
     using small_size_t = typename index_t::small_size_t;
-    using traversal_t = typename index_t::dense_traversal_context_t;
+    using traversal_t = typename index_t::traversal_context_t;
     using vector_view_t = typename index_t::vector_view_t;
     using vectors_view_t = typename index_t::vectors_view_t;
     using node_id_t = typename index_t::node_id_t;
@@ -352,7 +396,7 @@ bool run_search(streamed_dataset_type_& streamed) {
     config.synchronization = synchronization_t::immutable_k;
     std::size_t const batch_rows = streamed_batch_rows(settings, query_count);
     auto found_ids = nk::matrix<node_id_t>::zeros({batch_rows, top_k}).value;
-    auto found_distances = nk::matrix<dense_distance_t>::zeros({batch_rows, top_k}).value;
+    auto found_distances = nk::matrix<distance_t>::zeros({batch_rows, top_k}).value;
     if (found_ids.empty() || found_distances.empty()) {
         fmt::println("Failed to allocate the batch result matrices");
         return false;
@@ -370,7 +414,7 @@ bool run_search(streamed_dataset_type_& streamed) {
         auto search = [&](auto const&... ranking) noexcept {
             return bench.index->search(
                 staged, ranking..., nk::matrix_span<node_id_t> {found_ids.data(), {batch, top_k}},
-                nk::matrix_span<dense_distance_t> {found_distances.data(), {batch, top_k}}, *bench.traversal, config);
+                nk::matrix_span<distance_t> {found_distances.data(), {batch, top_k}}, *bench.traversal, config);
         };
 
         auto started = steady_clock_t::now();
@@ -393,7 +437,7 @@ bool run_search(streamed_dataset_type_& streamed) {
         for (std::size_t row = 0; row != batch; ++row) {
             std::size_t const query = offset + row;
             std::span<u32_t> const rows {bench.results.hit_rows.row(query).data(), top_k};
-            std::span<dense_distance_t> const distances {bench.results.hit_distances.row(query).data(), top_k};
+            std::span<distance_t> const distances {bench.results.hit_distances.row(query).data(), top_k};
             auto const found_row_ids = found_ids.view().row(row);
             auto const found_row_distances = found_distances.view().row(row);
             std::size_t count = 0;
@@ -493,8 +537,8 @@ template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability
           typename plane_allocator_, typename workload_type_>
 int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                   int device, nk_kernel_kind_t kernel, workload_type_ const& workload) {
-    using index_t = dense_vram_nvidia_index<stored_dtype_, capability_, plane_allocator_, plane_allocator_,
-                                            cuda_device_allocator_t>;
+    using index_t =
+        vram_nvidia_index<stored_dtype_, capability_, plane_allocator_, plane_allocator_, cuda_device_allocator_t>;
     cuda_bench_context<index_t> bench {settings, device, kernel};
     return stream_and_run(dataset, bench, [&](auto& streamed) {
         return prepare(streamed) && run_insertion(streamed) && run_refinement(streamed) &&
@@ -601,17 +645,18 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
         max_compute = cuda_compute_choices_k[named].bit;
     }
 
-    // `USEARCH_DEVICES` names USearch ordinals; the CUDA runtime takes each NVIDIA device's own.
+    // `USEARCH_DEVICES` names USearch ordinals; the driver takes each NVIDIA device's own.
     std::span<gpu_device_t const> const listed = gpu_devices();
     counts_t const named = env_devices();
     std::vector<int> devices;
+    std::vector<gpu_device_t> engaged;
     for (std::size_t const ordinal : named.view())
         if (ordinal < listed.size() && listed[ordinal].vendor == gpu_vendor_t::nvidia_k)
-            devices.push_back(static_cast<int>(listed[ordinal].vendor_ordinal));
+            devices.push_back(static_cast<int>(listed[ordinal].vendor_ordinal)), engaged.push_back(listed[ordinal]);
     if (!named.size)
         for (gpu_device_t const& device : listed)
             if (device.vendor == gpu_vendor_t::nvidia_k && devices.empty())
-                devices.push_back(static_cast<int>(device.vendor_ordinal));
+                devices.push_back(static_cast<int>(device.vendor_ordinal)), engaged.push_back(device);
     if (devices.empty() || devices.size() != (named.size ? named.size : 1)) {
         fmt::println(stderr,
                      "USEARCH_DEVICES=\"{}\" names no NVIDIA device of the {} listed:", fmt::join(named.view(), ","),
@@ -622,14 +667,11 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
                          listed[position].vendor_ordinal);
         return 1;
     }
-    cudaSetDevice(devices.front());
+    cuda_set_device(devices.front());
     fmt::println("USearch {}.{}.{}", USEARCH_VERSION_MAJOR, USEARCH_VERSION_MINOR, USEARCH_VERSION_PATCH);
-    for (int const device : devices) {
-        cudaDeviceProp properties = {};
-        cudaGetDeviceProperties(&properties, device);
-        fmt::println("- Device {}: {} · {} SMs · {:.2f} GB", device, properties.name, properties.multiProcessorCount,
-                     gigabytes(properties.totalGlobalMem));
-    }
+    for (gpu_device_t const& device : engaged)
+        fmt::println("- Device {}: {} · {} SMs · {:.2f} GB", device.vendor_ordinal, device.name, device.compute_units,
+                     gigabytes(device.memory_bytes));
     print(settings);
     fmt::println("- Max compute: {}", bit_name(cuda_compute_choices_k, max_compute, "ampere"));
     fmt::println("- Managed memory: {}", device_cli.managed_memory == switch_t::present_k);
@@ -647,3 +689,28 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
 #pragma endregion
 
 } // namespace unum::usearch::bench::dense
+
+template <>
+inline us::utilities::bytes_view_t
+us::dense::cuda_fatbin<us::bench::dense::cuda_ceiling_of(nk_cap_ampere_k)>() noexcept {
+    return us::bench::dense::cuda_bench_fatbin();
+}
+template <>
+inline us::utilities::bytes_view_t us::dense::cuda_fatbin<us::bench::dense::cuda_ceiling_of(nk_cap_ada_k)>() noexcept {
+    return us::bench::dense::cuda_bench_fatbin();
+}
+template <>
+inline us::utilities::bytes_view_t
+us::dense::cuda_fatbin<us::bench::dense::cuda_ceiling_of(nk_cap_hopper_k)>() noexcept {
+    return us::bench::dense::cuda_bench_fatbin();
+}
+template <>
+inline us::utilities::bytes_view_t
+us::dense::cuda_fatbin<us::bench::dense::cuda_ceiling_of(nk_cap_blackwell_k)>() noexcept {
+    return us::bench::dense::cuda_bench_fatbin();
+}
+template <>
+inline us::utilities::bytes_view_t
+us::dense::cuda_fatbin<us::bench::dense::cuda_ceiling_of(nk_cap_blackwellrtx_k)>() noexcept {
+    return us::bench::dense::cuda_bench_fatbin();
+}

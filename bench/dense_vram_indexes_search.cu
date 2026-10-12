@@ -7,12 +7,16 @@
  *
  *  The sharded pipeline lives in @c dense/vram_indexes_search.cuh, and the process setup it shares with every CUDA
  *  binary in @c dense/vram_index_search.cuh; this translation unit stays dtype-free by extern-declaring the
- *  @c run_indexes_with_stored_dtype instantiations the per-dtype shards carry, so the heavy device instantiation
- *  grids build in parallel and this unit recompiles in seconds.
+ *  @c run_indexes_with_stored_dtype instantiations the per-dtype host shards carry, so they build
+ *  in parallel. Its NVCC device-only pass compiles the binary's fatbin.
  */
 #include <fmt/format.h>
 
 #include "dense/vram_indexes_search.cuh"
+
+#if defined(__CUDACC__)
+template void us::bench::dense::instantiate_cuda_kernels<>();
+#endif
 
 namespace unum::usearch::bench {
 

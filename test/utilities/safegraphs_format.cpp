@@ -48,8 +48,8 @@ struct angular_metric_t {
     std::vector<embedding_t> staged_;
 
     void reset(embedding_t const& query) noexcept { query_ = query, staged_.clear(); }
-    basic_metric_staging_t push(embedding_t const& value) noexcept {
-        return staged_.push_back(value), basic_metric_staging_t::staged_k;
+    metric_staging_t push(embedding_t const& value) noexcept {
+        return staged_.push_back(value), metric_staging_t::staged_k;
     }
     void drain(std::span<f32_t> distances, f32_t) noexcept {
         for (std::size_t lane = 0; lane != distances.size(); ++lane)
@@ -81,7 +81,7 @@ struct embedding_codec_t {
 
 struct embeddings_fixture_t {
     using index_t =
-        basic_ram_index<embedding_t, u64_t, u32_t, f32_t, dummy_waiter_t, standard_atomic_ref, counting_allocator_t>;
+        ram_index<embedding_t, u64_t, u32_t, f32_t, dummy_waiter_t, standard_atomic_ref, counting_allocator_t>;
 
     static constexpr char const* metric_k = "angular";
     static constexpr char const* key_dtype_k = "u64";
@@ -115,14 +115,10 @@ struct embeddings_fixture_t {
     }
 };
 
-static_assert(basic_value<embedding_t>);
-static_assert(basic_metric<angular_metric_t, embedding_t, f32_t>);
-static_assert(basic_value_codec<embedding_codec_t, embedding_t>);
+static_assert(value<embedding_t>);
+static_assert(metric<angular_metric_t, embedding_t, f32_t>);
+static_assert(value_codec<embedding_codec_t, embedding_t>);
 static_assert(interchange_value_codec<embedding_codec_t>);
-
-#pragma endregion Embeddings
-
-#pragma region Harness
 
 /** The shared basic-tier scenarios over the embeddings fixture - a fixed-width value
  *  column, which no modality unit has: monolith, hostile header battery, and the
@@ -136,4 +132,4 @@ std::size_t test::utilities::check_safegraphs_format(settings_t const& settings)
     return report("safegraphs format", failures);
 }
 
-#pragma endregion Harness
+#pragma endregion Embeddings

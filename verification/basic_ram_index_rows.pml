@@ -1,9 +1,9 @@
 /**
  *  @brief The basic index's rows under their mutex, behind the gate's shared and unique sides.
  *
- *  One neighbor row from `include/usearch/basic/ram_index.hpp` under its `basic_mutex`, edited by
+ *  One neighbor row from `include/usearch/basic/ram_index.hpp` under its `basic::mutex`, edited by
  *  the manual `link` and `unlink` and by an insert's `back_link_` behind the shared side of
- *  `basic_shared_mutex`, copied by the traversal's `copy_row_`, the cursor's `seek` and `degree_of`
+ *  `basic::shared_mutex`, copied by the traversal's `copy_row_`, the cursor's `seek` and `degree_of`
  *  under the row mutex alone, and read plain by `health` and `plan_save` on the unique side. The
  *  gate inlines are the header's lines: the acquire add and the release fence of `lock_shared`, the
  *  release subtract of `unlock_shared`, the acquire compare-exchange from a free word of

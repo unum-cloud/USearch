@@ -54,8 +54,7 @@
 #include <sanitizer/common_interface_defs.h> // `__sanitizer_annotate_contiguous_container`
 #endif
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::utilities {
 
 #if USEARCH_SANITIZE_THREAD
 
@@ -187,5 +186,4 @@ inline void annotate_container(void const*, void const*, void const*, void const
 
 #endif
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::utilities

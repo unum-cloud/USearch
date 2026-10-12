@@ -1,5 +1,5 @@
 /**
- *  @brief `basic_shared_mutex`: the one-word gate every mutator of the basic index holds shared,
+ *  @brief `basic::shared_mutex`: the one-word gate every mutator of the basic index holds shared,
  *      the stop-the-world operations take unique, and the certified searches bracket with two probes.
  *
  *  From `include/usearch/basic/ram_index.hpp`. Two mutators each take the shared side once and

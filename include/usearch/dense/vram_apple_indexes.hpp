@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 11, 2026
  *  @brief The keyed index over the one Apple GPU a Mac carries - the Apple twin of
- *      @c dense_vram_nvidia_indexes.
+ *      @c vram_nvidia_indexes.
  *
  *  Speaks the sharded index's verbs, so the C layer drives every vendor alike, over the single
  *  shard Apple's one device hosts: keys resolve through a host key column and the locator map, an
@@ -30,8 +30,7 @@
 #include "usearch/dense/types.hpp"
 #include "usearch/dense/vram_apple_index.hpp"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::dense {
 
 /** The keyed index over one Apple GPU's single shard. */
 template <                                        //
@@ -39,22 +38,22 @@ template <                                        //
     nk_dtype_t vector_dtype_ = nk_i8_k,           //
     nk_capability_t capability_ = nk_cap_metal_k, //
     typename key_hash_type_ = std::hash<key_type_>>
-struct dense_vram_apple_indexes {
+struct vram_apple_indexes {
 
     using key_t = key_type_;
 
     /** Where one entry lives: the shard, and its ID there. */
     struct key_locator_t {
         std::size_t shard = 0;
-        dense_node_id_t node = 0;
+        node_id_t node = 0;
     };
 
     using locators_map_t = chunked_multimap<key_t, key_locator_t, key_hash_type_, forkunion_allocator_t>;
-    using index_t = dense_vram_apple_index<vector_dtype_, capability_>;
+    using index_t = vram_apple_index<vector_dtype_, capability_>;
     using keys_column_t =
         chunked_column<key_t, chunk_schedule<10, 20>, index_t::max_node_count_k, forkunion_allocator_t>;
     using executor_t = metal_executor_t;
-    using dense_traversal_context_t = typename index_t::dense_traversal_context_t;
+    using traversal_context_t = typename index_t::traversal_context_t;
     using distance_t = typename index_t::distance_t;
     using scalar_t = typename index_t::scalar_t;
     using dot_result_t = typename scalar_t::dot_result_t;
@@ -84,12 +83,12 @@ struct dense_vram_apple_indexes {
 
 #pragma region Placement and Measures
 
-    dense_vram_apple_indexes() = delete;
-    explicit dense_vram_apple_indexes(nk_kernel_kind_t kernel, forkunion_allocator_t allocator) noexcept
+    vram_apple_indexes() = delete;
+    explicit vram_apple_indexes(nk_kernel_kind_t kernel, forkunion_allocator_t allocator) noexcept
         : kernel_(kernel), shards_(allocator), locators_of_key_(allocator), allocator_(allocator) {}
-    dense_vram_apple_indexes(dense_vram_apple_indexes const&) = delete;
-    dense_vram_apple_indexes& operator=(dense_vram_apple_indexes const&) = delete;
-    ~dense_vram_apple_indexes() noexcept = default;
+    vram_apple_indexes(vram_apple_indexes const&) = delete;
+    vram_apple_indexes& operator=(vram_apple_indexes const&) = delete;
+    ~vram_apple_indexes() noexcept = default;
 
     /** Places the one shard on @p device; a second refuses, since one Apple device hosts one
      *  shard. */
@@ -122,7 +121,7 @@ struct dense_vram_apple_indexes {
     status_t status() const noexcept { return shards_.empty() ? status_t::success_k : shards_[0].index->status(); }
 
     std::size_t memory_usage() const noexcept {
-        std::size_t bytes = sizeof(dense_vram_apple_indexes) + locators_of_key_.memory_usage();
+        std::size_t bytes = sizeof(vram_apple_indexes) + locators_of_key_.memory_usage();
         for (shard_t const& one : shards_) bytes += one.index->memory_usage() + one.keys.memory_usage();
         return bytes;
     }
@@ -177,7 +176,7 @@ struct dense_vram_apple_indexes {
             if (launched_ + count > rows_) return status_t::config_mismatch_k;
             if (!count) return status_t::success_k;
             shard_t& one = owner_->shards_[0];
-            dense_node_id_t const first_node = static_cast<dense_node_id_t>(first_id_ + launched_);
+            node_id_t const first_node = static_cast<node_id_t>(first_id_ + launched_);
             for (std::size_t row = 0; row != count; ++row) one.keys[first_node + row] = keys[row];
             expected<insert_result_t> const inserted = one.index->submit_insert_(rows, {}, *traversal_, config_);
             if (!inserted) return status_ = inserted.status;
@@ -196,7 +195,7 @@ struct dense_vram_apple_indexes {
         expected<insert_result_t> finish() noexcept {
             if (!owner_) return {{}, status_t::uninitialized_k};
             if (succeeded(status_) && launched_ != rows_) return {{owner_->size()}, status_t::config_mismatch_k};
-            dense_vram_apple_indexes& owner = *std::exchange(owner_, nullptr);
+            vram_apple_indexes& owner = *std::exchange(owner_, nullptr);
             index_t& index = *owner.shards_[0].index;
             if (failed(status_)) {
                 if (launched_) [[maybe_unused]]
@@ -208,10 +207,10 @@ struct dense_vram_apple_indexes {
                 if (status_t const published = index.publish_(first_id_, launched_); failed(published))
                     return {result_, published};
             for (std::size_t row = 0; row != launched_; ++row) {
-                dense_node_id_t const node = static_cast<dense_node_id_t>(first_id_ + row);
+                node_id_t const node = static_cast<node_id_t>(first_id_ + row);
                 owner.locators_of_key_.insert(seats_, owner.shards_[0].keys[node], key_locator_t {0, node});
             }
-            result_.first_id = static_cast<dense_node_id_t>(first_id_);
+            result_.first_id = static_cast<node_id_t>(first_id_);
             result_.new_size = owner.size();
             return {result_, status_t::success_k};
         }
@@ -224,12 +223,12 @@ struct dense_vram_apple_indexes {
         std::size_t first_id_ = 0;
         insert_result_t result_ {};
         status_t status_ = status_t::success_k;
-        std::unique_ptr<dense_traversal_context_t> traversal_;
+        std::unique_ptr<traversal_context_t> traversal_;
         typename executor_t::claim_t streams_;
         std::unique_lock<fu::spin_mutex_t> mutating_;
-        dense_vram_apple_indexes* owner_ = nullptr;
+        vram_apple_indexes* owner_ = nullptr;
 
-        friend dense_vram_apple_indexes;
+        friend vram_apple_indexes;
     };
 
     /** Opens a batch of @p rows: takes the executor and the insertion gate, grows the shard and its
@@ -249,7 +248,7 @@ struct dense_vram_apple_indexes {
         plan.streams_ = std::move(claim);
         if (!mutating_.lock_if_free()) return {{}, status_t::contended_k};
         plan.mutating_ = std::unique_lock<fu::spin_mutex_t> {mutating_, std::adopt_lock};
-        plan.traversal_.reset(new (std::nothrow) dense_traversal_context_t {traversal_queue_(executor)});
+        plan.traversal_.reset(new (std::nothrow) traversal_context_t {traversal_queue_(executor)});
         if (!plan.traversal_ || !*plan.traversal_) return {{}, status_t::bad_alloc_k};
         shard_t& one = shards_[0];
         plan.first_id_ = one.index->claimed_();
@@ -299,9 +298,9 @@ struct dense_vram_apple_indexes {
         if (failed(claim_status)) return {{}, claim_status};
         if (!mutating_.lock_if_free()) return {{}, status_t::contended_k};
         std::lock_guard const mutating {mutating_, std::adopt_lock};
-        dense_traversal_context_t traversal {traversal_queue_(executor)};
+        traversal_context_t traversal {traversal_queue_(executor)};
         std::size_t const published = size();
-        auto const [result, status] = shards_[0].index->refine({0, dense_node_id_unknown_k}, traversal, config);
+        auto const [result, status] = shards_[0].index->refine({0, node_id_unknown_k}, traversal, config);
         if (failed(status)) return {result, status};
         if (on_visited(result.visited_nodes, published) == continuation_t::cancel_k)
             return {result, status_t::cancelled_k};
@@ -314,7 +313,7 @@ struct dense_vram_apple_indexes {
         if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
-        dense_traversal_context_t traversal {traversal_queue_(executor)};
+        traversal_context_t traversal {traversal_queue_(executor)};
         return shards_[0].index->health(traversal);
     }
 
@@ -329,7 +328,7 @@ struct dense_vram_apple_indexes {
         if (status_t const paired = pairs_with_(executor); failed(paired)) return {merged, paired};
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {merged, claim_status};
-        dense_traversal_context_t traversal {traversal_queue_(executor)};
+        traversal_context_t traversal {traversal_queue_(executor)};
         auto const [found, status] = shards_[0].index->search_one_(query_vector, traversal, config, size());
         if (failed(status)) return {merged, status};
         merged = found;
@@ -346,10 +345,10 @@ struct dense_vram_apple_indexes {
 
     /** The batched search ranked by a lightning indexer; a dot verb, refusing every other
      *  metric. */
-    expected<search_result_t> search(vectors_view_t queries, dense_indexer_heads<scalar_t> const& heads,
-                                     executor_t& executor, search_config_t config, nk::matrix_span<key_t> keys,
+    expected<search_result_t> search(vectors_view_t queries, indexer_heads<scalar_t> const& heads, executor_t& executor,
+                                     search_config_t config, nk::matrix_span<key_t> keys,
                                      nk::matrix_span<distance_t> distances, std::span<std::size_t> counts) noexcept
-        requires dense_floating_scalar<scalar_t>
+        requires floating_scalar<scalar_t>
     {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         return search_(queries, executor, config, keys, distances, counts, heads);
@@ -363,19 +362,19 @@ struct dense_vram_apple_indexes {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
         if (counts.size() != rows_count) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = dense_rankings_refusal(rows_count, keys, products); failed(refusal))
+        if (status_t const refusal = rankings_refusal(rows_count, keys, products); failed(refusal))
             return {{}, refusal};
         if (!rows_count) return {{}, status_t::success_k};
         if (left.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
-        growing_buffer<dense_node_id_t, forkunion_allocator_t> ids_landing {allocator_};
+        growing_buffer<node_id_t, forkunion_allocator_t> ids_landing {allocator_};
         growing_buffer<u32_t, forkunion_allocator_t> counts_landing {allocator_};
         if (failed(ids_landing.resize_uninitialized(rows_count * wanted)) ||
             failed(counts_landing.resize_uninitialized(rows_count)))
             return {{}, status_t::bad_alloc_k};
-        nk::matrix_span<dense_node_id_t> const ids {ids_landing.data(), rows_count, wanted};
-        dense_traversal_context_t traversal {traversal_queue_(executor)};
+        nk::matrix_span<node_id_t> const ids {ids_landing.data(), rows_count, wanted};
+        traversal_context_t traversal {traversal_queue_(executor)};
         expected<search_result_t> multiplied = shards_[0].index->multiply_(
             left, ids, products, to_writable_span(counts_landing), traversal, config, size());
         if (!multiplied) return multiplied;
@@ -397,7 +396,7 @@ struct dense_vram_apple_indexes {
         if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
         std::size_t const groups_count = rows_count / rows_per_query;
         if (counts.size() != groups_count) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = dense_rankings_refusal(groups_count, keys, scores); failed(refusal))
+        if (status_t const refusal = rankings_refusal(groups_count, keys, scores); failed(refusal))
             return {{}, refusal};
         if (!groups_count) return {{}, status_t::success_k};
         std::size_t const width = shards_[0].index->non_zero_expansion_factor(config);
@@ -405,7 +404,7 @@ struct dense_vram_apple_indexes {
         growing_buffer<key_t, forkunion_allocator_t> row_keys {allocator_};
         growing_buffer<distance_t, forkunion_allocator_t> row_distances {allocator_};
         growing_buffer<std::size_t, forkunion_allocator_t> row_counts {allocator_};
-        dense_maxsim_reducer<key_t, distance_t, forkunion_allocator_t> reduce {allocator_};
+        maxsim_reducer<key_t, distance_t, forkunion_allocator_t> reduce {allocator_};
         if (failed(row_keys.resize_uninitialized(rows_count * width)) ||
             failed(row_distances.resize_uninitialized(rows_count * width)) ||
             failed(row_counts.resize_uninitialized(rows_count)) || failed(reduce.reserve(rows_per_query, width)))
@@ -422,7 +421,7 @@ struct dense_vram_apple_indexes {
     /** Device attention is NVIDIA's alone until its value lookup has a Metal ABI. */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(vectors_view_t, std::size_t, value_lookup_type_&&, f32_t, nk::matrix_span<f32_t>,
-                                     std::span<dense_softmax_state_t>, executor_t&, search_config_t = {}) noexcept {
+                                     std::span<softmax_state_t>, executor_t&, search_config_t = {}) noexcept {
         return {{}, status_t::unsupported_k};
     }
 
@@ -573,7 +572,7 @@ struct dense_vram_apple_indexes {
                  std::span<std::size_t> entries, executor_t&) const noexcept {
         if (entries.size() != keys.size()) return status_t::config_mismatch_k;
         std::size_t const row_values = divide_round_up<std::size_t>(dimensions(), nk::dimensions_per_value<scalar_t>());
-        if (status_t const refusal = dense_rows_refusal(keys.size() * wanted, vectors, row_values); failed(refusal))
+        if (status_t const refusal = rows_refusal(keys.size() * wanted, vectors, row_values); failed(refusal))
             return refusal;
         for (std::size_t position = 0; position != keys.size(); ++position) {
             std::size_t const first = position * wanted;
@@ -606,9 +605,7 @@ struct dense_vram_apple_indexes {
     }
 
     /** The queue a context opened over @p executor submits to. */
-    static dense_metal_queue_t traversal_queue_(executor_t& executor) noexcept {
-        return {executor.device(0), executor.stream(0).handle};
-    }
+    static metal_queue_t traversal_queue_(executor_t& executor) noexcept { return executor.stream(0).share(); }
 
     /** The batched search body, under any indexer @p heads. */
     template <typename heads_type_>
@@ -618,31 +615,31 @@ struct dense_vram_apple_indexes {
         std::size_t const queries_count = queries.extent(0);
         if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
         if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = dense_rankings_refusal(queries_count, keys, distances); failed(refusal))
+        if (status_t const refusal = rankings_refusal(queries_count, keys, distances); failed(refusal))
             return {{}, refusal};
         if (!queries_count) return {{}, status_t::success_k};
         if (queries.extent(1) != dimensions() || config.count > 512) return {{}, status_t::config_mismatch_k};
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
-        growing_buffer<dense_node_id_t, forkunion_allocator_t> ids_landing {allocator_};
-        growing_buffer<dense_distance_t, forkunion_allocator_t> distances_landing {allocator_};
+        growing_buffer<node_id_t, forkunion_allocator_t> ids_landing {allocator_};
+        growing_buffer<distance_t, forkunion_allocator_t> distances_landing {allocator_};
         if (failed(ids_landing.resize_uninitialized(queries_count * config.count)) ||
             failed(distances_landing.resize_uninitialized(queries_count * config.count)))
             return {{}, status_t::bad_alloc_k};
-        nk::matrix_span<dense_node_id_t> const ids {ids_landing.data(), queries_count, config.count};
-        nk::matrix_span<dense_distance_t> const landed {distances_landing.data(), queries_count, config.count};
-        dense_traversal_context_t traversal {traversal_queue_(executor)};
+        nk::matrix_span<node_id_t> const ids {ids_landing.data(), queries_count, config.count};
+        nk::matrix_span<distance_t> const landed {distances_landing.data(), queries_count, config.count};
+        traversal_context_t traversal {traversal_queue_(executor)};
         expected<search_result_t> found = shards_[0].index->search_(queries, ids, landed, traversal, config, size(),
                                                                     heads);
         if (!found) return found;
-        dense_scored_node_t frame[512];
+        scored_node_t frame[512];
         found.value.count = 0;
         for (std::size_t query = 0; query != queries_count; ++query) {
             std::size_t live = 0;
-            for (; live != config.count && ids(query, live) != dense_node_id_unknown_k; ++live)
-                frame[live] = dense_scored_node_t {ids(query, live), landed(query, live)};
-            counts[query] = merge_search_results(std::span<dense_scored_node_t const> {frame}.first(live),
-                                                 shards_[0].keys, to_span(keys.row(query).as_vector()),
+            for (; live != config.count && ids(query, live) != node_id_unknown_k; ++live)
+                frame[live] = scored_node_t {ids(query, live), landed(query, live)};
+            counts[query] = merge_search_results(std::span<scored_node_t const> {frame}.first(live), shards_[0].keys,
+                                                 to_span(keys.row(query).as_vector()),
                                                  to_span(distances.row(query).as_vector()), 0);
             found.value.count += counts[query];
         }
@@ -852,10 +849,9 @@ struct dense_vram_apple_indexes {
                 if (low >= high) continue;
                 typename index_t::load_plan_t::step_t step;
                 step.position = batch.position;
-                step.index_rows = {static_cast<dense_node_id_t>(low), static_cast<dense_node_id_t>(high)};
-                step.source_rows = {static_cast<dense_node_id_t>(low - first_row),
-                                    static_cast<dense_node_id_t>(high - first_row)};
-                if (status_t const landed = plan.load(step, columns, {0, static_cast<dense_node_id_t>(part.nodes)});
+                step.index_rows = {static_cast<node_id_t>(low), static_cast<node_id_t>(high)};
+                step.source_rows = {static_cast<node_id_t>(low - first_row), static_cast<node_id_t>(high - first_row)};
+                if (status_t const landed = plan.load(step, columns, {0, static_cast<node_id_t>(part.nodes)});
                     failed(landed))
                     return landed;
             }
@@ -873,7 +869,7 @@ struct dense_vram_apple_indexes {
             });
             if (failed(read)) return read;
             for (std::size_t row = first_row; row != bound_row; ++row)
-                locators_of_key_.insert(seats, one.keys[row], key_locator_t {0, static_cast<dense_node_id_t>(row)});
+                locators_of_key_.insert(seats, one.keys[row], key_locator_t {0, static_cast<node_id_t>(row)});
             first_row = bound_row;
         }
         return plan.finish();
@@ -886,5 +882,4 @@ struct dense_vram_apple_indexes {
     fu::spin_mutex_t mutating_;
 };
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::dense

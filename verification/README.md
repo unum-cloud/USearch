@@ -30,12 +30,12 @@ Every scenario has a `pass` line, every knob appears on some line, and adding a 
 
 Each finding is the `@verify` line that replays it, where the full counterexample is written out.
 
-- `basic_shared_mutex::lock_shared` ends in a release fence; without it, a certified search certifies a torn pair of rows, under RC11 and under IMM on Arm and POWER, though x86's locked add orders the rows on its own: [`basic_shared_mutex.pml`](basic_shared_mutex.pml), [`basic_shared_mutex.cpp`](basic_shared_mutex.cpp).
+- `basic::shared_mutex::lock_shared` ends in a release fence; without it, a certified search certifies a torn pair of rows, under RC11 and under IMM on Arm and POWER, though x86's locked add orders the rows on its own: [`basic_shared_mutex.pml`](basic_shared_mutex.pml), [`basic_shared_mutex.cpp`](basic_shared_mutex.cpp).
 - The gate's back-off wait and the deficit wait in `claim_capacity` are capped; uncapped, a mutator arms its monitor after the holder left and waits forever: [`basic_shared_mutex.pml`](basic_shared_mutex.pml).
 - The gate's generation wrap is priced at days of churn; at a modulus of 2 it certifies a probe a mutator ran through: [`basic_shared_mutex.pml`](basic_shared_mutex.pml).
 - A certified search's acquire fence before its exit probe pairs with `lock_shared`'s release fence, and `unlock_shared`'s release and `try_lock`'s acquire carry the shared side's edits to the unique side, or a row is read torn: [`basic_shared_mutex.pml`](basic_shared_mutex.pml).
 - The basic index's rows carry their edits on the row lock's acquire and the unlock's release, and the traversal admits only IDs below its snapshot: [`basic_ram_index_rows.pml`](basic_ram_index_rows.pml).
-- `basic_ram_index::insert` dispenses a batch with one add and publishes it with one turn, and a walk admits another batch's row only once it acquires that row's `wired` flag, or a reader sees half a batch or a row unwritten: [`basic_ram_index_batches.pml`](basic_ram_index_batches.pml).
+- `basic::ram_index::insert` dispenses a batch with one add and publishes it with one turn, and a walk admits another batch's row only once it acquires that row's `wired` flag, or a reader sees half a batch or a row unwritten: [`basic_ram_index_batches.pml`](basic_ram_index_batches.pml).
 - `back_link_` revalidates the relocked row slot by slot, or an `unlink` followed by an append brings back the unlinked edge, and it runs before its batch's turn, where no `link` can name the newcomer: [`basic_ram_index_back_link.pml`](basic_ram_index_back_link.pml).
 - The load path's `finish` stores the counters before the watermark's release, and the steps' tally releases for the finisher's acquire: [`basic_ram_index_steps.pml`](basic_ram_index_steps.pml).
 - A failed load wipes the keys it registered, and `insert` clears its row before wiring: [`test/basic/sentences.cpp`](../test/basic/sentences.cpp).
@@ -62,7 +62,7 @@ Each finding is the `@verify` line that replays it, where the full counterexampl
 The dense index header compiles and starts under GenMC, but its first chunk is a thousand rows of sentinel stores, more events than GenMC's execution graph holds, so the dense clients spell the counters' lines rather than driving the header.
 The far-memory results are Spin's alone: GenMC has no posted add.
 `chunked_multimap` crashed GenMC 0.18's interpreter before the first insert, single-threaded, so the multimap has no client, and 0.19 is untried.
-The rows model has no client either: the row mutex sits inside `basic_ram_index`, whose allocations and key map are more than GenMC's graph takes.
+The rows model has no client either: the row mutex sits inside `basic::ram_index`, whose allocations and key map are more than GenMC's graph takes.
 The CUDA rows model folds the prior lock holder into one lane and takes `bar.warp.sync`'s ordering among its participants from the ISA text.
 An add overlapping a load of the RAM sharded index is outside that index's contract, which has no mutation gate; the CUDA twin's gate covers its load.
 The executors' holds are plain try-locks around the per-thread arenas and are not modelled; the fan-out under them is ForkUnion's, which refuses a second dispatch on its own.

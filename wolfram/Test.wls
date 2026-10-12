@@ -39,14 +39,15 @@ Expect["the frozen geometry", KeyTake[DenseDescribe[$index], {"Metric", "Quantiz
 
 (* One identity too wide for a machine integer and one plain integer, so the batch exercises both. *)
 $rows = {{1.0, 2.0, 3.0, 4.0, 5.0}, {5.0, 4.0, 3.0, 2.0, 1.0}};
-Expect["an insertion", DenseInsert[DenseIndexOn[$index, $executor], {$uuid, 43}, $rows], Null]
+$typed = NumericArray[$rows, "Real32"];
+Expect["an insertion", DenseInsert[DenseIndexOn[$index, $executor], {$uuid, 43}, $typed], Null]
 Expect["the size after insertion", DenseDescribe[$index]["Size"], 2]
 Expect["a narrow row", DenseInsert[$index, {44}, {{1.0, 2.0}}][[1]], "shape-mismatch"]
 Expect["one key per vector", DenseInsert[$index, {44}, $rows],
     Failure["shape-mismatch", <|"MessageTemplate" -> "there must be one key per vector"|>]]
 
 (* A search lands in an arena and answers each query's keys and scores, as many as it found. *)
-$matches = DenseSearch[DenseIndexOn[$index, $executor], $rows, 10, $arena]
+$matches = DenseSearch[DenseIndexOn[$index, $executor], $typed, 10, $arena]
 Print["Searched: ", $matches]
 Expect["the keys of a batch", $matches["Keys"], {{$uuid, 43}, {43, $uuid}}]
 Expect["the scores of a batch", Length /@ $matches["Scores"], {2, 2}]
@@ -58,6 +59,10 @@ Expect["a negative wanted", DenseSearch[$index, $rows, -1, $arena],
     Failure["invalid-argument", <|"MessageTemplate" -> "wanted must not be negative"|>]]
 Expect["arguments of the wrong type", Quiet[DenseSearch[$index, {{"one"}}, 1, $arena]],
     Failure["invalid-argument", <|"MessageTemplate" -> "the arguments do not match the verb's types"|>]]
+Expect["non-real typed rows", DenseSearch[$index, NumericArray[{{1, 2, 3, 4, 5}}, "Integer32"], 1, $arena][[1]],
+    "shape-mismatch"]
+Expect["a negative expansion", DenseSearch[$index, $typed, 1, $arena, "ExpansionFactor" -> -1][[1]],
+    "invalid-argument"]
 Expect["an empty batch", DenseInsert[$index, {}, {}], Null]
 Expect["no queries", DenseSearch[$index, {}, 10, $arena], <|"Keys" -> {}, "Scores" -> {}|>]
 
@@ -84,8 +89,26 @@ Expect["the product offsets", $products["Offsets"], {0, 2, 4}]
 Expect["the product keys", Sort /@ TakeList[$products["Keys"], {2, 2}], {Sort[{$uuid, 43}], Sort[{$uuid, 43}]}]
 Expect["the products scored", $products["Required"], 4]
 Print["Products: ", $products["Scores"]]
+$sparse = DenseMultiply[$index, $typed, {43, $uuid}, $arena];
+Expect["sparse columns follow explicit keys", Normal[$sparse], $rows . Transpose[Reverse[$rows]]]
+Expect["unknown product columns", DenseMultiply[$index, $rows, {43}, $arena][[1]], "invalid-argument"]
+
+$values = DenseValues[$index, {$uuid, 43}, NumericArray[$rows / 8., "Real64"]];
+$attended = DenseAttend[DenseIndexOn[$index, $executor], $typed, $values, $arena,
+    "HeadCount" -> 2, "ScoreScale" -> 0.01];
+$logits = 0.01 ($rows . Transpose[$rows]);
+$weights = Exp[$logits];
+$oracle = MapThread[#1 / #2 &, {$weights . ($rows / 8.), Total /@ $weights}];
+Expect["folded multi-head attention", Max[Abs[Flatten[$attended["Outputs"] - $oracle]]] < 0.00005, True]
+Expect["online softmax maximum", Max[Abs[$attended["Carry"][[All, 1]] - (Max /@ $logits)]] < 0.00005, True]
+Expect["online softmax partition", Max[Abs[$attended["Carry"][[All, 2]] -
+    (Total /@ Exp[Map[# - Max[#] &, $logits]])]] < 0.00005, True]
+Expect["borrowed rows are unchanged", Normal[$typed], $rows]
+Expect["duplicate value keys", DenseValues[$index, {43, 43}, $rows][[1]], "invalid-argument"]
+Expect["missing attention value", DenseAttend[$index, $typed,
+    DenseValues[$index, {43}, {Last[$rows]}], $arena][[1]], "shape-mismatch"]
 Expect["single-row queries scored late-interaction style",
-    Length /@ DenseMaxsim[DenseIndexOn[$index, $executor], $rows, 1, 10, $arena, "ExpansionFactor" -> 0]["Keys"], {2, 2}]
+    Length /@ DenseMaxsim[DenseIndexOn[$index, $executor], $typed, 1, 10, $arena, "ExpansionFactor" -> 0]["Keys"], {2, 2}]
 
 Expect["a refinement", IntegerQ[DenseRefine[DenseIndexOn[$index, $executor]]], True]
 Expect["an audit", KeyTake[DenseHealth[$index], {"Audited", "Reachable"}], <|"Audited" -> 2, "Reachable" -> 2|>]
@@ -94,6 +117,10 @@ $checkpoint = FileNameJoin[{$TemporaryDirectory, "usearch-test-wolfram.safegraph
 Expect["a save", DenseSave[DenseIndexOn[$index, $executor], $checkpoint], Null]
 $loaded = DenseLoadRam[$checkpoint, "Executor" -> $executor]
 Expect["a checkpoint round trip", DenseDescribe[$loaded]["Size"], 2]
+$nvme = DenseViewNvme[$checkpoint];
+Expect["a value cache also serves NVMe attention", Max[Abs[Flatten[
+    DenseAttend[$nvme, $typed, $values, $local, "HeadCount" -> 2, "ScoreScale" -> 0.01]["Outputs"] - $oracle]]] < 0.00005,
+    True]
 Expect["the checkpoint metadata", DenseMetadataRead[$checkpoint],
     <|"Metric" -> "inner", "Quantization" -> "bf16", "Dimensions" -> 5,
         "Connectivity" -> DenseDescribe[$index]["Connectivity"]|>]
@@ -108,7 +135,10 @@ Print["Saved and Loaded"]
 
 Expect["a clear", DenseClear[$loaded], Null]
 Expect["the size after clearing", DenseDescribe[$loaded]["Size"], 0]
+Expect["empty sparse products", Normal[DenseMultiply[$loaded, $typed, {43, $uuid}, $local]], ConstantArray[0, {2, 2}]]
+Expect["no matches in an empty index", DenseSearch[$loaded, $typed, 2, $local],
+    <|"Scores" -> {{}, {}}, "Keys" -> {{}, {}}|>]
 
-ClearAll[$loaded, $viewed, $arena, $local, $scanned, $index, $executor]
+ClearAll[$loaded, $viewed, $nvme, $arena, $local, $scanned, $index, $executor]
 DeleteFile[$checkpoint]
 Print["Handles Released"]

@@ -88,15 +88,34 @@ using counting_cuda_allocator_t = counting_cuda_allocator<byte_t>;
 
 static_assert(cuda_reservable_allocator<counting_cuda_allocator_t>);
 
+/** A device lookup over a value table whose rows sit a 16-byte pitch apart: an ID below @c count
+ *  names its row, a node ID on one GPU and a key on shards, and any other has none. */
+template <typename fragment_type_>
+struct dense_cuda_value_lookup {
+
+    /** Names the lookup to the attend kernels the suite's fatbin carries. */
+    inline static constexpr u32_t device_lookup_k = 1;
+
+    byte_t const* rows;
+    std::size_t pitch;
+    std::size_t count;
+
+#if defined(__CUDACC__)
+    __device__ fragment_type_ const* operator()(u32_t id) const noexcept {
+        return id < count ? reinterpret_cast<fragment_type_ const*>(rows + id * pitch) : nullptr;
+    }
+#endif
+};
+
 /** The NVIDIA index of one (dtype, kernel) cell over the ledgered planes, its sharded collection,
  *  and the factory the shared composers build the index with; device attention runs in
  *  @c vram_nvidia.cu instead of the shared composers. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::nvidia_k, dtype_, kernel_> {
     using allocator_t = counting_cuda_allocator_t;
-    using index_t = dense_vram_nvidia_index<dtype_, dense_nvidia_capabilities_k, allocator_t, allocator_t,
-                                            selected_cuda_allocator<>>;
-    using indexes_t = dense_vram_nvidia_indexes<u32_t, dtype_, dense_nvidia_capabilities_k>;
+    using index_t =
+        vram_nvidia_index<dtype_, dense_nvidia_capabilities_k, allocator_t, allocator_t, selected_cuda_allocator<>>;
+    using indexes_t = vram_nvidia_indexes<u32_t, dtype_, dense_nvidia_capabilities_k>;
     inline static constexpr char const* vendor_prefix_k = "cuda";
     inline static constexpr bool attends_k = true;
 

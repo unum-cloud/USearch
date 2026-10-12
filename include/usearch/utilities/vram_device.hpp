@@ -35,8 +35,7 @@
 #include "usearch/utilities/vram_apple_device.hpp" // `apple_gpu_devices`, `metal_executor_t`
 #endif
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::utilities {
 
 /** A variant over @c std::monostate, the state of no GPU, then each compiled vendor's
  *  @p selector_type_ applied to its executor, in listing order. */
@@ -205,5 +204,4 @@ struct gpu_arena_t {
     }
 };
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::utilities

@@ -4,88 +4,138 @@
  *  @date July 22, 2026
  *  @brief The NVIDIA suite's entry for the one VRAM runner: selects the device, runs every dtype
  *      cell and the sharded suite the settings select, then device attention, whose value lookups
- *      run on the device and so need NVCC.
+ *      run on the device.
  *
- *  The cells' index types instantiate here beside the kernels, since the shared shards compile with
- *  the host compiler and see only the faces.
+ *  Compiled twice, like the library's class units: by NVCC device-only into the suite's own fatbin,
+ *  carrying every cell's kernels and the attends over this file's value lookups, and by the host
+ *  compiler into the cells' index types, which the shared shards see only through the faces.
  */
-#include <cuda_runtime.h> // `cudaGetDeviceProperties`, `cudaMemcpy2D`
-
 #include <fmt/format.h>
-
-#include "usearch/dense/vram_nvidia_index.cuh"
 
 #include "vram_index.cuh"
 #include "vram_indexes.cuh"
 
-namespace unum::usearch {
+#if defined(__CUDACC__)
+#include "usearch/dense/vram_nvidia_index.cuh"
+#endif
+
+namespace unum::usearch::dense {
 
 using test::dense_nvidia_capabilities_k;
 using test::dense::counting_cuda_allocator_t;
 using test::dense::selected_cuda_allocator;
 
-// The ledgered index of every NVIDIA cell and the collections the sharded suite drives.
-template struct dense_vram_nvidia_index<nk_bf16_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                        counting_cuda_allocator_t, selected_cuda_allocator<>>;
-template struct dense_vram_nvidia_indexes<u32_t, nk_bf16_k, dense_nvidia_capabilities_k>;
+/** The lookups the suite attends through: by node ID on one GPU, and by key on shards. */
+using cuda_test_lookup_t = test::dense::dense_cuda_value_lookup<uint4>;
+using cuda_test_keyed_lookup_t = cuda_keyed_lookup<u32_t, cuda_test_lookup_t>;
+
+template <>
+struct cuda_value_lookup_of<cuda_test_lookup_t::device_lookup_k> {
+    using type = cuda_test_lookup_t;
+};
+template <>
+struct cuda_value_lookup_of<cuda_test_keyed_lookup_t::device_lookup_k> {
+    using type = cuda_test_keyed_lookup_t;
+};
+
+/** The suite's fatbin, linked in as raw bytes beside its host half. */
+extern "C" byte_t const test_vram_nvidia_bundle_start[], test_vram_nvidia_bundle_end[];
+
+#if defined(__CUDACC__)
+
+// Every cell's kernels and attends, and the keyed attends of the sharded suite's collection.
+template void cuda_instantiate<dense_nvidia_capabilities_k, nk_bf16_k, cuda_test_lookup_t::device_lookup_k,
+                               cuda_test_keyed_lookup_t::device_lookup_k>();
 #if USEARCH_DENSE_DTYPES >= 2
-template struct dense_vram_nvidia_index<nk_u1_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                        counting_cuda_allocator_t, selected_cuda_allocator<>>;
+template void cuda_instantiate<dense_nvidia_capabilities_k, nk_u1_k, cuda_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-template struct dense_vram_nvidia_index<nk_i8_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                        counting_cuda_allocator_t, selected_cuda_allocator<>>;
-template struct dense_vram_nvidia_indexes<u32_t, nk_i8_k, dense_nvidia_capabilities_k>;
+template void cuda_instantiate<dense_nvidia_capabilities_k, nk_i8_k, cuda_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-template struct dense_vram_nvidia_index<nk_e4m3_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                        counting_cuda_allocator_t, selected_cuda_allocator<>>;
+template void cuda_instantiate<dense_nvidia_capabilities_k, nk_e4m3_k, cuda_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-template struct dense_vram_nvidia_index<nk_f16_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                        counting_cuda_allocator_t, selected_cuda_allocator<>>;
+template void cuda_instantiate<dense_nvidia_capabilities_k, nk_f16_k, cuda_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-template struct dense_vram_nvidia_index<nk_u8_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                        counting_cuda_allocator_t, selected_cuda_allocator<>>;
+template void cuda_instantiate<dense_nvidia_capabilities_k, nk_u8_k, cuda_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-template struct dense_vram_nvidia_index<nk_e5m2_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                        counting_cuda_allocator_t, selected_cuda_allocator<>>;
+template void cuda_instantiate<dense_nvidia_capabilities_k, nk_e5m2_k, cuda_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-template struct dense_vram_nvidia_index<nk_i4_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                        counting_cuda_allocator_t, selected_cuda_allocator<>>;
+template void cuda_instantiate<dense_nvidia_capabilities_k, nk_i4_k, cuda_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-template struct dense_vram_nvidia_index<nk_u4_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                        counting_cuda_allocator_t, selected_cuda_allocator<>>;
+template void cuda_instantiate<dense_nvidia_capabilities_k, nk_u4_k, cuda_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-template struct dense_vram_nvidia_index<nk_e3m2_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                        counting_cuda_allocator_t, selected_cuda_allocator<>>;
+template void cuda_instantiate<dense_nvidia_capabilities_k, nk_e3m2_k, cuda_test_lookup_t::device_lookup_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-template struct dense_vram_nvidia_index<nk_e2m3_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
-                                        counting_cuda_allocator_t, selected_cuda_allocator<>>;
+template void cuda_instantiate<dense_nvidia_capabilities_k, nk_e2m3_k, cuda_test_lookup_t::device_lookup_k>();
 #endif
 
-} // namespace unum::usearch
+#else
+
+template <>
+bytes_view_t cuda_fatbin<dense_nvidia_capabilities_k>() noexcept {
+    return {test_vram_nvidia_bundle_start,
+            static_cast<std::size_t>(test_vram_nvidia_bundle_end - test_vram_nvidia_bundle_start)};
+}
+
+// The ledgered index of every NVIDIA cell and the collections the sharded suite drives.
+template struct vram_nvidia_index<nk_bf16_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
+                                  counting_cuda_allocator_t, selected_cuda_allocator<>>;
+template struct vram_nvidia_indexes<u32_t, nk_bf16_k, dense_nvidia_capabilities_k>;
+#if USEARCH_DENSE_DTYPES >= 2
+template struct vram_nvidia_index<nk_u1_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
+                                  counting_cuda_allocator_t, selected_cuda_allocator<>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+template struct vram_nvidia_index<nk_i8_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
+                                  counting_cuda_allocator_t, selected_cuda_allocator<>>;
+template struct vram_nvidia_indexes<u32_t, nk_i8_k, dense_nvidia_capabilities_k>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+template struct vram_nvidia_index<nk_e4m3_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
+                                  counting_cuda_allocator_t, selected_cuda_allocator<>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+template struct vram_nvidia_index<nk_f16_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
+                                  counting_cuda_allocator_t, selected_cuda_allocator<>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+template struct vram_nvidia_index<nk_u8_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
+                                  counting_cuda_allocator_t, selected_cuda_allocator<>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+template struct vram_nvidia_index<nk_e5m2_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
+                                  counting_cuda_allocator_t, selected_cuda_allocator<>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+template struct vram_nvidia_index<nk_i4_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
+                                  counting_cuda_allocator_t, selected_cuda_allocator<>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+template struct vram_nvidia_index<nk_u4_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
+                                  counting_cuda_allocator_t, selected_cuda_allocator<>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+template struct vram_nvidia_index<nk_e3m2_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
+                                  counting_cuda_allocator_t, selected_cuda_allocator<>>;
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+template struct vram_nvidia_index<nk_e2m3_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
+                                  counting_cuda_allocator_t, selected_cuda_allocator<>>;
+#endif
+
+#endif // defined(__CUDACC__)
+
+} // namespace unum::usearch::dense
 
 namespace unum::usearch::test::dense {
-
-/** A device lookup over a value table whose rows sit a 16-byte pitch apart: an ID below @c count
- *  names its row, a node ID on one GPU and a key on shards, and any other has none. */
-template <typename fragment_type_>
-struct dense_cuda_value_lookup {
-    byte_t const* rows;
-    std::size_t pitch;
-    std::size_t count;
-
-    __device__ fragment_type_ const* operator()(u32_t id) const noexcept {
-        return id < count ? reinterpret_cast<fragment_type_ const*>(rows + id * pitch) : nullptr;
-    }
-};
 
 /** A value table copied onto the device, its rows a 16-byte pitch apart; null rows when the copy
  *  failed. */
@@ -109,8 +159,9 @@ dense_cuda_value_table<fragment_type_> dense_cuda_upload_values(nk::matrix_view<
     std::size_t const pitch = round_up_to_multiple<std::size_t>(row_bytes, 16);
     dense_cuda_value_table<fragment_type_> table {cuda_make_unique(cuda_device_allocator_t {}, rows_count * pitch),
                                                   pitch};
-    if (table.rows && cudaMemcpy2D(table.rows.get(), pitch, values.byte_data(), values.stride_bytes(0), row_bytes,
-                                   rows_count, cudaMemcpyHostToDevice) != cudaSuccess)
+    if (table.rows && (cuda_copy_2d_async(table.rows.get(), pitch, values.byte_data(), values.stride_bytes(0),
+                                          row_bytes, rows_count, nullptr) != CUDA_SUCCESS ||
+                       cuda_api().stream_synchronize(nullptr) != CUDA_SUCCESS))
         table.rows.reset();
     return table;
 }
@@ -129,11 +180,11 @@ std::size_t dense_expect_vram_attend(make_index_type_ const& make_index, allocat
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
     index_type_ index = make_index(ledger);
-    typename index_type_::dense_traversal_context_t context {{}};
+    typename index_type_::traversal_context_t context {{}};
     failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     auto const vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "attend"));
     auto const values = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "attend", 1));
-    std::vector<dense_node_id_t> assigned_ids(nodes_count);
+    std::vector<node_id_t> assigned_ids(nodes_count);
     if (failed(index.insert(vectors.view(), {assigned_ids.data(), nodes_count}, context).status))
         return failures + expect(false);
     failures += expect_contiguous_ids(std::span {assigned_ids}, 0);
@@ -143,7 +194,7 @@ std::size_t dense_expect_vram_attend(make_index_type_ const& make_index, allocat
     typename index_type_::search_config_t const exhaustive {nodes_count};
     auto const queries = make_vectors<scalar_t>(tokens_count * 4, dimensions, stream_key(seed, "attend", 2));
     auto outputs = nk::matrix<f32_t>::zeros({crowded_heads, dimensions}).value;
-    std::vector<dense_softmax_state_t> carry(crowded_heads);
+    std::vector<softmax_state_t> carry(crowded_heads);
     auto attend = [&](nk::matrix_view<scalar_t> heads, std::size_t head_count, lookup_t lookup, f32_t score_scale,
                       typename index_type_::search_config_t config) noexcept {
         auto const [attended, status] = index.attend(heads, head_count, lookup, score_scale,
@@ -158,7 +209,7 @@ std::size_t dense_expect_vram_attend(make_index_type_ const& make_index, allocat
             dense_oracle_dots(dense_widened_rows(heads, index_type_::vector_dtype_k),
                               dense_widened_rows(vectors.view(), index_type_::vector_dtype_k), dimensions));
         nk::matrix_view<f32_t> const attended = outputs(nk::range(std::size_t {0}, heads.extent(0)), nk::slice);
-        std::span<dense_softmax_state_t const> const carried {carry.data(), heads.extent(0)};
+        std::span<softmax_state_t const> const carried {carry.data(), heads.extent(0)};
         failures += expect(attend(heads, head_count, table.lookup(nodes_count), score_scale, exhaustive) ==
                            status_t::success_k);
         failures += dense_expect_full_attention(
@@ -219,7 +270,7 @@ std::size_t dense_expect_vram_indexes_attend(u64_t seed) {
     typename indexes_type_::search_config_t const exhaustive {nodes_count};
     auto const queries = make_vectors<scalar_t>(tokens_count * 4, dimensions, stream_key(seed, "indexes_attend", 2));
     auto outputs = nk::matrix<f32_t>::zeros({queries.extent(0), dimensions}).value;
-    std::vector<dense_softmax_state_t> carry(queries.extent(0));
+    std::vector<softmax_state_t> carry(queries.extent(0));
     auto attend = [&](nk::matrix_view<scalar_t> heads, std::size_t head_count, lookup_t lookup, f32_t score_scale,
                       typename indexes_type_::search_config_t config) noexcept {
         auto const [attended, status] = indexes.attend(
@@ -234,7 +285,7 @@ std::size_t dense_expect_vram_indexes_attend(u64_t seed) {
             dense_oracle_dots(dense_widened_rows(heads, index_t::vector_dtype_k),
                               dense_widened_rows(vectors.view(), index_t::vector_dtype_k), dimensions));
         nk::matrix_view<f32_t> const attended = outputs(nk::range(std::size_t {0}, heads.extent(0)), nk::slice);
-        std::span<dense_softmax_state_t const> const carried {carry.data(), heads.extent(0)};
+        std::span<softmax_state_t const> const carried {carry.data(), heads.extent(0)};
         failures += expect(succeeded(attend(heads, head_count, table.lookup(nodes_count), score_scale, exhaustive)));
         failures += dense_expect_full_attention(
             vectors.view(), heads, head_count,
@@ -276,11 +327,11 @@ std::size_t test_vram_attend_cell(char const* name, u64_t seed) {
         allocation_ledger_t ledger;
         {
             typename refusing_cell_t::index_t index = refusing_cell_t::make_index(ledger);
-            typename refusing_cell_t::index_t::dense_traversal_context_t context {{}};
+            typename refusing_cell_t::index_t::traversal_context_t context {{}};
             failures += expect_eq(index
                                       .attend(typename refusing_cell_t::index_t::vectors_view_t {}, 1,
                                               dense_cuda_value_lookup<typename index_t::fragment_t> {}, 1.f,
-                                              nk::matrix_span<f32_t> {}, std::span<dense_softmax_state_t> {}, context)
+                                              nk::matrix_span<f32_t> {}, std::span<softmax_state_t> {}, context)
                                       .status,
                                   status_t::config_mismatch_k);
         }
@@ -337,17 +388,17 @@ static std::size_t check_vram_nvidia_attend(settings_t const& settings) {
     if (settings.selects("vram_indexes"))
         failures_count += report(
             "cuda-sharded bf16+attend",
-            dense_expect_vram_indexes_attend<dense_vram_nvidia_indexes<u32_t, nk_bf16_k, dense_nvidia_capabilities_k>>(
+            dense_expect_vram_indexes_attend<vram_nvidia_indexes<u32_t, nk_bf16_k, dense_nvidia_capabilities_k>>(
                 settings.seed));
     return failures_count;
 }
 
 std::size_t check_vram_nvidia(settings_t const& settings, gpu_device_t const& device) {
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    cudaDeviceProp properties {};
-    if (cudaSetDevice(ordinal) != cudaSuccess || cudaGetDeviceProperties(&properties, ordinal) != cudaSuccess)
-        return fmt::println("- CUDA: device #{} does not answer", ordinal), 1;
-    fmt::println("- CUDA: {} sm_{}{} #{}", properties.name, properties.major, properties.minor, ordinal);
+    if (cuda_set_device(ordinal) != CUDA_SUCCESS) return fmt::println("- CUDA: device #{} does not answer", ordinal), 1;
+    fmt::println("- CUDA: {} {} #{}, {} SMs, {} MiB", device.name,
+                 usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device.gpu_class)), ordinal,
+                 device.compute_units, device.memory_bytes >> 20);
     selected_device = ordinal;
     std::size_t failures_count = check_vram_index_cells<gpu_vendor_t::nvidia_k>(settings);
     if (settings.selects("vram_indexes")) failures_count += check_vram_indexes<gpu_vendor_t::nvidia_k>(settings);

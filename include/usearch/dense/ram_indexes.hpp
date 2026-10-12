@@ -5,7 +5,7 @@
  *  @brief The sharded index over CPU-resident dense shards - one per memory domain - with
  *      rotation-balanced insertion, merged cross-shard search, and SafeGraphs checkpoints.
  *
- *  The plural layer over @c dense_ram_index: same-geometry shards, each owned and pinned to one
+ *  The plural layer over @c ram_index: same-geometry shards, each owned and pinned to one
  *  ForkUnion memory domain, viewed as one index. Insertions rotate across the shards so they fill
  *  evenly; searches scatter over every shard and gather through @ref merge_search_results,
  *  resolving matches into the caller's keys, so shards with colliding ID spaces land in one
@@ -39,20 +39,19 @@
 #include "usearch/dense/types.hpp"
 #include "usearch/dense/ram_index.hpp"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::dense {
 
 template <typename indexes_type_>
-struct dense_ram_indexes_cursor;
+struct ram_indexes_cursor;
 
 /** Resolves a walked node ID to its key through one shard's key column, rebound per shard. */
 template <typename keys_type_>
-struct dense_keyed_ids {
+struct keyed_ids {
 
     /** The key column of the shard being walked. */
     keys_type_ const* keys = nullptr;
 
-    auto operator()(dense_node_id_t node_id) const noexcept { return (*keys)[node_id]; }
+    auto operator()(node_id_t node_id) const noexcept { return (*keys)[node_id]; }
 };
 
 /**
@@ -72,11 +71,11 @@ template <                                                                    //
     typename cache_hints_type_ = fu::standard_cache_hints_t,                  //
     typename key_hash_type_ = std::hash<key_type_>                            //
     >
-struct dense_ram_indexes {
-    friend struct dense_ram_indexes_cursor<dense_ram_indexes>;
+struct ram_indexes {
+    friend struct ram_indexes_cursor<ram_indexes>;
 
     /** A reader's walk over every shard's published rows in placement order. */
-    using cursor_t = dense_ram_indexes_cursor<dense_ram_indexes>;
+    using cursor_t = ram_indexes_cursor<ram_indexes>;
 
     /** The caller-visible identity, opaque to every shard - indexes store no keys, so the whole
      *  key vocabulary begins here. */
@@ -90,7 +89,7 @@ struct dense_ram_indexes {
         std::size_t shard = 0;
 
         /** The entry's ID inside that shard's own space. */
-        dense_node_id_t node = 0;
+        node_id_t node = 0;
     };
 
     /** Key to every entry stored under it; insert-only, wait-free for readers, growing in chunks. */
@@ -104,11 +103,11 @@ struct dense_ram_indexes {
 
     /** The shard type - geometry parameters in the shard's own order, so the two can never
      *  disagree. */
-    using index_t = dense_ram_index<vector_dtype_, capability_, wait_type_, atomic_ref_template_, //
-                                    cache_hints_type_,                                            //
-                                    forkunion_allocator_t,                                        //
-                                    forkunion_allocator_t,                                        //
-                                    arena_allocator<byte_t, forkunion_allocator_t>>;
+    using index_t = ram_index<vector_dtype_, capability_, wait_type_, atomic_ref_template_, //
+                              cache_hints_type_,                                            //
+                              forkunion_allocator_t,                                        //
+                              forkunion_allocator_t,                                        //
+                              arena_allocator<byte_t, forkunion_allocator_t>>;
 
     /** Keys of one shard's rows, indexed by that shard's own node IDs, growing on the shard's own schedule. */
     using keys_column_t = chunked_column<key_t, typename index_t::chunk_schedule_t, index_t::max_node_count_k,
@@ -133,7 +132,7 @@ struct dense_ram_indexes {
     using scalar_t = typename index_t::scalar_t;
     using dot_result_t = typename scalar_t::dot_result_t;
     using vectors_span_t = nk::matrix_span<scalar_t>;
-    using dense_traversal_context_t = typename index_t::dense_traversal_context_t;
+    using traversal_context_t = typename index_t::traversal_context_t;
     using vector_view_t = typename index_t::vector_view_t;
     using vectors_view_t = typename index_t::vectors_view_t;
     using search_config_t = typename index_t::search_config_t;
@@ -157,22 +156,22 @@ struct dense_ram_indexes {
 
     /** Every index names the distance kind its shards walk by and the host allocator its shard
      *  table, locator map and checkpoint catalogs sit on; nothing is placed by default. */
-    dense_ram_indexes() = delete;
-    explicit dense_ram_indexes(nk_kernel_kind_t kernel, forkunion_allocator_t allocator) noexcept
+    ram_indexes() = delete;
+    explicit ram_indexes(nk_kernel_kind_t kernel, forkunion_allocator_t allocator) noexcept
         : shards_(allocator), locators_of_key_(allocator), allocator_(allocator), kernel_(kernel) {}
-    dense_ram_indexes(dense_ram_indexes&& other) noexcept
+    ram_indexes(ram_indexes&& other) noexcept
         : shards_(other.allocator_), locators_of_key_(other.allocator_), allocator_(other.allocator_),
           kernel_(other.kernel_) {
         swap(other);
     }
-    dense_ram_indexes& operator=(dense_ram_indexes&& other) noexcept { return swap(other), *this; }
-    dense_ram_indexes(dense_ram_indexes const&) = delete;
-    dense_ram_indexes& operator=(dense_ram_indexes const&) = delete;
+    ram_indexes& operator=(ram_indexes&& other) noexcept { return swap(other), *this; }
+    ram_indexes(ram_indexes const&) = delete;
+    ram_indexes& operator=(ram_indexes const&) = delete;
 
     /** Every member is RAII, so the shards die with the index and nothing leaks. */
-    ~dense_ram_indexes() noexcept = default;
+    ~ram_indexes() noexcept = default;
 
-    void swap(dense_ram_indexes& other) noexcept {
+    void swap(ram_indexes& other) noexcept {
         std::swap(shards_, other.shards_);
         std::swap(locators_of_key_, other.locators_of_key_);
         std::swap(allocator_, other.allocator_);
@@ -254,7 +253,7 @@ struct dense_ram_indexes {
     /** Bytes the index occupies - every shard's storage, its key column, and the shared locator
      *  map; traversal scratch is the executor's. */
     std::size_t memory_usage() const noexcept {
-        std::size_t bytes = sizeof(dense_ram_indexes) + locators_of_key_.memory_usage();
+        std::size_t bytes = sizeof(ram_indexes) + locators_of_key_.memory_usage();
         for (shard_t const& one : shards_) bytes += one.index->memory_usage() + one.keys.memory_usage();
         return bytes;
     }
@@ -296,7 +295,7 @@ struct dense_ram_indexes {
      *  @param[inout] traversal The calling thread's scratch & telemetry.
      *  @param[in] config The insertion configuration handed to the receiving shard.
      */
-    expected<insert_result_t> insert(key_t const& key, vector_view_t new_vector, dense_traversal_context_t& traversal,
+    expected<insert_result_t> insert(key_t const& key, vector_view_t new_vector, traversal_context_t& traversal,
                                      insert_config_t config = {}) noexcept {
         insert_result_t result;
         result.new_size = size();
@@ -336,9 +335,9 @@ struct dense_ram_indexes {
         std::size_t const restarts_before = traversal.restarts;
 
         // The key lands before publication, so a reachable node always reads one.
-        dense_node_id_t assigned = 0;
+        node_id_t assigned = 0;
         vectors_view_t const row {new_vector.data(), 1u, new_vector.size()};
-        one.index->insert(std::move(claim), row, {}, traversal, config, [&](dense_node_id_t assigned_id) noexcept {
+        one.index->insert(std::move(claim), row, {}, traversal, config, [&](node_id_t assigned_id) noexcept {
             assigned = assigned_id;
             one.keys[assigned_id] = key;
         });
@@ -453,7 +452,7 @@ struct dense_ram_indexes {
             result.new_size = owner_->size();
             if (landed_rows_ != rows_) return {result, status_t::config_mismatch_k};
             std::size_t touched_shards = 0;
-            for (iota_view<dense_node_id_t> const range : ranges_) touched_shards += !range.empty();
+            for (iota_view<node_id_t> const range : ranges_) touched_shards += !range.empty();
             bool const spans_shards = touched_shards > 1;
 
             // No later range on a shard can take its turn ahead of this one, so the waits hold no bracket open.
@@ -475,7 +474,7 @@ struct dense_ram_indexes {
             drain_in_order_(rows_, locate_row);
 
             result.new_size = owner_->size();
-            for (dense_traversal_context_t const& traversal : traversals_) {
+            for (traversal_context_t const& traversal : traversals_) {
                 result.visited_members += traversal.visited_members;
                 result.computed_distances += traversal.computed_distances;
                 result.computed_distances_in_refines += traversal.computed_distances_in_refines;
@@ -492,7 +491,7 @@ struct dense_ram_indexes {
         /** Where row @p row of the plan lands: its shard, and its ID inside that shard's range. */
         key_locator_t locator_of_(std::size_t row) const noexcept {
             std::size_t const shard = (rotation_ + row) % ranges_.size();
-            return {shard, static_cast<dense_node_id_t>(ranges_[shard].first + row / ranges_.size())};
+            return {shard, static_cast<node_id_t>(ranges_[shard].first + row / ranges_.size())};
         }
 
         /** Runs @p per_row over @p rows rows taken in ascending order by the executor's threads, so a
@@ -516,10 +515,10 @@ struct dense_ram_indexes {
         growing_buffer<shard_capacity_claim_t, forkunion_allocator_t> claims_;
 
         /** Every shard's range in placement order, empty where no row lands; none before the first step. */
-        growing_buffer<iota_view<dense_node_id_t>, forkunion_allocator_t> ranges_;
+        growing_buffer<iota_view<node_id_t>, forkunion_allocator_t> ranges_;
 
         /** One traversal per executor thread, over that thread's arena. */
-        growing_buffer<dense_traversal_context_t, forkunion_allocator_t> traversals_;
+        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals_;
 
         /** The executor's one-caller hold, kept while the plan's threads may run. */
         typename executor_t::claim_t executor_claim_;
@@ -544,9 +543,9 @@ struct dense_ram_indexes {
 
         /** The index inserted into; null in the empty plan a refused @ref plan_insert returns, and
          *  once @c finish published. */
-        dense_ram_indexes* owner_ = nullptr;
+        ram_indexes* owner_ = nullptr;
 
-        friend dense_ram_indexes;
+        friend ram_indexes;
     };
 
     /**
@@ -628,15 +627,14 @@ struct dense_ram_indexes {
         if (status_t const sized = executor.reserve(shards_[0].index->traversal_memory_usage(walk_config));
             failed(sized))
             return {{}, sized};
-        growing_buffer<dense_traversal_context_t, forkunion_allocator_t> traversals {allocator_};
+        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
         if (status_t const ready = reserve_traversals_(traversals, executor, walk_config); failed(ready))
             return {{}, ready};
         growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
         growing_buffer<typename index_t::refine_plan_t, forkunion_allocator_t> plans {allocator_};
         if (failed(cursors.resize(shards)) || failed(plans.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
         for (std::size_t shard = 0; shard != shards; ++shard) {
-            auto [plan, status] = shards_[shard].index->plan_refine({0, dense_node_id_unknown_k}, traversals[0],
-                                                                    config);
+            auto [plan, status] = shards_[shard].index->plan_refine({0, node_id_unknown_k}, traversals[0], config);
             if (failed(status)) return {{}, status};
             plans.push_back_reserved(std::move(plan));
         }
@@ -646,7 +644,7 @@ struct dense_ram_indexes {
         alignas(default_alignment_k) std::size_t swept = 0;
         bool cancelled = false;
         auto run_step = [&](std::size_t shard, typename index_t::refine_plan_t::step_t const& step, std::size_t thread,
-                            nk::matrix_span<dense_node_id_t>) noexcept -> status_t {
+                            nk::matrix_span<node_id_t>) noexcept -> status_t {
             bool const reselecting = plans[shard].reselecting();
             if (status_t const ran = plans[shard].run(step, traversals[thread]); failed(ran)) return ran;
             if (!reselecting) return status_t::success_k;
@@ -694,7 +692,7 @@ struct dense_ram_indexes {
         auto [executor_claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
 
-        growing_buffer<dense_traversal_context_t, forkunion_allocator_t> traversals {allocator_};
+        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
         growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
         if (status_t const ready = reserve_audit_(traversals, cursors, executor); failed(ready)) return {{}, ready};
 
@@ -736,11 +734,10 @@ struct dense_ram_indexes {
      *  reported count and the ranking always agree. Every shard is walked below one consistent
      *  snapshot of the watermarks, so a batch is ranked whole or not at all.
      */
-    expected<search_result_t> search(vector_view_t query_vector, dense_traversal_context_t& traversal,
-                                     search_config_t config, std::span<key_t> keys,
-                                     std::span<distance_t> distances) noexcept {
+    expected<search_result_t> search(vector_view_t query_vector, traversal_context_t& traversal, search_config_t config,
+                                     std::span<key_t> keys, std::span<distance_t> distances) noexcept {
         search_result_t merged;
-        std::span<dense_node_id_t const> const watermarks = snapshot_(traversal);
+        std::span<node_id_t const> const watermarks = snapshot_(traversal);
         if (watermarks.size() != shards_.size()) return {merged, status_t::bad_alloc_k};
         status_t status = status_t::success_k;
         for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
@@ -790,10 +787,10 @@ struct dense_ram_indexes {
      *  @param[in] heads The indexer heads of every query row.
      *  @return @c config_mismatch_k unless the shards walk by dot.
      */
-    expected<search_result_t> search(vectors_view_t queries, dense_indexer_heads<scalar_t> const& heads,
-                                     executor_t& executor, search_config_t config, nk::matrix_span<key_t> keys,
+    expected<search_result_t> search(vectors_view_t queries, indexer_heads<scalar_t> const& heads, executor_t& executor,
+                                     search_config_t config, nk::matrix_span<key_t> keys,
                                      nk::matrix_span<distance_t> distances, std::span<std::size_t> counts) noexcept
-        requires dense_floating_scalar<scalar_t>
+        requires floating_scalar<scalar_t>
     {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         return search_rows_(queries, heads, executor, config, keys, distances, counts, dummy_predicate_t {});
@@ -841,14 +838,14 @@ struct dense_ram_indexes {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != rows_count) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = dense_rankings_refusal(rows_count, keys, products); failed(refusal))
+        if (status_t const refusal = rankings_refusal(rows_count, keys, products); failed(refusal))
             return {{}, refusal};
         if (!rows_count) return {{}, status_t::success_k};
 
-        auto multiply_row = [&](std::size_t row, std::size_t, dense_traversal_context_t& traversal,
-                                std::span<dense_node_id_t const> watermarks) noexcept {
-            dense_multiply_fold<key_t, dot_result_t, dense_keyed_ids<keys_column_t>> fold {
-                to_span(keys.row(row).as_vector()), to_span(products.row(row).as_vector())};
+        auto multiply_row = [&](std::size_t row, std::size_t, traversal_context_t& traversal,
+                                std::span<node_id_t const> watermarks) noexcept {
+            multiply_fold<key_t, dot_result_t, keyed_ids<keys_column_t>> fold {to_span(keys.row(row).as_vector()),
+                                                                               to_span(products.row(row).as_vector())};
             status_t refusal = status_t::success_k;
             for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
                 fold.resolve.keys = &shards_[shard].keys;
@@ -892,7 +889,7 @@ struct dense_ram_indexes {
         if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
         std::size_t const groups_count = rows_count / rows_per_query;
         if (counts.size() != groups_count) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = dense_rankings_refusal(groups_count, keys, scores); failed(refusal))
+        if (status_t const refusal = rankings_refusal(groups_count, keys, scores); failed(refusal))
             return {{}, refusal};
         if (!groups_count) return {{}, status_t::success_k};
 
@@ -901,7 +898,7 @@ struct dense_ram_indexes {
         growing_buffer<key_t, forkunion_allocator_t> row_keys {allocator_};
         growing_buffer<distance_t, forkunion_allocator_t> row_distances {allocator_};
         growing_buffer<std::size_t, forkunion_allocator_t> row_counts {allocator_};
-        dense_maxsim_reducer<key_t, distance_t, forkunion_allocator_t> reduce {allocator_};
+        maxsim_reducer<key_t, distance_t, forkunion_allocator_t> reduce {allocator_};
         if (failed(row_keys.resize_uninitialized(rows_count * width)) ||
             failed(row_distances.resize_uninitialized(rows_count * width)) ||
             failed(row_counts.resize_uninitialized(rows_count)) || failed(reduce.reserve(rows_per_query, width)))
@@ -937,7 +934,7 @@ struct dense_ram_indexes {
     template <typename value_lookup_type_>
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
                                      f32_t score_scale, nk::matrix_span<f32_t> outputs,
-                                     std::span<dense_softmax_state_t> carry, executor_t& executor,
+                                     std::span<softmax_state_t> carry, executor_t& executor,
                                      search_config_t config = {}) noexcept {
         std::size_t const rows_count = queries.extent(0), columns = queries.extent(1);
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
@@ -948,12 +945,12 @@ struct dense_ram_indexes {
         if (!outputs.is_contiguous()) return {{}, status_t::unsupported_layout_k};
         if (!rows_count) return {{}, status_t::success_k};
 
-        auto attend_token = [&](std::size_t token, std::size_t, dense_traversal_context_t& traversal,
-                                std::span<dense_node_id_t const> watermarks) noexcept {
+        auto attend_token = [&](std::size_t token, std::size_t, traversal_context_t& traversal,
+                                std::span<node_id_t const> watermarks) noexcept {
             std::size_t const first = token * head_count;
             status_t status = status_t::success_k;
             shard_value_lookup<value_lookup_type_> shard_lookup {nullptr, value_lookup};
-            dense_attention_rescoring<capability_, scalar_t, decltype(shard_lookup)> const attention {
+            attention_rescoring<capability_, scalar_t, decltype(shard_lookup)> const attention {
                 queries(nk::range(first, first + head_count), nk::slice),
                 shard_lookup,
                 score_scale,
@@ -1097,7 +1094,7 @@ struct dense_ram_indexes {
         }
 
         /** @brief Lands step @p step through its own shard's plan, rebasing through @p scratch. */
-        status_t save(step_t const& step, nk::matrix_span<dense_node_id_t> scratch) noexcept {
+        status_t save(step_t const& step, nk::matrix_span<node_id_t> scratch) noexcept {
             if (!owner_) return status_t::uninitialized_k;
             if (step.shard >= plans_.size()) return status_t::config_mismatch_k;
             return plans_[step.shard].save(step.inner, scratch);
@@ -1184,9 +1181,9 @@ struct dense_ram_indexes {
         growing_buffer<char, forkunion_allocator_t> path_;
         /** @brief The index being checkpointed; null in the empty plan a refused @ref plan_save
          *      returns, and once @c finish committed. */
-        dense_ram_indexes* owner_ = nullptr;
+        ram_indexes* owner_ = nullptr;
 
-        friend dense_ram_indexes;
+        friend ram_indexes;
     };
 
     /**
@@ -1252,7 +1249,7 @@ struct dense_ram_indexes {
             /** @brief The part the rows come from. */
             std::size_t part = 0;
             /** @brief The rows of that part the shard takes - the ID space they speak. */
-            iota_view<dense_node_id_t> source_range;
+            iota_view<node_id_t> source_range;
             /** @brief The shard plan's own step, cut to one part's share of one chunk. */
             typename index_t::load_plan_t::step_t inner;
         };
@@ -1345,8 +1342,8 @@ struct dense_ram_indexes {
                     });
                     if (failed(read)) return read;
                     for (std::size_t row = 0; row != rows; ++row)
-                        owner_->locators_of_key_.insert(
-                            seats, keys[first + row], key_locator_t {shard, static_cast<dense_node_id_t>(first + row)});
+                        owner_->locators_of_key_.insert(seats, keys[first + row],
+                                                        key_locator_t {shard, static_cast<node_id_t>(first + row)});
                     first += rows;
                 }
                 if (status_t const finished = plans_[shard].finish(); failed(finished)) return finished;
@@ -1372,9 +1369,9 @@ struct dense_ram_indexes {
         growing_buffer<step_t, forkunion_allocator_t> steps_;
         /** @brief The index being restored; null in the empty plan a refused @ref plan_load hands
          *      back, and once @c finish published. */
-        dense_ram_indexes* owner_ = nullptr;
+        ram_indexes* owner_ = nullptr;
 
-        friend dense_ram_indexes;
+        friend ram_indexes;
     };
 
     /**
@@ -1550,7 +1547,7 @@ struct dense_ram_indexes {
      *
      *  @param[in] keys The keys to export, repeats and absent ones included.
      *  @param[out] vectors @b [keys·wanted,dimensions]: row q · @p wanted + i is the i-th row of
-     *      key q; refused as @ref dense_rows_refusal says.
+     *      key q; refused as @ref rows_refusal says.
      *  @param[in] wanted Rows kept per key.
      *  @param[out] entries The true total under each key, parallel to @p keys; above @p wanted
      *      when its rows truncated, zero when absent.
@@ -1559,7 +1556,7 @@ struct dense_ram_indexes {
     status_t get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
                  std::span<std::size_t> entries, executor_t& executor) const noexcept {
         if (entries.size() != keys.size()) return status_t::config_mismatch_k;
-        if (status_t const refusal = dense_rows_refusal(keys.size() * wanted, vectors, row_values_()); failed(refusal))
+        if (status_t const refusal = rows_refusal(keys.size() * wanted, vectors, row_values_()); failed(refusal))
             return refusal;
         auto [executor_claim, claim_status] = executor.claim();
         if (failed(claim_status)) return claim_status;
@@ -1581,7 +1578,7 @@ struct dense_ram_indexes {
         /** The caller's lookup, which takes keys. */
         value_lookup_type_& value_lookup;
 
-        void operator()(std::span<dense_node_id_t const> nodes, std::span<vector_view_t> rows) const noexcept {
+        void operator()(std::span<node_id_t const> nodes, std::span<vector_view_t> rows) const noexcept {
             std::array<key_t, 4> node_keys;
             for (std::size_t lane = 0; lane != nodes.size(); ++lane) node_keys[lane] = (*keys)[nodes[lane]];
             value_lookup(std::span<key_t const>(node_keys).first(nodes.size()), rows);
@@ -1615,14 +1612,13 @@ struct dense_ram_indexes {
     /** Builds one traversal context per thread over its own arena, so a fan-out never allocates
      *  and never shares scratch. Sized to the executor, since a dynamic fan-out picks its
      *  threads. */
-    status_t reserve_traversals_(growing_buffer<dense_traversal_context_t, forkunion_allocator_t>& traversals,
+    status_t reserve_traversals_(growing_buffer<traversal_context_t, forkunion_allocator_t>& traversals,
                                  executor_t& executor, insert_config_t config) noexcept {
         std::size_t const threads = executor.size();
         if (!threads) return status_t::uninitialized_k;
         if (failed(traversals.reserve_exactly(threads))) return status_t::bad_alloc_k;
         for (std::size_t thread = 0; thread != threads; ++thread) {
-            dense_traversal_context_t traversal {
-                arena_allocator<byte_t, forkunion_allocator_t>(executor.arena(thread))};
+            traversal_context_t traversal {arena_allocator<byte_t, forkunion_allocator_t>(executor.arena(thread))};
             // Apart, and apart across calls: identically seeded contexts would send every
             // concurrent inserter through the same entry points.
             traversal.random_generator.state = atomic_ref<std::size_t>(routed_rows_).load(std::memory_order_relaxed) +
@@ -1657,7 +1653,7 @@ struct dense_ram_indexes {
     /** Sizes what an audit runs on: one context per thread, one cursor per shard. The reservation
      *  comes first, since it rewinds every arena, and the plans opened after it keep their
      *  bitsets. */
-    status_t reserve_audit_(growing_buffer<dense_traversal_context_t, forkunion_allocator_t>& traversals,
+    status_t reserve_audit_(growing_buffer<traversal_context_t, forkunion_allocator_t>& traversals,
                             growing_buffer<std::size_t, forkunion_allocator_t>& cursors,
                             executor_t& executor) noexcept {
         if (status_t const sized = executor.reserve(shards_[0].index->traversal_memory_usage()); failed(sized))
@@ -1672,8 +1668,7 @@ struct dense_ram_indexes {
     status_t sweep_reachability_(growing_buffer<plan_type_, forkunion_allocator_t>& plans,
                                  std::span<std::size_t> cursors, executor_t& executor) noexcept {
         for (plan_type_& plan : plans) plan.restart_sweep();
-        auto sweep_step = [&](std::size_t shard, auto const& step, std::size_t,
-                              nk::matrix_span<dense_node_id_t>) noexcept {
+        auto sweep_step = [&](std::size_t shard, auto const& step, std::size_t, nk::matrix_span<node_id_t>) noexcept {
             return plans[shard].sweep(step), status_t::success_k;
         };
         for (std::size_t expanded = 1; expanded;) {
@@ -1701,7 +1696,7 @@ struct dense_ram_indexes {
     /** Takes every shard's watermark into @p watermarks, unless it is empty, at one instant no batch
      *  spanning shards publishes through, so a walk of each shard below its own sees every batch whole
      *  or not at all; answers their sum. */
-    std::size_t snapshot_(std::span<dense_node_id_t> watermarks) const noexcept {
+    std::size_t snapshot_(std::span<node_id_t> watermarks) const noexcept {
         atomic_ref<u64_t const> const sequence {commit_sequence_};
         while (true) {
             u64_t const before = sequence.load(std::memory_order_acquire);
@@ -1713,7 +1708,7 @@ struct dense_ram_indexes {
             std::size_t total = 0;
             for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
                 std::size_t const visible = shards_[shard].index->size();
-                if (!watermarks.empty()) watermarks[shard] = static_cast<dense_node_id_t>(visible);
+                if (!watermarks.empty()) watermarks[shard] = static_cast<node_id_t>(visible);
                 total += visible;
             }
             if (sequence.load(std::memory_order_relaxed) == before) return total;
@@ -1723,11 +1718,11 @@ struct dense_ram_indexes {
     /** Takes the snapshot into @p traversal 's staged IDs, idle during any search and sized once per
      *  context as an insertion sizes them, so a read allocates nothing per call; empty when they cannot
      *  hold one watermark per shard. */
-    std::span<dense_node_id_t const> snapshot_(dense_traversal_context_t& traversal) const noexcept {
+    std::span<node_id_t const> snapshot_(traversal_context_t& traversal) const noexcept {
         if (failed(traversal.reserve_neighbors(max_of(connectivity(), shards_.size()))) ||
             nk::failed(traversal.staged_ids.resize({shards_.size()})))
             return {};
-        std::span<dense_node_id_t> const watermarks {traversal.staged_ids.data(), shards_.size()};
+        std::span<node_id_t> const watermarks {traversal.staged_ids.data(), shards_.size()};
         snapshot_(watermarks);
         return watermarks;
     }
@@ -1749,21 +1744,21 @@ struct dense_ram_indexes {
         std::size_t const queries_count = queries.extent(0), wanted = keys.extent(1);
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = dense_rankings_refusal(queries_count, keys, distances); failed(refusal))
+        if (status_t const refusal = rankings_refusal(queries_count, keys, distances); failed(refusal))
             return {{}, refusal};
         std::memset(counts.data(), 0, counts.size_bytes());
         if (!queries_count || !wanted) return {{}, status_t::success_k};
 
         std::size_t const width = index_t::scan_width(queries_count, executor.size());
-        auto scan_block = [&](std::size_t block, std::size_t, dense_traversal_context_t& traversal,
-                              std::span<dense_node_id_t const> watermarks) noexcept {
+        auto scan_block = [&](std::size_t block, std::size_t, traversal_context_t& traversal,
+                              std::span<node_id_t const> watermarks) noexcept {
             std::size_t const first = block * width;
             vectors_view_t const block_queries = queries(nk::range(first, min_of(first + width, queries_count)),
                                                          nk::slice);
             for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
                 shard_t const& one = shards_[shard];
                 // Each scanned match merges into its query's row as it beats the worst one there.
-                auto land = [&](std::size_t column, dense_scored_node_t const candidate) noexcept {
+                auto land = [&](std::size_t column, scored_node_t const candidate) noexcept {
                     std::size_t const query = first + column;
                     std::span<distance_t> const distances_row = to_span(distances.row(query).as_vector());
                     counts[query] = merge_search_results(std::span(&candidate, 1), one.keys,
@@ -1775,7 +1770,7 @@ struct dense_ram_indexes {
                 if constexpr (std::is_same_v<std::decay_t<predicate_type_>, dummy_predicate_t>)
                     scanned = one.index->scan_(block_queries, dummy_predicate_t {}, land, traversal, watermarks[shard]);
                 else {
-                    auto keyed = [&](dense_node_id_t node) noexcept { return predicate(one.keys[node]); };
+                    auto keyed = [&](node_id_t node) noexcept { return predicate(one.keys[node]); };
                     scanned = one.index->scan_(block_queries, keyed, land, traversal, watermarks[shard]);
                 }
                 if (failed(scanned)) return scanned;
@@ -1794,12 +1789,12 @@ struct dense_ram_indexes {
         std::size_t const queries_count = queries.extent(0);
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = dense_rankings_refusal(queries_count, keys, distances); failed(refusal))
+        if (status_t const refusal = rankings_refusal(queries_count, keys, distances); failed(refusal))
             return {{}, refusal};
         if (!queries_count) return {{}, status_t::success_k};
 
-        auto search_row = [&](std::size_t query, std::size_t, dense_traversal_context_t& traversal,
-                              std::span<dense_node_id_t const> watermarks) noexcept {
+        auto search_row = [&](std::size_t query, std::size_t, traversal_context_t& traversal,
+                              std::span<node_id_t const> watermarks) noexcept {
             std::span<key_t> const keys_row = to_span(keys.row(query).as_vector());
             std::span<distance_t> const distances_row = to_span(distances.row(query).as_vector());
             vector_view_t const query_vector = queries.row(query).as_vector();
@@ -1810,13 +1805,13 @@ struct dense_ram_indexes {
                 expected<search_result_t> found {};
                 if constexpr (!std::is_same_v<heads_type_, dummy_heads_t>)
                     found = one.index->walk_(query_vector, dummy_fold_t {},
-                                             dense_indexer_rescoring<capability_, scalar_t> {heads.row(query)},
-                                             traversal, config, watermarks[shard]);
+                                             indexer_rescoring<capability_, scalar_t> {heads.row(query)}, traversal,
+                                             config, watermarks[shard]);
                 else if constexpr (std::is_same_v<std::decay_t<predicate_type_>, dummy_predicate_t>)
                     found = one.index->walk_(query_vector, dummy_fold_t {}, dummy_rescoring_t {}, traversal, config,
                                              watermarks[shard]);
                 else {
-                    auto keyed = [&](dense_node_id_t node) noexcept { return predicate(one.keys[node]); };
+                    auto keyed = [&](node_id_t node) noexcept { return predicate(one.keys[node]); };
                     found = one.index->walk_if_(query_vector, keyed, traversal, config, watermarks[shard]);
                 }
                 if (!found) {
@@ -1848,15 +1843,15 @@ struct dense_ram_indexes {
             failed(sized))
             return {{}, sized};
 
-        growing_buffer<dense_traversal_context_t, forkunion_allocator_t> traversals {allocator_};
+        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
         if (status_t const ready = reserve_traversals_(traversals, executor, insert_config_t {config.expansion_factor});
             failed(ready))
             return {{}, ready};
 
         status_t first_refusal = status_t::success_k;
         auto each_row = [&](std::size_t row, std::size_t thread, std::size_t) noexcept {
-            dense_traversal_context_t& traversal = traversals[thread];
-            std::span<dense_node_id_t const> const watermarks = snapshot_(traversal);
+            traversal_context_t& traversal = traversals[thread];
+            std::span<node_id_t const> const watermarks = snapshot_(traversal);
             status_t const refusal = watermarks.size() == shards_.size() ? per_row(row, thread, traversal, watermarks)
                                                                          : status_t::bad_alloc_k;
             if (succeeded(refusal)) return;
@@ -1869,7 +1864,7 @@ struct dense_ram_indexes {
 
         search_result_t merged;
         for (std::size_t const count : counts) merged.count += count;
-        for (dense_traversal_context_t const& traversal : traversals) {
+        for (traversal_context_t const& traversal : traversals) {
             merged.visited_members += traversal.visited_members;
             merged.computed_distances += traversal.computed_distances;
             merged.restarts += traversal.restarts;
@@ -1936,13 +1931,12 @@ struct dense_ram_indexes {
 
     /** One slab of neighbor IDs from @p arena - the scratch a save chunk rebases through; empty
      *  when the arena is short. */
-    nk::matrix_span<dense_node_id_t> scratch_of_(typename executor_t::arena_t& arena,
-                                                 std::size_t scratch_rows) const noexcept {
+    nk::matrix_span<node_id_t> scratch_of_(typename executor_t::arena_t& arena,
+                                           std::size_t scratch_rows) const noexcept {
         std::size_t const connectivity = this->connectivity();
-        std::byte* bytes = arena.allocate(scratch_rows * connectivity * sizeof(dense_node_id_t),
-                                          alignof(dense_node_id_t));
+        std::byte* bytes = arena.allocate(scratch_rows * connectivity * sizeof(node_id_t), alignof(node_id_t));
         if (!bytes) return {};
-        return {reinterpret_cast<dense_node_id_t*>(bytes), scratch_rows, connectivity};
+        return {reinterpret_cast<node_id_t*>(bytes), scratch_rows, connectivity};
     }
 
     /** The shard placed on @p memory_domain - a thread's home - or the first shard when none sits
@@ -1971,7 +1965,7 @@ struct dense_ram_indexes {
         if (cursors.size() != shards) return status_t::config_mismatch_k;
         status_t outcome = status_t::success_k;
         auto drain = [&](std::size_t thread, std::size_t) noexcept {
-            nk::matrix_span<dense_node_id_t> scratch;
+            nk::matrix_span<node_id_t> scratch;
             if (scratch_rows) {
                 scratch = scratch_of_(executor.arena(thread), scratch_rows);
                 if (scratch.empty()) {
@@ -2011,7 +2005,7 @@ struct dense_ram_indexes {
         std::size_t const shards = shards_.size();
         auto const steps = plan.steps();
         constexpr bool saving_k = requires(plan_type_& planned, typename plan_type_::step_t const& step,
-                                           nk::matrix_span<dense_node_id_t> scratch) { planned.save(step, scratch); };
+                                           nk::matrix_span<node_id_t> scratch) { planned.save(step, scratch); };
         std::size_t const scratch_rows = saving_k
                                              ? power_of_two<std::size_t>(index_t::chunk_schedule_t::slab_rows_log2_k)
                                              : 0;
@@ -2019,14 +2013,14 @@ struct dense_ram_indexes {
         auto [executor_claim, claim_status] = executor.claim();
         if (failed(claim_status)) return claim_status;
         if (scratch_rows)
-            if (status_t const sized = executor.reserve(scratch_rows * connectivity() * sizeof(dense_node_id_t));
+            if (status_t const sized = executor.reserve(scratch_rows * connectivity() * sizeof(node_id_t));
                 failed(sized))
                 return sized;
         growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
         if (failed(cursors.resize(shards))) return status_t::bad_alloc_k;
         status_t outcome = status_t::success_k;
         auto drain = [&](std::size_t thread, std::size_t) noexcept {
-            nk::matrix_span<dense_node_id_t> scratch;
+            nk::matrix_span<node_id_t> scratch;
             if (scratch_rows) {
                 scratch = scratch_of_(executor.arena(thread), scratch_rows);
                 if (scratch.empty()) {
@@ -2075,7 +2069,7 @@ struct dense_ram_indexes {
                                                    header.rows_of(target, header.neighbors, first_row, nodes),
                                                    header.rows_of(target, header.norms, first_row, nodes)};
         auto [inner, status] = shards_[shard].index->plan_save(columns, config.synchronization,
-                                                               static_cast<dense_node_id_t>(first_row));
+                                                               static_cast<node_id_t>(first_row));
         if (failed(status)) return status;
         plan.plans_.push_back_reserved(std::move(inner));
         return status_t::success_k;
@@ -2300,12 +2294,12 @@ struct dense_ram_indexes {
                     typename load_plan_t::step_t step;
                     step.shard = shard;
                     step.part = assignment.part;
-                    step.source_range = {static_cast<dense_node_id_t>(assignment.rows.first),
-                                         static_cast<dense_node_id_t>(assignment.rows.bound)};
+                    step.source_range = {static_cast<node_id_t>(assignment.rows.first),
+                                         static_cast<node_id_t>(assignment.rows.bound)};
                     step.inner.position = chunk.position;
-                    step.inner.index_rows = {static_cast<dense_node_id_t>(low), static_cast<dense_node_id_t>(high)};
-                    step.inner.source_rows = {static_cast<dense_node_id_t>(assignment.rows.first + low - first_row),
-                                              static_cast<dense_node_id_t>(assignment.rows.first + high - first_row)};
+                    step.inner.index_rows = {static_cast<node_id_t>(low), static_cast<node_id_t>(high)};
+                    step.inner.source_rows = {static_cast<node_id_t>(assignment.rows.first + low - first_row),
+                                              static_cast<node_id_t>(assignment.rows.first + high - first_row)};
                     if (failed(plan.steps_.push_back(step))) return status_t::bad_alloc_k;
                 }
                 first_row = bound_row;
@@ -2346,7 +2340,7 @@ struct dense_ram_indexes {
 };
 
 /**
- *  @brief External reader's cursor over the published rows of one @c dense_ram_indexes: keys
+ *  @brief External reader's cursor over the published rows of one @c ram_indexes: keys
  *      and vectors in placement order, shard by shard.
  *
  *  Pure position - every read names the index it reads, which must be the one the cursor was
@@ -2356,7 +2350,7 @@ struct dense_ram_indexes {
  *  shard may carry rows published after the walk began.
  */
 template <typename indexes_type_>
-struct dense_ram_indexes_cursor {
+struct ram_indexes_cursor {
 
     using indexes_t = indexes_type_;
     using key_t = typename indexes_t::key_t;
@@ -2364,7 +2358,7 @@ struct dense_ram_indexes_cursor {
     using vectors_span_t = typename indexes_t::vectors_span_t;
 
     /** Enters the first shard of @p indexes, the one every later @ref read must name. */
-    explicit dense_ram_indexes_cursor(indexes_t const& indexes) noexcept { enter_(indexes); }
+    explicit ram_indexes_cursor(indexes_t const& indexes) noexcept { enter_(indexes); }
 
     /** Copies up to @p keys.size() rows of @p indexes into @p keys - and their vectors in the stored scalar type
      *  into @p vectors, unless it holds no rows - advancing past them and reporting the rows written. An export
@@ -2393,16 +2387,15 @@ struct dense_ram_indexes_cursor {
     /** @brief Snapshots the current shard's watermark, skipping shards with nothing published. */
     void enter_(indexes_t const& indexes) noexcept {
         for (node_ = 0; shard_ < indexes.shards_.size(); ++shard_)
-            if ((visible_ = static_cast<dense_node_id_t>(indexes.shards_[shard_].index->size())) != 0) return;
+            if ((visible_ = static_cast<node_id_t>(indexes.shards_[shard_].index->size())) != 0) return;
     }
 
     /** @brief The shard being read, positional in placement order; the shard count past the end. */
     std::size_t shard_ = 0;
     /** @brief The current row inside that shard. */
-    dense_node_id_t node_ = 0;
+    node_id_t node_ = 0;
     /** @brief That shard's watermark snapshot: rows strictly below it are readable. */
-    dense_node_id_t visible_ = 0;
+    node_id_t visible_ = 0;
 };
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::dense

@@ -18,8 +18,7 @@
 
 #include "usearch/utilities/types.hpp" // `u32_t`
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::utilities {
 
 /**
  *  @brief Sorts up to four @p values ascending by @p comparator_type_ through fully-unrolled
@@ -99,5 +98,4 @@ void partial_sort(std::span<value_type_> values, std::size_t count, comparator_t
     }
 }
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::utilities

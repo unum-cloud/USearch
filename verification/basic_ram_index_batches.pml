@@ -2,7 +2,7 @@
  *  @brief A basic index batch publishes whole: one add dispenses its range, one turn publishes it.
  *      Other batches' walks admit its rows earlier through one `wired` flag per row.
  *
- *  `basic_ram_index::insert` from `include/usearch/basic/ram_index.hpp`. Two inserters bring two
+ *  `basic::ram_index::insert` from `include/usearch/basic/ram_index.hpp`. Two inserters bring two
  *  rows each. One add dispenses an inserter's range, then each row walks, writes its value and
  *  neighbors plain, and stores its `wired` flag with a release; one turn from the range's first ID
  *  to its end publishes both rows, and the keys land after it. A row's walk draws below its own ID.

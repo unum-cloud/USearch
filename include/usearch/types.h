@@ -573,6 +573,15 @@ typedef struct usearch_gpu_device_t {
 
     /** The class whose kernels run on it. */
     usearch_gpu_class_t gpu_class;
+
+    /** Streaming multiprocessors, compute units or GPU cores. */
+    uint32_t compute_units;
+
+    /** Device memory in bytes, or the working set Metal recommends for unified memory. */
+    uint64_t memory_bytes;
+
+    /** The vendor's own name for the device, NUL-terminated and truncated to fit. */
+    char name[64];
 } usearch_gpu_device_t;
 
 /**

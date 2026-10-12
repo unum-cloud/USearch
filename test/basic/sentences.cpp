@@ -56,9 +56,9 @@ struct levenshtein_metric_t {
 
     void reset(std::string_view query) noexcept { query_ = query, staged_.clear(); }
     void reset(std::string const& query) noexcept { reset(std::string_view {query}); }
-    basic_metric_staging_t push(std::string const& value) noexcept {
-        if (staged_.size() == staging_limit_k) return basic_metric_staging_t::refused_k;
-        return staged_.push_back(value), basic_metric_staging_t::staged_k;
+    metric_staging_t push(std::string const& value) noexcept {
+        if (staged_.size() == staging_limit_k) return metric_staging_t::refused_k;
+        return staged_.push_back(value), metric_staging_t::staged_k;
     }
     void drain(std::span<u64_t> distances, u64_t) noexcept {
         for (std::size_t lane = 0; lane != distances.size(); ++lane)
@@ -96,8 +96,7 @@ struct sentences_handmade_t {
 
 template <typename wait_type_ = dummy_waiter_t, template <typename> class atomic_ref_template_ = standard_atomic_ref>
 struct sentences_fixture {
-    using index_t =
-        basic_ram_index<std::string, u64_t, u32_t, u64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;
+    using index_t = ram_index<std::string, u64_t, u32_t, u64_t, wait_type_, atomic_ref_template_, counting_allocator_t>;
 
     static index_t make_index(allocation_ledger_t& ledger) { return index_t {counting_allocator_t {ledger}}; }
     static levenshtein_metric_t make_metric() { return {}; }
@@ -154,11 +153,11 @@ struct sentences_fixture {
 
 using sentences_fixture_t = sentences_fixture<flaky_waiter_t>;
 
-static_assert(basic_value<std::string>);
-static_assert(basic_metric<levenshtein_metric_t, std::string, u64_t>);
+static_assert(value<std::string>);
+static_assert(metric<levenshtein_metric_t, std::string, u64_t>);
 static_assert(transparent_metric<levenshtein_metric_t>);
-static_assert(basic_query<std::string_view, levenshtein_metric_t, std::string>);
-static_assert(basic_value_codec<sentence_codec_t, std::string>);
+static_assert(query<std::string_view, levenshtein_metric_t, std::string>);
+static_assert(value_codec<sentence_codec_t, std::string>);
 
 /** The transparency arm: a @c string_view query - never a stored value - opens the
  *  metric's rounds, and its self-match still lands at distance zero. */
@@ -174,8 +173,7 @@ static std::size_t check_sentences_transparent_search(u64_t seed) {
         std::string const copied_value = values[0];
         failures += expect(bool(index.reserve(values.size())));
         std::vector<u32_t> assigned_ids;
-        failures += basic_build<sentences_fixture_t>(index, metric, values, assigned_ids, context,
-                                                     basic_keep_diverse_t {4});
+        failures += basic_build<sentences_fixture_t>(index, metric, values, assigned_ids, context, keep_diverse_t {4});
 
         auto const [result, status] = index.search(std::string_view {copied_value}, metric, context);
         failures += expect_eq(status, status_t::success_k);
@@ -201,8 +199,7 @@ static std::size_t check_sentences_codec_poison(u64_t seed) {
         auto values = sentences_fixture_t::make_values(8, stream_key(seed, "codec_poison", 1));
         failures += expect(bool(index.reserve(values.size())));
         std::vector<u32_t> assigned_ids;
-        failures += basic_build<sentences_fixture_t>(index, metric, values, assigned_ids, context,
-                                                     basic_keep_diverse_t {4});
+        failures += basic_build<sentences_fixture_t>(index, metric, values, assigned_ids, context, keep_diverse_t {4});
 
         auto [columns, status] = basic_saved_columns(index, codec);
         failures += expect(succeeded(status));
@@ -217,7 +214,7 @@ static std::size_t check_sentences_codec_poison(u64_t seed) {
         std::array<u64_t, 2> const fresh_keys {sentences_fixture_t::make_key(values.size()),
                                                sentences_fixture_t::make_key(values.size() + 1)};
         auto const [inserted, insert_status] = poisoned.insert(std::span(fresh_values), std::span(fresh_keys), metric,
-                                                               {}, context, basic_keep_diverse_t {4});
+                                                               {}, context, keep_diverse_t {4});
         failures += expect_eq(insert_status, status_t::success_k);
         failures += expect(!poisoned.contains(sentences_fixture_t::make_key(0)));
         failures += expect_eq(poisoned.degree_of(0).value, 1u);
@@ -250,7 +247,7 @@ static std::size_t check_sentences_whole_batch(u64_t seed) {
                                                                        &released};
                 context_t context {stream_key(seed, "whole_batch", 1), counting_allocator_t {ledger}};
                 auto const [result, status] = index.insert(std::span(values), std::span(keys), gated, {}, context,
-                                                           basic_keep_diverse_t {4});
+                                                           keep_diverse_t {4});
                 if (status != status_t::success_k) thread_failures.fetch_add(1);
                 return;
             }

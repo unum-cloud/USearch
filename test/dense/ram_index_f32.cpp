@@ -2,7 +2,7 @@
  *  @file test/dense/ram_index_f32.cpp
  *  @author Ash Vardanian
  *  @date July 23, 2026
- *  @brief Smoke & concurrency tests for the CPU-resident @c dense_ram_index over f32 cells.
+ *  @brief Smoke & concurrency tests for the CPU-resident @c dense::ram_index over f32 cells.
  */
 #include "dense/ram_index.hpp"
 

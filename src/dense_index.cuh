@@ -5,10 +5,9 @@
  *  @brief The dense modality's C surface: the variant grid over every compiled backend, the handle
  *      owning the chosen one, and every exported entry point as one visit apiece.
  *
- *  Compiled twice: as @c dense_index.cpp for the portable library and as @c dense_index.cu for
- *  the CUDA one, with @c USEARCH_ARCH_CUDA_, @c USEARCH_ARCH_ROCM_ and @c USEARCH_ARCH_METAL_
- *  deciding which vendors' VRAM arms join the variant and @c USEARCH_DENSE_DTYPES how many
- *  storage dtypes every class contributes to it.
+ *  Compiled once, as @c dense_index.cpp by the host compiler, with @c USEARCH_ARCH_CUDA_,
+ *  @c USEARCH_ARCH_ROCM_ and @c USEARCH_ARCH_METAL_ deciding which vendors' VRAM arms join the
+ *  variant and @c USEARCH_DENSE_DTYPES how many storage dtypes every class contributes to it.
  *  Arms are ordered newest-capability-first inside each dtype cell, since a machine reporting
  *  Ice Lake also reports Haswell and Skylake; the serial floor is last and unconditional. The
  *  arms' bodies compile in the per-class units, never here.
@@ -59,1008 +58,1013 @@ struct usearch_dense_index_handle_t {
     using variants_t = std::variant<
 #if NUMKONG_TARGET_HASWELL
         // intel_haswell over serial by haswell: every dtype, 11 arms
-        ram_index<nk_bf16_k, cpu_class_t::intel_haswell_k>, //
+        ram_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        ram_index<nk_u1_k, cpu_class_t::intel_haswell_k>, //
+        ram_indexes<nk_u1_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        ram_index<nk_i8_k, cpu_class_t::intel_haswell_k>, //
+        ram_indexes<nk_i8_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        ram_index<nk_e4m3_k, cpu_class_t::intel_haswell_k>, //
+        ram_indexes<nk_e4m3_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        ram_index<nk_f16_k, cpu_class_t::intel_haswell_k>, //
+        ram_indexes<nk_f16_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        ram_index<nk_u8_k, cpu_class_t::intel_haswell_k>, //
+        ram_indexes<nk_u8_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        ram_index<nk_e5m2_k, cpu_class_t::intel_haswell_k>, //
+        ram_indexes<nk_e5m2_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        ram_index<nk_i4_k, cpu_class_t::intel_haswell_k>, //
+        ram_indexes<nk_i4_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        ram_index<nk_u4_k, cpu_class_t::intel_haswell_k>, //
+        ram_indexes<nk_u4_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        ram_index<nk_e3m2_k, cpu_class_t::intel_haswell_k>, //
+        ram_indexes<nk_e3m2_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        ram_index<nk_e2m3_k, cpu_class_t::intel_haswell_k>, //
+        ram_indexes<nk_e2m3_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #endif // NUMKONG_TARGET_HASWELL
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
         // intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd:
         // bf16 u1 e4m3 f16 e5m2 i4 u4 e3m2, 8 arms
-        ram_index<nk_bf16_k, cpu_class_t::intel_sierra_k>, //
+        ram_indexes<nk_bf16_k, cpu_class_t::intel_sierra_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        ram_index<nk_u1_k, cpu_class_t::intel_sierra_k>, //
+        ram_indexes<nk_u1_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        ram_index<nk_e4m3_k, cpu_class_t::intel_sierra_k>, //
+        ram_indexes<nk_e4m3_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        ram_index<nk_f16_k, cpu_class_t::intel_sierra_k>, //
+        ram_indexes<nk_f16_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        ram_index<nk_e5m2_k, cpu_class_t::intel_sierra_k>, //
+        ram_indexes<nk_e5m2_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        ram_index<nk_i4_k, cpu_class_t::intel_sierra_k>, //
+        ram_indexes<nk_i4_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        ram_index<nk_u4_k, cpu_class_t::intel_sierra_k>, //
+        ram_indexes<nk_u4_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        ram_index<nk_e3m2_k, cpu_class_t::intel_sierra_k>, //
+        ram_indexes<nk_e3m2_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
     // intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd, alder, sierra:
     // i8 u8 e2m3, 3 arms
 #if USEARCH_DENSE_DTYPES >= 3
-        ram_index<nk_i8_k, cpu_class_t::intel_sierra_k>, //
+        ram_indexes<nk_i8_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        ram_index<nk_u8_k, cpu_class_t::intel_sierra_k>, //
+        ram_indexes<nk_u8_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        ram_index<nk_e2m3_k, cpu_class_t::intel_sierra_k>, //
+        ram_indexes<nk_e2m3_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 #if NUMKONG_TARGET_SKYLAKE
         // intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 arms
-        ram_index<nk_bf16_k, cpu_class_t::intel_skylake_k>, //
+        ram_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>, //
 #if USEARCH_DENSE_DTYPES >= 4
-        ram_index<nk_e4m3_k, cpu_class_t::intel_skylake_k>, //
+        ram_indexes<nk_e4m3_k, cpu_class_t::intel_skylake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        ram_index<nk_f16_k, cpu_class_t::intel_skylake_k>, //
+        ram_indexes<nk_f16_k, cpu_class_t::intel_skylake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        ram_index<nk_e5m2_k, cpu_class_t::intel_skylake_k>, //
+        ram_indexes<nk_e5m2_k, cpu_class_t::intel_skylake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        ram_index<nk_e3m2_k, cpu_class_t::intel_skylake_k>, //
+        ram_indexes<nk_e3m2_k, cpu_class_t::intel_skylake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        ram_index<nk_e2m3_k, cpu_class_t::intel_skylake_k>, //
+        ram_indexes<nk_e2m3_k, cpu_class_t::intel_skylake_k>, //
 #endif
 #endif // NUMKONG_TARGET_SKYLAKE
 #if NUMKONG_TARGET_ICELAKE
     // intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 arms
 #if USEARCH_DENSE_DTYPES >= 2
-        ram_index<nk_u1_k, cpu_class_t::intel_icelake_k>, //
+        ram_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        ram_index<nk_i8_k, cpu_class_t::intel_icelake_k>, //
+        ram_indexes<nk_i8_k, cpu_class_t::intel_icelake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        ram_index<nk_u8_k, cpu_class_t::intel_icelake_k>, //
+        ram_indexes<nk_u8_k, cpu_class_t::intel_icelake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        ram_index<nk_i4_k, cpu_class_t::intel_icelake_k>, //
+        ram_indexes<nk_i4_k, cpu_class_t::intel_icelake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        ram_index<nk_u4_k, cpu_class_t::intel_icelake_k>, //
+        ram_indexes<nk_u4_k, cpu_class_t::intel_icelake_k>, //
 #endif
 #endif // NUMKONG_TARGET_ICELAKE
 #if NUMKONG_TARGET_GENOA
         // amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 arms
-        ram_index<nk_bf16_k, cpu_class_t::amd_genoa_k>, //
+        ram_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>, //
 #if USEARCH_DENSE_DTYPES >= 4
-        ram_index<nk_e4m3_k, cpu_class_t::amd_genoa_k>, //
+        ram_indexes<nk_e4m3_k, cpu_class_t::amd_genoa_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        ram_index<nk_e5m2_k, cpu_class_t::amd_genoa_k>, //
+        ram_indexes<nk_e5m2_k, cpu_class_t::amd_genoa_k>, //
 #endif
 #endif // NUMKONG_TARGET_GENOA
 #if NUMKONG_TARGET_SAPPHIREAMX
         // intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 arms
-        ram_index<nk_bf16_k, cpu_class_t::intel_sapphire_k>, //
+        ram_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>, //
 #if USEARCH_DENSE_DTYPES >= 3
-        ram_index<nk_i8_k, cpu_class_t::intel_sapphire_k>, //
+        ram_indexes<nk_i8_k, cpu_class_t::intel_sapphire_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        ram_index<nk_e4m3_k, cpu_class_t::intel_sapphire_k>, //
+        ram_indexes<nk_e4m3_k, cpu_class_t::intel_sapphire_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        ram_index<nk_u8_k, cpu_class_t::intel_sapphire_k>, //
+        ram_indexes<nk_u8_k, cpu_class_t::intel_sapphire_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        ram_index<nk_e5m2_k, cpu_class_t::intel_sapphire_k>, //
+        ram_indexes<nk_e5m2_k, cpu_class_t::intel_sapphire_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        ram_index<nk_e3m2_k, cpu_class_t::intel_sapphire_k>, //
+        ram_indexes<nk_e3m2_k, cpu_class_t::intel_sapphire_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        ram_index<nk_e2m3_k, cpu_class_t::intel_sapphire_k>, //
+        ram_indexes<nk_e2m3_k, cpu_class_t::intel_sapphire_k>, //
 #endif
 #endif // NUMKONG_TARGET_SAPPHIREAMX
 #if NUMKONG_TARGET_GRANITEAMX
     // intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 arms
 #if USEARCH_DENSE_DTYPES >= 5
-        ram_index<nk_f16_k, cpu_class_t::intel_granite_k>, //
+        ram_indexes<nk_f16_k, cpu_class_t::intel_granite_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        ram_index<nk_e5m2_k, cpu_class_t::intel_granite_k>, //
+        ram_indexes<nk_e5m2_k, cpu_class_t::intel_granite_k>, //
 #endif
 #endif // NUMKONG_TARGET_GRANITEAMX
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
         // intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd:
         // bf16 u1 f16 i4 u4 e3m2, 6 arms
-        ram_index<nk_bf16_k, cpu_class_t::intel_diamond_k>, //
+        ram_indexes<nk_bf16_k, cpu_class_t::intel_diamond_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        ram_index<nk_u1_k, cpu_class_t::intel_diamond_k>, //
+        ram_indexes<nk_u1_k, cpu_class_t::intel_diamond_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        ram_index<nk_f16_k, cpu_class_t::intel_diamond_k>, //
+        ram_indexes<nk_f16_k, cpu_class_t::intel_diamond_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        ram_index<nk_i4_k, cpu_class_t::intel_diamond_k>, //
+        ram_indexes<nk_i4_k, cpu_class_t::intel_diamond_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        ram_index<nk_u4_k, cpu_class_t::intel_diamond_k>, //
+        ram_indexes<nk_u4_k, cpu_class_t::intel_diamond_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        ram_index<nk_e3m2_k, cpu_class_t::intel_diamond_k>, //
+        ram_indexes<nk_e3m2_k, cpu_class_t::intel_diamond_k>, //
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_DIAMOND
     // intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd, diamond: e4m3 e5m2, 2 arms
 #if USEARCH_DENSE_DTYPES >= 4
-        ram_index<nk_e4m3_k, cpu_class_t::intel_diamond_k>, //
+        ram_indexes<nk_e4m3_k, cpu_class_t::intel_diamond_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        ram_index<nk_e5m2_k, cpu_class_t::intel_diamond_k>, //
+        ram_indexes<nk_e5m2_k, cpu_class_t::intel_diamond_k>, //
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_DIAMOND
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
     // intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd, alder, sierra:
     // i8 u8 e2m3, 3 arms
 #if USEARCH_DENSE_DTYPES >= 3
-        ram_index<nk_i8_k, cpu_class_t::intel_diamond_k>, //
+        ram_indexes<nk_i8_k, cpu_class_t::intel_diamond_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        ram_index<nk_u8_k, cpu_class_t::intel_diamond_k>, //
+        ram_indexes<nk_u8_k, cpu_class_t::intel_diamond_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        ram_index<nk_e2m3_k, cpu_class_t::intel_diamond_k>, //
+        ram_indexes<nk_e2m3_k, cpu_class_t::intel_diamond_k>, //
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 #if NUMKONG_TARGET_NEON
         // aws_g2 over serial by neon: bf16 u1 f16, 3 arms
-        ram_index<nk_bf16_k, cpu_class_t::aws_g2_k>, //
+        ram_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        ram_index<nk_u1_k, cpu_class_t::aws_g2_k>, //
+        ram_indexes<nk_u1_k, cpu_class_t::aws_g2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        ram_index<nk_f16_k, cpu_class_t::aws_g2_k>, //
+        ram_indexes<nk_f16_k, cpu_class_t::aws_g2_k>, //
 #endif
 #endif // NUMKONG_TARGET_NEON
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONBFDOT
         // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonbfdot: bf16, 1 arm
-        ram_index<nk_bf16_k, cpu_class_t::apple_m2_k>, //
+        ram_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONFHM
     // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonfhm: e4m3 f16 e5m2, 3 arms
 #if USEARCH_DENSE_DTYPES >= 4
-        ram_index<nk_e4m3_k, cpu_class_t::apple_m2_k>, //
+        ram_indexes<nk_e4m3_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        ram_index<nk_f16_k, cpu_class_t::apple_m2_k>, //
+        ram_indexes<nk_f16_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        ram_index<nk_e5m2_k, cpu_class_t::apple_m2_k>, //
+        ram_indexes<nk_e5m2_k, cpu_class_t::apple_m2_k>, //
 #endif
 #endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONFHM
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONSDOT
     // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 arms
 #if USEARCH_DENSE_DTYPES >= 3
-        ram_index<nk_i8_k, cpu_class_t::apple_m2_k>, //
+        ram_indexes<nk_i8_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        ram_index<nk_u8_k, cpu_class_t::apple_m2_k>, //
+        ram_indexes<nk_u8_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        ram_index<nk_i4_k, cpu_class_t::apple_m2_k>, //
+        ram_indexes<nk_i4_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        ram_index<nk_u4_k, cpu_class_t::apple_m2_k>, //
+        ram_indexes<nk_u4_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        ram_index<nk_e3m2_k, cpu_class_t::apple_m2_k>, //
+        ram_indexes<nk_e3m2_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        ram_index<nk_e2m3_k, cpu_class_t::apple_m2_k>, //
+        ram_indexes<nk_e2m3_k, cpu_class_t::apple_m2_k>, //
 #endif
 #endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONSDOT
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC
     // apple_m2 over aws_g2 by arm64_lse, arm64_rcpc: u1, 1 arm
 #if USEARCH_DENSE_DTYPES >= 2
-        ram_index<nk_u1_k, cpu_class_t::apple_m2_k>, //
+        ram_indexes<nk_u1_k, cpu_class_t::apple_m2_k>, //
 #endif
 #endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC
 #if NUMKONG_TARGET_SME
         // apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms
-        ram_index<nk_bf16_k, cpu_class_t::apple_m4_k>, //
+        ram_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>, //
 #if USEARCH_DENSE_DTYPES >= 3
-        ram_index<nk_i8_k, cpu_class_t::apple_m4_k>, //
+        ram_indexes<nk_i8_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        ram_index<nk_e4m3_k, cpu_class_t::apple_m4_k>, //
+        ram_indexes<nk_e4m3_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        ram_index<nk_f16_k, cpu_class_t::apple_m4_k>, //
+        ram_indexes<nk_f16_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        ram_index<nk_u8_k, cpu_class_t::apple_m4_k>, //
+        ram_indexes<nk_u8_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        ram_index<nk_e5m2_k, cpu_class_t::apple_m4_k>, //
+        ram_indexes<nk_e5m2_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        ram_index<nk_i4_k, cpu_class_t::apple_m4_k>, //
+        ram_indexes<nk_i4_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        ram_index<nk_u4_k, cpu_class_t::apple_m4_k>, //
+        ram_indexes<nk_u4_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        ram_index<nk_e3m2_k, cpu_class_t::apple_m4_k>, //
+        ram_indexes<nk_e3m2_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        ram_index<nk_e2m3_k, cpu_class_t::apple_m4_k>, //
+        ram_indexes<nk_e2m3_k, cpu_class_t::apple_m4_k>, //
 #endif
 #endif // NUMKONG_TARGET_SME
 #if NUMKONG_TARGET_SMEBI32
     // apple_m4 over apple_m2 by smebi32: u1, 1 arm
 #if USEARCH_DENSE_DTYPES >= 2
-        ram_index<nk_u1_k, cpu_class_t::apple_m4_k>, //
+        ram_indexes<nk_u1_k, cpu_class_t::apple_m4_k>, //
 #endif
 #endif // NUMKONG_TARGET_SMEBI32
 #if FORKUNION_TARGET_ARM64_WFET
         // aws_g5 over apple_m2 by arm64_wfet: every dtype, 11 arms
-        ram_index<nk_bf16_k, cpu_class_t::aws_g5_k>, //
+        ram_indexes<nk_bf16_k, cpu_class_t::aws_g5_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        ram_index<nk_u1_k, cpu_class_t::aws_g5_k>, //
+        ram_indexes<nk_u1_k, cpu_class_t::aws_g5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        ram_index<nk_i8_k, cpu_class_t::aws_g5_k>, //
+        ram_indexes<nk_i8_k, cpu_class_t::aws_g5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        ram_index<nk_e4m3_k, cpu_class_t::aws_g5_k>, //
+        ram_indexes<nk_e4m3_k, cpu_class_t::aws_g5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        ram_index<nk_f16_k, cpu_class_t::aws_g5_k>, //
+        ram_indexes<nk_f16_k, cpu_class_t::aws_g5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        ram_index<nk_u8_k, cpu_class_t::aws_g5_k>, //
+        ram_indexes<nk_u8_k, cpu_class_t::aws_g5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        ram_index<nk_e5m2_k, cpu_class_t::aws_g5_k>, //
+        ram_indexes<nk_e5m2_k, cpu_class_t::aws_g5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        ram_index<nk_i4_k, cpu_class_t::aws_g5_k>, //
+        ram_indexes<nk_i4_k, cpu_class_t::aws_g5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        ram_index<nk_u4_k, cpu_class_t::aws_g5_k>, //
+        ram_indexes<nk_u4_k, cpu_class_t::aws_g5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        ram_index<nk_e3m2_k, cpu_class_t::aws_g5_k>, //
+        ram_indexes<nk_e3m2_k, cpu_class_t::aws_g5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        ram_index<nk_e2m3_k, cpu_class_t::aws_g5_k>, //
+        ram_indexes<nk_e2m3_k, cpu_class_t::aws_g5_k>, //
 #endif
 #endif // FORKUNION_TARGET_ARM64_WFET
 #if NUMKONG_TARGET_NEONFP8
     // nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 arms
 #if USEARCH_DENSE_DTYPES >= 4
-        ram_index<nk_e4m3_k, cpu_class_t::nvidia_vera_k>, //
+        ram_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        ram_index<nk_e5m2_k, cpu_class_t::nvidia_vera_k>, //
+        ram_indexes<nk_e5m2_k, cpu_class_t::nvidia_vera_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        ram_index<nk_e3m2_k, cpu_class_t::nvidia_vera_k>, //
+        ram_indexes<nk_e3m2_k, cpu_class_t::nvidia_vera_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        ram_index<nk_e2m3_k, cpu_class_t::nvidia_vera_k>, //
+        ram_indexes<nk_e2m3_k, cpu_class_t::nvidia_vera_k>, //
 #endif
 #endif // NUMKONG_TARGET_NEONFP8
 #if FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
         // alibaba_c930 over serial by risc5_wrs, risc5_zacas: every dtype, 11 arms
-        ram_index<nk_bf16_k, cpu_class_t::alibaba_c930_k>, //
+        ram_indexes<nk_bf16_k, cpu_class_t::alibaba_c930_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        ram_index<nk_u1_k, cpu_class_t::alibaba_c930_k>, //
+        ram_indexes<nk_u1_k, cpu_class_t::alibaba_c930_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        ram_index<nk_i8_k, cpu_class_t::alibaba_c930_k>, //
+        ram_indexes<nk_i8_k, cpu_class_t::alibaba_c930_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        ram_index<nk_e4m3_k, cpu_class_t::alibaba_c930_k>, //
+        ram_indexes<nk_e4m3_k, cpu_class_t::alibaba_c930_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        ram_index<nk_f16_k, cpu_class_t::alibaba_c930_k>, //
+        ram_indexes<nk_f16_k, cpu_class_t::alibaba_c930_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        ram_index<nk_u8_k, cpu_class_t::alibaba_c930_k>, //
+        ram_indexes<nk_u8_k, cpu_class_t::alibaba_c930_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        ram_index<nk_e5m2_k, cpu_class_t::alibaba_c930_k>, //
+        ram_indexes<nk_e5m2_k, cpu_class_t::alibaba_c930_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        ram_index<nk_i4_k, cpu_class_t::alibaba_c930_k>, //
+        ram_indexes<nk_i4_k, cpu_class_t::alibaba_c930_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        ram_index<nk_u4_k, cpu_class_t::alibaba_c930_k>, //
+        ram_indexes<nk_u4_k, cpu_class_t::alibaba_c930_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        ram_index<nk_e3m2_k, cpu_class_t::alibaba_c930_k>, //
+        ram_indexes<nk_e3m2_k, cpu_class_t::alibaba_c930_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        ram_index<nk_e2m3_k, cpu_class_t::alibaba_c930_k>, //
+        ram_indexes<nk_e2m3_k, cpu_class_t::alibaba_c930_k>, //
 #endif
 #endif // FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
 #if NUMKONG_TARGET_V128
         // wasm32_v128 over serial by v128: bf16 u1 i8 u8, 4 arms
-        ram_index<nk_bf16_k, cpu_class_t::wasm32_v128_k>, //
+        ram_indexes<nk_bf16_k, cpu_class_t::wasm32_v128_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        ram_index<nk_u1_k, cpu_class_t::wasm32_v128_k>, //
+        ram_indexes<nk_u1_k, cpu_class_t::wasm32_v128_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        ram_index<nk_i8_k, cpu_class_t::wasm32_v128_k>, //
+        ram_indexes<nk_i8_k, cpu_class_t::wasm32_v128_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        ram_index<nk_u8_k, cpu_class_t::wasm32_v128_k>, //
+        ram_indexes<nk_u8_k, cpu_class_t::wasm32_v128_k>, //
 #endif
 #endif // NUMKONG_TARGET_V128
 #if NUMKONG_TARGET_V128RELAXED
         // wasm64_extended over wasm32_v128 by v128relaxed:
         // bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms
-        ram_index<nk_bf16_k, cpu_class_t::wasm64_extended_k>, //
+        ram_indexes<nk_bf16_k, cpu_class_t::wasm64_extended_k>, //
 #if USEARCH_DENSE_DTYPES >= 3
-        ram_index<nk_i8_k, cpu_class_t::wasm64_extended_k>, //
+        ram_indexes<nk_i8_k, cpu_class_t::wasm64_extended_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        ram_index<nk_e4m3_k, cpu_class_t::wasm64_extended_k>, //
+        ram_indexes<nk_e4m3_k, cpu_class_t::wasm64_extended_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        ram_index<nk_f16_k, cpu_class_t::wasm64_extended_k>, //
+        ram_indexes<nk_f16_k, cpu_class_t::wasm64_extended_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        ram_index<nk_u8_k, cpu_class_t::wasm64_extended_k>, //
+        ram_indexes<nk_u8_k, cpu_class_t::wasm64_extended_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        ram_index<nk_e5m2_k, cpu_class_t::wasm64_extended_k>, //
+        ram_indexes<nk_e5m2_k, cpu_class_t::wasm64_extended_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        ram_index<nk_i4_k, cpu_class_t::wasm64_extended_k>, //
+        ram_indexes<nk_i4_k, cpu_class_t::wasm64_extended_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        ram_index<nk_u4_k, cpu_class_t::wasm64_extended_k>, //
+        ram_indexes<nk_u4_k, cpu_class_t::wasm64_extended_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        ram_index<nk_e3m2_k, cpu_class_t::wasm64_extended_k>, //
+        ram_indexes<nk_e3m2_k, cpu_class_t::wasm64_extended_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        ram_index<nk_e2m3_k, cpu_class_t::wasm64_extended_k>, //
+        ram_indexes<nk_e2m3_k, cpu_class_t::wasm64_extended_k>, //
 #endif
 #endif // NUMKONG_TARGET_V128RELAXED
 #if NUMKONG_TARGET_HASWELL
         // NVMe intel_haswell over serial by haswell: every dtype, 11 arms
-        nvme_index<nk_bf16_k, cpu_class_t::intel_haswell_k>, //
+        nvme_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        nvme_index<nk_u1_k, cpu_class_t::intel_haswell_k>, //
+        nvme_indexes<nk_u1_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        nvme_index<nk_i8_k, cpu_class_t::intel_haswell_k>, //
+        nvme_indexes<nk_i8_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        nvme_index<nk_e4m3_k, cpu_class_t::intel_haswell_k>, //
+        nvme_indexes<nk_e4m3_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        nvme_index<nk_f16_k, cpu_class_t::intel_haswell_k>, //
+        nvme_indexes<nk_f16_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        nvme_index<nk_u8_k, cpu_class_t::intel_haswell_k>, //
+        nvme_indexes<nk_u8_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        nvme_index<nk_e5m2_k, cpu_class_t::intel_haswell_k>, //
+        nvme_indexes<nk_e5m2_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        nvme_index<nk_i4_k, cpu_class_t::intel_haswell_k>, //
+        nvme_indexes<nk_i4_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        nvme_index<nk_u4_k, cpu_class_t::intel_haswell_k>, //
+        nvme_indexes<nk_u4_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        nvme_index<nk_e3m2_k, cpu_class_t::intel_haswell_k>, //
+        nvme_indexes<nk_e3m2_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        nvme_index<nk_e2m3_k, cpu_class_t::intel_haswell_k>, //
+        nvme_indexes<nk_e2m3_k, cpu_class_t::intel_haswell_k>, //
 #endif
 #endif // NUMKONG_TARGET_HASWELL
 #if NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
     // NVMe intel_sierra over intel_haswell by alder, sierra: i8 u8 e2m3, 3 arms
 #if USEARCH_DENSE_DTYPES >= 3
-        nvme_index<nk_i8_k, cpu_class_t::intel_sierra_k>, //
+        nvme_indexes<nk_i8_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        nvme_index<nk_u8_k, cpu_class_t::intel_sierra_k>, //
+        nvme_indexes<nk_u8_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        nvme_index<nk_e2m3_k, cpu_class_t::intel_sierra_k>, //
+        nvme_indexes<nk_e2m3_k, cpu_class_t::intel_sierra_k>, //
 #endif
 #endif // NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 #if NUMKONG_TARGET_SKYLAKE
         // NVMe intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 arms
-        nvme_index<nk_bf16_k, cpu_class_t::intel_skylake_k>, //
+        nvme_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>, //
 #if USEARCH_DENSE_DTYPES >= 4
-        nvme_index<nk_e4m3_k, cpu_class_t::intel_skylake_k>, //
+        nvme_indexes<nk_e4m3_k, cpu_class_t::intel_skylake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        nvme_index<nk_f16_k, cpu_class_t::intel_skylake_k>, //
+        nvme_indexes<nk_f16_k, cpu_class_t::intel_skylake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        nvme_index<nk_e5m2_k, cpu_class_t::intel_skylake_k>, //
+        nvme_indexes<nk_e5m2_k, cpu_class_t::intel_skylake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        nvme_index<nk_e3m2_k, cpu_class_t::intel_skylake_k>, //
+        nvme_indexes<nk_e3m2_k, cpu_class_t::intel_skylake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        nvme_index<nk_e2m3_k, cpu_class_t::intel_skylake_k>, //
+        nvme_indexes<nk_e2m3_k, cpu_class_t::intel_skylake_k>, //
 #endif
 #endif // NUMKONG_TARGET_SKYLAKE
 #if NUMKONG_TARGET_ICELAKE
     // NVMe intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 arms
 #if USEARCH_DENSE_DTYPES >= 2
-        nvme_index<nk_u1_k, cpu_class_t::intel_icelake_k>, //
+        nvme_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        nvme_index<nk_i8_k, cpu_class_t::intel_icelake_k>, //
+        nvme_indexes<nk_i8_k, cpu_class_t::intel_icelake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        nvme_index<nk_u8_k, cpu_class_t::intel_icelake_k>, //
+        nvme_indexes<nk_u8_k, cpu_class_t::intel_icelake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        nvme_index<nk_i4_k, cpu_class_t::intel_icelake_k>, //
+        nvme_indexes<nk_i4_k, cpu_class_t::intel_icelake_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        nvme_index<nk_u4_k, cpu_class_t::intel_icelake_k>, //
+        nvme_indexes<nk_u4_k, cpu_class_t::intel_icelake_k>, //
 #endif
 #endif // NUMKONG_TARGET_ICELAKE
 #if NUMKONG_TARGET_GENOA
         // NVMe amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 arms
-        nvme_index<nk_bf16_k, cpu_class_t::amd_genoa_k>, //
+        nvme_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>, //
 #if USEARCH_DENSE_DTYPES >= 4
-        nvme_index<nk_e4m3_k, cpu_class_t::amd_genoa_k>, //
+        nvme_indexes<nk_e4m3_k, cpu_class_t::amd_genoa_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        nvme_index<nk_e5m2_k, cpu_class_t::amd_genoa_k>, //
+        nvme_indexes<nk_e5m2_k, cpu_class_t::amd_genoa_k>, //
 #endif
 #endif // NUMKONG_TARGET_GENOA
 #if NUMKONG_TARGET_SAPPHIREAMX
         // NVMe intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 arms
-        nvme_index<nk_bf16_k, cpu_class_t::intel_sapphire_k>, //
+        nvme_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>, //
 #if USEARCH_DENSE_DTYPES >= 3
-        nvme_index<nk_i8_k, cpu_class_t::intel_sapphire_k>, //
+        nvme_indexes<nk_i8_k, cpu_class_t::intel_sapphire_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        nvme_index<nk_e4m3_k, cpu_class_t::intel_sapphire_k>, //
+        nvme_indexes<nk_e4m3_k, cpu_class_t::intel_sapphire_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        nvme_index<nk_u8_k, cpu_class_t::intel_sapphire_k>, //
+        nvme_indexes<nk_u8_k, cpu_class_t::intel_sapphire_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        nvme_index<nk_e5m2_k, cpu_class_t::intel_sapphire_k>, //
+        nvme_indexes<nk_e5m2_k, cpu_class_t::intel_sapphire_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        nvme_index<nk_e3m2_k, cpu_class_t::intel_sapphire_k>, //
+        nvme_indexes<nk_e3m2_k, cpu_class_t::intel_sapphire_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        nvme_index<nk_e2m3_k, cpu_class_t::intel_sapphire_k>, //
+        nvme_indexes<nk_e2m3_k, cpu_class_t::intel_sapphire_k>, //
 #endif
 #endif // NUMKONG_TARGET_SAPPHIREAMX
 #if NUMKONG_TARGET_GRANITEAMX
     // NVMe intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 arms
 #if USEARCH_DENSE_DTYPES >= 5
-        nvme_index<nk_f16_k, cpu_class_t::intel_granite_k>, //
+        nvme_indexes<nk_f16_k, cpu_class_t::intel_granite_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        nvme_index<nk_e5m2_k, cpu_class_t::intel_granite_k>, //
+        nvme_indexes<nk_e5m2_k, cpu_class_t::intel_granite_k>, //
 #endif
 #endif // NUMKONG_TARGET_GRANITEAMX
 #if NUMKONG_TARGET_DIAMOND
     // NVMe intel_diamond over intel_granite by diamond: e4m3 e5m2, 2 arms
 #if USEARCH_DENSE_DTYPES >= 4
-        nvme_index<nk_e4m3_k, cpu_class_t::intel_diamond_k>, //
+        nvme_indexes<nk_e4m3_k, cpu_class_t::intel_diamond_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        nvme_index<nk_e5m2_k, cpu_class_t::intel_diamond_k>, //
+        nvme_indexes<nk_e5m2_k, cpu_class_t::intel_diamond_k>, //
 #endif
 #endif // NUMKONG_TARGET_DIAMOND
 #if NUMKONG_TARGET_NEON
         // NVMe aws_g2 over serial by neon: bf16 u1 f16, 3 arms
-        nvme_index<nk_bf16_k, cpu_class_t::aws_g2_k>, //
+        nvme_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        nvme_index<nk_u1_k, cpu_class_t::aws_g2_k>, //
+        nvme_indexes<nk_u1_k, cpu_class_t::aws_g2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        nvme_index<nk_f16_k, cpu_class_t::aws_g2_k>, //
+        nvme_indexes<nk_f16_k, cpu_class_t::aws_g2_k>, //
 #endif
 #endif // NUMKONG_TARGET_NEON
 #if NUMKONG_TARGET_NEONBFDOT
         // NVMe apple_m2 over aws_g2 by neonbfdot: bf16, 1 arm
-        nvme_index<nk_bf16_k, cpu_class_t::apple_m2_k>, //
+        nvme_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if NUMKONG_TARGET_NEONFHM
     // NVMe apple_m2 over aws_g2 by neonfhm: e4m3 f16 e5m2, 3 arms
 #if USEARCH_DENSE_DTYPES >= 4
-        nvme_index<nk_e4m3_k, cpu_class_t::apple_m2_k>, //
+        nvme_indexes<nk_e4m3_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        nvme_index<nk_f16_k, cpu_class_t::apple_m2_k>, //
+        nvme_indexes<nk_f16_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        nvme_index<nk_e5m2_k, cpu_class_t::apple_m2_k>, //
+        nvme_indexes<nk_e5m2_k, cpu_class_t::apple_m2_k>, //
 #endif
 #endif // NUMKONG_TARGET_NEONFHM
 #if NUMKONG_TARGET_NEONSDOT
     // NVMe apple_m2 over aws_g2 by neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 arms
 #if USEARCH_DENSE_DTYPES >= 3
-        nvme_index<nk_i8_k, cpu_class_t::apple_m2_k>, //
+        nvme_indexes<nk_i8_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        nvme_index<nk_u8_k, cpu_class_t::apple_m2_k>, //
+        nvme_indexes<nk_u8_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        nvme_index<nk_i4_k, cpu_class_t::apple_m2_k>, //
+        nvme_indexes<nk_i4_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        nvme_index<nk_u4_k, cpu_class_t::apple_m2_k>, //
+        nvme_indexes<nk_u4_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        nvme_index<nk_e3m2_k, cpu_class_t::apple_m2_k>, //
+        nvme_indexes<nk_e3m2_k, cpu_class_t::apple_m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        nvme_index<nk_e2m3_k, cpu_class_t::apple_m2_k>, //
+        nvme_indexes<nk_e2m3_k, cpu_class_t::apple_m2_k>, //
 #endif
 #endif // NUMKONG_TARGET_NEONSDOT
 #if NUMKONG_TARGET_SME
         // NVMe apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms
-        nvme_index<nk_bf16_k, cpu_class_t::apple_m4_k>, //
+        nvme_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>, //
 #if USEARCH_DENSE_DTYPES >= 3
-        nvme_index<nk_i8_k, cpu_class_t::apple_m4_k>, //
+        nvme_indexes<nk_i8_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        nvme_index<nk_e4m3_k, cpu_class_t::apple_m4_k>, //
+        nvme_indexes<nk_e4m3_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        nvme_index<nk_f16_k, cpu_class_t::apple_m4_k>, //
+        nvme_indexes<nk_f16_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        nvme_index<nk_u8_k, cpu_class_t::apple_m4_k>, //
+        nvme_indexes<nk_u8_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        nvme_index<nk_e5m2_k, cpu_class_t::apple_m4_k>, //
+        nvme_indexes<nk_e5m2_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        nvme_index<nk_i4_k, cpu_class_t::apple_m4_k>, //
+        nvme_indexes<nk_i4_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        nvme_index<nk_u4_k, cpu_class_t::apple_m4_k>, //
+        nvme_indexes<nk_u4_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        nvme_index<nk_e3m2_k, cpu_class_t::apple_m4_k>, //
+        nvme_indexes<nk_e3m2_k, cpu_class_t::apple_m4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        nvme_index<nk_e2m3_k, cpu_class_t::apple_m4_k>, //
+        nvme_indexes<nk_e2m3_k, cpu_class_t::apple_m4_k>, //
 #endif
 #endif // NUMKONG_TARGET_SME
 #if NUMKONG_TARGET_SMEBI32
     // NVMe apple_m4 over apple_m2 by smebi32: u1, 1 arm
 #if USEARCH_DENSE_DTYPES >= 2
-        nvme_index<nk_u1_k, cpu_class_t::apple_m4_k>, //
+        nvme_indexes<nk_u1_k, cpu_class_t::apple_m4_k>, //
 #endif
 #endif // NUMKONG_TARGET_SMEBI32
 #if NUMKONG_TARGET_NEONFP8
     // NVMe nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 arms
 #if USEARCH_DENSE_DTYPES >= 4
-        nvme_index<nk_e4m3_k, cpu_class_t::nvidia_vera_k>, //
+        nvme_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        nvme_index<nk_e5m2_k, cpu_class_t::nvidia_vera_k>, //
+        nvme_indexes<nk_e5m2_k, cpu_class_t::nvidia_vera_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        nvme_index<nk_e3m2_k, cpu_class_t::nvidia_vera_k>, //
+        nvme_indexes<nk_e3m2_k, cpu_class_t::nvidia_vera_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        nvme_index<nk_e2m3_k, cpu_class_t::nvidia_vera_k>, //
+        nvme_indexes<nk_e2m3_k, cpu_class_t::nvidia_vera_k>, //
 #endif
 #endif // NUMKONG_TARGET_NEONFP8
 #if USEARCH_ARCH_CUDA_
         // nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 11 arms
-        vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_blackwellrtx_k>, //
+        vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_blackwellrtx_k>, //
 #endif
         // nvidia_blackwell over nvidia_ampere by "100f": every cell, 11 arms
-        vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_blackwell_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_blackwell_k>, //
+        vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_blackwell_k>, //
 #endif
         // nvidia_hopper over nvidia_ampere by "90a": every cell, 11 arms
-        vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_hopper_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_hopper_k>, //
+        vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_hopper_k>, //
 #endif
         // nvidia_ada over nvidia_ampere by "89": every cell, 11 arms
-        vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_ada_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_ada_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_ada_k>, //
+        vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_ada_k>, //
 #endif
         // nvidia_ampere, the floor by "80", its PTX serving every GPU without a class:
         // every cell, 11 arms
-        vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_ampere_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_ampere_k>, //
+        vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_ampere_k>, //
 #endif
 #endif // USEARCH_ARCH_CUDA_
 #if USEARCH_ARCH_ROCM_
+#if USEARCH_ARCH_CDNA5_
         // amd_cdna5 over amd_cdna3 by "gfx1250", 32-wide waves: every cell, 11 arms
-        vram_amd_index<nk_bf16_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna5_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_amd_index<nk_u1_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_amd_index<nk_i8_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_indexes<nk_i8_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_amd_index<nk_e4m3_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_indexes<nk_e4m3_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_amd_index<nk_f16_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_indexes<nk_f16_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_amd_index<nk_u8_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_indexes<nk_u8_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_amd_index<nk_e5m2_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_indexes<nk_e5m2_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_amd_index<nk_i4_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_indexes<nk_i4_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_amd_index<nk_u4_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_indexes<nk_u4_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_amd_index<nk_e3m2_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_indexes<nk_e3m2_k, gpu_class_t::amd_cdna5_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_amd_index<nk_e2m3_k, gpu_class_t::amd_cdna5_k>, //
+        vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna5_k>, //
 #endif
+#endif // USEARCH_ARCH_CDNA5_
+#if USEARCH_ARCH_CDNA4_
         // amd_cdna4 over amd_cdna3 by "gfx950": every cell, 11 arms
-        vram_amd_index<nk_bf16_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna4_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_amd_index<nk_u1_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_amd_index<nk_i8_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_indexes<nk_i8_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_amd_index<nk_e4m3_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_indexes<nk_e4m3_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_amd_index<nk_f16_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_indexes<nk_f16_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_amd_index<nk_u8_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_indexes<nk_u8_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_amd_index<nk_e5m2_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_indexes<nk_e5m2_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_amd_index<nk_i4_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_indexes<nk_i4_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_amd_index<nk_u4_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_indexes<nk_u4_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_amd_index<nk_e3m2_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_indexes<nk_e3m2_k, gpu_class_t::amd_cdna4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_amd_index<nk_e2m3_k, gpu_class_t::amd_cdna4_k>, //
+        vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna4_k>, //
 #endif
+#endif // USEARCH_ARCH_CDNA4_
+
         // amd_cdna3, the AMD floor by "gfx942": every cell, 11 arms
-        vram_amd_index<nk_bf16_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna3_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_amd_index<nk_u1_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_amd_index<nk_i8_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_indexes<nk_i8_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_amd_index<nk_e4m3_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_indexes<nk_e4m3_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_amd_index<nk_f16_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_indexes<nk_f16_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_amd_index<nk_u8_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_indexes<nk_u8_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_amd_index<nk_e5m2_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_indexes<nk_e5m2_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_amd_index<nk_i4_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_indexes<nk_i4_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_amd_index<nk_u4_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_indexes<nk_u4_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_amd_index<nk_e3m2_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_indexes<nk_e3m2_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_amd_index<nk_e2m3_k, gpu_class_t::amd_cdna3_k>, //
+        vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna3_k>, //
 #endif
 #endif // USEARCH_ARCH_ROCM_
 #if USEARCH_ARCH_METAL_
         // apple, serving every Apple class until a family's kernels differ: every cell, 11 arms
-        vram_apple_index<nk_bf16_k>, //
+        vram_apple_indexes<nk_bf16_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        vram_apple_index<nk_u1_k>, //
+        vram_apple_indexes<nk_u1_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        vram_apple_index<nk_i8_k>, //
+        vram_apple_indexes<nk_i8_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        vram_apple_index<nk_e4m3_k>, //
+        vram_apple_indexes<nk_e4m3_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        vram_apple_index<nk_f16_k>, //
+        vram_apple_indexes<nk_f16_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        vram_apple_index<nk_u8_k>, //
+        vram_apple_indexes<nk_u8_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        vram_apple_index<nk_e5m2_k>, //
+        vram_apple_indexes<nk_e5m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        vram_apple_index<nk_i4_k>, //
+        vram_apple_indexes<nk_i4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        vram_apple_index<nk_u4_k>, //
+        vram_apple_indexes<nk_u4_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        vram_apple_index<nk_e3m2_k>, //
+        vram_apple_indexes<nk_e3m2_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        vram_apple_index<nk_e2m3_k>, //
+        vram_apple_indexes<nk_e2m3_k>, //
 #endif
 #endif // USEARCH_ARCH_METAL_
 
         // The NVMe serial floor: every wired cell, every platform.
-        nvme_index<nk_bf16_k, cpu_class_t::serial_k>, //
+        nvme_indexes<nk_bf16_k, cpu_class_t::serial_k>, //
 #if USEARCH_DENSE_DTYPES >= 2
-        nvme_index<nk_u1_k, cpu_class_t::serial_k>, //
+        nvme_indexes<nk_u1_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        nvme_index<nk_i8_k, cpu_class_t::serial_k>, //
+        nvme_indexes<nk_i8_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        nvme_index<nk_e4m3_k, cpu_class_t::serial_k>, //
+        nvme_indexes<nk_e4m3_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        nvme_index<nk_f16_k, cpu_class_t::serial_k>, //
+        nvme_indexes<nk_f16_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        nvme_index<nk_u8_k, cpu_class_t::serial_k>, //
+        nvme_indexes<nk_u8_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        nvme_index<nk_e5m2_k, cpu_class_t::serial_k>, //
+        nvme_indexes<nk_e5m2_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        nvme_index<nk_i4_k, cpu_class_t::serial_k>, //
+        nvme_indexes<nk_i4_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        nvme_index<nk_u4_k, cpu_class_t::serial_k>, //
+        nvme_indexes<nk_u4_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        nvme_index<nk_e3m2_k, cpu_class_t::serial_k>, //
+        nvme_indexes<nk_e3m2_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        nvme_index<nk_e2m3_k, cpu_class_t::serial_k>, //
+        nvme_indexes<nk_e2m3_k, cpu_class_t::serial_k>, //
 #endif
     // The serial floor: every wired cell, every platform, the standard yield. The bf16 rung every
     // build keeps closes the list, so no trailing comma ever depends on the ladder.
 #if USEARCH_DENSE_DTYPES >= 2
-        ram_index<nk_u1_k, cpu_class_t::serial_k>, //
+        ram_indexes<nk_u1_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-        ram_index<nk_i8_k, cpu_class_t::serial_k>, //
+        ram_indexes<nk_i8_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-        ram_index<nk_e4m3_k, cpu_class_t::serial_k>, //
+        ram_indexes<nk_e4m3_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-        ram_index<nk_f16_k, cpu_class_t::serial_k>, //
+        ram_indexes<nk_f16_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-        ram_index<nk_u8_k, cpu_class_t::serial_k>, //
+        ram_indexes<nk_u8_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-        ram_index<nk_e5m2_k, cpu_class_t::serial_k>, //
+        ram_indexes<nk_e5m2_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-        ram_index<nk_i4_k, cpu_class_t::serial_k>, //
+        ram_indexes<nk_i4_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-        ram_index<nk_u4_k, cpu_class_t::serial_k>, //
+        ram_indexes<nk_u4_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-        ram_index<nk_e3m2_k, cpu_class_t::serial_k>, //
+        ram_indexes<nk_e3m2_k, cpu_class_t::serial_k>, //
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-        ram_index<nk_e2m3_k, cpu_class_t::serial_k>, //
+        ram_indexes<nk_e2m3_k, cpu_class_t::serial_k>, //
 #endif
-        ram_index<nk_bf16_k, cpu_class_t::serial_k>>; //
+        ram_indexes<nk_bf16_k, cpu_class_t::serial_k>>; //
 
     /** The chosen backend - one alternative of the compiled grid, selected once at construction.
      *  Residency, quantization and compute tier all live in the alternative's own type. */
@@ -1087,1004 +1091,1008 @@ struct usearch_dense_index_handle_t {
  *  unit only visits. */
 #if NUMKONG_TARGET_HASWELL
 /* intel_haswell over serial by haswell: every dtype, 11 arms */
-extern template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_index<nk_u1_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_index<nk_i8_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_index<nk_f16_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_index<nk_u8_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_index<nk_i4_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_index<nk_u4_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_index<nk_e3m2_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #endif // NUMKONG_TARGET_HASWELL
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
 /* intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd:
  * bf16 u1 e4m3 f16 e5m2 i4 u4 e3m2, 8 arms */
-extern template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_sierra_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_index<nk_u1_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_index<nk_f16_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_index<nk_i4_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_index<nk_u4_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_index<nk_e3m2_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 /* intel_sierra over intel_haswell by x86_tpause, x86_cmpccxadd, alder, sierra:
  * i8 u8 e2m3, 3 arms */
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_index<nk_i8_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_index<nk_u8_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 #if NUMKONG_TARGET_SKYLAKE
 /* intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 arms */
-extern template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>>;
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::intel_skylake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_index<nk_f16_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::intel_skylake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::intel_skylake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_index<nk_e3m2_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::intel_skylake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_skylake_k>>;
 #endif
 #endif // NUMKONG_TARGET_SKYLAKE
 #if NUMKONG_TARGET_ICELAKE
 /* intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 arms */
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_index<nk_u1_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_index<nk_i8_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::intel_icelake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_index<nk_u8_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::intel_icelake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_index<nk_i4_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::intel_icelake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_index<nk_u4_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::intel_icelake_k>>;
 #endif
 #endif // NUMKONG_TARGET_ICELAKE
 #if NUMKONG_TARGET_GENOA
 /* amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 arms */
-extern template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::amd_genoa_k>>;
+extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>>;
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::amd_genoa_k>>;
+extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::amd_genoa_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::amd_genoa_k>>;
+extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::amd_genoa_k>>;
 #endif
 #endif // NUMKONG_TARGET_GENOA
 #if NUMKONG_TARGET_SAPPHIREAMX
 /* intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 arms */
-extern template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::intel_sapphire_k>>;
+extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>>;
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_index<nk_i8_k, cpu_class_t::intel_sapphire_k>>;
+extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::intel_sapphire_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::intel_sapphire_k>>;
+extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::intel_sapphire_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_index<nk_u8_k, cpu_class_t::intel_sapphire_k>>;
+extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::intel_sapphire_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::intel_sapphire_k>>;
+extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::intel_sapphire_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_index<nk_e3m2_k, cpu_class_t::intel_sapphire_k>>;
+extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::intel_sapphire_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::intel_sapphire_k>>;
+extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_sapphire_k>>;
 #endif
 #endif // NUMKONG_TARGET_SAPPHIREAMX
 #if NUMKONG_TARGET_GRANITEAMX
 /* intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 arms */
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_index<nk_f16_k, cpu_class_t::intel_granite_k>>;
+extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::intel_granite_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::intel_granite_k>>;
+extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::intel_granite_k>>;
 #endif
 #endif // NUMKONG_TARGET_GRANITEAMX
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
 /* intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd: bf16 u1 f16 i4 u4 e3m2, 6 arms */
-extern template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::intel_diamond_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_index<nk_u1_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::intel_diamond_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_index<nk_f16_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::intel_diamond_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_index<nk_i4_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::intel_diamond_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_index<nk_u4_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::intel_diamond_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_index<nk_e3m2_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::intel_diamond_k>>;
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_DIAMOND
 /* intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd, diamond: e4m3 e5m2, 2 arms */
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::intel_diamond_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::intel_diamond_k>>;
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_DIAMOND
 #if FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 /* intel_diamond over intel_granite by x86_tpause, x86_cmpccxadd, alder, sierra:
  * i8 u8 e2m3, 3 arms */
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_index<nk_i8_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::intel_diamond_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_index<nk_u8_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::intel_diamond_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::intel_diamond_k>>;
 #endif
 #endif // FORKUNION_TARGET_X86_TPAUSE || FORKUNION_TARGET_X86_CMPCCXADD || NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 #if NUMKONG_TARGET_NEON
 /* aws_g2 over serial by neon: bf16 u1 f16, 3 arms */
-extern template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::aws_g2_k>>;
+extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_index<nk_u1_k, cpu_class_t::aws_g2_k>>;
+extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::aws_g2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_index<nk_f16_k, cpu_class_t::aws_g2_k>>;
+extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::aws_g2_k>>;
 #endif
 #endif // NUMKONG_TARGET_NEON
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONBFDOT
 /* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonbfdot: bf16, 1 arm */
-extern template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONFHM
 /* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonfhm: e4m3 f16 e5m2, 3 arms */
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_index<nk_f16_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::apple_m2_k>>;
 #endif
 #endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONFHM
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONSDOT
 /* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc, neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 arms */
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_index<nk_i8_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_index<nk_u8_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_index<nk_i4_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_index<nk_u4_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_index<nk_e3m2_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::apple_m2_k>>;
 #endif
 #endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC || NUMKONG_TARGET_NEONSDOT
 #if FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC
 /* apple_m2 over aws_g2 by arm64_lse, arm64_rcpc: u1, 1 arm */
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_index<nk_u1_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::apple_m2_k>>;
 #endif
 #endif // FORKUNION_TARGET_ARM64_LSE || FORKUNION_TARGET_ARM64_RCPC
 #if NUMKONG_TARGET_SME
 /* apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms */
-extern template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>>;
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_index<nk_i8_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_index<nk_f16_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_index<nk_u8_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_index<nk_i4_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_index<nk_u4_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_index<nk_e3m2_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::apple_m4_k>>;
 #endif
 #endif // NUMKONG_TARGET_SME
 #if NUMKONG_TARGET_SMEBI32
 /* apple_m4 over apple_m2 by smebi32: u1, 1 arm */
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_index<nk_u1_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::apple_m4_k>>;
 #endif
 #endif // NUMKONG_TARGET_SMEBI32
 #if FORKUNION_TARGET_ARM64_WFET
 /* aws_g5 over apple_m2 by arm64_wfet: every dtype, 11 arms */
-extern template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::aws_g5_k>>;
+extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::aws_g5_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_index<nk_u1_k, cpu_class_t::aws_g5_k>>;
+extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::aws_g5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_index<nk_i8_k, cpu_class_t::aws_g5_k>>;
+extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::aws_g5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::aws_g5_k>>;
+extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::aws_g5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_index<nk_f16_k, cpu_class_t::aws_g5_k>>;
+extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::aws_g5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_index<nk_u8_k, cpu_class_t::aws_g5_k>>;
+extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::aws_g5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::aws_g5_k>>;
+extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::aws_g5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_index<nk_i4_k, cpu_class_t::aws_g5_k>>;
+extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::aws_g5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_index<nk_u4_k, cpu_class_t::aws_g5_k>>;
+extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::aws_g5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_index<nk_e3m2_k, cpu_class_t::aws_g5_k>>;
+extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::aws_g5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::aws_g5_k>>;
+extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::aws_g5_k>>;
 #endif
 #endif // FORKUNION_TARGET_ARM64_WFET
 #if NUMKONG_TARGET_NEONFP8
 /* nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 arms */
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::nvidia_vera_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_index<nk_e3m2_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::nvidia_vera_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::nvidia_vera_k>>;
 #endif
 #endif // NUMKONG_TARGET_NEONFP8
 #if FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
 /* alibaba_c930 over serial by risc5_wrs, risc5_zacas: every dtype, 11 arms */
-extern template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::alibaba_c930_k>>;
+extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::alibaba_c930_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_index<nk_u1_k, cpu_class_t::alibaba_c930_k>>;
+extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::alibaba_c930_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_index<nk_i8_k, cpu_class_t::alibaba_c930_k>>;
+extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::alibaba_c930_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::alibaba_c930_k>>;
+extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::alibaba_c930_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_index<nk_f16_k, cpu_class_t::alibaba_c930_k>>;
+extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::alibaba_c930_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_index<nk_u8_k, cpu_class_t::alibaba_c930_k>>;
+extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::alibaba_c930_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::alibaba_c930_k>>;
+extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::alibaba_c930_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_index<nk_i4_k, cpu_class_t::alibaba_c930_k>>;
+extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::alibaba_c930_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_index<nk_u4_k, cpu_class_t::alibaba_c930_k>>;
+extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::alibaba_c930_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_index<nk_e3m2_k, cpu_class_t::alibaba_c930_k>>;
+extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::alibaba_c930_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::alibaba_c930_k>>;
+extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::alibaba_c930_k>>;
 #endif
 #endif // FORKUNION_TARGET_RISC5_WRS || FORKUNION_TARGET_RISC5_ZACAS
 #if NUMKONG_TARGET_V128
 /* wasm32_v128 over serial by v128: bf16 u1 i8 u8, 4 arms */
-extern template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::wasm32_v128_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_index<nk_u1_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::wasm32_v128_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_index<nk_i8_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::wasm32_v128_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_index<nk_u8_k, cpu_class_t::wasm32_v128_k>>;
+extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::wasm32_v128_k>>;
 #endif
 #endif // NUMKONG_TARGET_V128
 #if NUMKONG_TARGET_V128RELAXED
 /* wasm64_extended over wasm32_v128 by v128relaxed:
  * bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms */
-extern template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::wasm64_extended_k>>;
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_index<nk_i8_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::wasm64_extended_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::wasm64_extended_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_index<nk_f16_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::wasm64_extended_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_index<nk_u8_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::wasm64_extended_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::wasm64_extended_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_index<nk_i4_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::wasm64_extended_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_index<nk_u4_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::wasm64_extended_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_index<nk_e3m2_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::wasm64_extended_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::wasm64_extended_k>>;
+extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::wasm64_extended_k>>;
 #endif
 #endif // NUMKONG_TARGET_V128RELAXED
 #if USEARCH_ARCH_CUDA_
 /* nvidia_blackwellrtx over nvidia_ampere by "120f": every cell, 11 arms */
-extern template struct specialized_index<vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_blackwellrtx_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_blackwellrtx_k>>;
 #endif
 /* nvidia_blackwell over nvidia_ampere by "100f": every cell, 11 arms */
-extern template struct specialized_index<vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_blackwell_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_blackwell_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_blackwell_k>>;
 #endif
 /* nvidia_hopper over nvidia_ampere by "90a": every cell, 11 arms */
-extern template struct specialized_index<vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_hopper_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_hopper_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_hopper_k>>;
 #endif
 /* nvidia_ada over nvidia_ampere by "89": every cell, 11 arms */
-extern template struct specialized_index<vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_ada_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_ada_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_ada_k>>;
 #endif
 /* nvidia_ampere, the floor by "80", its PTX serving every GPU without a class:
  * every cell, 11 arms */
-extern template struct specialized_index<vram_nvidia_index<nk_bf16_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_bf16_k, gpu_class_t::nvidia_ampere_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_nvidia_index<nk_u1_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u1_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_nvidia_index<nk_i8_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_i8_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_nvidia_index<nk_e4m3_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e4m3_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_nvidia_index<nk_f16_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_f16_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_nvidia_index<nk_u8_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u8_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_nvidia_index<nk_e5m2_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e5m2_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_nvidia_index<nk_i4_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_i4_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_nvidia_index<nk_u4_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_u4_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_nvidia_index<nk_e3m2_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e3m2_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_nvidia_index<nk_e2m3_k, gpu_class_t::nvidia_ampere_k>>;
+extern template struct specialized_index<vram_nvidia_indexes<nk_e2m3_k, gpu_class_t::nvidia_ampere_k>>;
 #endif
 #endif // USEARCH_ARCH_CUDA_
 #if USEARCH_ARCH_ROCM_
+#if USEARCH_ARCH_CDNA5_
 /* amd_cdna5 over amd_cdna3 by "gfx1250", 32-wide waves: every cell, 11 arms */
-extern template struct specialized_index<vram_amd_index<nk_bf16_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna5_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_amd_index<nk_u1_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_amd_index<nk_i8_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_i8_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_amd_index<nk_e4m3_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_e4m3_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_amd_index<nk_f16_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_f16_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_amd_index<nk_u8_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_u8_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_amd_index<nk_e5m2_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_e5m2_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_amd_index<nk_i4_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_i4_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_amd_index<nk_u4_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_u4_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_amd_index<nk_e3m2_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_e3m2_k, gpu_class_t::amd_cdna5_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_amd_index<nk_e2m3_k, gpu_class_t::amd_cdna5_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna5_k>>;
 #endif
+#endif // USEARCH_ARCH_CDNA5_
+#if USEARCH_ARCH_CDNA4_
 /* amd_cdna4 over amd_cdna3 by "gfx950": every cell, 11 arms */
-extern template struct specialized_index<vram_amd_index<nk_bf16_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna4_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_amd_index<nk_u1_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_amd_index<nk_i8_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_i8_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_amd_index<nk_e4m3_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_e4m3_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_amd_index<nk_f16_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_f16_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_amd_index<nk_u8_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_u8_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_amd_index<nk_e5m2_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_e5m2_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_amd_index<nk_i4_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_i4_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_amd_index<nk_u4_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_u4_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_amd_index<nk_e3m2_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_e3m2_k, gpu_class_t::amd_cdna4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_amd_index<nk_e2m3_k, gpu_class_t::amd_cdna4_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna4_k>>;
 #endif
+#endif // USEARCH_ARCH_CDNA4_
 /* amd_cdna3, the AMD floor by "gfx942": every cell, 11 arms */
-extern template struct specialized_index<vram_amd_index<nk_bf16_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna3_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_amd_index<nk_u1_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_amd_index<nk_i8_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_i8_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_amd_index<nk_e4m3_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_e4m3_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_amd_index<nk_f16_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_f16_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_amd_index<nk_u8_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_u8_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_amd_index<nk_e5m2_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_e5m2_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_amd_index<nk_i4_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_i4_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_amd_index<nk_u4_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_u4_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_amd_index<nk_e3m2_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_e3m2_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_amd_index<nk_e2m3_k, gpu_class_t::amd_cdna3_k>>;
+extern template struct specialized_index<vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna3_k>>;
 #endif
 #endif // USEARCH_ARCH_ROCM_
 #if USEARCH_ARCH_METAL_
 /* apple, serving every Apple class until a family's kernels differ: every cell, 11 arms */
-extern template struct specialized_index<vram_apple_index<nk_bf16_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_bf16_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<vram_apple_index<nk_u1_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_u1_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<vram_apple_index<nk_i8_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_i8_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<vram_apple_index<nk_e4m3_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_e4m3_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<vram_apple_index<nk_f16_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_f16_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<vram_apple_index<nk_u8_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_u8_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<vram_apple_index<nk_e5m2_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_e5m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<vram_apple_index<nk_i4_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_i4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<vram_apple_index<nk_u4_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_u4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<vram_apple_index<nk_e3m2_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_e3m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<vram_apple_index<nk_e2m3_k>>;
+extern template struct specialized_index<vram_apple_indexes<nk_e2m3_k>>;
 #endif
 #endif // USEARCH_ARCH_METAL_
 #if NUMKONG_TARGET_HASWELL
 /* NVMe intel_haswell over serial by haswell: every dtype, 11 arms */
-extern template struct specialized_index<nvme_index<nk_bf16_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::intel_haswell_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<nvme_index<nk_u1_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<nvme_index<nk_i8_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_index<nk_e4m3_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<nvme_index<nk_f16_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<nvme_index<nk_u8_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_index<nk_e5m2_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<nvme_index<nk_i4_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_indexes<nk_i4_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<nvme_index<nk_u4_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u4_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<nvme_index<nk_e3m2_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_index<nk_e2m3_k, cpu_class_t::intel_haswell_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::intel_haswell_k>>;
 #endif
 #endif // NUMKONG_TARGET_HASWELL
 #if NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 /* NVMe intel_sierra over intel_haswell by alder, sierra: i8 u8 e2m3, 3 arms */
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<nvme_index<nk_i8_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<nvme_index<nk_u8_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_index<nk_e2m3_k, cpu_class_t::intel_sierra_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::intel_sierra_k>>;
 #endif
 #endif // NUMKONG_TARGET_ALDER || NUMKONG_TARGET_SIERRA
 #if NUMKONG_TARGET_SKYLAKE
 /* NVMe intel_skylake over intel_haswell by skylake: bf16 e4m3 f16 e5m2 e3m2 e2m3, 6 arms */
-extern template struct specialized_index<nvme_index<nk_bf16_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::intel_skylake_k>>;
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_index<nk_e4m3_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::intel_skylake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<nvme_index<nk_f16_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::intel_skylake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_index<nk_e5m2_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::intel_skylake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<nvme_index<nk_e3m2_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::intel_skylake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_index<nk_e2m3_k, cpu_class_t::intel_skylake_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::intel_skylake_k>>;
 #endif
 #endif // NUMKONG_TARGET_SKYLAKE
 #if NUMKONG_TARGET_ICELAKE
 /* NVMe intel_icelake over intel_skylake by icelake: u1 i8 u8 i4 u4, 5 arms */
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<nvme_index<nk_u1_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::intel_icelake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<nvme_index<nk_i8_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::intel_icelake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<nvme_index<nk_u8_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::intel_icelake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<nvme_index<nk_i4_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_indexes<nk_i4_k, cpu_class_t::intel_icelake_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<nvme_index<nk_u4_k, cpu_class_t::intel_icelake_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u4_k, cpu_class_t::intel_icelake_k>>;
 #endif
 #endif // NUMKONG_TARGET_ICELAKE
 #if NUMKONG_TARGET_GENOA
 /* NVMe amd_genoa over intel_icelake by genoa: bf16 e4m3 e5m2, 3 arms */
-extern template struct specialized_index<nvme_index<nk_bf16_k, cpu_class_t::amd_genoa_k>>;
+extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::amd_genoa_k>>;
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_index<nk_e4m3_k, cpu_class_t::amd_genoa_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::amd_genoa_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_index<nk_e5m2_k, cpu_class_t::amd_genoa_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::amd_genoa_k>>;
 #endif
 #endif // NUMKONG_TARGET_GENOA
 #if NUMKONG_TARGET_SAPPHIREAMX
 /* NVMe intel_sapphire over amd_genoa by sapphireamx: bf16 i8 e4m3 u8 e5m2 e3m2 e2m3, 7 arms */
-extern template struct specialized_index<nvme_index<nk_bf16_k, cpu_class_t::intel_sapphire_k>>;
+extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::intel_sapphire_k>>;
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<nvme_index<nk_i8_k, cpu_class_t::intel_sapphire_k>>;
+extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::intel_sapphire_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_index<nk_e4m3_k, cpu_class_t::intel_sapphire_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::intel_sapphire_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<nvme_index<nk_u8_k, cpu_class_t::intel_sapphire_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::intel_sapphire_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_index<nk_e5m2_k, cpu_class_t::intel_sapphire_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::intel_sapphire_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<nvme_index<nk_e3m2_k, cpu_class_t::intel_sapphire_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::intel_sapphire_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_index<nk_e2m3_k, cpu_class_t::intel_sapphire_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::intel_sapphire_k>>;
 #endif
 #endif // NUMKONG_TARGET_SAPPHIREAMX
 #if NUMKONG_TARGET_GRANITEAMX
 /* NVMe intel_granite over intel_sapphire by graniteamx: f16 e5m2, 2 arms */
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<nvme_index<nk_f16_k, cpu_class_t::intel_granite_k>>;
+extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::intel_granite_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_index<nk_e5m2_k, cpu_class_t::intel_granite_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::intel_granite_k>>;
 #endif
 #endif // NUMKONG_TARGET_GRANITEAMX
 #if NUMKONG_TARGET_DIAMOND
 /* NVMe intel_diamond over intel_granite by diamond: e4m3 e5m2, 2 arms */
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_index<nk_e4m3_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::intel_diamond_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_index<nk_e5m2_k, cpu_class_t::intel_diamond_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::intel_diamond_k>>;
 #endif
 #endif // NUMKONG_TARGET_DIAMOND
 #if NUMKONG_TARGET_NEON
 /* NVMe aws_g2 over serial by neon: bf16 u1 f16, 3 arms */
-extern template struct specialized_index<nvme_index<nk_bf16_k, cpu_class_t::aws_g2_k>>;
+extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::aws_g2_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<nvme_index<nk_u1_k, cpu_class_t::aws_g2_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::aws_g2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<nvme_index<nk_f16_k, cpu_class_t::aws_g2_k>>;
+extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::aws_g2_k>>;
 #endif
 #endif // NUMKONG_TARGET_NEON
 #if NUMKONG_TARGET_NEONBFDOT
 /* NVMe apple_m2 over aws_g2 by neonbfdot: bf16, 1 arm */
-extern template struct specialized_index<nvme_index<nk_bf16_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if NUMKONG_TARGET_NEONFHM
 /* NVMe apple_m2 over aws_g2 by neonfhm: e4m3 f16 e5m2, 3 arms */
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_index<nk_e4m3_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<nvme_index<nk_f16_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_index<nk_e5m2_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::apple_m2_k>>;
 #endif
 #endif // NUMKONG_TARGET_NEONFHM
 #if NUMKONG_TARGET_NEONSDOT
 /* NVMe apple_m2 over aws_g2 by neonsdot: i8 u8 i4 u4 e3m2 e2m3, 6 arms */
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<nvme_index<nk_i8_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<nvme_index<nk_u8_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<nvme_index<nk_i4_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_indexes<nk_i4_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<nvme_index<nk_u4_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u4_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<nvme_index<nk_e3m2_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::apple_m2_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_index<nk_e2m3_k, cpu_class_t::apple_m2_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::apple_m2_k>>;
 #endif
 #endif // NUMKONG_TARGET_NEONSDOT
 #if NUMKONG_TARGET_SME
 /* NVMe apple_m4 over apple_m2 by sme: bf16 i8 e4m3 f16 u8 e5m2 i4 u4 e3m2 e2m3, 10 arms */
-extern template struct specialized_index<nvme_index<nk_bf16_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::apple_m4_k>>;
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<nvme_index<nk_i8_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_index<nk_e4m3_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<nvme_index<nk_f16_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<nvme_index<nk_u8_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_index<nk_e5m2_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<nvme_index<nk_i4_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<nvme_indexes<nk_i4_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<nvme_index<nk_u4_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u4_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<nvme_index<nk_e3m2_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::apple_m4_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_index<nk_e2m3_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::apple_m4_k>>;
 #endif
 #endif // NUMKONG_TARGET_SME
 #if NUMKONG_TARGET_SMEBI32
 /* NVMe apple_m4 over apple_m2 by smebi32: u1, 1 arm */
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<nvme_index<nk_u1_k, cpu_class_t::apple_m4_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::apple_m4_k>>;
 #endif
 #endif // NUMKONG_TARGET_SMEBI32
 #if NUMKONG_TARGET_NEONFP8
 /* NVMe nvidia_vera over aws_g5 by neonfp8: e4m3 e5m2 e3m2 e2m3, 4 arms */
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_index<nk_e4m3_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::nvidia_vera_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_index<nk_e5m2_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::nvidia_vera_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<nvme_index<nk_e3m2_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::nvidia_vera_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_index<nk_e2m3_k, cpu_class_t::nvidia_vera_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::nvidia_vera_k>>;
 #endif
 #endif // NUMKONG_TARGET_NEONFP8
 /* The NVMe serial floor: every wired cell, every platform. */
-extern template struct specialized_index<nvme_index<nk_bf16_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_indexes<nk_bf16_k, cpu_class_t::serial_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<nvme_index<nk_u1_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u1_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<nvme_index<nk_i8_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_indexes<nk_i8_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<nvme_index<nk_e4m3_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e4m3_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<nvme_index<nk_f16_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_indexes<nk_f16_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<nvme_index<nk_u8_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u8_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<nvme_index<nk_e5m2_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e5m2_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<nvme_index<nk_i4_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_indexes<nk_i4_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<nvme_index<nk_u4_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_indexes<nk_u4_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<nvme_index<nk_e3m2_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e3m2_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<nvme_index<nk_e2m3_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<nvme_indexes<nk_e2m3_k, cpu_class_t::serial_k>>;
 #endif
 /* The serial floor: every wired cell, every platform, the standard yield. */
-extern template struct specialized_index<ram_index<nk_bf16_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<ram_indexes<nk_bf16_k, cpu_class_t::serial_k>>;
 #if USEARCH_DENSE_DTYPES >= 2
-extern template struct specialized_index<ram_index<nk_u1_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<ram_indexes<nk_u1_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-extern template struct specialized_index<ram_index<nk_i8_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<ram_indexes<nk_i8_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-extern template struct specialized_index<ram_index<nk_e4m3_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<ram_indexes<nk_e4m3_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-extern template struct specialized_index<ram_index<nk_f16_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<ram_indexes<nk_f16_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-extern template struct specialized_index<ram_index<nk_u8_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<ram_indexes<nk_u8_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-extern template struct specialized_index<ram_index<nk_e5m2_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<ram_indexes<nk_e5m2_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-extern template struct specialized_index<ram_index<nk_i4_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<ram_indexes<nk_i4_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-extern template struct specialized_index<ram_index<nk_u4_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<ram_indexes<nk_u4_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-extern template struct specialized_index<ram_index<nk_e3m2_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::serial_k>>;
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-extern template struct specialized_index<ram_index<nk_e2m3_k, cpu_class_t::serial_k>>;
+extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::serial_k>>;
 #endif
 
 /** Whether @p alternative_type_ is listed in @p variant_type_ - the membership fact the ladder
@@ -2154,7 +2162,7 @@ template <typename multi_type_>
     requires is_ram_index<multi_type_> || is_nvme_index<multi_type_>
 static void compose_capabilities(usearch_dense_index_handle_t& handle, multi_type_ const&) noexcept {
     constexpr nk_capability_t picked =
-        dense_quads_chain<typename multi_type_::scalar_t, multi_type_::capability_k>::picked_k;
+        us::dense::quads_chain<typename multi_type_::scalar_t, multi_type_::capability_k>::picked_k;
     for (numkong_capability_name_t const& named : numkong_capability_names_k)
         if (picked & named.bit) append_capability(handle, named.name);
 }
@@ -2239,10 +2247,10 @@ template <nk_dtype_t dtype_, cpu_class_t cpu_class_>
 consteval bool rung_advances() noexcept {
     constexpr cpu_class_t parent_k = parent_class_of(cpu_class_);
     using scalar_t = typename nk::type_for<dtype_>::type;
-    using upper_chain_t = dense_quads_chain<scalar_t, numkong_capabilities_of(cpu_class_)>;
-    using lower_chain_t = dense_quads_chain<scalar_t, numkong_capabilities_of(parent_k)>;
-    using upper_tiles_t = dense_tiles_chain<scalar_t, numkong_capabilities_of(cpu_class_)>;
-    using lower_tiles_t = dense_tiles_chain<scalar_t, numkong_capabilities_of(parent_k)>;
+    using upper_chain_t = us::dense::quads_chain<scalar_t, numkong_capabilities_of(cpu_class_)>;
+    using lower_chain_t = us::dense::quads_chain<scalar_t, numkong_capabilities_of(parent_k)>;
+    using upper_tiles_t = us::dense::tiles_chain<scalar_t, numkong_capabilities_of(cpu_class_)>;
+    using lower_tiles_t = us::dense::tiles_chain<scalar_t, numkong_capabilities_of(parent_k)>;
     return upper_chain_t::picked_k != lower_chain_t::picked_k || upper_tiles_t::picked_k != lower_tiles_t::picked_k ||
            forkunion_capabilities_of<cpu_class_>() != forkunion_capabilities_of<parent_k>();
 }
@@ -2252,7 +2260,7 @@ template <nk_dtype_t dtype_>
 static usearch_dense_index_t descend_ram_ladder(usearch_dense_metadata_t const& geometry,
                                                 usearch_ram_options_t const& ram, nk_kernel_kind_t kernel,
                                                 nk_capability_t, usearch_outcome_t* outcome) noexcept {
-    return make_punned_dense_index<ram_index<dtype_, cpu_class_t::serial_k>>(geometry, ram, kernel, outcome);
+    return make_punned_dense_index<ram_indexes<dtype_, cpu_class_t::serial_k>>(geometry, ram, kernel, outcome);
 }
 
 /** One rung: taken when the machine reports the class, else falls through; a class that picks
@@ -2263,10 +2271,10 @@ static usearch_dense_index_t descend_ram_ladder(usearch_dense_metadata_t const& 
                                                 nk_capability_t available, usearch_outcome_t* outcome) noexcept {
     if constexpr (rung_advances<dtype_, cpu_class_>()) {
         if (numkong_admits(available, cpu_class_) && forkunion_admits<cpu_class_>())
-            return make_punned_dense_index<ram_index<dtype_, cpu_class_>>(geometry, ram, kernel, outcome);
+            return make_punned_dense_index<ram_indexes<dtype_, cpu_class_>>(geometry, ram, kernel, outcome);
     }
     else {
-        static_assert(!variant_carries<ram_index<dtype_, cpu_class_>, usearch_dense_index_handle_t::variants_t>,
+        static_assert(!variant_carries<ram_indexes<dtype_, cpu_class_>, usearch_dense_index_handle_t::variants_t>,
                       "This rung no longer advances past the one below - drop its arm from the variant list");
     }
     return descend_ram_ladder<dtype_, lower_classes_...>(geometry, ram, kernel, available, outcome);
@@ -2308,8 +2316,8 @@ consteval bool nvme_rung_advances() noexcept {
     using scalar_t = typename nk::type_for<dtype_>::type;
     constexpr nk_capability_t upper = numkong_capabilities_of(cpu_class_);
     constexpr nk_capability_t lower = numkong_capabilities_of(parent_class_of(cpu_class_));
-    return dense_quads_chain<scalar_t, upper>::picked_k != dense_quads_chain<scalar_t, lower>::picked_k ||
-           dense_tiles_chain<scalar_t, upper>::picked_k != dense_tiles_chain<scalar_t, lower>::picked_k;
+    return us::dense::quads_chain<scalar_t, upper>::picked_k != us::dense::quads_chain<scalar_t, lower>::picked_k ||
+           us::dense::tiles_chain<scalar_t, upper>::picked_k != us::dense::tiles_chain<scalar_t, lower>::picked_k;
 }
 
 /** The unconditional serial floor of every NVMe ladder. */
@@ -2317,7 +2325,7 @@ template <nk_dtype_t dtype_>
 static usearch_dense_index_t descend_nvme_ladder(usearch_dense_metadata_t const& geometry, nvme_placement_t const& nvme,
                                                  nk_kernel_kind_t kernel, nk_capability_t,
                                                  usearch_outcome_t* outcome) noexcept {
-    return make_punned_dense_index<nvme_index<dtype_, cpu_class_t::serial_k>>(geometry, nvme, kernel, outcome);
+    return make_punned_dense_index<nvme_indexes<dtype_, cpu_class_t::serial_k>>(geometry, nvme, kernel, outcome);
 }
 
 /** One NVMe rung: taken when the machine reports the class's kits, else falls through; a class that
@@ -2328,13 +2336,13 @@ static usearch_dense_index_t descend_nvme_ladder(usearch_dense_metadata_t const&
                                                  usearch_outcome_t* outcome) noexcept {
     if constexpr (nvme_rung_advances<dtype_, cpu_class_>()) {
         if (numkong_admits(available, cpu_class_))
-            return make_punned_dense_index<nvme_index<dtype_, cpu_class_>>(geometry, nvme, kernel, outcome);
+            return make_punned_dense_index<nvme_indexes<dtype_, cpu_class_>>(geometry, nvme, kernel, outcome);
     }
     else {
         // A class sharing its parent's mask names the parent's very arm, which the variant rightly
         // carries.
         static_assert(numkong_capabilities_of(cpu_class_) == numkong_capabilities_of(parent_class_of(cpu_class_)) ||
-                          !variant_carries<nvme_index<dtype_, cpu_class_>, usearch_dense_index_handle_t::variants_t>,
+                          !variant_carries<nvme_indexes<dtype_, cpu_class_>, usearch_dense_index_handle_t::variants_t>,
                       "This NVMe rung no longer advances past the one below - drop its arm from the variant list");
     }
     return descend_nvme_ladder<dtype_, lower_classes_...>(geometry, nvme, kernel, available, outcome);
@@ -2395,37 +2403,41 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
     switch (gpu_class) {
 #if USEARCH_ARCH_CUDA_
     case gpu_class_t::nvidia_blackwellrtx_k:
-        return make_punned_dense_index<vram_nvidia_index<dtype_, gpu_class_t::nvidia_blackwellrtx_k>>(geometry, vram,
-                                                                                                      kernel, outcome);
+        return make_punned_dense_index<vram_nvidia_indexes<dtype_, gpu_class_t::nvidia_blackwellrtx_k>>(
+            geometry, vram, kernel, outcome);
     case gpu_class_t::nvidia_blackwell_k:
-        return make_punned_dense_index<vram_nvidia_index<dtype_, gpu_class_t::nvidia_blackwell_k>>(geometry, vram,
-                                                                                                   kernel, outcome);
+        return make_punned_dense_index<vram_nvidia_indexes<dtype_, gpu_class_t::nvidia_blackwell_k>>(geometry, vram,
+                                                                                                     kernel, outcome);
     case gpu_class_t::nvidia_hopper_k:
-        return make_punned_dense_index<vram_nvidia_index<dtype_, gpu_class_t::nvidia_hopper_k>>(geometry, vram, kernel,
-                                                                                                outcome);
+        return make_punned_dense_index<vram_nvidia_indexes<dtype_, gpu_class_t::nvidia_hopper_k>>(geometry, vram,
+                                                                                                  kernel, outcome);
     case gpu_class_t::nvidia_ada_k:
-        return make_punned_dense_index<vram_nvidia_index<dtype_, gpu_class_t::nvidia_ada_k>>(geometry, vram, kernel,
-                                                                                             outcome);
+        return make_punned_dense_index<vram_nvidia_indexes<dtype_, gpu_class_t::nvidia_ada_k>>(geometry, vram, kernel,
+                                                                                               outcome);
     case gpu_class_t::nvidia_ampere_k:
-        return make_punned_dense_index<vram_nvidia_index<dtype_, gpu_class_t::nvidia_ampere_k>>(geometry, vram, kernel,
-                                                                                                outcome);
+        return make_punned_dense_index<vram_nvidia_indexes<dtype_, gpu_class_t::nvidia_ampere_k>>(geometry, vram,
+                                                                                                  kernel, outcome);
 #endif
 #if USEARCH_ARCH_ROCM_
+#if USEARCH_ARCH_CDNA5_
     case gpu_class_t::amd_cdna5_k:
-        return make_punned_dense_index<vram_amd_index<dtype_, gpu_class_t::amd_cdna5_k>>(geometry, vram, kernel,
-                                                                                         outcome);
-    case gpu_class_t::amd_cdna4_k:
-        return make_punned_dense_index<vram_amd_index<dtype_, gpu_class_t::amd_cdna4_k>>(geometry, vram, kernel,
-                                                                                         outcome);
-    case gpu_class_t::amd_cdna3_k:
-        return make_punned_dense_index<vram_amd_index<dtype_, gpu_class_t::amd_cdna3_k>>(geometry, vram, kernel,
-                                                                                         outcome);
+        return make_punned_dense_index<vram_amd_indexes<dtype_, gpu_class_t::amd_cdna5_k>>(geometry, vram, kernel,
+                                                                                           outcome);
 #endif
+#if USEARCH_ARCH_CDNA4_
+    case gpu_class_t::amd_cdna4_k:
+        return make_punned_dense_index<vram_amd_indexes<dtype_, gpu_class_t::amd_cdna4_k>>(geometry, vram, kernel,
+                                                                                           outcome);
+#endif
+    case gpu_class_t::amd_cdna3_k:
+        return make_punned_dense_index<vram_amd_indexes<dtype_, gpu_class_t::amd_cdna3_k>>(geometry, vram, kernel,
+                                                                                           outcome);
+#endif // USEARCH_ARCH_ROCM_
 #if USEARCH_ARCH_METAL_
     case gpu_class_t::apple_metal10_k:
     case gpu_class_t::apple_metal9_k:
     case gpu_class_t::apple_metal7_k:
-        return make_punned_dense_index<vram_apple_index<dtype_>>(geometry, vram, kernel, outcome);
+        return make_punned_dense_index<vram_apple_indexes<dtype_>>(geometry, vram, kernel, outcome);
 #endif
     default:
         return propagate_error(usearch_status_device_k, outcome,
@@ -2971,7 +2983,7 @@ static expected<std::size_t> export_rows(std::byte* landing, std::size_t rows, n
     nk::matrix<scalar_type_> staged = std::move(zeros.value);
     expected<std::size_t> const exported = fill(staged.span());
     for (std::size_t row = 0; exported && row != min_of(exported.value, rows); ++row) {
-        [[maybe_unused]] nk_status_t const cast = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
+        [[maybe_unused]] nk_status_t const cast = us::dense::elementwise_chain<nk_cap_any_k>::kit_t::cast(
             staged.span().row(row).as_vector().byte_data(), stored_dtype, landing + row * row_bytes, target_dtype,
             dimensions, nullptr);
         assert(cast == nk_success_k && "The serial tier casts every dtype pair");
@@ -3081,7 +3093,7 @@ static void land_scores(nk::matrix_view<score_type_> staged, nk_dtype_t staged_d
     std::size_t const runs = packed ? 1 : staged.extent(0);
     std::size_t const run_length = packed ? staged.extent(0) * staged.extent(1) : staged.extent(1);
     for (std::size_t run = 0; run_length && run != runs; ++run) {
-        [[maybe_unused]] nk_status_t const cast = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
+        [[maybe_unused]] nk_status_t const cast = us::dense::elementwise_chain<nk_cap_any_k>::kit_t::cast(
             staged.row(run).data(), staged_dtype, scores.row(run).data(), nk_f64_k, run_length, nullptr);
         assert(cast == nk_success_k && "The serial tier casts every dtype pair");
     }
@@ -3310,7 +3322,7 @@ USEARCH_EXPORT void usearch_dense_view_nvme(usearch_dense_view_nvme_t* arguments
     for (std::size_t path = 0; path != paths_count; ++path) paths[path] = as_text(nvme.paths[path]);
 
     // The view's own header read, so a transport ID names a checkpoint as a file path does.
-    auto const [checkpoint, read_status] = dense_nvme_read_metadata(as_text(arguments->path));
+    auto const [checkpoint, read_status] = us::dense::nvme_read_metadata(as_text(arguments->path));
     if (failed(read_status)) return propagate_error(read_status, outcome), void();
     usearch_dense_metadata_t geometry {};
     adopt_metadata(checkpoint, &geometry);
@@ -3392,7 +3404,7 @@ USEARCH_EXPORT void usearch_dense_describe(usearch_dense_describe_t* arguments) 
 USEARCH_EXPORT void usearch_dense_count(usearch_dense_count_t* arguments) {
     if (submitted<usearch_dense_count>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    us::uuid_t const key = uuid_of(arguments->key);
+    us::utilities::uuid_t const key = uuid_of(arguments->key);
     *arguments->entries = 0;
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
@@ -3567,7 +3579,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
 USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
     if (submitted<usearch_dense_get>(arguments)) return;
     call_outcome_t outcome(arguments->outcome, arguments->arena);
-    us::uuid_t const key = uuid_of(arguments->key);
+    us::utilities::uuid_t const key = uuid_of(arguments->key);
     usearch_scalar_t const scalar = arguments->outputs_scalar;
     *arguments->vectors = {};
     if (arguments->written) *arguments->written = 0;
@@ -3829,7 +3841,7 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                     // A run starts no later than its own row, so moving rows in order
                     // overwrites only rows already moved.
                     std::memmove(keys + offsets[row], keys + row * width, kept * sizeof(usearch_key_t));
-                    [[maybe_unused]] nk_status_t const cast = dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
+                    [[maybe_unused]] nk_status_t const cast = us::dense::elementwise_chain<nk_cap_any_k>::kit_t::cast(
                         kept_products.row(row).data(), dot_result_t::dtype(), scores + offsets[row], nk_f64_k, kept,
                         nullptr);
                     assert(cast == nk_success_k && "The serial tier casts every dtype pair");
@@ -3843,7 +3855,7 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
         arguments->index->variants);
 }
 
-static_assert(sizeof(us::dense_softmax_state_t) == sizeof(usearch_dense_softmax_state_t));
+static_assert(sizeof(us::dense::softmax_state_t) == sizeof(usearch_dense_softmax_state_t));
 
 USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
     if (submitted<usearch_dense_attend>(arguments)) return;
@@ -3892,7 +3904,7 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                 // Outputs stage as `f32` and narrow one row at a time; the carry stages beside them.
                 auto make_sink = [&](std::size_t chunk, status_t& staged) noexcept {
                     growing_buffer<f32_t> staged_outputs {global_allocator};
-                    growing_buffer<us::dense_softmax_state_t> staged_carry {global_allocator};
+                    growing_buffer<us::dense::softmax_state_t> staged_carry {global_allocator};
                     growing_buffer<std::byte> narrowed {global_allocator};
                     if (failed(staged_outputs.resize(chunk * columns)) || failed(staged_carry.resize(chunk)) ||
                         failed(narrowed.resize(row_bytes)))
@@ -3914,7 +3926,7 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                         for (std::size_t row = 0; row != taking; ++row) {
                             std::byte* const target = landing + (resolved + row) * row_bytes;
                             [[maybe_unused]] nk_status_t const cast =
-                                dense_elementwise_chain<nk_cap_any_k>::kit_t::cast(
+                                us::dense::elementwise_chain<nk_cap_any_k>::kit_t::cast(
                                     attended.row(row).data(), nk_f32_k,
                                     device == host_device_k ? target : narrowed.data(), outputs_dtype, columns,
                                     nullptr);
@@ -4175,10 +4187,17 @@ USEARCH_EXPORT void usearch_gpu_devices(usearch_gpu_devices_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     std::span<gpu_device_t const> const listed = gpu_devices();
     std::size_t const copied = arguments->devices ? min_of(listed.size(), arguments->devices_capacity) : 0;
-    for (std::size_t position = 0; position != copied; ++position)
-        arguments->devices[position] = {static_cast<usearch_gpu_vendor_t>(listed[position].vendor),
-                                        listed[position].vendor_ordinal,
-                                        static_cast<usearch_gpu_class_t>(listed[position].gpu_class)};
+    for (std::size_t position = 0; position != copied; ++position) {
+        gpu_device_t const& device = listed[position];
+        usearch_gpu_device_t& landed = arguments->devices[position];
+        landed = {static_cast<usearch_gpu_vendor_t>(device.vendor),
+                  device.vendor_ordinal,
+                  static_cast<usearch_gpu_class_t>(device.gpu_class),
+                  device.compute_units,
+                  device.memory_bytes,
+                  {}};
+        std::memcpy(landed.name, device.name, sizeof(landed.name));
+    }
     if (arguments->devices_count) *arguments->devices_count = listed.size();
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }

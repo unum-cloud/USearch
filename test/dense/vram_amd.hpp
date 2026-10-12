@@ -87,15 +87,15 @@ using counting_hip_allocator_t = counting_hip_allocator<byte_t>;
 static_assert(hip_reservable_allocator<counting_hip_allocator_t>);
 
 /** The AMD class the suite links, whose code object its device must load: CDNA3, the floor. */
-inline constexpr nk_capability_t dense_amd_capabilities_k = dense_amd_capabilities_of(gpu_class_t::amd_cdna3_k);
+inline constexpr nk_capability_t dense_amd_capabilities_k = amd_capabilities_of(gpu_class_t::amd_cdna3_k);
 
 /** The AMD index of one (dtype, kernel) cell over the ledgered planes, its sharded collection, and
  *  the factory the shared composers build the index with. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::amd_k, dtype_, kernel_> {
-    using index_t = dense_vram_amd_index<dtype_, dense_amd_capabilities_k, counting_hip_allocator_t,
-                                         counting_hip_allocator_t, selected_hip_allocator<>>;
-    using indexes_t = dense_vram_amd_indexes<u32_t, dtype_, dense_amd_capabilities_k>;
+    using index_t = vram_amd_index<dtype_, dense_amd_capabilities_k, counting_hip_allocator_t, counting_hip_allocator_t,
+                                   selected_hip_allocator<>>;
+    using indexes_t = vram_amd_indexes<u32_t, dtype_, dense_amd_capabilities_k>;
     inline static constexpr char const* vendor_prefix_k = "rocm";
 
     static index_t make_index(allocation_ledger_t& ledger) noexcept {

@@ -27,7 +27,7 @@
 
 namespace fu = ashvardanian::forkunion;
 namespace us = unum::usearch;
-using us::u32_t;
+using us::utilities::u32_t;
 template <typename value_type_>
 using atomic_ref = fu::standard_atomic_ref<value_type_>;
 

@@ -3,7 +3,7 @@
  *  @author Ash Vardanian
  *  @date October 10, 2026
  *  @brief The sharded index over SafeGraphs parts on block storage: every read verb of
- *      @c dense_ram_indexes, walking every shard of a row on one thread, and the freestanding
+ *      @c ram_indexes, walking every shard of a row on one thread, and the freestanding
  *      merge, split, refine and build that rewrite its parts.
  *
  *  A view opens the manifest or the monolith a RAM or VRAM index saved, keeps every part's medium
@@ -64,16 +64,15 @@
 #include "usearch/utilities/ram_sorts.hpp"         // `partial_sort`
 #include "usearch/utilities/safegraphs_format.hpp" // `safegraphs_read_manifest`, `safegraphs_write_manifest`
 #include "usearch/dense/types.hpp"
-#include "usearch/dense/ram_index.hpp" // `dense_ram_index`, the RAM index a block build fills
+#include "usearch/dense/ram_index.hpp" // `ram_index`, the RAM index a block build fills
 #include "usearch/dense/nvme_index.hpp"
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::dense {
 
 #if USEARCH_OS_WINDOWS_
 
 /** Whether @p path names a directory, which a relocation joins a part's file name onto. */
-inline bool dense_nvme_is_directory_(char const* path) noexcept {
+inline bool nvme_is_directory_(char const* path) noexcept {
     DWORD const attributes = ::GetFileAttributesA(path);
     return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
 }
@@ -81,7 +80,7 @@ inline bool dense_nvme_is_directory_(char const* path) noexcept {
 #else
 
 /** Whether @p path names a directory, which a relocation joins a part's file name onto. */
-inline bool dense_nvme_is_directory_(char const* path) noexcept {
+inline bool nvme_is_directory_(char const* path) noexcept {
     struct stat description;
     return ::stat(path, &description) == 0 && S_ISDIR(description.st_mode);
 }
@@ -89,11 +88,11 @@ inline bool dense_nvme_is_directory_(char const* path) noexcept {
 #endif
 
 template <typename indexes_type_>
-struct dense_nvme_indexes_cursor;
+struct nvme_indexes_cursor;
 
 /**
  *  @brief The sharded index over SafeGraphs parts on block storage, read-only: the read verbs of
- *      @c dense_ram_indexes over the parts a RAM or VRAM index saved.
+ *      @c ram_indexes over the parts a RAM or VRAM index saved.
  *
  *  A row's walks, one per part, share one row state on one executor thread, so the verbs reuse the
  *  in-memory index's folds and rescorings unchanged and need no lock. No mutating verb exists:
@@ -106,19 +105,19 @@ template <                                          //
     nk_capability_t capability_ = nk_cap_icelake_k, //
     typename engine_type_ = default_io_engine_t     //
     >
-struct dense_nvme_indexes {
-    friend struct dense_nvme_indexes_cursor<dense_nvme_indexes>;
+struct nvme_indexes {
+    friend struct nvme_indexes_cursor<nvme_indexes>;
     template <typename>
-    friend struct dense_nvme_rewrite_plan;
+    friend struct nvme_rewrite_plan;
 
     /** A reader's walk over every part's rows in placement order. */
-    using cursor_t = dense_nvme_indexes_cursor<dense_nvme_indexes>;
+    using cursor_t = nvme_indexes_cursor<nvme_indexes>;
 
     /** The caller-visible identity, read from every part's key column. */
     using key_t = key_type_;
 
     /** The one-part index, whose walks every verb drives over all parts at once. */
-    using index_t = dense_nvme_index<vector_dtype_, capability_, engine_type_>;
+    using index_t = nvme_index<vector_dtype_, capability_, engine_type_>;
 
     /** The threads, their engines and their scratch every verb runs on; it names no view, so one
      *  executor serves every view reaching the same devices. */
@@ -134,7 +133,7 @@ struct dense_nvme_indexes {
     using vector_norms_t = typename index_t::vector_norms_t;
     using search_config_t = typename index_t::search_config_t;
     using search_result_t = typename index_t::search_result_t;
-    using health_result_t = dense_health_result_t;
+    using health_result_t = dense::health_result_t;
 
     /** The stored scalar vocabulary, re-exported for dispatchers gating crossing rows. */
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
@@ -143,13 +142,13 @@ struct dense_nvme_indexes {
     inline static constexpr nk_capability_t capability_k = capability_;
 
     /** Every index names the host allocator its catalog of parts sits on. */
-    dense_nvme_indexes() = delete;
-    explicit dense_nvme_indexes(forkunion_allocator_t allocator) noexcept
+    nvme_indexes() = delete;
+    explicit nvme_indexes(forkunion_allocator_t allocator) noexcept
         : media_(allocator), parts_(allocator), allocator_(allocator) {}
-    dense_nvme_indexes(dense_nvme_indexes&&) noexcept = default;
-    dense_nvme_indexes& operator=(dense_nvme_indexes&&) noexcept = default;
-    dense_nvme_indexes(dense_nvme_indexes const&) = delete;
-    dense_nvme_indexes& operator=(dense_nvme_indexes const&) = delete;
+    nvme_indexes(nvme_indexes&&) noexcept = default;
+    nvme_indexes& operator=(nvme_indexes&&) noexcept = default;
+    nvme_indexes(nvme_indexes const&) = delete;
+    nvme_indexes& operator=(nvme_indexes const&) = delete;
 
     /**
      *  @brief Opens a manifest or a monolith, whichever its content names, and every part's header
@@ -181,10 +180,8 @@ struct dense_nvme_indexes {
     /** Whether the kernel reads rows' norms, which a rewrite's targets then carry as a column. */
     bool stores_norms() const noexcept { return index_t::stores_norms_(kernel_); }
 
-    /** The checkpoint's metadata without viewing it, @ref dense_nvme_read_metadata. */
-    static expected<safegraphs_metadata_t> metadata(std::string_view path) noexcept {
-        return dense_nvme_read_metadata(path);
-    }
+    /** The checkpoint's metadata without viewing it, @ref nvme_read_metadata. */
+    static expected<safegraphs_metadata_t> metadata(std::string_view path) noexcept { return nvme_read_metadata(path); }
 
     /** Shards in the view, one per part of the checkpoint, so a monolith views as one shard. */
     std::size_t shards_count() const noexcept { return parts_.size(); }
@@ -192,7 +189,7 @@ struct dense_nvme_indexes {
     /** Entries across every shard. */
     std::size_t size() const noexcept {
         std::size_t total = 0;
-        for (dense_nvme_part_t const& part : parts_) total += part.nodes;
+        for (nvme_part_t const& part : parts_) total += part.nodes;
         return total;
     }
 
@@ -207,7 +204,7 @@ struct dense_nvme_indexes {
 
     /** Bytes the index occupies: the catalog of parts alone, whatever the rows. */
     std::size_t memory_usage() const noexcept {
-        return sizeof(dense_nvme_indexes) + media_.memory_usage() + parts_.memory_usage();
+        return sizeof(nvme_indexes) + media_.memory_usage() + parts_.memory_usage();
     }
 
     /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
@@ -247,11 +244,11 @@ struct dense_nvme_indexes {
      *  @param[in] heads The indexer heads of every query row.
      *  @return @c config_mismatch_k unless the parts rank by dot.
      */
-    expected<search_result_t> search(vectors_view_t queries, dense_indexer_heads<scalar_t> const& heads,
-                                     executor_t& executor, search_config_t config, nk::matrix_span<key_t> keys,
+    expected<search_result_t> search(vectors_view_t queries, indexer_heads<scalar_t> const& heads, executor_t& executor,
+                                     search_config_t config, nk::matrix_span<key_t> keys,
                                      nk::matrix_span<distance_t> distances, std::span<std::size_t> counts,
                                      std::span<u64_t> latencies = {}) noexcept
-        requires dense_floating_scalar<scalar_t>
+        requires floating_scalar<scalar_t>
     {
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
@@ -302,7 +299,7 @@ struct dense_nvme_indexes {
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (counts.size() != rows_count) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = dense_rankings_refusal(rows_count, keys, products); failed(refusal))
+        if (status_t const refusal = rankings_refusal(rows_count, keys, products); failed(refusal))
             return {{}, refusal};
         if (rows_count && left.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
         typename multiply_row_t::inputs_t const inputs {left, keys, products, counts};
@@ -336,7 +333,7 @@ struct dense_nvme_indexes {
         if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
         std::size_t const groups_count = rows_count / rows_per_query;
         if (counts.size() != groups_count) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = dense_rankings_refusal(groups_count, keys, scores); failed(refusal))
+        if (status_t const refusal = rankings_refusal(groups_count, keys, scores); failed(refusal))
             return {{}, refusal};
         if (!groups_count) return {{}, status_t::success_k};
         if (queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
@@ -353,7 +350,7 @@ struct dense_nvme_indexes {
         growing_buffer<key_t, scratch_allocator_t> row_keys {scratch};
         growing_buffer<distance_t, scratch_allocator_t> row_distances {scratch};
         growing_buffer<std::size_t, scratch_allocator_t> row_counts {scratch};
-        dense_maxsim_reducer<key_t, distance_t, scratch_allocator_t> reduce {scratch};
+        maxsim_reducer<key_t, distance_t, scratch_allocator_t> reduce {scratch};
         if (failed(row_keys.resize_uninitialized(rows_count * width)) ||
             failed(row_distances.resize_uninitialized(rows_count * width)) ||
             failed(row_counts.resize_uninitialized(rows_count)) || failed(reduce.reserve(rows_per_query, width)))
@@ -396,7 +393,7 @@ struct dense_nvme_indexes {
     template <typename value_lookup_type_>
     expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
                                      f32_t score_scale, nk::matrix_span<f32_t> outputs,
-                                     std::span<dense_softmax_state_t> carry, executor_t& executor,
+                                     std::span<softmax_state_t> carry, executor_t& executor,
                                      search_config_t config = {}, std::span<u64_t> latencies = {}) noexcept {
         std::size_t const rows_count = queries.extent(0), columns = queries.extent(1);
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
@@ -434,7 +431,7 @@ struct dense_nvme_indexes {
         if (keys.empty()) return status_t::success_k;
         auto [call, call_status] = begin_scans_(executor, 1);
         if (failed(call_status)) return call_status;
-        return scan_keys_(keys, executor, [&](std::size_t position, dense_nvme_locator_t) noexcept {
+        return scan_keys_(keys, executor, [&](std::size_t position, nvme_locator_t) noexcept {
             std::atomic_ref<std::size_t>(entries[position]).fetch_add(1, std::memory_order_relaxed);
         });
     }
@@ -455,7 +452,7 @@ struct dense_nvme_indexes {
      *  @param[in] keys The keys to export, repeats and absent ones included.
      *  @param[out] vectors @b [keys·wanted,dimensions]: row q · @p wanted + i is the i-th row of
      *      key q in shard and row order, a key holding more keeping its earliest; refused as
-     *      @ref dense_rows_refusal says.
+     *      @ref rows_refusal says.
      *  @param[in] wanted Rows kept per key.
      *  @param[out] entries The true total under each key, parallel to @p keys; above @p wanted when
      *      its rows truncated, zero when absent.
@@ -465,7 +462,7 @@ struct dense_nvme_indexes {
                  std::span<std::size_t> entries, executor_t& executor) const noexcept {
         std::size_t const row_values = divide_round_up<std::size_t>(dimensions(), nk::dimensions_per_value<scalar_t>());
         if (entries.size() != keys.size()) return status_t::config_mismatch_k;
-        if (status_t const refusal = dense_rows_refusal(keys.size() * wanted, vectors, row_values); failed(refusal))
+        if (status_t const refusal = rows_refusal(keys.size() * wanted, vectors, row_values); failed(refusal))
             return refusal;
         if (parts_.empty()) return status_t::uninitialized_k;
         std::memset(entries.data(), 0, entries.size_bytes());
@@ -475,7 +472,7 @@ struct dense_nvme_indexes {
 
         // Threads meet a key's rows in any order, so each key keeps its earliest under a lock
         // striped by position, one stripe per thread.
-        growing_buffer<dense_nvme_locator_t, scratch_allocator_t> kept {scratch_allocator_t {executor.arena(0)}};
+        growing_buffer<nvme_locator_t, scratch_allocator_t> kept {scratch_allocator_t {executor.arena(0)}};
         if (failed(kept.resize_uninitialized(keys.size() * wanted))) return status_t::bad_alloc_k;
         std::size_t const stripes_count = executor.size();
         auto* const stripes = reinterpret_cast<fu::spin_mutex_t*>(
@@ -483,25 +480,24 @@ struct dense_nvme_indexes {
         if (!stripes) return status_t::bad_alloc_k;
         // nvcc mislowers a bare over-aligned placement `new`, so a standard template builds them.
         std::uninitialized_value_construct_n(stripes, stripes_count);
-        auto earlier = [](dense_nvme_locator_t first, dense_nvme_locator_t second) noexcept {
+        auto earlier = [](nvme_locator_t first, nvme_locator_t second) noexcept {
             return first.shard != second.shard ? first.shard < second.shard : first.node < second.node;
         };
-        status_t const scanned = scan_keys_(
-            keys, executor, [&](std::size_t position, dense_nvme_locator_t locator) noexcept {
-                std::unique_lock<fu::spin_mutex_t> const held {stripes[position % stripes_count]};
-                dense_nvme_locator_t* const rows = kept.data() + position * wanted;
-                std::size_t slot = min_of(entries[position]++, wanted);
-                if (slot == wanted && (!wanted || !earlier(locator, rows[wanted - 1]))) return;
-                if (slot == wanted) --slot;
-                for (; slot && earlier(locator, rows[slot - 1]); --slot) rows[slot] = rows[slot - 1];
-                rows[slot] = locator;
-            });
+        status_t const scanned = scan_keys_(keys, executor, [&](std::size_t position, nvme_locator_t locator) noexcept {
+            std::unique_lock<fu::spin_mutex_t> const held {stripes[position % stripes_count]};
+            nvme_locator_t* const rows = kept.data() + position * wanted;
+            std::size_t slot = min_of(entries[position]++, wanted);
+            if (slot == wanted && (!wanted || !earlier(locator, rows[wanted - 1]))) return;
+            if (slot == wanted) --slot;
+            for (; slot && earlier(locator, rows[slot - 1]); --slot) rows[slot] = rows[slot - 1];
+            rows[slot] = locator;
+        });
         if (failed(scanned)) return scanned;
         auto describe = [&](std::size_t read, u64_t& progress) noexcept -> std::array<extent_t, 1> {
             std::size_t const position = read / wanted, rank = read % wanted;
             if (progress++ || rank >= min_of(entries[position], wanted)) return {};
-            dense_nvme_locator_t const locator = kept[read];
-            dense_nvme_part_t const& part = parts_[locator.shard];
+            nvme_locator_t const locator = kept[read];
+            nvme_part_t const& part = parts_[locator.shard];
             return {extent_t {locator.shard, part.values_begin + u64_t(locator.node) * part.value_row_bytes,
                               part.value_row_bytes}};
         };
@@ -532,7 +528,7 @@ struct dense_nvme_indexes {
     expected<health_result_t> health(executor_t& executor) const noexcept {
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
         std::size_t widest = 0;
-        for (dense_nvme_part_t const& part : parts_) widest = max_of<std::size_t>(widest, part.nodes);
+        for (nvme_part_t const& part : parts_) widest = max_of<std::size_t>(widest, part.nodes);
         auto [call, call_status] = begin_scans_(executor, 1);
         if (failed(call_status)) return {{}, call_status};
         std::size_t const words = max_of<std::size_t>(divide_round_up<std::size_t>(widest, 64), 1);
@@ -561,7 +557,7 @@ struct dense_nvme_indexes {
     using candidates_allocator_t = typename index_t::candidates_allocator_t;
     using results_array_t = typename index_t::results_array_t;
     using walk_t = typename index_t::walk_t;
-    using node_id_t = dense_node_id_t;
+    using node_id_t = dense::node_id_t;
 
 #pragma region Rows
 
@@ -582,15 +578,15 @@ struct dense_nvme_indexes {
             key_t* pool_keys = nullptr;
             std::size_t limit = 0;
 
-            walk_demand_t absorb(std::span<dense_scored_node_t const> scored, std::span<dot_result_t const>,
+            walk_demand_t absorb(std::span<scored_node_t const> scored, std::span<dot_result_t const>,
                                  std::span<key_t const> keys) noexcept {
                 for (std::size_t lane = 0; lane != scored.size(); ++lane) {
                     if (predicate(keys[lane]) != admission_t::admit_k) continue;
                     std::size_t const kept = pool.size();
                     // The slot `sorted_buffer::insert` picks, so the keys open the same one.
                     std::size_t const slot = static_cast<std::size_t>(
-                        lower_bound(to_span(pool), scored[lane], dense_closer_scored_node_t {}) - pool.data());
-                    if (!pool.insert(dense_scored_node_t(scored[lane]), limit)) continue;
+                        lower_bound(to_span(pool), scored[lane], closer_scored_node_t {}) - pool.data());
+                    if (!pool.insert(scored_node_t(scored[lane]), limit)) continue;
                     std::memmove(pool_keys + slot + 1, pool_keys + slot,
                                  (kept - (kept == limit) - slot) * sizeof(key_t));
                     pool_keys[slot] = keys[lane];
@@ -599,11 +595,10 @@ struct dense_nvme_indexes {
             }
         };
 
-        inline static constexpr dense_nvme_key_reads_t key_reads_k =
-            std::is_same_v<std::remove_cv_t<predicate_type_>, dummy_predicate_t> ? dense_nvme_key_reads_t::outputs_k
-                                                                                 : dense_nvme_key_reads_t::scored_k;
-        using fold_t =
-            std::conditional_t<key_reads_k == dense_nvme_key_reads_t::scored_k, admitting_fold_t, dummy_fold_t>;
+        inline static constexpr nvme_key_reads_t key_reads_k =
+            std::is_same_v<std::remove_cv_t<predicate_type_>, dummy_predicate_t> ? nvme_key_reads_t::outputs_k
+                                                                                 : nvme_key_reads_t::scored_k;
+        using fold_t = std::conditional_t<key_reads_k == nvme_key_reads_t::scored_k, admitting_fold_t, dummy_fold_t>;
 
         /** The batch every row of the call reads and writes. */
         struct inputs_t {
@@ -617,7 +612,7 @@ struct dense_nvme_indexes {
         };
 
         inputs_t const& inputs;
-        growing_buffer<dense_nvme_locator_t, scratch_allocator_t> locators;
+        growing_buffer<nvme_locator_t, scratch_allocator_t> locators;
         growing_buffer<results_array_t, scratch_allocator_t> admitted;
         growing_buffer<key_t, scratch_allocator_t> admitted_keys;
         scratch_allocator_t allocator;
@@ -632,7 +627,7 @@ struct dense_nvme_indexes {
 
         status_t reserve(std::size_t shards, std::size_t connectivity) noexcept {
             if (failed(locators.resize_uninitialized(inputs.keys.extent(1)))) return status_t::bad_alloc_k;
-            if constexpr (key_reads_k == dense_nvme_key_reads_t::scored_k) {
+            if constexpr (key_reads_k == nvme_key_reads_t::scored_k) {
                 if (failed(admitted.reserve_exactly(shards)) ||
                     failed(admitted_keys.resize_uninitialized(shards * inputs.expansion_factor)))
                     return status_t::bad_alloc_k;
@@ -653,29 +648,28 @@ struct dense_nvme_indexes {
             for (results_array_t& pool : admitted) pool.clear();
         }
         void rescore(std::array<node_id_t, 4> const& ids, std::array<vector_view_t, 4> const& vectors,
-                     std::array<vector_norms_t, 4> const& norms, dense_scores<dot_result_t, 4>& scores,
+                     std::array<vector_norms_t, 4> const& norms, scores_result<dot_result_t, 4>& scores,
                      std::size_t count, std::span<key_t const>) const noexcept {
             if constexpr (!std::is_same_v<heads_type_, dummy_heads_t>)
-                dense_indexer_rescoring<capability_, scalar_t> {inputs.heads->row(row)}(ids, vectors, norms, scores,
-                                                                                        count);
+                indexer_rescoring<capability_, scalar_t> {inputs.heads->row(row)}(ids, vectors, norms, scores, count);
         }
         fold_t fold(walk_t const& walk) noexcept {
-            if constexpr (key_reads_k == dense_nvme_key_reads_t::scored_k)
+            if constexpr (key_reads_k == nvme_key_reads_t::scored_k)
                 return {*inputs.predicate, admitted[walk.shard],
                         admitted_keys.data() + walk.shard * inputs.expansion_factor, inputs.expansion_factor};
             else return {};
         }
         results_array_t const& bound(walk_t const& walk) const noexcept {
-            if constexpr (key_reads_k == dense_nvme_key_reads_t::scored_k) return admitted[walk.shard];
+            if constexpr (key_reads_k == nvme_key_reads_t::scored_k) return admitted[walk.shard];
             else return walk.results;
         }
         void finish_walk(walk_t const& walk) noexcept {
             std::span<distance_t> const distances = to_span(inputs.distances.row(row).as_vector());
-            if constexpr (key_reads_k == dense_nvme_key_reads_t::scored_k) {
+            if constexpr (key_reads_k == nvme_key_reads_t::scored_k) {
                 // The walk is over, so its pool's IDs become slots of the keys kept beside it,
                 // which merge directly.
                 results_array_t& pool = admitted[walk.shard];
-                dense_scored_node_t* const slots = pool.data();
+                scored_node_t* const slots = pool.data();
                 for (std::size_t slot = 0; slot != pool.size(); ++slot)
                     slots[slot].node_id = static_cast<node_id_t>(slot);
                 found = merge_search_results(to_span(bound(walk)),
@@ -683,14 +677,14 @@ struct dense_nvme_indexes {
                                              to_span(inputs.keys.row(row).as_vector()), distances, found);
             }
             else
-                found = merge_search_results(to_span(bound(walk)), dense_nvme_shard_locators_t {walk.shard},
+                found = merge_search_results(to_span(bound(walk)), nvme_shard_locators_t {walk.shard},
                                              to_writable_span(locators), distances, found);
         }
         std::size_t outputs() const noexcept {
-            if constexpr (key_reads_k == dense_nvme_key_reads_t::scored_k) return 0;
+            if constexpr (key_reads_k == nvme_key_reads_t::scored_k) return 0;
             else return found;
         }
-        dense_nvme_locator_t locator(std::size_t output) const noexcept { return locators[output]; }
+        nvme_locator_t locator(std::size_t output) const noexcept { return locators[output]; }
         void resolve(std::size_t output, byte_t const* key) noexcept {
             std::memcpy(&inputs.keys(row, output), key, sizeof(key_t));
         }
@@ -704,8 +698,8 @@ struct dense_nvme_indexes {
      *  locator until the row fills, and the written locators resolve into keys. */
     struct multiply_row_t {
         using key_t = key_type_;
-        using fold_t = dense_multiply_fold<dense_nvme_locator_t, dot_result_t, dense_nvme_shard_locators_t>;
-        inline static constexpr dense_nvme_key_reads_t key_reads_k = dense_nvme_key_reads_t::outputs_k;
+        using fold_t = multiply_fold<nvme_locator_t, dot_result_t, nvme_shard_locators_t>;
+        inline static constexpr nvme_key_reads_t key_reads_k = nvme_key_reads_t::outputs_k;
 
         /** The batch every row of the call reads and writes. */
         struct inputs_t {
@@ -716,7 +710,7 @@ struct dense_nvme_indexes {
         };
 
         inputs_t const& inputs;
-        growing_buffer<dense_nvme_locator_t, scratch_allocator_t> locators;
+        growing_buffer<nvme_locator_t, scratch_allocator_t> locators;
         fold_t pairs;
         std::size_t row = 0;
         vector_view_t query;
@@ -736,7 +730,7 @@ struct dense_nvme_indexes {
             pairs = fold_t {to_writable_span(locators), to_span(inputs.products.row(row).as_vector())};
         }
         void rescore(std::array<node_id_t, 4> const&, std::array<vector_view_t, 4> const&,
-                     std::array<vector_norms_t, 4> const&, dense_scores<dot_result_t, 4>&, std::size_t,
+                     std::array<vector_norms_t, 4> const&, scores_result<dot_result_t, 4>&, std::size_t,
                      std::span<key_t const>) const noexcept {}
         fold_t& fold(walk_t const& walk) noexcept {
             pairs.resolve.shard = walk.shard;
@@ -745,7 +739,7 @@ struct dense_nvme_indexes {
         results_array_t const& bound(walk_t const& walk) const noexcept { return walk.results; }
         void finish_walk(walk_t const&) noexcept {}
         std::size_t outputs() const noexcept { return pairs.written; }
-        dense_nvme_locator_t locator(std::size_t output) const noexcept { return locators[output]; }
+        nvme_locator_t locator(std::size_t output) const noexcept { return locators[output]; }
         void resolve(std::size_t output, byte_t const* key) noexcept {
             std::memcpy(&inputs.keys(row, output), key, sizeof(key_t));
         }
@@ -762,8 +756,8 @@ struct dense_nvme_indexes {
     struct attend_row {
         using key_t = key_type_;
         using fold_t = dummy_fold_t;
-        using rescoring_t = dense_attention_rescoring<capability_, scalar_t, value_lookup_type_>;
-        inline static constexpr dense_nvme_key_reads_t key_reads_k = dense_nvme_key_reads_t::scored_k;
+        using rescoring_t = attention_rescoring<capability_, scalar_t, value_lookup_type_>;
+        inline static constexpr nvme_key_reads_t key_reads_k = nvme_key_reads_t::scored_k;
 
         /** The batch every row of the call reads and writes. */
         struct inputs_t {
@@ -772,7 +766,7 @@ struct dense_nvme_indexes {
             std::remove_reference_t<value_lookup_type_>* value_lookup = nullptr;
             f32_t score_scale = 1;
             nk::matrix_span<f32_t> outputs;
-            std::span<dense_softmax_state_t> carry;
+            std::span<softmax_state_t> carry;
         };
 
         inputs_t const& inputs;
@@ -804,7 +798,7 @@ struct dense_nvme_indexes {
             rescoring().clear();
         }
         void rescore(std::array<node_id_t, 4> const& ids, std::array<vector_view_t, 4> const& vectors,
-                     std::array<vector_norms_t, 4> const& norms, dense_scores<dot_result_t, 4>& scores,
+                     std::array<vector_norms_t, 4> const& norms, scores_result<dot_result_t, 4>& scores,
                      std::size_t count, std::span<key_t const> keys) noexcept {
             rescoring_t const attention = rescoring();
             attention(ids, vectors, norms, scores, count, keys);
@@ -813,7 +807,7 @@ struct dense_nvme_indexes {
         results_array_t const& bound(walk_t const& walk) const noexcept { return walk.results; }
         void finish_walk(walk_t const&) noexcept {}
         std::size_t outputs() const noexcept { return 0; }
-        dense_nvme_locator_t locator(std::size_t) const noexcept { return {}; }
+        nvme_locator_t locator(std::size_t) const noexcept { return {}; }
         void resolve(std::size_t, byte_t const*) noexcept {}
         status_t finish() noexcept {
             if (failed(status)) return status;
@@ -842,7 +836,7 @@ struct dense_nvme_indexes {
         std::size_t const queries_count = queries.extent(0);
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = dense_rankings_refusal(queries_count, keys, distances); failed(refusal))
+        if (status_t const refusal = rankings_refusal(queries_count, keys, distances); failed(refusal))
             return {{}, refusal};
         if (queries_count && queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
         using row_t = search_row<heads_type_, predicate_type_>;
@@ -892,7 +886,7 @@ struct dense_nvme_indexes {
     struct run_t {
 
         /** The shard and the run's first row inside it. */
-        dense_nvme_locator_t start;
+        nvme_locator_t start;
 
         /** Rows in the run; zero past the last run. */
         std::size_t rows = 0;
@@ -932,14 +926,14 @@ struct dense_nvme_indexes {
      *  drains its engine.
      */
     template <std::size_t reads_per_task_ = 1, typename describe_type_, typename consume_type_>
-    expected<dense_nvme_reads_t> scan_reads_(executor_t& executor, std::size_t tasks_count, describe_type_&& describe,
-                                             consume_type_&& consume) const noexcept {
+    expected<nvme_reads_t> scan_reads_(executor_t& executor, std::size_t tasks_count, describe_type_&& describe,
+                                       consume_type_&& consume) const noexcept {
         using slot_t = scan_slot<reads_per_task_>;
         constexpr std::size_t unclaimed_k = ~std::size_t {0};
         std::size_t const depth = max_of<std::size_t>(executor.queue_depth(), 1);
         alignas(default_alignment_k) std::size_t cursor = 0;
         status_t failure = status_t::success_k;
-        dense_nvme_reads_t issued;
+        nvme_reads_t issued;
         auto scan_thread = [&](std::size_t thread, std::size_t) noexcept {
             engine_t& engine = executor.engine(thread);
             arena_t& arena = executor.arena(thread);
@@ -956,7 +950,7 @@ struct dense_nvme_indexes {
             // The slot whose reads are being enqueued and its next read, which a full engine may
             // refuse until a completion frees room in it; `depth` while none is.
             std::size_t issuing = depth, next_read = 0;
-            dense_nvme_reads_t reads;
+            nvme_reads_t reads;
             while (true) {
                 while (succeeded(local) &&
                        succeeded(std::atomic_ref<status_t>(failure).load(std::memory_order_relaxed))) {
@@ -981,7 +975,7 @@ struct dense_nvme_indexes {
                     medium_t const& medium = media_[extent.shard];
                     u64_t const begin = byte_base_of(medium) + extent.begin;
                     // The buffer alone names what landed, so the context stays unused.
-                    io_request_t const request = dense_nvme_covering_read(
+                    io_request_t const request = nvme_covering_read(
                         begin, extent.bytes, block_bytes_of(medium), extent.shard,
                         static_cast<io_buffer_id_t>(issuing + next_read * depth), 0);
                     slot.offsets[next_read] = begin - request.offset;
@@ -993,7 +987,7 @@ struct dense_nvme_indexes {
                         local = enqueued == status_t::overflow_k ? status_t::io_k : enqueued;
                         break;
                     }
-                    reads += dense_nvme_reads_t {1, request.length};
+                    reads += nvme_reads_t {1, request.length};
                     ++outstanding;
                     if (++next_read == reads_per_task_) issuing = depth;
                 }
@@ -1038,13 +1032,12 @@ struct dense_nvme_indexes {
 
     /** One column of every part: where its rows start, and how wide they are. */
     struct column_t {
-        u64_t dense_nvme_part_t::* begin = nullptr;
-        u32_t dense_nvme_part_t::* row_bytes = nullptr;
+        u64_t nvme_part_t::* begin = nullptr;
+        u32_t nvme_part_t::* row_bytes = nullptr;
     };
 
-    inline static constexpr column_t key_column_k {&dense_nvme_part_t::keys_begin, &dense_nvme_part_t::key_row_bytes};
-    inline static constexpr column_t value_column_k {&dense_nvme_part_t::values_begin,
-                                                     &dense_nvme_part_t::value_row_bytes};
+    inline static constexpr column_t key_column_k {&nvme_part_t::keys_begin, &nvme_part_t::key_row_bytes};
+    inline static constexpr column_t value_column_k {&nvme_part_t::values_begin, &nvme_part_t::value_row_bytes};
 
     /** Bytes of one staging buffer: the covering read of the widest row any part holds. */
     std::size_t staging_bytes_() const noexcept { return index_t::staging_bytes_(to_span(media_), to_span(parts_)); }
@@ -1089,7 +1082,7 @@ struct dense_nvme_indexes {
 
     /** The read of @p run in @p column. */
     extent_t run_extent_(run_t const& run, column_t column) const noexcept {
-        dense_nvme_part_t const& part = parts_[run.start.shard];
+        nvme_part_t const& part = parts_[run.start.shard];
         u64_t const row_bytes = part.*column.row_bytes;
         return {run.start.shard, part.*column.begin + run.start.node * row_bytes, run.rows * row_bytes};
     }
@@ -1172,14 +1165,14 @@ struct dense_nvme_indexes {
         auto consume = [&](std::size_t, std::size_t, auto const& extents, auto const& landed) noexcept {
             extent_t const& extent = extents[0];
             byte_t const* const bytes = landed[0];
-            dense_nvme_part_t const& part = parts_[extent.shard];
+            nvme_part_t const& part = parts_[extent.shard];
             std::size_t const first = static_cast<std::size_t>((extent.begin - part.keys_begin) / part.key_row_bytes);
             for (std::size_t row = 0; row != extent.bytes / part.key_row_bytes; ++row) {
                 key_t key;
                 std::memcpy(&key, bytes + row * part.key_row_bytes, sizeof(key_t));
                 std::size_t const slot = slot_of(key);
                 for (std::size_t position = heads[slot]; position != empty_k; position = chains[position])
-                    on_hit(position, dense_nvme_locator_t {extent.shard, static_cast<node_id_t>(first + row)});
+                    on_hit(position, nvme_locator_t {extent.shard, static_cast<node_id_t>(first + row)});
             }
         };
         return scan_reads_(executor, runs_count_(0, rows_count, key_column_k), describe, consume).status;
@@ -1216,13 +1209,13 @@ struct dense_nvme_indexes {
                                          nk::matrix_span<distance_t> distances, std::span<std::size_t> counts,
                                          predicate_type_& predicate, std::span<u64_t> latencies) noexcept {
         using slice_t = arena_allocator<byte_t>;
-        using tiles_chain_t = dense_tiles_chain<scalar_t, capability_>;
+        using tiles_chain_t = tiles_chain<scalar_t, capability_>;
         using quads_kit_t = typename index_t::quads_kit_t;
         constexpr bool filtered_k = !std::is_same_v<std::remove_cv_t<predicate_type_>, dummy_predicate_t>;
         std::size_t const queries_count = queries.extent(0), wanted = keys.extent(1), threads = executor.size();
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
-        if (status_t const refusal = dense_rankings_refusal(queries_count, keys, distances); failed(refusal))
+        if (status_t const refusal = rankings_refusal(queries_count, keys, distances); failed(refusal))
             return {{}, refusal};
         if (!latencies.empty() && latencies.size() != queries_count) return {{}, status_t::config_mismatch_k};
         if (queries_count && queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
@@ -1279,7 +1272,7 @@ struct dense_nvme_indexes {
                 share.thresholds[query] = std::numeric_limits<distance_t>::max();
         }
         for (std::size_t query = 0; query != padded_queries; ++query) {
-            norms[query] = query < queries_count ? index_t::dense_norms_(kernel_, queries.row(query).as_vector())
+            norms[query] = query < queries_count ? index_t::norms_(kernel_, queries.row(query).as_vector())
                                                  : vector_norms_t {};
             sumsqs[query] = norms[query].sumsq;
         }
@@ -1326,7 +1319,7 @@ struct dense_nvme_indexes {
         auto consume = [&](std::size_t thread, std::size_t, std::array<extent_t, 2> const& extents,
                            std::array<byte_t const*, 2> const& landed) noexcept {
             scan_share_t const& share = shares[thread];
-            dense_nvme_part_t const& part = parts_[extents[1].shard];
+            nvme_part_t const& part = parts_[extents[1].shard];
             std::size_t const run_rows = static_cast<std::size_t>(extents[1].bytes / part.value_row_bytes);
             auto key_of = [&](std::size_t row) noexcept {
                 key_t key;
@@ -1338,7 +1331,7 @@ struct dense_nvme_indexes {
                                       part.dimensions};
             };
             auto admits = [&]() noexcept {
-                if constexpr (filtered_k) return [&](dense_node_id_t row) noexcept { return predicate(key_of(row)); };
+                if constexpr (filtered_k) return [&](node_id_t row) noexcept { return predicate(key_of(row)); };
                 else return dummy_predicate_t {};
             }();
             if constexpr (tiles_chain_t::has_tiles_k)
@@ -1356,18 +1349,18 @@ struct dense_nvme_indexes {
                     nk::matrix_span<raw_dot_t> const dots {reinterpret_cast<raw_dot_t*>(share.dots), stream_rows,
                                                            pack_columns};
                     auto row_sumsq = [&](std::size_t row) noexcept {
-                        return index_t::dense_norms_(kernel_, row_of(row)).sumsq;
+                        return index_t::norms_(kernel_, row_of(row)).sumsq;
                     };
                     for (std::size_t pack = 0; pack != packs; ++pack) {
                         std::size_t const first = pack * pack_columns;
                         std::size_t const columns = min_of(pack_columns, queries_count - first);
-                        auto land = [&](std::size_t column, dense_scored_node_t scored) noexcept {
+                        auto land = [&](std::size_t column, scored_node_t scored) noexcept {
                             return land_into(share, first + column, {scored.distance, key_of(scored.node_id)});
                         };
-                        dense_scan_tiles<tiles_kit_t, quads_kit_t>(
-                            kernel_, rows, 0, packed + pack * pack_stride,
-                            std::span<dot_result_t const>(sumsqs + first, columns),
-                            std::span<distance_t>(share.thresholds + first, columns), dots, row_sumsq, admits, land);
+                        scan_tiles<tiles_kit_t, quads_kit_t>(kernel_, rows, 0, packed + pack * pack_stride,
+                                                             std::span<dot_result_t const>(sumsqs + first, columns),
+                                                             std::span<distance_t>(share.thresholds + first, columns),
+                                                             dots, row_sumsq, admits, land);
                     }
                     return;
                 }
@@ -1377,17 +1370,17 @@ struct dense_nvme_indexes {
                 std::array<vector_norms_t, 4> lane_norms;
                 for (std::size_t lane = 0; lane != 4; ++lane) {
                     lane_rows[lane] = row_of(row + min_of(lane, lanes - 1));
-                    lane_norms[lane] = index_t::dense_norms_(kernel_, lane_rows[lane]);
+                    lane_norms[lane] = index_t::norms_(kernel_, lane_rows[lane]);
                 }
                 // A lane asks the predicate at most once, once it beats some query's worst.
                 std::array<u8_t, 4> verdicts {};
                 auto admitted = [&](std::size_t lane) noexcept {
                     if (!verdicts[lane])
-                        verdicts[lane] = dense_admitted(admits, static_cast<dense_node_id_t>(row + lane)) ? 1 : 2;
+                        verdicts[lane] = dense::admitted(admits, static_cast<node_id_t>(row + lane)) ? 1 : 2;
                     return verdicts[lane] == 1;
                 };
                 for (std::size_t query = 0; query != queries_count; ++query) {
-                    std::array<distance_t, 4> const lane_distances = usearch::distances<capability_, scalar_t>(
+                    std::array<distance_t, 4> const lane_distances = dense::distances<capability_, scalar_t>(
                         kernel_, queries.row(query).as_vector(), norms[query], lane_rows, lane_norms);
                     for (std::size_t lane = 0; lane != lanes; ++lane)
                         if (lane_distances[lane] < share.thresholds[query] && admitted(lane))
@@ -1437,7 +1430,7 @@ struct dense_nvme_indexes {
      *  expanded. */
     expected<health_result_t> audit_part_(u32_t part_index, std::span<u64_t> current, std::span<u64_t> next,
                                           executor_t& executor) const noexcept {
-        dense_nvme_part_t const& part = parts_[part_index];
+        nvme_part_t const& part = parts_[part_index];
         std::size_t const nodes = part.nodes, words = divide_round_up<std::size_t>(nodes, 64);
         std::size_t const row_bytes = std::size_t {part.connectivity} * sizeof(node_id_t);
         std::size_t const run_rows = scan_run_rows_(part_index, row_bytes), tasks = divide_round_up(nodes, run_rows);
@@ -1590,13 +1583,13 @@ struct dense_nvme_indexes {
             else {
                 // The directory test runs on the terminated copy, which the OS reads.
                 joined = join_path_(resolved, {}, paths[part]);
-                if (succeeded(joined) && dense_nvme_is_directory_(resolved.data()))
+                if (succeeded(joined) && nvme_is_directory_(resolved.data()))
                     joined = join_path_(resolved, paths[part], safegraphs_basename(relative));
             }
             if (failed(joined)) return joined;
 
             medium_t medium;
-            dense_nvme_part_t opened;
+            nvme_part_t opened;
             std::string_view const resolved_path {resolved.data(), resolved.size() - 1};
             if (status_t const vetted = index_t::open_part_(resolved_path, safegraphs_key_dtype<key_t>(), kernel_,
                                                             allocator_, medium, opened);
@@ -1608,7 +1601,7 @@ struct dense_nvme_indexes {
             media_.push_back_reserved(std::move(medium));
             parts_.push_back_reserved(opened);
         }
-        if (!dense_kernel_supported<typename index_t::quads_kit_t>(kernel_)) return status_t::unknown_kind_k;
+        if (!kernel_supported<typename index_t::quads_kit_t>(kernel_)) return status_t::unknown_kind_k;
         return status_t::success_k;
     }
 
@@ -1618,7 +1611,7 @@ struct dense_nvme_indexes {
     growing_buffer<medium_t, forkunion_allocator_t> media_;
 
     /** Where every part keeps its columns, parallel to @c media_. */
-    growing_buffer<dense_nvme_part_t, forkunion_allocator_t> parts_;
+    growing_buffer<nvme_part_t, forkunion_allocator_t> parts_;
 
     /** The host allocator behind the catalog and the paths a view resolves. */
     forkunion_allocator_t allocator_;
@@ -1628,7 +1621,7 @@ struct dense_nvme_indexes {
 };
 
 /**
- *  @brief External reader's cursor over the rows of one @c dense_nvme_indexes: keys and vectors in
+ *  @brief External reader's cursor over the rows of one @c nvme_indexes: keys and vectors in
  *      placement order, part by part, each read scanning whole runs of the key and value columns
  *      through an executor.
  *
@@ -1637,7 +1630,7 @@ struct dense_nvme_indexes {
  *  counter is the whole position.
  */
 template <typename indexes_type_>
-struct dense_nvme_indexes_cursor {
+struct nvme_indexes_cursor {
 
     using indexes_t = indexes_type_;
     using key_t = typename indexes_t::key_t;
@@ -1647,7 +1640,7 @@ struct dense_nvme_indexes_cursor {
     using search_result_t = typename indexes_t::search_result_t;
 
     /** Starts at the first row of @p indexes, the one every later @ref read must name. */
-    explicit dense_nvme_indexes_cursor(indexes_t const&) noexcept {}
+    explicit nvme_indexes_cursor(indexes_t const&) noexcept {}
 
     /** Copies up to @p keys.size() rows of @p indexes into @p keys, and their vectors in the stored
      *  scalar type into @p vectors unless it holds no rows, through @p executor, advancing past
@@ -1677,9 +1670,9 @@ struct dense_nvme_indexes_cursor {
 #pragma region Rewrites
 
 /** What the current phase's steps do, declared in the order every rewrite runs them, which
- *  @ref dense_nvme_rewrite_plan::advance steps through one at a time, skipping phases with no
+ *  @ref nvme_rewrite_plan::advance steps through one at a time, skipping phases with no
  *  steps; @c finish_k once it answered false. */
-enum class dense_nvme_rewrite_phase_t : u8_t {
+enum class nvme_rewrite_phase_t : u8_t {
 
     /** Counts the rows every key range of a split takes. */
     route_k,
@@ -1700,13 +1693,13 @@ enum class dense_nvme_rewrite_phase_t : u8_t {
     /** Sweeps reachability, then links islands back in. */
     heal_k,
 
-    /** Nothing left but @ref dense_nvme_rewrite_plan::finish. */
+    /** Nothing left but @ref nvme_rewrite_plan::finish. */
     finish_k,
 };
 
 /** What every rewrite shares; zeros derive from the geometry. The target is always a manifest
  *  beside its parts. */
-struct dense_nvme_rewrite_config_t {
+struct nvme_rewrite_config_t {
 
     /** Breadth of every re-selection walk and block build; zero means twice the connectivity. */
     u32_t expansion_factor = 0;
@@ -1719,7 +1712,7 @@ struct dense_nvme_rewrite_config_t {
 };
 
 /** Outcome of a merge, split, refine or build. */
-struct [[nodiscard]] dense_nvme_rewrite_result_t {
+struct [[nodiscard]] nvme_rewrite_result_t {
 
     /** Rows the target holds. */
     std::size_t rows = 0;
@@ -1732,23 +1725,23 @@ struct [[nodiscard]] dense_nvme_rewrite_result_t {
     std::size_t cut_edges = 0;
 
     /** The re-selections, the block builds and the heal, counted as a RAM refine counts them. */
-    dense_refine_result_t graph;
+    refine_result_t graph;
 
     /** Neighbors rows the walks and the heal read. */
-    dense_nvme_reads_t neighbor_reads;
+    nvme_reads_t neighbor_reads;
 
     /** Value rows the walks, the selections and the back-links read. */
-    dense_nvme_reads_t value_reads;
+    nvme_reads_t value_reads;
 
     /** Runs of whole rows the copies and the batches scanned, and the spills read back. */
-    dense_nvme_reads_t scan_reads;
+    nvme_reads_t scan_reads;
 
     /** Bytes the target parts and the spills received. */
     std::size_t written_bytes = 0;
 };
 
 /** Cuts every source part into consecutive ranges of at most @c rows rows, each a target part. */
-struct dense_split_by_rows_t {
+struct split_by_rows_t {
     std::size_t rows = 0;
 };
 
@@ -1756,7 +1749,7 @@ struct dense_split_by_rows_t {
  *  last past all of them; empty ranges make no part. At most 255 fences, since every row's range
  *  is routed as one byte. */
 template <typename key_type_>
-struct dense_split_by_keys {
+struct split_by_keys {
     std::span<key_type_ const> fences;
 };
 
@@ -1764,17 +1757,17 @@ struct dense_split_by_keys {
  *  copies; releasing does nothing, so a RAM index built over it lives exactly inside the
  *  workspace. */
 template <typename value_type_ = byte_t>
-struct dense_nvme_workspace_allocator {
+struct nvme_workspace_allocator {
     using value_type = value_type_;
 
     /** The workspace not handed out yet; null refuses every request. */
     bytes_span_t* remaining = nullptr;
 
-    constexpr dense_nvme_workspace_allocator() noexcept = default;
-    explicit constexpr dense_nvme_workspace_allocator(bytes_span_t& remaining) noexcept : remaining(&remaining) {}
+    constexpr nvme_workspace_allocator() noexcept = default;
+    explicit constexpr nvme_workspace_allocator(bytes_span_t& remaining) noexcept : remaining(&remaining) {}
 
     template <typename other_type_>
-    constexpr dense_nvme_workspace_allocator(dense_nvme_workspace_allocator<other_type_> const& other) noexcept
+    constexpr nvme_workspace_allocator(nvme_workspace_allocator<other_type_> const& other) noexcept
         : remaining(other.remaining) {}
 
     value_type_* allocate(std::size_t count) noexcept {
@@ -1789,44 +1782,44 @@ struct dense_nvme_workspace_allocator {
         return slice;
     }
     void deallocate(value_type_*, std::size_t) noexcept {}
-    bool operator==(dense_nvme_workspace_allocator const& other) const noexcept { return remaining == other.remaining; }
+    bool operator==(nvme_workspace_allocator const& other) const noexcept { return remaining == other.remaining; }
 };
 
 template <typename indexes_type_>
-struct dense_nvme_rewrite_plan;
+struct nvme_rewrite_plan;
 
 /** Stitches @p sources into one target part: the largest part hosts and keeps its IDs, every other
  *  part lands after it with its edges rebased, its rows walk the target and link in, their
  *  back-links are spilled and merged, then the target heals. The sources are borrowed until the
  *  plan dies, and the target names none of their files. */
 template <typename indexes_type_>
-expected<dense_nvme_rewrite_plan<indexes_type_>> plan_merge(std::span<indexes_type_ const* const> sources,
-                                                            std::string_view target, bytes_span_t workspace,
-                                                            dense_nvme_rewrite_config_t const& config = {}) noexcept;
+expected<nvme_rewrite_plan<indexes_type_>> plan_merge(std::span<indexes_type_ const* const> sources,
+                                                      std::string_view target, bytes_span_t workspace,
+                                                      nvme_rewrite_config_t const& config = {}) noexcept;
 
 /** Cuts @p source as @p policy says, drops and counts the edges the cut crosses, and repairs every
  *  target part: in RAM when it fits the workspace, otherwise by walks, back-links and a heal. The
  *  source and the policy's fences are borrowed until the plan dies. */
 template <typename indexes_type_, typename split_type_>
-expected<dense_nvme_rewrite_plan<indexes_type_>> plan_split(indexes_type_ const& source, split_type_ const& policy,
-                                                            std::string_view target, bytes_span_t workspace,
-                                                            dense_nvme_rewrite_config_t const& config = {}) noexcept;
+expected<nvme_rewrite_plan<indexes_type_>> plan_split(indexes_type_ const& source, split_type_ const& policy,
+                                                      std::string_view target, bytes_span_t workspace,
+                                                      nvme_rewrite_config_t const& config = {}) noexcept;
 
 /** Copies @p source and re-selects @p rows of it, in placement order across its parts, by walks of
  *  the copy, or in RAM for a whole part the workspace holds, then merges the back-links and heals;
  *  empty rows heal alone. The source is borrowed until the plan dies. */
 template <typename indexes_type_>
-expected<dense_nvme_rewrite_plan<indexes_type_>> plan_refine(indexes_type_ const& source, iota_view<std::size_t> rows,
-                                                             std::string_view target, bytes_span_t workspace,
-                                                             dense_nvme_rewrite_config_t const& config = {}) noexcept;
+expected<nvme_rewrite_plan<indexes_type_>> plan_refine(indexes_type_ const& source, iota_view<std::size_t> rows,
+                                                       std::string_view target, bytes_span_t workspace,
+                                                       nvme_rewrite_config_t const& config = {}) noexcept;
 
 /** Builds one graph over every row of the parts at @p sources, their neighbors ignored, in
  *  contiguous blocks the workspace holds as a RAM index, then stitches the blocks as a merge
  *  does. */
 template <typename indexes_type_>
-expected<dense_nvme_rewrite_plan<indexes_type_>> plan_build(std::span<std::string_view const> sources,
-                                                            std::string_view target, bytes_span_t workspace,
-                                                            dense_nvme_rewrite_config_t const& config = {}) noexcept;
+expected<nvme_rewrite_plan<indexes_type_>> plan_build(std::span<std::string_view const> sources,
+                                                      std::string_view target, bytes_span_t workspace,
+                                                      nvme_rewrite_config_t const& config = {}) noexcept;
 
 /**
  *  @brief One rewrite in flight: phases of steps, each step run across every thread of an executor.
@@ -1837,11 +1830,11 @@ expected<dense_nvme_rewrite_plan<indexes_type_>> plan_build(std::span<std::strin
  *  every target part no manifest committed, so a stopped rewrite reads as absent.
  */
 template <typename indexes_type_>
-struct [[nodiscard]] dense_nvme_rewrite_plan {
+struct [[nodiscard]] nvme_rewrite_plan {
     using indexes_t = indexes_type_;
     using executor_t = typename indexes_t::executor_t;
     using key_t = typename indexes_t::key_t;
-    using result_t = dense_nvme_rewrite_result_t;
+    using result_t = nvme_rewrite_result_t;
 
     /** One unit of the current phase. */
     struct step_t {
@@ -1854,17 +1847,17 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         std::size_t part = 0;
 
         /** The node IDs it covers: source ones for a route or copy step, target ones otherwise. */
-        iota_view<dense_node_id_t> nodes;
+        iota_view<node_id_t> nodes;
     };
 
-    dense_nvme_rewrite_plan() noexcept = default;
-    dense_nvme_rewrite_plan(dense_nvme_rewrite_plan&&) noexcept = default;
-    dense_nvme_rewrite_plan& operator=(dense_nvme_rewrite_plan&&) = delete;
-    dense_nvme_rewrite_plan(dense_nvme_rewrite_plan const&) = delete;
-    dense_nvme_rewrite_plan& operator=(dense_nvme_rewrite_plan const&) = delete;
+    nvme_rewrite_plan() noexcept = default;
+    nvme_rewrite_plan(nvme_rewrite_plan&&) noexcept = default;
+    nvme_rewrite_plan& operator=(nvme_rewrite_plan&&) = delete;
+    nvme_rewrite_plan(nvme_rewrite_plan const&) = delete;
+    nvme_rewrite_plan& operator=(nvme_rewrite_plan const&) = delete;
 
     /** Removes the spills, and the target parts unless @ref finish committed them. */
-    ~dense_nvme_rewrite_plan() noexcept {
+    ~nvme_rewrite_plan() noexcept {
         drop_spills_();
         for (target_t& target : targets_) {
             [[maybe_unused]] status_t const closed = target.file.close();
@@ -1879,10 +1872,10 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     }
 
     /** The current phase's steps, positionally; none once the plan is done. */
-    indexed_range<dense_nvme_rewrite_plan> steps() const noexcept { return {this, steps_.size()}; }
+    indexed_range<nvme_rewrite_plan> steps() const noexcept { return {this, steps_.size()}; }
 
     /** The phase whose steps run now. */
-    dense_nvme_rewrite_phase_t phase() const noexcept { return phase_; }
+    nvme_rewrite_phase_t phase() const noexcept { return phase_; }
 
     /** Runs @p step of the current phase across every thread of @p executor, which it claims while
      *  it runs. */
@@ -1890,12 +1883,12 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         if (failed(failure_)) return failure_;
         if (step.position >= steps_.size()) return status_t::config_mismatch_k;
         switch (phase_) {
-        case dense_nvme_rewrite_phase_t::route_k: return route_(step, executor);
-        case dense_nvme_rewrite_phase_t::copy_k: return copy_(step, executor);
-        case dense_nvme_rewrite_phase_t::build_k: return build_(step, executor);
-        case dense_nvme_rewrite_phase_t::select_k: return select_(step, executor);
-        case dense_nvme_rewrite_phase_t::reverse_k: return reverse_(step, executor);
-        case dense_nvme_rewrite_phase_t::heal_k: return heal_(step, executor);
+        case nvme_rewrite_phase_t::route_k: return route_(step, executor);
+        case nvme_rewrite_phase_t::copy_k: return copy_(step, executor);
+        case nvme_rewrite_phase_t::build_k: return build_(step, executor);
+        case nvme_rewrite_phase_t::select_k: return select_(step, executor);
+        case nvme_rewrite_phase_t::reverse_k: return reverse_(step, executor);
+        case nvme_rewrite_phase_t::heal_k: return heal_(step, executor);
         default: return status_t::uninitialized_k;
         }
     }
@@ -1903,8 +1896,8 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     /** The barrier between phases, one caller after every step ran: enters the next phase with
      *  steps and answers whether one follows. */
     bool advance() noexcept {
-        while (phase_ != dense_nvme_rewrite_phase_t::finish_k && succeeded(failure_)) {
-            phase_ = static_cast<dense_nvme_rewrite_phase_t>(static_cast<u8_t>(phase_) + 1);
+        while (phase_ != nvme_rewrite_phase_t::finish_k && succeeded(failure_)) {
+            phase_ = static_cast<nvme_rewrite_phase_t>(static_cast<u8_t>(phase_) + 1);
             if (status_t const entered = enter_(); failed(entered)) {
                 failure_ = entered;
                 return false;
@@ -1919,7 +1912,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     expected<result_t> finish() noexcept {
         if (failed(failure_)) return {result_, failure_};
         if (targets_.empty()) return {result_, status_t::uninitialized_k};
-        if (phase_ != dense_nvme_rewrite_phase_t::finish_k) return {result_, status_t::cancelled_k};
+        if (phase_ != nvme_rewrite_phase_t::finish_k) return {result_, status_t::cancelled_k};
         std::span<safegraphs_custom_field_t const> const fields = to_span(fields_);
         std::size_t rows = 0;
         for (target_t& target : targets_) {
@@ -1949,23 +1942,20 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
 
   private:
     template <typename other_type_>
-    friend expected<dense_nvme_rewrite_plan<other_type_>> plan_merge(std::span<other_type_ const* const>,
-                                                                     std::string_view, bytes_span_t,
-                                                                     dense_nvme_rewrite_config_t const&) noexcept;
+    friend expected<nvme_rewrite_plan<other_type_>> plan_merge(std::span<other_type_ const* const>, std::string_view,
+                                                               bytes_span_t, nvme_rewrite_config_t const&) noexcept;
     template <typename other_type_, typename split_type_>
-    friend expected<dense_nvme_rewrite_plan<other_type_>> plan_split(other_type_ const&, split_type_ const&,
-                                                                     std::string_view, bytes_span_t,
-                                                                     dense_nvme_rewrite_config_t const&) noexcept;
+    friend expected<nvme_rewrite_plan<other_type_>> plan_split(other_type_ const&, split_type_ const&, std::string_view,
+                                                               bytes_span_t, nvme_rewrite_config_t const&) noexcept;
     template <typename other_type_>
-    friend expected<dense_nvme_rewrite_plan<other_type_>> plan_refine(other_type_ const&, iota_view<std::size_t>,
-                                                                      std::string_view, bytes_span_t,
-                                                                      dense_nvme_rewrite_config_t const&) noexcept;
+    friend expected<nvme_rewrite_plan<other_type_>> plan_refine(other_type_ const&, iota_view<std::size_t>,
+                                                                std::string_view, bytes_span_t,
+                                                                nvme_rewrite_config_t const&) noexcept;
     template <typename other_type_>
-    friend expected<dense_nvme_rewrite_plan<other_type_>> plan_build(std::span<std::string_view const>,
-                                                                     std::string_view, bytes_span_t,
-                                                                     dense_nvme_rewrite_config_t const&) noexcept;
+    friend expected<nvme_rewrite_plan<other_type_>> plan_build(std::span<std::string_view const>, std::string_view,
+                                                               bytes_span_t, nvme_rewrite_config_t const&) noexcept;
 
-    using node_id_t = dense_node_id_t;
+    using node_id_t = dense::node_id_t;
     using scalar_t = typename indexes_t::scalar_t;
     using dot_result_t = typename indexes_t::dot_result_t;
     using vector_view_t = typename indexes_t::vector_view_t;
@@ -1980,16 +1970,15 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     using paths_t = growing_buffer<char, forkunion_allocator_t>;
 
     /** The RAM index a block build or a whole-part refine places inside the workspace. */
-    using ram_index_t =
-        dense_ram_index<indexes_t::vector_dtype_k, indexes_t::capability_k, fu::standard_yield_t,
-                        fu::standard_atomic_ref, fu::standard_cache_hints_t, dense_nvme_workspace_allocator<byte_t>,
-                        dense_nvme_workspace_allocator<byte_t>, arena_allocator<byte_t, forkunion_allocator_t>>;
-    using dense_traversal_context_t = typename ram_index_t::dense_traversal_context_t;
-    using traversals_t = growing_buffer<dense_traversal_context_t, forkunion_allocator_t>;
+    using ram_index_t = ram_index<indexes_t::vector_dtype_k, indexes_t::capability_k, fu::standard_yield_t,
+                                  fu::standard_atomic_ref, fu::standard_cache_hints_t, nvme_workspace_allocator<byte_t>,
+                                  nvme_workspace_allocator<byte_t>, arena_allocator<byte_t, forkunion_allocator_t>>;
+    using traversal_context_t = typename ram_index_t::traversal_context_t;
+    using traversals_t = growing_buffer<traversal_context_t, forkunion_allocator_t>;
     using ram_cursor_t =
-        dense_ram_cursor<ram_index_t, synchronization_t::immutable_k, arena_allocator<byte_t, forkunion_allocator_t>>;
+        ram_cursor<ram_index_t, synchronization_t::immutable_k, arena_allocator<byte_t, forkunion_allocator_t>>;
 
-    inline static constexpr node_id_t sentinel_k = dense_node_id_unknown_k;
+    inline static constexpr node_id_t sentinel_k = node_id_unknown_k;
     static_assert(sizeof(vector_norms_t) == 2 * sizeof(dot_result_t), "A norms row is a sum and a square");
 
     /** Key ranges a split by keys routes at most: every row's range is tagged with one byte. */
@@ -2070,21 +2059,21 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     /** Every row's candidate pool of one batch: the best rows by exact distance, with their bytes
      *  when the batch keeps them, so a selection reads nothing again. */
     struct pools_t {
-        dense_scored_node_t* entries = nullptr;
+        scored_node_t* entries = nullptr;
         byte_t* vectors = nullptr;
         u32_t* counts = nullptr;
         std::size_t slots = 0;
         std::size_t row_bytes = 0;
 
-        dense_scored_node_t* entries_of(std::size_t row) const noexcept { return entries + row * slots; }
+        scored_node_t* entries_of(std::size_t row) const noexcept { return entries + row * slots; }
         byte_t* vector_of(std::size_t row, std::size_t slot) const noexcept {
             return vectors + (row * slots + slot) * row_bytes;
         }
 
         /** Keeps @p candidate in the pool of @p row, at most @p limit long, unless it is there
          *  already or every kept one is closer; answers the slot it took, or @p limit. */
-        std::size_t offer(std::size_t row, dense_scored_node_t candidate, std::size_t limit) const noexcept {
-            dense_scored_node_t* const kept = entries_of(row);
+        std::size_t offer(std::size_t row, scored_node_t candidate, std::size_t limit) const noexcept {
+            scored_node_t* const kept = entries_of(row);
             std::size_t const count = counts[row];
             std::size_t worst = 0;
             for (std::size_t slot = 0; slot != count; ++slot) {
@@ -2106,15 +2095,14 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
      *  its bytes, the row itself excepted. */
     struct select_row_t {
         using key_t = typename indexes_t::key_t;
-        inline static constexpr dense_nvme_key_reads_t key_reads_k = dense_nvme_key_reads_t::outputs_k;
+        inline static constexpr nvme_key_reads_t key_reads_k = nvme_key_reads_t::outputs_k;
 
         /** Offers every scored lane of a quad to the row's pool with the bytes its rescoring
          *  saw. */
         struct fold_t {
             select_row_t* row = nullptr;
 
-            walk_demand_t absorb(std::span<dense_scored_node_t const> scored,
-                                 std::span<dot_result_t const>) const noexcept {
+            walk_demand_t absorb(std::span<scored_node_t const> scored, std::span<dot_result_t const>) const noexcept {
                 inputs_t const& inputs = row->inputs;
                 pools_t const& pools = inputs.pools;
                 for (std::size_t lane = 0; lane != scored.size(); ++lane) {
@@ -2152,7 +2140,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
             inputs.pools.counts[row] = 0;
         }
         void rescore(std::array<node_id_t, 4> const&, std::array<vector_view_t, 4> const& vectors,
-                     std::array<vector_norms_t, 4> const&, dense_scores<dot_result_t, 4>&, std::size_t,
+                     std::array<vector_norms_t, 4> const&, scores_result<dot_result_t, 4>&, std::size_t,
                      std::span<key_t const>) noexcept {
             landed = vectors;
         }
@@ -2160,7 +2148,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         results_array_t const& bound(walk_t const& walk) const noexcept { return walk.results; }
         void finish_walk(walk_t const&) noexcept {}
         std::size_t outputs() const noexcept { return 0; }
-        dense_nvme_locator_t locator(std::size_t) const noexcept { return {}; }
+        nvme_locator_t locator(std::size_t) const noexcept { return {}; }
         void resolve(std::size_t, byte_t const*) noexcept {}
         status_t finish() noexcept { return status_t::success_k; }
     };
@@ -2196,14 +2184,14 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     /** Opens the plan's common state: the workspace, the walk breadth, the kernel and the header
      *  fields, the target's paths and the geometry of the first source part, and removes a stale
      *  manifest so no half-written part is ever named. */
-    status_t open_(std::string_view target, bytes_span_t workspace, dense_nvme_rewrite_config_t const& config,
+    status_t open_(std::string_view target, bytes_span_t workspace, nvme_rewrite_config_t const& config,
                    indexes_t const& view) noexcept {
         save_config_t const save {checkpoint_layout_t::distributed_k, config.alignment, synchronization_t::immutable_k,
                                   config.provenance};
         if (status_t const valid = save.validate(); failed(valid)) return valid;
         if (target.empty()) return status_t::invalid_argument_k;
         if (!view.shards_count()) return status_t::uninitialized_k;
-        dense_nvme_part_t const& first = view.parts_[0];
+        nvme_part_t const& first = view.parts_[0];
         workspace_ = workspace;
         alignment_ = config.alignment;
         dimensions_ = first.dimensions, connectivity_ = first.connectivity, value_row_bytes_ = first.value_row_bytes;
@@ -2225,7 +2213,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     status_t add_sources_(indexes_t const& view) noexcept {
         if (view.kernel() != kernel_) return status_t::config_mismatch_k;
         for (u32_t part = 0; part != view.parts_.size(); ++part) {
-            dense_nvme_part_t const& opened = view.parts_[part];
+            nvme_part_t const& opened = view.parts_[part];
             if (opened.dimensions != dimensions_ || opened.connectivity != connectivity_ ||
                 opened.value_row_bytes != value_row_bytes_ || opened.key_row_bytes != sizeof(key_t))
                 return status_t::config_mismatch_k;
@@ -2247,7 +2235,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
             return status_t::bad_alloc_k;
         std::size_t buckets = 0;
         for (std::size_t part = 0; part != rows.size(); ++part) {
-            if (!rows[part] || rows[part] >= dense_node_id_unknown_k) return status_t::overflow_k;
+            if (!rows[part] || rows[part] >= node_id_unknown_k) return status_t::overflow_k;
             safegraphs_regular_shape_t const shape {
                 rows[part],
                 safegraphs_key_dtype<key_t>(),
@@ -2273,7 +2261,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
 
             auto [file_medium, medium_status] = file_medium_t::open(target.path.data());
             if (failed(medium_status)) return medium_status;
-            dense_nvme_part_t viewed;
+            nvme_part_t viewed;
             viewed.nodes = static_cast<u32_t>(rows[part]);
             viewed.dimensions = static_cast<u32_t>(dimensions_);
             viewed.connectivity = static_cast<u32_t>(connectivity_);
@@ -2307,7 +2295,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         copy_rows_ = workspace_.size() > copy_reserved ? (workspace_.size() - copy_reserved) / copy_row_bytes_() : 0;
         select_rows_ = workspace_.size() > select_reserved ? (workspace_.size() - select_reserved) / select_row_bytes_()
                                                            : 0;
-        bucket_rows_ = workspace_.size() / 2 / (sizeof(u32_t) + connectivity_ * sizeof(dense_scored_node_t));
+        bucket_rows_ = workspace_.size() / 2 / (sizeof(u32_t) + connectivity_ * sizeof(scored_node_t));
         bool const reverses = workspace_.size() >= reverse_reserved + reverse_row_bytes_();
         if (!copy_rows_ || !select_rows_ || !bucket_rows_ || !reverses) return status_t::bad_alloc_k;
         return status_t::success_k;
@@ -2318,12 +2306,12 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     status_t enter_() noexcept {
         steps_.clear();
         switch (phase_) {
-        case dense_nvme_rewrite_phase_t::route_k:
+        case nvme_rewrite_phase_t::route_k:
             if (fences_.empty()) return status_t::success_k;
             for (std::size_t source = 0; source != sources_.size(); ++source)
                 if (status_t const listed = add_step_(source, 0, sources_[source].rows); failed(listed)) return listed;
             return status_t::success_k;
-        case dense_nvme_rewrite_phase_t::copy_k:
+        case nvme_rewrite_phase_t::copy_k:
             if (targets_.empty())
                 if (status_t const opened = open_routed_targets_(); failed(opened)) return opened;
             for (std::size_t index = 0; index != sources_.size(); ++index) {
@@ -2336,7 +2324,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
                 }
             }
             return status_t::success_k;
-        case dense_nvme_rewrite_phase_t::build_k:
+        case nvme_rewrite_phase_t::build_k:
             if (!build_rows_) return status_t::success_k;
             for (std::size_t part = 0; part != targets_.size(); ++part)
                 for (std::size_t first = 0; first < targets_[part].view.size(); first += build_rows_)
@@ -2345,7 +2333,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
                         failed(listed))
                         return listed;
             return status_t::success_k;
-        case dense_nvme_rewrite_phase_t::select_k:
+        case nvme_rewrite_phase_t::select_k:
             for (std::size_t part = 0; part != selected_.size(); ++part) {
                 iota_view<std::size_t> const rows = selected_[part];
                 std::size_t const nodes = targets_[part].view.size();
@@ -2360,7 +2348,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
                         return listed;
             }
             return status_t::success_k;
-        case dense_nvme_rewrite_phase_t::reverse_k:
+        case nvme_rewrite_phase_t::reverse_k:
             for (std::size_t part = 0; part != targets_.size(); ++part)
                 for (std::size_t bucket = bucket_bases_[part]; bucket != bucket_bases_[part + 1]; ++bucket) {
                     if (!buckets_[bucket].bytes) continue;
@@ -2371,7 +2359,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
                         return listed;
                 }
             return status_t::success_k;
-        case dense_nvme_rewrite_phase_t::heal_k:
+        case nvme_rewrite_phase_t::heal_k:
             for (std::size_t part = 0; part != targets_.size(); ++part)
                 if (status_t const listed = add_step_(part, 0, targets_[part].view.size()); failed(listed))
                     return listed;
@@ -2388,7 +2376,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
 
     /** Starts the plan in its first phase with steps. */
     status_t start_() noexcept {
-        phase_ = dense_nvme_rewrite_phase_t::route_k;
+        phase_ = nvme_rewrite_phase_t::route_k;
         if (status_t const entered = enter_(); failed(entered)) return entered;
         if (steps_.empty()) [[maybe_unused]]
             bool const more = advance();
@@ -2416,7 +2404,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     std::size_t select_row_bytes_() const noexcept {
         std::size_t const slots = pool_slots_();
         return value_row_bytes_ + 2 * neighbors_row_bytes_() + sizeof(u32_t) +
-               slots * (sizeof(dense_scored_node_t) + value_row_bytes_ + sizeof(u32_t)) + selection_bytes_() +
+               slots * (sizeof(scored_node_t) + value_row_bytes_ + sizeof(u32_t)) + selection_bytes_() +
                connectivity_ * (sizeof(proposal_t) + sizeof(u32_t));
     }
 
@@ -2425,7 +2413,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     std::size_t reverse_row_bytes_() const noexcept {
         std::size_t const slots = connectivity_ * 2;
         return neighbors_row_bytes_() + value_row_bytes_ + sizeof(u32_t) +
-               slots * (sizeof(dense_scored_node_t) + value_row_bytes_ + sizeof(u32_t)) + selection_bytes_() +
+               slots * (sizeof(scored_node_t) + value_row_bytes_ + sizeof(u32_t)) + selection_bytes_() +
                (slots + 1) * sizeof(u32_t);
     }
 
@@ -2485,7 +2473,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
      *  short. */
     template <typename value_type_>
     static value_type_* carve_(bytes_span_t& space, std::size_t count) noexcept {
-        dense_nvme_workspace_allocator<value_type_> slicer {space};
+        nvme_workspace_allocator<value_type_> slicer {space};
         return slicer.allocate(count);
     }
 
@@ -2544,7 +2532,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     template <typename row_of_type_, typename destination_of_type_>
     status_t read_points_(indexes_t const& view, u64_t begin, std::size_t row_bytes, std::size_t tasks,
                           row_of_type_&& row_of, destination_of_type_&& destination_of, executor_t& executor,
-                          dense_nvme_reads_t& reads) noexcept {
+                          nvme_reads_t& reads) noexcept {
         if (!tasks) return status_t::success_k;
         auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<extent_t, 1> {
             if (progress++) return {};
@@ -2565,7 +2553,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     template <typename on_key_type_>
     status_t scan_keys_(source_t const& source, executor_t& executor, on_key_type_&& on_key) noexcept {
         indexes_t const& view = *source.view;
-        dense_nvme_part_t const& part = view.parts_[source.part];
+        nvme_part_t const& part = view.parts_[source.part];
         std::size_t const run_rows = min_of(view.scan_run_rows_(source.part, sizeof(key_t)), source.rows);
         auto describe = [&](std::size_t task, u64_t& progress) noexcept -> std::array<extent_t, 1> {
             if (progress++) return {};
@@ -2612,7 +2600,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     }
 
     /** The one part of target part @p target. */
-    static dense_nvme_part_t const& part_of_(target_t const& target) noexcept { return target.view.parts_[0]; }
+    static nvme_part_t const& part_of_(target_t const& target) noexcept { return target.view.parts_[0]; }
 
 #pragma endregion Scans and Writes
 
@@ -2620,8 +2608,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
 
     /** The norms the kernel reads of the row whose bytes start at @p bytes, or none. */
     vector_norms_t norms_of_(byte_t const* bytes) const noexcept {
-        return norms_bytes_ ? usearch::dense_norms<indexes_t::capability_k, scalar_t>(view_of_(bytes))
-                            : vector_norms_t {};
+        return norms_bytes_ ? dense::norms<indexes_t::capability_k, scalar_t>(view_of_(bytes)) : vector_norms_t {};
     }
     vector_view_t view_of_(byte_t const* bytes) const noexcept {
         return vector_view_t {reinterpret_cast<scalar_t const*>(bytes), dimensions_};
@@ -2630,8 +2617,8 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     /** The exact distance between two rows. */
     f32_t distance_(byte_t const* first, vector_norms_t first_norms, byte_t const* second,
                     vector_norms_t second_norms) const noexcept {
-        return usearch::distance<indexes_t::capability_k, scalar_t>(kernel_, view_of_(first), first_norms,
-                                                                    view_of_(second), second_norms);
+        return dense::distance<indexes_t::capability_k, scalar_t>(kernel_, view_of_(first), first_norms,
+                                                                  view_of_(second), second_norms);
     }
 
     /**
@@ -2644,7 +2631,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
      */
     std::size_t select_diverse_(pools_t const& pools, std::size_t row, selection_t scratch, std::span<node_id_t> out,
                                 std::size_t& computed) const noexcept {
-        dense_scored_node_t const* const entries = pools.entries_of(row);
+        scored_node_t const* const entries = pools.entries_of(row);
         std::size_t const count = pools.counts[row], limit = out.size();
         for (u32_t slot = 0; slot != count; ++slot) scratch.order[slot] = slot;
         partial_sort(std::span<u32_t>(scratch.order, count), count, [&](u32_t first, u32_t second) noexcept {
@@ -2885,7 +2872,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     status_t copy_(step_t const& step, executor_t& executor) noexcept {
         std::size_t const index = step.part;
         source_t const& source = sources_[index];
-        dense_nvme_part_t const& part = source.view->parts_[source.part];
+        nvme_part_t const& part = source.view->parts_[source.part];
         std::size_t const count = step.nodes.size(), first = step.nodes.first;
         std::size_t const value_bytes = value_row_bytes_, neighbor_bytes = neighbors_row_bytes_();
         bytes_span_t space = workspace_;
@@ -2929,7 +2916,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         if (fences_.empty()) {
             std::size_t const range = first / source.stride;
             target_t& target = targets_[source.target + range];
-            dense_nvme_part_t const& written = part_of_(target);
+            nvme_part_t const& written = part_of_(target);
             std::size_t const landed = source.base + first - range * source.stride;
             status_t wrote = write_rows_(target, written.keys_begin, sizeof(key_t), landed, count, keys);
             if (succeeded(wrote)) wrote = write_rows_(target, written.values_begin, value_bytes, landed, count, values);
@@ -2975,7 +2962,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
             std::size_t row = 0;
             while (tags[first + row] != range) ++row;
             target_t& target = targets_[range_targets_[range]];
-            dense_nvme_part_t const& written = part_of_(target);
+            nvme_part_t const& written = part_of_(target);
             std::size_t const landed = routed_row_(index, first + row, tags, directory), from = offsets[range];
             status_t wrote = write_rows_(target, written.keys_begin, sizeof(key_t), landed, rows,
                                          gathered_keys + from * sizeof(key_t));
@@ -3006,7 +2993,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         if (failed(traversals.reserve_exactly(executor.size()))) return status_t::bad_alloc_k;
         for (std::size_t thread = 0; thread != executor.size(); ++thread) {
             traversals.push_back_reserved(
-                dense_traversal_context_t {typename dense_traversal_context_t::allocator_t {executor.arena(thread)}});
+                traversal_context_t {typename traversal_context_t::allocator_t {executor.arena(thread)}});
             traversals[thread].random_generator.state = mix_bits(thread + 1);
             if (status_t const sized = index.reserve_traversal(traversals[thread], config); failed(sized)) return sized;
         }
@@ -3015,7 +3002,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
 
     /** Folds the telemetry a RAM index's traversals ran up into the result. */
     void absorb_traversals_(traversals_t const& traversals) noexcept {
-        for (dense_traversal_context_t const& traversal : traversals) {
+        for (traversal_context_t const& traversal : traversals) {
             result_.graph.visited_members += traversal.visited_members;
             result_.graph.computed_distances += traversal.computed_distances;
             result_.graph.computed_distances_in_refines += traversal.computed_distances_in_refines;
@@ -3071,8 +3058,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         if (status_t const read = scan_rows_(target.view, 0, first, count, columns, executor); failed(read))
             return read;
 
-        ram_index_t index {kernel_, dense_nvme_workspace_allocator<byte_t>(space),
-                           dense_nvme_workspace_allocator<byte_t>(space)};
+        ram_index_t index {kernel_, nvme_workspace_allocator<byte_t>(space), nvme_workspace_allocator<byte_t>(space)};
         if (status_t const reserved =
                 index.reserve({count, static_cast<connectivity_t>(connectivity_), dimensions_}).status;
             failed(reserved))
@@ -3120,8 +3106,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
                                                             header.data_of(bytes, header.neighbors),
                                                             {}};
         bytes_span_t space = workspace_;
-        ram_index_t index {kernel_, dense_nvme_workspace_allocator<byte_t>(space),
-                           dense_nvme_workspace_allocator<byte_t>(space)};
+        ram_index_t index {kernel_, nvme_workspace_allocator<byte_t>(space), nvme_workspace_allocator<byte_t>(space)};
         if (status_t const reserved =
                 index.reserve({nodes, static_cast<connectivity_t>(connectivity_), dimensions_}).status;
             failed(reserved))
@@ -3194,13 +3179,13 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         if (count == nodes && ram_fits_(nodes, neighbors_row_bytes_(), refine_slices_k))
             return refine_in_ram_(step.part, executor);
         std::size_t const slots = pool_slots_(), connectivity = connectivity_;
-        dense_nvme_part_t const& part = part_of_(target);
+        nvme_part_t const& part = part_of_(target);
         bytes_span_t space = workspace_;
         auto* const queries = carve_<byte_t>(space, count * value_row_bytes_);
         auto* const neighbors = carve_<node_id_t>(space, count * connectivity);
         auto* const previous_neighbors = carve_<node_id_t>(space, count * connectivity);
         auto* const counts = carve_<u32_t>(space, count);
-        auto* const entries = carve_<dense_scored_node_t>(space, count * slots);
+        auto* const entries = carve_<scored_node_t>(space, count * slots);
         auto* const vectors = carve_<byte_t>(space, count * slots * value_row_bytes_);
         auto* const orders = carve_<u32_t>(space, count * slots);
         auto* const kept_slots = carve_<u32_t>(space, count * connectivity);
@@ -3271,7 +3256,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
             for (std::size_t pick = 0; pick != connectivity; ++pick) {
                 spilled[pick] = proposal_t {};
                 if (pick >= picks) continue;
-                dense_scored_node_t const* const pool = pools.entries_of(row);
+                scored_node_t const* const pool = pools.entries_of(row);
                 std::size_t slot = 0;
                 while (pool[slot].node_id != out[pick]) ++slot;
                 spilled[pick] = proposal_t {out[pick], static_cast<node_id_t>(first + row), pool[slot].distance};
@@ -3298,13 +3283,13 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
      *  rows write back in one run. */
     status_t reverse_(step_t const& step, executor_t& executor) noexcept {
         target_t& target = targets_[step.part];
-        dense_nvme_part_t const& part = part_of_(target);
+        nvme_part_t const& part = part_of_(target);
         std::size_t const nodes = target.view.size(), connectivity = connectivity_, rows = step.nodes.size();
         std::size_t const lowest = step.nodes.first, slots = connectivity * 2;
         bucket_t& bucket = buckets_[bucket_bases_[step.part] + lowest / bucket_rows_];
         bytes_span_t space = workspace_;
         auto* const proposed_counts = carve_<u32_t>(space, rows);
-        auto* const proposed = carve_<dense_scored_node_t>(space, rows * connectivity);
+        auto* const proposed = carve_<scored_node_t>(space, rows * connectivity);
         if (!proposed_counts || !proposed) return status_t::bad_alloc_k;
         std::memset(proposed_counts, 0, rows * sizeof(u32_t));
         pools_t const proposals {proposed, nullptr, proposed_counts, connectivity, 0};
@@ -3320,7 +3305,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
             if (status_t const read = bucket.file.read_at(offset, {reinterpret_cast<byte_t*>(run), length});
                 failed(read))
                 return read;
-            result_.scan_reads += dense_nvme_reads_t {1, length};
+            result_.scan_reads += nvme_reads_t {1, length};
             for (std::size_t record = 0; record != length / sizeof(proposal_t); ++record) {
                 proposal_t const& back_link = run[record];
                 if (back_link.target < lowest || back_link.target >= lowest + rows ||
@@ -3341,7 +3326,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
             auto* const neighbors = carve_<node_id_t>(carving, count * connectivity);
             auto* const owns = carve_<byte_t>(carving, count * value_row_bytes_);
             auto* const counts = carve_<u32_t>(carving, count);
-            auto* const entries = carve_<dense_scored_node_t>(carving, count * slots);
+            auto* const entries = carve_<scored_node_t>(carving, count * slots);
             auto* const vectors = carve_<byte_t>(carving, count * slots * value_row_bytes_);
             auto* const orders = carve_<u32_t>(carving, count * slots);
             auto* const kept_slots = carve_<u32_t>(carving, count * connectivity);
@@ -3369,7 +3354,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
                     node_id_t const neighbor = neighbors[row * connectivity + slot];
                     if (neighbor < nodes && neighbor != self) pools.offer(row, {neighbor, 0}, slots);
                 }
-                dense_scored_node_t const* const proposed_row = proposals.entries_of(local);
+                scored_node_t const* const proposed_row = proposals.entries_of(local);
                 for (std::size_t slot = 0; slot != proposed_counts[local]; ++slot)
                     pools.offer(row, {proposed_row[slot].node_id, 0}, slots);
                 for (std::size_t slot = 0; slot != counts[row]; ++slot)
@@ -3427,7 +3412,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
      *  covering it, and sweeps again while the islands shrink. */
     status_t heal_(step_t const& step, executor_t& executor) noexcept {
         target_t& target = targets_[step.part];
-        dense_nvme_part_t const& part = part_of_(target);
+        nvme_part_t const& part = part_of_(target);
         std::size_t const nodes = target.view.size(), connectivity = connectivity_;
         std::size_t const words = divide_round_up<std::size_t>(nodes, 64), row_bytes = neighbors_row_bytes_();
         bytes_span_t space = workspace_;
@@ -3438,15 +3423,15 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
         if (!current || !next || !island_row || !target_row) return status_t::bad_alloc_k;
         auto reached = [&](std::size_t node) noexcept { return (current[node / 64] >> (node % 64)) & 1u; };
         auto read_row = [&](std::size_t node, node_id_t* row) noexcept {
-            result_.neighbor_reads += dense_nvme_reads_t {1, row_bytes};
+            result_.neighbor_reads += nvme_reads_t {1, row_bytes};
             return target.file.read_at(part.neighbors_begin + node * row_bytes,
                                        {reinterpret_cast<byte_t*>(row), row_bytes});
         };
         std::size_t const seeds = min_of<std::size_t>(connectivity, nodes);
-        std::size_t const spread = dense_heal_spread(connectivity);
+        std::size_t const spread = heal_spread(connectivity);
         std::size_t islands_before = nodes + 1;
         for (std::size_t round = 0;; ++round) {
-            dense_health_result_t audited;
+            health_result_t audited;
             {
                 auto [call, call_status] = target.view.begin_scans_(executor, 1);
                 if (failed(call_status)) return call_status;
@@ -3557,7 +3542,7 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
     std::size_t select_rows_ = 0;
     std::size_t build_rows_ = 0;
 
-    dense_nvme_rewrite_phase_t phase_ = dense_nvme_rewrite_phase_t::finish_k;
+    nvme_rewrite_phase_t phase_ = nvme_rewrite_phase_t::finish_k;
 
     /** The current phase's steps. */
     growing_buffer<step_t, forkunion_allocator_t> steps_ {allocator_};
@@ -3569,10 +3554,10 @@ struct [[nodiscard]] dense_nvme_rewrite_plan {
 };
 
 template <typename indexes_type_>
-expected<dense_nvme_rewrite_plan<indexes_type_>> plan_merge(std::span<indexes_type_ const* const> sources,
-                                                            std::string_view target, bytes_span_t workspace,
-                                                            dense_nvme_rewrite_config_t const& config) noexcept {
-    using plan_t = dense_nvme_rewrite_plan<indexes_type_>;
+expected<nvme_rewrite_plan<indexes_type_>> plan_merge(std::span<indexes_type_ const* const> sources,
+                                                      std::string_view target, bytes_span_t workspace,
+                                                      nvme_rewrite_config_t const& config) noexcept {
+    using plan_t = nvme_rewrite_plan<indexes_type_>;
     plan_t plan;
     if (sources.empty() || !sources[0]) return {std::move(plan), status_t::uninitialized_k};
     if (status_t const opened = plan.open_(target, workspace, config, *sources[0]); failed(opened))
@@ -3590,7 +3575,7 @@ expected<dense_nvme_rewrite_plan<indexes_type_>> plan_merge(std::span<indexes_ty
         if (plan.sources_[part].rows > plan.sources_[host].rows) host = part;
         rows += plan.sources_[part].rows;
     }
-    if (rows >= dense_node_id_unknown_k) return {std::move(plan), status_t::overflow_k};
+    if (rows >= node_id_unknown_k) return {std::move(plan), status_t::overflow_k};
     std::swap(plan.sources_[0], plan.sources_[host]);
     for (std::size_t part = 0, base = 0; part != plan.sources_.size(); base += plan.sources_[part].rows, ++part) {
         plan.sources_[part].base = base;
@@ -3606,13 +3591,13 @@ expected<dense_nvme_rewrite_plan<indexes_type_>> plan_merge(std::span<indexes_ty
 }
 
 template <typename indexes_type_, typename split_type_>
-expected<dense_nvme_rewrite_plan<indexes_type_>> plan_split(indexes_type_ const& source, split_type_ const& policy,
-                                                            std::string_view target, bytes_span_t workspace,
-                                                            dense_nvme_rewrite_config_t const& config) noexcept {
-    using plan_t = dense_nvme_rewrite_plan<indexes_type_>;
+expected<nvme_rewrite_plan<indexes_type_>> plan_split(indexes_type_ const& source, split_type_ const& policy,
+                                                      std::string_view target, bytes_span_t workspace,
+                                                      nvme_rewrite_config_t const& config) noexcept {
+    using plan_t = nvme_rewrite_plan<indexes_type_>;
     using key_t = typename indexes_type_::key_t;
-    constexpr bool by_rows_k = std::is_same_v<split_type_, dense_split_by_rows_t>;
-    static_assert(by_rows_k || std::is_same_v<split_type_, dense_split_by_keys<key_t>>, "Split by rows or by keys");
+    constexpr bool by_rows_k = std::is_same_v<split_type_, split_by_rows_t>;
+    static_assert(by_rows_k || std::is_same_v<split_type_, split_by_keys<key_t>>, "Split by rows or by keys");
     plan_t plan;
     if (!source.shards_count()) return {std::move(plan), status_t::uninitialized_k};
     if (status_t const opened = plan.open_(target, workspace, config, source); failed(opened))
@@ -3656,10 +3641,10 @@ expected<dense_nvme_rewrite_plan<indexes_type_>> plan_split(indexes_type_ const&
 }
 
 template <typename indexes_type_>
-expected<dense_nvme_rewrite_plan<indexes_type_>> plan_refine(indexes_type_ const& source, iota_view<std::size_t> rows,
-                                                             std::string_view target, bytes_span_t workspace,
-                                                             dense_nvme_rewrite_config_t const& config) noexcept {
-    using plan_t = dense_nvme_rewrite_plan<indexes_type_>;
+expected<nvme_rewrite_plan<indexes_type_>> plan_refine(indexes_type_ const& source, iota_view<std::size_t> rows,
+                                                       std::string_view target, bytes_span_t workspace,
+                                                       nvme_rewrite_config_t const& config) noexcept {
+    using plan_t = nvme_rewrite_plan<indexes_type_>;
     plan_t plan;
     if (!source.shards_count()) return {std::move(plan), status_t::uninitialized_k};
     if (status_t const opened = plan.open_(target, workspace, config, source); failed(opened))
@@ -3691,10 +3676,10 @@ expected<dense_nvme_rewrite_plan<indexes_type_>> plan_refine(indexes_type_ const
 }
 
 template <typename indexes_type_>
-expected<dense_nvme_rewrite_plan<indexes_type_>> plan_build(std::span<std::string_view const> sources,
-                                                            std::string_view target, bytes_span_t workspace,
-                                                            dense_nvme_rewrite_config_t const& config) noexcept {
-    using plan_t = dense_nvme_rewrite_plan<indexes_type_>;
+expected<nvme_rewrite_plan<indexes_type_>> plan_build(std::span<std::string_view const> sources,
+                                                      std::string_view target, bytes_span_t workspace,
+                                                      nvme_rewrite_config_t const& config) noexcept {
+    using plan_t = nvme_rewrite_plan<indexes_type_>;
     plan_t plan;
     if (sources.empty()) return {std::move(plan), status_t::uninitialized_k};
     if (failed(plan.opened_.reserve_exactly(sources.size()))) return {std::move(plan), status_t::bad_alloc_k};
@@ -3709,7 +3694,7 @@ expected<dense_nvme_rewrite_plan<indexes_type_>> plan_build(std::span<std::strin
     std::size_t rows = 0;
     for (auto& part : plan.sources_) part.base = rows, rows += part.rows;
     if (!rows) return {std::move(plan), status_t::uninitialized_k};
-    if (rows >= dense_node_id_unknown_k) return {std::move(plan), status_t::overflow_k};
+    if (rows >= node_id_unknown_k) return {std::move(plan), status_t::overflow_k};
     plan.build_rows_ = plan.fitting_block_rows_(rows);
     if (!plan.build_rows_) return {std::move(plan), status_t::bad_alloc_k};
     if (status_t const sized = plan.size_steps_(0); failed(sized)) return {std::move(plan), sized};
@@ -3724,8 +3709,8 @@ expected<dense_nvme_rewrite_plan<indexes_type_>> plan_build(std::span<std::strin
 
 /** Drains @p planned over @p executor: every step of every phase in order, then the commit. */
 template <typename plan_type_>
-expected<dense_nvme_rewrite_result_t> dense_nvme_rewrite_drain_(expected<plan_type_>&& planned,
-                                                                typename plan_type_::executor_t& executor) noexcept {
+expected<nvme_rewrite_result_t> nvme_rewrite_drain_(expected<plan_type_>&& planned,
+                                                    typename plan_type_::executor_t& executor) noexcept {
     if (!planned) return {{}, planned.status};
     plan_type_& plan = planned.value;
     do
@@ -3737,39 +3722,36 @@ expected<dense_nvme_rewrite_result_t> dense_nvme_rewrite_drain_(expected<plan_ty
 
 /** The one-shot @ref plan_merge, drained over @p executor. */
 template <typename indexes_type_>
-expected<dense_nvme_rewrite_result_t> merge(std::span<indexes_type_ const* const> sources, std::string_view target,
-                                            typename indexes_type_::executor_t& executor, bytes_span_t workspace,
-                                            dense_nvme_rewrite_config_t const& config = {}) noexcept {
-    return dense_nvme_rewrite_drain_(plan_merge(sources, target, workspace, config), executor);
+expected<nvme_rewrite_result_t> merge(std::span<indexes_type_ const* const> sources, std::string_view target,
+                                      typename indexes_type_::executor_t& executor, bytes_span_t workspace,
+                                      nvme_rewrite_config_t const& config = {}) noexcept {
+    return nvme_rewrite_drain_(plan_merge(sources, target, workspace, config), executor);
 }
 
 /** The one-shot @ref plan_split, drained over @p executor. */
 template <typename indexes_type_, typename split_type_>
-expected<dense_nvme_rewrite_result_t> split(indexes_type_ const& source, split_type_ const& policy,
-                                            std::string_view target, typename indexes_type_::executor_t& executor,
-                                            bytes_span_t workspace,
-                                            dense_nvme_rewrite_config_t const& config = {}) noexcept {
-    return dense_nvme_rewrite_drain_(plan_split(source, policy, target, workspace, config), executor);
+expected<nvme_rewrite_result_t> split(indexes_type_ const& source, split_type_ const& policy, std::string_view target,
+                                      typename indexes_type_::executor_t& executor, bytes_span_t workspace,
+                                      nvme_rewrite_config_t const& config = {}) noexcept {
+    return nvme_rewrite_drain_(plan_split(source, policy, target, workspace, config), executor);
 }
 
 /** The one-shot @ref plan_refine, drained over @p executor. */
 template <typename indexes_type_>
-expected<dense_nvme_rewrite_result_t> refine(indexes_type_ const& source, iota_view<std::size_t> rows,
-                                             std::string_view target, typename indexes_type_::executor_t& executor,
-                                             bytes_span_t workspace,
-                                             dense_nvme_rewrite_config_t const& config = {}) noexcept {
-    return dense_nvme_rewrite_drain_(plan_refine(source, rows, target, workspace, config), executor);
+expected<nvme_rewrite_result_t> refine(indexes_type_ const& source, iota_view<std::size_t> rows,
+                                       std::string_view target, typename indexes_type_::executor_t& executor,
+                                       bytes_span_t workspace, nvme_rewrite_config_t const& config = {}) noexcept {
+    return nvme_rewrite_drain_(plan_refine(source, rows, target, workspace, config), executor);
 }
 
 /** The one-shot @ref plan_build, drained over @p executor. */
 template <typename indexes_type_>
-expected<dense_nvme_rewrite_result_t> build(std::span<std::string_view const> sources, std::string_view target,
-                                            typename indexes_type_::executor_t& executor, bytes_span_t workspace,
-                                            dense_nvme_rewrite_config_t const& config = {}) noexcept {
-    return dense_nvme_rewrite_drain_(plan_build<indexes_type_>(sources, target, workspace, config), executor);
+expected<nvme_rewrite_result_t> build(std::span<std::string_view const> sources, std::string_view target,
+                                      typename indexes_type_::executor_t& executor, bytes_span_t workspace,
+                                      nvme_rewrite_config_t const& config = {}) noexcept {
+    return nvme_rewrite_drain_(plan_build<indexes_type_>(sources, target, workspace, config), executor);
 }
 
 #pragma endregion Rewrites
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::dense

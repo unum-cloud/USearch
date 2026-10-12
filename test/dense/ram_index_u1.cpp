@@ -2,7 +2,7 @@
  *  @file test/dense/ram_index_u1.cpp
  *  @author Ash Vardanian
  *  @date August 15, 2026
- *  @brief Smoke & concurrency tests for the CPU-resident @c dense_ram_index over packed u1 cells,
+ *  @brief Smoke & concurrency tests for the CPU-resident @c dense::ram_index over packed u1 cells,
  *      under the bit kernels.
  */
 #include "dense/ram_index.hpp"

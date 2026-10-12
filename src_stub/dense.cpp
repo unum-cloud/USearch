@@ -420,7 +420,7 @@ void usearch_dense_init_ram(usearch_dense_init_ram_t* arguments) {
     usearch_dense_index_handle_t* const index = new (std::nothrow) usearch_dense_index_handle_t();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return;
     index->options = {arguments->metric, arguments->quantization, arguments->dimensions,
-                      arguments->connectivity ? arguments->connectivity : us::connectivity_16_k,
+                      arguments->connectivity ? arguments->connectivity : us::utilities::connectivity_16_k,
                       arguments->values_per_key};
     *arguments->index = index;
 }
@@ -1021,7 +1021,7 @@ void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
     // the walk; an entry's rows need no ordering and two documents need not share a row count.
     std::vector<usearch_key_t> documents;
     std::vector<std::vector<std::size_t>> token_rows;
-    std::unordered_map<us::uuid_t, std::size_t> position_of;
+    std::unordered_map<us::utilities::uuid_t, std::size_t> position_of;
     for (std::size_t row = 0; row != index.entries.size(); ++row) {
         auto const [slot, emplace_status] = position_of.emplace(keyed(index.entries[row].key), documents.size());
         if (emplace_status) documents.push_back(index.entries[row].key), token_rows.emplace_back();

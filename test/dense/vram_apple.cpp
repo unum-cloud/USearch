@@ -14,10 +14,9 @@ namespace unum::usearch::test::dense {
 
 std::size_t check_vram_apple(settings_t const& settings, gpu_device_t const& device) {
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    auto const [specs, status] = metal_device_specs_t::query(ordinal);
-    if (failed(status)) return fmt::println("- Metal: device #{} does not answer", ordinal), 1;
-    fmt::println("- Metal: device #{} {}", ordinal,
-                 usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(specs.gpu_class)));
+    fmt::println("- Metal: device #{} {}, {}, {} compute units, {} MiB", ordinal, device.name,
+                 usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device.gpu_class)), device.compute_units,
+                 device.memory_bytes >> 20);
     selected_device = ordinal;
     std::size_t failures_count = check_vram_index_cells<gpu_vendor_t::apple_k>(settings);
     if (settings.selects("vram_indexes")) failures_count += check_vram_indexes<gpu_vendor_t::apple_k>(settings);

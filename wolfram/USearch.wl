@@ -44,7 +44,9 @@ DenseGet::usage = "DenseGet[receiver, key, arena] calls usearch_dense_get."
 DenseSave::usage = "DenseSave[receiver, path] calls usearch_dense_save."
 DenseSaveBuffer::usage = "DenseSaveBuffer[receiver, arena] calls usearch_dense_save_buffer."
 DenseDescribe::usage = "DenseDescribe[receiver] calls usearch_dense_describe."
-DenseMultiply::usage = "DenseMultiply[receiver, left, arena] calls usearch_dense_multiply."
+DenseMultiply::usage = "DenseMultiply[receiver, left, arena] calls usearch_dense_multiply; DenseMultiply[receiver, left, columnKeys, arena] returns a SparseArray."
+DenseValues::usage = "DenseValues[receiver, keys, values] prepares immutable value rows in the index's quantization for DenseAttend. Binding-only."
+DenseAttend::usage = "DenseAttend[receiver, queries, values, arena] calls usearch_dense_attend and folds softmax attention over every key scored by the graph walk."
 
 VersionName::usage = "VersionName[] calls usearch_version_name."
 CapabilitiesCompiled::usage = "CapabilitiesCompiled[] calls usearch_capabilities_compiled."
@@ -58,6 +60,11 @@ verb[name_String, arguments_List] := LibraryFunctionLoad[$library, name, argumen
 
 (* Every index verb leads with the IDs of its index and its executor. *)
 receiving[name_String, arguments_List] := verb[name, Join[{Integer, Integer}, arguments]]
+
+receivingRows[name_String, before_List, after_List] := Quiet[<|
+    List -> receiving[name, Join[before, {{Real, _, "Constant"}, Boolean}, after]],
+    NumericArray -> receiving[name, Join[before, {{LibraryDataType[NumericArray], "Constant"}, Boolean}, after]]|>,
+    LibraryFunction::overload]
 
 executorForRam = verb["ExecutorForRam", {Integer, "DataStore", Integer}];
 executorOnPool = verb["ExecutorOnPool", {Integer, "DataStore", Integer}];
@@ -79,17 +86,20 @@ denseMetadataRead = verb["DenseMetadataRead", {Integer, "UTF8String"}];
 denseMetadataReadBuffer = verb["DenseMetadataReadBuffer", {Integer, LibraryDataType[NumericArray]}];
 denseReserve = receiving["DenseReserve", {Integer}];
 denseClear = receiving["DenseClear", {}];
-denseInsert = receiving["DenseInsert", {LibraryDataType[NumericArray], {Real, _}, Integer}];
+denseInsert = receivingRows["DenseInsert", {{LibraryDataType[NumericArray], "Constant"}}, {Integer}];
 denseRefine = receiving["DenseRefine", {Integer}];
 denseHealth = receiving["DenseHealth", {}];
-denseSearch = receiving["DenseSearch", {{Real, _}, Integer, Integer, Integer, "UTF8String"}];
-denseMaxsim = receiving["DenseMaxsim", {{Real, _}, Integer, Integer, Integer, Integer}];
+denseSearch = receivingRows["DenseSearch", {}, {Integer, Integer, Integer, "UTF8String"}];
+denseMaxsim = receivingRows["DenseMaxsim", {}, {Integer, Integer, Integer, Integer}];
 denseCount = receiving["DenseCount", {LibraryDataType[NumericArray]}];
 denseGet = receiving["DenseGet", {LibraryDataType[NumericArray], Integer}];
 denseSave = receiving["DenseSave", {"UTF8String"}];
 denseSaveBuffer = receiving["DenseSaveBuffer", {Integer}];
 denseDescribe = receiving["DenseDescribe", {}];
-denseMultiply = receiving["DenseMultiply", {{Real, _}, Integer, Integer, Integer}];
+denseMultiply = receivingRows["DenseMultiply", {}, {Integer, Integer, Integer}];
+denseValues = receivingRows["DenseValues", {{LibraryDataType[NumericArray], "Constant"}}, {}];
+denseAttend = receivingRows["DenseAttend", {}, {{LibraryDataType[NumericArray], "Constant"},
+    {LibraryDataType[NumericArray], "Constant"}, "UTF8String", Integer, Integer, Integer, Integer, Real}];
 versionName = LibraryFunctionLoad[$library, "VersionName", {}, "UTF8String"];
 capabilitiesCompiled = LibraryFunctionLoad[$library, "CapabilitiesCompiled", {}, "UTF8String"];
 capabilitiesAvailable = LibraryFunctionLoad[$library, "CapabilitiesAvailable", {}, "UTF8String"];
@@ -97,11 +107,13 @@ capabilitiesAvailable = LibraryFunctionLoad[$library, "CapabilitiesAvailable", {
 (* A key is an integer below 2^128, crossing as its sixteen base-256 digits, most significant first. *)
 keyQ[key_] := IntegerQ[key] && 0 <= key < 2^128
 keyBytes[keys_] := NumericArray[IntegerDigits[keys, 256, 16], "UnsignedInteger8"]
+keysFromBytes[{}] := {}
 keysFromBytes[bytes_NumericArray] := If[MemberQ[Dimensions[bytes], 0], ConstantArray[0, Most[Dimensions[bytes]]],
     Normal[bytes] . (256^Range[15, 0, -1])]
 
 store[list_List] := Developer`DataStore @@ list
-rows[vectors_] := Developer`ToPackedArray[N[vectors]]
+rows[vectors_NumericArray] := vectors
+rows[vectors_List] := Developer`ToPackedArray[N[vectors]]
 monolith[bytes_ByteArray] := NumericArray[Normal[bytes], "UnsignedInteger8"]
 monolith[bytes_NumericArray] := bytes
 
@@ -133,6 +145,9 @@ construct[head_Symbol, function_, arguments_List] :=
 submit[index_DenseIndex, function_, arguments_List] := call[function, Join[{index, None}, arguments]]
 submit[DenseIndexOn[index_DenseIndex, executor_Executor], function_, arguments_List] :=
     call[function, Join[{index, executor}, arguments]]
+
+submitRows[receiver_, functions_Association, before_List, vectors_, after_List] :=
+    submit[receiver, functions[Head[vectors]], Join[before, {rows[vectors], Head[vectors] === NumericArray}, after]]
 
 Options[ExecutorForRam] = {"MemoryDomains" -> {}, "Threads" -> 0};
 ExecutorForRam[OptionsPattern[]] := construct[Executor, executorForRam,
@@ -187,29 +202,51 @@ DenseClear[receiver_] := submit[receiver, denseClear, {}]
 Options[DenseInsert] = {"ExpansionFactor" -> 0};
 (* No NumericArray holds zero keys, and inserting none is the C library's no-op too. *)
 DenseInsert[receiver_, {}, {}, OptionsPattern[]] := Null
-DenseInsert[receiver_, keys : {__?keyQ}, vectors_List, OptionsPattern[]] :=
-    submit[receiver, denseInsert, {keyBytes[keys], rows[vectors], OptionValue["ExpansionFactor"]}]
+DenseInsert[receiver_, keys : {__?keyQ}, vectors : (_List | _NumericArray), OptionsPattern[]] :=
+    submitRows[receiver, denseInsert, {keyBytes[keys]}, vectors, {OptionValue["ExpansionFactor"]}]
 Options[DenseRefine] = {"ExpansionFactor" -> 0};
 DenseRefine[receiver_, OptionsPattern[]] := submit[receiver, denseRefine, {OptionValue["ExpansionFactor"]}]
 DenseHealth[receiver_] := submit[receiver, denseHealth, {}]
 Options[DenseSearch] = {"ExpansionFactor" -> 0, "Traversal" -> "walk"};
 (* No tensor holds zero rows, so a call with no queries answers here, as C would, with nothing found. *)
 DenseSearch[receiver_, {}, wanted_Integer, arena_Arena, OptionsPattern[]] := <|"Keys" -> {}, "Scores" -> {}|>
-DenseSearch[receiver_, queries : {__List}, wanted_Integer, arena_Arena, OptionsPattern[]] := submit[receiver,
-    denseSearch, {rows[queries], wanted, arena, OptionValue["ExpansionFactor"], OptionValue["Traversal"]}]
+DenseSearch[receiver_, queries : ({__List} | _NumericArray), wanted_Integer, arena_Arena, OptionsPattern[]] :=
+    submitRows[receiver, denseSearch, {}, queries,
+        {wanted, arena, OptionValue["ExpansionFactor"], OptionValue["Traversal"]}]
 Options[DenseMaxsim] = {"ExpansionFactor" -> 0};
 DenseMaxsim[receiver_, {}, rowsPerQuery_Integer, wanted_Integer, arena_Arena, OptionsPattern[]] :=
     <|"Keys" -> {}, "Scores" -> {}|>
-DenseMaxsim[receiver_, queries : {__List}, rowsPerQuery_Integer, wanted_Integer, arena_Arena, OptionsPattern[]] :=
-    submit[receiver, denseMaxsim, {rows[queries], rowsPerQuery, wanted, arena, OptionValue["ExpansionFactor"]}]
+DenseMaxsim[receiver_, queries : ({__List} | _NumericArray), rowsPerQuery_Integer, wanted_Integer, arena_Arena, OptionsPattern[]] :=
+    submitRows[receiver, denseMaxsim, {}, queries, {rowsPerQuery, wanted, arena, OptionValue["ExpansionFactor"]}]
 DenseCount[receiver_, key_?keyQ] := submit[receiver, denseCount, {keyBytes[key]}]
 DenseGet[receiver_, key_?keyQ, arena_Arena] := submit[receiver, denseGet, {keyBytes[key], arena}]
 DenseSave[receiver_, path_String] := submit[receiver, denseSave, {path}]
 DenseSaveBuffer[receiver_, arena_Arena] := submit[receiver, denseSaveBuffer, {arena}]
 DenseDescribe[receiver_] := submit[receiver, denseDescribe, {}]
 Options[DenseMultiply] = {"Wanted" -> 0, "ExpansionFactor" -> 0};
-DenseMultiply[receiver_, left_List, arena_Arena, OptionsPattern[]] := submit[receiver, denseMultiply,
-    {rows[left], arena, OptionValue["Wanted"], OptionValue["ExpansionFactor"]}]
+DenseMultiply[receiver_, left : (_List | _NumericArray), arena_Arena, OptionsPattern[]] :=
+    submitRows[receiver, denseMultiply, {}, left, {arena, OptionValue["Wanted"], OptionValue["ExpansionFactor"]}]
+DenseMultiply[receiver_, left : (_List | _NumericArray), columnKeys : {___?keyQ}, arena_Arena,
+    options : OptionsPattern[]] :=
+    Module[{products, columns, positions},
+        If[!DuplicateFreeQ[columnKeys], Return[Failure["invalid-argument",
+            <|"MessageTemplate" -> "column keys must be unique"|>]]];
+        products = DenseMultiply[receiver, left, arena, options];
+        If[FailureQ[products], Return[products]];
+        columns = AssociationThread[columnKeys -> Range[Length[columnKeys]]];
+        positions = Flatten[MapIndexed[Thread[{First[#2], #1}] &,
+            TakeList[Lookup[columns, products["Keys"], Missing["UnknownKey"]], Differences[products["Offsets"]]]], 1];
+        If[!FreeQ[positions, _Missing] || !DuplicateFreeQ[positions], Return[Failure["invalid-argument",
+            <|"MessageTemplate" -> "each product must identify a unique row and a known column"|>]]];
+        SparseArray[Thread[positions -> products["Scores"]], {Length[products["Offsets"]] - 1, Length[columnKeys]}]]
+DenseValues[receiver_, keys : {__?keyQ}, values : (_List | _NumericArray)] :=
+    Replace[submitRows[receiver, denseValues, {keyBytes[keys]}, values, {}], fields_Association :> DenseValues[fields]]
+Options[DenseAttend] = {"HeadCount" -> 1, "ExpansionFactor" -> 0, "ScoreScale" -> 0.};
+DenseAttend[receiver_, {}, values_DenseValues, arena_Arena, OptionsPattern[]] := <|"Outputs" -> {}, "Carry" -> {}|>
+DenseAttend[receiver_, queries : ({__List} | _NumericArray), DenseValues[values_Association], arena_Arena,
+    OptionsPattern[]] := submitRows[receiver, denseAttend, {}, queries,
+        {values["ValueKeys"], values["ValueRows"], values["Quantization"], values["Dimensions"], arena,
+            OptionValue["HeadCount"], OptionValue["ExpansionFactor"], N[OptionValue["ScoreScale"]]}]
 
 VersionName[] := versionName[]
 CapabilitiesCompiled[] := capabilitiesCompiled[]

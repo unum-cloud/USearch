@@ -56,7 +56,7 @@ namespace us = unum::usearch;
 
 /** What @c usearch_arena_t owns: host memory that one call at a time rewinds and refills. */
 struct usearch_arena_handle_t {
-    us::growing_arena<> memory {us::global_allocator};
+    us::utilities::growing_arena<> memory {us::utilities::global_allocator};
 
     /** The outcome of the call holding the arena, from its claim or deferred submission until just
      *  before its final status; null while free. Atomic, since a held call finishes on any thread. */
@@ -66,6 +66,7 @@ struct usearch_arena_handle_t {
 namespace unum {
 namespace usearch {
 namespace stub {
+using namespace unum::usearch::utilities;
 
 #pragma region Vocabulary and Outcomes
 

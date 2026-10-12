@@ -2,7 +2,7 @@
 
 The readable reference tier: a graph index over arbitrary payloads, scored by any batched metric you write, under keys you choose.
 It needs the standard library and the OS headers only, so together with `utilities/` it ships as a standalone header-only library.
-The sequence and geospatial modalities are instantiations of it, `sequence_ram_index` over string views and `geospatial_ram_index` over Earth-fixed positions.
+The sequence and geospatial modalities are instantiations of it, `sequence::ram_index` over string views and `geospatial::ram_index` over Earth-fixed positions.
 Specialized optimizations, like packed state words, growth schedules, lock-free readers and SIMD kernel kits, belong to the dense family instead.
 
 ## Metrics
@@ -32,8 +32,8 @@ struct manhattan_metric_t {
     std::vector<std::vector<float> const*> staged_;
 
     void reset(std::vector<float> const& query) noexcept { query_ = &query, staged_.clear(); }
-    us::basic_metric_staging_t push(std::vector<float> const& value) noexcept {
-        return staged_.push_back(&value), us::basic_metric_staging_t::staged_k;
+    us::basic::metric_staging_t push(std::vector<float> const& value) noexcept {
+        return staged_.push_back(&value), us::basic::metric_staging_t::staged_k;
     }
     void drain(std::span<double> distances, double) noexcept {
         for (std::size_t i = 0; i != staged_.size(); ++i) {
@@ -52,16 +52,17 @@ An index is a template over the payload, the key, the node ID width and the dist
 Each thread brings its own metric instance and its own traversal context, which holds the walk's scratch and receives the matches:
 
 ```cpp
-using index_t = us::basic_ram_index<std::vector<float>, us::u64_t>;
+using index_t = us::basic::ram_index<std::vector<float>, us::utilities::u64_t>;
 index_t index;
 if (!index.reserve(1000)) return 1;
 
 manhattan_metric_t metric;
 index_t::traversal_context_t context {/* seed */ 42};
 std::vector<std::vector<float>> values = {{0, 0, 1}, {0, 1, 0}, {1, 0, 0}};
-std::vector<us::u64_t> keys = {10, 20, 30};
-auto const [inserted, insert_status] = index.insert(std::span {values}, std::span<us::u64_t const> {keys}, metric,
-                                                    std::span<us::u64_t> {}, context, us::basic_keep_diverse_t {16});
+std::vector<us::utilities::u64_t> keys = {10, 20, 30};
+auto const [inserted, insert_status] = index.insert(std::span {values}, std::span<us::utilities::u64_t const> {keys},
+                                                    metric, std::span<us::utilities::u64_t> {}, context,
+                                                    us::basic::keep_diverse_t {16});
 
 std::vector<float> const query = {0, 0, 0.9f};
 auto const [found, search_status] = index.search(query, metric, context);
@@ -72,7 +73,7 @@ for (std::size_t i = 0; i != found.count; ++i) {
 ```
 
 - `insert` moves a batch of payloads in under their keys and is all-or-nothing: capacity and scratch for the whole batch are secured before the first value moves.
-- The selector decides which candidates become neighbors, and carries the neighbors-per-node budget: `basic_keep_diverse_t` prunes by diversity, `basic_keep_closest_t` keeps the nearest.
+- The selector decides which candidates become neighbors, and carries the neighbors-per-node budget: `basic::keep_diverse_t` prunes by diversity, `basic::keep_closest_t` keeps the nearest.
   Both are per-call values, so heuristics and budgets can change between batches.
 - `search` leaves its matches in `context.results`, nearest first, and `key_of`, `value_of`, `find` and `count` translate between node IDs and keys.
 - A search may score with a different metric than the one the graph was built with, and a `fold` passed to `search` reads every scored round, for walks that reduce to something other than the nearest matches.

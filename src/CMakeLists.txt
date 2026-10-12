@@ -183,48 +183,100 @@ foreach (
 endforeach ()
 
 # The type-erased implementations behind the C interface: the dispatch unit visits the arms through their explicitly
-# instantiated views and compiles at the baseline, since it inlines no kernel. Under CUDA the dispatch unit is the `.cu`
-# twin and the device arms join, so the C libraries carry them too.
-add_library(usearch_punned OBJECT types.cpp sequence.cpp)
+# instantiated views and compiles at the baseline, since it inlines no kernel. Under CUDA the device arms join, so the C
+# libraries carry them too.
+add_library(usearch_punned OBJECT types.cpp sequence.cpp dense_index.cpp)
 usearch_setup_target(usearch_punned)
 target_include_directories(usearch_punned PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_punned PRIVATE yyjson forkunion::static stringzilla::header)
 set(USEARCH_PUNNED_LIBRARIES usearch_punned usearch_dense_ram_variants usearch_dense_nvme_variants)
 
+# NVCC is only a device compiler here: every unit with kernels compiles twice, once by NVCC device-only into a fatbin
+# that links in as raw bytes, and once by the host compiler, which names no kernel, so nothing registers with or links
+# the CUDA runtime, and the driver opens at first use. The functions serve the tests and benchmarks too.
 if (USEARCH_BUILD_CUDA)
-    enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
+    enable_language(ASM)
 
-    # One unit per GPU class, compiled for its own architecture alone - the device twin of the CPU classes' per-unit ISA
-    # flags - so no cubin carries another generation's kernels. Every unit sees the same NumKong GPU capabilities, as
-    # the CPU units see the same probe verdicts, so the arms' types agree across units, and each class's ceiling keeps
-    # its arms within its generation. The codes reach NVCC directly, since CMake spells family-specific ones only from
-    # 3.31.
+    # Sets @p output to NVCC's codes for CMake-style @p architectures: a "-real" entry keeps its cubin alone, a
+    # "-virtual" one its PTX alone, a bare one both, and "native" the visible GPUs'.
+    function (usearch_cuda_codes output architectures)
+        set(codes_)
+        foreach (architecture_ IN LISTS architectures)
+            if (architecture_ STREQUAL "native")
+                list(APPEND codes_ -arch=native)
+            elseif (architecture_ MATCHES "^([0-9]+[af]?)-real$")
+                list(APPEND codes_ --generate-code=arch=compute_${CMAKE_MATCH_1},code=sm_${CMAKE_MATCH_1})
+            elseif (architecture_ MATCHES "^([0-9]+[af]?)-virtual$")
+                list(APPEND codes_ --generate-code=arch=compute_${CMAKE_MATCH_1},code=compute_${CMAKE_MATCH_1})
+            else ()
+                list(APPEND codes_ --generate-code=arch=compute_${architecture_},code=sm_${architecture_}
+                     --generate-code=arch=compute_${architecture_},code=compute_${architecture_}
+                )
+            endif ()
+        endforeach ()
+        set(${output}
+            "${codes_}"
+            PARENT_SCOPE
+        )
+    endfunction ()
+
+    # Compiles @p source device-only through NVCC into a fatbin of the codes the remaining arguments name, with @p
+    # target's includes and definitions, and links it into @p target page-aligned in a read-only section through an
+    # assembler stub, under `<name>_bundle_start` and `<name>_bundle_end`, so it travels into archives too. The host
+    # compiler NVCC pairs with is `CMAKE_CUDA_HOST_COMPILER` when set, and `CMAKE_CUDA_FLAGS` reach the pass.
+    function (usearch_cuda_fatbin target name source)
+        set(fatbins_dir_ ${CMAKE_CURRENT_BINARY_DIR}/cuda/${target})
+        set(fatbin_ ${fatbins_dir_}/${name}.fatbin)
+        set(host_compiler_ ${CMAKE_CXX_COMPILER})
+        if (CMAKE_CUDA_HOST_COMPILER)
+            set(host_compiler_ ${CMAKE_CUDA_HOST_COMPILER})
+        endif ()
+        separate_arguments(device_flags_ UNIX_COMMAND "${CMAKE_CUDA_FLAGS}")
+        add_custom_command(
+            OUTPUT ${fatbin_}
+            COMMAND
+                ${CUDAToolkit_NVCC_EXECUTABLE} -x cu -std=c++20 -O3 --fatbin -ccbin ${host_compiler_}
+                --expt-relaxed-constexpr ${ARGN} "-I$<JOIN:$<TARGET_PROPERTY:${target},INCLUDE_DIRECTORIES>,;-I>"
+                "-D$<JOIN:$<TARGET_PROPERTY:${target},COMPILE_DEFINITIONS>,;-D>" ${device_flags_} -MD -MF ${fatbin_}.d
+                ${source} -o ${fatbin_}
+            DEPENDS ${source}
+            DEPFILE ${fatbin_}.d
+            COMMENT "Compiling the ${name} kernels"
+            COMMAND_EXPAND_LISTS VERBATIM
+        )
+        set(fatbin_stub_ ${fatbins_dir_}/${name}_bundle.S)
+        file(
+            WRITE ${fatbin_stub_}
+            ".section .rodata\n.balign 4096\n.globl ${name}_bundle_start\n${name}_bundle_start:\n"
+            ".incbin \"${fatbin_}\"\n.globl ${name}_bundle_end\n${name}_bundle_end:\n"
+            ".section .note.GNU-stack,\"\",@progbits\n"
+        )
+        set_source_files_properties(${fatbin_stub_} PROPERTIES LANGUAGE ASM OBJECT_DEPENDS ${fatbin_})
+        target_sources(${target} PRIVATE ${fatbin_stub_})
+    endfunction ()
+
+    # One unit per GPU class, its fatbin compiled for its own architecture alone - the device twin of the CPU classes'
+    # per-unit ISA flags - so no cubin carries another generation's kernels. Every unit sees the same NumKong GPU
+    # capabilities, as the CPU units see the same probe verdicts, so the arms' types agree across units, and each
+    # class's ceiling keeps its arms within its generation.
     set(usearch_cuda_capabilities_ NUMKONG_TARGET_AMPERE=1 NUMKONG_TARGET_ADA=1 NUMKONG_TARGET_HOPPER=1
                                    NUMKONG_TARGET_BLACKWELL=1 NUMKONG_TARGET_BLACKWELLRTX=1
     )
     function (usearch_dense_vram_nvidia_variant class)
         set(target_ usearch_dense_vram_variants_${class})
-        add_library(${target_} OBJECT dense/vram_variants_${class}.cu)
-        target_include_directories(
-            ${target_} PRIVATE $<TARGET_PROPERTY:${USEARCH_TARGET_NAME},INTERFACE_INCLUDE_DIRECTORIES>
-                               ${CMAKE_CURRENT_SOURCE_DIR}
-        )
-        # Skips `usearch_setup_target`, whose host-compiler flags the CUDA driver rejects, so it links NumKong's and
-        # ForkUnion's compilable capabilities itself.
+        set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_variants_${class}.cu)
+        add_library(${target_} OBJECT ${source_})
+        usearch_setup_target(${target_})
+        target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         target_compile_definitions(${target_} PRIVATE "USEARCH_ARCH_CUDA_=1" ${usearch_cuda_capabilities_})
-        set_target_properties(
-            ${target_}
-            PROPERTIES CXX_STANDARD 20
-                       CUDA_STANDARD 20
-                       CUDA_ARCHITECTURES OFF
-                       POSITION_INDEPENDENT_CODE ON
-        )
-        target_compile_options(${target_} PRIVATE --expt-relaxed-constexpr ${ARGN})
         target_link_libraries(
-            ${target_} PRIVATE yyjson forkunion::static numkong::header numkong::cpu_capabilities_compiled
-                               stringzilla::cpu_capabilities_compiled forkunion::cpu_capabilities_compiled
+            ${target_}
+            PRIVATE yyjson forkunion::static CUDA::toolkit
+            PUBLIC ${CMAKE_DL_LIBS}
         )
+        set_source_files_properties(${source_} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xc++")
+        usearch_cuda_fatbin(${target_} dense_${class} ${source_} ${ARGN})
         set(USEARCH_PUNNED_LIBRARIES
             ${USEARCH_PUNNED_LIBRARIES} ${target_}
             PARENT_SCOPE
@@ -239,24 +291,9 @@ if (USEARCH_BUILD_CUDA)
     usearch_dense_vram_nvidia_variant(nvidia_blackwell --generate-code=arch=compute_100f,code=sm_100f)
     usearch_dense_vram_nvidia_variant(nvidia_blackwellrtx --generate-code=arch=compute_120f,code=sm_120f)
 
-    target_sources(usearch_punned PRIVATE dense_index.cu)
     target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_CUDA_=1" ${usearch_cuda_capabilities_})
-    set_target_properties(
-        usearch_punned
-        PROPERTIES CUDA_STANDARD 20
-                   CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}"
-                   POSITION_INDEPENDENT_CODE ON
-    )
-    # The variant over every arm nests one union per alternative, past the front end's default of 200 in flight.
-    target_compile_options(
-        usearch_punned PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>
-                               "$<$<COMPILE_LANGUAGE:CUDA>:SHELL:-Xcudafe --pending_instantiations=1024>"
-    )
-    # The static runtime opens the driver itself and the planes resolve the rest through it, so nothing links `libcuda`
-    # and the library loads on machines without one.
-    set_target_properties(usearch_punned PROPERTIES CUDA_RUNTIME_LIBRARY Static)
+    target_link_libraries(usearch_punned PRIVATE CUDA::toolkit)
 else ()
-    target_sources(usearch_punned PRIVATE dense_index.cpp)
     target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_CUDA_=0")
 endif ()
 
@@ -279,6 +316,7 @@ if (USEARCH_BUILD_ROCM)
         if (NOT processors_)
             return()
         endif ()
+        target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_${target_macro}_=1")
         set(target_ usearch_dense_vram_variants_${class})
         set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_variants_${class}.hip)
         set(bundles_dir_ ${CMAKE_CURRENT_BINARY_DIR}/rocm)
@@ -325,12 +363,20 @@ if (USEARCH_BUILD_ROCM)
     usearch_dense_vram_amd_variant(amd_cdna3 CDNA3 gfx942 gfx950)
     usearch_dense_vram_amd_variant(amd_cdna4 CDNA4 gfx950)
     usearch_dense_vram_amd_variant(amd_cdna5 CDNA5 gfx1250 gfx1251)
-    target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_ROCM_=1")
+    # The plain C++ units type the runtime's entry points off `hip_runtime_api.h`, which declares and links nothing, but
+    # needs ROCm's headers and the platform HIP-Clang would name for it.
+    get_filename_component(rocm_compiler_dir_ ${CMAKE_CXX_COMPILER} DIRECTORY)
+    find_path(USEARCH_HIP_INCLUDE_DIR hip/hip_runtime_api.h
+              HINTS $ENV{ROCM_PATH}/include ${rocm_compiler_dir_}/../../include ${rocm_compiler_dir_}/../../../include
+                    /opt/rocm/include REQUIRED
+    )
+    target_include_directories(usearch_punned SYSTEM PRIVATE ${USEARCH_HIP_INCLUDE_DIR})
+    target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_ROCM_=1" "__HIP_PLATFORM_AMD__")
 endif ()
 
 # The Apple arms: one plain C++ unit serving every Apple class until a family's kernels differ, whose kernels compile
 # from embedded source at first use, so no Metal toolchain is needed to build it. The dispatch unit and the Apple unit
-# see `USEARCH_ARCH_METAL_=1`.
+# see `USEARCH_ARCH_METAL_=1`, and nothing links Metal, Foundation or `libobjc`, which `metal_api` opens at first use.
 if (USEARCH_BUILD_METAL)
     add_library(usearch_dense_vram_variants_apple OBJECT dense/vram_variants_apple.cpp)
     usearch_setup_target(usearch_dense_vram_variants_apple)
@@ -339,7 +385,6 @@ if (USEARCH_BUILD_METAL)
     target_link_libraries(usearch_dense_vram_variants_apple PRIVATE yyjson forkunion::static)
     set(USEARCH_PUNNED_LIBRARIES ${USEARCH_PUNNED_LIBRARIES} usearch_dense_vram_variants_apple)
     target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_METAL_=1")
-    target_link_libraries(usearch_punned PUBLIC "-framework Metal" "-framework Foundation" objc)
 endif ()
 
 # Objects never travel through another object library, so every consumer names the whole set: executables and shared

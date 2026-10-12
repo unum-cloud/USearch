@@ -4,9 +4,9 @@
  *  @date August 27, 2026
  *  @brief The header-only tier's proof.
  *
- *  Everything under @c utilities/, @c basic/ & @c geospatial/ compiles & runs with the standard
- *  library alone - only @c -Iinclude, no submodule paths, no third-party targets - and this
- *  translation unit instantiates the whole public surface to witness it.
+ *  Everything under @c utilities/, @c basic/ & @c geospatial/ compiles & runs from headers
+ *  alone - its own and the header-only ForkUnion & NumKong - and this translation unit
+ *  instantiates the whole public surface to witness it.
  *
  *  @c utilities/serialization.hpp is deliberately absent: it consumes yyjson for the
  *  SafeGraphs JSON header, so it sits outside the tier this file vouches for. Checks are
@@ -32,11 +32,12 @@
 #include "usearch/geospatial/ram_index.hpp"
 
 using namespace unum::usearch;
+using namespace unum::usearch::utilities;
 
 /** The geospatial tier's witnesses: its metric, codec & index alias satisfy the basic concepts. */
-static_assert(basic_metric<chord_metric_t, earth_fixed_t, i64_t>);
-static_assert(basic_value_codec<earth_fixed_codec_t, earth_fixed_t>);
-static_assert(basic_selector<surface_keep_octants_t, geospatial_ram_index_t, chord_metric_t>);
+static_assert(basic::metric<geospatial::chord_metric_t, geospatial::earth_fixed_t, i64_t>);
+static_assert(basic::value_codec<geospatial::earth_fixed_codec_t, geospatial::earth_fixed_t>);
+static_assert(basic::selector<geospatial::surface_keep_octants_t, geospatial::ram_index_t, geospatial::chord_metric_t>);
 
 /** Hamming distance over eight-byte tags - the smallest metric the concept admits. */
 struct header_only_metric_t {
@@ -45,12 +46,12 @@ struct header_only_metric_t {
     std::size_t staged_ = 0;
 
     void reset(std::array<char, 8> const& query) noexcept { query_ = query, staged_ = 0; }
-    basic_metric_staging_t push(std::array<char, 8> const& value) noexcept {
+    basic::metric_staging_t push(std::array<char, 8> const& value) noexcept {
         u64_t difference = 0;
         for (std::size_t position = 0; position != query_.size(); ++position)
             difference += query_[position] != value[position];
         differences_[staged_++] = difference;
-        return staged_ != differences_.size() ? basic_metric_staging_t::staged_k : basic_metric_staging_t::refused_k;
+        return staged_ != differences_.size() ? basic::metric_staging_t::staged_k : basic::metric_staging_t::refused_k;
     }
     void drain(std::span<u64_t> distances, u64_t) noexcept {
         for (std::size_t lane = 0; lane != distances.size(); ++lane) distances[lane] = differences_[lane];
@@ -80,19 +81,19 @@ struct header_only_codec_t {
     }
 };
 
-using narrow_index_t = basic_ram_index<std::array<char, 8>, u64_t, u32_t, u64_t>;
-using wide_index_t = basic_ram_index<std::array<char, 8>, uuid_t, u64_t, u64_t>;
+using narrow_index_t = basic::ram_index<std::array<char, 8>, u64_t, u32_t, u64_t>;
+using wide_index_t = basic::ram_index<std::array<char, 8>, utilities::uuid_t, u64_t, u64_t>;
 
-static_assert(basic_value<std::array<char, 8>>);
-static_assert(basic_metric<header_only_metric_t, std::array<char, 8>, u64_t>);
-static_assert(!transparent_metric<header_only_metric_t>);
-static_assert(transparent_metric<header_only_transparent_metric_t>);
-static_assert(basic_query<std::array<char, 8>, header_only_metric_t, std::array<char, 8>>);
-static_assert(basic_value_codec<header_only_codec_t, std::array<char, 8>>);
-static_assert(basic_selector<basic_keep_closest_t, narrow_index_t, header_only_metric_t>);
-static_assert(basic_selector<basic_keep_diverse_t, wide_index_t, header_only_metric_t>);
+static_assert(basic::value<std::array<char, 8>>);
+static_assert(basic::metric<header_only_metric_t, std::array<char, 8>, u64_t>);
+static_assert(!basic::transparent_metric<header_only_metric_t>);
+static_assert(basic::transparent_metric<header_only_transparent_metric_t>);
+static_assert(basic::query<std::array<char, 8>, header_only_metric_t, std::array<char, 8>>);
+static_assert(basic::value_codec<header_only_codec_t, std::array<char, 8>>);
+static_assert(basic::selector<basic::keep_closest_t, narrow_index_t, header_only_metric_t>);
+static_assert(basic::selector<basic::keep_diverse_t, wide_index_t, header_only_metric_t>);
 static_assert(walk_step_t::exhausted_k != walk_step_t::advanced_k);
-static_assert(std::is_same_v<narrow_index_t::columns_t, basic_columns<u64_t, u32_t, byte_t, u64_t>>);
+static_assert(std::is_same_v<narrow_index_t::columns_t, basic::columns<u64_t, u32_t, byte_t, u64_t>>);
 static_assert(std::is_move_constructible_v<narrow_index_t::save_plan_t> &&
               !std::is_copy_constructible_v<narrow_index_t::save_plan_t> &&
               !std::is_copy_assignable_v<narrow_index_t::save_plan_t> &&
@@ -101,8 +102,8 @@ static_assert(std::is_move_constructible_v<narrow_index_t::load_plan_t> &&
               !std::is_copy_constructible_v<narrow_index_t::load_plan_t> &&
               !std::is_copy_assignable_v<narrow_index_t::load_plan_t> &&
               !std::is_move_assignable_v<narrow_index_t::load_plan_t>);
-static_assert(
-    std::is_same_v<wide_index_t::columns_view_t, basic_columns<uuid_t const, u64_t const, byte_t const, u64_t const>>);
+static_assert(std::is_same_v<wide_index_t::columns_view_t,
+                             basic::columns<utilities::uuid_t const, u64_t const, byte_t const, u64_t const>>);
 
 /** The tags the index probes store: distinct leading letters, shared tails. */
 static std::array<char, 8> make_tag(std::size_t ordinal) noexcept {
@@ -117,8 +118,8 @@ int main() {
     u64_t seven = 7;
     expected<u64_t const&> const borrowed {&seven, status_t::success_k};
     if (!borrowed || borrowed.value() != 7) return 1;
-    uuid_t const uuid {};
-    if (std::hash<uuid_t> {}(uuid) != std::hash<uuid_t> {}(uuid)) return 1;
+    utilities::uuid_t const uuid {};
+    if (std::hash<utilities::uuid_t> {}(uuid) != std::hash<utilities::uuid_t> {}(uuid)) return 1;
     if (mix_bits(1) == mix_bits(2)) return 1;
     if (multiply_high(u64_t {1} << 32, u64_t {1} << 32) != 1) return 1;
     if (dtype_named("u64") != dtype_t::u64_k) return 1;
@@ -142,29 +143,29 @@ int main() {
     network_sort(std::span<u32_t, 4> {quad});
     if (quad[0] != 1 || quad[3] != 4) return 1;
 
-    max_heap<dense_scored_node_t, dense_further_scored_node_t> frontier {global_allocator};
+    max_heap<dense::scored_node_t, dense::further_scored_node_t> frontier {global_allocator};
     if (failed(frontier.reserve(64))) return 1;
-    if (failed(frontier.insert({dense_node_id_t {1}, dense_distance_t {0.5f}}))) return 1;
-    if (failed(frontier.insert({dense_node_id_t {2}, dense_distance_t {0.25f}}))) return 1;
+    if (failed(frontier.insert({dense::node_id_t {1}, dense::distance_t {0.5f}}))) return 1;
+    if (failed(frontier.insert({dense::node_id_t {2}, dense::distance_t {0.25f}}))) return 1;
     if (frontier.top().node_id != 2) return 1; // The furthest-first comparator surfaces the nearest.
     frontier.pop();
 
-    max_heap_dary<8, dense_scored_node_t, dense_further_scored_node_t> wide_frontier {global_allocator};
+    max_heap_dary<8, dense::scored_node_t, dense::further_scored_node_t> wide_frontier {global_allocator};
     if (failed(wide_frontier.reserve(64))) return 1;
-    if (failed(wide_frontier.insert({dense_node_id_t {3}, dense_distance_t {0.75f}}))) return 1;
+    if (failed(wide_frontier.insert({dense::node_id_t {3}, dense::distance_t {0.75f}}))) return 1;
     if (wide_frontier.top().node_id != 3) return 1;
 
-    sorted_buffer<dense_scored_node_t, dense_closer_scored_node_t> results {global_allocator};
+    sorted_buffer<dense::scored_node_t, dense::closer_scored_node_t> results {global_allocator};
     if (failed(results.reserve(4))) return 1;
-    results.insert({dense_node_id_t {3}, dense_distance_t {0.75f}}, 4);
+    results.insert({dense::node_id_t {3}, dense::distance_t {0.75f}}, 4);
     if (results.top().node_id != 3) return 1;
 
     // Associative containers: the visited set & the concurrent multimap.
-    growing_hash_set<dense_node_id_t> visited {global_allocator};
+    growing_hash_set<dense::node_id_t> visited {global_allocator};
     if (failed(visited.reserve(64))) return 1;
     if (visited.insert(42) != membership_t::absent_k) return 1;
     if (!visited.contains(42) || visited.contains(43)) return 1;
-    if (visited.insert(std::array<dense_node_id_t, 4> {42, 43, 44, 45}) != 0b1110u) return 1;
+    if (visited.insert(std::array<dense::node_id_t, 4> {42, 43, 44, 45}) != 0b1110u) return 1;
 
     chunked_multimap<u64_t, u32_t> multimap {global_allocator};
     auto [seats, seat_status] = multimap.claim(2);
@@ -195,7 +196,7 @@ int main() {
     std::array<u64_t, 1> const one_more_key {200};
     if (failed(index
                    .template insert<synchronization_t::exclusive_k>({one_more}, {one_more_key}, metric, {}, context,
-                                                                    basic_keep_closest_t {2})
+                                                                    basic::keep_closest_t {2})
                    .status))
         return 1;
     if (index.size() != 9) return 1;
@@ -247,14 +248,14 @@ int main() {
     if (restored.key_of(0).value != index.key_of(0).value) return 1;
     if (restored.degree_of(3).value != index.degree_of(3).value) return 1;
 
-    // The wide instantiation: uuid keys through `std::hash<uuid_t>`, 64-bit IDs.
+    // The wide instantiation: uuid keys through `std::hash<utilities::uuid_t>`, 64-bit IDs.
     wide_index_t wide_index;
     if (failed(wide_index.reserve(4).status)) return 1;
-    std::array<uuid_t, 2> const wide_keys {std::bit_cast<uuid_t>(std::array<u64_t, 2> {1, 2}),
-                                           std::bit_cast<uuid_t>(std::array<u64_t, 2> {3, 4})};
+    std::array<utilities::uuid_t, 2> const wide_keys {std::bit_cast<utilities::uuid_t>(std::array<u64_t, 2> {1, 2}),
+                                                      std::bit_cast<utilities::uuid_t>(std::array<u64_t, 2> {3, 4})};
     std::array<std::array<char, 8>, 2> wide_tags {{make_tag(1), make_tag(2)}};
     wide_index_t::traversal_context_t wide_context {9};
-    if (failed(wide_index.insert({wide_tags}, {wide_keys}, metric, {}, wide_context, basic_keep_diverse_t {2}).status))
+    if (failed(wide_index.insert({wide_tags}, {wide_keys}, metric, {}, wide_context, basic::keep_diverse_t {2}).status))
         return 1;
     if (!wide_index.find(wide_keys[1]) || wide_index.find(wide_keys[1]).value != 1) return 1;
     if (failed(wide_index.search(make_tag(1), metric, wide_context).status)) return 1;

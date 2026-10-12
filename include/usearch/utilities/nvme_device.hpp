@@ -188,8 +188,7 @@
 #include <spdk/nvme.h>     // `spdk_nvme_connect`, `spdk_nvme_ns_cmd_read`, `spdk_nvme_qpair_process_completions`
 #endif
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::utilities {
 
 #pragma region Requests and Completions
 
@@ -2658,5 +2657,4 @@ using nvme_executor_t = nvme_executor<default_io_engine_t>;
 
 #pragma endregion Executor
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::utilities

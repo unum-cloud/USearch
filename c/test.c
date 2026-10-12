@@ -1100,7 +1100,9 @@ void test_library_probes(void) {
         expect(devices[position].vendor != usearch_gpu_vendor_unknown_k, "A listed GPU names its vendor");
         expect(strcmp(usearch_gpu_class_name(devices[position].gpu_class), "unknown") != 0,
                "A listed GPU names its class");
-        printf("- GPU %zu: %s\n", position, usearch_gpu_class_name(devices[position].gpu_class));
+        printf("- GPU %zu: %s, %s, %u compute units, %llu MiB\n", position, devices[position].name,
+               usearch_gpu_class_name(devices[position].gpu_class), devices[position].compute_units,
+               (unsigned long long)(devices[position].memory_bytes >> 20));
     }
     printf("Test: Library Probes - PASSED\n");
 }

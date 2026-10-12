@@ -46,6 +46,11 @@ usearch/dense/vram_index.cuh
 ============================
 .. doxygenfile:: dense/vram_index.cuh
 
+============================
+usearch/dense/vram_queue.cuh
+============================
+.. doxygenfile:: dense/vram_queue.cuh
+
 ====================================
 usearch/dense/vram_nvidia_metric.cuh
 ====================================
@@ -56,10 +61,25 @@ usearch/dense/vram_nvidia_index.cuh
 ===================================
 .. doxygenfile:: dense/vram_nvidia_index.cuh
 
+===================================
+usearch/dense/vram_nvidia_index.hpp
+===================================
+.. doxygenfile:: dense/vram_nvidia_index.hpp
+
 =====================================
-usearch/dense/vram_nvidia_indexes.cuh
+usearch/dense/vram_nvidia_indexes.hpp
 =====================================
-.. doxygenfile:: dense/vram_nvidia_indexes.cuh
+.. doxygenfile:: dense/vram_nvidia_indexes.hpp
+
+================================
+usearch/dense/vram_amd_index.hpp
+================================
+.. doxygenfile:: dense/vram_amd_index.hpp
+
+==================================
+usearch/dense/vram_amd_indexes.hpp
+==================================
+.. doxygenfile:: dense/vram_amd_indexes.hpp
 
 ==================================
 usearch/dense/vram_apple_index.hpp
@@ -146,7 +166,7 @@ usearch/utilities/vram_apple_device.hpp
 =======================================
 .. doxygenfile:: utilities/vram_apple_device.hpp
 
-================================
-usearch/utilities/vram_queue.cuh
-================================
-.. doxygenfile:: utilities/vram_queue.cuh
+=====================================
+usearch/utilities/vram_amd_device.hpp
+=====================================
+.. doxygenfile:: utilities/vram_amd_device.hpp

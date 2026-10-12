@@ -49,11 +49,11 @@ target_include_directories(usearch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_test PRIVATE fmt::fmt yyjson forkunion::static)
 add_test(NAME usearch_test COMMAND usearch_test)
 
-# The header-only tier's witness: everything under `utilities/` & `basic/` compiles & runs with the standard library
-# alone - only -Iinclude, no submodule paths, no third-party targets.
+# The header-only tier's witness: everything under `utilities/`, `basic/` & `geospatial/` compiles & runs from headers
+# alone - its own and the header-only siblings', with no compiled library or yyjson behind it.
 add_executable(usearch_test_header_only_witness header_only_witness.cpp)
-target_include_directories(usearch_test_header_only_witness PRIVATE ${PROJECT_SOURCE_DIR}/include)
-set_target_properties(usearch_test_header_only_witness PROPERTIES CXX_STANDARD 20)
+usearch_setup_target(usearch_test_header_only_witness HOST)
+target_link_libraries(usearch_test_header_only_witness PRIVATE forkunion::header numkong::header)
 add_test(NAME usearch_test_header_only_witness COMMAND usearch_test_header_only_witness)
 
 # The one VRAM runner: every vendor compiles the vendor-neutral residency shards into an object library of its own, with
@@ -79,31 +79,27 @@ usearch_setup_target(usearch_test_vram HOST)
 target_link_libraries(usearch_test_vram PRIVATE fmt::fmt yyjson forkunion::static)
 add_test(NAME usearch_test_vram COMMAND usearch_test_vram)
 
-# The NVIDIA object compiles the shards with the host compiler over the plain-C++ faces, and its entry with NVCC, since
-# device attention looks values up on the device and the cells' kernels instantiate beside it.
+# The NVIDIA object compiles everything with the host compiler over the plain-C++ faces, and its entry once more with
+# NVCC device-only, into the suite's own fatbin of the cells' kernels and the attends over its device value lookups.
 if (USEARCH_BUILD_CUDA)
-    enable_language(CUDA)
     find_package(CUDAToolkit REQUIRED)
-
-    add_library(usearch_test_vram_nvidia OBJECT ${usearch_test_vram_shards_} dense/vram_nvidia.cu)
+    enable_language(ASM)
+    set(usearch_test_vram_nvidia_entry_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_nvidia.cu)
+    add_library(usearch_test_vram_nvidia OBJECT ${usearch_test_vram_shards_} ${usearch_test_vram_nvidia_entry_})
     usearch_keep_dense_dtypes(usearch_test_vram_nvidia)
     usearch_setup_target(usearch_test_vram_nvidia HOST)
     target_include_directories(usearch_test_vram_nvidia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    set_target_properties(
-        usearch_test_vram_nvidia
-        PROPERTIES CXX_STANDARD 20
-                   CUDA_STANDARD 20
-                   CUDA_ARCHITECTURES "${USEARCH_CUDA_ARCHITECTURES}"
-    )
-    # The device units test a generation's kits only when every listed architecture runs them.
+    # The device pass tests a generation's kits only when every listed architecture runs them.
     usearch_cuda_capabilities(test_cuda_capabilities_ "${USEARCH_CUDA_ARCHITECTURES}")
     target_compile_definitions(usearch_test_vram_nvidia PRIVATE "USEARCH_ARCH_CUDA_=1" ${test_cuda_capabilities_})
-    target_compile_options(usearch_test_vram_nvidia PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--expt-relaxed-constexpr>)
-    target_link_libraries(
-        usearch_test_vram_nvidia PRIVATE fmt::fmt yyjson forkunion::static numkong::header CUDA::cudart_static
+    target_link_libraries(usearch_test_vram_nvidia PRIVATE fmt::fmt yyjson forkunion::static CUDA::toolkit)
+    set_source_files_properties(${usearch_test_vram_nvidia_entry_} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xc++")
+    usearch_cuda_codes(test_cuda_codes_ "${USEARCH_CUDA_ARCHITECTURES}")
+    usearch_cuda_fatbin(
+        usearch_test_vram_nvidia test_vram_nvidia ${usearch_test_vram_nvidia_entry_} ${test_cuda_codes_}
     )
     target_compile_definitions(usearch_test_vram PRIVATE "USEARCH_ARCH_CUDA_=1")
-    target_link_libraries(usearch_test_vram PRIVATE usearch_test_vram_nvidia CUDA::cudart_static)
+    target_link_libraries(usearch_test_vram PRIVATE usearch_test_vram_nvidia CUDA::toolkit ${CMAKE_DL_LIBS})
 endif ()
 
 # The Apple object compiles everything with the host compiler; its kernels compile from embedded source at first use.
@@ -115,9 +111,7 @@ if (USEARCH_BUILD_METAL)
     target_compile_definitions(usearch_test_vram_apple PRIVATE "USEARCH_ARCH_METAL_=1")
     target_link_libraries(usearch_test_vram_apple PRIVATE fmt::fmt yyjson forkunion::static)
     target_compile_definitions(usearch_test_vram PRIVATE "USEARCH_ARCH_METAL_=1")
-    target_link_libraries(
-        usearch_test_vram PRIVATE usearch_test_vram_apple "-framework Metal" "-framework Foundation" objc
-    )
+    target_link_libraries(usearch_test_vram PRIVATE usearch_test_vram_apple ${CMAKE_DL_LIBS})
 endif ()
 
 # The AMD object compiles everything with the host compiler and links the CDNA3 floor unit, whose code object CDNA3 and
@@ -129,9 +123,11 @@ if (USEARCH_BUILD_ROCM)
     target_include_directories(
         usearch_test_vram_amd PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/dense
     )
-    target_compile_definitions(usearch_test_vram_amd PRIVATE "USEARCH_ARCH_ROCM_=1")
+    target_include_directories(usearch_test_vram_amd SYSTEM PRIVATE ${USEARCH_HIP_INCLUDE_DIR})
+    target_compile_definitions(usearch_test_vram_amd PRIVATE "USEARCH_ARCH_ROCM_=1" "__HIP_PLATFORM_AMD__")
     target_link_libraries(usearch_test_vram_amd PRIVATE fmt::fmt yyjson forkunion::static)
-    target_compile_definitions(usearch_test_vram PRIVATE "USEARCH_ARCH_ROCM_=1")
+    target_include_directories(usearch_test_vram SYSTEM PRIVATE ${USEARCH_HIP_INCLUDE_DIR})
+    target_compile_definitions(usearch_test_vram PRIVATE "USEARCH_ARCH_ROCM_=1" "__HIP_PLATFORM_AMD__")
     target_link_libraries(
         usearch_test_vram PRIVATE usearch_test_vram_amd $<TARGET_OBJECTS:usearch_dense_vram_variants_amd_cdna3>
                                   ${CMAKE_DL_LIBS}

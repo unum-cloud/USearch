@@ -7,7 +7,7 @@ None of it is a public header: the C libraries, the C test and every binding lin
 
 - `types.cpp` answers the library-wide probes of `types.h`: the version, the capability levels compiled and available, an outcome's status, and the spelling of every closed set in both directions.
 - `dense_index.cuh` implements `dense_index.h`: the variant grid over every compiled arm, the handle owning the chosen one, and every exported verb as one visit apiece.
-- `dense_index.cpp` and `dense_index.cu` compile that header twice, for the portable library and for the CUDA one, where the VRAM arms join the variant.
+- `dense_index.cpp` compiles that header with the host compiler for every build, the VRAM arms joining the variant for each vendor built.
 - `dense_specializations.cuh` spells one arm: the scalar and capability tables, the CPU and GPU classes with the ForkUnion primitives they pair, and the `specialized_index` view every class unit instantiates.
 - `dense/ram_variants_<class>.cpp`, `dense/nvme_variants_<class>.cpp` and `dense/vram_variants_<class>.{cu,hip,cpp}` are the class units, each instantiating `specialized_index` over its class's arms, one per storage dtype the class advances.
 - `sequence.cpp` instantiates the sequence checkpoint verbs over the default index, so they keep compiling until the sequence modality's entry points land.
@@ -34,10 +34,10 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
 
 The arms are aliases over those templates, keyed by the storage dtype and the class:
 
-- `ram_index<dtype, cpu_class>` → `dense_ram_indexes<uuid_t, dtype, numkong_capabilities_of(cpu_class), waiter_of<cpu_class>, ...>`, with the class's atomic reference and cache hints last.
-- `nvme_index<dtype, cpu_class>` → `dense_nvme_indexes<uuid_t, dtype, numkong_capabilities_of(cpu_class)>`.
-- `vram_nvidia_index<dtype, gpu_class>` → `dense_vram_nvidia_indexes<uuid_t, dtype, numkong_capabilities_of(gpu_class)>`, and `vram_amd_index<dtype, gpu_class>` likewise over `dense_vram_amd_indexes`.
-- `vram_apple_index<dtype>` → `dense_vram_apple_indexes<uuid_t, dtype>`, one arm serving every Apple class until a family's kernels differ.
+- `ram_indexes<dtype, cpu_class>` → `dense::ram_indexes<uuid_t, dtype, numkong_capabilities_of(cpu_class), waiter_of<cpu_class>, ...>`, with the class's atomic reference and cache hints last.
+- `nvme_indexes<dtype, cpu_class>` → `dense::nvme_indexes<uuid_t, dtype, numkong_capabilities_of(cpu_class)>`.
+- `vram_nvidia_indexes<dtype, gpu_class>` → `dense::vram_nvidia_indexes<uuid_t, dtype, numkong_capabilities_of(gpu_class)>`, and `vram_amd_indexes<dtype, gpu_class>` likewise over `dense::vram_amd_indexes`.
+- `vram_apple_indexes<dtype>` → `dense::vram_apple_indexes<uuid_t, dtype>`, one arm serving every Apple class until a family's kernels differ.
 
 An arm's executor type is its residency, so `is_ram_index`, `is_nvme_index` and `is_vram_index` read it rather than a second tag that could disagree.
 The core verbs land on `specialized_index` members of the same names, `count`, `get`, `reserve`, `clear`, `refine`, `health`, `search`, `multiply`, `maxsim`, `attend`, `save` and `load`.
@@ -71,10 +71,13 @@ The dispatch unit visits every arm yet compiles at the baseline instruction set.
 - `usearch_dense_ram_variants` collects the CPU class units.
   `src/CMakeLists.txt` restates the lineage row for row: `usearch_dense_ram_variant(<class> OVER <parent> <kits>...)` unions the parent's flags with those of every delta kit that compiled, and the unit exists only when its parent does and some delta compiled.
 - `usearch_dense_nvme_variants` reuses those flags for the classes whose kits a storage walk tells apart, so `aws_g5`, `alibaba_c930` and the WebAssembly classes take none.
-- `usearch_dense_vram_variants_nvidia_<class>` compiles one NVIDIA class for its own architecture alone: `sm_80` with its PTX, `sm_89`, `sm_90a`, `sm_100f` and `sm_120f`.
+- `usearch_dense_vram_variants_nvidia_<class>` embeds one NVIDIA class's fatbin, compiled by NVCC device-only for its own architecture alone: `sm_80` with its PTX, `sm_89`, `sm_90a`, `sm_100f` and `sm_120f`.
+  Nothing links `libcuda` or the CUDA runtime: `cuda_api` opens the driver at first use, typed off `cuda.h`, and the host compiler builds the arms.
 - `usearch_dense_vram_variants_amd_<class>` embeds one AMD class's code object, compiled for its own processors, and the CDNA3 floor for CDNA4 too.
+  Nothing links `libamdhip64`: `hip_api` opens it at first use, typed off `hip_runtime_api.h`, so plain C++ units name `__HIP_PLATFORM_AMD__`.
 - `usearch_dense_vram_variants_apple` compiles the Apple arms as plain C++, their kernels compiled from embedded source at first use.
-- `usearch_punned` - `types.cpp`, `sequence.cpp` & the dense dispatch unit, `dense_index.cpp`, or `dense_index.cu` under `USEARCH_BUILD_CUDA`.
+  Nothing links Metal, Foundation or `libobjc`: `metal_api` opens them at first use.
+- `usearch_punned` - `types.cpp`, `sequence.cpp` & the dense dispatch unit, `dense_index.cpp`.
 
 `USEARCH_PUNNED_LIBRARIES` and `USEARCH_PUNNED_OBJECTS` hand all of them to `usearch_shared`, `usearch_static` and `usearch_test_c`, and the static archive carries the yyjson, NumKong and ForkUnion objects too, so a binding links one library.
 `USEARCH_DENSE_DTYPES` trims every unit's arms from the front of `bf16`, `u1`, `i8`, `e4m3`, `f16`, `u8`, `e5m2`, `i4`, `u4`, `e3m2` and `e2m3`, keeping four by default.
@@ -110,7 +113,7 @@ A call naming an executor and `usearch_completion_deferred_k` runs nothing at su
 ## NVMe
 
 `usearch_dense_view_nvme` reads the checkpoint's header, adopts its geometry and metric, and opens every part in place, optionally on one device or directory per part.
-The result is a read-only `dense_nvme_indexes` view, so every mutating verb answers `usearch_status_read_only_k`.
+The result is a read-only `dense::nvme_indexes` view, so every mutating verb answers `usearch_status_read_only_k`.
 `usearch_executor_for_nvme` spawns threads that each open an I/O engine keeping 64 reads in flight.
 Kernel paths take the first engine the host admits, from `io_uring` through Linux AIO to blocking reads.
 Transport identifiers such as `trtype:PCIe` need an SPDK build, `USEARCH_WITH_LINUX_SPDK`, with hugepages for PCIe controllers alone, and one executor never mixes them with kernel paths.

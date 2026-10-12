@@ -44,8 +44,9 @@
 #include "usearch/utilities/safegraphs_format.hpp"
 
 namespace unum::usearch::test {
+using namespace unum::usearch::basic;
 
-#pragma region Constants
+#pragma region Instrumented Metrics
 
 /** Nodes in the single-threaded growth & oracle-recall scenarios. */
 constexpr std::size_t basic_growth_nodes_k = 256;
@@ -56,7 +57,7 @@ constexpr std::size_t basic_recall_samples_k = 24;
 /** Share of sampled queries whose best distance must match the oracle's. */
 constexpr std::size_t basic_minimal_recall_percent_k = 90;
 
-/** The floor for @c basic_keep_closest_t builds: closest-only wiring promises
+/** The floor for @c basic::keep_closest_t builds: closest-only wiring promises
  *  navigability, never the diverse selector's cross-cluster recall. */
 constexpr std::size_t basic_relaxed_recall_percent_k = 50;
 
@@ -72,13 +73,9 @@ constexpr std::size_t basic_connectivity_k = 8;
 /** The reader thread performs at least this many searches, even if writers finish first. */
 constexpr std::size_t basic_reader_minimal_searches_k = 16;
 
-#pragma endregion Constants
-
-#pragma region Instrumented Metrics
-
-/** Contract-auditing wrapper over any @c basic_metric: counts the verbs, verifies
- *  every drain is sized to that round's accepted pushes, flags abandoned pushed
- *  rounds, and can refuse pushes after an armed budget to drive every saturation path. */
+/** Contract-auditing wrapper over any @c basic::metric: counts the verbs, verifies every
+ *  drain is sized to that round's accepted pushes, flags abandoned pushed rounds, and can
+ *  refuse pushes after an armed budget to drive every saturation path. */
 template <typename inner_metric_type_, typename distance_type_>
 struct basic_auditing_metric {
     inner_metric_type_ inner;
@@ -103,13 +100,12 @@ struct basic_auditing_metric {
         pushes_this_round = 0;
     }
     template <typename staged_type_>
-    basic_metric_staging_t push(staged_type_ const& staged) noexcept {
+    metric_staging_t push(staged_type_ const& staged) noexcept {
         if (!resets) ++violations; // A round was opened implicitly.
-        if (!budget_left) return ++refusals, basic_metric_staging_t::refused_k;
-        if (inner.push(staged) == basic_metric_staging_t::refused_k)
-            return ++refusals, basic_metric_staging_t::refused_k;
+        if (!budget_left) return ++refusals, metric_staging_t::refused_k;
+        if (inner.push(staged) == metric_staging_t::refused_k) return ++refusals, metric_staging_t::refused_k;
         --budget_left, ++pushes, ++pushes_this_round;
-        return basic_metric_staging_t::staged_k;
+        return metric_staging_t::staged_k;
     }
     void drain(std::span<distance_type_> distances, distance_type_ radius) noexcept {
         if (!resets) ++violations;
@@ -136,7 +132,7 @@ struct basic_gated_metric {
         inner.reset(query);
     }
     template <typename staged_type_>
-    basic_metric_staging_t push(staged_type_ const& staged) noexcept {
+    metric_staging_t push(staged_type_ const& staged) noexcept {
         entered->store(true, std::memory_order_release);
         while (!released->load(std::memory_order_acquire)) std::this_thread::yield();
         return inner.push(staged);
@@ -278,7 +274,7 @@ struct basic_columns_storage {
     std::vector<std::byte> values;
 
     basic_columns_storage() = default;
-    explicit basic_columns_storage(basic_columns_extents_t extents, std::byte fill = std::byte {})
+    explicit basic_columns_storage(columns_extents_t extents, std::byte fill = std::byte {})
         : keys(extents.nodes), neighbor_offsets(extents.nodes + 1), neighbor_ids(extents.neighbors),
           value_offsets(extents.nodes + 1), values(extents.value_bytes, fill) {}
 
@@ -395,7 +391,7 @@ std::size_t test_basic_guards(u64_t seed) {
         failures += expect_eq(index.insert({values.data(), 2}, {keys.data(), 1}, metric, {}, context).status,
                               status_t::config_mismatch_k);
         failures += expect_eq(
-            index.insert({values.data(), 1}, {keys.data(), 1}, metric, {}, context, basic_keep_closest_t {0}).status,
+            index.insert({values.data(), 1}, {keys.data(), 1}, metric, {}, context, keep_closest_t {0}).status,
             status_t::config_mismatch_k);
         failures += expect_eq(index.insert({values.data(), 0}, {keys.data(), 0}, metric, {}, context).status,
                               status_t::success_k);
@@ -408,7 +404,7 @@ std::size_t test_basic_guards(u64_t seed) {
         failures += expect_eq(index.size(), 0u);
         failures += expect_eq(index
                                   .insert({values.data(), ceiling_k}, {keys.data(), ceiling_k}, metric, {}, context,
-                                          basic_keep_diverse_t {basic_connectivity_k})
+                                          keep_diverse_t {basic_connectivity_k})
                                   .status,
                               status_t::success_k);
         failures += expect_eq(index.size(), ceiling_k);
@@ -491,7 +487,7 @@ std::size_t test_basic_growth_and_recall(u64_t seed) {
         failures += expect(bool(index.reserve(basic_growth_nodes_k)));
         std::vector<typename index_t::node_id_t> assigned_ids;
         failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
-                                               basic_keep_diverse_t {basic_connectivity_k});
+                                               keep_diverse_t {basic_connectivity_k});
         failures += expect_eq(index.size(), basic_growth_nodes_k);
 
         // A single-threaded build dispenses a contiguous ID window in submission order.
@@ -586,8 +582,8 @@ std::size_t test_basic_selectors(u64_t seed) {
     };
 
     typename index_t::graph_health_t closest_health, diverse_health;
-    build_and_audit_recall(basic_keep_closest_t {basic_connectivity_k}, basic_relaxed_recall_percent_k, closest_health);
-    build_and_audit_recall(basic_keep_diverse_t {basic_connectivity_k}, basic_minimal_recall_percent_k, diverse_health);
+    build_and_audit_recall(keep_closest_t {basic_connectivity_k}, basic_relaxed_recall_percent_k, closest_health);
+    build_and_audit_recall(keep_diverse_t {basic_connectivity_k}, basic_minimal_recall_percent_k, diverse_health);
     failures += expect(closest_health.mean_degree != diverse_health.mean_degree ||
                        closest_health.reciprocal_edges != diverse_health.reciprocal_edges);
     return failures;
@@ -619,7 +615,7 @@ std::size_t test_basic_keys(u64_t seed) {
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids(nodes_k);
         failures += expect_eq(
-            index.insert({values}, {keys}, metric, {assigned_ids}, context, basic_keep_diverse_t {basic_connectivity_k})
+            index.insert({values}, {keys}, metric, {assigned_ids}, context, keep_diverse_t {basic_connectivity_k})
                 .status,
             status_t::success_k);
 
@@ -684,7 +680,7 @@ std::size_t test_basic_wiring(u64_t seed) {
         auto values = fixture_type_::make_values(nodes_k, stream_key(seed, "wiring"));
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids;
-        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context, basic_keep_diverse_t {4});
+        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context, keep_diverse_t {4});
 
         node_id_t const from = 0, to = static_cast<node_id_t>(nodes_k - 1);
         [[maybe_unused]] status_t const cleared = index.unlink(from, to); // Absent or not, now absent.
@@ -753,7 +749,7 @@ std::size_t test_basic_allocation_budget(u64_t seed) {
         constexpr std::size_t linked_nodes_k = 40;
         auto values = fixture_type_::make_values(linked_nodes_k, stream_key(seed, "budget"));
         std::vector<node_id_t> assigned_ids;
-        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context, basic_keep_closest_t {1});
+        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context, keep_closest_t {1});
 
         // Amortized row growth leaves power-of-two slack, so links absorb it for free -
         // but the slack is finite, and a starved ledger must refuse the first real
@@ -794,7 +790,7 @@ std::size_t basic_warm_staging_capacity(u64_t seed, std::size_t nodes_count, all
     auto values = fixture_type_::make_values(nodes_count, stream_key(seed, "starved"));
     std::vector<typename index_t::node_id_t> assigned_ids;
     failures += expect(bool(index.reserve(nodes_count)));
-    failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context, basic_keep_closest_t {4});
+    failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context, keep_closest_t {4});
     auto query = fixture_type_::make_values(1, stream_key(seed, "starved", 3));
     context_t small_context {stream_key(seed, "starved", 1), counting_allocator_t {ledger}};
     failures += expect_eq(index.search(query[0], metric, small_context, {8, 1}).status, status_t::success_k);
@@ -825,8 +821,7 @@ std::size_t test_basic_starved(u64_t seed) {
         auto values = fixture_type_::make_values(nodes_count, stream_key(seed, "starved"));
         failures += expect(bool(index.reserve(nodes_count + 2)));
         std::vector<node_id_t> assigned_ids;
-        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, warm_context,
-                                               basic_keep_closest_t {4});
+        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, warm_context, keep_closest_t {4});
 
         auto extras = fixture_type_::make_values(2, stream_key(seed, "starved", 4));
         std::array<key_t, 2> const extra_keys {fixture_type_::make_key(nodes_count),
@@ -858,7 +853,7 @@ std::size_t test_basic_starved(u64_t seed) {
         // Warm scratch under the same budget: the claimed ID must still publish, only
         // thinner - the fresh row's growth is the one refused allocation.
         failures += expect_eq(
-            index.insert({extras.data(), 1}, {extra_keys.data(), 1}, metric, {}, warm_context, basic_keep_closest_t {4})
+            index.insert({extras.data(), 1}, {extra_keys.data(), 1}, metric, {}, warm_context, keep_closest_t {4})
                 .status,
             status_t::success_k);
         failures += expect_eq(index.size(), nodes_count + 1);
@@ -926,7 +921,7 @@ std::size_t test_basic_snapshot_roundtrip(u64_t seed) {
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids;
         failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
-                                               basic_keep_diverse_t {basic_connectivity_k});
+                                               keep_diverse_t {basic_connectivity_k});
 
         auto const [extents, measure_status] = index.columns_extents(codec);
         failures += expect(succeeded(measure_status));
@@ -1002,7 +997,7 @@ std::size_t test_basic_snapshot_hostile(u64_t seed) {
         auto values = fixture_type_::make_values(nodes_k, stream_key(seed, "hostile"));
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids;
-        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context, basic_keep_diverse_t {4});
+        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context, keep_diverse_t {4});
         // One extra manual edge de-uniformizes the degrees and guarantees at least one
         // serialized neighbor ID to corrupt.
         [[maybe_unused]] auto const bumped = index.link(0, static_cast<node_id_t>(nodes_k / 2));
@@ -1071,7 +1066,7 @@ std::size_t test_basic_snapshot_regions(u64_t seed) {
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids;
         failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
-                                               basic_keep_diverse_t {basic_connectivity_k});
+                                               keep_diverse_t {basic_connectivity_k});
 
         auto const [single, single_status] = basic_saved_columns(index, codec);
         failures += expect(succeeded(single_status));
@@ -1169,7 +1164,7 @@ std::size_t test_basic_plan_race(u64_t seed) {
     using node_id_t = typename index_t::node_id_t;
     using key_t = typename index_t::key_t;
     using context_t = typename index_t::traversal_context_t;
-    using cursor_t = basic_ram_cursor<index_t, synchronization_t::concurrent_k, counting_allocator_t>;
+    using cursor_t = ram_cursor<index_t, synchronization_t::concurrent_k, counting_allocator_t>;
     constexpr std::size_t nodes_k = 64;
     std::size_t failures = 0;
     allocation_ledger_t ledger;
@@ -1182,7 +1177,7 @@ std::size_t test_basic_plan_race(u64_t seed) {
         failures += expect(bool(index.reserve(nodes_k + 1)));
         std::vector<node_id_t> assigned_ids;
         failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
-                                               basic_keep_diverse_t {basic_connectivity_k});
+                                               keep_diverse_t {basic_connectivity_k});
 
         auto const [reference, save_status] = basic_saved_columns(index, codec);
         failures += expect(succeeded(save_status));
@@ -1219,7 +1214,7 @@ std::size_t test_basic_plan_race(u64_t seed) {
             auto thread_metric = fixture_type_::make_metric();
             context_t thread_context {stream_key(seed, "plan_race", 1), counting_allocator_t {ledger}};
             auto const [result, status] = index.insert({one_more.data(), 1}, {&one_more_key, 1}, thread_metric, {},
-                                                       thread_context, basic_keep_diverse_t {basic_connectivity_k});
+                                                       thread_context, keep_diverse_t {basic_connectivity_k});
             if (status != status_t::success_k) thread_failures.fetch_add(1);
             assert_no_locks_held();
         };
@@ -1318,7 +1313,7 @@ std::size_t test_basic_plan_contention(u64_t seed) {
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids;
         failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
-                                               basic_keep_diverse_t {basic_connectivity_k});
+                                               keep_diverse_t {basic_connectivity_k});
 
         auto const [reference, save_status] = basic_saved_columns(index, codec);
         failures += expect(succeeded(save_status));
@@ -1397,8 +1392,7 @@ std::size_t test_basic_plan_contention(u64_t seed) {
                                                                                   &entered, &released};
                 context_t parked_context {stream_key(seed, "plan_contention", 1), counting_allocator_t {ledger}};
                 auto const [result, status] = target.insert({pair_values.data(), 2}, {pair_keys.data(), 2}, gated, {},
-                                                            parked_context,
-                                                            basic_keep_diverse_t {basic_connectivity_k});
+                                                            parked_context, keep_diverse_t {basic_connectivity_k});
                 if (status != status_t::success_k) thread_failures.fetch_add(1);
                 assert_no_locks_held();
                 return;
@@ -1453,7 +1447,7 @@ std::size_t test_basic_health(u64_t seed) {
         auto values = fixture_type_::make_values(nodes_k, stream_key(seed, "health"));
         std::vector<typename index_t::node_id_t> assigned_ids;
         failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
-                                               basic_keep_diverse_t {basic_connectivity_k});
+                                               keep_diverse_t {basic_connectivity_k});
 
         auto const first_report = index.health(context);
         failures += expect_eq(first_report.status, status_t::success_k);
@@ -1485,7 +1479,7 @@ std::size_t test_basic_health(u64_t seed) {
                                                                                   &entered, &released};
                 context_t parked_context {stream_key(seed, "health", 1), counting_allocator_t {ledger}};
                 auto const [result, status] = index.insert({one_more.data(), 1}, {&one_more_key, 1}, gated, {},
-                                                           parked_context, basic_keep_diverse_t {basic_connectivity_k});
+                                                           parked_context, keep_diverse_t {basic_connectivity_k});
                 if (status != status_t::success_k) thread_failures.fetch_add(1);
                 return;
             }
@@ -1540,12 +1534,12 @@ std::size_t test_basic_certified(u64_t seed) {
         failures += expect_eq(exclusive_index
                                   .template insert<synchronization_t::exclusive_k>(
                                       {exclusive_values}, {keys}, exclusive_metric, {}, exclusive_context,
-                                      basic_keep_diverse_t {basic_connectivity_k})
+                                      keep_diverse_t {basic_connectivity_k})
                                   .status,
                               status_t::success_k);
         failures += expect_eq(concurrent_index
                                   .insert({concurrent_values}, {keys}, concurrent_metric, {}, concurrent_context,
-                                          basic_keep_diverse_t {basic_connectivity_k})
+                                          keep_diverse_t {basic_connectivity_k})
                                   .status,
                               status_t::success_k);
         // Same data, same seeds, single-threaded: the lock elision must be invisible.
@@ -1590,7 +1584,7 @@ std::size_t test_basic_certified(u64_t seed) {
                 context_t parked_context {stream_key(seed, "certified", 2), counting_allocator_t {ledger}};
                 auto const [result, status] = exclusive_index.insert({one_more.data(), 1}, {&one_more_key, 1}, gated,
                                                                      {}, parked_context,
-                                                                     basic_keep_diverse_t {basic_connectivity_k});
+                                                                     keep_diverse_t {basic_connectivity_k});
                 if (status != status_t::success_k) thread_failures.fetch_add(1);
                 return;
             }
@@ -1642,7 +1636,7 @@ std::size_t test_basic_torn_bracket(u64_t seed) {
         failures += expect(bool(index.reserve(nodes_k + 1)));
         std::vector<node_id_t> assigned_ids;
         failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
-                                               basic_keep_diverse_t {basic_connectivity_k});
+                                               keep_diverse_t {basic_connectivity_k});
         auto query = fixture_type_::make_values(1, stream_key(seed, "torn_bracket", 5));
         auto one_more = fixture_type_::make_values(1, stream_key(seed, "torn_bracket", 6));
         key_t const one_more_key = fixture_type_::make_key(nodes_k);
@@ -1679,7 +1673,7 @@ std::size_t test_basic_torn_bracket(u64_t seed) {
                 auto thread_metric = fixture_type_::make_metric();
                 context_t thread_context {stream_key(seed, "torn_bracket", 3), counting_allocator_t {ledger}};
                 auto const [result, status] = index.insert({one_more.data(), 1}, {&one_more_key, 1}, thread_metric, {},
-                                                           thread_context, basic_keep_diverse_t {basic_connectivity_k});
+                                                           thread_context, keep_diverse_t {basic_connectivity_k});
                 if (status != status_t::success_k) thread_failures.fetch_add(1);
                 released.store(true, std::memory_order_release); // Every path - the search must resume.
                 assert_no_locks_held();
@@ -1743,7 +1737,7 @@ std::size_t test_basic_metric_contract(u64_t seed) {
         failures += expect(bool(index.reserve(nodes_k + 1)));
         std::vector<typename index_t::node_id_t> assigned_ids;
         failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
-                                               basic_keep_diverse_t {basic_connectivity_k});
+                                               keep_diverse_t {basic_connectivity_k});
         failures += expect_eq(metric.violations, 0u);
         failures += expect(metric.resets > 0 && metric.drains > 0);
         // Every drained thread is one counted distance, so the two tallies must agree.
@@ -1786,7 +1780,7 @@ std::size_t test_basic_metric_contract(u64_t seed) {
         typename index_t::key_t const one_more_key = fixture_type_::make_key(nodes_k);
         failures += expect_eq(index
                                   .insert({one_more.data(), 1}, {&one_more_key, 1}, metric, {}, context,
-                                          basic_keep_diverse_t {basic_connectivity_k})
+                                          keep_diverse_t {basic_connectivity_k})
                                   .status,
                               status_t::success_k);
         metric.disarm();
@@ -1820,7 +1814,7 @@ std::size_t test_basic_restarts(u64_t seed) {
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids;
         failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
-                                               basic_keep_diverse_t {basic_connectivity_k});
+                                               keep_diverse_t {basic_connectivity_k});
 
         for (std::size_t island = nodes_k - islands_k; island != nodes_k; ++island) {
             for (std::size_t node = 0; node != nodes_k; ++node) {
@@ -1878,7 +1872,7 @@ std::size_t test_basic_concurrent_build(u64_t seed) {
             auto const [result, status] = index.insert(
                 {threads.values[thread]}, {threads.keys[thread]}, threads.metrics[thread],
                 {assigned_ids.data() + thread * basic_thread_nodes_k, basic_thread_nodes_k}, threads.contexts[thread],
-                basic_keep_diverse_t {basic_connectivity_k});
+                keep_diverse_t {basic_connectivity_k});
             if (status != status_t::success_k) thread_failures.fetch_add(1);
             assert_no_locks_held();
         });
@@ -1927,7 +1921,7 @@ std::size_t test_basic_concurrent_search(u64_t seed) {
         auto prefill_values = fixture_type_::make_values(prefill_k, stream_key(seed, "search_thread"));
         std::vector<node_id_t> prefill_ids;
         failures += basic_build<fixture_type_>(index, prefill_metric, prefill_values, prefill_ids, prefill_context,
-                                               basic_keep_diverse_t {basic_connectivity_k});
+                                               keep_diverse_t {basic_connectivity_k});
 
         auto threads = basic_make_threads<fixture_type_>(ledger, writer_threads_k, basic_thread_nodes_k, seed,
                                                          "search_writer", prefill_k);
@@ -1943,7 +1937,7 @@ std::size_t test_basic_concurrent_search(u64_t seed) {
             if (thread < writer_threads_k) {
                 auto const [result, status] = index.insert({threads.values[thread]}, {threads.keys[thread]},
                                                            threads.metrics[thread], {}, threads.contexts[thread],
-                                                           basic_keep_diverse_t {basic_connectivity_k});
+                                                           keep_diverse_t {basic_connectivity_k});
                 if (status != status_t::success_k) thread_failures.fetch_add(1);
                 writer_threads_remaining.fetch_sub(1, std::memory_order_release);
                 assert_no_locks_held();
@@ -2005,7 +1999,7 @@ std::size_t test_basic_wiring_race(u64_t seed) {
         failures += expect(bool(index.reserve(nodes_k + inserts_k)));
         std::vector<node_id_t> assigned_ids;
         failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
-                                               basic_keep_diverse_t {basic_connectivity_k});
+                                               keep_diverse_t {basic_connectivity_k});
 
         auto insert_values = fixture_type_::make_values(inserts_k, stream_key(seed, "wiring_race", 4));
         std::vector<key_t> insert_keys(inserts_k);
@@ -2068,7 +2062,7 @@ std::size_t test_basic_wiring_race(u64_t seed) {
             auto thread_metric = fixture_type_::make_metric();
             context_t thread_context {stream_key(seed, "wiring_race", 1), counting_allocator_t {ledger}};
             auto const [result, status] = index.insert({insert_values}, {insert_keys}, thread_metric, {},
-                                                       thread_context, basic_keep_diverse_t {basic_connectivity_k});
+                                                       thread_context, keep_diverse_t {basic_connectivity_k});
             if (status != status_t::success_k) record_unexpected(1, status);
             inserting_done.store(true, std::memory_order_release);
             assert_no_locks_held();
@@ -2172,7 +2166,7 @@ std::size_t test_basic_overflow_race(u64_t seed) {
                                           .insert({threads.values[thread]}, {threads.keys[thread]},
                                                   threads.metrics[thread],
                                                   {assigned_ids.data() + thread * per_thread_k, per_thread_k},
-                                                  threads.contexts[thread], basic_keep_diverse_t {basic_connectivity_k})
+                                                  threads.contexts[thread], keep_diverse_t {basic_connectivity_k})
                                           .status;
             assert_no_locks_held();
         });
@@ -2210,7 +2204,7 @@ std::size_t test_basic_cursor(u64_t seed) {
     using node_id_t = typename index_t::node_id_t;
     using key_t = typename index_t::key_t;
     using context_t = typename index_t::traversal_context_t;
-    using cursor_t = basic_ram_cursor<index_t, synchronization_t::concurrent_k, counting_allocator_t>;
+    using cursor_t = ram_cursor<index_t, synchronization_t::concurrent_k, counting_allocator_t>;
     constexpr std::size_t nodes_k = 64;
     constexpr std::size_t racing_inserts_k = 8;
     std::size_t failures = 0;
@@ -2227,7 +2221,7 @@ std::size_t test_basic_cursor(u64_t seed) {
         failures += expect(bool(index.reserve(nodes_k + 1 + racing_inserts_k)));
         std::vector<node_id_t> assigned_ids;
         failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
-                                               basic_keep_diverse_t {basic_connectivity_k});
+                                               keep_diverse_t {basic_connectivity_k});
 
         // A fresh cursor stands past the end; seek(0) enters the graph.
         cursor_t cursor {index, counting_allocator_t {ledger}};
@@ -2287,7 +2281,7 @@ std::size_t test_basic_cursor(u64_t seed) {
                     thread_keys[ordinal] = fixture_type_::make_key(nodes_k + 1 + ordinal);
                 auto const [result, status] = index.insert({extras.data() + 1, racing_inserts_k}, {thread_keys},
                                                            thread_metric, {}, thread_context,
-                                                           basic_keep_diverse_t {basic_connectivity_k});
+                                                           keep_diverse_t {basic_connectivity_k});
                 if (status != status_t::success_k) thread_failures.fetch_add(1);
                 for (std::size_t round = 0; round != 512; ++round) {
                     [[maybe_unused]] auto const linked = index.link(1, 2 + round % 8);
@@ -2323,7 +2317,7 @@ std::size_t test_basic_cursor(u64_t seed) {
         failures += expect_eq(parked_cursor.seek(0), status_t::success_k);
 
         // The certified arm agrees with the concurrent one on a settled graph.
-        basic_ram_cursor<index_t, synchronization_t::immutable_k, counting_allocator_t> settled_cursor {
+        ram_cursor<index_t, synchronization_t::immutable_k, counting_allocator_t> settled_cursor {
             index, counting_allocator_t {ledger}};
         failures += expect_eq(settled_cursor.seek(0), status_t::success_k);
         std::size_t settled_visited = 0;
@@ -2363,7 +2357,7 @@ std::size_t test_basic_safegraphs_roundtrip(u64_t seed, std::string_view key_dty
         auto values = fixture_type_::make_values(nodes_k, stream_key(seed, "safegraphs"));
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids;
-        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context, basic_keep_diverse_t {4});
+        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context, keep_diverse_t {4});
         // One manual edge de-uniformizes the degrees: the irregular-neighbors mapping.
         [[maybe_unused]] auto const bumped = index.link(0, static_cast<node_id_t>(nodes_k / 2));
         auto const [extents, measure_status] = index.columns_extents(codec);
@@ -2502,7 +2496,7 @@ std::size_t test_basic_safegraphs_distributed(u64_t seed, std::string_view metri
             std::vector<node_id_t> assigned_ids;
             failures += expect(bool(indexes[part].reserve(half_k)));
             failures += basic_build<fixture_type_>(indexes[part], metric, halves[part], assigned_ids, context,
-                                                   basic_keep_diverse_t {4});
+                                                   keep_diverse_t {4});
         }
 
         char manifest_path[64];
@@ -2592,7 +2586,7 @@ std::size_t test_basic_safegraphs_hostile(u64_t seed, std::string_view metric_to
         auto values = fixture_type_::make_values(nodes_k, stream_key(seed, "safegraphs", 1));
         failures += expect(bool(index.reserve(nodes_k)));
         std::vector<node_id_t> assigned_ids;
-        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context, basic_keep_diverse_t {4});
+        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context, keep_diverse_t {4});
         [[maybe_unused]] auto const bumped = index.link(0, static_cast<node_id_t>(nodes_k / 2));
         serial_executor_t serial;
 

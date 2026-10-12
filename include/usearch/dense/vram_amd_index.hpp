@@ -6,11 +6,11 @@
  *
  *  The host face of the AMD family, compiled by any C++ compiler: it fills plain argument records
  *  and launches the kernels of @c vram_amd_index.hip by name through the HIP runtime it opens at
- *  first use, so it never sees a kit, a shared view or a HIP header. Every kernel is one
- *  instantiation of a single template over four integers - the kernel, the class, the dtype and the
- *  register rung - so its mangled name is spelled here from those integers alone, and one code
- *  object per class carries every dtype. Attention refuses with @c unsupported_k, as a device value
- *  lookup is vendor-specific.
+ *  first use, so it never sees a kit, a shared view or HIP beyond its runtime's declarations. Every
+ *  kernel is one instantiation of a single template over four integers - the kernel, the class, the
+ *  dtype and the register rung - so its mangled name is spelled here from those integers alone, and
+ *  one code object per class carries every dtype. Attention refuses with @c unsupported_k, as a
+ *  device value lookup is vendor-specific.
  */
 #pragma once
 
@@ -32,49 +32,48 @@
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_amd_device.hpp"
-#include "usearch/dense/types.hpp" // `dense_vram_telemetry_block_t` & the launch geometry constants
+#include "usearch/dense/types.hpp" // `vram_telemetry_block_t` & the launch geometry constants
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::dense {
 
 #pragma region Kernel Records
 
 /** Bytes of every AMD kit's fragment and of one scored node, the two strides the host sizes by. */
-inline constexpr std::size_t dense_amd_fragment_bytes_k = 16;
-inline constexpr std::size_t dense_amd_scored_node_bytes_k = 8;
+inline constexpr std::size_t amd_fragment_bytes_k = 16;
+inline constexpr std::size_t amd_scored_node_bytes_k = 8;
 
 /** Bytes of one wavefront's staged batch over @p wave_lanes lanes: the candidate IDs, then a
  *  lane-width of scored nodes and four-byte dots. */
-constexpr std::size_t dense_amd_gathered_bytes(u32_t wave_lanes) noexcept {
-    return dense_vram_cache_rows_k * sizeof(u32_t) + wave_lanes * (dense_amd_scored_node_bytes_k + 4);
+constexpr std::size_t amd_gathered_bytes(u32_t wave_lanes) noexcept {
+    return vram_cache_rows_k * sizeof(u32_t) + wave_lanes * (amd_scored_node_bytes_k + 4);
 }
 
 /** One bit per row over device-resident words, marked concurrently by a whole grid. */
-struct dense_hip_bitset_t {
+struct hip_bitset_t {
     u32_t* words = nullptr;
 };
 
-/** One wavefront's arena slice, mirroring the shared @c dense_vram_arena_shape_t field by field. */
-struct dense_amd_arena_shape_t {
+/** One wavefront's arena slice, mirroring the shared @c vram_arena_shape_t field by field. */
+struct amd_arena_shape_t {
     u32_t visited_slots = 0;
     u32_t visited_hash_shift = 0;
     u32_t tail_entries = 0;
 
     constexpr std::size_t slice_bytes() const noexcept {
         return static_cast<std::size_t>(visited_slots) * sizeof(u64_t) +
-               static_cast<std::size_t>(tail_entries) * dense_amd_scored_node_bytes_k;
+               static_cast<std::size_t>(tail_entries) * amd_scored_node_bytes_k;
     }
 };
 
 /** The exact visited set sized well past @p expansion visits, then @p tail_entries of spill
  *  tail. */
-inline dense_amd_arena_shape_t dense_amd_arena_shape(u32_t expansion, u32_t tail_entries) noexcept {
+inline amd_arena_shape_t amd_arena_shape(u32_t expansion, u32_t tail_entries) noexcept {
     u32_t const visited_slots = std::bit_ceil(64 * expansion);
     return {visited_slots, 32 - static_cast<u32_t>(std::bit_width(visited_slots - 1)), tail_entries};
 }
 
 /** The planes a kernel reads, mirroring the shared planes view field by field. */
-struct dense_amd_planes_t {
+struct amd_planes_t {
     byte_t* vectors = nullptr;
     byte_t* norms = nullptr;
     u32_t* neighbors = nullptr;
@@ -87,62 +86,62 @@ struct dense_amd_planes_t {
 };
 
 /** One insertion launch, mirroring the shared build view. */
-struct dense_amd_build_t {
-    dense_amd_planes_t planes;
+struct amd_build_t {
+    amd_planes_t planes;
     byte_t const* staging = nullptr;
     u32_t end_id = 0;
     u32_t scratch_bytes_per_warp = 0;
-    dense_node_id_t first_id = 0;
+    node_id_t first_id = 0;
     byte_t* arena = nullptr;
-    dense_amd_arena_shape_t arena_shape;
+    amd_arena_shape_t arena_shape;
     u32_t epoch_base = 0;
     u32_t* published_rows = nullptr;
-    dense_vram_telemetry_block_t* telemetry = nullptr;
+    vram_telemetry_block_t* telemetry = nullptr;
     u32_t* assigned_rows = nullptr;
 };
 
 /** One walking launch, mirroring the shared search view. */
-struct dense_amd_search_t {
-    dense_amd_planes_t planes;
+struct amd_search_t {
+    amd_planes_t planes;
     byte_t const* queries = nullptr;
     u32_t queries_count = 0;
     u32_t sampling_bound = 0;
     u32_t scratch_bytes_per_warp = 0;
     u32_t expansion = 0;
     byte_t* arena = nullptr;
-    dense_amd_arena_shape_t arena_shape;
+    amd_arena_shape_t arena_shape;
     u32_t epoch_base = 0;
-    dense_vram_telemetry_block_t* telemetry = nullptr;
+    vram_telemetry_block_t* telemetry = nullptr;
 };
 
 /** One refinement launch, mirroring the shared refine view. */
-struct dense_amd_refine_t {
-    dense_amd_planes_t planes;
+struct amd_refine_t {
+    amd_planes_t planes;
     u32_t* shadow_neighbors = nullptr;
     u32_t end_id = 0;
     u32_t scratch_bytes_per_warp = 0;
-    dense_node_id_t first_id = 0;
+    node_id_t first_id = 0;
     byte_t* arena = nullptr;
-    dense_amd_arena_shape_t arena_shape;
+    amd_arena_shape_t arena_shape;
     u32_t epoch_base = 0;
-    dense_vram_telemetry_block_t* telemetry = nullptr;
+    vram_telemetry_block_t* telemetry = nullptr;
     u32_t* assigned_rows = nullptr;
     u32_t const* node_ids = nullptr;
     u32_t sampling_bound = 0;
 };
 
 /** A search's landing, mirroring the shared search sink. */
-struct dense_amd_search_sink_t {
-    dense_node_id_t* result_ids = nullptr;
-    dense_distance_t* result_distances = nullptr;
+struct amd_search_sink_t {
+    node_id_t* result_ids = nullptr;
+    distance_t* result_distances = nullptr;
     u32_t count = 0;
     nk_kernel_kind_t kernel = nk_kernel_dot_k;
 };
 
 /** A graph product's landing, mirroring the shared multiply sink; the products are the kit's
  *  dots. */
-struct dense_amd_multiply_sink_t {
-    dense_node_id_t* ids = nullptr;
+struct amd_multiply_sink_t {
+    node_id_t* ids = nullptr;
     byte_t* products = nullptr;
     u32_t* counts = nullptr;
     u32_t wanted = 0;
@@ -150,7 +149,7 @@ struct dense_amd_multiply_sink_t {
 
 /** An indexer's heads, mirroring the shared indexer rescoring; null heads score by the query
  *  alone. */
-struct dense_amd_rescoring_t {
+struct amd_rescoring_t {
     byte_t const* heads = nullptr;
     f32_t const* weights = nullptr;
     u32_t heads_count = 0;
@@ -158,8 +157,8 @@ struct dense_amd_rescoring_t {
 };
 
 /** What the graph kernels - the scatter, the merge's buckets, the norms and the audits - read. */
-struct dense_amd_graph_t {
-    dense_amd_planes_t planes;
+struct amd_graph_t {
+    amd_planes_t planes;
     u32_t* neighbors = nullptr;
     u32_t rows_count = 0;
     u32_t connectivity = 0;
@@ -169,7 +168,7 @@ struct dense_amd_graph_t {
     u32_t bucket_width = 0;
     u32_t* bucket_ids = nullptr;
     u32_t* bucket_counts = nullptr;
-    dense_hip_bitset_t touched, reached, frontier, next_frontier;
+    hip_bitset_t touched, reached, frontier, next_frontier;
     u32_t* counter = nullptr;
     u32_t* island_ids = nullptr;
     u32_t islands_count = 0;
@@ -179,22 +178,22 @@ struct dense_amd_graph_t {
 };
 
 /** The one argument every AMD kernel takes, each reading the records its kernel names. */
-struct dense_amd_arguments_t {
-    dense_amd_build_t build;
-    dense_amd_search_t search;
-    dense_amd_refine_t refine;
-    dense_amd_search_sink_t search_sink;
-    dense_amd_multiply_sink_t multiply_sink;
-    dense_amd_rescoring_t rescoring;
-    dense_amd_graph_t graph;
+struct amd_arguments_t {
+    amd_build_t build;
+    amd_search_t search;
+    amd_refine_t refine;
+    amd_search_sink_t search_sink;
+    amd_multiply_sink_t multiply_sink;
+    amd_rescoring_t rescoring;
+    amd_graph_t graph;
 };
 
 #pragma endregion Kernel Records
 
 #pragma region Kernel Names
 
-/** The AMD kernels, the first template argument of @c dense_amd_kernel. */
-enum class dense_amd_kernel_t : u32_t {
+/** The AMD kernels, the first template argument of @c amd_kernel. */
+enum class amd_kernel_t : u32_t {
     insert_k,
     refine_k,
     search_k,
@@ -213,78 +212,78 @@ enum class dense_amd_kernel_t : u32_t {
 
 /** One instantiated kernel: the kernel and its register rung, zero where it keeps no ladder or
  *  walks the arena frontier. */
-struct dense_amd_rung_t {
-    dense_amd_kernel_t kernel;
+struct amd_rung_t {
+    amd_kernel_t kernel;
     u32_t slots;
 };
 
 /** Every instantiation one dtype's code exports, which the device pass instantiates and the host
  *  looks up. */
-inline constexpr dense_amd_rung_t dense_amd_rungs[] = {
-    {dense_amd_kernel_t::insert_k, 2},
-    {dense_amd_kernel_t::insert_k, 4},
-    {dense_amd_kernel_t::insert_k, 8},
-    {dense_amd_kernel_t::insert_k, 16},
-    {dense_amd_kernel_t::refine_k, 2},
-    {dense_amd_kernel_t::refine_k, 4},
-    {dense_amd_kernel_t::refine_k, 8},
-    {dense_amd_kernel_t::refine_k, 16},
-    {dense_amd_kernel_t::search_k, 0},
-    {dense_amd_kernel_t::search_k, 2},
-    {dense_amd_kernel_t::search_k, 4},
-    {dense_amd_kernel_t::search_k, 8},
-    {dense_amd_kernel_t::search_k, 16},
-    {dense_amd_kernel_t::search_indexer_k, 0},
-    {dense_amd_kernel_t::search_indexer_k, 2},
-    {dense_amd_kernel_t::search_indexer_k, 4},
-    {dense_amd_kernel_t::search_indexer_k, 8},
-    {dense_amd_kernel_t::search_indexer_k, 16},
-    {dense_amd_kernel_t::multiply_k, 0},
-    {dense_amd_kernel_t::multiply_k, 2},
-    {dense_amd_kernel_t::multiply_k, 4},
-    {dense_amd_kernel_t::multiply_k, 8},
-    {dense_amd_kernel_t::multiply_k, 16},
-    {dense_amd_kernel_t::merge_links_k, 0},
-    {dense_amd_kernel_t::scatter_links_k, 0},
-    {dense_amd_kernel_t::derive_norms_k, 0},
-    {dense_amd_kernel_t::mark_seeds_k, 0},
-    {dense_amd_kernel_t::reachability_sweep_k, 0},
-    {dense_amd_kernel_t::reachability_islands_k, 0},
-    {dense_amd_kernel_t::reached_in_links_k, 0},
-    {dense_amd_kernel_t::reconnect_island_k, 0},
+inline constexpr amd_rung_t amd_rungs[] = {
+    {amd_kernel_t::insert_k, 2},
+    {amd_kernel_t::insert_k, 4},
+    {amd_kernel_t::insert_k, 8},
+    {amd_kernel_t::insert_k, 16},
+    {amd_kernel_t::refine_k, 2},
+    {amd_kernel_t::refine_k, 4},
+    {amd_kernel_t::refine_k, 8},
+    {amd_kernel_t::refine_k, 16},
+    {amd_kernel_t::search_k, 0},
+    {amd_kernel_t::search_k, 2},
+    {amd_kernel_t::search_k, 4},
+    {amd_kernel_t::search_k, 8},
+    {amd_kernel_t::search_k, 16},
+    {amd_kernel_t::search_indexer_k, 0},
+    {amd_kernel_t::search_indexer_k, 2},
+    {amd_kernel_t::search_indexer_k, 4},
+    {amd_kernel_t::search_indexer_k, 8},
+    {amd_kernel_t::search_indexer_k, 16},
+    {amd_kernel_t::multiply_k, 0},
+    {amd_kernel_t::multiply_k, 2},
+    {amd_kernel_t::multiply_k, 4},
+    {amd_kernel_t::multiply_k, 8},
+    {amd_kernel_t::multiply_k, 16},
+    {amd_kernel_t::merge_links_k, 0},
+    {amd_kernel_t::scatter_links_k, 0},
+    {amd_kernel_t::derive_norms_k, 0},
+    {amd_kernel_t::mark_seeds_k, 0},
+    {amd_kernel_t::reachability_sweep_k, 0},
+    {amd_kernel_t::reachability_islands_k, 0},
+    {amd_kernel_t::reached_in_links_k, 0},
+    {amd_kernel_t::reconnect_island_k, 0},
 };
 
 /** Rungs per kernel: the arena frontier's zero, then 2, 4, 8 and 16 slots. */
-inline constexpr std::size_t dense_amd_rungs_per_kernel_k = 5;
+inline constexpr std::size_t amd_rungs_per_kernel_k = 5;
 
-constexpr std::size_t dense_amd_rung_index(u32_t slots) noexcept {
+constexpr std::size_t amd_rung_index(u32_t slots) noexcept {
     return slots == 0 ? 0 : slots == 2 ? 1 : slots == 4 ? 2 : slots == 8 ? 3 : 4;
 }
 
 /** The AMD class a capability ceiling names. */
-constexpr gpu_class_t dense_amd_class_of(nk_capability_t capability) noexcept {
+constexpr gpu_class_t amd_class_of(nk_capability_t capability) noexcept {
     return capability & nk_cap_cdna5_k   ? gpu_class_t::amd_cdna5_k
            : capability & nk_cap_cdna4_k ? gpu_class_t::amd_cdna4_k
                                          : gpu_class_t::amd_cdna3_k;
 }
 
 /** The ceiling a class's kits are chosen under, as @c numkong_capabilities_of grants it. */
-constexpr nk_capability_t dense_amd_capabilities_of(gpu_class_t gpu_class) noexcept {
+constexpr nk_capability_t amd_capabilities_of(gpu_class_t gpu_class) noexcept {
     nk_capability_t const cdna3 = nk_cap_rocm_k | nk_cap_cdna3_k, cdna4 = cdna3 | nk_cap_cdna4_k;
     return gpu_class == gpu_class_t::amd_cdna5_k   ? cdna4 | nk_cap_cdna5_k
            : gpu_class == gpu_class_t::amd_cdna4_k ? cdna4
                                                    : cdna3;
 }
 
-inline constexpr std::size_t dense_amd_kernel_name_capacity_k = 160;
+inline constexpr std::size_t amd_kernel_name_capacity_k = 160;
 
-/** Spells the Itanium mangled name of @c dense_amd_kernel<kernel,class,dtype,slots>: four unsigned
- *  template arguments, then the one @ref dense_amd_arguments_t parameter, as the device pass emits
+/** Spells the Itanium mangled name of @c amd_kernel<kernel,class,dtype,slots>: four unsigned
+ *  template arguments, then the one @ref amd_arguments_t parameter, as the device pass emits
  *  it. */
-inline void dense_amd_kernel_name(char (&name)[dense_amd_kernel_name_capacity_k], dense_amd_rung_t rung,
-                                  gpu_class_t gpu_class, nk_dtype_t dtype) noexcept {
+inline void amd_kernel_name(char (&name)[amd_kernel_name_capacity_k], amd_rung_t rung, gpu_class_t gpu_class,
+                            nk_dtype_t dtype) noexcept {
     std::snprintf(name, sizeof(name),
-                  "_ZN4unum7usearch16dense_amd_kernelILj%uELj%uELj%uELj%uEEEvNS0_21dense_amd_arguments_tE",
+                  "_ZN4unum7usearch5dense10amd_kernelILj%uELj%uELj%uELj%uEEEvNS1_15amd_arguments_tE",
                   static_cast<unsigned>(rung.kernel), static_cast<unsigned>(gpu_class), static_cast<unsigned>(dtype),
                   static_cast<unsigned>(rung.slots));
 }
@@ -292,19 +291,19 @@ inline void dense_amd_kernel_name(char (&name)[dense_amd_kernel_name_capacity_k]
 /** One class's code object, an offload bundle of its listed processors carrying every compiled
  *  dtype, defined in that class's host unit. */
 template <nk_capability_t capability_>
-bytes_view_t dense_amd_code_object() noexcept;
+bytes_view_t amd_code_object() noexcept;
 
 #pragma endregion Kernel Names
 
 template <nk_dtype_t, nk_capability_t, typename, typename, typename>
-struct dense_vram_amd_index;
+struct vram_amd_index;
 
 /** One stream's device-side scratch for driving an AMD index: the traversal arena, the batch
  *  staging, the telemetry counters and the attend miss word, riding the stream its allocator names
  *  and never opening one. Two contexts on one index share only the planes and the published
  *  counter, never scratch. */
 template <hip_allocator allocator_type_ = hip_device_allocator_t>
-struct dense_hip_traversal_context {
+struct hip_traversal_context {
     using allocator_t = allocator_type_;
 
     /** Matches the single-query verb lands at most - the arena frontier's head width. */
@@ -312,13 +311,13 @@ struct dense_hip_traversal_context {
 
     /** The single-query verb's landing: ascending matches in inline storage. */
     struct results_t {
-        dense_scored_node_t entries_[results_capacity_k];
+        scored_node_t entries_[results_capacity_k];
         std::size_t count_ = 0;
 
-        dense_scored_node_t* data() noexcept { return entries_; }
-        dense_scored_node_t const* data() const noexcept { return entries_; }
-        dense_scored_node_t& operator[](std::size_t rank) noexcept { return entries_[rank]; }
-        dense_scored_node_t const& operator[](std::size_t rank) const noexcept { return entries_[rank]; }
+        scored_node_t* data() noexcept { return entries_; }
+        scored_node_t const* data() const noexcept { return entries_; }
+        scored_node_t& operator[](std::size_t rank) noexcept { return entries_[rank]; }
+        scored_node_t const& operator[](std::size_t rank) const noexcept { return entries_[rank]; }
         std::size_t size() const noexcept { return count_; }
     };
 
@@ -327,25 +326,25 @@ struct dense_hip_traversal_context {
     /** Binds this context to @p allocator's stream and device, a null stream naming the legacy
      *  default one, and allocates only the fixed-size counters; sized buffers wait for the first
      *  verb. */
-    dense_hip_traversal_context(allocator_t allocator = {}) noexcept
+    hip_traversal_context(allocator_t allocator = {}) noexcept
         : allocator_ {allocator}, //
           telemetry_ {hip_make_unique(telemetry_allocator_t {allocator_}, 1)},
           assigned_rows_ {hip_make_unique(counter_allocator_t {allocator_}, 1)},
           missed_ {hip_make_unique(counter_allocator_t {allocator_}, 1)},
           arena_ {nullptr, hip_deleter<allocator_t> {allocator_, 0}},
           staging_ {nullptr, hip_deleter<allocator_t> {allocator_, 0}} {
-        if (telemetry_) hip_runtime().fill_async(telemetry_.get(), 0, sizeof(dense_vram_telemetry_block_t), stream());
+        if (telemetry_) hip_api().fill_async(telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream());
     }
 
-    dense_hip_traversal_context(dense_hip_traversal_context const&) = delete;
-    dense_hip_traversal_context& operator=(dense_hip_traversal_context const&) = delete;
+    hip_traversal_context(hip_traversal_context const&) = delete;
+    hip_traversal_context& operator=(hip_traversal_context const&) = delete;
 
     /** Every owned resource frees in stream order, so a move is a member-wise steal and destruction
      *  needs no drain. */
-    dense_hip_traversal_context(dense_hip_traversal_context&&) noexcept = default;
-    ~dense_hip_traversal_context() noexcept = default;
+    hip_traversal_context(hip_traversal_context&&) noexcept = default;
+    ~hip_traversal_context() noexcept = default;
 
-    hip_stream_handle_t stream() const noexcept { return allocator_.stream(); }
+    hipStream_t stream() const noexcept { return allocator_.stream(); }
     int device() const noexcept { return allocator_.device(); }
 
     /** Whether this context can walk at all: every device-side word claimed. */
@@ -355,16 +354,15 @@ struct dense_hip_traversal_context {
      *  completion, the executor's @c drain being the fleet's. Selects the context's device first,
      *  since a null stream is the current device's. */
     status_t drain() noexcept {
-        return hip_runtime().set_device(device()) == hip_success_k &&
-                       hip_runtime().stream_synchronize(stream()) == hip_success_k
+        return hip_api().set_device(device()) == hipSuccess && hip_api().stream_synchronize(stream()) == hipSuccess
                    ? status_t::success_k
                    : status_t::device_error_k;
     }
 
     /** The telemetry of the last submission, zeroed when it was queued; read after a drain. */
-    dense_vram_telemetry_block_t spent() const noexcept {
-        dense_vram_telemetry_block_t snapshot = {};
-        hip_runtime().copy(&snapshot, telemetry_.get(), sizeof(snapshot), hip_memcpy_kind_t::device_to_host_k);
+    vram_telemetry_block_t spent() const noexcept {
+        vram_telemetry_block_t snapshot = {};
+        hip_api().copy(&snapshot, telemetry_.get(), sizeof(snapshot), hipMemcpyDeviceToHost);
         return snapshot;
     }
 
@@ -372,7 +370,7 @@ struct dense_hip_traversal_context {
      *  after a drain. */
     bool missed() const noexcept {
         u32_t word = 0;
-        hip_runtime().copy(&word, missed_.get(), sizeof(word), hip_memcpy_kind_t::device_to_host_k);
+        hip_api().copy(&word, missed_.get(), sizeof(word), hipMemcpyDeviceToHost);
         return word != 0;
     }
 
@@ -381,9 +379,9 @@ struct dense_hip_traversal_context {
     /** Only the index's verbs reach the raw scratch - callers observe a context through @c results,
      *  @ref spent and @ref missed, never through its buffers. */
     template <nk_dtype_t, nk_capability_t, typename, typename, typename>
-    friend struct dense_vram_amd_index;
+    friend struct vram_amd_index;
 
-    using telemetry_allocator_t = typename allocator_t::template rebind<dense_vram_telemetry_block_t>::other;
+    using telemetry_allocator_t = typename allocator_t::template rebind<vram_telemetry_block_t>::other;
     using counter_allocator_t = typename allocator_t::template rebind<u32_t>::other;
     using bytes_ptr_t = hip_unique_ptr<byte_t, allocator_t>;
 
@@ -394,7 +392,7 @@ struct dense_hip_traversal_context {
     u64_t epoch_floor_ = 0;
 
     /** The device-side counters of the last submission, zeroed when it was queued. */
-    hip_unique_ptr<dense_vram_telemetry_block_t, telemetry_allocator_t> telemetry_;
+    hip_unique_ptr<vram_telemetry_block_t, telemetry_allocator_t> telemetry_;
 
     /** Rows of the current launch's batch warps have assigned themselves so far. */
     hip_unique_ptr<u32_t, counter_allocator_t> assigned_rows_;
@@ -445,7 +443,7 @@ template <                                                                     /
     typename vectors_allocator_type_ = hip_virtual_memory_allocator<byte_t>,   //
     typename neighbors_allocator_type_ = hip_virtual_memory_allocator<byte_t>, //
     typename traversals_allocator_type_ = hip_arena_allocator_t>               //
-struct dense_vram_amd_index {
+struct vram_amd_index {
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
 
@@ -460,9 +458,9 @@ struct dense_vram_amd_index {
     using norms_t = vector_norms<dot_t>;
     using vectors_view_t = nk::matrix_view<scalar_t>;
     using vector_view_t = nk::vector_view<scalar_t>;
-    using node_id_t = dense_node_id_t;
+    using node_id_t = dense::node_id_t;
     using node_ids_span_t = nk::vector_span<node_id_t>;
-    using distance_t = dense_distance_t;
+    using distance_t = dense::distance_t;
     using small_size_t = u32_t;
 
     /** The page-locked host bytes a checkpoint moves through, one batch at a time. */
@@ -471,7 +469,7 @@ struct dense_vram_amd_index {
     /** Rows one checkpoint batch carries between a plane and the caller: one slab, the row
      *  granularity the RAM residency grows by. */
     inline static constexpr std::size_t bounce_rows_log2_k = 20;
-    using dense_traversal_context_t = dense_hip_traversal_context<traversals_allocator_t>;
+    using traversal_context_t = hip_traversal_context<traversals_allocator_t>;
 
     /** The strongest @c synchronization_t contract this design honors; nothing routes on it.
      *  Batches claim disjoint ID ranges and the publication protocol makes overlapping searches
@@ -504,12 +502,12 @@ struct dense_vram_amd_index {
     /** The @p kernel every walk scores by, checked against the dtype at the first @c reserve, and
      *  one allocator per plane concern, each carrying its device placement; the index pins itself
      *  to the vectors allocator's device and demands the neighbors allocator agree. */
-    explicit dense_vram_amd_index(nk_kernel_kind_t kernel, vectors_allocator_t const& vectors_allocator = {},
-                                  neighbors_allocator_t const& neighbors_allocator = {}) noexcept
+    explicit vram_amd_index(nk_kernel_kind_t kernel, vectors_allocator_t const& vectors_allocator = {},
+                            neighbors_allocator_t const& neighbors_allocator = {}) noexcept
         : device_ {vectors_allocator.device()}, kernel_ {kernel}, vectors_plane_(vectors_allocator),
           norms_plane_(vectors_allocator), neighbors_plane_(neighbors_allocator) {}
-    dense_vram_amd_index(dense_vram_amd_index const&) = delete;
-    dense_vram_amd_index& operator=(dense_vram_amd_index const&) = delete;
+    vram_amd_index(vram_amd_index const&) = delete;
+    vram_amd_index& operator=(vram_amd_index const&) = delete;
 
 #pragma region Measures
 
@@ -564,7 +562,7 @@ struct dense_vram_amd_index {
     bool stores_norms() const noexcept { return kernel_ != nk_kernel_dot_k; }
 
     /** Device-side plane views - the audit surface for invariant checkers & tests. */
-    dense_amd_planes_t planes() const noexcept {
+    amd_planes_t planes() const noexcept {
         u32_t const fragments = row_fragments();
         return {reinterpret_cast<byte_t*>(vectors_plane_.base()),
                 reinterpret_cast<byte_t*>(norms_plane_.base()),
@@ -584,14 +582,12 @@ struct dense_vram_amd_index {
 
     /** Fragments per vector row, derived from the frozen geometry like every row measure. */
     u32_t row_fragments() const noexcept {
-        return divide_round_up<u32_t>(static_cast<u32_t>(packed_row_bytes()), dense_amd_fragment_bytes_k);
+        return divide_round_up<u32_t>(static_cast<u32_t>(packed_row_bytes()), amd_fragment_bytes_k);
     }
 
     /** The vector row's byte length, rounded up to whole fragments; the tail bytes stay zero so
      *  every dot-derived metric is unaffected. */
-    std::size_t row_bytes() const noexcept {
-        return static_cast<std::size_t>(row_fragments()) * dense_amd_fragment_bytes_k;
-    }
+    std::size_t row_bytes() const noexcept { return static_cast<std::size_t>(row_fragments()) * amd_fragment_bytes_k; }
 
     /** Lanes cooperating on one row: the smallest power of two covering its fragments, at most a
      *  warp. */
@@ -601,7 +597,7 @@ struct dense_vram_amd_index {
     u32_t wave_lanes() const noexcept { return capability_ & nk_cap_cdna5_k ? 32u : 64u; }
 
     /** Threads per block, four wavefronts. */
-    u32_t block_threads() const noexcept { return dense_vram_warps_per_block_k * wave_lanes(); }
+    u32_t block_threads() const noexcept { return vram_warps_per_block_k * wave_lanes(); }
 
     /** Steps those lanes take across one row. */
     u32_t steps_per_row() const noexcept { return divide_round_up(row_fragments(), lanes_per_row()); }
@@ -610,10 +606,10 @@ struct dense_vram_amd_index {
      *  traversing, then the candidate cache & re-selection spans. */
     u32_t insert_scratch_bytes_per_warp() const noexcept {
         u32_t const selection_slots = min_of(static_cast<u32_t>(connectivity()), //
-                                             static_cast<u32_t>(dense_vram_cache_rows_k));
-        u32_t const selection_bytes = selection_slots * static_cast<u32_t>(dense_amd_scored_node_bytes_k + //
+                                             static_cast<u32_t>(vram_cache_rows_k));
+        u32_t const selection_bytes = selection_slots * static_cast<u32_t>(amd_scored_node_bytes_k + //
                                                                            2 * sizeof(u32_t));
-        u32_t const cache_bytes = static_cast<u32_t>(row_bytes()) * dense_vram_cache_rows_k;
+        u32_t const cache_bytes = static_cast<u32_t>(row_bytes()) * vram_cache_rows_k;
         return max_of(static_cast<u32_t>(row_bytes()), cache_bytes + selection_bytes);
     }
 
@@ -621,26 +617,23 @@ struct dense_vram_amd_index {
      *  cache - whose last row hosts the node's own vector - then the scored span and the
      *  kept-row indices. */
     u32_t merge_scratch_bytes_per_warp() const noexcept {
-        u32_t const cache_bytes = static_cast<u32_t>(row_bytes()) * dense_vram_cache_rows_k;
-        return cache_bytes +
-               dense_vram_cache_rows_k * static_cast<u32_t>(dense_amd_scored_node_bytes_k + sizeof(u32_t));
+        u32_t const cache_bytes = static_cast<u32_t>(row_bytes()) * vram_cache_rows_k;
+        return cache_bytes + vram_cache_rows_k * static_cast<u32_t>(amd_scored_node_bytes_k + sizeof(u32_t));
     }
 
     /** Whether a search, multiply or attend launch seats on this device: per warp, the query span
      *  and the @p fold_bytes an attend keeps past it, beside the static batch buffers. */
     bool walk_scratch_fits(std::size_t fold_bytes = 0) const noexcept {
-        return std::size_t {dense_vram_warps_per_block_k} *
-                   (row_bytes() + fold_bytes + dense_amd_gathered_bytes(wave_lanes())) <=
+        return std::size_t {vram_warps_per_block_k} * (row_bytes() + fold_bytes + amd_gathered_bytes(wave_lanes())) <=
                device_.shared_memory_per_block_bytes;
     }
 
     /** Whether an insert or refine launch seats on this device: its per-warp candidate cache beside
      *  the static norms and batch buffers - wide rows can serve walks yet refuse building. */
     bool build_scratch_fits() const noexcept {
-        std::size_t const statics = std::size_t {dense_vram_warps_per_block_k} *
-                                    (dense_vram_cache_rows_k * sizeof(norms_t) +
-                                     dense_amd_gathered_bytes(wave_lanes()));
-        return statics + std::size_t {dense_vram_warps_per_block_k} *
+        std::size_t const statics = std::size_t {vram_warps_per_block_k} *
+                                    (vram_cache_rows_k * sizeof(norms_t) + amd_gathered_bytes(wave_lanes()));
+        return statics + std::size_t {vram_warps_per_block_k} *
                              max_of(insert_scratch_bytes_per_warp(), merge_scratch_bytes_per_warp()) <=
                device_.shared_memory_per_block_bytes;
     }
@@ -684,7 +677,7 @@ struct dense_vram_amd_index {
     /** Bytes this index occupies - the committed device planes, the published-row count, and the
      *  host struct; traversal scratch belongs to executors and contexts. */
     std::size_t memory_usage() const noexcept {
-        return sizeof(dense_vram_amd_index) + vectors_plane_.committed_bytes() + norms_plane_.committed_bytes() +
+        return sizeof(vram_amd_index) + vectors_plane_.committed_bytes() + norms_plane_.committed_bytes() +
                neighbors_plane_.committed_bytes() + (published_rows_ ? sizeof(u32_t) : 0);
     }
 
@@ -696,9 +689,9 @@ struct dense_vram_amd_index {
         if (destination.size() != dimensions()) return status_t::config_mismatch_k;
         if (!destination.is_contiguous()) return status_t::unsupported_layout_k;
         std::size_t const scalar_row_bytes = packed_row_bytes();
-        return hip_runtime().copy(destination.byte_data(),
-                                  vectors_plane_.base() + static_cast<std::size_t>(node) * row_bytes(),
-                                  scalar_row_bytes, hip_memcpy_kind_t::device_to_host_k) == hip_success_k
+        return hip_api().copy(destination.byte_data(),
+                              vectors_plane_.base() + static_cast<std::size_t>(node) * row_bytes(), scalar_row_bytes,
+                              hipMemcpyDeviceToHost) == hipSuccess
                    ? status_t::success_k
                    : status_t::device_error_k;
     }
@@ -707,8 +700,7 @@ struct dense_vram_amd_index {
      *  Call it only with no batch in flight. */
     status_t validate() const noexcept {
         u32_t published = 0;
-        if (hip_runtime().copy(&published, published_rows_.get(), sizeof(u32_t), hip_memcpy_kind_t::device_to_host_k) !=
-            hip_success_k)
+        if (hip_api().copy(&published, published_rows_.get(), sizeof(u32_t), hipMemcpyDeviceToHost) != hipSuccess)
             return status_t::device_error_k;
         return published == claimed_() ? status_t::success_k : status_t::device_error_k;
     }
@@ -725,7 +717,7 @@ struct dense_vram_amd_index {
      *  sized well past the expected visit count so probing stays short, plus the spill tail when
      *  @p frontier_kind outgrows registers. */
     auto arena_shape_for(u32_t expansion, frontier_kind_t frontier_kind) const noexcept {
-        return dense_amd_arena_shape(expansion, frontier_kind == frontier_kind_t::wide_arena_k ? 32 * expansion : 0);
+        return amd_arena_shape(expansion, frontier_kind == frontier_kind_t::wide_arena_k ? 32 * expansion : 0);
     }
 
     /** Requested geometry & capacity for a @c reserve() call; frozen by the first success. */
@@ -762,8 +754,7 @@ struct dense_vram_amd_index {
         connectivity_t const connectivity = config.connectivity;
         if (config.capacity > max_node_count_k) return {capacity(), status_t::overflow_k};
         if (!vectors_plane_.reserved_bytes()) { // First reservation: bind the device, size the ceiling.
-            if (!hip_runtime() || hip_runtime().set_device(device_.ordinal) != hip_success_k)
-                return {0, status_t::device_error_k};
+            if (!hip_api() || hip_api().set_device(device_.ordinal) != hipSuccess) return {0, status_t::device_error_k};
             auto const [specs, status] = hip_device_specs_t::query(device_.ordinal);
             if (failed(status)) return {0, status};
             device_ = specs;
@@ -793,7 +784,7 @@ struct dense_vram_amd_index {
                 return {0, status_t::bad_alloc_k};
             counter_allocator_t counter_allocator {nullptr, device_.ordinal};
             published_rows_ = hip_make_unique(counter_allocator, 1);
-            if (!published_rows_ || hip_runtime().fill(published_rows_.get(), 0, sizeof(u32_t)) != hip_success_k)
+            if (!published_rows_ || hip_api().fill(published_rows_.get(), 0, sizeof(u32_t)) != hipSuccess)
                 return {0, status_t::device_error_k};
         }
         status_t const grown = grow_rows_(config.capacity, nullptr);
@@ -824,10 +815,10 @@ struct dense_vram_amd_index {
         auto const arena_shape = arena_shape_for(pool_slots * wave_lanes(), frontier_kind_t::register_ladder_k);
         std::size_t const arena_warps = static_cast<std::size_t>(device_.multiprocessor_count) *
                                         max_of(insert_blocks_per_multiprocessor_k, search_blocks_per_multiprocessor_k) *
-                                        dense_vram_warps_per_block_k;
+                                        vram_warps_per_block_k;
         std::size_t const results_bytes = // The widest single-query result landing.
-            512 * (sizeof(dense_node_id_t) + sizeof(dense_distance_t));
-        return aligned(sizeof(dense_vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
+            512 * (sizeof(node_id_t) + sizeof(distance_t));
+        return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
                aligned(arena_warps * arena_shape.slice_bytes()) + aligned(rows * row_bytes() + results_bytes);
     }
 
@@ -836,7 +827,7 @@ struct dense_vram_amd_index {
      *  the range's end. */
     struct [[nodiscard]] insert_result_t {
         std::size_t new_size = 0;
-        dense_node_id_t first_id = dense_node_id_unknown_k;
+        node_id_t first_id = node_id_unknown_k;
         std::size_t visited_members = 0;
         std::size_t computed_distances = 0;
         std::size_t restarts = 0;
@@ -863,12 +854,12 @@ struct dense_vram_amd_index {
      *  that stream, turns the watermark over the range once every earlier batch has, and reports
      *  telemetry. */
     expected<insert_result_t> insert(vectors_view_t new_vectors, node_ids_span_t assigned_ids,
-                                     dense_traversal_context_t& context, insert_config_t config = {}) noexcept {
+                                     traversal_context_t& context, insert_config_t config = {}) noexcept {
         // Zeroed per call rather than per launch, so the launches of a sharded plan on one context
         // add up.
         if (context && context.device() == device_.ordinal &&
-            hip_runtime().fill_async(context.telemetry_.get(), 0, sizeof(dense_vram_telemetry_block_t),
-                                     context.stream()) != hip_success_k)
+            hip_api().fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream()) !=
+                hipSuccess)
             return {{}, status_t::device_error_k};
         expected<insert_result_t> inserted = submit_insert_(new_vectors, assigned_ids, context, config);
         if (!inserted || !new_vectors.extent(0)) return inserted;
@@ -876,7 +867,7 @@ struct dense_vram_amd_index {
             return {{inserted.value.new_size, inserted.value.first_id}, fail_(drained)};
         if (status_t const published = publish_(inserted.value.first_id, new_vectors.extent(0)); failed(published))
             return {{inserted.value.new_size, inserted.value.first_id}, published};
-        dense_vram_telemetry_block_t const spent = context.spent();
+        vram_telemetry_block_t const spent = context.spent();
         inserted.value.visited_members = spent.hops;
         inserted.value.computed_distances = spent.scored;
         inserted.value.restarts = spent.restarts;
@@ -919,7 +910,7 @@ struct dense_vram_amd_index {
      *  @p rows rows under @p config, landing @c config.count columns per row, one aligned term per
      *  carve the verb makes. */
     std::size_t traversal_memory_usage(std::size_t rows, search_config_t config) const noexcept {
-        static_assert(sizeof(dot_t) == sizeof(dense_distance_t));
+        static_assert(sizeof(dot_t) == sizeof(distance_t));
         if (!dimensions() || !device_.multiprocessor_count) return 0;
         auto aligned = [](std::size_t bytes) noexcept {
             return divide_round_up<std::size_t>(bytes, default_alignment_k) * default_alignment_k;
@@ -936,18 +927,18 @@ struct dense_vram_amd_index {
             wide ? expansion : pool_slots * wave_lanes(),
             wide ? frontier_kind_t::wide_arena_k : frontier_kind_t::register_ladder_k);
         std::size_t const arena_warps = static_cast<std::size_t>(device_.multiprocessor_count) *
-                                        search_blocks_per_multiprocessor_k * dense_vram_warps_per_block_k;
+                                        search_blocks_per_multiprocessor_k * vram_warps_per_block_k;
         std::size_t const staging_bytes = rows * row_bytes() +
-                                          rows * config.count * (sizeof(dense_node_id_t) + sizeof(dense_distance_t)) +
+                                          rows * config.count * (sizeof(node_id_t) + sizeof(distance_t)) +
                                           rows * sizeof(u32_t);
-        return aligned(sizeof(dense_vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
+        return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
                aligned(arena_warps * arena_shape.slice_bytes()) + aligned(staging_bytes);
     }
 
     /** The bytes a search under the indexer @p heads needs: the plain walk's, plus the staging of
      *  the heads and their weights. */
     std::size_t traversal_memory_usage(std::size_t rows, search_config_t config,
-                                       dense_indexer_heads<scalar_t> const& heads) const noexcept {
+                                       indexer_heads<scalar_t> const& heads) const noexcept {
         // The heads share the staging carve, and aligning their bytes apart can only overestimate
         // it.
         std::size_t const heads_bytes = heads.heads.extent(0) * (row_bytes() + sizeof(f32_t));
@@ -961,7 +952,7 @@ struct dense_vram_amd_index {
     std::size_t traversal_memory_usage(std::size_t rows, search_config_t config, std::size_t head_count,
                                        std::size_t shards = 1) const noexcept {
         std::size_t const rows_bytes = rows * (row_bytes() +
-                                               shards * (dimensions() * sizeof(f32_t) + sizeof(dense_softmax_state_t)));
+                                               shards * (dimensions() * sizeof(f32_t) + sizeof(softmax_state_t)));
         return traversal_memory_usage(head_count ? rows / head_count : rows, config) +
                divide_round_up<std::size_t>(rows_bytes, default_alignment_k) * default_alignment_k;
     }
@@ -981,9 +972,9 @@ struct dense_vram_amd_index {
      *      deferred returns once queued, and the caller drains before reading either output.
      *  @return The match count per query, and the traversal telemetry this call spent.
      */
-    expected<search_result_t> search(vectors_view_t queries, nk::matrix_span<dense_node_id_t> result_ids,
-                                     nk::matrix_span<dense_distance_t> result_distances,
-                                     dense_traversal_context_t& context, search_config_t config = {},
+    expected<search_result_t> search(vectors_view_t queries, nk::matrix_span<node_id_t> result_ids,
+                                     nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
+                                     search_config_t config = {},
                                      completion_t completion = completion_t::blocking_k) noexcept {
         return settle_(submit_search_(queries, result_ids, result_distances, context, config, size()),
                        queries.extent(0), context, completion);
@@ -993,12 +984,12 @@ struct dense_vram_amd_index {
      *  ReLU(qₕ · k) over the @p heads of its query, which must match the queries in count and the
      *  index in dimensions, while the walk navigates by @p queries. A dot verb: any other metric
      *  refuses with @c config_mismatch_k. */
-    expected<search_result_t> search(vectors_view_t queries, dense_indexer_heads<scalar_t> const& heads,
-                                     nk::matrix_span<dense_node_id_t> result_ids,
-                                     nk::matrix_span<dense_distance_t> result_distances,
-                                     dense_traversal_context_t& context, search_config_t config = {},
+    expected<search_result_t> search(vectors_view_t queries, indexer_heads<scalar_t> const& heads,
+                                     nk::matrix_span<node_id_t> result_ids,
+                                     nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
+                                     search_config_t config = {},
                                      completion_t completion = completion_t::blocking_k) noexcept
-        requires dense_floating_scalar<scalar_t>
+        requires floating_scalar<scalar_t>
     {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         return settle_(submit_search_(queries, result_ids, result_distances, context, config, size(), heads),
@@ -1007,7 +998,7 @@ struct dense_vram_amd_index {
 
     /** One query in, the nearest matches ascending in @c context.results - the correctness path; a
      *  one-query grid never fills the machine, the batched overload does. */
-    expected<search_result_t> search(vector_view_t query_vector, dense_traversal_context_t& context,
+    expected<search_result_t> search(vector_view_t query_vector, traversal_context_t& context,
                                      search_config_t config = {}) noexcept {
         return search_(query_vector, context, config, size());
     }
@@ -1015,7 +1006,7 @@ struct dense_vram_amd_index {
     /** Filtered search is banned on the device index: a host predicate cannot run inside the walk,
      *  and a device-resident admission bitmap is a design of its own. */
     template <typename predicate_type_>
-    expected<search_result_t> search_if(vector_view_t, predicate_type_&&, dense_traversal_context_t&,
+    expected<search_result_t> search_if(vector_view_t, predicate_type_&&, traversal_context_t&,
                                         search_config_t = {}) noexcept = delete;
 
     /**
@@ -1037,9 +1028,9 @@ struct dense_vram_amd_index {
      *      carry them after the drain - and the traversal telemetry this call spent;
      *      @c config_mismatch_k unless the index scores by dot.
      */
-    expected<search_result_t> multiply(vectors_view_t left, nk::matrix_span<dense_node_id_t> node_ids,
+    expected<search_result_t> multiply(vectors_view_t left, nk::matrix_span<node_id_t> node_ids,
                                        nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
-                                       dense_traversal_context_t& context, search_config_t config = {},
+                                       traversal_context_t& context, search_config_t config = {},
                                        completion_t completion = completion_t::blocking_k) noexcept {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         expected<search_result_t> landed = settle_(
@@ -1054,7 +1045,7 @@ struct dense_vram_amd_index {
      *  vendor-specific. */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(vectors_view_t, std::size_t, value_lookup_type_&&, f32_t, nk::matrix_span<f32_t>,
-                                     std::span<dense_softmax_state_t>, dense_traversal_context_t&, search_config_t = {},
+                                     std::span<softmax_state_t>, traversal_context_t&, search_config_t = {},
                                      completion_t = completion_t::blocking_k) noexcept {
         return {{}, status_t::unsupported_k};
     }
@@ -1071,8 +1062,8 @@ struct dense_vram_amd_index {
         small_size_t expansion_factor = 0;
     };
 
-    using refine_result_t = dense_refine_result_t;
-    using health_result_t = dense_health_result_t;
+    using refine_result_t = dense::refine_result_t;
+    using health_result_t = dense::health_result_t;
 
     /**
      *  @brief Re-selects the neighbors of every node in @p nodes from a fresh walk seeded by the
@@ -1092,7 +1083,7 @@ struct dense_vram_amd_index {
      *  @param[inout] context The driving context; its arena grows to the pass's shape.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      */
-    expected<refine_result_t> refine(iota_view<dense_node_id_t> nodes, dense_traversal_context_t& context,
+    expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
                                      refine_config_t config = {}) noexcept {
         std::size_t const rows = size();
         refine_result_t result;
@@ -1103,7 +1094,7 @@ struct dense_vram_amd_index {
             result.computed_distances += walked.computed_distances;
             result.restarts += walked.restarts;
         };
-        dense_node_id_t const bound = static_cast<dense_node_id_t>(min_of<std::size_t>(nodes.bound, rows));
+        node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
         if (nodes.first < bound) {
             auto const [walked, status] = refine_pass_(context, config, {nodes.first, bound}, {});
             if (failed(status)) return {result, status};
@@ -1133,9 +1124,9 @@ struct dense_vram_amd_index {
             // The reached in-links first, so no reconnection takes the last link a reached node is
             // found through.
             u32_t* const neighbors = reinterpret_cast<u32_t*>(neighbors_plane_.base());
-            if (hip_runtime().fill_async(audit.in_links, 0, rows * sizeof(u32_t), context.stream()) != hip_success_k)
+            if (hip_api().fill_async(audit.in_links, 0, rows * sizeof(u32_t), context.stream()) != hipSuccess)
                 return {result, status_t::device_error_k};
-            dense_amd_arguments_t heal {};
+            amd_arguments_t heal {};
             heal.graph.neighbors = neighbors;
             heal.graph.rows_count = static_cast<u32_t>(rows);
             heal.graph.connectivity = static_cast<u32_t>(connectivity());
@@ -1146,12 +1137,12 @@ struct dense_vram_amd_index {
             heal.graph.seed_count = static_cast<u32_t>(min_of<std::size_t>(connectivity(), rows));
             heal.graph.reconnected = audit.reconnected;
             if (status_t const counted = launch_(
-                    dense_amd_kernel_t::reached_in_links_k, 0,
+                    amd_kernel_t::reached_in_links_k, 0,
                     static_cast<u32_t>(device_.multiprocessor_count) * search_blocks_per_multiprocessor_k, 0,
                     context.stream(), heal);
                 failed(counted))
                 return {result, counted};
-            if (status_t const launched = launch_(dense_amd_kernel_t::reconnect_island_k, 0,
+            if (status_t const launched = launch_(amd_kernel_t::reconnect_island_k, 0,
                                                   divide_round_up<u32_t>(islands, block_threads()), 0, context.stream(),
                                                   heal);
                 failed(launched))
@@ -1172,7 +1163,7 @@ struct dense_vram_amd_index {
     /** Measures forward reachability from as many stride-spread landmarks as one search draws - the
      *  connectivity; any shortfall against @c size() is the population no search can discover.
      *  Read-only on the graph, so concurrent insertions may leave fresh nodes uncounted. */
-    expected<health_result_t> health(dense_traversal_context_t& context) noexcept {
+    expected<health_result_t> health(traversal_context_t& context) noexcept {
         std::size_t const rows = size();
         if (!rows) return {{}, status_t::success_k};
         auto [audit, reserve_status] = reserve_audit_(context, 0);
@@ -1206,7 +1197,7 @@ struct dense_vram_amd_index {
         node_id_t id_shift = 0;
 
         /** The stream every device-to-host copy queues on, drained before its bytes move. */
-        hip_stream_handle_t stream = nullptr;
+        hipStream_t stream = nullptr;
 
         /** Page-locked host bytes: one batch of packed vector rows, then its neighbor IDs, then its
          *  norms. */
@@ -1229,8 +1220,8 @@ struct dense_vram_amd_index {
         /** The index snapshotted into @p columns on @p stream under the watermark at @p visible,
          *  its IDs shifted by @p id_shift; only @ref plan_save calls it, and sizes the bounce
          *  afterwards. */
-        save_plan_t(dense_vram_amd_index const& index, columns_t columns, node_id_t id_shift,
-                    hip_stream_handle_t stream, node_id_t visible) noexcept
+        save_plan_t(vram_amd_index const& index, columns_t columns, node_id_t id_shift, hipStream_t stream,
+                    node_id_t visible) noexcept
             : columns(columns), id_shift(id_shift), stream(stream),
               bounce(hip_pinned_allocator_t {stream, index.device_.ordinal}), visible(visible),
               batch_rows(min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(bounce_rows_log2_k))),
@@ -1302,13 +1293,12 @@ struct dense_vram_amd_index {
             bytes_span_t const norms_rows = plane_rows(columns.norms, first, rows.size(), sizeof(norms_t));
             if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
-            if (hip_runtime().copy_2d_async(
+            if (hip_api().copy_2d_async(
                     bounce.data(), scalar_row_bytes,
                     index_->vectors_plane_.base() + static_cast<std::size_t>(rows.first) * index_->row_bytes(),
-                    index_->row_bytes(), scalar_row_bytes, rows.size(), hip_memcpy_kind_t::device_to_host_k,
-                    stream) != hip_success_k)
+                    index_->row_bytes(), scalar_row_bytes, rows.size(), hipMemcpyDeviceToHost, stream) != hipSuccess)
                 return status_t::device_error_k;
-            if (hip_runtime().stream_synchronize(stream) != hip_success_k) return status_t::device_error_k;
+            if (hip_api().stream_synchronize(stream) != hipSuccess) return status_t::device_error_k;
             [[maybe_unused]] status_t const copied_vectors = copy_bytes(vectors_rows,
                                                                         bytes_of(bounce.data(), vectors_rows.size()));
             // The norms count with the vectors, so a refused copy of either leaves the step
@@ -1316,26 +1306,26 @@ struct dense_vram_amd_index {
             if (!norms_rows.empty()) {
                 bytes_span_t const bounce_norms = to_writable_span(bounce).subspan(
                     batch_rows * (scalar_row_bytes + neighbors_row_bytes), norms_rows.size());
-                if (hip_runtime().copy_async(
+                if (hip_api().copy_async(
                         bounce_norms.data(),
                         index_->norms_plane_.base() + static_cast<std::size_t>(rows.first) * sizeof(norms_t),
-                        bounce_norms.size(), hip_memcpy_kind_t::device_to_host_k, stream) != hip_success_k)
+                        bounce_norms.size(), hipMemcpyDeviceToHost, stream) != hipSuccess)
                     return status_t::device_error_k;
-                if (hip_runtime().stream_synchronize(stream) != hip_success_k) return status_t::device_error_k;
+                if (hip_api().stream_synchronize(stream) != hipSuccess) return status_t::device_error_k;
                 [[maybe_unused]] status_t const copied_norms = copy_bytes(norms_rows, bounce_norms);
             }
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
 
             bytes_span_t const bounce_neighbors = to_writable_span(bounce).subspan(batch_rows * scalar_row_bytes);
-            if (hip_runtime().copy_async(
+            if (hip_api().copy_async(
                     bounce_neighbors.data(),
                     index_->neighbors_plane_.base() + static_cast<std::size_t>(rows.first) * neighbors_row_bytes,
-                    rows.size() * neighbors_row_bytes, hip_memcpy_kind_t::device_to_host_k, stream) != hip_success_k)
+                    rows.size() * neighbors_row_bytes, hipMemcpyDeviceToHost, stream) != hipSuccess)
                 return status_t::device_error_k;
-            if (hip_runtime().stream_synchronize(stream) != hip_success_k) return status_t::device_error_k;
+            if (hip_api().stream_synchronize(stream) != hipSuccess) return status_t::device_error_k;
             std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(bounce_neighbors.data()), step_slots};
             for (node_id_t& neighbor : landed)
-                neighbor = neighbor < visible ? static_cast<node_id_t>(neighbor + id_shift) : dense_node_id_unknown_k;
+                neighbor = neighbor < visible ? static_cast<node_id_t>(neighbor + id_shift) : node_id_unknown_k;
             [[maybe_unused]] status_t const copied_neighbors = copy_bytes(neighbors_rows, std::as_bytes(landed));
             standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(rows.size(), std::memory_order_acq_rel);
             return status_t::success_k;
@@ -1357,7 +1347,7 @@ struct dense_vram_amd_index {
 
         /** The index being snapshotted; null in the empty plan a refused @ref plan_save returns,
          *  and once @c finish succeeded. */
-        dense_vram_amd_index const* index_ = nullptr;
+        vram_amd_index const* index_ = nullptr;
     };
 
     /**
@@ -1373,8 +1363,8 @@ struct dense_vram_amd_index {
      *  @param[in] stream The stream every copy queues on.
      *  @param[in] id_shift What an ID under the watermark moves by - the row this shard starts at.
      */
-    expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
-                                    hip_stream_handle_t stream = nullptr, node_id_t id_shift = 0) const noexcept {
+    expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization, hipStream_t stream = nullptr,
+                                    node_id_t id_shift = 0) const noexcept {
         if (synchronization == synchronization_t::concurrent_k) return {{}, status_t::config_mismatch_k};
         if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         std::size_t const rows = size();
@@ -1392,7 +1382,7 @@ struct dense_vram_amd_index {
     /** Serializes every row under the watermark into @p columns on the calling thread - the
      *  one-shot over @ref plan_save for a caller with no streams to fan the steps out over. */
     status_t save(columns_t columns, synchronization_t synchronization, nk::matrix_span<node_id_t> scratch,
-                  hip_stream_handle_t stream = nullptr) const noexcept {
+                  hipStream_t stream = nullptr) const noexcept {
         auto [plan, status] = plan_save(columns, synchronization, stream);
         if (failed(status)) return status;
         for (typename save_plan_t::step_t const step : plan.steps())
@@ -1420,7 +1410,7 @@ struct dense_vram_amd_index {
         iota_view<node_id_t> source_range {};
 
         /** The stream every host-to-device copy and the norms kernel queue on. */
-        hip_stream_handle_t stream = nullptr;
+        hipStream_t stream = nullptr;
 
         /** Page-locked host bytes: one batch of packed vector rows, then its neighbor IDs, then its
          *  norms. */
@@ -1449,8 +1439,8 @@ struct dense_vram_amd_index {
 
         /** The index appended to at @p base on @p stream, and the claim held meanwhile - unowned
          *  for a plan of no rows; only @ref plan_load calls it, and sizes the bounce afterwards. */
-        load_plan_t(dense_vram_amd_index& index, columns_view_t columns, iota_view<node_id_t> source_range,
-                    hip_stream_handle_t stream, std::unique_lock<fu::spin_mutex_t>&& claiming, node_id_t base,
+        load_plan_t(vram_amd_index& index, columns_view_t columns, iota_view<node_id_t> source_range,
+                    hipStream_t stream, std::unique_lock<fu::spin_mutex_t>&& claiming, node_id_t base,
                     std::size_t rows) noexcept
             : columns(columns), source_range(source_range), stream(stream),
               bounce(hip_pinned_allocator_t {stream, index.device_.ordinal}), base(base), rows(rows),
@@ -1544,42 +1534,39 @@ struct dense_vram_amd_index {
                 return status_t::config_mismatch_k;
             [[maybe_unused]] status_t const staged_vectors = copy_bytes(bytes_of(bounce.data(), vectors_rows.size()),
                                                                         vectors_rows);
-            if (hip_runtime().copy_2d_async(
+            if (hip_api().copy_2d_async(
                     index_->vectors_plane_.base() + static_cast<std::size_t>(range.first) * index_->row_bytes(),
                     index_->row_bytes(), bounce.data(), scalar_row_bytes, scalar_row_bytes, range.size(),
-                    hip_memcpy_kind_t::host_to_device_k, stream) != hip_success_k)
+                    hipMemcpyHostToDevice, stream) != hipSuccess)
                 return index_->fail_(status_t::device_error_k);
             // Dot reserves no norms plane, so a part's column has nowhere to land.
             if (index_->stores_norms() && !norms_rows.empty()) {
                 bytes_span_t const bounce_norms = to_writable_span(bounce).subspan(
                     batch_rows * (scalar_row_bytes + neighbors_row_bytes), norms_rows.size());
                 [[maybe_unused]] status_t const staged_norms = copy_bytes(bounce_norms, norms_rows);
-                if (hip_runtime().copy_async(
+                if (hip_api().copy_async(
                         index_->norms_plane_.base() + static_cast<std::size_t>(range.first) * sizeof(norms_t),
-                        bounce_norms.data(), bounce_norms.size(), hip_memcpy_kind_t::host_to_device_k,
-                        stream) != hip_success_k)
+                        bounce_norms.data(), bounce_norms.size(), hipMemcpyHostToDevice, stream) != hipSuccess)
                     return index_->fail_(status_t::device_error_k);
                 // Tallied ahead of the drain: a failed one keeps the vectors short, which `finish`
                 // refuses.
                 standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(range.size(), std::memory_order_acq_rel);
             }
-            if (hip_runtime().stream_synchronize(stream) != hip_success_k)
-                return index_->fail_(status_t::device_error_k);
+            if (hip_api().stream_synchronize(stream) != hipSuccess) return index_->fail_(status_t::device_error_k);
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
 
             bytes_span_t const bounce_neighbors = to_writable_span(bounce).subspan(batch_rows * scalar_row_bytes);
             [[maybe_unused]] status_t const staged_neighbors = copy_bytes(bounce_neighbors.first(neighbors_rows.size()),
                                                                           neighbors_rows);
             std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(bounce_neighbors.data()), step_slots};
-            rebase_neighbors(landed, source_range, shift, dense_node_id_unknown_k);
-            compact_neighbors(landed, connectivity, range.first, dense_node_id_unknown_k);
-            if (hip_runtime().copy_async(
+            rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
+            compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
+            if (hip_api().copy_async(
                     index_->neighbors_plane_.base() + static_cast<std::size_t>(range.first) * neighbors_row_bytes,
-                    bounce_neighbors.data(), range.size() * neighbors_row_bytes, hip_memcpy_kind_t::host_to_device_k,
-                    stream) != hip_success_k)
+                    bounce_neighbors.data(), range.size() * neighbors_row_bytes, hipMemcpyHostToDevice,
+                    stream) != hipSuccess)
                 return index_->fail_(status_t::device_error_k);
-            if (hip_runtime().stream_synchronize(stream) != hip_success_k)
-                return index_->fail_(status_t::device_error_k);
+            if (hip_api().stream_synchronize(stream) != hipSuccess) return index_->fail_(status_t::device_error_k);
             standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(range.size(), std::memory_order_acq_rel);
             return status_t::success_k;
         }
@@ -1606,14 +1593,14 @@ struct dense_vram_amd_index {
                                                         stream)))
                     return index_->fail_(status_t::device_error_k);
                 u32_t const restored = static_cast<u32_t>(base + rows);
-                if (hip_runtime().copy_async(index_->published_rows_.get(), &restored, sizeof(restored),
-                                             hip_memcpy_kind_t::host_to_device_k, stream) != hip_success_k ||
-                    hip_runtime().stream_synchronize(stream) != hip_success_k)
+                if (hip_api().copy_async(index_->published_rows_.get(), &restored, sizeof(restored),
+                                         hipMemcpyHostToDevice, stream) != hipSuccess ||
+                    hip_api().stream_synchronize(stream) != hipSuccess)
                     return index_->fail_(status_t::device_error_k);
                 standard_atomic_ref<std::size_t>(index_->claimed_rows_).store(base + rows, std::memory_order_release);
                 claiming_.unlock();
             }
-            dense_vram_amd_index* const index = std::exchange(index_, nullptr);
+            vram_amd_index* const index = std::exchange(index_, nullptr);
             return rows ? index->publish_(base, rows) : status_t::success_k;
         }
 
@@ -1621,7 +1608,7 @@ struct dense_vram_amd_index {
 
         /** The index appended to; null in the empty plan a refused @ref plan_load returns, and once
          *  @c finish published. */
-        dense_vram_amd_index* index_ = nullptr;
+        vram_amd_index* index_ = nullptr;
 
         /** The claim held from planning to publication, dropped by its own death otherwise. */
         std::unique_lock<fu::spin_mutex_t> claiming_;
@@ -1642,7 +1629,7 @@ struct dense_vram_amd_index {
      *  @param[in] stream The stream every copy and the norms kernel queue on.
      */
     expected<load_plan_t> plan_load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
-                                    hip_stream_handle_t stream = nullptr) noexcept {
+                                    hipStream_t stream = nullptr) noexcept {
         if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (columns.vectors.size() < rows * packed_row_bytes() ||
             columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
@@ -1657,7 +1644,7 @@ struct dense_vram_amd_index {
 
     /** Opens a load of @p rows the caller sources per step - what a sharded plan drives, its parts
      *  arriving one slice at a time rather than as one pair of columns. */
-    expected<load_plan_t> plan_load(std::size_t rows, hip_stream_handle_t stream = nullptr) noexcept {
+    expected<load_plan_t> plan_load(std::size_t rows, hipStream_t stream = nullptr) noexcept {
         if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (!rows)
@@ -1680,7 +1667,7 @@ struct dense_vram_amd_index {
     /** Appends the whole source on the calling thread - the one-shot over @ref plan_load for a
      *  caller with no streams to fan the steps out over. */
     status_t load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
-                  hip_stream_handle_t stream = nullptr) noexcept {
+                  hipStream_t stream = nullptr) noexcept {
         auto [plan, status] = plan_load(columns, rows, source_range, stream);
         if (failed(status)) return status;
         for (typename load_plan_t::step_t const step : plan.steps())
@@ -1695,7 +1682,7 @@ struct dense_vram_amd_index {
     /** The sharded index walks its shards under one snapshot of their watermarks, merges their
      *  attends on its first device, and publishes or fails their batches together. */
     template <typename, nk_dtype_t, nk_capability_t, typename>
-    friend struct dense_vram_amd_indexes;
+    friend struct vram_amd_indexes;
 
 #pragma region Insertion
 
@@ -1704,9 +1691,9 @@ struct dense_vram_amd_index {
      *  them. Back-to-back submissions on one context are serialized by its stream and add into its
      *  telemetry, which the caller zeroes; across devices they overlap freely. */
     expected<insert_result_t> submit_insert_(vectors_view_t new_vectors, node_ids_span_t assigned_ids,
-                                             dense_traversal_context_t& context, insert_config_t config) noexcept {
+                                             traversal_context_t& context, insert_config_t config) noexcept {
         std::size_t const rows = new_vectors.extent(0);
-        if (!rows) return {{claimed_(), static_cast<dense_node_id_t>(claimed_())}, status_t::success_k};
+        if (!rows) return {{claimed_(), static_cast<node_id_t>(claimed_())}, status_t::success_k};
         if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (new_vectors.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
         if (assigned_ids.size() && assigned_ids.size() != rows) return {{}, status_t::config_mismatch_k};
@@ -1716,26 +1703,25 @@ struct dense_vram_amd_index {
         std::size_t const scalar_row_bytes = packed_row_bytes();
         if (new_vectors.stride_bytes(0) < static_cast<std::ptrdiff_t>(scalar_row_bytes))
             return {{}, status_t::unsupported_layout_k};
-        hip_stream_handle_t const stream = context.stream();
+        hipStream_t const stream = context.stream();
         // Every fallible preparation precedes the claim: a claimed range that never publishes would
         // starve every later batch's admission ramp.
         byte_t* const staging = context.ensure_staging(rows * row_bytes());
         if (!staging) return {{}, status_t::bad_alloc_k};
         if (scalar_row_bytes != row_bytes() &&
-            hip_runtime().fill_async(staging, 0, rows * row_bytes(), stream) != hip_success_k)
+            hip_api().fill_async(staging, 0, rows * row_bytes(), stream) != hipSuccess)
             return {{}, status_t::device_error_k};
         // The source pitch is the caller's stride, so a strided view uploads without being gathered
         // first.
-        if (hip_runtime().copy_2d_async(staging, row_bytes(), new_vectors.byte_data(), new_vectors.stride_bytes(0),
-                                        scalar_row_bytes, rows, hip_memcpy_kind_t::host_to_device_k,
-                                        stream) != hip_success_k)
+        if (hip_api().copy_2d_async(staging, row_bytes(), new_vectors.byte_data(), new_vectors.stride_bytes(0),
+                                    scalar_row_bytes, rows, hipMemcpyHostToDevice, stream) != hipSuccess)
             return {{}, status_t::device_error_k};
 
         // Every inserting warp owns an arena slice for its exact visited set.
         u32_t const pool_slots = pool_slots_for_(config.expansion_factor, 4);
         auto const arena_shape = arena_shape_for(pool_slots * wave_lanes(), frontier_kind_t::register_ladder_k);
         std::size_t const arena_warps = static_cast<std::size_t>(device_.multiprocessor_count) *
-                                        insert_blocks_per_multiprocessor_k * dense_vram_warps_per_block_k;
+                                        insert_blocks_per_multiprocessor_k * vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
         byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes());
         if (!arena) return {{}, status_t::bad_alloc_k};
@@ -1751,7 +1737,7 @@ struct dense_vram_amd_index {
             // Only a fresh allocation or a wrapped 32-bit epoch space warrants zeroing, never a
             // warm arena.
             if (context.arena_bytes_ != arena_bytes_before || context.epoch_floor_ + rows > 0xFFFFFFFEull) {
-                if (hip_runtime().fill_async(arena, 0, context.arena_bytes_, stream) != hip_success_k) {
+                if (hip_api().fill_async(arena, 0, context.arena_bytes_, stream) != hipSuccess) {
                     claimed = status_t::device_error_k;
                     context.arena_bytes_ = 0; // Spent: a retry must re-zero, never walk epoch garbage.
                 }
@@ -1760,20 +1746,20 @@ struct dense_vram_amd_index {
             u32_t const epoch_base = static_cast<u32_t>(context.epoch_floor_);
             context.epoch_floor_ += rows; // Monotone; an un-claim below only forfeits epoch space.
             if (claimed == status_t::success_k &&
-                hip_runtime().fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream) != hip_success_k)
+                hip_api().fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream) != hipSuccess)
                 claimed = status_t::device_error_k;
             if (claimed == status_t::success_k) {
-                dense_amd_build_t view {planes(), //
-                                        staging,
-                                        static_cast<u32_t>(total_rows),
-                                        insert_scratch_bytes_per_warp(),
-                                        static_cast<dense_node_id_t>(first_id),
-                                        arena,
-                                        arena_shape,
-                                        epoch_base,
-                                        published_rows_.get(),
-                                        context.telemetry_.get(),
-                                        context.assigned_rows_.get()};
+                amd_build_t view {planes(), //
+                                  staging,
+                                  static_cast<u32_t>(total_rows),
+                                  insert_scratch_bytes_per_warp(),
+                                  static_cast<node_id_t>(first_id),
+                                  arena,
+                                  arena_shape,
+                                  epoch_base,
+                                  published_rows_.get(),
+                                  context.telemetry_.get(),
+                                  context.assigned_rows_.get()};
                 // The launch is the last fallible step; reading its verdict here keeps the claim
                 // reversible.
                 if (failed(launch_insert_(view, pool_slots, stream))) claimed = status_t::device_error_k;
@@ -1785,9 +1771,9 @@ struct dense_vram_amd_index {
         if (claimed != status_t::success_k) return {{}, claimed};
 
         insert_result_t result;
-        result.first_id = static_cast<dense_node_id_t>(first_id);
+        result.first_id = static_cast<node_id_t>(first_id);
         for (std::size_t row = 0; row != assigned_ids.size(); ++row)
-            assigned_ids[row] = static_cast<dense_node_id_t>(first_id + row);
+            assigned_ids[row] = static_cast<node_id_t>(first_id + row);
         result.new_size = total_rows;
         return {result, status_t::success_k};
     }
@@ -1802,7 +1788,7 @@ struct dense_vram_amd_index {
     struct walk_launch {
 
         /** The device view every walk kernel reads. */
-        dense_amd_search_t view;
+        amd_search_t view;
 
         /** The register ladder's width, when the ladder serves. */
         u32_t pool_slots;
@@ -1826,7 +1812,7 @@ struct dense_vram_amd_index {
 
     /** The device rescoring the walks under @p heads_type_ score with. */
     template <typename heads_type_>
-    using walk_rescoring = dense_amd_rescoring_t;
+    using walk_rescoring = amd_rescoring_t;
 
     /** Validates and uploads @p queries, then any indexer or attend @p heads and the indexer's
      *  weights, sizes the arena for @p expansion, and reserves @p outputs_bytes of staging past
@@ -1835,10 +1821,10 @@ struct dense_vram_amd_index {
     template <typename heads_type_>
     expected<walk_launch<walk_rescoring<heads_type_>>> stage_walk_(vectors_view_t queries,
                                                                    [[maybe_unused]] heads_type_ const& heads,
-                                                                   dense_traversal_context_t& context, u32_t expansion,
+                                                                   traversal_context_t& context, u32_t expansion,
                                                                    u32_t minimum_slots, std::size_t outputs_bytes,
                                                                    std::size_t visible) noexcept {
-        constexpr bool indexer_k = std::is_same_v<heads_type_, dense_indexer_heads<scalar_t>>;
+        constexpr bool indexer_k = std::is_same_v<heads_type_, indexer_heads<scalar_t>>;
         constexpr bool attend_k = std::is_same_v<heads_type_, attend_heads_t>;
         std::size_t const queries_count = queries.extent(0);
         if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
@@ -1861,7 +1847,7 @@ struct dense_vram_amd_index {
             if (heads.rows.stride_bytes(0) < static_cast<std::ptrdiff_t>(packed_row_bytes()))
                 return {{}, status_t::unsupported_layout_k};
         }
-        hip_stream_handle_t const stream = context.stream();
+        hipStream_t const stream = context.stream();
 
         // Past the register ladder's widest pool the arena-backed walk serves.
         frontier_kind_t const frontier = expansion > 16 * wave_lanes() ? frontier_kind_t::wide_arena_k
@@ -1870,7 +1856,7 @@ struct dense_vram_amd_index {
         auto const arena_shape = arena_shape_for(
             frontier == frontier_kind_t::wide_arena_k ? expansion : pool_slots * wave_lanes(), frontier);
         std::size_t const arena_warps = static_cast<std::size_t>(device_.multiprocessor_count) *
-                                        search_blocks_per_multiprocessor_k * dense_vram_warps_per_block_k;
+                                        search_blocks_per_multiprocessor_k * vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
         byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes());
         if (!arena) return {{}, status_t::bad_alloc_k};
@@ -1884,7 +1870,7 @@ struct dense_vram_amd_index {
         // Only a fresh allocation or a wrapped 32-bit epoch space warrants zeroing, never a warm
         // arena.
         if (context.arena_bytes_ != arena_bytes_before || context.epoch_floor_ + queries_count > 0xFFFFFFFEull) {
-            if (hip_runtime().fill_async(arena, 0, context.arena_bytes_, stream) != hip_success_k) {
+            if (hip_api().fill_async(arena, 0, context.arena_bytes_, stream) != hipSuccess) {
                 context.arena_bytes_ = 0; // Spent: a retry must re-zero, never walk epoch garbage.
                 return {{}, status_t::device_error_k};
             }
@@ -1895,17 +1881,15 @@ struct dense_vram_amd_index {
         // Pitched uploads: device rows pad to whole fragments, and the pad bytes must be zero for
         // the zero-tail distance identity to hold.
         std::size_t const scalar_row_bytes = packed_row_bytes();
-        if (scalar_row_bytes != row_bytes() &&
-            hip_runtime().fill_async(staging, 0, rows_bytes, stream) != hip_success_k)
+        if (scalar_row_bytes != row_bytes() && hip_api().fill_async(staging, 0, rows_bytes, stream) != hipSuccess)
             return {{}, status_t::device_error_k};
         auto upload_rows = [&](byte_t* destination, vectors_view_t rows) noexcept {
-            return hip_runtime().copy_2d_async(destination, row_bytes(), rows.byte_data(), rows.stride_bytes(0),
-                                               scalar_row_bytes, rows.extent(0), hip_memcpy_kind_t::host_to_device_k,
-                                               stream) == hip_success_k;
+            return hip_api().copy_2d_async(destination, row_bytes(), rows.byte_data(), rows.stride_bytes(0),
+                                           scalar_row_bytes, rows.extent(0), hipMemcpyHostToDevice,
+                                           stream) == hipSuccess;
         };
         if (!upload_rows(staging, queries)) return {{}, status_t::device_error_k};
-        if (hip_runtime().fill_async(context.telemetry_.get(), 0, sizeof(dense_vram_telemetry_block_t), stream) !=
-            hip_success_k)
+        if (hip_api().fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) != hipSuccess)
             return {{}, status_t::device_error_k};
 
         walk_rescoring<heads_type_> rescoring {};
@@ -1914,9 +1898,9 @@ struct dense_vram_amd_index {
             byte_t* const staged_weights = staging + rows_bytes;
             std::size_t const weights_row_bytes = heads.weights.extent(1) * sizeof(f32_t);
             if (!upload_rows(staged_heads, heads.heads) ||
-                hip_runtime().copy_2d_async(staged_weights, weights_row_bytes, heads.weights.byte_data(),
-                                            heads.weights.stride_bytes(0), weights_row_bytes, queries_count,
-                                            hip_memcpy_kind_t::default_k, stream) != hip_success_k)
+                hip_api().copy_2d_async(staged_weights, weights_row_bytes, heads.weights.byte_data(),
+                                        heads.weights.stride_bytes(0), weights_row_bytes, queries_count,
+                                        hipMemcpyDefault, stream) != hipSuccess)
                 return {{}, status_t::device_error_k};
             rescoring = {staged_heads, reinterpret_cast<f32_t const*>(staged_weights),
                          static_cast<u32_t>(heads.weights.extent(1)), row_fragments()};
@@ -1927,26 +1911,26 @@ struct dense_vram_amd_index {
             rescoring = {staged_heads, nullptr, static_cast<u32_t>(heads.head_count), row_fragments()};
         }
 
-        dense_amd_search_t const view {planes(),
-                                       staging,
-                                       static_cast<u32_t>(queries_count),
-                                       static_cast<u32_t>(visible),
-                                       static_cast<u32_t>(row_bytes()),
-                                       expansion,
-                                       arena,
-                                       arena_shape,
-                                       epoch_base,
-                                       context.telemetry_.get()};
+        amd_search_t const view {planes(),
+                                 staging,
+                                 static_cast<u32_t>(queries_count),
+                                 static_cast<u32_t>(visible),
+                                 static_cast<u32_t>(row_bytes()),
+                                 expansion,
+                                 arena,
+                                 arena_shape,
+                                 epoch_base,
+                                 context.telemetry_.get()};
         return {{view, pool_slots, frontier, staging + rows_bytes + weights_bytes, rescoring}, status_t::success_k};
     }
 
     /** Blocking drains the context's stream and adds the telemetry the walks spent; deferred
      *  returns the submission as queued. */
     expected<search_result_t> settle_(expected<search_result_t> submitted, std::size_t rows,
-                                      dense_traversal_context_t& context, completion_t completion) noexcept {
+                                      traversal_context_t& context, completion_t completion) noexcept {
         if (completion == completion_t::deferred_k || !submitted || !rows) return submitted;
         if (status_t const drained = context.drain(); failed(drained)) return {{}, drained};
-        dense_vram_telemetry_block_t const spent = context.spent();
+        vram_telemetry_block_t const spent = context.spent();
         submitted.value.visited_members = spent.hops;
         submitted.value.computed_distances = spent.scored;
         submitted.value.restarts = spent.restarts;
@@ -1957,27 +1941,27 @@ struct dense_vram_amd_index {
 
     /** The single-query @c search over the @p visible rows, which a sharded caller snapshots across
      *  its shards. */
-    expected<search_result_t> search_(vector_view_t query_vector, dense_traversal_context_t& context,
-                                      search_config_t config, std::size_t visible) noexcept {
+    expected<search_result_t> search_(vector_view_t query_vector, traversal_context_t& context, search_config_t config,
+                                      std::size_t visible) noexcept {
         context.results.count_ = 0;
         if (!visible) return {{}, status_t::success_k}; // An empty index matches nothing, touches nothing.
         // Up to the expansion factor, defaulting to twice the connectivity, clipped to the landing
         // and the graph.
         u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
-        u32_t const count = min_of<u32_t>(min_of<u32_t>(dense_traversal_context_t::results_capacity_k, expansion),
+        u32_t const count = min_of<u32_t>(min_of<u32_t>(traversal_context_t::results_capacity_k, expansion),
                                           static_cast<u32_t>(visible));
-        dense_node_id_t staged_ids[dense_traversal_context_t::results_capacity_k];
-        dense_distance_t staged_distances[dense_traversal_context_t::results_capacity_k];
+        node_id_t staged_ids[traversal_context_t::results_capacity_k];
+        distance_t staged_distances[traversal_context_t::results_capacity_k];
         vectors_view_t const one_query {query_vector.data(), {1, query_vector.size()}};
         config.count = count;
         expected<search_result_t> result = settle_(
-            submit_search_(one_query, nk::matrix_span<dense_node_id_t> {staged_ids, {1, count}},
-                           nk::matrix_span<dense_distance_t> {staged_distances, {1, count}}, context, config, visible),
+            submit_search_(one_query, nk::matrix_span<node_id_t> {staged_ids, {1, count}},
+                           nk::matrix_span<distance_t> {staged_distances, {1, count}}, context, config, visible),
             1, context, completion_t::blocking_k);
         if (!result) return result;
         std::size_t live = 0;
-        for (; live != count && staged_ids[live] != dense_node_id_unknown_k; ++live)
-            context.results.entries_[live] = dense_scored_node_t {staged_ids[live], staged_distances[live]};
+        for (; live != count && staged_ids[live] != node_id_unknown_k; ++live)
+            context.results.entries_[live] = scored_node_t {staged_ids[live], staged_distances[live]};
         context.results.count_ = live;
         result.value.count = live;
         return result;
@@ -1988,10 +1972,10 @@ struct dense_vram_amd_index {
      *  the heads, both outputs and the context stay live; across contexts they must not share a
      *  buffer at all. */
     template <typename heads_type_ = dummy_heads_t>
-    expected<search_result_t> submit_search_(vectors_view_t queries, nk::matrix_span<dense_node_id_t> result_ids,
-                                             nk::matrix_span<dense_distance_t> result_distances,
-                                             dense_traversal_context_t& context, search_config_t config,
-                                             std::size_t visible, heads_type_ const& heads = {}) noexcept {
+    expected<search_result_t> submit_search_(vectors_view_t queries, nk::matrix_span<node_id_t> result_ids,
+                                             nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
+                                             search_config_t config, std::size_t visible,
+                                             heads_type_ const& heads = {}) noexcept {
         std::size_t const queries_count = queries.extent(0);
         if (!queries_count) return {{}, status_t::success_k};
         bool const wants_distances = result_distances.extent(0) != 0;
@@ -1999,9 +1983,9 @@ struct dense_vram_amd_index {
             (wants_distances &&
              (result_distances.extent(0) != queries_count || result_distances.extent(1) < config.count)))
             return {{}, status_t::config_mismatch_k};
-        if (result_ids.stride_bytes(0) < static_cast<std::ptrdiff_t>(config.count * sizeof(dense_node_id_t)) ||
+        if (result_ids.stride_bytes(0) < static_cast<std::ptrdiff_t>(config.count * sizeof(node_id_t)) ||
             (wants_distances &&
-             result_distances.stride_bytes(0) < static_cast<std::ptrdiff_t>(config.count * sizeof(dense_distance_t))))
+             result_distances.stride_bytes(0) < static_cast<std::ptrdiff_t>(config.count * sizeof(distance_t))))
             return {{}, status_t::unsupported_layout_k};
 
         // Past the register ladder's widest pool the ranks cover the arena frontier's head of 64.
@@ -2010,38 +1994,39 @@ struct dense_vram_amd_index {
         // The pool must cover the requested count, whatever the expansion asked for.
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
         std::size_t const results_count = queries_count * config.count;
-        std::size_t const ids_bytes = results_count * sizeof(dense_node_id_t);
-        std::size_t const distances_bytes = wants_distances ? results_count * sizeof(dense_distance_t) : 0;
+        std::size_t const ids_bytes = results_count * sizeof(node_id_t);
+        std::size_t const distances_bytes = wants_distances ? results_count * sizeof(distance_t) : 0;
         auto const staged = stage_walk_(queries, heads, context, expansion, count_slots > 2 ? count_slots : 2,
                                         ids_bytes + distances_bytes, visible);
         if (!staged) return {{}, staged.status};
-        dense_node_id_t* const device_ids = reinterpret_cast<dense_node_id_t*>(staged.value.outputs);
-        dense_distance_t* const device_distances =
-            wants_distances ? reinterpret_cast<dense_distance_t*>(staged.value.outputs + ids_bytes) : nullptr;
-        hip_stream_handle_t const stream = context.stream();
+        node_id_t* const device_ids = reinterpret_cast<node_id_t*>(staged.value.outputs);
+        distance_t* const device_distances = wants_distances
+                                                 ? reinterpret_cast<distance_t*>(staged.value.outputs + ids_bytes)
+                                                 : nullptr;
+        hipStream_t const stream = context.stream();
         if (status_t const launched = launch_walk_(
-                staged.value, dense_amd_search_sink_t {device_ids, device_distances, config.count, kernel_}, stream);
+                staged.value, amd_search_sink_t {device_ids, device_distances, config.count, kernel_}, stream);
             failed(launched))
             return {{}, launched};
         // The landing may be wider than the count, so a multi-index can hand every shard its own
         // columns of one results matrix.
-        if (hip_runtime().copy_2d_async(result_ids.data(), result_ids.stride_bytes(0), device_ids,
-                                        config.count * sizeof(dense_node_id_t), config.count * sizeof(dense_node_id_t),
-                                        queries_count, hip_memcpy_kind_t::default_k, stream) != hip_success_k)
+        if (hip_api().copy_2d_async(result_ids.data(), result_ids.stride_bytes(0), device_ids,
+                                    config.count * sizeof(node_id_t), config.count * sizeof(node_id_t), queries_count,
+                                    hipMemcpyDefault, stream) != hipSuccess)
             return {{}, status_t::device_error_k};
-        if (wants_distances && hip_runtime().copy_2d_async(result_distances.data(), result_distances.stride_bytes(0),
-                                                           device_distances, config.count * sizeof(dense_distance_t),
-                                                           config.count * sizeof(dense_distance_t), queries_count,
-                                                           hip_memcpy_kind_t::default_k, stream) != hip_success_k)
+        if (wants_distances &&
+            hip_api().copy_2d_async(result_distances.data(), result_distances.stride_bytes(0), device_distances,
+                                    config.count * sizeof(distance_t), config.count * sizeof(distance_t), queries_count,
+                                    hipMemcpyDefault, stream) != hipSuccess)
             return {{}, status_t::device_error_k};
         return {{config.count}, status_t::success_k};
     }
 
     /** The submission half of @c multiply: stages the rows, launches walks over the @p visible
      *  rows, and queues the writeback of the kept pairs and the scored counts. */
-    expected<search_result_t> submit_multiply_(vectors_view_t left, nk::matrix_span<dense_node_id_t> node_ids,
+    expected<search_result_t> submit_multiply_(vectors_view_t left, nk::matrix_span<node_id_t> node_ids,
                                                nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
-                                               dense_traversal_context_t& context, search_config_t config,
+                                               traversal_context_t& context, search_config_t config,
                                                std::size_t visible) noexcept {
         std::size_t const rows_count = left.extent(0);
         std::size_t const wanted = node_ids.extent(1);
@@ -2049,30 +2034,29 @@ struct dense_vram_amd_index {
             counts.size() != rows_count)
             return {{}, status_t::config_mismatch_k};
         if (!rows_count) return {{}, status_t::success_k};
-        if (node_ids.stride_bytes(0) < static_cast<std::ptrdiff_t>(wanted * sizeof(dense_node_id_t)) ||
+        if (node_ids.stride_bytes(0) < static_cast<std::ptrdiff_t>(wanted * sizeof(node_id_t)) ||
             products.stride_bytes(0) < static_cast<std::ptrdiff_t>(wanted * sizeof(dot_result_t)))
             return {{}, status_t::unsupported_layout_k};
-        std::size_t const ids_bytes = rows_count * wanted * sizeof(dense_node_id_t);
+        std::size_t const ids_bytes = rows_count * wanted * sizeof(node_id_t);
         std::size_t const products_bytes = rows_count * wanted * sizeof(dot_t);
         auto const staged = stage_walk_(left, dummy_heads_t {}, context,
                                         static_cast<u32_t>(non_zero_expansion_factor(config)), 2,
                                         ids_bytes + products_bytes + rows_count * sizeof(u32_t), visible);
         if (!staged) return {{}, staged.status};
-        dense_node_id_t* const device_ids = reinterpret_cast<dense_node_id_t*>(staged.value.outputs);
+        node_id_t* const device_ids = reinterpret_cast<node_id_t*>(staged.value.outputs);
         byte_t* const device_products = staged.value.outputs + ids_bytes;
         u32_t* const device_counts = reinterpret_cast<u32_t*>(staged.value.outputs + ids_bytes + products_bytes);
-        hip_stream_handle_t const stream = context.stream();
-        dense_amd_multiply_sink_t const sink {device_ids, device_products, device_counts, static_cast<u32_t>(wanted)};
+        hipStream_t const stream = context.stream();
+        amd_multiply_sink_t const sink {device_ids, device_products, device_counts, static_cast<u32_t>(wanted)};
         if (status_t const launched = launch_walk_(staged.value, sink, stream); failed(launched)) return {{}, launched};
-        if (wanted && (hip_runtime().copy_2d_async(node_ids.data(), node_ids.stride_bytes(0), device_ids,
-                                                   wanted * sizeof(dense_node_id_t), wanted * sizeof(dense_node_id_t),
-                                                   rows_count, hip_memcpy_kind_t::default_k, stream) != hip_success_k ||
-                       hip_runtime().copy_2d_async(products.data(), products.stride_bytes(0), device_products,
-                                                   wanted * sizeof(dot_t), wanted * sizeof(dot_t), rows_count,
-                                                   hip_memcpy_kind_t::default_k, stream) != hip_success_k))
+        if (wanted &&
+            (hip_api().copy_2d_async(node_ids.data(), node_ids.stride_bytes(0), device_ids, wanted * sizeof(node_id_t),
+                                     wanted * sizeof(node_id_t), rows_count, hipMemcpyDefault, stream) != hipSuccess ||
+             hip_api().copy_2d_async(products.data(), products.stride_bytes(0), device_products, wanted * sizeof(dot_t),
+                                     wanted * sizeof(dot_t), rows_count, hipMemcpyDefault, stream) != hipSuccess))
             return {{}, status_t::device_error_k};
-        if (hip_runtime().copy_async(counts.data(), device_counts, rows_count * sizeof(u32_t),
-                                     hip_memcpy_kind_t::default_k, stream) != hip_success_k)
+        if (hip_api().copy_async(counts.data(), device_counts, rows_count * sizeof(u32_t), hipMemcpyDefault, stream) !=
+            hipSuccess)
             return {{}, status_t::device_error_k};
         return {{}, status_t::success_k};
     }
@@ -2089,8 +2073,8 @@ struct dense_vram_amd_index {
      *  device-resident @p node_ids the listed IDs with @p nodes spanning the array's offsets; the
      *  reverse passes re-select the walked rows and the rows they pick, and leave every other row
      *  as it was. */
-    expected<refine_result_t> refine_pass_(dense_traversal_context_t& context, refine_config_t config,
-                                           iota_view<dense_node_id_t> nodes, std::span<u32_t const> node_ids) noexcept {
+    expected<refine_result_t> refine_pass_(traversal_context_t& context, refine_config_t config,
+                                           iota_view<node_id_t> nodes, std::span<u32_t const> node_ids) noexcept {
         std::size_t const nodes_count = size();
         if (!nodes_count) return {{}, status_t::success_k};
         if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
@@ -2099,10 +2083,10 @@ struct dense_vram_amd_index {
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         // IDs at or past the published count are unwalkable; an ID array is bounded by its own
         // length.
-        if (node_ids.empty()) nodes.bound = static_cast<dense_node_id_t>(min_of<std::size_t>(nodes.bound, nodes_count));
+        if (node_ids.empty()) nodes.bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, nodes_count));
         if (nodes.first >= nodes.bound) return {{}, status_t::success_k};
         std::size_t const walk_count = nodes.size();
-        hip_stream_handle_t const stream = context.stream();
+        hipStream_t const stream = context.stream();
         // Pass-local planes no reader observes: the shadow neighbors, the reverse buckets, their
         // counters, and the bitset of rows the merge re-selects; the bucket width is the
         // connectivity.
@@ -2119,8 +2103,8 @@ struct dense_vram_amd_index {
         std::span<u32_t> const counters {reinterpret_cast<u32_t*>(shadow.get() + shadow_bytes * 2),
                                          counters_bytes / sizeof(u32_t)};
         std::span<u32_t> const bucket_counts = counters.first(nodes_count);
-        dense_hip_bitset_t const touched {counters.subspan(nodes_count).data()};
-        if (hip_runtime().fill_async(counters.data(), 0, counters.size_bytes(), stream) != hip_success_k)
+        hip_bitset_t const touched {counters.subspan(nodes_count).data()};
+        if (hip_api().fill_async(counters.data(), 0, counters.size_bytes(), stream) != hipSuccess)
             return {{}, status_t::device_error_k};
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the pool sizes the
@@ -2128,47 +2112,47 @@ struct dense_vram_amd_index {
         u32_t const pool_slots = pool_slots_for_(static_cast<u32_t>(non_zero_expansion_factor(config)), 4);
         auto const arena_shape = arena_shape_for(pool_slots * wave_lanes(), frontier_kind_t::register_ladder_k);
         std::size_t const arena_warps = static_cast<std::size_t>(device_.multiprocessor_count) *
-                                        insert_blocks_per_multiprocessor_k * dense_vram_warps_per_block_k;
+                                        insert_blocks_per_multiprocessor_k * vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
         byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes());
         if (!arena) return {{}, status_t::bad_alloc_k};
         // Only a fresh allocation or a wrapped 32-bit epoch space warrants zeroing, never a warm
         // arena.
         if (context.arena_bytes_ != arena_bytes_before || context.epoch_floor_ + walk_count > 0xFFFFFFFEull) {
-            hip_runtime().fill_async(arena, 0, context.arena_bytes_, stream);
+            hip_api().fill_async(arena, 0, context.arena_bytes_, stream);
             context.epoch_floor_ = 0;
         }
         u32_t const epoch_base = static_cast<u32_t>(context.epoch_floor_);
         context.epoch_floor_ += walk_count;
-        hip_runtime().fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream);
-        hip_runtime().fill_async(context.telemetry_.get(), 0, sizeof(dense_vram_telemetry_block_t), stream);
+        hip_api().fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream);
+        hip_api().fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream);
 
-        dense_amd_refine_t view {planes(), //
-                                 shadow_neighbors.data(),
-                                 static_cast<u32_t>(nodes.bound),
-                                 insert_scratch_bytes_per_warp(),
-                                 static_cast<dense_node_id_t>(nodes.first),
-                                 arena,
-                                 arena_shape,
-                                 epoch_base,
-                                 context.telemetry_.get(),
-                                 context.assigned_rows_.get(),
-                                 node_ids.data(),
-                                 static_cast<u32_t>(nodes_count)};
+        amd_refine_t view {planes(), //
+                           shadow_neighbors.data(),
+                           static_cast<u32_t>(nodes.bound),
+                           insert_scratch_bytes_per_warp(),
+                           static_cast<node_id_t>(nodes.first),
+                           arena,
+                           arena_shape,
+                           epoch_base,
+                           context.telemetry_.get(),
+                           context.assigned_rows_.get(),
+                           node_ids.data(),
+                           static_cast<u32_t>(nodes_count)};
         // A walk short of the whole graph starts from the live neighbors copied into the shadow
         // verbatim, so a row it never rewrites but one of its picks lands in merges its own
         // neighbors with the new reverse links.
         if (!node_ids.empty() || walk_count != nodes_count)
-            if (hip_runtime().copy_async(shadow_neighbors.data(), neighbors_plane_.base(), shadow_bytes,
-                                         hip_memcpy_kind_t::device_to_device_k, stream) != hip_success_k)
+            if (hip_api().copy_async(shadow_neighbors.data(), neighbors_plane_.base(), shadow_bytes,
+                                     hipMemcpyDeviceToDevice, stream) != hipSuccess)
                 return {{}, status_t::device_error_k};
         if (status_t const launched = launch_refine_(view, pool_slots, stream); failed(launched)) return {{}, launched};
-        if (hip_runtime().stream_synchronize(stream) != hip_success_k) return {{}, status_t::device_error_k};
+        if (hip_api().stream_synchronize(stream) != hipSuccess) return {{}, status_t::device_error_k};
         // The assigned count is the completion oracle: every offset assigned means every shadow row
         // landed.
         u32_t assigned = 0;
-        if (hip_runtime().copy(&assigned, context.assigned_rows_.get(), sizeof(u32_t),
-                               hip_memcpy_kind_t::device_to_host_k) != hip_success_k ||
+        if (hip_api().copy(&assigned, context.assigned_rows_.get(), sizeof(u32_t), hipMemcpyDeviceToHost) !=
+                hipSuccess ||
             assigned < walk_count)
             return {{}, status_t::device_error_k};
 
@@ -2176,8 +2160,8 @@ struct dense_vram_amd_index {
         // forward & reverse candidates into its final live row. A heal round over island IDs
         // re-selects the islands' own rows alone: re-judging the rows they pick would drop the
         // links that reconnected earlier islands.
-        hip_runtime().fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream);
-        dense_amd_arguments_t scatter {};
+        hip_api().fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream);
+        amd_arguments_t scatter {};
         scatter.graph.neighbors = shadow_neighbors.data();
         scatter.graph.rows_count = static_cast<u32_t>(nodes_count);
         scatter.graph.first_id = static_cast<u32_t>(nodes.first);
@@ -2189,12 +2173,12 @@ struct dense_vram_amd_index {
         scatter.graph.bucket_counts = bucket_counts.data();
         scatter.graph.touched = touched;
         if (status_t const launched = launch_(
-                dense_amd_kernel_t::scatter_links_k, 0,
+                amd_kernel_t::scatter_links_k, 0,
                 static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k, 0, stream,
                 scatter);
             failed(launched))
             return {{}, launched};
-        dense_amd_refine_t merge_view = view;
+        amd_refine_t merge_view = view;
         merge_view.scratch_bytes_per_warp = merge_scratch_bytes_per_warp();
         // The merge sweeps the whole ID space and skips the rows the scatter left untouched.
         merge_view.node_ids = nullptr;
@@ -2203,13 +2187,13 @@ struct dense_vram_amd_index {
         if (status_t const launched = launch_merge_(merge_view, buckets, bucket_counts, touched, stream);
             failed(launched))
             return {{}, launched};
-        if (hip_runtime().stream_synchronize(stream) != hip_success_k) return {{}, status_t::device_error_k};
-        if (hip_runtime().copy(&assigned, context.assigned_rows_.get(), sizeof(u32_t),
-                               hip_memcpy_kind_t::device_to_host_k) != hip_success_k ||
+        if (hip_api().stream_synchronize(stream) != hipSuccess) return {{}, status_t::device_error_k};
+        if (hip_api().copy(&assigned, context.assigned_rows_.get(), sizeof(u32_t), hipMemcpyDeviceToHost) !=
+                hipSuccess ||
             assigned < nodes_count)
             return {{}, status_t::device_error_k};
 
-        dense_vram_telemetry_block_t const spent = context.spent();
+        vram_telemetry_block_t const spent = context.spent();
         refine_result_t result;
         result.visited_nodes = walk_count;
         result.changed_nodes = spent.changed_nodes;
@@ -2224,8 +2208,8 @@ struct dense_vram_amd_index {
      *  reconnected counters, and the unreached rows' IDs and their in-link counts when a caller
      *  collects them. */
     struct audit_t {
-        typename dense_traversal_context_t::bytes_ptr_t bytes;
-        dense_hip_bitset_t reached, frontier, next_frontier;
+        typename traversal_context_t::bytes_ptr_t bytes;
+        hip_bitset_t reached, frontier, next_frontier;
         u32_t* expanded = nullptr;
         u32_t* unreached = nullptr;
         u32_t* reconnected = nullptr;
@@ -2239,9 +2223,9 @@ struct dense_vram_amd_index {
 
     /** Allocates an audit over the rows published now, with room for @p island_slots unreached IDs
      *  and as many in-link counts, the reconnected counter zeroed. */
-    expected<audit_t> reserve_audit_(dense_traversal_context_t& context, std::size_t island_slots) noexcept {
-        audit_t audit {typename dense_traversal_context_t::bytes_ptr_t {
-            nullptr, hip_deleter<typename dense_traversal_context_t::allocator_t> {context.allocator_, 0}}};
+    expected<audit_t> reserve_audit_(traversal_context_t& context, std::size_t island_slots) noexcept {
+        audit_t audit {typename traversal_context_t::bytes_ptr_t {
+            nullptr, hip_deleter<typename traversal_context_t::allocator_t> {context.allocator_, 0}}};
         audit.words = divide_round_up<std::size_t>(size(), 32);
         std::size_t const bytes = (audit.words * 3 + 3 + island_slots * 2) * sizeof(u32_t);
         audit.bytes.reset(context.allocator_.allocate(bytes));
@@ -2255,7 +2239,7 @@ struct dense_vram_amd_index {
         audit.reconnected = audit.unreached + 1;
         audit.island_ids = island_slots ? audit.reconnected + 1 : nullptr;
         audit.in_links = island_slots ? audit.island_ids + island_slots : nullptr;
-        if (hip_runtime().fill_async(audit.reconnected, 0, sizeof(u32_t), context.stream()) != hip_success_k)
+        if (hip_api().fill_async(audit.reconnected, 0, sizeof(u32_t), context.stream()) != hipSuccess)
             return {std::move(audit), status_t::device_error_k};
         return {std::move(audit), status_t::success_k};
     }
@@ -2263,17 +2247,16 @@ struct dense_vram_amd_index {
     /** Sweeps reachability to convergence from as many stride-spread landmarks as one search draws
      *  - the connectivity - then counts the rows it never reached, collecting their IDs when
      *    @p audit has room for them. */
-    expected<u32_t> audit_(dense_traversal_context_t& context, audit_t& audit) noexcept {
+    expected<u32_t> audit_(traversal_context_t& context, audit_t& audit) noexcept {
         std::size_t const rows = size();
         if (!vectors_plane_.reserved_bytes()) return {0, status_t::uninitialized_k};
         if (context.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
-        hip_stream_handle_t const stream = context.stream();
+        hipStream_t const stream = context.stream();
         std::size_t const seed_count = min_of<std::size_t>(connectivity(), rows);
         // The bitsets, the expanded counter and the unreached counter lie back to back.
-        if (hip_runtime().fill_async(audit.reached.words, 0, (audit.words * 3 + 2) * sizeof(u32_t), stream) !=
-            hip_success_k)
+        if (hip_api().fill_async(audit.reached.words, 0, (audit.words * 3 + 2) * sizeof(u32_t), stream) != hipSuccess)
             return {0, status_t::device_error_k};
-        dense_amd_arguments_t sweep {};
+        amd_arguments_t sweep {};
         sweep.graph.neighbors = reinterpret_cast<u32_t*>(neighbors_plane_.base());
         sweep.graph.rows_count = static_cast<u32_t>(rows);
         sweep.graph.connectivity = static_cast<u32_t>(connectivity());
@@ -2283,7 +2266,7 @@ struct dense_vram_amd_index {
         sweep.graph.next_frontier = audit.next_frontier;
         sweep.graph.counter = audit.expanded;
         sweep.graph.island_ids = audit.island_ids;
-        if (status_t const launched = launch_(dense_amd_kernel_t::mark_seeds_k, 0,
+        if (status_t const launched = launch_(amd_kernel_t::mark_seeds_k, 0,
                                               divide_round_up<u32_t>(static_cast<u32_t>(seed_count), block_threads()),
                                               0, stream, sweep);
             failed(launched))
@@ -2294,11 +2277,11 @@ struct dense_vram_amd_index {
         constexpr std::size_t sweeps_cap_k = 256;
         u32_t const grid = static_cast<u32_t>(device_.multiprocessor_count) * search_blocks_per_multiprocessor_k;
         for (audit.sweeps = 1; audit.sweeps != sweeps_cap_k; ++audit.sweeps) {
-            if (hip_runtime().fill_async(audit.expanded, 0, sizeof(u32_t), stream) != hip_success_k ||
-                hip_runtime().fill_async(sweep.graph.next_frontier.words, 0, audit.words * sizeof(u32_t), stream) !=
-                    hip_success_k)
+            if (hip_api().fill_async(audit.expanded, 0, sizeof(u32_t), stream) != hipSuccess ||
+                hip_api().fill_async(sweep.graph.next_frontier.words, 0, audit.words * sizeof(u32_t), stream) !=
+                    hipSuccess)
                 return {0, status_t::device_error_k};
-            if (status_t const launched = launch_(dense_amd_kernel_t::reachability_sweep_k, 0, grid, 0, stream, sweep);
+            if (status_t const launched = launch_(amd_kernel_t::reachability_sweep_k, 0, grid, 0, stream, sweep);
                 failed(launched))
                 return {0, launched};
             auto const [expanded_rows, read_status] = read_counter_(audit.expanded, stream);
@@ -2307,7 +2290,7 @@ struct dense_vram_amd_index {
             std::swap(sweep.graph.frontier, sweep.graph.next_frontier);
         }
         sweep.graph.counter = audit.unreached;
-        if (status_t const launched = launch_(dense_amd_kernel_t::reachability_islands_k, 0,
+        if (status_t const launched = launch_(amd_kernel_t::reachability_islands_k, 0,
                                               divide_round_up<u32_t>(static_cast<u32_t>(rows), block_threads()), 0,
                                               stream, sweep);
             failed(launched))
@@ -2316,11 +2299,10 @@ struct dense_vram_amd_index {
     }
 
     /** One device counter read back once the stream drains. */
-    static expected<u32_t> read_counter_(u32_t const* counter, hip_stream_handle_t stream) noexcept {
+    static expected<u32_t> read_counter_(u32_t const* counter, hipStream_t stream) noexcept {
         u32_t value = 0;
-        if (hip_runtime().copy_async(&value, counter, sizeof(u32_t), hip_memcpy_kind_t::device_to_host_k, stream) !=
-                hip_success_k ||
-            hip_runtime().stream_synchronize(stream) != hip_success_k)
+        if (hip_api().copy_async(&value, counter, sizeof(u32_t), hipMemcpyDeviceToHost, stream) != hipSuccess ||
+            hip_api().stream_synchronize(stream) != hipSuccess)
             return {0, status_t::device_error_k};
         return {value, status_t::success_k};
     }
@@ -2331,7 +2313,7 @@ struct dense_vram_amd_index {
 
     /** Insertion blocks per multiprocessor: the resident count saturates the path at its
      *  registers. */
-    inline static constexpr u32_t insert_blocks_per_multiprocessor_k = dense_vram_resident_blocks_per_multiprocessor_k;
+    inline static constexpr u32_t insert_blocks_per_multiprocessor_k = vram_resident_blocks_per_multiprocessor_k;
 
     /** Search blocks per multiprocessor: oversubscribed, so enough queries stay in flight to reach
      *  the memory-level-parallelism knee. */
@@ -2368,7 +2350,7 @@ struct dense_vram_amd_index {
     /** Maps every plane up to @p rows and sentinel-fills the fresh neighbor rows - always ahead of
      *  any launch that could assign new_node_ids into them. Callers hold @c claiming_, or run
      *  exclusively like @c reserve and @c load. */
-    status_t grow_rows_(std::size_t rows, hip_stream_handle_t stream) noexcept {
+    status_t grow_rows_(std::size_t rows, hipStream_t stream) noexcept {
         if (rows <= capacity()) return status_t::success_k;
         std::size_t const neighbors_before = neighbors_plane_.committed_bytes();
         if (status_t status = vectors_plane_.commit(rows * row_bytes()); status != status_t::success_k) return status;
@@ -2382,11 +2364,11 @@ struct dense_vram_amd_index {
         // Past a successful commit a failure must be kept: `capacity()` has advanced, so a retry
         // would early-return and assign IDs into rows never sentinel-filled.
         std::size_t const fresh_bytes = neighbors_plane_.committed_bytes() - neighbors_before;
-        if (fresh_bytes && hip_runtime().fill_words_async(neighbors_plane_.base() + neighbors_before,
-                                                          static_cast<int>(dense_node_id_unknown_k), fresh_bytes / 4,
-                                                          stream) != hip_success_k)
+        if (fresh_bytes &&
+            hip_api().fill_words_async(neighbors_plane_.base() + neighbors_before, static_cast<int>(node_id_unknown_k),
+                                       fresh_bytes / 4, stream) != hipSuccess)
             return fail_(status_t::device_error_k);
-        if (hip_runtime().stream_synchronize(stream) != hip_success_k) return fail_(status_t::device_error_k);
+        if (hip_api().stream_synchronize(stream) != hipSuccess) return fail_(status_t::device_error_k);
         return status_t::success_k;
     }
 
@@ -2398,82 +2380,80 @@ struct dense_vram_amd_index {
     }
 
     /** Loads this class's code object onto the device and finds every kernel this dtype exports, by
-     *  the mangled name @ref dense_amd_kernel_name spells. */
+     *  the mangled name @ref amd_kernel_name spells. */
     status_t load_kernels_() noexcept {
-        auto [module, status] = hip_module_t::load(device_.ordinal, dense_amd_code_object<capability_>());
+        auto [module, status] = hip_module_t::load(device_.ordinal, amd_code_object<capability_>());
         if (failed(status)) return status;
         module_ = std::move(module);
-        char name[dense_amd_kernel_name_capacity_k];
-        for (dense_amd_rung_t const rung : dense_amd_rungs) {
-            dense_amd_kernel_name(name, rung, dense_amd_class_of(capability_), vector_dtype_);
-            hip_function_handle_t& function =
-                kernels_[static_cast<u32_t>(rung.kernel)][dense_amd_rung_index(rung.slots)];
+        char name[amd_kernel_name_capacity_k];
+        for (amd_rung_t const rung : amd_rungs) {
+            amd_kernel_name(name, rung, amd_class_of(capability_), vector_dtype_);
+            hipFunction_t& function = kernels_[static_cast<u32_t>(rung.kernel)][amd_rung_index(rung.slots)];
             if (!(function = module_.function(name))) return status_t::device_error_k;
         }
         return status_t::success_k;
     }
 
     /** Launches @p kernel on its @p slots rung over @p blocks of four wavefronts on @p stream. */
-    status_t launch_(dense_amd_kernel_t kernel, u32_t slots, u32_t blocks, u32_t shared_bytes,
-                     hip_stream_handle_t stream, dense_amd_arguments_t const& arguments) noexcept {
-        return hip_launch(kernels_[static_cast<u32_t>(kernel)][dense_amd_rung_index(slots)], blocks, block_threads(),
+    status_t launch_(amd_kernel_t kernel, u32_t slots, u32_t blocks, u32_t shared_bytes, hipStream_t stream,
+                     amd_arguments_t const& arguments) noexcept {
+        return hip_launch(kernels_[static_cast<u32_t>(kernel)][amd_rung_index(slots)], blocks, block_threads(),
                           shared_bytes, stream, arguments);
     }
 
-    status_t launch_insert_(dense_amd_build_t const& view, u32_t pool_slots, hip_stream_handle_t stream) noexcept {
-        dense_amd_arguments_t arguments {};
+    status_t launch_insert_(amd_build_t const& view, u32_t pool_slots, hipStream_t stream) noexcept {
+        amd_arguments_t arguments {};
         arguments.build = view;
-        return launch_(dense_amd_kernel_t::insert_k, pool_slots,
+        return launch_(amd_kernel_t::insert_k, pool_slots,
                        static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k,
-                       dense_vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
+                       vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
     }
-    status_t launch_refine_(dense_amd_refine_t const& view, u32_t pool_slots, hip_stream_handle_t stream) noexcept {
-        dense_amd_arguments_t arguments {};
+    status_t launch_refine_(amd_refine_t const& view, u32_t pool_slots, hipStream_t stream) noexcept {
+        amd_arguments_t arguments {};
         arguments.refine = view;
-        return launch_(dense_amd_kernel_t::refine_k, pool_slots,
+        return launch_(amd_kernel_t::refine_k, pool_slots,
                        static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k,
-                       dense_vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
+                       vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
     }
-    status_t launch_merge_(dense_amd_refine_t const& view, nk::matrix_view<u32_t> buckets,
-                           std::span<u32_t const> bucket_counts, dense_hip_bitset_t touched,
-                           hip_stream_handle_t stream) noexcept {
-        dense_amd_arguments_t arguments {};
+    status_t launch_merge_(amd_refine_t const& view, nk::matrix_view<u32_t> buckets,
+                           std::span<u32_t const> bucket_counts, hip_bitset_t touched, hipStream_t stream) noexcept {
+        amd_arguments_t arguments {};
         arguments.refine = view;
         arguments.graph.bucket_ids = const_cast<u32_t*>(buckets.data());
         arguments.graph.bucket_counts = const_cast<u32_t*>(bucket_counts.data());
         arguments.graph.bucket_width = static_cast<u32_t>(buckets.extent(1));
         arguments.graph.touched = touched;
-        return launch_(dense_amd_kernel_t::merge_links_k, 0,
+        return launch_(amd_kernel_t::merge_links_k, 0,
                        static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k,
-                       dense_vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
+                       vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
     }
-    status_t launch_derive_norms_(u32_t first_row, u32_t rows, u32_t blocks, hip_stream_handle_t stream) noexcept {
-        dense_amd_arguments_t arguments {};
+    status_t launch_derive_norms_(u32_t first_row, u32_t rows, u32_t blocks, hipStream_t stream) noexcept {
+        amd_arguments_t arguments {};
         arguments.graph.planes = planes();
         arguments.graph.first_id = first_row;
         arguments.graph.rows_count = rows;
-        return launch_(dense_amd_kernel_t::derive_norms_k, 0, blocks, 0, stream, arguments);
+        return launch_(amd_kernel_t::derive_norms_k, 0, blocks, 0, stream, arguments);
     }
 
     /** Launches one walk per query of @p launch, each written out through @p sink: the search,
      *  indexed search and multiply families, each on its register rung or the arena frontier. */
     template <typename sink_, typename rescoring_>
-    status_t launch_walk_(walk_launch<rescoring_> const& launch, sink_ sink, hip_stream_handle_t stream) noexcept {
+    status_t launch_walk_(walk_launch<rescoring_> const& launch, sink_ sink, hipStream_t stream) noexcept {
         u32_t const blocks = static_cast<u32_t>(device_.multiprocessor_count) * search_blocks_per_multiprocessor_k;
-        dense_amd_arguments_t arguments {};
+        amd_arguments_t arguments {};
         arguments.search = launch.view;
         arguments.rescoring = launch.rescoring;
-        dense_amd_kernel_t kernel = dense_amd_kernel_t::search_k;
-        if constexpr (std::is_same_v<sink_, dense_amd_multiply_sink_t>) {
+        amd_kernel_t kernel = amd_kernel_t::search_k;
+        if constexpr (std::is_same_v<sink_, amd_multiply_sink_t>) {
             arguments.multiply_sink = sink;
-            kernel = dense_amd_kernel_t::multiply_k;
+            kernel = amd_kernel_t::multiply_k;
         }
         else {
             arguments.search_sink = sink;
-            if (launch.rescoring.heads) kernel = dense_amd_kernel_t::search_indexer_k;
+            if (launch.rescoring.heads) kernel = amd_kernel_t::search_indexer_k;
         }
         u32_t const slots = launch.frontier == frontier_kind_t::wide_arena_k ? 0 : launch.pool_slots;
-        return launch_(kernel, slots, blocks, dense_vram_warps_per_block_k * launch.view.scratch_bytes_per_warp, stream,
+        return launch_(kernel, slots, blocks, vram_warps_per_block_k * launch.view.scratch_bytes_per_warp, stream,
                        arguments);
     }
 
@@ -2485,10 +2465,10 @@ struct dense_vram_amd_index {
     /** The neighbor plane's backend, rebound to bytes. */
     using neighbors_plane_allocator_t = typename neighbors_allocator_t::template rebind<byte_t>::other;
 
-    /** This class's code object on this device, and its kernels in @ref dense_amd_kernel_t
+    /** This class's code object on this device, and its kernels in @ref amd_kernel_t
      *  order. */
     hip_module_t module_;
-    hip_function_handle_t kernels_[static_cast<u32_t>(dense_amd_kernel_t::count_k)][dense_amd_rungs_per_kernel_k] = {};
+    hipFunction_t kernels_[static_cast<u32_t>(amd_kernel_t::count_k)][amd_rungs_per_kernel_k] = {};
 
     /** The published-row counter is plain stream-ordered device memory on the legacy stream. */
     using counter_allocator_t = hip_device_allocator<u32_t>;
@@ -2529,5 +2509,4 @@ struct dense_vram_amd_index {
     status_t status_ = status_t::success_k;
 };
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::dense

@@ -8,8 +8,8 @@ env:
   GH_TOKEN: ${{ secrets.SEMANTIC_RELEASE_TOKEN }}
   PYTHONUTF8: 1
   PYTHON_VERSION: 3.12
-  DOTNET_VERSION: 8.0.x
-  NODE_VERSION: 20
+  DOTNET_VERSION: 10.0.x
+  NODE_VERSION: 22
   JAVA_VERSION: 25
   GO_VERSION: "^1.22.0"
   ANDROID_NDK_VERSION: 26.3.11579264
@@ -85,7 +85,7 @@ jobs:
           force: True
 
   create_linux_deb_package:
-    name: Build Linux Package
+    name: Build Linux Package for ${{ matrix.arch }}
     runs-on: ubuntu-24.04
     needs: versioning
     env:
@@ -161,7 +161,7 @@ jobs:
           update_latest_release: true
 
   create_windows_dll_library:
-    name: Build Windows Library
+    name: Build Windows Library for ${{ matrix.arch }}
     runs-on: windows-2022
     needs: versioning
     strategy:
@@ -239,7 +239,7 @@ jobs:
           update_latest_release: true
 
   create_macos_dylib_library:
-    name: Build macOS Library
+    name: Build macOS Library for ${{ matrix.arch }}
     runs-on: macos-15
     needs: versioning
     strategy:
@@ -299,7 +299,7 @@ jobs:
           update_latest_release: true
 
   create_android_library:
-    name: Build Android Library
+    name: Build Android Library for ${{ matrix.abi }}
     runs-on: ubuntu-24.04
     needs: versioning
     strategy:
@@ -364,7 +364,7 @@ jobs:
           update_latest_release: true
 
   build_jni_linux:
-    name: Build JNI for Linux
+    name: Build JNI for Linux ${{ matrix.arch }}
     runs-on: ubuntu-24.04
     needs: versioning
     # `-target <triple>` is a Clang flag; without these, CMake picks the host
@@ -437,7 +437,7 @@ jobs:
           retention-days: 1
 
   build_jni_windows:
-    name: Build JNI for Windows
+    name: Build JNI for Windows ${{ matrix.arch }}
     runs-on: windows-2022
     needs: versioning
     # Only x64 is supported today. 32-bit MSVC leaves NumKong's SIMD backends
@@ -483,7 +483,7 @@ jobs:
           retention-days: 1
 
   build_jni_macos:
-    name: Build JNI for macOS
+    name: Build JNI for macOS ${{ matrix.arch }}
     runs-on: macos-15
     needs: versioning
     strategy:
@@ -535,7 +535,7 @@ jobs:
           retention-days: 1
 
   build_jni_android:
-    name: Build JNI for Android
+    name: Build JNI for Android ${{ matrix.abi }}
     runs-on: ubuntu-24.04
     needs: versioning
     strategy:
@@ -698,7 +698,7 @@ jobs:
           body: ${{ steps.hash_list.outputs.hash_body }}
 
   build_wheels:
-    name: Build Python Wheels
+    name: Build Python Wheels for ${{ matrix.os }} cp${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
     needs: versioning
     strategy:
@@ -763,7 +763,7 @@ jobs:
           print-hash: true
 
   build_javascript:
-    name: Build JavaScript Native Modules
+    name: Build JavaScript Native Modules for ${{ matrix.os }} ${{ matrix.arch }}
     needs: versioning
     strategy:
       fail-fast: false
@@ -807,10 +807,10 @@ jobs:
         run: |
           npm install --ignore-scripts
       - name: Prebuild for one target
-        run: npm run prebuild-single
+        run: npm run prebuild
         if: matrix.os != 'macos-14'
-      - name: Prebuild the macOS universal binary
-        run: npm run prebuild-darwin-x64+arm64
+      - name: Prebuild for both macOS architectures
+        run: npm run prebuild && npm run prebuild-arm64
         env:
           CC: clang
           CXX: clang++
@@ -1074,7 +1074,7 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
   build_csharp:
-    name: Build C Dependencies for C#
+    name: Build C Dependencies for C# on ${{ matrix.os }}
     needs: versioning
     strategy:
       fail-fast: false
@@ -1198,16 +1198,9 @@ jobs:
         run: |
           sudo apt update &&
           sudo apt install -y doxygen graphviz dia git &&
-          pip install -r docs/requirements.txt &&
-          npm install -g jsdoc typedoc
+          pip install -r docs/requirements.txt
       - name: Install USearch from PyPi
         run: pip install usearch
-
-        # NPM installation fails spuriously all the time
-      - name: Build CJS JS
-        run: |
-          npm install --ignore-scripts
-          npm run build-js
       - name: Build documentation
         run: cd docs && doxygen conf.dox && make html
       - name: Copy assets

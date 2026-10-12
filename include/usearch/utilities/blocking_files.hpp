@@ -44,8 +44,7 @@
 #include <sys/mman.h> // `mmap`, `munmap`, `msync`
 #endif
 
-namespace unum {
-namespace usearch {
+namespace unum::usearch::utilities {
 
 #pragma region Descriptors
 
@@ -529,5 +528,4 @@ inline void mapped_file_t::unmap_() noexcept {
 
 #pragma endregion Slices and Mappings
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::utilities

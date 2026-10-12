@@ -2,8 +2,8 @@
  *  @file bench/dense/ram_indexes_algebra.hpp
  *  @author Ash Vardanian
  *  @date October 9, 2026
- *  @brief Profiling harness for graph products and graph attention over the sharded @c dense_ram_indexes, shared
- *      by the per-dtype algebra shards.
+ *  @brief Profiling harness for graph products and graph attention over the sharded
+ *      @c dense::ram_indexes, shared by the per-dtype algebra shards.
  *
  *  The build phases, the compile-time cascade and the process setup are the sharded search harness's, from
  *  @c dense/ram_indexes_search.hpp; this header swaps its search phase for the batched @c multiply and @c attend
@@ -88,7 +88,7 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
             value_rows[lane] = values.row(value_keys[lane]).as_vector();
     };
     auto outputs = nk::matrix<f32_t>::zeros({query_count, columns}).value;
-    std::vector<dense_softmax_state_t> carry(query_count);
+    std::vector<softmax_state_t> carry(query_count);
     started = steady_clock_t::now();
     auto const [attended, attend_status] = bench.indexes.attend(inputs.rows, head_count, value_of, inputs.score_scale,
                                                                 outputs.span(), std::span {carry}, bench.executor,

@@ -4,20 +4,20 @@
  *  @date October 11, 2026
  *  @brief Host-side vocabulary for driving one AMD GPU - the HIP runtime, specs, streams, memory.
  *
- *  The library never links @c libamdhip64: @ref hip_runtime opens it at first use and resolves the
+ *  The library never links @c libamdhip64: @ref hip_api opens it at first use and resolves the
  *  entry points USearch calls into one table, which stays empty where the library is absent, so AMD
  *  then lists no devices and the binary still loads. Kernels reach a device as code objects
  *  compiled ahead of time and embedded in the library, loaded by @ref hip_module_t and launched by
  *  name, since HIP-Clang's fat-binary registration would link the runtime outright.
  *
- *  The host half is plain C++ that never includes the HIP headers, so the HIP types it passes are
- *  opaque handles and field mirrors, whose handles and constants HIP-Clang checks against its own.
- *  The device half, the @ref hip_warp_t policy, compiles only there.
+ *  The host half is plain C++ over @c <hip/hip_runtime_api.h>, which only declares, so the table's
+ *  entries take HIP's own prototypes and types; a plain C++ unit names @c __HIP_PLATFORM_AMD__ for
+ *  it. The device half, the @ref hip_warp_t policy, compiles only under HIP-Clang.
  */
 #pragma once
 
 #include <cstddef> // `std::size_t`
-#include <cstring> // `std::memcpy` - a field read out of the properties' bytes
+#include <cstring> // `std::strncpy` - a listed device's name
 
 #include <dlfcn.h> // `dlopen`, `dlsym` - the HIP runtime opened at first use
 
@@ -29,6 +29,8 @@
 #include <string_view> // `std::string_view` - an architecture name
 #include <utility>     // `std::move`, `std::exchange`
 
+#include <hip/hip_runtime_api.h> // `hipDeviceProp_t`, `hipStream_t` & the prototypes the table takes
+
 #include <forkunion/topology.hpp> // `fu::volume_ram` - the managed planes' host-memory budget
 #include <forkunion/types.hpp>    // `fu::round_up_to_multiple`, `fu::spin_mutex_t` - the hold
 
@@ -38,158 +40,63 @@
 #include "usearch/utilities/types.hpp"       // `gpu_device_t`, `gpu_devices_capacity_k`
 
 #if NUMKONG_ARCH_ROCM_
-#include <hip/hip_runtime.h> // `__shfl_xor`, `__ballot`, `__syncwarp` & the mirrored types
+#include <hip/hip_runtime.h> // `__shfl_xor`, `__ballot`, `__syncwarp`
 #endif                       // NUMKONG_ARCH_ROCM_
 
-/*  HIP's handle types point to these, so the aliases below are HIP's own types where both meet. */
-struct ihipStream_t;
-struct ihipModule_t;
-struct ihipModuleSymbol_t;
-struct ihipMemGenericAllocationHandle;
-
-namespace unum {
-namespace usearch {
-
-/** A HIP stream, the ordering identity transfers and launches ride; null is the legacy default. */
-using hip_stream_handle_t = ihipStream_t*;
-
-/** A code object loaded onto one device. */
-using hip_module_handle_t = ihipModule_t*;
-
-/** One kernel of a loaded code object. */
-using hip_function_handle_t = ihipModuleSymbol_t*;
-
-/** Physical memory created for a virtual-memory mapping. */
-using hip_allocation_handle_t = ihipMemGenericAllocationHandle*;
-
-/** A HIP call's outcome, zero on success. */
-using hip_error_t = int;
-inline constexpr hip_error_t hip_success_k = 0;
-
-/** The copy directions HIP names, valued as @c hipMemcpyKind. */
-enum class hip_memcpy_kind_t : int {
-    host_to_device_k = 1,
-    device_to_host_k = 2,
-    device_to_device_k = 3,
-
-    /** Inferred from the pointers, which unified addressing tells apart. */
-    default_k = 4,
-};
-
-/** Where an allocation lives, as @c hipMemLocation spells it. */
-struct hip_memory_location_t {
-    int type = 0;
-    int id = 0;
-};
-
-/** How a virtual-memory slab is created, as @c hipMemAllocationProp lays it out. */
-struct hip_allocation_properties_t {
-    int type = 0;
-    int requested_handle_types = 0;
-    hip_memory_location_t location;
-    void* win32_handle_metadata = nullptr;
-    u8_t compression_type = 0;
-    u8_t gpu_direct_rdma_capable = 0;
-    u16_t usage = 0;
-};
-
-/** Who may touch a mapped range, as @c hipMemAccessDesc lays it out. */
-struct hip_access_descriptor_t {
-    hip_memory_location_t location;
-    int flags = 0;
-};
-
-/** The flag values the allocators pass, valued as HIP's own enumerators and macros. */
-inline constexpr int hip_memory_allocation_pinned_k = 1;
-inline constexpr int hip_memory_location_device_k = 1;
-inline constexpr int hip_memory_access_read_write_k = 3;
-inline constexpr int hip_memory_granularity_minimum_k = 0;
-inline constexpr unsigned hip_memory_attach_global_k = 1;
-inline constexpr int hip_memory_advise_preferred_location_k = 3;
-inline constexpr int hip_memory_advise_accessed_by_k = 5;
-inline constexpr int hip_cpu_device_k = -1;
-inline constexpr unsigned hip_host_malloc_portable_k = 1;
-inline constexpr unsigned hip_stream_non_blocking_k = 1;
-
-/** HIP's @c hipDeviceProp_tR0600, which its versioned entry point fills whatever the runtime's own
- *  version: opaque bytes, read at the offsets of the few fields USearch consults. */
-struct alignas(8) hip_device_properties_t {
-    inline static constexpr std::size_t total_global_memory_offset_k = 288;
-    inline static constexpr std::size_t multiprocessor_count_offset_k = 388;
-    inline static constexpr std::size_t shared_memory_per_block_optin_offset_k = 696;
-    inline static constexpr std::size_t arch_name_offset_k = 1160;
-    inline static constexpr std::size_t arch_name_capacity_k = 256;
-
-    byte_t bytes[1472];
-
-    template <typename field_type_>
-    field_type_ read(std::size_t offset) const noexcept {
-        field_type_ field;
-        std::memcpy(&field, bytes + offset, sizeof(field_type_));
-        return field;
-    }
-
-    /** The architecture the runtime reports, like @c "gfx942:sramecc+:xnack-". */
-    std::string_view arch_name() const noexcept {
-        std::string_view const padded {reinterpret_cast<char const*>(bytes + arch_name_offset_k), arch_name_capacity_k};
-        return padded.substr(0, padded.find('\0'));
-    }
-};
+namespace unum::usearch::utilities {
 
 /**
  *  @brief The HIP entry points USearch calls, resolved from @c libamdhip64 on first use.
  *
  *  Every entry is null when the library is absent or lacks any of them, which leaves AMD with no
- *  devices; the parameter types mirror HIP's own, with the handles above and @c int for its enums.
+ *  devices. HIP overloads a few allocators with typed C++ wrappers, so those entries name the C
+ *  prototype they take, which the compiler still checks against HIP's declaration.
  */
-struct hip_runtime_t {
-    hip_error_t (*get_device_count)(int*) = nullptr;
-    hip_error_t (*get_device_properties)(hip_device_properties_t*, int) = nullptr;
-    hip_error_t (*set_device)(int) = nullptr;
-    hip_error_t (*malloc_async)(void**, std::size_t, hip_stream_handle_t) = nullptr;
-    hip_error_t (*free_async)(void*, hip_stream_handle_t) = nullptr;
-    hip_error_t (*malloc_managed)(void**, std::size_t, unsigned) = nullptr;
-    hip_error_t (*memory_advise)(void const*, std::size_t, int, int) = nullptr;
-    hip_error_t (*free_managed)(void*) = nullptr;
-    hip_error_t (*host_malloc)(void**, std::size_t, unsigned) = nullptr;
-    hip_error_t (*host_free)(void*) = nullptr;
-    hip_error_t (*copy)(void*, void const*, std::size_t, hip_memcpy_kind_t) = nullptr;
-    hip_error_t (*copy_async)(void*, void const*, std::size_t, hip_memcpy_kind_t, hip_stream_handle_t) = nullptr;
-    hip_error_t (*copy_2d_async)(void*, std::size_t, void const*, std::size_t, std::size_t, std::size_t,
-                                 hip_memcpy_kind_t, hip_stream_handle_t) = nullptr;
-    hip_error_t (*fill)(void*, int, std::size_t) = nullptr;
-    hip_error_t (*fill_async)(void*, int, std::size_t, hip_stream_handle_t) = nullptr;
-    hip_error_t (*fill_words_async)(void*, int, std::size_t, hip_stream_handle_t) = nullptr;
-    hip_error_t (*stream_create_with_flags)(hip_stream_handle_t*, unsigned) = nullptr;
-    hip_error_t (*stream_destroy)(hip_stream_handle_t) = nullptr;
-    hip_error_t (*stream_synchronize)(hip_stream_handle_t) = nullptr;
-    hip_error_t (*module_load_data)(hip_module_handle_t*, void const*) = nullptr;
-    hip_error_t (*module_unload)(hip_module_handle_t) = nullptr;
-    hip_error_t (*module_get_function)(hip_function_handle_t*, hip_module_handle_t, char const*) = nullptr;
-    hip_error_t (*module_launch_kernel)(hip_function_handle_t, unsigned, unsigned, unsigned, unsigned, unsigned,
-                                        unsigned, unsigned, hip_stream_handle_t, void**, void**) = nullptr;
-    hip_error_t (*memory_granularity)(std::size_t*, hip_allocation_properties_t const*, int) = nullptr;
-    hip_error_t (*memory_address_reserve)(void**, std::size_t, std::size_t, void*, unsigned long long) = nullptr;
-    hip_error_t (*memory_address_free)(void*, std::size_t) = nullptr;
-    hip_error_t (*memory_create)(hip_allocation_handle_t*, std::size_t, hip_allocation_properties_t const*,
-                                 unsigned long long) = nullptr;
-    hip_error_t (*memory_release)(hip_allocation_handle_t) = nullptr;
-    hip_error_t (*memory_map)(void*, std::size_t, std::size_t, hip_allocation_handle_t, unsigned long long) = nullptr;
-    hip_error_t (*memory_unmap)(void*, std::size_t) = nullptr;
-    hip_error_t (*memory_set_access)(void*, std::size_t, hip_access_descriptor_t const*, std::size_t) = nullptr;
+struct hip_api_t {
+    decltype(&::hipGetDeviceCount) get_device_count = nullptr;
+    decltype(&::hipGetDeviceProperties) get_device_properties = nullptr;
+    decltype(&::hipSetDevice) set_device = nullptr;
+    decltype(static_cast<hipError_t (*)(void**, std::size_t, hipStream_t)>(&::hipMallocAsync)) malloc_async = nullptr;
+    decltype(&::hipFreeAsync) free_async = nullptr;
+    decltype(static_cast<hipError_t (*)(void**, std::size_t, unsigned)>(&::hipMallocManaged)) malloc_managed = nullptr;
+    decltype(&::hipMemAdvise) memory_advise = nullptr;
+    decltype(&::hipFree) free_managed = nullptr;
+    decltype(static_cast<hipError_t (*)(void**, std::size_t, unsigned)>(&::hipHostMalloc)) host_malloc = nullptr;
+    decltype(&::hipHostFree) host_free = nullptr;
+    decltype(&::hipMemcpy) copy = nullptr;
+    decltype(&::hipMemcpyAsync) copy_async = nullptr;
+    decltype(&::hipMemcpy2DAsync) copy_2d_async = nullptr;
+    decltype(&::hipMemset) fill = nullptr;
+    decltype(&::hipMemsetAsync) fill_async = nullptr;
+    decltype(&::hipMemsetD32Async) fill_words_async = nullptr;
+    decltype(&::hipStreamCreateWithFlags) stream_create_with_flags = nullptr;
+    decltype(&::hipStreamDestroy) stream_destroy = nullptr;
+    decltype(&::hipStreamSynchronize) stream_synchronize = nullptr;
+    decltype(&::hipModuleLoadData) module_load_data = nullptr;
+    decltype(&::hipModuleUnload) module_unload = nullptr;
+    decltype(&::hipModuleGetFunction) module_get_function = nullptr;
+    decltype(&::hipModuleLaunchKernel) module_launch_kernel = nullptr;
+    decltype(&::hipMemGetAllocationGranularity) memory_granularity = nullptr;
+    decltype(&::hipMemAddressReserve) memory_address_reserve = nullptr;
+    decltype(&::hipMemAddressFree) memory_address_free = nullptr;
+    decltype(&::hipMemCreate) memory_create = nullptr;
+    decltype(&::hipMemRelease) memory_release = nullptr;
+    decltype(&::hipMemMap) memory_map = nullptr;
+    decltype(&::hipMemUnmap) memory_unmap = nullptr;
+    decltype(&::hipMemSetAccess) memory_set_access = nullptr;
 
     /** Whether the runtime loaded with every entry resolved. */
     explicit operator bool() const noexcept { return memory_set_access != nullptr; }
 
     /** Opens the runtime and resolves every entry, or answers the empty table. The library stays
      *  open for the life of the process, as the table points into it. */
-    static hip_runtime_t load() noexcept {
+    static hip_api_t load() noexcept {
         char const* const names[] = {"libamdhip64.so", "libamdhip64.so.7", "libamdhip64.so.6"};
         void* library = nullptr;
         for (char const* name : names)
             if ((library = dlopen(name, RTLD_NOW | RTLD_LOCAL))) break;
         if (!library) return {};
-        hip_runtime_t runtime;
+        hip_api_t runtime;
         bool const resolved = //
             resolve_(library, "hipGetDeviceCount", runtime.get_device_count) &&
             resolve_(library, "hipGetDevicePropertiesR0600", runtime.get_device_properties) &&
@@ -234,9 +141,9 @@ struct hip_runtime_t {
 };
 
 /** The one table every AMD call goes through, filled on first use by whichever thread is first. */
-inline hip_runtime_t const& hip_runtime() noexcept {
-    static hip_runtime_t const runtime = hip_runtime_t::load();
-    return runtime;
+inline hip_api_t const& hip_api() noexcept {
+    static hip_api_t const api = hip_api_t::load();
+    return api;
 }
 
 /** The class whose kernels run on an AMD GPU of architecture @p arch_name, as the runtime spells
@@ -275,14 +182,12 @@ struct hip_device_specs_t {
 
     /** Queries the runtime for @p ordinal's specification; meaningful only on @c success_k. */
     static expected<hip_device_specs_t> query(int ordinal) noexcept {
-        hip_runtime_t const& runtime = hip_runtime();
-        hip_device_properties_t properties;
-        if (!runtime || runtime.get_device_properties(&properties, ordinal) != hip_success_k)
+        hip_api_t const& runtime = hip_api();
+        hipDeviceProp_t properties;
+        if (!runtime || runtime.get_device_properties(&properties, ordinal) != hipSuccess)
             return {{ordinal}, status_t::device_error_k};
-        return {{ordinal, properties.read<int>(hip_device_properties_t::multiprocessor_count_offset_k),
-                 properties.read<std::size_t>(hip_device_properties_t::total_global_memory_offset_k),
-                 properties.read<std::size_t>(hip_device_properties_t::shared_memory_per_block_optin_offset_k),
-                 hip_gpu_class_of(properties.arch_name())},
+        return {{ordinal, properties.multiProcessorCount, properties.totalGlobalMem, properties.sharedMemPerBlockOptin,
+                 hip_gpu_class_of(properties.gcnArchName)},
                 status_t::success_k};
     }
 };
@@ -297,13 +202,18 @@ inline std::span<gpu_device_t const> amd_gpu_devices() noexcept {
     };
     static listing_t const listing = [] {
         listing_t found;
-        hip_runtime_t const& runtime = hip_runtime();
+        hip_api_t const& runtime = hip_api();
         int devices_count = 0;
-        if (!runtime || runtime.get_device_count(&devices_count) != hip_success_k) return found;
+        if (!runtime || runtime.get_device_count(&devices_count) != hipSuccess) return found;
         for (int ordinal = 0; ordinal != devices_count && found.count != gpu_devices_capacity_k; ++ordinal) {
-            auto const [specs, status] = hip_device_specs_t::query(ordinal);
-            if (failed(status) || specs.gpu_class == gpu_class_t::unknown_k) continue;
-            found.devices[found.count++] = {gpu_vendor_t::amd_k, static_cast<u32_t>(ordinal), specs.gpu_class};
+            hipDeviceProp_t properties;
+            if (runtime.get_device_properties(&properties, ordinal) != hipSuccess) continue;
+            gpu_class_t const gpu_class = hip_gpu_class_of(properties.gcnArchName);
+            if (gpu_class == gpu_class_t::unknown_k) continue;
+            gpu_device_t& device = found.devices[found.count++];
+            device = {gpu_vendor_t::amd_k, static_cast<u32_t>(ordinal), gpu_class,
+                      static_cast<u32_t>(properties.multiProcessorCount), properties.totalGlobalMem};
+            std::strncpy(device.name, properties.name, sizeof(device.name) - 1);
         }
         return found;
     }();
@@ -332,7 +242,7 @@ concept hip_allocator = requires(allocator_ allocator, typename allocator_::valu
     { allocator_::address_space_k } -> std::convertible_to<hip_address_space_t>;
     { allocator.allocate(count) } -> std::same_as<typename allocator_::value_type*>;
     { allocator.deallocate(pointer, count) } -> std::same_as<void>;
-    { allocator.stream() } -> std::convertible_to<hip_stream_handle_t>;
+    { allocator.stream() } -> std::convertible_to<hipStream_t>;
     { allocator.device() } -> std::convertible_to<int>;
 };
 
@@ -396,17 +306,17 @@ struct hip_virtual_memory_allocator {
     /** Reserves @p virtual_address_bytes of virtual address space on @p device - no physical memory
      *  yet, so the ceiling costs nothing and should be generous. */
     status_t reserve_range(std::size_t virtual_address_bytes, int device) noexcept {
-        hip_runtime_t const& runtime = hip_runtime();
-        hip_allocation_properties_t const properties = allocation_properties_(device);
+        hip_api_t const& runtime = hip_api();
+        hipMemAllocationProp const properties = allocation_properties_(device);
         std::size_t granularity = 0;
         if (!runtime ||
-            runtime.memory_granularity(&granularity, &properties, hip_memory_granularity_minimum_k) != hip_success_k)
+            runtime.memory_granularity(&granularity, &properties, hipMemAllocationGranularityMinimum) != hipSuccess)
             return status_t::device_error_k;
         slab_bytes_ = max_of(granularity, preferred_slab_bytes_k / granularity * granularity);
         virtual_address_bytes_ = fu::round_up_to_multiple(virtual_address_bytes, slab_bytes_);
         device_ = device;
         void* base = nullptr;
-        if (runtime.memory_address_reserve(&base, virtual_address_bytes_, 0, nullptr, 0) != hip_success_k)
+        if (runtime.memory_address_reserve(&base, virtual_address_bytes_, 0, nullptr, 0) != hipSuccess)
             return status_t::bad_alloc_k;
         base_ = static_cast<byte_t*>(base);
         return status_t::success_k;
@@ -416,21 +326,20 @@ struct hip_virtual_memory_allocator {
      *  handle is released right after mapping, since the mapping alone keeps the memory alive. */
     status_t commit(std::size_t bytes) noexcept {
         if (bytes > virtual_address_bytes_) return status_t::overflow_k;
-        hip_runtime_t const& runtime = hip_runtime();
-        hip_allocation_properties_t const properties = allocation_properties_(device_);
-        hip_access_descriptor_t access;
+        hip_api_t const& runtime = hip_api();
+        hipMemAllocationProp const properties = allocation_properties_(device_);
+        hipMemAccessDesc access {};
         access.location = properties.location;
-        access.flags = hip_memory_access_read_write_k;
+        access.flags = hipMemAccessFlagsProtReadWrite;
         while (mapped_bytes_ < bytes) {
-            hip_allocation_handle_t handle = nullptr;
-            if (runtime.memory_create(&handle, slab_bytes_, &properties, 0) != hip_success_k)
-                return status_t::bad_alloc_k;
+            hipMemGenericAllocationHandle_t handle = nullptr;
+            if (runtime.memory_create(&handle, slab_bytes_, &properties, 0) != hipSuccess) return status_t::bad_alloc_k;
             byte_t* const slab = base_ + mapped_bytes_;
-            bool const mapped = runtime.memory_map(slab, slab_bytes_, 0, handle, 0) == hip_success_k &&
-                                runtime.memory_set_access(slab, slab_bytes_, &access, 1) == hip_success_k;
+            bool const mapped = runtime.memory_map(slab, slab_bytes_, 0, handle, 0) == hipSuccess &&
+                                runtime.memory_set_access(slab, slab_bytes_, &access, 1) == hipSuccess;
             runtime.memory_release(handle);
             if (!mapped) return status_t::device_error_k;
-            if (runtime.fill(slab, 0, slab_bytes_) != hip_success_k) return status_t::device_error_k;
+            if (runtime.fill(slab, 0, slab_bytes_) != hipSuccess) return status_t::device_error_k;
             standard_atomic_ref<std::size_t>(mapped_bytes_)
                 .store(mapped_bytes_ + slab_bytes_, std::memory_order_release);
         }
@@ -445,16 +354,16 @@ struct hip_virtual_memory_allocator {
     int device() const noexcept { return device_; }
 
     void release() noexcept {
-        if (mapped_bytes_) hip_runtime().memory_unmap(base_, mapped_bytes_);
-        if (base_) hip_runtime().memory_address_free(base_, virtual_address_bytes_);
+        if (mapped_bytes_) hip_api().memory_unmap(base_, mapped_bytes_);
+        if (base_) hip_api().memory_address_free(base_, virtual_address_bytes_);
         base_ = nullptr, virtual_address_bytes_ = 0, mapped_bytes_ = 0;
     }
 
   private:
-    static hip_allocation_properties_t allocation_properties_(int device) noexcept {
-        hip_allocation_properties_t properties;
-        properties.type = hip_memory_allocation_pinned_k;
-        properties.location.type = hip_memory_location_device_k;
+    static hipMemAllocationProp allocation_properties_(int device) noexcept {
+        hipMemAllocationProp properties {};
+        properties.type = hipMemAllocationTypePinned;
+        properties.location.type = hipMemLocationTypeDevice;
         properties.location.id = device;
         return properties;
     }
@@ -489,16 +398,15 @@ struct hip_managed_allocator {
     ~hip_managed_allocator() noexcept { release(); }
 
     status_t reserve_range(std::size_t virtual_address_bytes, int device) noexcept {
-        hip_runtime_t const& runtime = hip_runtime();
+        hip_api_t const& runtime = hip_api();
         device_ = device;
         virtual_address_bytes_ = virtual_address_bytes;
         void* base = nullptr;
-        if (!runtime ||
-            runtime.malloc_managed(&base, virtual_address_bytes, hip_memory_attach_global_k) != hip_success_k)
+        if (!runtime || runtime.malloc_managed(&base, virtual_address_bytes, hipMemAttachGlobal) != hipSuccess)
             return status_t::bad_alloc_k;
         base_ = static_cast<value_type*>(base);
-        runtime.memory_advise(base, virtual_address_bytes, hip_memory_advise_preferred_location_k, device);
-        runtime.memory_advise(base, virtual_address_bytes, hip_memory_advise_accessed_by_k, hip_cpu_device_k);
+        runtime.memory_advise(base, virtual_address_bytes, hipMemAdviseSetPreferredLocation, device);
+        runtime.memory_advise(base, virtual_address_bytes, hipMemAdviseSetAccessedBy, hipCpuDeviceId);
         return status_t::success_k;
     }
 
@@ -506,8 +414,8 @@ struct hip_managed_allocator {
         if (bytes > virtual_address_bytes_) return status_t::overflow_k;
         if (bytes <= committed_bytes_) return status_t::success_k;
         // Managed pages arrive unzeroed; zeroing the fresh range also commits its residency.
-        if (hip_runtime().fill(reinterpret_cast<byte_t*>(base_) + committed_bytes_, 0, bytes - committed_bytes_) !=
-            hip_success_k)
+        if (hip_api().fill(reinterpret_cast<byte_t*>(base_) + committed_bytes_, 0, bytes - committed_bytes_) !=
+            hipSuccess)
             return status_t::device_error_k;
         standard_atomic_ref<std::size_t>(committed_bytes_).store(bytes, std::memory_order_release);
         return status_t::success_k;
@@ -525,7 +433,7 @@ struct hip_managed_allocator {
     static std::size_t budget_bytes() noexcept { return fu::volume_ram() / 2; }
 
     void release() noexcept {
-        if (base_) hip_runtime().free_managed(base_);
+        if (base_) hip_api().free_managed(base_);
         base_ = nullptr, virtual_address_bytes_ = 0, committed_bytes_ = 0;
     }
 };
@@ -541,23 +449,23 @@ struct hip_device_allocator {
     };
 
     hip_device_allocator() noexcept = default;
-    hip_device_allocator(hip_stream_handle_t stream, int device) noexcept : stream_(stream), device_(device) {}
+    hip_device_allocator(hipStream_t stream, int device) noexcept : stream_(stream), device_(device) {}
     template <typename other_>
     hip_device_allocator(hip_device_allocator<other_> const& other) noexcept
         : stream_(other.stream()), device_(other.device()) {}
 
     value_type* allocate(std::size_t count) noexcept {
         void* pointer = nullptr;
-        return hip_runtime().malloc_async(&pointer, count * sizeof(value_type), stream_) == hip_success_k
+        return hip_api().malloc_async(&pointer, count * sizeof(value_type), stream_) == hipSuccess
                    ? static_cast<value_type*>(pointer)
                    : nullptr;
     }
-    void deallocate(value_type* pointer, std::size_t) noexcept { hip_runtime().free_async(pointer, stream_); }
-    hip_stream_handle_t stream() const noexcept { return stream_; }
+    void deallocate(value_type* pointer, std::size_t) noexcept { hip_api().free_async(pointer, stream_); }
+    hipStream_t stream() const noexcept { return stream_; }
     int device() const noexcept { return device_; }
 
   private:
-    hip_stream_handle_t stream_ = nullptr;
+    hipStream_t stream_ = nullptr;
     int device_ = 0;
 };
 
@@ -582,7 +490,7 @@ struct hip_arena_allocator {
         using other = hip_arena_allocator<other_>;
     };
 
-    hip_arena_allocator(arena_t& arena, hip_stream_handle_t stream, int device) noexcept
+    hip_arena_allocator(arena_t& arena, hipStream_t stream, int device) noexcept
         : arena_(arena), stream_(stream), device_(device) {}
 
     /** The rebinding conversion @c std::allocator_traits performs - the identity rides along, and
@@ -599,7 +507,7 @@ struct hip_arena_allocator {
     /** A carve is never returned; the run's owner rewinds it between calls. */
     void deallocate(value_type*, std::size_t) noexcept {}
 
-    hip_stream_handle_t stream() const noexcept { return stream_; }
+    hipStream_t stream() const noexcept { return stream_; }
     int device() const noexcept { return device_; }
 
     /** The run every rebound copy shares. */
@@ -608,7 +516,7 @@ struct hip_arena_allocator {
 
   private:
     arena_t& arena_;
-    hip_stream_handle_t stream_ = nullptr;
+    hipStream_t stream_ = nullptr;
     int device_ = 0;
 };
 
@@ -627,24 +535,23 @@ struct hip_pinned_allocator {
     };
 
     hip_pinned_allocator() noexcept = default;
-    hip_pinned_allocator(hip_stream_handle_t stream, int device) noexcept : stream_(stream), device_(device) {}
+    hip_pinned_allocator(hipStream_t stream, int device) noexcept : stream_(stream), device_(device) {}
     template <typename other_>
     hip_pinned_allocator(hip_pinned_allocator<other_> const& other) noexcept
         : stream_(other.stream()), device_(other.device()) {}
 
     value_type* allocate(std::size_t count) noexcept {
         void* pointer = nullptr;
-        return hip_runtime().host_malloc(&pointer, count * sizeof(value_type), hip_host_malloc_portable_k) ==
-                       hip_success_k
+        return hip_api().host_malloc(&pointer, count * sizeof(value_type), hipHostMallocPortable) == hipSuccess
                    ? static_cast<value_type*>(pointer)
                    : nullptr;
     }
-    void deallocate(value_type* pointer, std::size_t) noexcept { hip_runtime().host_free(pointer); }
-    hip_stream_handle_t stream() const noexcept { return stream_; }
+    void deallocate(value_type* pointer, std::size_t) noexcept { hip_api().host_free(pointer); }
+    hipStream_t stream() const noexcept { return stream_; }
     int device() const noexcept { return device_; }
 
   private:
-    hip_stream_handle_t stream_ = nullptr;
+    hipStream_t stream_ = nullptr;
     int device_ = 0;
 };
 
@@ -654,8 +561,8 @@ using hip_pinned_allocator_t = hip_pinned_allocator<byte_t>;
 /** Owned non-blocking stream, born on the current device; destruction drains it first. */
 struct hip_stream_t {
     hip_stream_t() noexcept {
-        if (hip_runtime_t const& runtime = hip_runtime(); runtime)
-            runtime.stream_create_with_flags(&handle_, hip_stream_non_blocking_k);
+        if (hip_api_t const& runtime = hip_api(); runtime)
+            runtime.stream_create_with_flags(&handle_, hipStreamNonBlocking);
     }
 
     /** The current device's legacy default stream, which nothing here owns or destroys. */
@@ -664,13 +571,13 @@ struct hip_stream_t {
     hip_stream_t(hip_stream_t const&) = delete;
     hip_stream_t& operator=(hip_stream_t const&) = delete;
     ~hip_stream_t() noexcept {
-        if (handle_) hip_runtime().stream_synchronize(handle_), hip_runtime().stream_destroy(handle_);
+        if (handle_) hip_api().stream_synchronize(handle_), hip_api().stream_destroy(handle_);
     }
 
-    operator hip_stream_handle_t() const noexcept { return handle_; }
+    operator hipStream_t() const noexcept { return handle_; }
 
   private:
-    hip_stream_handle_t handle_ = nullptr;
+    hipStream_t handle_ = nullptr;
 };
 
 /** Device memory that one call at a time rewinds and refills, on one AMD device: the AMD arm of
@@ -682,8 +589,8 @@ struct hip_device_arena_t {
     /** Carves @p count values on the arena's device, or null when it cannot grow. */
     template <typename value_type_>
     value_type_* allocate(std::size_t count) noexcept {
-        hip_runtime_t const& runtime = hip_runtime();
-        if (!runtime || runtime.set_device(device_) != hip_success_k) return nullptr;
+        hip_api_t const& runtime = hip_api();
+        if (!runtime || runtime.set_device(device_) != hipSuccess) return nullptr;
         return reinterpret_cast<value_type_*>(memory_.allocate(count * sizeof(value_type_), default_alignment_k));
     }
 
@@ -696,11 +603,10 @@ struct hip_device_arena_t {
     /** Copies @p bytes of host memory at @p source to @p destination in the arena,
      *  synchronously. */
     status_t upload(void* destination, void const* source, std::size_t bytes) noexcept {
-        hip_runtime_t const& runtime = hip_runtime();
-        if (!runtime || runtime.set_device(device_) != hip_success_k) return status_t::device_error_k;
-        return runtime.copy(destination, source, bytes, hip_memcpy_kind_t::host_to_device_k) == hip_success_k
-                   ? status_t::success_k
-                   : status_t::device_error_k;
+        hip_api_t const& runtime = hip_api();
+        if (!runtime || runtime.set_device(device_) != hipSuccess) return status_t::device_error_k;
+        return runtime.copy(destination, source, bytes, hipMemcpyHostToDevice) == hipSuccess ? status_t::success_k
+                                                                                             : status_t::device_error_k;
     }
 
     int device() const noexcept { return device_; }
@@ -766,12 +672,12 @@ struct hip_executor_t {
     /** Opens one stream per named HIP ordinal, binding each first, since a stream is born on the
      *  current device. */
     static expected<hip_executor_t> spawn(std::span<int const> devices) noexcept {
-        hip_runtime_t const& runtime = hip_runtime();
+        hip_api_t const& runtime = hip_api();
         growing_buffer<stream_t> streams {global_allocator};
         if (!runtime) return {{}, status_t::device_error_k};
         if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
         for (int device : devices) {
-            if (runtime.set_device(device) != hip_success_k) return {{}, status_t::device_error_k};
+            if (runtime.set_device(device) != hipSuccess) return {{}, status_t::device_error_k};
             stream_t opened {device, hip_stream_t {}};
             if (!opened.handle) return {{}, status_t::device_error_k};
             streams.push_back_reserved(std::move(opened));
@@ -782,12 +688,12 @@ struct hip_executor_t {
     /** The twin of @ref spawn over each named device's legacy default stream, for a call that names
      *  no executor; every use binds its device first, since a null stream is the current one's. */
     static expected<hip_executor_t> on_default_streams(std::span<int const> devices) noexcept {
-        hip_runtime_t const& runtime = hip_runtime();
+        hip_api_t const& runtime = hip_api();
         growing_buffer<stream_t> streams {global_allocator};
         if (!runtime) return {{}, status_t::device_error_k};
         if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
         for (int device : devices) {
-            if (runtime.set_device(device) != hip_success_k) return {{}, status_t::device_error_k};
+            if (runtime.set_device(device) != hipSuccess) return {{}, status_t::device_error_k};
             streams.push_back_reserved(stream_t {device, hip_stream_t {nullptr}});
         }
         return acquire(std::move(streams));
@@ -807,10 +713,10 @@ struct hip_executor_t {
     /** Waits for every transfer and launch queued on every stream - the fleet's completion; binds
      *  each device first, since a null stream is the current device's. */
     status_t drain() noexcept {
-        hip_runtime_t const& runtime = hip_runtime();
+        hip_api_t const& runtime = hip_api();
         for (stream_t& opened : streams_)
-            if (runtime.set_device(opened.device) != hip_success_k ||
-                runtime.stream_synchronize(opened.handle) != hip_success_k)
+            if (runtime.set_device(opened.device) != hipSuccess ||
+                runtime.stream_synchronize(opened.handle) != hipSuccess)
                 return status_t::device_error_k;
         return status_t::success_k;
     }
@@ -862,40 +768,40 @@ struct hip_module_t {
     hip_module_t(hip_module_t const&) = delete;
     hip_module_t& operator=(hip_module_t const&) = delete;
     ~hip_module_t() noexcept {
-        if (handle_) hip_runtime().module_unload(handle_);
+        if (handle_) hip_api().module_unload(handle_);
     }
 
     /** Loads @p code_object onto HIP ordinal @p device, binding it first, since a module loads into
      *  the current device; an offload bundle loads the entry matching the device's architecture. */
     static expected<hip_module_t> load(int device, bytes_view_t code_object) noexcept {
-        hip_runtime_t const& runtime = hip_runtime();
+        hip_api_t const& runtime = hip_api();
         hip_module_t module;
-        if (!runtime || runtime.set_device(device) != hip_success_k ||
-            runtime.module_load_data(&module.handle_, code_object.data()) != hip_success_k)
+        if (!runtime || runtime.set_device(device) != hipSuccess ||
+            runtime.module_load_data(&module.handle_, code_object.data()) != hipSuccess)
             return {{}, status_t::device_error_k};
         return {std::move(module), status_t::success_k};
     }
 
     /** The kernel exported as @p name, or null when the code object has none. */
-    hip_function_handle_t function(char const* name) const noexcept {
-        hip_function_handle_t function = nullptr;
-        return hip_runtime().module_get_function(&function, handle_, name) == hip_success_k ? function : nullptr;
+    hipFunction_t function(char const* name) const noexcept {
+        hipFunction_t function = nullptr;
+        return hip_api().module_get_function(&function, handle_, name) == hipSuccess ? function : nullptr;
     }
 
   private:
-    hip_module_handle_t handle_ = nullptr;
+    hipModule_t handle_ = nullptr;
 };
 
 /** Launches @p function over @p blocks of @p threads on @p stream - the only launch path - passing
  *  each argument by address, as the module API takes them, so each must already be the kernel's own
  *  type; answers the launch's own error, like a bad configuration or too much shared memory. */
 template <typename... argument_types_>
-status_t hip_launch(hip_function_handle_t function, u32_t blocks, u32_t threads, u32_t shared_bytes,
-                    hip_stream_handle_t stream, argument_types_... arguments) noexcept {
+status_t hip_launch(hipFunction_t function, u32_t blocks, u32_t threads, u32_t shared_bytes, hipStream_t stream,
+                    argument_types_... arguments) noexcept {
     static_assert((std::is_trivially_copyable_v<argument_types_> && ...), "Kernels take their arguments by bytes");
     void* addresses[] = {static_cast<void*>(&arguments)...};
-    return hip_runtime().module_launch_kernel(function, blocks, 1, 1, threads, 1, 1, shared_bytes, stream, addresses,
-                                              nullptr) == hip_success_k
+    return hip_api().module_launch_kernel(function, blocks, 1, 1, threads, 1, 1, shared_bytes, stream, addresses,
+                                          nullptr) == hipSuccess
                ? status_t::success_k
                : status_t::device_error_k;
 }
@@ -907,22 +813,6 @@ static_assert(hip_allocator<hip_arena_allocator_t>);
 static_assert(hip_allocator<hip_pinned_allocator_t>);
 
 #if NUMKONG_ARCH_ROCM_
-
-static_assert(std::is_same_v<hip_stream_handle_t, hipStream_t> && std::is_same_v<hip_module_handle_t, hipModule_t>);
-static_assert(std::is_same_v<hip_function_handle_t, hipFunction_t>);
-static_assert(std::is_same_v<hip_allocation_handle_t, hipMemGenericAllocationHandle_t>);
-static_assert(hip_success_k == hipSuccess && static_cast<int>(hip_memcpy_kind_t::default_k) == hipMemcpyDefault);
-static_assert(static_cast<int>(hip_memcpy_kind_t::host_to_device_k) == hipMemcpyHostToDevice);
-static_assert(static_cast<int>(hip_memcpy_kind_t::device_to_host_k) == hipMemcpyDeviceToHost);
-static_assert(static_cast<int>(hip_memcpy_kind_t::device_to_device_k) == hipMemcpyDeviceToDevice);
-static_assert(hip_memory_allocation_pinned_k == hipMemAllocationTypePinned);
-static_assert(hip_memory_location_device_k == hipMemLocationTypeDevice);
-static_assert(hip_memory_access_read_write_k == hipMemAccessFlagsProtReadWrite);
-static_assert(hip_memory_granularity_minimum_k == hipMemAllocationGranularityMinimum);
-static_assert(hip_memory_attach_global_k == hipMemAttachGlobal && hip_host_malloc_portable_k == hipHostMallocPortable);
-static_assert(hip_memory_advise_preferred_location_k == hipMemAdviseSetPreferredLocation);
-static_assert(hip_memory_advise_accessed_by_k == hipMemAdviseSetAccessedBy && hip_cpu_device_k == hipCpuDeviceId);
-static_assert(hip_stream_non_blocking_k == hipStreamNonBlocking);
 
 /*  A wavefront spans 32 lanes on the GFX12 parts, MI400, and 64 on the GFX9 ones, MI300 and MI350.
  *  HIP-Clang learns the wavefront size only after code generation, so the width comes from the
@@ -1043,5 +933,4 @@ struct hip_warp_t {
 
 #endif // NUMKONG_ARCH_ROCM_
 
-} // namespace usearch
-} // namespace unum
+} // namespace unum::usearch::utilities
