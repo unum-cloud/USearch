@@ -94,7 +94,8 @@ struct vram_apple_indexes {
      *  shard. */
     status_t emplace(int device) noexcept {
         if (!shards_.empty()) return status_t::config_mismatch_k;
-        std::unique_ptr<index_t> shard {new (std::nothrow) index_t(kernel_, metal_shared_allocator_t {device})};
+        metal_shared_allocator_t const allocator {device};
+        std::unique_ptr<index_t> shard {new (std::nothrow) index_t(kernel_, allocator, allocator)};
         if (!shard) return status_t::bad_alloc_k;
         return shards_.push_back(shard_t {std::move(shard), keys_column_t {allocator_}});
     }

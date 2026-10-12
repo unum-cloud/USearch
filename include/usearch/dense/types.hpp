@@ -214,7 +214,8 @@ inline constexpr u32_t vram_cache_rows_k = 64;
 struct vram_telemetry_block_t {
     u64_t hops, scored, lock_attempts, lock_skips, reselections, restarts, locked_drops;
 
-    /** Scored candidates split by plane residency; zero unless the view names a resident range. */
+    /** Scored candidates split by storage residency; zero unless the view names a resident
+     *  range. */
     u64_t local_scored, remote_scored;
 
     /** Frontier tail entries shed past their slice, and visited-set claims out of probes. */

@@ -741,7 +741,7 @@ struct ram_index {
 
     /** Whether rows keep norms: every metric but dot finalizes through them, and so does dot on a
      *  kit whose finalize subtracts the candidates' row sums. Otherwise the norms chunks stay
-     *  empty, and checkpoints carry no norms plane. */
+     *  empty, and checkpoints carry no norms column. */
     bool stores_norms() const noexcept { return kernel_ != nk_kernel_dot_k || quads_compensated<quads_kit_t>; }
 
     /** Number of published vectors - the visibility watermark; the index itself stores no keys. */
@@ -836,17 +836,17 @@ struct ram_index {
         return {count, frozen.dimensions(), frozen.connectivity()};
     }
 
-    /** Where a save lands: row-major planes the caller sized from @ref saved_shape, handed
+    /** Where a save lands: row-major columns the caller sized from @ref saved_shape, handed
      *  over at planning so no step names a destination of its own. */
     struct columns_t {
 
-        /** The vectors plane, one packed row per node. */
+        /** The vectors matrix, one packed row per node. */
         bytes_span_t vectors;
 
-        /** The neighbors plane, @c connectivity IDs per node. */
+        /** The neighbors matrix, @c connectivity IDs per node. */
         bytes_span_t neighbors;
 
-        /** The norms plane, one @c vector_norms_t per node, or empty to write none; only an index
+        /** The norms column, one @c vector_norms_t per node, or empty to write none; only an index
          *  that keeps norms takes one. */
         bytes_span_t norms;
     };
@@ -854,13 +854,13 @@ struct ram_index {
     /** Where a load reads from - the read-only twin of @ref columns_t. */
     struct columns_view_t {
 
-        /** The vectors plane, one packed row per node. */
+        /** The vectors matrix, one packed row per node. */
         bytes_view_t vectors;
 
-        /** The neighbors plane, @c connectivity IDs per node. */
+        /** The neighbors matrix, @c connectivity IDs per node. */
         bytes_view_t neighbors;
 
-        /** The norms plane, one @c vector_norms_t per node, or empty to derive them from the
+        /** The norms column, one @c vector_norms_t per node, or empty to derive them from the
          *  vectors; only an index that keeps norms takes one. */
         bytes_view_t norms;
     };
@@ -1915,7 +1915,7 @@ struct ram_index {
     /**
      *  @brief One save in flight: the watermark it took, the contract it runs under, and the storage
      *      chunks it hands out to any number of threads. Vectors and sentinel-padded neighbor rows
-     *      are what a snapshot holds, and the norms when the columns carry a plane for them.
+     *      are what a snapshot holds, and the norms when the columns carry one for them.
      *
      *  A checkpointing reader, not a mutator: concurrent searches keep running on every arm.
      *  Under @c concurrent_k every row is copied under its slot-zero lock, as writers edit it, and
@@ -2023,10 +2023,10 @@ struct ram_index {
             // Chunk rows are padded to whole kit steps, while checkpoints keep logical rows.
             std::size_t const row_bytes = stored_row_values(frozen) * sizeof(scalar_t);
             std::size_t const first = step.source_rows.first;
-            bytes_span_t const vectors_rows = plane_rows(columns.vectors, first, rows.size(), row_bytes);
-            bytes_span_t const neighbors_rows = plane_rows(columns.neighbors, first, rows.size(),
-                                                           connectivity * sizeof(node_id_t));
-            bytes_span_t const norms_rows = plane_rows(columns.norms, first, rows.size(), sizeof(vector_norms_t));
+            bytes_span_t const vectors_rows = flat_rows(columns.vectors, first, rows.size(), row_bytes);
+            bytes_span_t const neighbors_rows = flat_rows(columns.neighbors, first, rows.size(),
+                                                          connectivity * sizeof(node_id_t));
+            bytes_span_t const norms_rows = flat_rows(columns.norms, first, rows.size(), sizeof(vector_norms_t));
             if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
             if (scratch.extent(0) < rows.size() || scratch.extent(1) != connectivity || !scratch.is_contiguous())
@@ -2245,7 +2245,7 @@ struct ram_index {
          *      rows in that part's row and ID spaces.
          *
          *  @param[in] step The step to fill; its source rows address @p columns.
-         *  @param[in] columns The part's own planes.
+         *  @param[in] columns The part's own columns.
          *  @param[in] source_range The ID space the part's rows speak.
          */
         status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range) noexcept {
@@ -2258,10 +2258,10 @@ struct ram_index {
             // Checkpoints keep logical rows, while chunk rows are padded to whole kit steps.
             std::size_t const row_bytes = stored_row_values(frozen) * sizeof(scalar_t);
             std::size_t const first = step.source_rows.first;
-            bytes_view_t const vectors_rows = plane_rows(columns.vectors, first, range.size(), row_bytes);
-            bytes_view_t const neighbors_rows = plane_rows(columns.neighbors, first, range.size(),
-                                                           connectivity * sizeof(node_id_t));
-            bytes_view_t const norms_rows = plane_rows(columns.norms, first, range.size(), sizeof(vector_norms_t));
+            bytes_view_t const vectors_rows = flat_rows(columns.vectors, first, range.size(), row_bytes);
+            bytes_view_t const neighbors_rows = flat_rows(columns.neighbors, first, range.size(),
+                                                          connectivity * sizeof(node_id_t));
+            bytes_view_t const norms_rows = flat_rows(columns.norms, first, range.size(), sizeof(vector_norms_t));
             if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
             // The part's rows land at this step's own index rows, so an ID's shift follows from
@@ -2336,7 +2336,7 @@ struct ram_index {
      *  Refuses an unfrozen geometry, columns shorter than the rows, an insert mid-flight, and rows
      *  past the ID space.
      *
-     *  @param[in] columns Where the rows come from, every plane but an empty norms one sized for
+     *  @param[in] columns Where the rows come from, every column but an empty norms one sized for
      *      @p rows.
      *  @param[in] rows Rows to append.
      *  @param[in] source_range The ID space the source's rows speak.
@@ -3650,7 +3650,7 @@ struct ram_index {
     /** Read-mostly after the freeze - kept off the watermark's line with the other cold members. */
     alignas(default_alignment_k) geometry_t geometry_ {};
 
-    /** The distance kind every walk ranks by; only the distance epilogue and the norms plane
+    /** The distance kind every walk ranks by; only the distance epilogue and the norms chunks
      *  read it. */
     nk_kernel_kind_t kernel_;
 

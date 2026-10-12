@@ -12,10 +12,10 @@
  *  @c v_dot4_i32_iu8. Each class unit compiles for its own processor with that tier's
  *  @c NUMKONG_TARGET_* alone, so a tier's kits compile only where its instructions exist, and the
  *  chains pick among them under the class's ceiling. MI300's fp8 conversions read the FNUZ
- *  encodings rather than the OCP ones the planes store, so CDNA3 widens fp8 in software, through
+ *  encodings rather than the OCP ones the vectors matrix stores, so CDNA3 widens fp8 in software, through
  *  NumKong's converters.
  *
- *  Fragments are 16 bytes, rows and the metric are runtime state of the planes view, and the
+ *  Fragments are 16 bytes, rows and the metric are runtime state of the flat view, and the
  *  cross-lane reductions live in @c vram_index.cuh over @ref hip_warp_t, exactly as on NVIDIA; the
  *  arithmetic lives in named device primitives, and a kit binds them. Only HIP-Clang's device pass
  *  sees past the guard: the host classes take their scalar layouts from the dtype alone.

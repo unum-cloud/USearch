@@ -18,7 +18,7 @@
 #include <atomic>      // `std::atomic_ref` - the outcome's status word
 #include <bit>         // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
 #include <mutex>       // `std::lock_guard` over the ticks' lock
-#include <span>        // `std::span` - the search verbs' landing planes
+#include <span>        // `std::span` - the search verbs' landing matrices
 #include <string_view> // `std::string_view` - kernel tokens & checkpoint paths
 #include <type_traits> // `std::is_same_v` - the residency discrimination
 
@@ -821,7 +821,7 @@ struct specialized_index {
     status_t load(bytes_view_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept;
 
     /** The C layer's save config: the path's suffix picks the layout, the residency the contract -
-     *  device planes cannot be settlement-probed, so a GPU handle certifies. */
+     *  device storage cannot be settlement-probed, so a GPU handle certifies. */
     static save_config_t save_config_of(std::string_view path) noexcept;
 };
 

@@ -14,8 +14,9 @@
  *  Plain C++ over the driver's declarations in @c <cuda.h>, hence the @c .hpp extension; the warp
  *  policy the shared walk code is written against lives beside the kits in
  *  @c vram_nvidia_metric.cuh. The flat @c cuda_allocator carries @c std::allocator's call surface
- *  with the stream bound at construction; the @c cuda_reservable_allocator is the plane backend, a
- *  reserve-once / commit-on-demand range whose base survives growth. Nothing models both.
+ *  with the stream bound at construction; the @c cuda_reservable_allocator is the flat storage
+ *  backend, a reserve-once / commit-on-demand range whose base survives growth. Nothing models
+ *  both.
  */
 #pragma once
 
@@ -37,7 +38,7 @@
 
 #include <cuda.h> // Driver API declarations only: `CUdeviceptr`, `CUmemAllocationProp`, `CUlaunchConfig`
 
-#include <forkunion/topology.hpp> // `fu::volume_ram` - the managed planes' host-memory budget
+#include <forkunion/topology.hpp> // `fu::volume_ram` - the managed storage's host-memory budget
 #include <forkunion/types.hpp>    // `fu::round_up_to_multiple`, `fu::spin_mutex_t` - the hold
 
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - an executor's table of contexts
@@ -334,8 +335,8 @@ concept cuda_allocator = requires(allocator_ allocator, typename allocator_::val
     { allocator.device() } -> std::convertible_to<int>;
 };
 
-/** The plane backend contract: a reserve-once / commit-on-demand address range whose base
- *  never moves. Not a refinement of @c cuda_allocator, since planes never free mid-life. */
+/** The flat storage backend contract: a reserve-once / commit-on-demand address range whose base
+ *  never moves. Not a refinement of @c cuda_allocator, since flat storage never frees mid-life. */
 template <typename allocator_>
 concept cuda_reservable_allocator = requires(allocator_ allocator, std::size_t bytes, int device) {
     typename allocator_::value_type;
@@ -349,7 +350,7 @@ concept cuda_reservable_allocator = requires(allocator_ allocator, std::size_t b
     { allocator.device() } -> std::convertible_to<int>;
 };
 
-/** Virtual-memory plane backend: a fixed driver-API address reservation backed by slabs
+/** Virtual-memory flat storage backend: a fixed driver-API address reservation backed by slabs
  *  mapped on demand, host-driven ahead of any kernel; fresh slabs arrive zeroed. */
 template <typename value_type_ = byte_t>
 struct cuda_virtual_memory_allocator {
@@ -455,7 +456,7 @@ struct cuda_virtual_memory_allocator {
     }
 };
 
-/** Unified-memory plane backend: one @c cuMemAllocManaged reservation for the whole ceiling,
+/** Unified-memory flat storage backend: one @c cuMemAllocManaged reservation for the whole ceiling,
  *  preferring the device and oversubscribable past VRAM. */
 template <typename value_type_ = byte_t>
 struct cuda_managed_allocator {

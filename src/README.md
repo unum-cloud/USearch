@@ -42,7 +42,7 @@ The arms are aliases over those templates, keyed by the storage dtype and the cl
 An arm's executor type is its residency, so `is_ram_index`, `is_nvme_index` and `is_vram_index` read it rather than a second tag that could disagree.
 The core verbs land on `specialized_index` members of the same names, `count`, `get`, `reserve`, `clear`, `refine`, `health`, `search`, `multiply`, `maxsim`, `attend`, `save` and `load`.
 `insert` becomes `add`, one plan with a step per chunk that publishes every row at once.
-Rows whose scalar differs from the stored one cast through NumKong into a staged plane, 4096 rows at a time, while matching rows reach the arm in place.
+Rows whose scalar differs from the stored one cast through NumKong into a staged matrix, 4096 rows at a time, while matching rows reach the arm in place.
 Progress callbacks tick once per such chunk, and scores staged at the engine's width widen to the ABI's `double` as they land in the arena.
 
 ## Dispatch over Capability Kits

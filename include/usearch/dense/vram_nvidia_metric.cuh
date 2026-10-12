@@ -14,7 +14,7 @@
  *
  *  Fragments are 16 bytes of scalars held in registers, and metrics with precomputable norms
  *  finalize "through the dot". Row geometry - how many fragments span one vector, how many lanes
- *  cooperate on a row - and the metric are runtime state of the planes view, not the kit:
+ *  cooperate on a row - and the metric are runtime state of the flat view, not the kit:
  *  dimensions are frozen by the first @c reserve, never by a type, and the metric only steers the
  *  scalar epilogue, so one kernel serves every metric of a dtype. The cross-lane reduction is
  *  deliberately not a kit member - one shuffle tree in @c vram_index.cuh serves every kit, over the
@@ -24,7 +24,7 @@
  *  Families sort from the widest numeric types to the smallest & most exotic: 16-bit floats, 8-bit
  *  integers, minifloats, packed nibbles, packed bits. Norms are the CPU's @c vector_norms over each
  *  kit's dot type, so the unsigned families accumulate in unsigned words with defined wrapping and
- *  no cast chatter, while @c i8 keeps the CPU planes' signed @b {sum,sumsq} layout.
+ *  no cast chatter, while @c i8 keeps the CPU norms' signed @b {sum,sumsq} layout.
  */
 #pragma once
 

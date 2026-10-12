@@ -19,7 +19,7 @@
 #include <cstring> // `std::memcpy`
 
 #include <bit>     // `std::bit_ceil`, `std::has_single_bit`
-#include <mutex>   // `std::unique_lock` while one context grows the planes and claims
+#include <mutex>   // `std::unique_lock` while one context grows the storage and claims
 #include <span>    // `std::span`
 #include <utility> // `std::exchange`
 
@@ -72,8 +72,8 @@ inline amd_arena_shape_t amd_arena_shape(u32_t expansion, u32_t tail_entries) no
     return {visited_slots, 32 - static_cast<u32_t>(std::bit_width(visited_slots - 1)), tail_entries};
 }
 
-/** The planes a kernel reads, mirroring the shared planes view field by field. */
-struct amd_planes_t {
+/** The flat storage a kernel reads, mirroring the shared flat view field by field. */
+struct amd_flat_storage_t {
     byte_t* vectors = nullptr;
     byte_t* norms = nullptr;
     u32_t* neighbors = nullptr;
@@ -87,7 +87,7 @@ struct amd_planes_t {
 
 /** One insertion launch, mirroring the shared build view. */
 struct amd_build_t {
-    amd_planes_t planes;
+    amd_flat_storage_t storage;
     byte_t const* staging = nullptr;
     u32_t end_id = 0;
     u32_t scratch_bytes_per_warp = 0;
@@ -102,7 +102,7 @@ struct amd_build_t {
 
 /** One walking launch, mirroring the shared search view. */
 struct amd_search_t {
-    amd_planes_t planes;
+    amd_flat_storage_t storage;
     byte_t const* queries = nullptr;
     u32_t queries_count = 0;
     u32_t sampling_bound = 0;
@@ -116,7 +116,7 @@ struct amd_search_t {
 
 /** One refinement launch, mirroring the shared refine view. */
 struct amd_refine_t {
-    amd_planes_t planes;
+    amd_flat_storage_t storage;
     u32_t* shadow_neighbors = nullptr;
     u32_t end_id = 0;
     u32_t scratch_bytes_per_warp = 0;
@@ -158,7 +158,7 @@ struct amd_rescoring_t {
 
 /** What the graph kernels - the scatter, the merge's buckets, the norms and the audits - read. */
 struct amd_graph_t {
-    amd_planes_t planes;
+    amd_flat_storage_t storage;
     u32_t* neighbors = nullptr;
     u32_t rows_count = 0;
     u32_t connectivity = 0;
@@ -300,7 +300,7 @@ struct vram_amd_index;
 
 /** One stream's device-side scratch for driving an AMD index: the traversal arena, the batch
  *  staging, the telemetry counters and the attend miss word, riding the stream its allocator names
- *  and never opening one. Two contexts on one index share only the planes and the published
+ *  and never opening one. Two contexts on one index share only the storage and the published
  *  counter, never scratch. */
 template <hip_allocator allocator_type_ = hip_device_allocator_t>
 struct hip_traversal_context {
@@ -432,8 +432,8 @@ struct hip_traversal_context {
  *  contiguous range, and its rows publish unordered on the device, turning visible to searches a
  *  whole batch at a time; see @ref dense_vram_amd_index_concurrency. The first successful
  *  @c reserve freezes the geometry and the virtual-address ceiling; physical slabs map on demand,
- *  and fresh neighbors are sentinel-filled before any ID covering them can be assigned. The planes
- *  grow only while @c claiming_ is held, and the claim counter, the watermark and the kept status
+ *  and fresh neighbors are sentinel-filled before any ID covering them can be assigned. The storage
+ *  grows only while @c claiming_ is held, and the claim counter, the watermark and the kept status
  *  are the only mutable host state; the published-row count is device memory no host thread
  *  dereferences.
  */
@@ -453,7 +453,7 @@ struct vram_amd_index {
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using dot_result_t = typename scalar_t::dot_result_t;
 
-    /** Every AMD kit accumulates the scalar's own dot type, which the norms plane stores. */
+    /** Every AMD kit accumulates the scalar's own dot type, which the norms column stores. */
     using dot_t = dot_result_t;
     using norms_t = vector_norms<dot_t>;
     using vectors_view_t = nk::matrix_view<scalar_t>;
@@ -466,7 +466,7 @@ struct vram_amd_index {
     /** The page-locked host bytes a checkpoint moves through, one batch at a time. */
     using bounce_t = growing_buffer<byte_t, hip_pinned_allocator_t>;
 
-    /** Rows one checkpoint batch carries between a plane and the caller: one slab, the row
+    /** Rows one checkpoint batch carries between a matrix and the caller: one slab, the row
      *  granularity the RAM residency grows by. */
     inline static constexpr std::size_t bounce_rows_log2_k = 20;
     using traversal_context_t = hip_traversal_context<traversals_allocator_t>;
@@ -500,12 +500,12 @@ struct vram_amd_index {
     }
 
     /** The @p kernel every walk scores by, checked against the dtype at the first @c reserve, and
-     *  one allocator per plane concern, each carrying its device placement; the index pins itself
+     *  one allocator per storage concern, each carrying its device placement; the index pins itself
      *  to the vectors allocator's device and demands the neighbors allocator agree. */
     explicit vram_amd_index(nk_kernel_kind_t kernel, vectors_allocator_t const& vectors_allocator = {},
                             neighbors_allocator_t const& neighbors_allocator = {}) noexcept
-        : device_ {vectors_allocator.device()}, kernel_ {kernel}, vectors_plane_(vectors_allocator),
-          norms_plane_(vectors_allocator), neighbors_plane_(neighbors_allocator) {}
+        : device_ {vectors_allocator.device()}, kernel_ {kernel}, vectors_matrix_(vectors_allocator),
+          norms_column_(vectors_allocator), neighbors_matrix_(neighbors_allocator) {}
     vram_amd_index(vram_amd_index const&) = delete;
     vram_amd_index& operator=(vram_amd_index const&) = delete;
 
@@ -523,17 +523,17 @@ struct vram_amd_index {
         return standard_atomic_ref<status_t const>(status_).load(std::memory_order_acquire);
     }
 
-    /** Rows mapped across the planes, the smallest of their counts, since slabs are a fixed byte
-     *  size and each plane maps a different row count per slab; dot's empty norms plane bounds
-     *  nothing. */
+    /** Rows mapped across the flat storage, the smallest of their counts, since slabs are a fixed
+     *  byte size and each matrix maps a different row count per slab; dot's empty norms column
+     *  bounds nothing. */
     std::size_t capacity() const noexcept {
         std::size_t const neighbors_row_bytes = connectivity() * sizeof(u32_t);
         std::size_t const vector_row_bytes = row_bytes();
         if (!neighbors_row_bytes || !vector_row_bytes) return 0;
-        std::size_t const by_vectors = vectors_plane_.committed_bytes() / vector_row_bytes;
-        std::size_t const by_neighbors = neighbors_plane_.committed_bytes() / neighbors_row_bytes;
+        std::size_t const by_vectors = vectors_matrix_.committed_bytes() / vector_row_bytes;
+        std::size_t const by_neighbors = neighbors_matrix_.committed_bytes() / neighbors_row_bytes;
         if (kernel_ == nk_kernel_dot_k) return min_of(by_vectors, by_neighbors);
-        std::size_t const by_norms = norms_plane_.committed_bytes() / sizeof(norms_t);
+        std::size_t const by_norms = norms_column_.committed_bytes() / sizeof(norms_t);
         return min_of(by_vectors, min_of(by_norms, by_neighbors));
     }
     std::size_t connectivity() const noexcept {
@@ -558,15 +558,15 @@ struct vram_amd_index {
     nk_kernel_kind_t kernel() const noexcept { return kernel_; }
 
     /** Whether rows keep norms: every metric but dot finalizes through them, so dot leaves the
-     *  norms plane empty and checkpoints carry none. */
+     *  norms column empty and checkpoints carry none. */
     bool stores_norms() const noexcept { return kernel_ != nk_kernel_dot_k; }
 
-    /** Device-side plane views - the audit surface for invariant checkers & tests. */
-    amd_planes_t planes() const noexcept {
+    /** Device-side flat storage views - the audit surface for invariant checkers & tests. */
+    amd_flat_storage_t storage() const noexcept {
         u32_t const fragments = row_fragments();
-        return {reinterpret_cast<byte_t*>(vectors_plane_.base()),
-                reinterpret_cast<byte_t*>(norms_plane_.base()),
-                reinterpret_cast<u32_t*>(neighbors_plane_.base()),
+        return {reinterpret_cast<byte_t*>(vectors_matrix_.base()),
+                reinterpret_cast<byte_t*>(norms_column_.base()),
+                reinterpret_cast<u32_t*>(neighbors_matrix_.base()),
                 static_cast<u32_t>(connectivity()),
                 fragments,
                 lanes_per_row(),
@@ -647,38 +647,38 @@ struct vram_amd_index {
     };
     saved_shape_t saved_shape() const noexcept { return {size(), dimensions(), connectivity()}; }
 
-    /** Where a save lands: row-major host planes the caller sized from @ref saved_shape, handed
+    /** Where a save lands: row-major host columns the caller sized from @ref saved_shape, handed
      *  over at planning so no step names a destination of its own. */
     struct columns_t {
 
-        /** The vectors plane, one packed row per node. */
+        /** The vectors matrix, one packed row per node. */
         bytes_span_t vectors;
 
-        /** The neighbors plane, @c connectivity IDs per node. */
+        /** The neighbors matrix, @c connectivity IDs per node. */
         bytes_span_t neighbors;
 
-        /** The norms plane, one @c norms_t per node, or empty to write none. */
+        /** The norms column, one @c norms_t per node, or empty to write none. */
         bytes_span_t norms;
     };
 
     /** Where a load reads from - the read-only twin of @ref columns_t. */
     struct columns_view_t {
 
-        /** The vectors plane, one packed row per node. */
+        /** The vectors matrix, one packed row per node. */
         bytes_view_t vectors;
 
-        /** The neighbors plane, @c connectivity IDs per node. */
+        /** The neighbors matrix, @c connectivity IDs per node. */
         bytes_view_t neighbors;
 
-        /** The norms plane, one @c norms_t per node, or empty to derive them from the vectors. */
+        /** The norms column, one @c norms_t per node, or empty to derive them from the vectors. */
         bytes_view_t norms;
     };
 
-    /** Bytes this index occupies - the committed device planes, the published-row count, and the
+    /** Bytes this index occupies - the committed device storage, the published-row count, and the
      *  host struct; traversal scratch belongs to executors and contexts. */
     std::size_t memory_usage() const noexcept {
-        return sizeof(vram_amd_index) + vectors_plane_.committed_bytes() + norms_plane_.committed_bytes() +
-               neighbors_plane_.committed_bytes() + (published_rows_ ? sizeof(u32_t) : 0);
+        return sizeof(vram_amd_index) + vectors_matrix_.committed_bytes() + norms_column_.committed_bytes() +
+               neighbors_matrix_.committed_bytes() + (published_rows_ ? sizeof(u32_t) : 0);
     }
 
     /** Copies the stored row of @p node into @p destination with the fragment padding stripped,
@@ -690,7 +690,7 @@ struct vram_amd_index {
         if (!destination.is_contiguous()) return status_t::unsupported_layout_k;
         std::size_t const scalar_row_bytes = packed_row_bytes();
         return hip_api().copy(destination.byte_data(),
-                              vectors_plane_.base() + static_cast<std::size_t>(node) * row_bytes(), scalar_row_bytes,
+                              vectors_matrix_.base() + static_cast<std::size_t>(node) * row_bytes(), scalar_row_bytes,
                               hipMemcpyDeviceToHost) == hipSuccess
                    ? status_t::success_k
                    : status_t::device_error_k;
@@ -739,7 +739,7 @@ struct vram_amd_index {
                                 : kernel_ == nk_kernel_dot_k || kernel_ == nk_kernel_angular_k ||
                                       kernel_ == nk_kernel_sqeuclidean_k || kernel_ == nk_kernel_euclidean_k;
         if (!scored) return {0, status_t::unknown_kind_k};
-        if (neighbors_plane_.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
+        if (neighbors_matrix_.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
         if (!config.dimensions || !std::has_single_bit(static_cast<u32_t>(config.connectivity)))
             return {0, status_t::config_mismatch_k};
         // The first success freezes both axes at once; later calls must agree with what they
@@ -753,7 +753,7 @@ struct vram_amd_index {
             return {capacity(), status_t::config_mismatch_k};
         connectivity_t const connectivity = config.connectivity;
         if (config.capacity > max_node_count_k) return {capacity(), status_t::overflow_k};
-        if (!vectors_plane_.reserved_bytes()) { // First reservation: bind the device, size the ceiling.
+        if (!vectors_matrix_.reserved_bytes()) { // First reservation: bind the device, size the ceiling.
             if (!hip_api() || hip_api().set_device(device_.ordinal) != hipSuccess) return {0, status_t::device_error_k};
             auto const [specs, status] = hip_device_specs_t::query(device_.ordinal);
             if (failed(status)) return {0, status};
@@ -768,18 +768,18 @@ struct vram_amd_index {
             bool const normed = kernel_ != nk_kernel_dot_k;
             std::size_t const bytes_per_row = row_bytes() + (normed ? sizeof(norms_t) : 0) +
                                               connectivity * sizeof(u32_t);
-            // Device planes budget against VRAM; managed planes oversubscribe it and budget against
-            // host memory through their own backend, which keeps the topology symbols out of device
-            // instantiations.
+            // Device storage budgets against VRAM; managed storage oversubscribes it and budgets
+            // against host memory through their own backend, which keeps the topology symbols out
+            // of device instantiations.
             std::size_t budget_bytes = 4 * device_.vram_bytes;
             if constexpr (vectors_allocator_t::address_space_k == hip_address_space_t::managed_k)
                 budget_bytes = vectors_allocator_t::budget_bytes();
             std::size_t const ceiling_rows = min_of(max_node_count_k,
                                                     max_of<std::size_t>(config.capacity, budget_bytes / bytes_per_row));
-            if (vectors_plane_.reserve_range(ceiling_rows * row_bytes(), device_.ordinal) != status_t::success_k ||
+            if (vectors_matrix_.reserve_range(ceiling_rows * row_bytes(), device_.ordinal) != status_t::success_k ||
                 (normed &&
-                 norms_plane_.reserve_range(ceiling_rows * sizeof(norms_t), device_.ordinal) != status_t::success_k) ||
-                neighbors_plane_.reserve_range(ceiling_rows * connectivity * sizeof(u32_t), device_.ordinal) !=
+                 norms_column_.reserve_range(ceiling_rows * sizeof(norms_t), device_.ordinal) != status_t::success_k) ||
+                neighbors_matrix_.reserve_range(ceiling_rows * connectivity * sizeof(u32_t), device_.ordinal) !=
                     status_t::success_k)
                 return {0, status_t::bad_alloc_k};
             counter_allocator_t counter_allocator {nullptr, device_.ordinal};
@@ -1123,7 +1123,7 @@ struct vram_amd_index {
             if (!islands) break;
             // The reached in-links first, so no reconnection takes the last link a reached node is
             // found through.
-            u32_t* const neighbors = reinterpret_cast<u32_t*>(neighbors_plane_.base());
+            u32_t* const neighbors = reinterpret_cast<u32_t*>(neighbors_matrix_.base());
             if (hip_api().fill_async(audit.in_links, 0, rows * sizeof(u32_t), context.stream()) != hipSuccess)
                 return {result, status_t::device_error_k};
             amd_arguments_t heal {};
@@ -1179,11 +1179,11 @@ struct vram_amd_index {
 
     /**
      *  @brief One save in flight: the watermark it took, the stream its copies ride, and the
-     *      batches it hands out - one pinned bounce of rows at a time, since a device plane cannot
+     *      batches it hands out - one pinned bounce of rows at a time, since a device matrix cannot
      *      be read in place.
      *
      *  Vectors travel as logical rows with the fragment padding stripped, neighbors verbatim under
-     *  the positional sentinel convention, and norms verbatim when the columns carry their plane.
+     *  the positional sentinel convention, and norms verbatim when the columns carry theirs.
      *
      *  One host thread drives a device, so batches are taken one after another, though the tallies
      *  keep the shape a threaded caller expects.
@@ -1288,14 +1288,14 @@ struct vram_amd_index {
             std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
             std::size_t const step_slots = rows.size() * connectivity;
             std::size_t const first = step.source_rows.first;
-            bytes_span_t const vectors_rows = plane_rows(columns.vectors, first, rows.size(), scalar_row_bytes);
-            bytes_span_t const neighbors_rows = plane_rows(columns.neighbors, first, rows.size(), neighbors_row_bytes);
-            bytes_span_t const norms_rows = plane_rows(columns.norms, first, rows.size(), sizeof(norms_t));
+            bytes_span_t const vectors_rows = flat_rows(columns.vectors, first, rows.size(), scalar_row_bytes);
+            bytes_span_t const neighbors_rows = flat_rows(columns.neighbors, first, rows.size(), neighbors_row_bytes);
+            bytes_span_t const norms_rows = flat_rows(columns.norms, first, rows.size(), sizeof(norms_t));
             if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
             if (hip_api().copy_2d_async(
                     bounce.data(), scalar_row_bytes,
-                    index_->vectors_plane_.base() + static_cast<std::size_t>(rows.first) * index_->row_bytes(),
+                    index_->vectors_matrix_.base() + static_cast<std::size_t>(rows.first) * index_->row_bytes(),
                     index_->row_bytes(), scalar_row_bytes, rows.size(), hipMemcpyDeviceToHost, stream) != hipSuccess)
                 return status_t::device_error_k;
             if (hip_api().stream_synchronize(stream) != hipSuccess) return status_t::device_error_k;
@@ -1308,7 +1308,7 @@ struct vram_amd_index {
                     batch_rows * (scalar_row_bytes + neighbors_row_bytes), norms_rows.size());
                 if (hip_api().copy_async(
                         bounce_norms.data(),
-                        index_->norms_plane_.base() + static_cast<std::size_t>(rows.first) * sizeof(norms_t),
+                        index_->norms_column_.base() + static_cast<std::size_t>(rows.first) * sizeof(norms_t),
                         bounce_norms.size(), hipMemcpyDeviceToHost, stream) != hipSuccess)
                     return status_t::device_error_k;
                 if (hip_api().stream_synchronize(stream) != hipSuccess) return status_t::device_error_k;
@@ -1319,7 +1319,7 @@ struct vram_amd_index {
             bytes_span_t const bounce_neighbors = to_writable_span(bounce).subspan(batch_rows * scalar_row_bytes);
             if (hip_api().copy_async(
                     bounce_neighbors.data(),
-                    index_->neighbors_plane_.base() + static_cast<std::size_t>(rows.first) * neighbors_row_bytes,
+                    index_->neighbors_matrix_.base() + static_cast<std::size_t>(rows.first) * neighbors_row_bytes,
                     rows.size() * neighbors_row_bytes, hipMemcpyDeviceToHost, stream) != hipSuccess)
                 return status_t::device_error_k;
             if (hip_api().stream_synchronize(stream) != hipSuccess) return status_t::device_error_k;
@@ -1354,7 +1354,7 @@ struct vram_amd_index {
      *  @brief Opens a save into @p columns under @p synchronization on @p stream: takes the
      *      watermark and sizes one bounce for it.
      *
-     *  @c concurrent_k answers @c config_mismatch_k, since the device planes cannot be probed for
+     *  @c concurrent_k answers @c config_mismatch_k, since the device storage cannot be probed for
      *  settlement; @c exclusive_k reads like @c immutable_k. Columns too short for the rows under
      *  it are refused here, so no step ever writes past them.
      *
@@ -1366,7 +1366,7 @@ struct vram_amd_index {
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization, hipStream_t stream = nullptr,
                                     node_id_t id_shift = 0) const noexcept {
         if (synchronization == synchronization_t::concurrent_k) return {{}, status_t::config_mismatch_k};
-        if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
+        if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         std::size_t const rows = size();
         if (columns.vectors.size() < rows * packed_row_bytes() ||
             columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
@@ -1391,7 +1391,7 @@ struct vram_amd_index {
     }
 
     /**
-     *  @brief One load in flight: the rows it appends past every claimed one, the planes grown to
+     *  @brief One load in flight: the rows it appends past every claimed one, the storage grown to
      *      hold them, and the batches they span, each filled through one pinned bounce and uploaded
      *      on the stream; @ref finish derives the norms no batch carried and publishes.
      *
@@ -1399,7 +1399,7 @@ struct vram_amd_index {
      *  IDs are local to the rows it delivers, so every batch shifts them onto the appended range
      *  and folds every other ID onto the sentinel. Repeated plans append, which is how several
      *  parts land in one shard. A plan that dies before @c finish claims nothing, drops the mutex,
-     *  and leaves the planes grown for the next one.
+     *  and leaves the storage grown for the next one.
      */
     struct [[nodiscard]] load_plan_t {
 
@@ -1493,8 +1493,8 @@ struct vram_amd_index {
         /**
          *  @brief Copies step @p step 's rows out of the plan's own columns through the bounce.
          *
-         *  The vectors land in the fragment-padded plane rows, whose fresh tails arrive zeroed, and
-         *  their norms where the columns carry them, then the neighbors with every ID inside
+         *  The vectors land in the fragment-padded matrix rows, whose fresh tails arrive zeroed,
+         *  and their norms where the columns carry them, then the neighbors with every ID inside
          *  @c source_range folded onto the appended range and every other onto the sentinel.
          *
          *  @param[in] step The step to fill, as @ref steps hands them out.
@@ -1508,7 +1508,7 @@ struct vram_amd_index {
          *  in that part's row and ID spaces.
          *
          *  @param[in] step The step to fill; its source rows address @p columns.
-         *  @param[in] columns The part's own planes.
+         *  @param[in] columns The part's own columns.
          *  @param[in] source_range The ID space the part's rows speak.
          */
         status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range) noexcept {
@@ -1520,9 +1520,9 @@ struct vram_amd_index {
             std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
             std::size_t const step_slots = range.size() * connectivity;
             std::size_t const first = step.source_rows.first;
-            bytes_view_t const vectors_rows = plane_rows(columns.vectors, first, range.size(), scalar_row_bytes);
-            bytes_view_t const neighbors_rows = plane_rows(columns.neighbors, first, range.size(), neighbors_row_bytes);
-            bytes_view_t const norms_rows = plane_rows(columns.norms, first, range.size(), sizeof(norms_t));
+            bytes_view_t const vectors_rows = flat_rows(columns.vectors, first, range.size(), scalar_row_bytes);
+            bytes_view_t const neighbors_rows = flat_rows(columns.neighbors, first, range.size(), neighbors_row_bytes);
+            bytes_view_t const norms_rows = flat_rows(columns.norms, first, range.size(), sizeof(norms_t));
             if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
             // The part's rows land at this step's own index rows, so an ID's shift follows from
@@ -1535,17 +1535,17 @@ struct vram_amd_index {
             [[maybe_unused]] status_t const staged_vectors = copy_bytes(bytes_of(bounce.data(), vectors_rows.size()),
                                                                         vectors_rows);
             if (hip_api().copy_2d_async(
-                    index_->vectors_plane_.base() + static_cast<std::size_t>(range.first) * index_->row_bytes(),
+                    index_->vectors_matrix_.base() + static_cast<std::size_t>(range.first) * index_->row_bytes(),
                     index_->row_bytes(), bounce.data(), scalar_row_bytes, scalar_row_bytes, range.size(),
                     hipMemcpyHostToDevice, stream) != hipSuccess)
                 return index_->fail_(status_t::device_error_k);
-            // Dot reserves no norms plane, so a part's column has nowhere to land.
+            // Dot reserves no norms column, so a part's column has nowhere to land.
             if (index_->stores_norms() && !norms_rows.empty()) {
                 bytes_span_t const bounce_norms = to_writable_span(bounce).subspan(
                     batch_rows * (scalar_row_bytes + neighbors_row_bytes), norms_rows.size());
                 [[maybe_unused]] status_t const staged_norms = copy_bytes(bounce_norms, norms_rows);
                 if (hip_api().copy_async(
-                        index_->norms_plane_.base() + static_cast<std::size_t>(range.first) * sizeof(norms_t),
+                        index_->norms_column_.base() + static_cast<std::size_t>(range.first) * sizeof(norms_t),
                         bounce_norms.data(), bounce_norms.size(), hipMemcpyHostToDevice, stream) != hipSuccess)
                     return index_->fail_(status_t::device_error_k);
                 // Tallied ahead of the drain: a failed one keeps the vectors short, which `finish`
@@ -1562,7 +1562,7 @@ struct vram_amd_index {
             rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
             if (hip_api().copy_async(
-                    index_->neighbors_plane_.base() + static_cast<std::size_t>(range.first) * neighbors_row_bytes,
+                    index_->neighbors_matrix_.base() + static_cast<std::size_t>(range.first) * neighbors_row_bytes,
                     bounce_neighbors.data(), range.size() * neighbors_row_bytes, hipMemcpyHostToDevice,
                     stream) != hipSuccess)
                 return index_->fail_(status_t::device_error_k);
@@ -1616,13 +1616,13 @@ struct vram_amd_index {
 
     /**
      *  @brief Opens a load of @p rows from @p columns past every claimed one on @p stream: takes
-     *      the claim, grows the planes to hold them - the fresh neighbor rows arrive
+     *      the claim, grows the storage to hold them - the fresh neighbor rows arrive
      *      sentinel-filled - and sizes one bounce.
      *
      *  Refuses an unreserved index, a kept failure, columns shorter than the rows, a claim already
      *  held, and rows past the ID space.
      *
-     *  @param[in] columns Where the rows come from, every plane but an empty norms one sized for
+     *  @param[in] columns Where the rows come from, every column but an empty norms one sized for
      *      @p rows.
      *  @param[in] rows Rows to append.
      *  @param[in] source_range The ID space the source's rows speak.
@@ -1630,7 +1630,7 @@ struct vram_amd_index {
      */
     expected<load_plan_t> plan_load(columns_view_t columns, std::size_t rows, iota_view<node_id_t> source_range,
                                     hipStream_t stream = nullptr) noexcept {
-        if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
+        if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (columns.vectors.size() < rows * packed_row_bytes() ||
             columns.neighbors.size() < rows * connectivity() * sizeof(node_id_t) ||
             (!columns.norms.empty() && (!stores_norms() || columns.norms.size() < rows * sizeof(norms_t))))
@@ -1645,7 +1645,7 @@ struct vram_amd_index {
     /** Opens a load of @p rows the caller sources per step - what a sharded plan drives, its parts
      *  arriving one slice at a time rather than as one pair of columns. */
     expected<load_plan_t> plan_load(std::size_t rows, hipStream_t stream = nullptr) noexcept {
-        if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
+        if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (!rows)
             return {load_plan_t {*this, {}, {}, stream, {}, static_cast<node_id_t>(claimed_()), 0},
@@ -1694,7 +1694,7 @@ struct vram_amd_index {
                                              traversal_context_t& context, insert_config_t config) noexcept {
         std::size_t const rows = new_vectors.extent(0);
         if (!rows) return {{claimed_(), static_cast<node_id_t>(claimed_())}, status_t::success_k};
-        if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
+        if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (new_vectors.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
         if (assigned_ids.size() && assigned_ids.size() != rows) return {{}, status_t::config_mismatch_k};
         if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
@@ -1749,7 +1749,7 @@ struct vram_amd_index {
                 hip_api().fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream) != hipSuccess)
                 claimed = status_t::device_error_k;
             if (claimed == status_t::success_k) {
-                amd_build_t view {planes(), //
+                amd_build_t view {storage(), //
                                   staging,
                                   static_cast<u32_t>(total_rows),
                                   insert_scratch_bytes_per_warp(),
@@ -1827,7 +1827,7 @@ struct vram_amd_index {
         constexpr bool indexer_k = std::is_same_v<heads_type_, indexer_heads<scalar_t>>;
         constexpr bool attend_k = std::is_same_v<heads_type_, attend_heads_t>;
         std::size_t const queries_count = queries.extent(0);
-        if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
+        if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
         if (queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
         // Validated with the rest: past here a refusal would already have burned epoch space.
@@ -1911,7 +1911,7 @@ struct vram_amd_index {
             rescoring = {staged_heads, nullptr, static_cast<u32_t>(heads.head_count), row_fragments()};
         }
 
-        amd_search_t const view {planes(),
+        amd_search_t const view {storage(),
                                  staging,
                                  static_cast<u32_t>(queries_count),
                                  static_cast<u32_t>(visible),
@@ -2077,7 +2077,7 @@ struct vram_amd_index {
                                            iota_view<node_id_t> nodes, std::span<u32_t const> node_ids) noexcept {
         std::size_t const nodes_count = size();
         if (!nodes_count) return {{}, status_t::success_k};
-        if (!vectors_plane_.reserved_bytes()) return {{}, status_t::uninitialized_k};
+        if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
         if (!build_scratch_fits()) return {{}, status_t::config_mismatch_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
@@ -2087,7 +2087,7 @@ struct vram_amd_index {
         if (nodes.first >= nodes.bound) return {{}, status_t::success_k};
         std::size_t const walk_count = nodes.size();
         hipStream_t const stream = context.stream();
-        // Pass-local planes no reader observes: the shadow neighbors, the reverse buckets, their
+        // Pass-local buffers no reader observes: the shadow neighbors, the reverse buckets, their
         // counters, and the bitset of rows the merge re-selects; the bucket width is the
         // connectivity.
         std::size_t const shadow_bytes = nodes_count * connectivity() * sizeof(u32_t);
@@ -2127,7 +2127,7 @@ struct vram_amd_index {
         hip_api().fill_async(context.assigned_rows_.get(), 0, sizeof(u32_t), stream);
         hip_api().fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream);
 
-        amd_refine_t view {planes(), //
+        amd_refine_t view {storage(), //
                            shadow_neighbors.data(),
                            static_cast<u32_t>(nodes.bound),
                            insert_scratch_bytes_per_warp(),
@@ -2143,7 +2143,7 @@ struct vram_amd_index {
         // verbatim, so a row it never rewrites but one of its picks lands in merges its own
         // neighbors with the new reverse links.
         if (!node_ids.empty() || walk_count != nodes_count)
-            if (hip_api().copy_async(shadow_neighbors.data(), neighbors_plane_.base(), shadow_bytes,
+            if (hip_api().copy_async(shadow_neighbors.data(), neighbors_matrix_.base(), shadow_bytes,
                                      hipMemcpyDeviceToDevice, stream) != hipSuccess)
                 return {{}, status_t::device_error_k};
         if (status_t const launched = launch_refine_(view, pool_slots, stream); failed(launched)) return {{}, launched};
@@ -2249,7 +2249,7 @@ struct vram_amd_index {
      *    @p audit has room for them. */
     expected<u32_t> audit_(traversal_context_t& context, audit_t& audit) noexcept {
         std::size_t const rows = size();
-        if (!vectors_plane_.reserved_bytes()) return {0, status_t::uninitialized_k};
+        if (!vectors_matrix_.reserved_bytes()) return {0, status_t::uninitialized_k};
         if (context.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
         hipStream_t const stream = context.stream();
         std::size_t const seed_count = min_of<std::size_t>(connectivity(), rows);
@@ -2257,7 +2257,7 @@ struct vram_amd_index {
         if (hip_api().fill_async(audit.reached.words, 0, (audit.words * 3 + 2) * sizeof(u32_t), stream) != hipSuccess)
             return {0, status_t::device_error_k};
         amd_arguments_t sweep {};
-        sweep.graph.neighbors = reinterpret_cast<u32_t*>(neighbors_plane_.base());
+        sweep.graph.neighbors = reinterpret_cast<u32_t*>(neighbors_matrix_.base());
         sweep.graph.rows_count = static_cast<u32_t>(rows);
         sweep.graph.connectivity = static_cast<u32_t>(connectivity());
         sweep.graph.seed_count = static_cast<u32_t>(seed_count);
@@ -2347,25 +2347,25 @@ struct vram_amd_index {
         return status_t::success_k;
     }
 
-    /** Maps every plane up to @p rows and sentinel-fills the fresh neighbor rows - always ahead of
-     *  any launch that could assign new_node_ids into them. Callers hold @c claiming_, or run
-     *  exclusively like @c reserve and @c load. */
+    /** Maps every matrix and column up to @p rows and sentinel-fills the fresh neighbor rows -
+     *  always ahead of any launch that could assign new_node_ids into them. Callers hold
+     *  @c claiming_, or run exclusively like @c reserve and @c load. */
     status_t grow_rows_(std::size_t rows, hipStream_t stream) noexcept {
         if (rows <= capacity()) return status_t::success_k;
-        std::size_t const neighbors_before = neighbors_plane_.committed_bytes();
-        if (status_t status = vectors_plane_.commit(rows * row_bytes()); status != status_t::success_k) return status;
+        std::size_t const neighbors_before = neighbors_matrix_.committed_bytes();
+        if (status_t status = vectors_matrix_.commit(rows * row_bytes()); status != status_t::success_k) return status;
         if (status_t status = kernel_ == nk_kernel_dot_k ? status_t::success_k
-                                                         : norms_plane_.commit(rows * sizeof(norms_t));
+                                                         : norms_column_.commit(rows * sizeof(norms_t));
             status != status_t::success_k)
             return status;
-        if (status_t status = neighbors_plane_.commit(rows * connectivity() * sizeof(u32_t));
+        if (status_t status = neighbors_matrix_.commit(rows * connectivity() * sizeof(u32_t));
             status != status_t::success_k)
             return status;
         // Past a successful commit a failure must be kept: `capacity()` has advanced, so a retry
         // would early-return and assign IDs into rows never sentinel-filled.
-        std::size_t const fresh_bytes = neighbors_plane_.committed_bytes() - neighbors_before;
+        std::size_t const fresh_bytes = neighbors_matrix_.committed_bytes() - neighbors_before;
         if (fresh_bytes &&
-            hip_api().fill_words_async(neighbors_plane_.base() + neighbors_before, static_cast<int>(node_id_unknown_k),
+            hip_api().fill_words_async(neighbors_matrix_.base() + neighbors_before, static_cast<int>(node_id_unknown_k),
                                        fresh_bytes / 4, stream) != hipSuccess)
             return fail_(status_t::device_error_k);
         if (hip_api().stream_synchronize(stream) != hipSuccess) return fail_(status_t::device_error_k);
@@ -2429,7 +2429,7 @@ struct vram_amd_index {
     }
     status_t launch_derive_norms_(u32_t first_row, u32_t rows, u32_t blocks, hipStream_t stream) noexcept {
         amd_arguments_t arguments {};
-        arguments.graph.planes = planes();
+        arguments.graph.storage = storage();
         arguments.graph.first_id = first_row;
         arguments.graph.rows_count = rows;
         return launch_(amd_kernel_t::derive_norms_k, 0, blocks, 0, stream, arguments);
@@ -2459,11 +2459,11 @@ struct vram_amd_index {
 
 #pragma endregion Launches
 
-    /** The vector and norm planes' backend, rebound to bytes. */
-    using vectors_plane_allocator_t = typename vectors_allocator_t::template rebind<byte_t>::other;
+    /** The vectors matrix and norms column backend, rebound to bytes. */
+    using vectors_matrix_allocator_t = typename vectors_allocator_t::template rebind<byte_t>::other;
 
-    /** The neighbor plane's backend, rebound to bytes. */
-    using neighbors_plane_allocator_t = typename neighbors_allocator_t::template rebind<byte_t>::other;
+    /** The neighbors matrix backend, rebound to bytes. */
+    using neighbors_matrix_allocator_t = typename neighbors_allocator_t::template rebind<byte_t>::other;
 
     /** This class's code object on this device, and its kernels in @ref amd_kernel_t
      *  order. */
@@ -2478,18 +2478,18 @@ struct vram_amd_index {
     hip_device_specs_t device_;
 
     /** The metric every walk scores by; under dot, the one metric that reads no norms, the norms
-     *  plane stays empty. */
+     *  column stays empty. */
     nk_kernel_kind_t kernel_;
 
     /** The frozen geometry word: dimensions high, connectivity low, zero when unreserved. */
     packed_geometry_id_t geometry_ = 0;
 
-    /** The vector and norm planes; each allocator is its plane, owning the base and the committed
-     *  extent, so capacities are derived, never cached. */
-    vectors_plane_allocator_t vectors_plane_, norms_plane_;
+    /** The vectors matrix and norms column; each allocator is its storage, owning the base and the
+     *  committed extent, so capacities are derived, never cached. */
+    vectors_matrix_allocator_t vectors_matrix_, norms_column_;
 
-    /** The neighbor plane, on the same terms. */
-    neighbors_plane_allocator_t neighbors_plane_;
+    /** The neighbors matrix, on the same terms. */
+    neighbors_matrix_allocator_t neighbors_matrix_;
 
     /** The device-resident published-row count, allocated by the first @c reserve(); every driving
      *  context polls it, none owns it. */

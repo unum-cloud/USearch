@@ -201,7 +201,8 @@ struct metal_pool {
 
 #pragma region Walk
 
-/** One simdgroup's walk: the planes, its slice of scratch, the visited set, the random stream and the telemetry. */
+/** One simdgroup's walk: the flat storage, its slice of scratch, the visited set, the random stream
+ *  and the telemetry. */
 struct metal_walk_t {
     device uint4* vectors;
     device norms_t* norms;
@@ -741,7 +742,7 @@ inline void metal_insert(constant metal_arguments_t& arguments, device uint4* ve
     metal_flush(walk);
 }
 
-/** One simdgroup re-selects one node at a time into the shadow plane, read-only on the live one. */
+/** One simdgroup re-selects one node at a time into the shadow matrix, read-only on the live one. */
 template <uint slots_>
 inline void metal_refine(constant metal_arguments_t& arguments, device uint4* vectors, device norms_t* norms,
                          device uint* neighbors, device uint const* node_ids, device uchar* arena,

@@ -11,7 +11,7 @@
  *  calls into one table, which stays empty where any is absent, so Apple then lists no devices and
  *  the binary still loads. Kernels travel as source and compile on the device at first use, so no
  *  Metal toolchain is needed to build. Memory is unified and every buffer is shared, so the host
- *  reads and writes a plane in place and a launch binds the same buffer by handle.
+ *  reads and writes a matrix in place and a launch binds the same buffer by handle.
  */
 #pragma once
 
@@ -251,7 +251,7 @@ struct metal_device_specs_t {
     /** The longest buffer one allocation may span. */
     std::size_t max_buffer_bytes = 0;
 
-    /** The memory Metal recommends one process keep resident - the planes' budget. */
+    /** The memory Metal recommends one process keep resident - the storage budget. */
     std::size_t working_set_bytes = 0;
 
     /** Queries Metal for @p ordinal's specification; meaningful only on @c success_k. */
@@ -303,8 +303,8 @@ inline metal_buffer_t metal_allocate(metal_context_t& context, std::size_t bytes
     return buffer;
 }
 
-/** The plane backend of the Apple index: shared buffers on one device, each allocation its own
- *  @c MTLBuffer, so a plane grows by allocating a wider one and copying. */
+/** The storage backend of the Apple index: shared buffers on one device, each allocation its own
+ *  @c MTLBuffer, so a matrix grows by allocating a wider one and copying. */
 struct metal_shared_allocator_t {
     metal_shared_allocator_t() noexcept = default;
     explicit metal_shared_allocator_t(int device) noexcept : device_(device) {}

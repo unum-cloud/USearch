@@ -4,12 +4,12 @@
  *  @date October 11, 2026
  *  @brief Vector Search index for the unified memory of one Apple GPU.
  *
- *  The Apple twin of @c vram_nvidia_index: the same planes, the same walk, insert and refine
+ *  The Apple twin of @c vram_nvidia_index: the same flat storage, the same walk, insert and refine
  *  kernels ported to Metal in @c vram_apple_index.metal, and the same verbs. Memory is unified, so
- *  every plane is a shared buffer the host reads and writes in place: checkpoints copy without a
- *  bounce, and the reachability audit and the island reconnection run on the host over the planes
- *  the device just wrote. A plane grows by allocating a wider buffer, under an exclusive hold that
- *  every walk shares while its command buffer runs.
+ *  every matrix and column is a shared buffer the host reads and writes in place: checkpoints copy
+ *  without a bounce, and the reachability audit and the island reconnection run on the host over
+ *  the storage the device just wrote. A matrix grows by allocating a wider buffer, under an
+ *  exclusive hold that every walk shares while its command buffer runs.
  *
  *  Metal promises no forward progress between command buffers, while an insert's admission ramp
  *  waits on rows earlier batches publish, so batches run one at a time; searches overlap them
@@ -23,7 +23,7 @@
 #include <atomic>       // `std::memory_order`
 #include <bit>          // `std::bit_ceil`, `std::bit_width`, `std::countr_zero`, `std::has_single_bit`
 #include <mutex>        // `std::unique_lock` - the batch hold
-#include <shared_mutex> // `std::shared_mutex` - walks share the planes, growth takes them alone
+#include <shared_mutex> // `std::shared_mutex` - walks share the storage, growth takes it alone
 #include <span>         // `std::span`
 #include <utility>      // `std::exchange`
 
@@ -135,12 +135,16 @@ enum class metal_output_t : bool { distances_k, products_k };
 
 /** One caller's scratch for driving an Apple index: the walks' arena, the staging of one batch, the
  *  telemetry counters and the single-query landing. Two contexts on one index share only the
- *  planes. */
-struct metal_traversal_context_t {
+ *  storage. */
+template <typename buffers_allocator_type_ = metal_shared_allocator_t>
+struct metal_traversal_context {
 
     /** The queue the context submits to, named an allocator because the residency-level harnesses
      *  build every context from its @c allocator_t. */
     using allocator_t = metal_queue_t;
+
+    /** The backend of the arena, the staging and the counters, on the queue's device. */
+    using buffers_allocator_t = buffers_allocator_type_;
 
     /** Matches the single-query verb lands at most. */
     inline static constexpr u32_t results_capacity_k = 64;
@@ -160,13 +164,13 @@ struct metal_traversal_context_t {
     results_t results;
 
     /** Binds the context to @p queue's device; buffers wait for the first verb. */
-    metal_traversal_context_t(allocator_t queue = {}) noexcept
-        : queue_(std::move(queue)), context_(metal_context(queue_.device)) {
-        if (context_) counters_ = metal_allocate(*context_, static_cast<std::size_t>(metal_counter_t::count_k) * 4);
+    metal_traversal_context(allocator_t queue = {}) noexcept
+        : queue_(std::move(queue)), context_(metal_context(queue_.device)), buffers_allocator_(queue_.device) {
+        if (context_) counters_ = buffers_allocator_.allocate(static_cast<std::size_t>(metal_counter_t::count_k) * 4);
     }
-    metal_traversal_context_t(metal_traversal_context_t&&) noexcept = default;
-    metal_traversal_context_t(metal_traversal_context_t const&) = delete;
-    metal_traversal_context_t& operator=(metal_traversal_context_t const&) = delete;
+    metal_traversal_context(metal_traversal_context&&) noexcept = default;
+    metal_traversal_context(metal_traversal_context const&) = delete;
+    metal_traversal_context& operator=(metal_traversal_context const&) = delete;
 
     int device() const noexcept { return queue_.device; }
     void* queue() const noexcept { return queue_.handle() ? queue_.handle() : context_->queue; }
@@ -182,11 +186,12 @@ struct metal_traversal_context_t {
     }
 
   private:
-    template <nk_dtype_t, nk_capability_t, typename>
+    template <nk_dtype_t, nk_capability_t, typename, typename, typename>
     friend struct vram_apple_index;
 
     allocator_t queue_;
     metal_context_t* context_ = nullptr;
+    buffers_allocator_t buffers_allocator_;
     metal_buffer_t counters_;
     metal_buffer_t arena_;
     metal_buffer_t staging_;
@@ -200,7 +205,7 @@ struct metal_traversal_context_t {
     status_t ensure_(metal_buffer_t& buffer, std::size_t bytes, bool& fresh) noexcept {
         fresh = false;
         if (bytes <= buffer.bytes) return status_t::success_k;
-        buffer = metal_allocate(*context_, bytes);
+        buffer = buffers_allocator_.allocate(bytes);
         fresh = true;
         return buffer ? status_t::success_k : status_t::bad_alloc_k;
     }
@@ -214,16 +219,20 @@ struct metal_traversal_context_t {
  *  refused with @c unsupported_k until its value-lookup ABI is designed for Metal, and walks past
  *  the widest register pool of 512 clamp to it.
  */
-template <                                                      //
-    nk_dtype_t vector_dtype_ = nk_i8_k,                         //
-    nk_capability_t capability_ = nk_cap_metal_k,               //
-    typename planes_allocator_type_ = metal_shared_allocator_t> //
+template <                                                          //
+    nk_dtype_t vector_dtype_ = nk_i8_k,                             //
+    nk_capability_t capability_ = nk_cap_metal_k,                   //
+    typename vectors_allocator_type_ = metal_shared_allocator_t,    //
+    typename neighbors_allocator_type_ = metal_shared_allocator_t,  //
+    typename traversals_allocator_type_ = metal_shared_allocator_t> //
 struct vram_apple_index {
 
     inline static constexpr nk_dtype_t vector_dtype_k = vector_dtype_;
     static_assert(metal_kit_name(vector_dtype_) != nullptr, "No Metal kit stores this dtype");
 
-    using planes_allocator_t = planes_allocator_type_;
+    using vectors_allocator_t = vectors_allocator_type_;
+    using neighbors_allocator_t = neighbors_allocator_type_;
+    using traversals_allocator_t = traversals_allocator_type_;
     using scalar_t = typename nk::type_for<vector_dtype_>::type;
     using dot_result_t = typename scalar_t::dot_result_t;
     using dot_t = typename dot_result_t::raw_t;
@@ -234,7 +243,7 @@ struct vram_apple_index {
     using node_ids_span_t = nk::vector_span<node_id_t>;
     using distance_t = dense::distance_t;
     using small_size_t = u32_t;
-    using traversal_context_t = metal_traversal_context_t;
+    using traversal_context_t = metal_traversal_context<traversals_allocator_t>;
     using refine_result_t = dense::refine_result_t;
     using health_result_t = dense::health_result_t;
     static_assert(sizeof(norms_t) == 8, "The kernels address norms as two 32-bit words");
@@ -254,15 +263,18 @@ struct vram_apple_index {
     inline static constexpr std::size_t cache_rows_k = 64;
 
     /** The @p kernel every walk scores by, checked against the dtype at the first @c reserve, and
-     *  the backend whose device the planes live on. */
-    explicit vram_apple_index(nk_kernel_kind_t kernel, planes_allocator_t const& planes_allocator = {}) noexcept
-        : device_ {planes_allocator.device()}, kernel_ {kernel}, planes_allocator_ {planes_allocator} {}
+     *  one allocator per storage concern; the index pins itself to the vectors allocator's device
+     *  and demands the neighbors allocator agree. */
+    explicit vram_apple_index(nk_kernel_kind_t kernel, vectors_allocator_t const& vectors_allocator = {},
+                              neighbors_allocator_t const& neighbors_allocator = {}) noexcept
+        : device_ {vectors_allocator.device()}, kernel_ {kernel}, vectors_allocator_ {vectors_allocator},
+          neighbors_allocator_ {neighbors_allocator} {}
     vram_apple_index(vram_apple_index const&) = delete;
     vram_apple_index& operator=(vram_apple_index const&) = delete;
     ~vram_apple_index() noexcept {
-        planes_allocator_.deallocate(vectors_plane_);
-        planes_allocator_.deallocate(norms_plane_);
-        planes_allocator_.deallocate(neighbors_plane_);
+        vectors_allocator_.deallocate(vectors_matrix_);
+        vectors_allocator_.deallocate(norms_column_);
+        neighbors_allocator_.deallocate(neighbors_matrix_);
     }
 
 #pragma region Measures
@@ -277,7 +289,7 @@ struct vram_apple_index {
         return standard_atomic_ref<status_t const>(status_).load(std::memory_order_acquire);
     }
 
-    /** Rows the planes hold without growing. */
+    /** Rows the storage holds without growing. */
     std::size_t capacity() const noexcept { return capacity_rows_; }
     std::size_t connectivity() const noexcept { return connectivity_; }
     std::size_t dimensions() const noexcept { return dimensions_; }
@@ -301,9 +313,9 @@ struct vram_apple_index {
     }
     std::size_t row_bytes() const noexcept { return row_fragments() * fragment_bytes_k; }
 
-    /** Bytes this index occupies: its planes and its counters. */
+    /** Bytes this index occupies: its storage and its counters. */
     std::size_t memory_usage() const noexcept {
-        return sizeof(vram_apple_index) + vectors_plane_.bytes + norms_plane_.bytes + neighbors_plane_.bytes +
+        return sizeof(vram_apple_index) + vectors_matrix_.bytes + norms_column_.bytes + neighbors_matrix_.bytes +
                counters_.bytes;
     }
 
@@ -312,8 +324,8 @@ struct vram_apple_index {
         if (node >= size()) return status_t::config_mismatch_k;
         if (destination.size() != dimensions()) return status_t::config_mismatch_k;
         if (!destination.is_contiguous()) return status_t::unsupported_layout_k;
-        std::shared_lock planes {planes_};
-        std::memcpy(destination.byte_data(), vectors_plane_.host + static_cast<std::size_t>(node) * row_bytes(),
+        std::shared_lock storage {storage_};
+        std::memcpy(destination.byte_data(), vectors_matrix_.host + static_cast<std::size_t>(node) * row_bytes(),
                     packed_row_bytes());
         return status_t::success_k;
     }
@@ -331,7 +343,7 @@ struct vram_apple_index {
     };
     saved_shape_t saved_shape() const noexcept { return {size(), dimensions(), connectivity()}; }
 
-    /** Where a save lands: row-major host planes the caller sized from @ref saved_shape. */
+    /** Where a save lands: row-major host columns the caller sized from @ref saved_shape. */
     struct columns_t {
         bytes_span_t vectors;
         bytes_span_t neighbors;
@@ -373,6 +385,7 @@ struct vram_apple_index {
             return {capacity(), status_t::config_mismatch_k};
         if (config.capacity > max_node_count_k) return {capacity(), status_t::overflow_k};
         if (!dimensions_) {
+            if (neighbors_allocator_.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
             auto const [specs, status] = metal_device_specs_t::query(device_.ordinal);
             if (failed(status)) return {0, status};
             device_ = specs;
@@ -499,7 +512,7 @@ struct vram_apple_index {
      *  @brief Re-selects the neighbors of every node in @p nodes from a fresh walk seeded by the
      *      ones it holds, then heals whatever no search can reach. An empty range heals.
      *
-     *  The walk lands the re-selection in a shadow plane that replaces the walked rows once the
+     *  The walk lands the re-selection in a shadow matrix that replaces the walked rows once the
      *  device finishes; unlike the CUDA pass no reverse merge follows, since the heal's audit and
      *  reconnection, run on the host over unified memory, restore whatever a re-selection strands.
      *  Demands an exclusive caller.
@@ -560,7 +573,7 @@ struct vram_apple_index {
         if (failed(audit.reached.resize(rows)) || failed(audit.frontier.resize(rows)) ||
             failed(audit.next_frontier.resize(rows)) || failed(audit.islands.reserve_exactly(rows)))
             return {{}, status_t::bad_alloc_k};
-        std::shared_lock planes {planes_};
+        std::shared_lock storage {storage_};
         audit_(audit);
         return {{rows, rows - audit.islands.size(), audit.sweeps}, status_t::success_k};
     }
@@ -570,7 +583,7 @@ struct vram_apple_index {
 #pragma region Checkpoints
 
     /** One save in flight: the watermark it took and its steps, each copying rows straight out of
-     *  the planes. */
+     *  the storage. */
     struct [[nodiscard]] save_plan_t {
         columns_t columns {};
         node_id_t id_shift = 0;
@@ -612,7 +625,7 @@ struct vram_apple_index {
             return {this, index_ && batch_rows ? divide_round_up<std::size_t>(visible, batch_rows) : 0};
         }
 
-        /** Copies the step's rows out of the planes: vectors unpadded, neighbors rebased onto
+        /** Copies the step's rows out of the storage: vectors unpadded, neighbors rebased onto
          *  @c id_shift with every ID past the watermark folded to the sentinel, and norms where the
          *  columns take them. */
         status_t save(step_t const& step, nk::matrix_span<node_id_t>) noexcept {
@@ -623,20 +636,20 @@ struct vram_apple_index {
             std::size_t const connectivity = index_->connectivity();
             std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
             std::size_t const first = step.source_rows.first;
-            bytes_span_t const vectors_rows = plane_rows(columns.vectors, first, rows.size(), scalar_row_bytes);
-            bytes_span_t const neighbors_rows = plane_rows(columns.neighbors, first, rows.size(), neighbors_row_bytes);
-            bytes_span_t const norms_rows = plane_rows(columns.norms, first, rows.size(), sizeof(norms_t));
+            bytes_span_t const vectors_rows = flat_rows(columns.vectors, first, rows.size(), scalar_row_bytes);
+            bytes_span_t const neighbors_rows = flat_rows(columns.neighbors, first, rows.size(), neighbors_row_bytes);
+            bytes_span_t const norms_rows = flat_rows(columns.norms, first, rows.size(), sizeof(norms_t));
             if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
-            std::shared_lock planes {index_->planes_};
+            std::shared_lock storage {index_->storage_};
             for (std::size_t row = 0; row != rows.size(); ++row)
                 std::memcpy(vectors_rows.data() + row * scalar_row_bytes,
-                            index_->vectors_plane_.host + (rows.first + row) * index_->row_bytes(), scalar_row_bytes);
+                            index_->vectors_matrix_.host + (rows.first + row) * index_->row_bytes(), scalar_row_bytes);
             if (!norms_rows.empty())
-                std::memcpy(norms_rows.data(), index_->norms_plane_.host + rows.first * sizeof(norms_t),
+                std::memcpy(norms_rows.data(), index_->norms_column_.host + rows.first * sizeof(norms_t),
                             norms_rows.size());
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
-            node_id_t const* const source = reinterpret_cast<node_id_t const*>(index_->neighbors_plane_.host) +
+            node_id_t const* const source = reinterpret_cast<node_id_t const*>(index_->neighbors_matrix_.host) +
                                             static_cast<std::size_t>(rows.first) * connectivity;
             node_id_t* const landed = reinterpret_cast<node_id_t*>(neighbors_rows.data());
             for (std::size_t slot = 0; slot != rows.size() * connectivity; ++slot)
@@ -660,8 +673,8 @@ struct vram_apple_index {
         vram_apple_index const* index_ = nullptr;
     };
 
-    /** Opens a save into @p columns; @c concurrent_k refuses, since the planes cannot be probed for
-     *  settlement. */
+    /** Opens a save into @p columns; @c concurrent_k refuses, since the storage cannot be probed
+     *  for settlement. */
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
                                     node_id_t id_shift = 0) const noexcept {
         if (synchronization == synchronization_t::concurrent_k) return {{}, status_t::config_mismatch_k};
@@ -733,7 +746,7 @@ struct vram_apple_index {
 
         status_t load(step_t const& step) noexcept { return load(step, columns, source_range); }
 
-        /** Copies the step's rows out of @p columns into the planes: vectors padded, norms where
+        /** Copies the step's rows out of @p columns into the storage: vectors padded, norms where
          *  carried, neighbors rebased from @p source_range onto the appended range and
          *  compacted. */
         status_t load(step_t const& step, columns_view_t columns, iota_view<node_id_t> source_range) noexcept {
@@ -744,9 +757,9 @@ struct vram_apple_index {
             std::size_t const connectivity = index_->connectivity();
             std::size_t const neighbors_row_bytes = connectivity * sizeof(node_id_t);
             std::size_t const first = step.source_rows.first;
-            bytes_view_t const vectors_rows = plane_rows(columns.vectors, first, range.size(), scalar_row_bytes);
-            bytes_view_t const neighbors_rows = plane_rows(columns.neighbors, first, range.size(), neighbors_row_bytes);
-            bytes_view_t const norms_rows = plane_rows(columns.norms, first, range.size(), sizeof(norms_t));
+            bytes_view_t const vectors_rows = flat_rows(columns.vectors, first, range.size(), scalar_row_bytes);
+            bytes_view_t const neighbors_rows = flat_rows(columns.neighbors, first, range.size(), neighbors_row_bytes);
+            bytes_view_t const norms_rows = flat_rows(columns.norms, first, range.size(), sizeof(norms_t));
             if (vectors_rows.empty() || neighbors_rows.empty() || norms_rows.empty() != columns.norms.empty())
                 return status_t::config_mismatch_k;
             node_id_t const shift = static_cast<node_id_t>(range.first - step.source_rows.first + source_range.first);
@@ -754,17 +767,17 @@ struct vram_apple_index {
                 return status_t::config_mismatch_k;
             std::size_t const row_bytes = index_->row_bytes();
             for (std::size_t row = 0; row != range.size(); ++row) {
-                byte_t* const landing = index_->vectors_plane_.host + (range.first + row) * row_bytes;
+                byte_t* const landing = index_->vectors_matrix_.host + (range.first + row) * row_bytes;
                 std::memcpy(landing, vectors_rows.data() + row * scalar_row_bytes, scalar_row_bytes);
                 std::memset(landing + scalar_row_bytes, 0, row_bytes - scalar_row_bytes);
             }
             if (index_->stores_norms() && !norms_rows.empty()) {
-                std::memcpy(index_->norms_plane_.host + range.first * sizeof(norms_t), norms_rows.data(),
+                std::memcpy(index_->norms_column_.host + range.first * sizeof(norms_t), norms_rows.data(),
                             norms_rows.size());
                 standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(range.size(), std::memory_order_acq_rel);
             }
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
-            std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(index_->neighbors_plane_.host) +
+            std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(index_->neighbors_matrix_.host) +
                                                    static_cast<std::size_t>(range.first) * connectivity,
                                                range.size() * connectivity};
             std::memcpy(landed.data(), neighbors_rows.data(), neighbors_rows.size());
@@ -892,11 +905,11 @@ struct vram_apple_index {
 
         status_t launched = status_t::device_error_k;
         {
-            std::shared_lock planes {planes_};
+            std::shared_lock storage {storage_};
             void* const pipeline = pipeline_(name_of_(metal_kernel_t::insert_k, pool_slots));
             metal_launch_t launch {context.queue(), pipeline};
             if (pipeline && launch) {
-                bind_planes_(launch, arguments);
+                bind_storage_(launch, arguments);
                 launch.bind(context.staging_, 4);
                 launch.bind(context.arena_, 5);
                 launch.bind(counters_, 6);
@@ -981,7 +994,7 @@ struct vram_apple_index {
         return status_t::success_k;
     }
 
-    /** Copies @p rows into @p staging at the planes' pitch, the fragment padding zeroed. */
+    /** Copies @p rows into @p staging at the vectors matrix pitch, the fragment padding zeroed. */
     void stage_rows_(byte_t* staging, vectors_view_t rows) const noexcept {
         std::size_t const scalar_row_bytes = packed_row_bytes();
         for (std::size_t row = 0; row != rows.extent(0); ++row) {
@@ -1003,13 +1016,13 @@ struct vram_apple_index {
         return words[static_cast<u32_t>(counter)];
     }
 
-    /** Binds the arguments and the three planes, the vectors standing in for an empty norms
-     *  plane. */
-    void bind_planes_(metal_launch_t& launch, metal_arguments_t const& arguments) const noexcept {
+    /** Binds the arguments, the two matrices and the norms column, the vectors standing in for an
+     *  empty norms column. */
+    void bind_storage_(metal_launch_t& launch, metal_arguments_t const& arguments) const noexcept {
         launch.bind_bytes(&arguments, sizeof(arguments), 0);
-        launch.bind(vectors_plane_, 1);
-        launch.bind(stores_norms() ? norms_plane_ : vectors_plane_, 2);
-        launch.bind(neighbors_plane_, 3);
+        launch.bind(vectors_matrix_, 1);
+        launch.bind(stores_norms() ? norms_column_ : vectors_matrix_, 2);
+        launch.bind(neighbors_matrix_, 3);
     }
 
     /** The pipeline of kernel @p name for this dtype, built at first use. */
@@ -1043,12 +1056,12 @@ struct vram_apple_index {
         metal_context_t* const context = metal_context(device_.ordinal);
         void* const pipeline = pipeline_("metal_derive_norms_kernel");
         if (!context || !pipeline) return status_t::device_error_k;
-        std::shared_lock planes {planes_};
+        std::shared_lock storage {storage_};
         metal_launch_t launch {context->queue, pipeline};
         if (!launch) return status_t::device_error_k;
         launch.bind_bytes(&arguments, sizeof(arguments), 0);
-        launch.bind(vectors_plane_, 1);
-        launch.bind(norms_plane_, 2);
+        launch.bind(vectors_matrix_, 1);
+        launch.bind(norms_column_, 2);
         return launch.run(groups_for_(rows), simdgroups_per_group_k * 32);
     }
 
@@ -1217,12 +1230,12 @@ struct vram_apple_index {
             return status_t::success_k;
         }
         u32_t const keeps_word = keeps ? 1 : 0;
-        std::shared_lock planes {planes_};
+        std::shared_lock storage {storage_};
         void* const pipeline = pipeline_(name_of_(metal_kernel_t::search_k, pool_slots));
         if (!pipeline) return status_t::device_error_k;
         metal_launch_t launch {context.queue(), pipeline};
         if (!launch) return status_t::device_error_k;
-        bind_planes_(launch, arguments);
+        bind_storage_(launch, arguments);
         launch.bind(context.staging_, 4);
         launch.bind(context.arena_, 5);
         launch.bind(context.counters_, 6);
@@ -1252,7 +1265,7 @@ struct vram_apple_index {
 #pragma region Refinement Passes
 
     /** Re-selects @p nodes, or the IDs @p node_ids lists with @p nodes spanning its offsets, into a
-     *  shadow plane on the device, then lands every walked row in the live plane and counts the
+     *  shadow matrix on the device, then lands every walked row in the live matrix and counts the
      *  rows that changed. */
     expected<refine_result_t> refine_pass_(traversal_context_t& context, refine_config_t config,
                                            iota_view<node_id_t> nodes, std::span<u32_t const> node_ids) noexcept {
@@ -1282,11 +1295,11 @@ struct vram_apple_index {
 
         status_t launched = status_t::device_error_k;
         {
-            std::shared_lock planes {planes_};
+            std::shared_lock storage {storage_};
             void* const pipeline = pipeline_(name_of_(metal_kernel_t::refine_k, pool_slots));
             metal_launch_t launch {context.queue(), pipeline};
             if (pipeline && launch) {
-                bind_planes_(launch, arguments);
+                bind_storage_(launch, arguments);
                 launch.bind(context.staging_, 4);
                 launch.bind(context.arena_, 5);
                 launch.bind(counters_, 6);
@@ -1296,9 +1309,9 @@ struct vram_apple_index {
         }
         if (failed(launched)) return {{}, launched};
 
-        // Exclusive pass: the walked rows land in the live plane with plain stores.
+        // Exclusive pass: the walked rows land in the live matrix with plain stores.
         refine_result_t result;
-        u32_t* const live = reinterpret_cast<u32_t*>(neighbors_plane_.host);
+        u32_t* const live = reinterpret_cast<u32_t*>(neighbors_matrix_.host);
         u32_t const* const shadow = reinterpret_cast<u32_t const*>(context.staging_.host + ids_bytes);
         for (std::size_t offset = 0; offset != walk_count; ++offset) {
             std::size_t const node = node_ids.empty() ? nodes.first + offset : node_ids[offset];
@@ -1320,7 +1333,7 @@ struct vram_apple_index {
     void audit_(audit_t& audit) const noexcept {
         std::size_t const rows = size(), connectivity = this->connectivity();
         std::size_t const seed_count = min_of(connectivity, rows);
-        u32_t const* const neighbors = reinterpret_cast<u32_t const*>(neighbors_plane_.host);
+        u32_t const* const neighbors = reinterpret_cast<u32_t const*>(neighbors_matrix_.host);
         std::memset(audit.reached.data(), 0, rows);
         std::memset(audit.frontier.data(), 0, rows);
         for (std::size_t seed = 0; seed != seed_count; ++seed) {
@@ -1357,7 +1370,7 @@ struct vram_apple_index {
         std::size_t const rows = size(), connectivity = this->connectivity();
         std::size_t const seed_count = min_of(connectivity, rows);
         std::size_t const spread = heal_spread(connectivity);
-        u32_t* const neighbors = reinterpret_cast<u32_t*>(neighbors_plane_.host);
+        u32_t* const neighbors = reinterpret_cast<u32_t*>(neighbors_matrix_.host);
         growing_buffer<u32_t> in_links {global_allocator};
         if (failed(in_links.resize(rows))) return 0;
         for (std::size_t row = 0; row != rows; ++row) {
@@ -1432,47 +1445,60 @@ struct vram_apple_index {
         return status_t::success_k;
     }
 
-    /** Grows every plane to hold @p rows, doubling, the fresh neighbor rows sentinel-filled; the
-     *  caller holds the batch hold, and the copy waits for every walk sharing the planes. */
+    /** Grows every matrix and column to hold @p rows, doubling, the fresh neighbor rows
+     *  sentinel-filled; the caller holds the batch hold, and the copy waits for every walk sharing
+     *  the storage. */
     status_t grow_rows_(std::size_t rows) noexcept {
         if (rows <= capacity_rows_) return status_t::success_k;
         std::size_t const grown = max_of(rows, capacity_rows_ * 2);
         std::size_t const neighbors_row_bytes = connectivity() * sizeof(u32_t);
-        metal_buffer_t vectors = planes_allocator_.allocate(grown * row_bytes());
-        metal_buffer_t norms = stores_norms() ? planes_allocator_.allocate(grown * sizeof(norms_t)) : metal_buffer_t {};
-        metal_buffer_t neighbors = planes_allocator_.allocate(grown * neighbors_row_bytes);
+        metal_buffer_t vectors = vectors_allocator_.allocate(grown * row_bytes());
+        metal_buffer_t norms = stores_norms() ? vectors_allocator_.allocate(grown * sizeof(norms_t))
+                                              : metal_buffer_t {};
+        metal_buffer_t neighbors = neighbors_allocator_.allocate(grown * neighbors_row_bytes);
         if (!vectors || !neighbors || (stores_norms() && !norms)) {
-            planes_allocator_.deallocate(vectors), planes_allocator_.deallocate(norms);
-            planes_allocator_.deallocate(neighbors);
+            vectors_allocator_.deallocate(vectors), vectors_allocator_.deallocate(norms);
+            neighbors_allocator_.deallocate(neighbors);
             return status_t::bad_alloc_k;
         }
-        std::unique_lock planes {planes_};
+        std::unique_lock storage {storage_};
         if (capacity_rows_) {
-            std::memcpy(vectors.host, vectors_plane_.host, capacity_rows_ * row_bytes());
-            if (stores_norms()) std::memcpy(norms.host, norms_plane_.host, capacity_rows_ * sizeof(norms_t));
-            std::memcpy(neighbors.host, neighbors_plane_.host, capacity_rows_ * neighbors_row_bytes);
+            std::memcpy(vectors.host, vectors_matrix_.host, capacity_rows_ * row_bytes());
+            if (stores_norms()) std::memcpy(norms.host, norms_column_.host, capacity_rows_ * sizeof(norms_t));
+            std::memcpy(neighbors.host, neighbors_matrix_.host, capacity_rows_ * neighbors_row_bytes);
         }
         std::memset(neighbors.host + capacity_rows_ * neighbors_row_bytes, 0xFF,
                     (grown - capacity_rows_) * neighbors_row_bytes);
-        planes_allocator_.deallocate(vectors_plane_), planes_allocator_.deallocate(norms_plane_);
-        planes_allocator_.deallocate(neighbors_plane_);
-        vectors_plane_ = std::move(vectors), norms_plane_ = std::move(norms), neighbors_plane_ = std::move(neighbors);
+        vectors_allocator_.deallocate(vectors_matrix_), vectors_allocator_.deallocate(norms_column_);
+        neighbors_allocator_.deallocate(neighbors_matrix_);
+        vectors_matrix_ = std::move(vectors), norms_column_ = std::move(norms),
+        neighbors_matrix_ = std::move(neighbors);
         capacity_rows_ = grown;
         return status_t::success_k;
     }
 
     metal_device_specs_t device_;
     nk_kernel_kind_t kernel_;
-    planes_allocator_t planes_allocator_;
     std::size_t dimensions_ = 0, connectivity_ = 0, capacity_rows_ = 0;
-    metal_buffer_t vectors_plane_, norms_plane_, neighbors_plane_;
+
+    /** The vectors matrix and norms column backend. */
+    vectors_allocator_t vectors_allocator_;
+
+    /** The neighbors matrix backend. */
+    neighbors_allocator_t neighbors_allocator_;
+
+    /** The vectors matrix and norms column, each a shared buffer replaced wholesale on growth. */
+    metal_buffer_t vectors_matrix_, norms_column_;
+
+    /** The neighbors matrix, on the same terms. */
+    metal_buffer_t neighbors_matrix_;
 
     /** The batches' counters: the assigned and published rows and the telemetry of the last insert
      *  or refine. */
     metal_buffer_t counters_;
 
     /** Shared by every walk while its command buffer runs, taken alone by growth. */
-    mutable std::shared_mutex planes_;
+    mutable std::shared_mutex storage_;
 
     /** Held by the one batch, load or refinement at a time. */
     std::mutex batch_;

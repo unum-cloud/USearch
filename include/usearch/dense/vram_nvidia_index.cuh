@@ -105,23 +105,23 @@ struct cuda_heads_rescoring {
     /** Scores the batch against every head past the first as @ref vram_score_batch scores it
      *  against the query: a sub-warp of @c lanes_per_row lanes owns one row, and each key fragment
      *  it loads meets every head. */
-    __device__ __forceinline__ vram_scored_node_t rescore(vram_planes_view<kit_> const& planes,
+    __device__ __forceinline__ vram_scored_node_t rescore(vram_flat_view<kit_> const& storage,
                                                           vram_gathered<kit_>& gathered, u32_t gathered_count, int lane,
                                                           vram_scored_node_t scored) const noexcept {
-        u32_t const lanes_log2 = 31 - __clz(planes.lanes_per_row);
-        u32_t const lane_in_row = static_cast<u32_t>(lane) & (planes.lanes_per_row - 1);
+        u32_t const lanes_log2 = 31 - __clz(storage.lanes_per_row);
+        u32_t const lane_in_row = static_cast<u32_t>(lane) & (storage.lanes_per_row - 1);
         bool const live = static_cast<u32_t>(lane) < gathered_count;
         if (live) dots[lane] = static_cast<f32_t>(gathered.dots[lane]);
         for (u32_t row_base = 0; heads_count != 1 && row_base < gathered_count; row_base += 32u >> lanes_log2) {
             u32_t const row = row_base + (static_cast<u32_t>(lane) >> lanes_log2);
-            for (u32_t step = 0; step != planes.steps_per_row; ++step) {
+            for (u32_t step = 0; step != storage.steps_per_row; ++step) {
                 u32_t const fragment_index = lane_in_row + (step << lanes_log2);
-                bool const loads = row < gathered_count && fragment_index < planes.row_fragments;
-                fragment_t const key = loads ? planes.vector_for(gathered.ids[row], fragment_index) : fragment_t {};
+                bool const loads = row < gathered_count && fragment_index < storage.row_fragments;
+                fragment_t const key = loads ? storage.vector_for(gathered.ids[row], fragment_index) : fragment_t {};
                 for (u32_t head = 1; head != heads_count; ++head) {
                     fragment_t const query = loads ? heads[head * row_fragments + fragment_index] : fragment_t {};
                     dot_t const dot = vram_reduce<cuda_warp_t>(kit_::accumulate_dot(key, query, dot_t {}),
-                                                               planes.lanes_per_row);
+                                                               storage.lanes_per_row);
                     f32_t& slot = dots[head * 32 + row];
                     if (lane_in_row == 0 && row < gathered_count) slot = (step ? slot : 0.f) + static_cast<f32_t>(dot);
                 }
@@ -166,10 +166,10 @@ __device__ __forceinline__ void cuda_insert(vram_build_view<kit_> const& view) {
     std::size_t const warp_index = slice.warp_index;
     u64_t* const visited_slots = slice.visited_slots;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
-    vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.planes.row_fragments};
+    vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.storage.row_fragments};
     vram_selection_scratch_t const selection = vram_selection_scratch_t::carve(
-        slice.scratch, view.planes.connectivity,
-        static_cast<std::size_t>(view.planes.row_fragments) * sizeof(typename kit_::fragment_t) * vram_cache_rows_k);
+        slice.scratch, view.storage.connectivity,
+        static_cast<std::size_t>(view.storage.row_fragments) * sizeof(typename kit_::fragment_t) * vram_cache_rows_k);
     while (true) {
         u32_t new_node_id;
         if (lane == 0)
@@ -198,7 +198,7 @@ __device__ __forceinline__ void cuda_insert(vram_build_view<kit_> const& view) {
 }
 
 /** One warp refines one node, assigning itself node IDs from the pass counter; warps only read the
- *  live planes and write disjoint shadow neighbors. */
+ *  live storage and write disjoint shadow neighbors. */
 template <vram_quads_kit kit_, u32_t pool_slots_>
 __device__ __forceinline__ void cuda_refine(vram_refine_view<kit_> const& view) {
     extern __shared__ byte_t dynamic_scratch[];
@@ -209,10 +209,10 @@ __device__ __forceinline__ void cuda_refine(vram_refine_view<kit_> const& view) 
     int const warp = slice.warp, lane = slice.lane;
     u64_t* const visited_slots = slice.visited_slots;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
-    vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.planes.row_fragments};
+    vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.storage.row_fragments};
     vram_selection_scratch_t const selection = vram_selection_scratch_t::carve(
-        slice.scratch, view.planes.connectivity,
-        static_cast<std::size_t>(view.planes.row_fragments) * sizeof(typename kit_::fragment_t) * vram_cache_rows_k);
+        slice.scratch, view.storage.connectivity,
+        static_cast<std::size_t>(view.storage.row_fragments) * sizeof(typename kit_::fragment_t) * vram_cache_rows_k);
     while (true) {
         u32_t offset;
         if (lane == 0) offset = cuda_atomic_ref<u32_t>(*view.assigned_rows).fetch_add(1u, cuda::memory_order_relaxed);
@@ -270,8 +270,8 @@ __device__ __forceinline__ void cuda_scatter_links(u32_t const* shadow_neighbors
 }
 
 /** Selects one node's final neighbors from its forward picks and its reverse bucket, the diversity
- *  heuristic over the union ascending by distance to the node. The neighbors land in the live plane
- *  with plain stores, since the pass owns the graph exclusively. */
+ *  heuristic over the union ascending by distance to the node. The neighbors land in the live
+ *  matrix with plain stores, since the pass owns the graph exclusively. */
 template <vram_quads_kit kit_>
 __device__ __forceinline__ void cuda_merge_links_one( //
     vram_refine_view<kit_> const& view, u32_t const* bucket_ids, u32_t const* bucket_counts, u32_t bucket_width,
@@ -279,21 +279,21 @@ __device__ __forceinline__ void cuda_merge_links_one( //
     u32_t* kept_positions, typename kit_::norms_t (&cache_norms)[vram_cache_rows_k], vram_gathered<kit_>& gathered,
     vram_telemetry_t& telemetry, int lane) noexcept {
 
-    vram_planes_view<kit_> const& planes = view.planes;
+    vram_flat_view<kit_> const& storage = view.storage;
     // The last cache row hosts the node's own vector, so only the rows before it can host
     // candidates.
     constexpr u32_t query_row_k = vram_cache_rows_k - 1;
-    for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += 32)
-        cache.at(query_row_k, fragment) = planes.vector_for(node_id, fragment);
-    typename kit_::norms_t const query_state = planes.norm_for(node_id);
+    for (u32_t fragment = lane; fragment < storage.row_fragments; fragment += 32)
+        cache.at(query_row_k, fragment) = storage.vector_for(node_id, fragment);
+    typename kit_::norms_t const query_state = storage.norm_for(node_id);
     __syncwarp();
 
     // Stage the forward picks; the shadow neighbors are this pass's own output, already distinct.
     u32_t candidates_count = 0;
-    u32_t const* const shadow_slots = view.shadow_neighbors + static_cast<std::size_t>(node_id) * planes.connectivity;
-    for (u32_t slot_base = 0; slot_base < planes.connectivity; slot_base += 32) {
+    u32_t const* const shadow_slots = view.shadow_neighbors + static_cast<std::size_t>(node_id) * storage.connectivity;
+    for (u32_t slot_base = 0; slot_base < storage.connectivity; slot_base += 32) {
         u32_t const slot = slot_base + lane;
-        u32_t const forward_id = slot < planes.connectivity ? shadow_slots[slot] : node_id_unknown_k;
+        u32_t const forward_id = slot < storage.connectivity ? shadow_slots[slot] : node_id_unknown_k;
         bool const usable = forward_id != node_id_unknown_k && forward_id != node_id;
         unsigned const usable_mask = __ballot_sync(0xFFFFFFFFu, usable);
         u32_t const ordinal = __popc(usable_mask & ((1u << lane) - 1));
@@ -326,7 +326,7 @@ __device__ __forceinline__ void cuda_merge_links_one( //
     for (u32_t base = 0; base < candidates_count; base += 32) {
         u32_t const batch_count = min_of(candidates_count - base, 32u);
         vram_scored_node_t const scored = vram_score_batch<kit_>( //
-            planes, cache.row(query_row_k), query_state, gathered.ids + base, batch_count, gathered, lane);
+            storage, cache.row(query_row_k), query_state, gathered.ids + base, batch_count, gathered, lane);
         vram_scored_node_t const sorted_batch = sort_lanes<cuda_warp_t>(
             static_cast<u32_t>(lane) < batch_count
                 ? vram_scored_node_t::make(scored.distance(), base + lane) // ID = candidate index.
@@ -336,22 +336,22 @@ __device__ __forceinline__ void cuda_merge_links_one( //
     }
 
     // Cache the candidate vectors & norms for the pairwise diversity checks.
-    u32_t const candidate_words = candidates_count * planes.row_fragments;
+    u32_t const candidate_words = candidates_count * storage.row_fragments;
     for (u32_t word = lane; word < candidate_words; word += 32) {
-        u32_t const cache_row = planes.row_of_word(word), fragment = planes.fragment_of_word(word, cache_row);
+        u32_t const cache_row = storage.row_of_word(word), fragment = storage.fragment_of_word(word, cache_row);
         __pipeline_memcpy_async(&cache.at(cache_row, fragment),
-                                planes.vector_span_for(gathered.ids[cache_row]) + fragment,
+                                storage.vector_span_for(gathered.ids[cache_row]) + fragment,
                                 sizeof(typename kit_::fragment_t));
     }
     __pipeline_commit();
     __pipeline_wait_prior(0);
     for (u32_t cache_row = lane; cache_row < candidates_count; cache_row += 32)
-        cache_norms[cache_row] = planes.norm_for(gathered.ids[cache_row]);
+        cache_norms[cache_row] = storage.norm_for(gathered.ids[cache_row]);
     __syncwarp();
 
     // The greedy diversity walk, ascending by distance to the node.
     u32_t refined_count = 0;
-    for (u32_t merge_index = 0; merge_index != sorted_candidates.size_ && refined_count != planes.connectivity;
+    for (u32_t merge_index = 0; merge_index != sorted_candidates.size_ && refined_count != storage.connectivity;
          ++merge_index) {
         vram_scored_node_t const entry = sorted_candidates.at(merge_index);
         f32_t const to_query = entry.distance();
@@ -362,10 +362,10 @@ __device__ __forceinline__ void cuda_merge_links_one( //
             if (base + lane < refined_count) {
                 u32_t const kept_position = kept_positions[base + lane];
                 typename kit_::dot_t pair_accumulator {};
-                for (u32_t fragment = 0; fragment != planes.row_fragments; ++fragment)
+                for (u32_t fragment = 0; fragment != storage.row_fragments; ++fragment)
                     pair_accumulator = kit_::accumulate_dot(cache.at(candidate_position, fragment),
                                                             cache.at(kept_position, fragment), pair_accumulator);
-                f32_t const between = kit_::distance(planes.kernel, pair_accumulator, cache_norms[candidate_position],
+                f32_t const between = kit_::distance(storage.kernel, pair_accumulator, cache_norms[candidate_position],
                                                      cache_norms[kept_position]);
                 lane_diverse = between >= to_query;
                 ++telemetry.scored;
@@ -384,7 +384,7 @@ __device__ __forceinline__ void cuda_merge_links_one( //
     // one.
     u32_t const diverse_count = refined_count;
     for (u32_t merge_index = 0, matched = 0;
-         merge_index != sorted_candidates.size_ && refined_count != planes.connectivity; ++merge_index) {
+         merge_index != sorted_candidates.size_ && refined_count != storage.connectivity; ++merge_index) {
         u32_t const candidate_position = sorted_candidates.at(merge_index).id();
         if (matched != diverse_count && kept_positions[matched] == candidate_position) {
             ++matched;
@@ -395,18 +395,18 @@ __device__ __forceinline__ void cuda_merge_links_one( //
         __syncwarp();
     }
 
-    // Land the final neighbors in the live plane - the insertion's slot convention. The pass owns
+    // Land the final neighbors in the live matrix - the insertion's slot convention. The pass owns
     // the graph, so a slot-wise comparison is the settling signal.
     __syncwarp();
-    u32_t* const live_slots = planes.neighbors_for(node_id);
+    u32_t* const live_slots = storage.neighbors_for(node_id);
     unsigned changed_mask = 0;
-    for (u32_t slot_base = 0; slot_base < planes.connectivity; slot_base += 32) { // Warp-uniform bounds.
+    for (u32_t slot_base = 0; slot_base < storage.connectivity; slot_base += 32) { // Warp-uniform bounds.
         u32_t const slot = slot_base + lane;
         u32_t const value = slot < refined_count ? gathered.ids[kept_positions[slot]]
                             : slot == 0          ? node_id
                                                  : node_id_unknown_k;
-        changed_mask |= __ballot_sync(0xFFFFFFFFu, slot < planes.connectivity && live_slots[slot] != value);
-        if (slot < planes.connectivity) live_slots[slot] = value;
+        changed_mask |= __ballot_sync(0xFFFFFFFFu, slot < storage.connectivity && live_slots[slot] != value);
+        if (slot < storage.connectivity) live_slots[slot] = value;
     }
     telemetry.changed_nodes += changed_mask != 0;
     __syncwarp();
@@ -425,9 +425,9 @@ __device__ __forceinline__ void cuda_merge_links(vram_refine_view<kit_> const& v
     vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t>(view, dynamic_scratch);
     int const warp = slice.warp, lane = slice.lane;
     vram_vector_cache<typename kit_::fragment_t> const cache {
-        reinterpret_cast<typename kit_::fragment_t*>(slice.scratch), view.planes.row_fragments};
+        reinterpret_cast<typename kit_::fragment_t*>(slice.scratch), view.storage.row_fragments};
     // Past the candidate cache: the ascending scored span, then the kept-row indices.
-    std::size_t const cache_bytes = static_cast<std::size_t>(view.planes.row_fragments) *
+    std::size_t const cache_bytes = static_cast<std::size_t>(view.storage.row_fragments) *
                                     sizeof(typename kit_::fragment_t) * vram_cache_rows_k;
     vram_scored_node_t* const sorted_span = reinterpret_cast<vram_scored_node_t*>(slice.scratch + cache_bytes);
     u32_t* const kept_positions = reinterpret_cast<u32_t*>(slice.scratch + cache_bytes +
@@ -705,24 +705,25 @@ __device__ __forceinline__ void cuda_walk_wide(vram_search_view<kit_> const& vie
     }
 }
 
-/** Rebuilds the norms plane from the vector plane for rows @c [first_row,first_row+rows_count), one
- *  warp per row; norms are derived state, never serialized. */
+/** Rebuilds the norms column from the vectors matrix for rows @c [first_row,first_row+rows_count),
+ *  one warp per row; norms are derived state, never serialized. */
 template <vram_quads_kit kit_>
-__device__ __forceinline__ void cuda_derive_norms(vram_planes_view<kit_> const& planes, u32_t first_row,
+__device__ __forceinline__ void cuda_derive_norms(vram_flat_view<kit_> const& storage, u32_t first_row,
                                                   u32_t rows_count) {
     std::size_t const warp_index = (blockIdx.x * static_cast<std::size_t>(blockDim.x) + threadIdx.x) / 32;
     int const lane = threadIdx.x % 32;
     std::size_t const warps = gridDim.x * static_cast<std::size_t>(blockDim.x) / 32;
     for (std::size_t row = first_row + warp_index; row < first_row + rows_count; row += warps) {
         typename kit_::norms_accumulator_t accumulator {};
-        for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += 32)
-            accumulator = kit_::accumulate_norms(planes.vector_for(static_cast<node_id_t>(row), fragment), accumulator);
+        for (u32_t fragment = lane; fragment < storage.row_fragments; fragment += 32)
+            accumulator = kit_::accumulate_norms(storage.vector_for(static_cast<node_id_t>(row), fragment),
+                                                 accumulator);
         accumulator = vram_reduce_norms<cuda_warp_t>(accumulator);
-        if (lane == 0) planes.norm_ref_for(static_cast<node_id_t>(row)) = kit_::partials_to_norms(accumulator);
+        if (lane == 0) storage.norm_ref_for(static_cast<node_id_t>(row)) = kit_::partials_to_norms(accumulator);
     }
 }
 
-/** Post-drain structural audit of the neighbor plane: every row published, every ID in range,
+/** Post-drain structural audit of the neighbors matrix: every row published, every ID in range,
  *  self-loop rows childless, no duplicate neighbors within a row. One warp scans one row, a
  *  warp-width of slots at a time; each bad row bumps @p violations once. */
 static __global__ void cuda_invariant_kernel(u32_t const* neighbors, u32_t rows_count, u32_t connectivity,
@@ -922,20 +923,20 @@ using cuda_kit =
 
 /** The shared views and sinks, field by field from the host's records. */
 template <typename kit_>
-__device__ __forceinline__ vram_planes_view<kit_> cuda_view(cuda_planes_t const& planes) noexcept {
-    return {reinterpret_cast<typename kit_::fragment_t*>(planes.vectors),
-            reinterpret_cast<typename kit_::norms_t*>(planes.norms),
-            planes.neighbors,
-            planes.connectivity,
-            planes.row_fragments,
-            planes.lanes_per_row,
-            planes.steps_per_row,
-            planes.row_fragments_magic,
-            planes.kernel};
+__device__ __forceinline__ vram_flat_view<kit_> cuda_view(cuda_flat_storage_t const& storage) noexcept {
+    return {reinterpret_cast<typename kit_::fragment_t*>(storage.vectors),
+            reinterpret_cast<typename kit_::norms_t*>(storage.norms),
+            storage.neighbors,
+            storage.connectivity,
+            storage.row_fragments,
+            storage.lanes_per_row,
+            storage.steps_per_row,
+            storage.row_fragments_magic,
+            storage.kernel};
 }
 template <typename kit_>
 __device__ __forceinline__ vram_build_view<kit_> cuda_view(cuda_build_t const& build) noexcept {
-    return {cuda_view<kit_>(build.planes),
+    return {cuda_view<kit_>(build.storage),
             reinterpret_cast<typename kit_::fragment_t const*>(build.staging),
             build.end_id,
             build.scratch_bytes_per_warp,
@@ -949,7 +950,7 @@ __device__ __forceinline__ vram_build_view<kit_> cuda_view(cuda_build_t const& b
 }
 template <typename kit_>
 __device__ __forceinline__ vram_search_view<kit_> cuda_view(cuda_search_t const& search) noexcept {
-    return {cuda_view<kit_>(search.planes),
+    return {cuda_view<kit_>(search.storage),
             reinterpret_cast<typename kit_::fragment_t const*>(search.queries),
             search.queries_count,
             search.sampling_bound,
@@ -962,7 +963,7 @@ __device__ __forceinline__ vram_search_view<kit_> cuda_view(cuda_search_t const&
 }
 template <typename kit_>
 __device__ __forceinline__ vram_refine_view<kit_> cuda_view(cuda_refine_t const& refine) noexcept {
-    return {cuda_view<kit_>(refine.planes),
+    return {cuda_view<kit_>(refine.storage),
             refine.shadow_neighbors,
             refine.end_id,
             refine.scratch_bytes_per_warp,
@@ -1065,7 +1066,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
                            graph.connectivity, graph.bucket_width, graph.bucket_ids, graph.bucket_counts,
                            graph.touched);
     else if constexpr (kernel == cuda_kernel_t::derive_norms_k)
-        cuda_derive_norms<kit_t>(cuda_view<kit_t>(graph.planes), graph.first_id, graph.rows_count);
+        cuda_derive_norms<kit_t>(cuda_view<kit_t>(graph.storage), graph.first_id, graph.rows_count);
     else if constexpr (kernel == cuda_kernel_t::mark_seeds_k)
         cuda_mark_seeds(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
     else if constexpr (kernel == cuda_kernel_t::reachability_sweep_k)

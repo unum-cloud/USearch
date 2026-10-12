@@ -2968,7 +2968,7 @@ static std::size_t packed_row_bytes(nk_dtype_t dtype, std::size_t dimensions) no
 
 /** The export tail every row reader shares: @p fill produces up to @p rows rows in the stored type
  *  and reports how many, landing packed in @p landing when the two types agree and in a staged
- *  plane converted row by row into @p target_dtype otherwise. */
+ *  matrix converted row by row into @p target_dtype otherwise. */
 template <typename scalar_type_, typename fill_type_>
 static expected<std::size_t> export_rows(std::byte* landing, std::size_t rows, nk_dtype_t target_dtype,
                                          std::size_t dimensions, nk_dtype_t stored_dtype, fill_type_&& fill) noexcept {
@@ -3085,7 +3085,7 @@ static bool carve_matches(usearch_arena_handle_t& arena, std::size_t count, std:
 }
 
 /** Widens @p staged, the engine's scores tagged @p staged_dtype, into the ABI's doubles: in one
- *  cast when both planes are packed, row by row otherwise. */
+ *  cast when both matrices are packed, row by row otherwise. */
 template <typename score_type_>
 static void land_scores(nk::matrix_view<score_type_> staged, nk_dtype_t staged_dtype,
                         nk::matrix_span<f64_t> scores) noexcept {

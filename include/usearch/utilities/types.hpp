@@ -139,7 +139,7 @@ using u8_t = std::uint8_t;
  *  enumeration's width, and a bitset binds whichever one its CPU class names. */
 using u1x64_t = u64_t;
 
-/** The half-width sibling, for planes a device addresses in 32-bit words. */
+/** The half-width sibling, for matrices a device addresses in 32-bit words. */
 using u1x32_t = u32_t;
 
 /** "usearch3" read as a little-endian word - the one magic fronting every USearch
@@ -305,13 +305,13 @@ inline status_t copy_bytes(bytes_span_t destination, bytes_view_t source) noexce
     return status_t::success_k;
 }
 
-/** Rows @p first to @p first + @p count of a row-major @p plane whose rows are @p row_bytes wide,
- *  or empty when the plane holds fewer. */
+/** Rows @p first to @p first + @p count of a flat row-major @p matrix whose rows are @p row_bytes
+ *  wide, or empty when the matrix holds fewer. */
 template <typename bytes_type_>
-bytes_type_ plane_rows(bytes_type_ plane, std::size_t first, std::size_t count, std::size_t row_bytes) noexcept {
+bytes_type_ flat_rows(bytes_type_ matrix, std::size_t first, std::size_t count, std::size_t row_bytes) noexcept {
     std::size_t const begin = first * row_bytes, bytes = count * row_bytes;
-    if (begin > plane.size() || plane.size() - begin < bytes) return {};
-    return plane.subspan(begin, bytes);
+    if (begin > matrix.size() || matrix.size() - begin < bytes) return {};
+    return matrix.subspan(begin, bytes);
 }
 
 /** Whether a filtered search admits one candidate or passes over it - rejected nodes

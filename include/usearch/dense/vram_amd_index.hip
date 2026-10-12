@@ -31,23 +31,23 @@ using amd_kit = typename quads_chain<typename nk::type_for<static_cast<nk_dtype_
 
 /** The shared views and sinks, field by field from the host's records. */
 template <typename kit_>
-__device__ __forceinline__ vram_planes_view<kit_> amd_view(amd_planes_t const& planes) noexcept {
-    return {reinterpret_cast<typename kit_::fragment_t*>(planes.vectors),
-            reinterpret_cast<typename kit_::norms_t*>(planes.norms),
-            planes.neighbors,
-            planes.connectivity,
-            planes.row_fragments,
-            planes.lanes_per_row,
-            planes.steps_per_row,
-            planes.row_fragments_magic,
-            planes.kernel};
+__device__ __forceinline__ vram_flat_view<kit_> amd_view(amd_flat_storage_t const& storage) noexcept {
+    return {reinterpret_cast<typename kit_::fragment_t*>(storage.vectors),
+            reinterpret_cast<typename kit_::norms_t*>(storage.norms),
+            storage.neighbors,
+            storage.connectivity,
+            storage.row_fragments,
+            storage.lanes_per_row,
+            storage.steps_per_row,
+            storage.row_fragments_magic,
+            storage.kernel};
 }
 __device__ __forceinline__ vram_arena_shape_t amd_view(amd_arena_shape_t const& shape) noexcept {
     return {shape.visited_slots, shape.visited_hash_shift, shape.tail_entries};
 }
 template <typename kit_>
 __device__ __forceinline__ vram_build_view<kit_> amd_view(amd_build_t const& build) noexcept {
-    return {amd_view<kit_>(build.planes),
+    return {amd_view<kit_>(build.storage),
             reinterpret_cast<typename kit_::fragment_t const*>(build.staging),
             build.end_id,
             build.scratch_bytes_per_warp,
@@ -61,7 +61,7 @@ __device__ __forceinline__ vram_build_view<kit_> amd_view(amd_build_t const& bui
 }
 template <typename kit_>
 __device__ __forceinline__ vram_search_view<kit_> amd_view(amd_search_t const& search) noexcept {
-    return {amd_view<kit_>(search.planes),
+    return {amd_view<kit_>(search.storage),
             reinterpret_cast<typename kit_::fragment_t const*>(search.queries),
             search.queries_count,
             search.sampling_bound,
@@ -74,10 +74,10 @@ __device__ __forceinline__ vram_search_view<kit_> amd_view(amd_search_t const& s
 }
 template <typename kit_>
 __device__ __forceinline__ vram_refine_view<kit_> amd_view(amd_refine_t const& refine) noexcept {
-    return {amd_view<kit_>(refine.planes), refine.shadow_neighbors, refine.end_id,
-            refine.scratch_bytes_per_warp, refine.first_id,         refine.arena,
-            amd_view(refine.arena_shape),  refine.epoch_base,       refine.telemetry,
-            refine.assigned_rows,          refine.node_ids,         refine.sampling_bound};
+    return {amd_view<kit_>(refine.storage), refine.shadow_neighbors, refine.end_id,
+            refine.scratch_bytes_per_warp,  refine.first_id,         refine.arena,
+            amd_view(refine.arena_shape),   refine.epoch_base,       refine.telemetry,
+            refine.assigned_rows,           refine.node_ids,         refine.sampling_bound};
 }
 template <typename kit_>
 __device__ __forceinline__ vram_search_sink<kit_> amd_view(amd_search_sink_t const& sink) noexcept {
@@ -131,10 +131,10 @@ __device__ __forceinline__ void amd_insert(vram_build_view<kit_> const& view) {
     vram_warp_slice_t const slice = vram_carve_slice<hip_warp_t>(view, dynamic_scratch);
     int const warp = slice.warp, lane = slice.lane;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
-    vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.planes.row_fragments};
+    vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.storage.row_fragments};
     vram_selection_scratch_t const selection = vram_selection_scratch_t::carve(
-        slice.scratch, view.planes.connectivity,
-        static_cast<std::size_t>(view.planes.row_fragments) * sizeof(typename kit_::fragment_t) * vram_cache_rows_k);
+        slice.scratch, view.storage.connectivity,
+        static_cast<std::size_t>(view.storage.row_fragments) * sizeof(typename kit_::fragment_t) * vram_cache_rows_k);
     while (true) {
         u32_t new_node_id = 0;
         if (lane == 0) new_node_id = view.first_id + hip_warp_t::fetch_add_relaxed(*view.assigned_rows, 1u);
@@ -168,10 +168,10 @@ __device__ __forceinline__ void amd_refine(vram_refine_view<kit_> const& view) {
     vram_warp_slice_t const slice = vram_carve_slice<hip_warp_t>(view, dynamic_scratch);
     int const warp = slice.warp, lane = slice.lane;
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
-    vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.planes.row_fragments};
+    vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.storage.row_fragments};
     vram_selection_scratch_t const selection = vram_selection_scratch_t::carve(
-        slice.scratch, view.planes.connectivity,
-        static_cast<std::size_t>(view.planes.row_fragments) * sizeof(typename kit_::fragment_t) * vram_cache_rows_k);
+        slice.scratch, view.storage.connectivity,
+        static_cast<std::size_t>(view.storage.row_fragments) * sizeof(typename kit_::fragment_t) * vram_cache_rows_k);
     while (true) {
         u32_t offset = 0;
         if (lane == 0) offset = hip_warp_t::fetch_add_relaxed(*view.assigned_rows, 1u);
@@ -257,18 +257,18 @@ __device__ __forceinline__ void amd_merge_links_one( //
     using kit_t = kit_;
     using mask_t = typename hip_warp_t::mask_t;
     constexpr u32_t lanes_k = hip_warp_t::width_k;
-    vram_planes_view<kit_t> const& planes = view.planes;
+    vram_flat_view<kit_t> const& storage = view.storage;
     constexpr u32_t query_row_k = vram_cache_rows_k - 1;
-    for (u32_t fragment = lane; fragment < planes.row_fragments; fragment += lanes_k)
-        cache.at(query_row_k, fragment) = planes.vector_for(node_id, fragment);
-    typename kit_t::norms_t const query_state = planes.norm_for(node_id);
+    for (u32_t fragment = lane; fragment < storage.row_fragments; fragment += lanes_k)
+        cache.at(query_row_k, fragment) = storage.vector_for(node_id, fragment);
+    typename kit_t::norms_t const query_state = storage.norm_for(node_id);
     hip_warp_t::sync();
 
     u32_t candidates_count = 0;
-    u32_t const* const shadow_slots = view.shadow_neighbors + static_cast<std::size_t>(node_id) * planes.connectivity;
-    for (u32_t slot_base = 0; slot_base < planes.connectivity; slot_base += lanes_k) {
+    u32_t const* const shadow_slots = view.shadow_neighbors + static_cast<std::size_t>(node_id) * storage.connectivity;
+    for (u32_t slot_base = 0; slot_base < storage.connectivity; slot_base += lanes_k) {
         u32_t const slot = slot_base + lane;
-        u32_t const forward_id = slot < planes.connectivity ? shadow_slots[slot] : node_id_unknown_k;
+        u32_t const forward_id = slot < storage.connectivity ? shadow_slots[slot] : node_id_unknown_k;
         bool const usable = forward_id != node_id_unknown_k && forward_id != node_id;
         mask_t const usable_mask = hip_warp_t::ballot(usable);
         u32_t const ordinal = hip_warp_t::count(usable_mask & hip_warp_t::below(lane));
@@ -298,7 +298,7 @@ __device__ __forceinline__ void amd_merge_links_one( //
     for (u32_t base = 0; base < candidates_count; base += lanes_k) {
         u32_t const batch_count = min_of(candidates_count - base, lanes_k);
         vram_scored_node_t const scored = vram_score_batch<kit_t>( //
-            planes, cache.row(query_row_k), query_state, gathered.ids + base, batch_count, gathered, lane);
+            storage, cache.row(query_row_k), query_state, gathered.ids + base, batch_count, gathered, lane);
         vram_scored_node_t const sorted_batch = sort_lanes<hip_warp_t>(
             static_cast<u32_t>(lane) < batch_count ? vram_scored_node_t::make(scored.distance(), base + lane)
                                                    : vram_scored_node_t::sentinel(),
@@ -306,19 +306,19 @@ __device__ __forceinline__ void amd_merge_links_one( //
         sorted_candidates.insert_batch(sorted_batch, batch_count, lane);
     }
 
-    u32_t const candidate_words = candidates_count * planes.row_fragments;
+    u32_t const candidate_words = candidates_count * storage.row_fragments;
     for (u32_t word = lane; word < candidate_words; word += lanes_k) {
-        u32_t const cache_row = planes.row_of_word(word), fragment = planes.fragment_of_word(word, cache_row);
+        u32_t const cache_row = storage.row_of_word(word), fragment = storage.fragment_of_word(word, cache_row);
         hip_warp_t::copy_async(&cache.at(cache_row, fragment),
-                               planes.vector_span_for(gathered.ids[cache_row]) + fragment);
+                               storage.vector_span_for(gathered.ids[cache_row]) + fragment);
     }
     hip_warp_t::copy_wait();
     for (u32_t cache_row = lane; cache_row < candidates_count; cache_row += lanes_k)
-        cache_norms[cache_row] = planes.norm_for(gathered.ids[cache_row]);
+        cache_norms[cache_row] = storage.norm_for(gathered.ids[cache_row]);
     hip_warp_t::sync();
 
     u32_t refined_count = 0;
-    for (u32_t merge_index = 0; merge_index != sorted_candidates.size_ && refined_count != planes.connectivity;
+    for (u32_t merge_index = 0; merge_index != sorted_candidates.size_ && refined_count != storage.connectivity;
          ++merge_index) {
         vram_scored_node_t const entry = sorted_candidates.at(merge_index);
         f32_t const to_query = entry.distance();
@@ -329,10 +329,10 @@ __device__ __forceinline__ void amd_merge_links_one( //
             if (base + lane < refined_count) {
                 u32_t const kept_position = kept_positions[base + lane];
                 typename kit_t::dot_t pair_accumulator {};
-                for (u32_t fragment = 0; fragment != planes.row_fragments; ++fragment)
+                for (u32_t fragment = 0; fragment != storage.row_fragments; ++fragment)
                     pair_accumulator = kit_t::accumulate_dot(cache.at(candidate_position, fragment),
                                                              cache.at(kept_position, fragment), pair_accumulator);
-                f32_t const between = kit_t::distance(planes.kernel, pair_accumulator, cache_norms[candidate_position],
+                f32_t const between = kit_t::distance(storage.kernel, pair_accumulator, cache_norms[candidate_position],
                                                       cache_norms[kept_position]);
                 lane_diverse = between >= to_query;
                 ++telemetry.scored;
@@ -348,7 +348,7 @@ __device__ __forceinline__ void amd_merge_links_one( //
 
     u32_t const diverse_count = refined_count;
     for (u32_t merge_index = 0, matched = 0;
-         merge_index != sorted_candidates.size_ && refined_count != planes.connectivity; ++merge_index) {
+         merge_index != sorted_candidates.size_ && refined_count != storage.connectivity; ++merge_index) {
         u32_t const candidate_position = sorted_candidates.at(merge_index).id();
         if (matched != diverse_count && kept_positions[matched] == candidate_position) {
             ++matched;
@@ -360,15 +360,15 @@ __device__ __forceinline__ void amd_merge_links_one( //
     }
 
     hip_warp_t::sync();
-    u32_t* const live_slots = planes.neighbors_for(node_id);
+    u32_t* const live_slots = storage.neighbors_for(node_id);
     mask_t changed_mask = 0;
-    for (u32_t slot_base = 0; slot_base < planes.connectivity; slot_base += lanes_k) {
+    for (u32_t slot_base = 0; slot_base < storage.connectivity; slot_base += lanes_k) {
         u32_t const slot = slot_base + lane;
         u32_t const value = slot < refined_count ? gathered.ids[kept_positions[slot]]
                             : slot == 0          ? node_id
                                                  : node_id_unknown_k;
-        changed_mask |= hip_warp_t::ballot(slot < planes.connectivity && live_slots[slot] != value);
-        if (slot < planes.connectivity) live_slots[slot] = value;
+        changed_mask |= hip_warp_t::ballot(slot < storage.connectivity && live_slots[slot] != value);
+        if (slot < storage.connectivity) live_slots[slot] = value;
     }
     telemetry.changed_nodes += changed_mask != 0;
     hip_warp_t::sync();
@@ -386,9 +386,9 @@ __device__ __forceinline__ void amd_merge_links(vram_refine_view<kit_> const& vi
     vram_warp_slice_t const slice = vram_carve_slice<hip_warp_t>(view, dynamic_scratch);
     int const warp = slice.warp, lane = slice.lane;
     vram_vector_cache<typename kit_::fragment_t> const cache {
-        reinterpret_cast<typename kit_::fragment_t*>(slice.scratch), view.planes.row_fragments};
+        reinterpret_cast<typename kit_::fragment_t*>(slice.scratch), view.storage.row_fragments};
     // Past the candidate cache: the ascending scored span, then the kept-row indices.
-    std::size_t const cache_bytes = static_cast<std::size_t>(view.planes.row_fragments) *
+    std::size_t const cache_bytes = static_cast<std::size_t>(view.storage.row_fragments) *
                                     sizeof(typename kit_::fragment_t) * vram_cache_rows_k;
     vram_scored_node_t* const sorted_span = reinterpret_cast<vram_scored_node_t*>(slice.scratch + cache_bytes);
     u32_t* const kept_positions = reinterpret_cast<u32_t*>(slice.scratch + cache_bytes +
@@ -426,17 +426,18 @@ __device__ __forceinline__ void amd_scatter_links(u32_t const* shadow_neighbors,
     }
 }
 
-/** Rebuilds the norms plane for a run of rows, one wavefront per row. */
+/** Rebuilds the norms column for a run of rows, one wavefront per row. */
 template <typename kit_>
-__device__ __forceinline__ void amd_derive_norms(vram_planes_view<kit_> const& planes, u32_t first_row,
+__device__ __forceinline__ void amd_derive_norms(vram_flat_view<kit_> const& storage, u32_t first_row,
                                                  u32_t rows_count) {
     amd_wave_t const wave = amd_wave();
     for (std::size_t row = first_row + wave.index; row < first_row + rows_count; row += wave.count) {
         typename kit_::norms_accumulator_t accumulator {};
-        for (u32_t fragment = wave.lane; fragment < planes.row_fragments; fragment += hip_warp_t::width_k)
-            accumulator = kit_::accumulate_norms(planes.vector_for(static_cast<node_id_t>(row), fragment), accumulator);
+        for (u32_t fragment = wave.lane; fragment < storage.row_fragments; fragment += hip_warp_t::width_k)
+            accumulator = kit_::accumulate_norms(storage.vector_for(static_cast<node_id_t>(row), fragment),
+                                                 accumulator);
         accumulator = vram_reduce_norms<hip_warp_t>(accumulator);
-        if (wave.lane == 0) planes.norm_ref_for(static_cast<node_id_t>(row)) = kit_::partials_to_norms(accumulator);
+        if (wave.lane == 0) storage.norm_ref_for(static_cast<node_id_t>(row)) = kit_::partials_to_norms(accumulator);
     }
 }
 
@@ -577,7 +578,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_warp_t::width_k) a
         amd_scatter_links(graph.neighbors, graph.rows_count, graph.first_id, graph.walk_count, graph.node_ids,
                           graph.connectivity, graph.bucket_width, graph.bucket_ids, graph.bucket_counts, graph.touched);
     else if constexpr (kernel == amd_kernel_t::derive_norms_k)
-        amd_derive_norms<kit_t>(amd_view<kit_t>(graph.planes), graph.first_id, graph.rows_count);
+        amd_derive_norms<kit_t>(amd_view<kit_t>(graph.storage), graph.first_id, graph.rows_count);
     else if constexpr (kernel == amd_kernel_t::mark_seeds_k)
         amd_mark_seeds(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
     else if constexpr (kernel == amd_kernel_t::reachability_sweep_k)

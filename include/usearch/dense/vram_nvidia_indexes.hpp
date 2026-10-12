@@ -272,7 +272,7 @@ struct vram_nvidia_indexes {
      *  @brief One batch in flight across the shards.
      *
      *  The executor and the insertion gate are held for the plan's whole life, one context per
-     *  shard carved for the whole batch, every shard's planes and key columns grown to the rows it
+     *  shard carved for the whole batch, every shard's storage and key columns grown to the rows it
      *  takes, and the locator seats claimed, so a step fails only on its devices.
      *
      *  Row @c t of the batch lands on shard @c (rotation+t) mod S. Steps run one after another on
@@ -464,7 +464,7 @@ struct vram_nvidia_indexes {
 
     /**
      *  @brief Opens a batch of @p rows: takes the executor and the insertion gate, carves one
-     *      context per shard, grows every shard's planes and key columns to the rows it takes, and
+     *      context per shard, grows every shard's storage and key columns to the rows it takes, and
      *      claims the locator seats.
      *
      *  @param[in] rows Rows in the batch; the plan's steps launch each exactly once, in any order.
@@ -1173,7 +1173,7 @@ struct vram_nvidia_indexes {
      *  @param[in] path The monolith's path, or the manifest's - its parts land beside it as
      *      @c <stem>-00001-of-0000S.safegraphs.
      *  @param[in] config The layout, alignment, certified contract and provenance; the device
-     *      planes cannot be settlement-probed, so @c concurrent_k refuses.
+     *      storage cannot be settlement-probed, so @c concurrent_k refuses.
      *  @param[inout] executor The streams the exports ride, held until the plan dies.
      */
     expected<save_plan_t> plan_save(std::string_view path, save_config_t const& config, executor_t& executor) noexcept {
@@ -2196,7 +2196,7 @@ struct vram_nvidia_indexes {
     locators_map_t locators_of_key_;
 
     /** The host allocator behind the shard table, the key columns, the locator map and every
-     *  checkpoint catalog; the shards' planes live on their devices. */
+     *  checkpoint catalog; the shards' storage lives on their devices. */
     forkunion_allocator_t allocator_;
 
     /** Rows routed so far - the next batch's rotation base. */

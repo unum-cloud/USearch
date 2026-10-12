@@ -31,7 +31,7 @@
 
 #include <hip/hip_runtime_api.h> // `hipDeviceProp_t`, `hipStream_t` & the prototypes the table takes
 
-#include <forkunion/topology.hpp> // `fu::volume_ram` - the managed planes' host-memory budget
+#include <forkunion/topology.hpp> // `fu::volume_ram` - the managed storage's host-memory budget
 #include <forkunion/types.hpp>    // `fu::round_up_to_multiple`, `fu::spin_mutex_t` - the hold
 
 #include <numkong/types.h> // `NUMKONG_ARCH_ROCM_` - set where HIP-Clang compiles
@@ -246,8 +246,8 @@ concept hip_allocator = requires(allocator_ allocator, typename allocator_::valu
     { allocator.device() } -> std::convertible_to<int>;
 };
 
-/** The plane backend contract: a reserve-once / commit-on-demand address range whose base never
- *  moves. Not a refinement of @c hip_allocator, since planes never free mid-life. */
+/** The flat storage backend contract: a reserve-once / commit-on-demand address range whose base
+ *  never moves. Not a refinement of @c hip_allocator, since flat storage never frees mid-life. */
 template <typename allocator_>
 concept hip_reservable_allocator = requires(allocator_ allocator, std::size_t bytes, int device) {
     typename allocator_::value_type;
@@ -261,8 +261,8 @@ concept hip_reservable_allocator = requires(allocator_ allocator, std::size_t by
     { allocator.device() } -> std::convertible_to<int>;
 };
 
-/** Virtual-memory plane backend: a fixed address reservation backed by slabs mapped on demand,
- *  host-driven ahead of any kernel; each fresh slab is zeroed as it maps. */
+/** Virtual-memory flat storage backend: a fixed address reservation backed by slabs mapped on
+ *  demand, host-driven ahead of any kernel; each fresh slab is zeroed as it maps. */
 template <typename value_type_ = byte_t>
 struct hip_virtual_memory_allocator {
     using value_type = value_type_;
@@ -369,7 +369,7 @@ struct hip_virtual_memory_allocator {
     }
 };
 
-/** Unified-memory plane backend: one @c hipMallocManaged reservation for the whole ceiling,
+/** Unified-memory flat storage backend: one @c hipMallocManaged reservation for the whole ceiling,
  *  preferring the device and oversubscribable past VRAM. */
 template <typename value_type_ = byte_t>
 struct hip_managed_allocator {

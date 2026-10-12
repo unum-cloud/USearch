@@ -43,12 +43,13 @@ struct counting_metal_allocator_t {
  *  and the factory the shared composers build the index with. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::apple_k, dtype_, kernel_> {
-    using index_t = vram_apple_index<dtype_, nk_cap_metal_k, counting_metal_allocator_t>;
+    using index_t = vram_apple_index<dtype_, nk_cap_metal_k, counting_metal_allocator_t, counting_metal_allocator_t>;
     using indexes_t = vram_apple_indexes<u32_t, dtype_, nk_cap_metal_k>;
     inline static constexpr char const* vendor_prefix_k = "metal";
 
     static index_t make_index(allocation_ledger_t& ledger) noexcept {
-        return index_t {kernel_, counting_metal_allocator_t {counting_allocator_t(ledger)}};
+        counting_metal_allocator_t const allocator {counting_allocator_t(ledger)};
+        return index_t {kernel_, allocator, allocator};
     }
 };
 
