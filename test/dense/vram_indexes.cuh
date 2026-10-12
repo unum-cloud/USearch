@@ -183,9 +183,16 @@ std::size_t test_dense_vram_indexes_indexer_search(u64_t seed) {
     }
 }
 
+/** A vendor this build leaves out composes nothing, so its shard instantiates empty. */
+template <gpu_vendor_t vendor_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
+std::size_t test_vram_indexes_configuration(char const*, u64_t) {
+    return 0;
+}
+
 /** Composes one (dtype, kernel) cell's sharded suite over @p vendor_ 's collection on the device
  *  under test, reported under @p name prefixed by the vendor's toolkit. */
 template <gpu_vendor_t vendor_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
+    requires vram_compiled<vendor_>
 std::size_t test_vram_indexes_configuration(char const* name, u64_t seed) {
     using cell_t = vram_cell<vendor_, dtype_, kernel_>;
     using indexes_t = typename cell_t::indexes_t;
@@ -210,8 +217,8 @@ std::size_t test_vram_indexes_configuration(char const* name, u64_t seed) {
     return report(vendor_name.c_str(), failures_count);
 }
 
-/** The sharded VRAM suite entry its translation unit defines for the vendor of its object library
- *  and that vendor's entry composes explicitly; returns the suite's failure count. */
+/** The sharded VRAM suite entry its translation unit defines for every vendor and each carried
+ *  vendor's entry composes explicitly; returns the suite's failure count. */
 template <gpu_vendor_t vendor_>
 std::size_t check_vram_indexes(settings_t const& settings);
 

@@ -2,11 +2,11 @@
  *  @file test/dense/vram_amd.hpp
  *  @author Ash Vardanian
  *  @date October 11, 2026
- *  @brief The AMD index the residency-level VRAM scenarios run over: its ledgered plane backend,
- *      the device-bound scratch allocator and the index factory.
+ *  @brief The AMD index the residency-level VRAM scenarios run over: its ledgered flat-matrix
+ *      backend, the device-bound scratch allocator and the index factory.
  *
  *  The shared composers include it for the AMD suite, so the scenarios stay vendor-neutral while
- *  the harness's live-bytes-must-balance ledger audits the AMD planes.
+ *  the harness's live-bytes-must-balance ledger audits the AMD flat matrices.
  */
 #pragma once
 
@@ -31,8 +31,8 @@ struct selected_hip_allocator : hip_device_allocator<value_type_> {
         : hip_device_allocator<value_type_>(other.stream(), other.device()) {}
 };
 
-/** Ledgered AMD plane backend: the virtual-memory one with every committed slab tallied into the
- *  harness's @c allocation_ledger_t, and a converting constructor from its host-side
+/** Ledgered AMD flat-matrix backend: the virtual-memory one with every committed slab tallied into
+ *  the harness's @c allocation_ledger_t, and a converting constructor from its host-side
  *  @c counting_allocator, so the ledger provably balances device bytes. */
 template <typename value_type_ = std::byte>
 struct counting_hip_allocator {
@@ -89,8 +89,8 @@ static_assert(hip_reservable_allocator<counting_hip_allocator_t>);
 /** The AMD class the suite links, whose code object its device must load: CDNA3, the floor. */
 inline constexpr nk_capability_t dense_amd_capabilities_k = amd_capabilities_of(gpu_class_t::amd_cdna3_k);
 
-/** The AMD index of one (dtype, kernel) cell over the ledgered planes, its sharded collection, and
- *  the factory the shared composers build the index with. */
+/** The AMD index of one (dtype, kernel) cell over the ledgered flat matrices, its sharded
+ *  collection, and the factory the shared composers build the index with. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::amd_k, dtype_, kernel_> {
     using index_t = vram_amd_index<dtype_, dense_amd_capabilities_k, counting_hip_allocator_t, counting_hip_allocator_t,
@@ -98,9 +98,10 @@ struct vram_cell<gpu_vendor_t::amd_k, dtype_, kernel_> {
     using indexes_t = vram_amd_indexes<u32_t, dtype_, dense_amd_capabilities_k>;
     inline static constexpr char const* vendor_prefix_k = "rocm";
 
-    static index_t make_index(allocation_ledger_t& ledger) noexcept {
-        return index_t {kernel_, counting_hip_allocator_t {counting_allocator_t(ledger)},
-                        counting_hip_allocator_t {counting_allocator_t(ledger)}};
+    static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) noexcept {
+        return std::unique_ptr<index_t>(new (std::nothrow)
+                                            index_t(kernel_, counting_hip_allocator_t {counting_allocator_t(ledger)},
+                                                    counting_hip_allocator_t {counting_allocator_t(ledger)}));
     }
 };
 

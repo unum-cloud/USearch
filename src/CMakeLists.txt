@@ -191,9 +191,58 @@ target_include_directories(usearch_punned PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_punned PRIVATE yyjson forkunion::static stringzilla::header)
 set(USEARCH_PUNNED_LIBRARIES usearch_punned usearch_dense_ram_variants usearch_dense_nvme_variants)
 
-# NVCC is only a device compiler here: every unit with kernels compiles twice, once by NVCC device-only into a fatbin
-# that links in as raw bytes, and once by the host compiler, which names no kernel, so nothing registers with or links
-# the CUDA runtime, and the driver opens at first use. The functions serve the tests and benchmarks too.
+# Every NVIDIA or AMD unit with kernels compiles twice. Host-only, through Clang's CUDA or HIP mode, it names its
+# kernels from device code alone, so nothing registers with or links a GPU runtime, which opens at first use.
+# Device-only, NVCC for NVIDIA and Clang for AMD, it compiles into a bundle of the codes the remaining arguments name, a
+# CUDA fatbin or a HIP offload bundle, with @p target's includes and definitions; the bundle links into @p target
+# page-aligned in a read-only section through an assembler stub, under `<name>_bundle_start` and `<name>_bundle_end`, so
+# it travels into archives too. With no codes the bundle is empty, and its devices refuse to load it. NVCC pairs with
+# `CMAKE_CUDA_HOST_COMPILER` when set, and `CMAKE_CUDA_FLAGS` reach its pass. The tests and benchmarks bundle theirs
+# through it too.
+function (usearch_gpu_bundle target vendor name source)
+    set(bundle_ ${CMAKE_CURRENT_BINARY_DIR}/bundles/${target}/${name}.bundle)
+    if (vendor STREQUAL "nvidia")
+        set(host_compiler_ ${CMAKE_CXX_COMPILER})
+        if (CMAKE_CUDA_HOST_COMPILER)
+            set(host_compiler_ ${CMAKE_CUDA_HOST_COMPILER})
+        endif ()
+        set(device_only_
+            "${CUDAToolkit_NVCC_EXECUTABLE};-x;cu;--fatbin;-ccbin;${host_compiler_};--expt-relaxed-constexpr"
+        )
+        separate_arguments(device_flags_ UNIX_COMMAND "${CMAKE_CUDA_FLAGS}")
+        set(host_only_ "-xcuda;--cuda-host-only;-nocudalib;--cuda-path=${CUDAToolkit_LIBRARY_ROOT}")
+    else ()
+        set(device_only_ "${CMAKE_CXX_COMPILER};-x;hip;--cuda-device-only;-c")
+        set(host_only_ "-xhip;--cuda-host-only;-nogpulib")
+    endif ()
+    set_source_files_properties(${source} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "${host_only_}")
+    if (ARGN)
+        add_custom_command(
+            OUTPUT ${bundle_}
+            COMMAND
+                ${device_only_} -std=c++20 -O3 ${ARGN} "-I$<JOIN:$<TARGET_PROPERTY:${target},INCLUDE_DIRECTORIES>,;-I>"
+                "-D$<JOIN:$<TARGET_PROPERTY:${target},COMPILE_DEFINITIONS>,;-D>" ${device_flags_} -MD -MF ${bundle_}.d
+                ${source} -o ${bundle_}
+            DEPENDS ${source}
+            DEPFILE ${bundle_}.d
+            COMMENT "Compiling the ${name} kernels"
+            COMMAND_EXPAND_LISTS VERBATIM
+        )
+    else ()
+        file(WRITE ${bundle_} "")
+    endif ()
+    set(stub_ ${CMAKE_CURRENT_BINARY_DIR}/bundles/${target}/${name}_bundle.S)
+    file(
+        WRITE ${stub_}
+        ".section .rodata\n.balign 4096\n.globl ${name}_bundle_start\n${name}_bundle_start:\n"
+        ".incbin \"${bundle_}\"\n.globl ${name}_bundle_end\n${name}_bundle_end:\n"
+        ".section .note.GNU-stack,\"\",@progbits\n"
+    )
+    set_source_files_properties(${stub_} PROPERTIES LANGUAGE ASM OBJECT_DEPENDS ${bundle_})
+    target_sources(${target} PRIVATE ${stub_})
+endfunction ()
+
+# NVCC is only a device compiler here, and NVIDIA's units, tests and benchmarks bundle their kernels as above.
 if (USEARCH_BUILD_CUDA)
     find_package(CUDAToolkit REQUIRED)
     enable_language(ASM)
@@ -221,90 +270,43 @@ if (USEARCH_BUILD_CUDA)
         )
     endfunction ()
 
-    # Compiles @p source device-only through NVCC into a fatbin of the codes the remaining arguments name, with @p
-    # target's includes and definitions, and links it into @p target page-aligned in a read-only section through an
-    # assembler stub, under `<name>_bundle_start` and `<name>_bundle_end`, so it travels into archives too. The host
-    # compiler NVCC pairs with is `CMAKE_CUDA_HOST_COMPILER` when set, and `CMAKE_CUDA_FLAGS` reach the pass.
-    function (usearch_cuda_fatbin target name source)
-        set(fatbins_dir_ ${CMAKE_CURRENT_BINARY_DIR}/cuda/${target})
-        set(fatbin_ ${fatbins_dir_}/${name}.fatbin)
-        set(host_compiler_ ${CMAKE_CXX_COMPILER})
-        if (CMAKE_CUDA_HOST_COMPILER)
-            set(host_compiler_ ${CMAKE_CUDA_HOST_COMPILER})
-        endif ()
-        separate_arguments(device_flags_ UNIX_COMMAND "${CMAKE_CUDA_FLAGS}")
-        add_custom_command(
-            OUTPUT ${fatbin_}
-            COMMAND
-                ${CUDAToolkit_NVCC_EXECUTABLE} -x cu -std=c++20 -O3 --fatbin -ccbin ${host_compiler_}
-                --expt-relaxed-constexpr ${ARGN} "-I$<JOIN:$<TARGET_PROPERTY:${target},INCLUDE_DIRECTORIES>,;-I>"
-                "-D$<JOIN:$<TARGET_PROPERTY:${target},COMPILE_DEFINITIONS>,;-D>" ${device_flags_} -MD -MF ${fatbin_}.d
-                ${source} -o ${fatbin_}
-            DEPENDS ${source}
-            DEPFILE ${fatbin_}.d
-            COMMENT "Compiling the ${name} kernels"
-            COMMAND_EXPAND_LISTS VERBATIM
-        )
-        set(fatbin_stub_ ${fatbins_dir_}/${name}_bundle.S)
-        file(
-            WRITE ${fatbin_stub_}
-            ".section .rodata\n.balign 4096\n.globl ${name}_bundle_start\n${name}_bundle_start:\n"
-            ".incbin \"${fatbin_}\"\n.globl ${name}_bundle_end\n${name}_bundle_end:\n"
-            ".section .note.GNU-stack,\"\",@progbits\n"
-        )
-        set_source_files_properties(${fatbin_stub_} PROPERTIES LANGUAGE ASM OBJECT_DEPENDS ${fatbin_})
-        target_sources(${target} PRIVATE ${fatbin_stub_})
-    endfunction ()
-
-    # One unit per GPU class, its fatbin compiled for its own architecture alone - the device twin of the CPU classes'
-    # per-unit ISA flags - so no cubin carries another generation's kernels. Every unit sees the same NumKong GPU
-    # capabilities, as the CPU units see the same probe verdicts, so the arms' types agree across units, and each
-    # class's ceiling keeps its arms within its generation.
-    set(usearch_cuda_capabilities_ NUMKONG_TARGET_AMPERE=1 NUMKONG_TARGET_ADA=1 NUMKONG_TARGET_HOPPER=1
-                                   NUMKONG_TARGET_BLACKWELL=1 NUMKONG_TARGET_BLACKWELLRTX=1
-    )
-    function (usearch_dense_vram_nvidia_variant class)
+    # One unit per GPU class, its fatbin compiled for its own architectures alone - the device twin of the CPU classes'
+    # per-unit ISA flags - so no cubin carries another generation's kernels. Each unit sees only its own NumKong GPU
+    # target, as an AMD unit does, since NumKong's own kernels compile under every target a unit names.
+    function (usearch_dense_vram_nvidia_variant class target_macro)
         set(target_ usearch_dense_vram_variants_${class})
         set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_variants_${class}.cu)
         add_library(${target_} OBJECT ${source_})
         usearch_setup_target(${target_})
         target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-        target_compile_definitions(${target_} PRIVATE "USEARCH_ARCH_CUDA_=1" ${usearch_cuda_capabilities_})
+        target_compile_definitions(${target_} PRIVATE "USEARCH_ARCH_CUDA_=1" "NUMKONG_TARGET_${target_macro}=1")
         target_link_libraries(
             ${target_}
-            PRIVATE yyjson forkunion::static CUDA::toolkit
+            PRIVATE yyjson forkunion::static
             PUBLIC ${CMAKE_DL_LIBS}
         )
-        set_source_files_properties(${source_} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xc++")
-        usearch_cuda_fatbin(${target_} dense_${class} ${source_} ${ARGN})
+        usearch_cuda_codes(codes_ "${ARGN}")
+        usearch_gpu_bundle(${target_} nvidia dense_${class} ${source_} ${codes_})
         set(USEARCH_PUNNED_LIBRARIES
             ${USEARCH_PUNNED_LIBRARIES} ${target_}
             PARENT_SCOPE
         )
     endfunction ()
+    usearch_dense_vram_nvidia_variant(nvidia_ampere AMPERE 80)
+    usearch_dense_vram_nvidia_variant(nvidia_ada ADA 89-real)
+    usearch_dense_vram_nvidia_variant(nvidia_hopper HOPPER 90a-real)
+    usearch_dense_vram_nvidia_variant(nvidia_blackwell BLACKWELL 100f-real)
+    usearch_dense_vram_nvidia_variant(nvidia_blackwellrtx BLACKWELLRTX 120f-real)
 
-    usearch_dense_vram_nvidia_variant(
-        nvidia_ampere --generate-code=arch=compute_80,code=sm_80 --generate-code=arch=compute_80,code=compute_80
-    )
-    usearch_dense_vram_nvidia_variant(nvidia_ada --generate-code=arch=compute_89,code=sm_89)
-    usearch_dense_vram_nvidia_variant(nvidia_hopper --generate-code=arch=compute_90a,code=sm_90a)
-    usearch_dense_vram_nvidia_variant(nvidia_blackwell --generate-code=arch=compute_100f,code=sm_100f)
-    usearch_dense_vram_nvidia_variant(nvidia_blackwellrtx --generate-code=arch=compute_120f,code=sm_120f)
-
-    target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_CUDA_=1" ${usearch_cuda_capabilities_})
-    target_link_libraries(usearch_punned PRIVATE CUDA::toolkit)
+    target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_CUDA_=1")
 else ()
     target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_CUDA_=0")
 endif ()
 
-# The AMD arms join beside the NVIDIA ones, so one dispatch unit carries both vendors. Each class unit compiles twice
-# through ROCm's Clang, never through CMake's HIP language, whose fat binaries would register with `libamdhip64`: once
-# device-only over every compiled dtype, into an offload bundle of the class's listed processors that links in as raw
-# bytes, and once host-only into the arms, which name no kernel, so they register nothing and link no HIP runtime.
+# The AMD arms join beside the NVIDIA ones, so one dispatch unit carries both vendors. Each class unit bundles its
+# kernels as above, through ROCm's Clang, never through CMake's HIP language, whose fat binaries would register with
+# `libamdhip64`, for the class's processors `USEARCH_ROCM_ARCHITECTURES` lists.
 if (USEARCH_BUILD_ROCM)
-    if (NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-        message(FATAL_ERROR "USEARCH_BUILD_ROCM compiles with ROCm's Clang - set CMAKE_CXX_COMPILER to its clang++")
-    endif ()
     enable_language(ASM)
     function (usearch_dense_vram_amd_variant class target_macro)
         set(processors_)
@@ -313,37 +315,9 @@ if (USEARCH_BUILD_ROCM)
                 list(APPEND processors_ --offload-arch=${processor_})
             endif ()
         endforeach ()
-        if (NOT processors_)
-            return()
-        endif ()
-        target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_${target_macro}_=1")
         set(target_ usearch_dense_vram_variants_${class})
         set(source_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_variants_${class}.hip)
-        set(bundles_dir_ ${CMAKE_CURRENT_BINARY_DIR}/rocm)
-        set(bundle_ ${bundles_dir_}/dense_${class}.hipfb)
-        add_custom_command(
-            OUTPUT ${bundle_}
-            COMMAND
-                ${CMAKE_CXX_COMPILER} -x hip -std=c++20 -O3 --cuda-device-only ${processors_}
-                "-I$<JOIN:$<TARGET_PROPERTY:${target_},INCLUDE_DIRECTORIES>,;-I>"
-                "-D$<JOIN:$<TARGET_PROPERTY:${target_},COMPILE_DEFINITIONS>,;-D>" -MD -MF ${bundle_}.d -c ${source_} -o
-                ${bundle_}
-            DEPENDS ${source_}
-            DEPFILE ${bundle_}.d
-            COMMENT "Compiling the ${class} kernels"
-            COMMAND_EXPAND_LISTS VERBATIM
-        )
-        # The bytes land page-aligned in a read-only section, under the names the unit declares, through an assembler
-        # stub, so the code object travels with the unit's own objects into archives too.
-        set(bundle_stub_ ${bundles_dir_}/dense_${class}_bundle.S)
-        file(
-            WRITE ${bundle_stub_}
-            ".section .rodata\n.balign 4096\n.globl dense_${class}_bundle_start\ndense_${class}_bundle_start:\n"
-            ".incbin \"${bundle_}\"\n.globl dense_${class}_bundle_end\ndense_${class}_bundle_end:\n"
-            ".section .note.GNU-stack,\"\",@progbits\n"
-        )
-        set_source_files_properties(${bundle_stub_} PROPERTIES LANGUAGE ASM OBJECT_DEPENDS ${bundle_})
-        add_library(${target_} OBJECT ${source_} ${bundle_stub_})
+        add_library(${target_} OBJECT ${source_})
         usearch_setup_target(${target_})
         target_include_directories(${target_} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
         target_compile_definitions(${target_} PRIVATE "USEARCH_ARCH_ROCM_=1" "NUMKONG_TARGET_${target_macro}=1")
@@ -352,9 +326,9 @@ if (USEARCH_BUILD_ROCM)
             PRIVATE yyjson forkunion::static
             PUBLIC ${CMAKE_DL_LIBS}
         )
-        set_source_files_properties(
-            ${source_} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xhip;--cuda-host-only;-nogpulib"
-        )
+        # A class none of whose processors is listed still links its arms, over an empty code object, so the dispatch
+        # unit lists every class whatever the toolchain compiles for.
+        usearch_gpu_bundle(${target_} amd dense_${class} ${source_} ${processors_})
         set(USEARCH_PUNNED_LIBRARIES
             ${USEARCH_PUNNED_LIBRARIES} ${target_}
             PARENT_SCOPE
@@ -363,15 +337,7 @@ if (USEARCH_BUILD_ROCM)
     usearch_dense_vram_amd_variant(amd_cdna3 CDNA3 gfx942 gfx950)
     usearch_dense_vram_amd_variant(amd_cdna4 CDNA4 gfx950)
     usearch_dense_vram_amd_variant(amd_cdna5 CDNA5 gfx1250 gfx1251)
-    # The plain C++ units type the runtime's entry points off `hip_runtime_api.h`, which declares and links nothing, but
-    # needs ROCm's headers and the platform HIP-Clang would name for it.
-    get_filename_component(rocm_compiler_dir_ ${CMAKE_CXX_COMPILER} DIRECTORY)
-    find_path(USEARCH_HIP_INCLUDE_DIR hip/hip_runtime_api.h
-              HINTS $ENV{ROCM_PATH}/include ${rocm_compiler_dir_}/../../include ${rocm_compiler_dir_}/../../../include
-                    /opt/rocm/include REQUIRED
-    )
-    target_include_directories(usearch_punned SYSTEM PRIVATE ${USEARCH_HIP_INCLUDE_DIR})
-    target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_ROCM_=1" "__HIP_PLATFORM_AMD__")
+    target_compile_definitions(usearch_punned PRIVATE "USEARCH_ARCH_ROCM_=1")
 endif ()
 
 # The Apple arms: one plain C++ unit serving every Apple class until a family's kernels differ, whose kernels compile

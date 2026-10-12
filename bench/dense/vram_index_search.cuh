@@ -13,9 +13,10 @@
  *  shard translation units split. The cascade ends in a workload, so one pipeline serves the search
  *  and algebra families, and the multi-device binaries reuse its streaming.
  *
- *  The shards compile with the host compiler alone; each binary's entry unit compiles once more
- *  with NVCC device-only, into the binary's own fatbin of every ceiling's kernels, which every unit
- *  finds through the @c dense::cuda_fatbin specializations below.
+ *  The shards compile with the host compiler alone; each binary's entry unit compiles host-only
+ *  through Clang's CUDA mode and once more with NVCC device-only, into the binary's own fatbin of
+ *  every ceiling's kernels, which every unit finds through the @c dense::cuda_fatbin
+ *  specializations below.
  */
 #pragma once
 
@@ -78,7 +79,7 @@ inline constexpr nk_dtype_t cuda_dtypes_ladder_k[] = {nk_bf16_k, nk_u1_k, nk_i8_
 /** Instantiates every ceiling's kernels for @p dtype_, with the attends over each of
  *  @p lookups_. */
 template <nk_dtype_t dtype_, u32_t... lookups_>
-void instantiate_cuda_ceilings() noexcept {
+__device__ void instantiate_cuda_ceilings() noexcept {
     cuda_instantiate<cuda_ceiling_of(nk_cap_ampere_k), dtype_, lookups_...>();
     [&]<std::size_t... rows_>(std::index_sequence<rows_...>) {
         (cuda_instantiate<cuda_ceiling_of(cuda_compute_choices_k[rows_].bit), dtype_, lookups_...>(), ...);
@@ -88,7 +89,7 @@ void instantiate_cuda_ceilings() noexcept {
 /** Instantiates the kernels of every compiled dtype under every ceiling, with the attends over each
  *  of @p lookups_ - what a binary's entry unit compiles into its fatbin. */
 template <u32_t... lookups_>
-void instantiate_cuda_kernels() noexcept {
+__device__ void instantiate_cuda_kernels() noexcept {
     [&]<std::size_t... dtypes_>(std::index_sequence<dtypes_...>) {
         (instantiate_cuda_ceilings<cuda_dtypes_ladder_k[dtypes_], lookups_...>(), ...);
     }(std::make_index_sequence<USEARCH_DENSE_DTYPES> {});
@@ -103,7 +104,8 @@ struct cuda_cli_t {
     /** The `--max-compute` name, resolved against @ref cuda_compute_choices_k once parsed. */
     std::string_view max_compute_name;
 
-    /** Whether the index planes live in managed memory oversubscribing VRAM, instead of VRAM. */
+    /** Whether the index's flat matrices live in managed memory oversubscribing VRAM, instead of
+     *  VRAM. */
     switch_t managed_memory = switch_t::absent_k;
 };
 
@@ -112,7 +114,7 @@ struct cuda_cli_t {
  *
  *  @verbatim
  *  --max-compute      the newest compiled  Compute ceiling by GPU generation, or ampere
- *  --managed-memory   off                  Managed-memory planes oversubscribing VRAM
+ *  --managed-memory   off                  Managed-memory flat matrices oversubscribing VRAM
  *  --batch            65536                Rows and queries per launch
  *  @endverbatim
  */
@@ -120,7 +122,7 @@ inline std::array<flag_t, 3> cuda_flags(settings_t& settings, cuda_cli_t& device
     return {{
         {"--max-compute", "name", "compute ceiling by GPU generation, like `hopper`, or `ampere`; newest by default",
          &device_cli.max_compute_name},
-        {"--managed-memory", "", "managed-memory planes: oversubscribe VRAM through the pager, host-RAM ceiling",
+        {"--managed-memory", "", "managed-memory flat matrices: oversubscribe VRAM through the pager, host-RAM ceiling",
          &device_cli.managed_memory},
         {"--batch", "rows", "rows & queries per launch; 65536 by default", &settings.batch},
     }};
@@ -150,7 +152,7 @@ struct cuda_bench_context {
     /** The parsed CLI, borrowed for the run's lifetime. */
     settings_t const& settings;
 
-    /** The CUDA ordinal every plane and launch of this run lands on. */
+    /** The CUDA ordinal every flat matrix and launch of this run lands on. */
     int device = 0;
 
     /** The metric the index scores by - the CLI's, or dot where the workload pins it. */
@@ -230,7 +232,7 @@ inline std::size_t streamed_batch_rows(settings_t const& settings, std::size_t t
 }
 
 /** Stages up to @p batch_rows rows of @p source starting at @p first_row into one device-ready
- *  host matrix - a zero-copy view when the scalars match, or the trampoline's contiguous plane
+ *  host matrix - a zero-copy view when the scalars match, or the trampoline's contiguous rows
  *  after per-row rescale and cast. Both phases share it. */
 template <typename streamed_dataset_type_>
 typename streamed_dataset_type_::bench_t::vectors_view_t stage_batch(
@@ -498,10 +500,10 @@ int stream_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dat
 
     streamed_t streamed {bench, {dataset.vectors().data(), rows, dimensions}, source_queries};
 
-    // Owns the staging trampoline plane, @b [1,batch,dimensions].
+    // Owns the staging trampoline rows, `[1,batch,dimensions]`.
     nk::tensor<scalar_t, std::allocator<scalar_t>, 3> staging;
-    // Owns the rescaling plane @c streamed_dataset::rescaling views.
-    nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_planes;
+    // Owns the rescaling rows `streamed_dataset::rescaling` views.
+    nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_rows;
     if constexpr (!streamed_t::zero_copy_k) {
         // The trampoline serves both phases, so it follows the larger of the two row counts.
         std::size_t const batch_rows = streamed_batch_rows(settings, std::max(rows, source_queries.extent(0)));
@@ -514,13 +516,13 @@ int stream_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dat
         streamed.staging = staging.span();
 
         if constexpr (streamed_t::scaled_k) {
-            rescaling_planes =
+            rescaling_rows =
                 nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::zeros({1, batch_rows, dimensions}).value;
-            if (rescaling_planes.empty()) {
+            if (rescaling_rows.empty()) {
                 fmt::println("Failed to allocate {} rescaling rows of {}d f32", batch_rows, dimensions);
                 return 1;
             }
-            streamed.rescaling = rescaling_planes.span();
+            streamed.rescaling = rescaling_rows.span();
             streamed.establish_scale();
         }
     }
@@ -534,11 +536,11 @@ int stream_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dat
 /** The innermost hop: binds the concrete CUDA-index instantiation, builds the index under @p kernel
  *  in checkpoint order, then runs @p workload. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_,
-          typename plane_allocator_, typename workload_type_>
+          typename storage_allocator_, typename workload_type_>
 int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                   int device, nk_kernel_kind_t kernel, workload_type_ const& workload) {
     using index_t =
-        vram_nvidia_index<stored_dtype_, capability_, plane_allocator_, plane_allocator_, cuda_device_allocator_t>;
+        vram_nvidia_index<stored_dtype_, capability_, storage_allocator_, storage_allocator_, cuda_device_allocator_t>;
     cuda_bench_context<index_t> bench {settings, device, kernel};
     return stream_and_run(dataset, bench, [&](auto& streamed) {
         return prepare(streamed) && run_insertion(streamed) && run_refinement(streamed) &&
@@ -549,17 +551,17 @@ int stage_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& data
 /** Kernel axis: admits the runtime metric the stored dtype scores by, the terminal hop into
  *  @ref stage_and_run; a dot-only workload pins the dot kernel instead. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_,
-          typename plane_allocator_, typename workload_type_>
+          typename storage_allocator_, typename workload_type_>
 int run_with_metric(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                     int device, workload_type_ const& workload) {
     if constexpr (workload_type_::dot_only_k)
-        return stage_and_run<dataset_scalar_type_, stored_dtype_, capability_, plane_allocator_>(
+        return stage_and_run<dataset_scalar_type_, stored_dtype_, capability_, storage_allocator_>(
             dataset, settings, device, nk_kernel_dot_k, workload);
     else
         return dispatch_kernel<stored_dtype_>(
             settings.kernel,
             [&](auto kernel) {
-                return stage_and_run<dataset_scalar_type_, stored_dtype_, capability_, plane_allocator_>(
+                return stage_and_run<dataset_scalar_type_, stored_dtype_, capability_, storage_allocator_>(
                     dataset, settings, device, kernel.value, workload);
             },
             [&](auto metric) {
@@ -570,7 +572,7 @@ int run_with_metric(utilities::persisted_dataset<dataset_scalar_type_> const& da
 
 /** Compute axis: the named table row's ceiling instantiates every cell below, so two runs on one device
  *  compare generations side by side; past the tail sit the Ampere kits every GPU runs. */
-template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename plane_allocator_, typename workload_type_>
+template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename storage_allocator_, typename workload_type_>
 int run_with_compute(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
                      int device, nk_capability_t max_compute, workload_type_ const& workload) {
     auto const named = std::ranges::find(cuda_compute_choices_k, max_compute, &capability_choice<nk_capability_t>::bit);
@@ -578,28 +580,28 @@ int run_with_compute(utilities::persisted_dataset<dataset_scalar_type_> const& d
         static_cast<std::size_t>(named - std::begin(cuda_compute_choices_k)),
         [&](auto row) {
             return run_with_metric<dataset_scalar_type_, stored_dtype_,
-                                   cuda_ceiling_of(cuda_compute_choices_k[row.value].bit), plane_allocator_>(
+                                   cuda_ceiling_of(cuda_compute_choices_k[row.value].bit), storage_allocator_>(
                 dataset, settings, device, workload);
         },
         [&] {
             return run_with_metric<dataset_scalar_type_, stored_dtype_, cuda_ceiling_of(nk_cap_ampere_k),
-                                   plane_allocator_>(dataset, settings, device, workload);
+                                   storage_allocator_>(dataset, settings, device, workload);
         });
 }
 
 /**
- *  @brief The shard hop: everything below one stored dtype - the memory axis picking the plane
+ *  @brief The shard hop: everything below one stored dtype - the memory axis picking the storage
  *      allocator, the generation ceiling, and the metric - so the per-dtype shard translation
  *      units carry the whole device instantiation grid of their dtype.
  *
- *  Device-space planes stay in VRAM through the virtual-memory backend; managed-space planes
+ *  Device-space flat matrices stay in VRAM through the virtual-memory backend; managed-space ones
  *  oversubscribe it through the pager, the bigger-than-VRAM build path. The cascade ends in the
  *  search workload.
  */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_with_stored_dtype(utilities::persisted_dataset<dataset_scalar_type_> const& dataset, settings_t const& settings,
-                          int device, nk_capability_t max_compute, cuda_address_space_t plane_space) {
-    return plane_space == cuda_address_space_t::managed_k
+                          int device, nk_capability_t max_compute, cuda_address_space_t storage_space) {
+    return storage_space == cuda_address_space_t::managed_k
                ? run_with_compute<dataset_scalar_type_, stored_dtype_, cuda_managed_allocator<std::byte>>( //
                      dataset, settings, device, max_compute, search_workload_t {})
                : run_with_compute<dataset_scalar_type_, stored_dtype_, cuda_virtual_memory_allocator<std::byte>>( //
@@ -614,7 +616,7 @@ int run_with_stored_dtype(utilities::persisted_dataset<dataset_scalar_type_> con
  *  the ones each of @p binary_flags adds, probes the devices - every NVIDIA one
  *  @c USEARCH_DEVICES names, or the first listed - resolves the compute ceiling, prints them, and
  *  opens the dataset for @p on_dataset - handed the dataset, the settings, the devices' CUDA
- *  ordinals, the ceiling, and the plane space. */
+ *  ordinals, the ceiling, and the storage space. */
 template <typename on_dataset_type_, typename... binary_flags_types_>
 int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, on_dataset_type_&& on_dataset,
                    binary_flags_types_... binary_flags) {
@@ -677,12 +679,12 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
     fmt::println("- Managed memory: {}", device_cli.managed_memory == switch_t::present_k);
     fmt::println("- Batch: {}", settings.batch.value);
 
-    cuda_address_space_t const plane_space = device_cli.managed_memory == switch_t::present_k
-                                                 ? cuda_address_space_t::managed_k
-                                                 : cuda_address_space_t::device_k;
+    cuda_address_space_t const storage_space = device_cli.managed_memory == switch_t::present_k
+                                                   ? cuda_address_space_t::managed_k
+                                                   : cuda_address_space_t::device_k;
     return open_dataset(
         settings.vectors_path, settings.queries_path, settings.neighbors_path, [&](auto const& dataset) {
-            return on_dataset(dataset, settings, std::span<int const> {devices}, max_compute, plane_space);
+            return on_dataset(dataset, settings, std::span<int const> {devices}, max_compute, storage_space);
         });
 }
 

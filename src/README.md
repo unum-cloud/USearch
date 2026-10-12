@@ -72,9 +72,9 @@ The dispatch unit visits every arm yet compiles at the baseline instruction set.
   `src/CMakeLists.txt` restates the lineage row for row: `usearch_dense_ram_variant(<class> OVER <parent> <kits>...)` unions the parent's flags with those of every delta kit that compiled, and the unit exists only when its parent does and some delta compiled.
 - `usearch_dense_nvme_variants` reuses those flags for the classes whose kits a storage walk tells apart, so `aws_g5`, `alibaba_c930` and the WebAssembly classes take none.
 - `usearch_dense_vram_variants_nvidia_<class>` embeds one NVIDIA class's fatbin, compiled by NVCC device-only for its own architecture alone: `sm_80` with its PTX, `sm_89`, `sm_90a`, `sm_100f` and `sm_120f`.
-  Nothing links `libcuda` or the CUDA runtime: `cuda_api` opens the driver at first use, typed off `cuda.h`, and the host compiler builds the arms.
+  Nothing links `libcuda` or the CUDA runtime: `cuda_api` opens the driver at first use through entry points it declares itself, and Clang's host-only pass builds the arms.
 - `usearch_dense_vram_variants_amd_<class>` embeds one AMD class's code object, compiled for its own processors, and the CDNA3 floor for CDNA4 too.
-  Nothing links `libamdhip64`: `hip_api` opens it at first use, typed off `hip_runtime_api.h`, so plain C++ units name `__HIP_PLATFORM_AMD__`.
+  Nothing links `libamdhip64`: `hip_api` opens it at first use through entry points it declares itself, so host units need no ROCm headers.
 - `usearch_dense_vram_variants_apple` compiles the Apple arms as plain C++, their kernels compiled from embedded source at first use.
   Nothing links Metal, Foundation or `libobjc`: `metal_api` opens them at first use.
 - `usearch_punned` - `types.cpp`, `sequence.cpp` & the dense dispatch unit, `dense_index.cpp`.

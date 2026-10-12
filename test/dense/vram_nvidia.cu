@@ -7,17 +7,15 @@
  *      run on the device.
  *
  *  Compiled twice, like the library's class units: by NVCC device-only into the suite's own fatbin,
- *  carrying every cell's kernels and the attends over this file's value lookups, and by the host
- *  compiler into the cells' index types, which the shared shards see only through the faces.
+ *  carrying every cell's kernels and the attends over this file's value lookups, and by Clang
+ *  host-only into the cells' index types, which the shared shards see only through the faces.
  */
 #include <fmt/format.h>
 
+#include "usearch/dense/vram_nvidia_index.cuh"
+
 #include "vram_index.cuh"
 #include "vram_indexes.cuh"
-
-#if defined(__CUDACC__)
-#include "usearch/dense/vram_nvidia_index.cuh"
-#endif
 
 namespace unum::usearch::dense {
 
@@ -41,49 +39,49 @@ struct cuda_value_lookup_of<cuda_test_keyed_lookup_t::device_lookup_k> {
 /** The suite's fatbin, linked in as raw bytes beside its host half. */
 extern "C" byte_t const test_vram_nvidia_bundle_start[], test_vram_nvidia_bundle_end[];
 
-#if defined(__CUDACC__)
-
-// Every cell's kernels and attends, and the keyed attends of the sharded suite's collection.
-template void cuda_instantiate<dense_nvidia_capabilities_k, nk_bf16_k, cuda_test_lookup_t::device_lookup_k,
-                               cuda_test_keyed_lookup_t::device_lookup_k>();
-#if USEARCH_DENSE_DTYPES >= 2
-template void cuda_instantiate<dense_nvidia_capabilities_k, nk_u1_k, cuda_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 3
-template void cuda_instantiate<dense_nvidia_capabilities_k, nk_i8_k, cuda_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 4
-template void cuda_instantiate<dense_nvidia_capabilities_k, nk_e4m3_k, cuda_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 5
-template void cuda_instantiate<dense_nvidia_capabilities_k, nk_f16_k, cuda_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 6
-template void cuda_instantiate<dense_nvidia_capabilities_k, nk_u8_k, cuda_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 7
-template void cuda_instantiate<dense_nvidia_capabilities_k, nk_e5m2_k, cuda_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 8
-template void cuda_instantiate<dense_nvidia_capabilities_k, nk_i4_k, cuda_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 9
-template void cuda_instantiate<dense_nvidia_capabilities_k, nk_u4_k, cuda_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 10
-template void cuda_instantiate<dense_nvidia_capabilities_k, nk_e3m2_k, cuda_test_lookup_t::device_lookup_k>();
-#endif
-#if USEARCH_DENSE_DTYPES >= 11
-template void cuda_instantiate<dense_nvidia_capabilities_k, nk_e2m3_k, cuda_test_lookup_t::device_lookup_k>();
-#endif
-
-#else
-
 template <>
 bytes_view_t cuda_fatbin<dense_nvidia_capabilities_k>() noexcept {
     return {test_vram_nvidia_bundle_start,
             static_cast<std::size_t>(test_vram_nvidia_bundle_end - test_vram_nvidia_bundle_start)};
 }
+
+// Every cell's kernels and attends, and the keyed attends of the sharded suite's collection.
+template __device__ void cuda_instantiate<dense_nvidia_capabilities_k, nk_bf16_k, cuda_test_lookup_t::device_lookup_k,
+                                          cuda_test_keyed_lookup_t::device_lookup_k>();
+#if USEARCH_DENSE_DTYPES >= 2
+template __device__ void cuda_instantiate<dense_nvidia_capabilities_k, nk_u1_k, cuda_test_lookup_t::device_lookup_k>();
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+template __device__ void cuda_instantiate<dense_nvidia_capabilities_k, nk_i8_k, cuda_test_lookup_t::device_lookup_k>();
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+template __device__ void
+cuda_instantiate<dense_nvidia_capabilities_k, nk_e4m3_k, cuda_test_lookup_t::device_lookup_k>();
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+template __device__ void cuda_instantiate<dense_nvidia_capabilities_k, nk_f16_k, cuda_test_lookup_t::device_lookup_k>();
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+template __device__ void cuda_instantiate<dense_nvidia_capabilities_k, nk_u8_k, cuda_test_lookup_t::device_lookup_k>();
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+template __device__ void
+cuda_instantiate<dense_nvidia_capabilities_k, nk_e5m2_k, cuda_test_lookup_t::device_lookup_k>();
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+template __device__ void cuda_instantiate<dense_nvidia_capabilities_k, nk_i4_k, cuda_test_lookup_t::device_lookup_k>();
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+template __device__ void cuda_instantiate<dense_nvidia_capabilities_k, nk_u4_k, cuda_test_lookup_t::device_lookup_k>();
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+template __device__ void
+cuda_instantiate<dense_nvidia_capabilities_k, nk_e3m2_k, cuda_test_lookup_t::device_lookup_k>();
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+template __device__ void
+cuda_instantiate<dense_nvidia_capabilities_k, nk_e2m3_k, cuda_test_lookup_t::device_lookup_k>();
+#endif
 
 // The ledgered index of every NVIDIA cell and the collections the sharded suite drives.
 template struct vram_nvidia_index<nk_bf16_k, dense_nvidia_capabilities_k, counting_cuda_allocator_t,
@@ -131,8 +129,6 @@ template struct vram_nvidia_index<nk_e2m3_k, dense_nvidia_capabilities_k, counti
                                   counting_cuda_allocator_t, selected_cuda_allocator<>>;
 #endif
 
-#endif // defined(__CUDACC__)
-
 } // namespace unum::usearch::dense
 
 namespace unum::usearch::test::dense {
@@ -160,8 +156,8 @@ dense_cuda_value_table<fragment_type_> dense_cuda_upload_values(nk::matrix_view<
     dense_cuda_value_table<fragment_type_> table {cuda_make_unique(cuda_device_allocator_t {}, rows_count * pitch),
                                                   pitch};
     if (table.rows && (cuda_copy_2d_async(table.rows.get(), pitch, values.byte_data(), values.stride_bytes(0),
-                                          row_bytes, rows_count, nullptr) != CUDA_SUCCESS ||
-                       cuda_api().stream_synchronize(nullptr) != CUDA_SUCCESS))
+                                          row_bytes, rows_count, nullptr) != cuda_success_k ||
+                       cuda_api().stream_synchronize(nullptr) != cuda_success_k))
         table.rows.reset();
     return table;
 }
@@ -179,7 +175,8 @@ std::size_t dense_expect_vram_attend(make_index_type_ const& make_index, allocat
     constexpr std::size_t nodes_count = dense_thread_nodes_k, tokens_count = 4, crowded_heads = 1024;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
-    index_type_ index = make_index(ledger);
+    std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
+    index_type_& index = *index_ptr;
     typename index_type_::traversal_context_t context {{}};
     failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     auto const vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "attend"));
@@ -326,12 +323,12 @@ std::size_t test_vram_attend_cell(char const* name, u64_t seed) {
     {
         allocation_ledger_t ledger;
         {
-            typename refusing_cell_t::index_t index = refusing_cell_t::make_index(ledger);
+            std::unique_ptr<typename refusing_cell_t::index_t> const index = refusing_cell_t::make_index(ledger);
             typename refusing_cell_t::index_t::traversal_context_t context {{}};
             failures += expect_eq(index
-                                      .attend(typename refusing_cell_t::index_t::vectors_view_t {}, 1,
-                                              dense_cuda_value_lookup<typename index_t::fragment_t> {}, 1.f,
-                                              nk::matrix_span<f32_t> {}, std::span<softmax_state_t> {}, context)
+                                      ->attend(typename refusing_cell_t::index_t::vectors_view_t {}, 1,
+                                               dense_cuda_value_lookup<typename index_t::fragment_t> {}, 1.f,
+                                               nk::matrix_span<f32_t> {}, std::span<softmax_state_t> {}, context)
                                       .status,
                                   status_t::config_mismatch_k);
         }
@@ -395,7 +392,8 @@ static std::size_t check_vram_nvidia_attend(settings_t const& settings) {
 
 std::size_t check_vram_nvidia(settings_t const& settings, gpu_device_t const& device) {
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    if (cuda_set_device(ordinal) != CUDA_SUCCESS) return fmt::println("- CUDA: device #{} does not answer", ordinal), 1;
+    if (cuda_set_device(ordinal) != cuda_success_k)
+        return fmt::println("- CUDA: device #{} does not answer", ordinal), 1;
     fmt::println("- CUDA: {} {} #{}, {} SMs, {} MiB", device.name,
                  usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device.gpu_class)), ordinal,
                  device.compute_units, device.memory_bytes >> 20);

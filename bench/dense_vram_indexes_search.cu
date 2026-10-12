@@ -14,9 +14,7 @@
 
 #include "dense/vram_indexes_search.cuh"
 
-#if defined(__CUDACC__)
-template void us::bench::dense::instantiate_cuda_kernels<>();
-#endif
+template __device__ void us::bench::dense::instantiate_cuda_kernels<>();
 
 namespace unum::usearch::bench {
 
@@ -154,11 +152,13 @@ int bench_dense_vram_indexes_search(int argc, char const* const* argv) {
     auto const on_dataset = []<typename dataset_scalar_type_>(
                                 utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
                                 settings_t const& settings, std::span<int const> devices, nk_capability_t max_compute,
-                                cuda_address_space_t plane_space) {
+                                cuda_address_space_t storage_space) {
         if (settings.merge == switch_t::present_k || settings.expansion_merge.value)
             return fmt::println(stderr, "--merge has no verb in the sharded index; queries scatter to every shard"), 1;
-        if (plane_space == cuda_address_space_t::managed_k)
-            return fmt::println(stderr, "--managed-memory pages one index's planes; every shard here stays in VRAM"), 1;
+        if (storage_space == cuda_address_space_t::managed_k)
+            return fmt::println(stderr,
+                                "--managed-memory pages one index's flat matrices; every shard here stays in VRAM"),
+                   1;
         return dispatch_stored_value<dataset_scalar_type_, nk_bf16_k, nk_f16_k, nk_e5m2_k, nk_e4m3_k, nk_e3m2_k,
                                      nk_e2m3_k, nk_i8_k, nk_i4_k, nk_u8_k, nk_u4_k, nk_u1_k>(
             settings.stored_dtype,

@@ -153,8 +153,15 @@ fn main() -> Result<(), Box<dyn Error>> {
             .cxxflag("-fno-exceptions");
     }
 
-    // The architecture list is CUDA's alone, and says nothing unless its kernels are compiled.
+    // The architecture list is CUDA's alone, and says nothing unless its kernels are compiled. Every GPU
+    // build compiles its host side with Clang, so an unset `CXX` takes `clang++` rather than the default.
     if chosen.options.contains(&"USEARCH_BUILD_CUDA") {
+        println!("cargo:rerun-if-env-changed=CXX");
+        if env::var_os("CXX").is_none() {
+            engine
+                .define("CMAKE_C_COMPILER", "clang")
+                .define("CMAKE_CXX_COMPILER", "clang++");
+        }
         println!("cargo:rerun-if-env-changed=USEARCH_CUDA_ARCHITECTURES");
         if let Ok(architectures) = env::var("USEARCH_CUDA_ARCHITECTURES") {
             engine.define("USEARCH_CUDA_ARCHITECTURES", architectures);

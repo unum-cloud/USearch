@@ -18,7 +18,7 @@ The search family searches the built index, by plain rows or by a lightning inde
 
 - `usearch_bench_dense_ram_index_search` builds one `dense::ram_index` on one memory domain and isolates kernel kits, wait instructions, connectivity and expansion, per-thread staging and latency percentiles.
 - `usearch_bench_dense_ram_indexes_search` builds one `dense::ram_indexes` over every memory domain and isolates what the C interface drives: admission, rotation across shards, batched verbs and SafeGraphs checkpoints.
-- `usearch_bench_dense_vram_index_search` builds one `dense::vram_nvidia_index` on one device and isolates batch-per-launch build and search, the kit generation ceiling and managed-memory planes.
+- `usearch_bench_dense_vram_index_search` builds one `dense::vram_nvidia_index` on one device and isolates batch-per-launch build and search, the kit generation ceiling and managed-memory flat matrices.
 - `usearch_bench_dense_vram_indexes_search` builds one `dense::vram_nvidia_indexes` with a shard per `USEARCH_DEVICES` ordinal and isolates what the C interface drives across GPUs: rotation across devices, scatter-gather search merged on the host, and SafeGraphs checkpoints.
 - `usearch_bench_dense_nvme_indexes_search` views the parts a sharded RAM or VRAM binary saved as one `dense::nvme_indexes`, building nothing in RAM, and isolates what storage adds to the batched search: the I/O transport, the queue depth, and the reads and bytes each query costs.
 
@@ -91,7 +91,7 @@ build_host_release/usearch_bench_dense_ram_indexes_search \
 - `--huge-pages` defaults to `0`: huge pages provisioned before launch; the run fails rather than measuring base pages; CPU only.
 - `USEARCH_DEVICES` - an environment variable, not a flag - names USearch device ordinals, positions in `usearch_gpu_devices`, like `0` or `0,1`; the single-device binaries take the first, the sharded ones place one shard per ordinal, and unset takes the first NVIDIA device; GPU only.
 - `--merge` and `--expansion-merge` are reserved for stitching the device shards into one graph, and `usearch_bench_dense_vram_indexes_search` refuses them until `dense::vram_nvidia_indexes` has a merge verb.
-- `--managed-memory` defaults to off: managed-memory planes oversubscribing VRAM; GPU only, refused by both `vram_indexes` binaries.
+- `--managed-memory` defaults to off: managed-memory flat matrices oversubscribing VRAM; GPU only, refused by both `vram_indexes` binaries.
 - `--batch` defaults to `65536`: rows and queries per launch; GPU only.
 
 A bad value prints one line, like `--top-k="0" does not parse, expected a positive count`, and exits with status 1.
@@ -176,7 +176,7 @@ Today this crosses only between the single-index binaries, which share one check
 
 The algebra binaries build the index exactly as the search binaries do, from the same dataset, dtype, executor, graph, refinement and checkpoint flags, and then run `multiply` and `attend` instead of the search phase.
 They pin the dot kernel, the only one both verbs are defined over, so `--metric` takes only `dot` and no ground truth is judged.
-They store only the dot kernel's dtypes, `bf16` through `u4`, so an `.fbin` file needs a `--stored-dtype`.
+They store only the dot kernel's dtypes, `bf16` through `u1`, so an `.fbin` file needs a `--stored-dtype`.
 
 ```sh
 build_host_release/usearch_bench_dense_ram_index_algebra \

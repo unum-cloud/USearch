@@ -91,10 +91,10 @@ bool run_indexes_algebra(streamed_dataset_type_& streamed, algebra_settings_t co
                                            attend_rows * columns * sizeof(f32_t));
     if (failed(device_values.reserve_range(nodes_count * pitch, bench.devices.front())) || !device_outputs ||
         cuda_copy_2d_async(device_values.base(), pitch, inputs.node_values.data(), row_bytes, row_bytes, nodes_count,
-                           nullptr) != CUDA_SUCCESS ||
-        cuda_api().stream_synchronize(nullptr) != CUDA_SUCCESS ||
-        cuda_api().memory_advise(cuda_address(device_values.base()), nodes_count * pitch, CU_MEM_ADVISE_SET_READ_MOSTLY,
-                                 CUmemLocation {}) != CUDA_SUCCESS) {
+                           nullptr) != cuda_success_k ||
+        cuda_api().stream_synchronize(nullptr) != cuda_success_k ||
+        cuda_api().memory_advise(cuda_address(device_values.base()), nodes_count * pitch, cuda_advise_read_mostly_k,
+                                 cuda_memory_location_t {}) != cuda_success_k) {
         fmt::println("Failed to place {:.2f} GB of values in managed memory", gigabytes(nodes_count * pitch));
         return false;
     }
@@ -120,7 +120,7 @@ bool run_indexes_algebra(streamed_dataset_type_& streamed, algebra_settings_t co
         sums.computed_distances += result.computed_distances;
         std::size_t const judged_rows = offset < judged ? std::min(batch, judged - offset) : 0;
         if (judged_rows && cuda_copy(judged_outputs.row(offset).data(), outputs.data(),
-                                     judged_rows * columns * sizeof(f32_t)) != CUDA_SUCCESS) {
+                                     judged_rows * columns * sizeof(f32_t)) != cuda_success_k) {
             fmt::println("Failed to read back the attended rows");
             return false;
         }

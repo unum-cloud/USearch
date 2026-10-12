@@ -14,8 +14,7 @@ namespace unum::usearch::test::dense {
 
 std::size_t check_vram_amd(settings_t const& settings, gpu_device_t const& device) {
     int const ordinal = static_cast<int>(device.vendor_ordinal);
-    if (hip_api().set_device(ordinal) != hipSuccess)
-        return fmt::println("- ROCm: device #{} does not answer", ordinal), 1;
+    if (hip_set_device(ordinal) != hip_success_k) return fmt::println("- ROCm: device #{} does not answer", ordinal), 1;
     fmt::println("- ROCm: device #{} {}, {}, {} compute units, {} MiB", ordinal, device.name,
                  usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(device.gpu_class)), device.compute_units,
                  device.memory_bytes >> 20);

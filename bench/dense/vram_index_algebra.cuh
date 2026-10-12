@@ -96,8 +96,8 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
                                            attend_rows * columns * sizeof(f32_t));
     if (!device_values || !device_outputs ||
         cuda_copy_2d_async(device_values.get(), pitch, inputs.node_values.data(), row_bytes, row_bytes, nodes_count,
-                           nullptr) != CUDA_SUCCESS ||
-        cuda_api().stream_synchronize(nullptr) != CUDA_SUCCESS) {
+                           nullptr) != cuda_success_k ||
+        cuda_api().stream_synchronize(nullptr) != cuda_success_k) {
         fmt::println("Failed to place {:.2f} GB of values on device {}", gigabytes(nodes_count * pitch), bench.device);
         return false;
     }
@@ -123,7 +123,7 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
         bench.lane.computed_distances += result.computed_distances;
         std::size_t const judged_rows = offset < judged ? std::min(batch, judged - offset) : 0;
         if (judged_rows && cuda_copy(judged_outputs.row(offset).data(), outputs.data(),
-                                     judged_rows * columns * sizeof(f32_t)) != CUDA_SUCCESS) {
+                                     judged_rows * columns * sizeof(f32_t)) != cuda_success_k) {
             fmt::println("Failed to read back the attended rows");
             return false;
         }
@@ -154,8 +154,8 @@ struct algebra_workload_t {
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_>
 int run_algebra_with_stored_dtype(utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
                                   settings_t const& settings, algebra_settings_t const& algebra, int device,
-                                  nk_capability_t max_compute, cuda_address_space_t plane_space) {
-    return plane_space == cuda_address_space_t::managed_k
+                                  nk_capability_t max_compute, cuda_address_space_t storage_space) {
+    return storage_space == cuda_address_space_t::managed_k
                ? run_with_compute<dataset_scalar_type_, stored_dtype_, cuda_managed_allocator<std::byte>>( //
                      dataset, settings, device, max_compute, algebra_workload_t {algebra})
                : run_with_compute<dataset_scalar_type_, stored_dtype_, cuda_virtual_memory_allocator<std::byte>>( //

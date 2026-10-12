@@ -805,10 +805,10 @@ struct streamed_dataset {
     /** The @b [rows] recall bookkeeping: dense node ID → global dataset row, filled while inserting. */
     std::vector<u32_t> id_to_row;
 
-    /** The @b [threads,rows_per_thread,dimensions] staging trampoline planes. */
+    /** The @b [threads,rows_per_thread,dimensions] staging trampoline rows. */
     nk::tensor_span<scalar_t, 3> staging;
 
-    /** The @b [threads,rows_per_thread,dimensions] `f32` rescaling planes; only set when
+    /** The @b [threads,rows_per_thread,dimensions] `f32` rescaling rows; only set when
      *  @c scaled_k. */
     nk::tensor_span<nk::f32_t, 3> rescaling;
 
@@ -837,8 +837,8 @@ struct streamed_dataset {
         }
     }
 
-    /** Converts one source row into the calling thread's own staging plane and views it back;
-     *  @p task rotates the row within the plane, so in-flight tasks never clash. */
+    /** Converts one source row into the calling thread's own staging rows and views it back;
+     *  @p task rotates the row among them, so in-flight tasks never clash. */
     vector_view_t stage(nk::vector_view<dataset_scalar_type_> source, std::size_t thread, std::size_t task) noexcept {
         std::size_t const dimensions = vectors.extent(1);
         std::size_t const rotation = task % staging.extent(1);

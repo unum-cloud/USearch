@@ -21,13 +21,14 @@ if (POLICY CMP0077)
     cmake_policy(SET CMP0077 NEW)
 endif ()
 
-# Each GPU vendor is probed only to default its `USEARCH_BUILD_<VENDOR>` switch, and only while the caller leaves it
-# unset. NVIDIA needs NVCC, though `check_language` caches the host compiler it paired with, which would then outrank a
-# caller's own `CMAKE_CUDA_HOST_COMPILER`. AMD needs ROCm's own Clang as the C++ compiler, as the `rocm_*` presets name
-# it. Apple needs only an Apple silicon target, since Metal ships with macOS and its kernels compile at first use.
+# Each GPU vendor is probed only to default its `USEARCH_BUILD_<VENDOR>` switch, only while the caller leaves it unset,
+# and only under Clang, which compiles every GPU build's host code. NVIDIA needs NVCC, though `check_language` caches
+# the host compiler it paired with, which would then outrank a caller's own `CMAKE_CUDA_HOST_COMPILER`. AMD needs ROCm's
+# own Clang as the C++ compiler, as the `rocm_*` presets name it. Apple needs only an Apple silicon target, since Metal
+# ships with macOS and its kernels compile at first use.
 include(CheckLanguage)
 set(USEARCH_CAN_BUILD_CUDA OFF)
-if (NOT DEFINED USEARCH_BUILD_CUDA)
+if (NOT DEFINED USEARCH_BUILD_CUDA AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     check_language(CUDA)
     if (CMAKE_CUDA_COMPILER)
         set(USEARCH_CAN_BUILD_CUDA ON)
@@ -41,6 +42,7 @@ set(USEARCH_CAN_BUILD_METAL OFF)
 if (NOT DEFINED USEARCH_BUILD_METAL
     AND APPLE
     AND CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64"
+    AND CMAKE_CXX_COMPILER_ID MATCHES "Clang"
 )
     set(USEARCH_CAN_BUILD_METAL ON)
 endif ()
@@ -62,6 +64,19 @@ option(USEARCH_BUILD_ROCM "Compile the AMD index arms and tests with ROCm's Clan
 option(USEARCH_BUILD_METAL "Compile the Apple index arms and tests over Metal" ${USEARCH_CAN_BUILD_METAL})
 option(USEARCH_BUILD_SPDK "Compile the SPDK engine into every target, finding SPDK through pkg-config" OFF)
 
+# Clang keeps a unit's host and device halves apart, through the host-only passes of its CUDA and HIP modes, where other
+# host compilers trip over mixed units.
+if ((USEARCH_BUILD_CUDA
+     OR USEARCH_BUILD_ROCM
+     OR USEARCH_BUILD_METAL)
+    AND NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang"
+)
+    message(
+        FATAL_ERROR
+            "Every GPU build compiles its host code with Clang, found ${CMAKE_CXX_COMPILER_ID} - set CMAKE_CXX_COMPILER to clang++, and to ROCm's own clang++ for USEARCH_BUILD_ROCM"
+    )
+endif ()
+
 if (USEARCH_BUILD_SPDK)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(USEARCH_SPDK REQUIRED spdk_nvme spdk_env_dpdk)
@@ -80,6 +95,7 @@ set(USEARCH_CUDA_ARCHITECTURES
 
 # The AMD units embed one code object per listed processor of their class, and the CDNA3 floor also for CDNA4, which
 # keeps every instruction its kits use; CDNA5 drops `v_dot4_i32_i8` and `v_dot2_f32_f16`, so only its own unit runs it.
+# A class with no processor listed embeds none, and its devices refuse to load.
 set(USEARCH_ROCM_ARCHITECTURES
     "gfx942;gfx950;gfx1250"
     CACHE STRING "AMD processors the code objects compile for: gfx942 for CDNA3, gfx950 for CDNA4, gfx1250 for CDNA5"

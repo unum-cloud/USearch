@@ -18,4 +18,6 @@ std::size_t test::dense::check_vram_index_u4(settings_t const& settings) {
     return failures_count;
 }
 
-template std::size_t test::dense::check_vram_index_u4<test::dense::vram_object_vendor_k>(settings_t const&);
+template std::size_t test::dense::check_vram_index_u4<gpu_vendor_t::nvidia_k>(settings_t const&);
+template std::size_t test::dense::check_vram_index_u4<gpu_vendor_t::amd_k>(settings_t const&);
+template std::size_t test::dense::check_vram_index_u4<gpu_vendor_t::apple_k>(settings_t const&);

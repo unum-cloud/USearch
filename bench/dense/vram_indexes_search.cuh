@@ -393,7 +393,7 @@ int run_indexes_with_metric(utilities::persisted_dataset<dataset_scalar_type_> c
 }
 
 /** Compute axis: the named table row's ceiling instantiates every cell below; past the tail sit the Ampere kits
- *  every GPU runs. Every shard keeps its planes in VRAM. */
+ *  every GPU runs. Every shard keeps its flat matrices in VRAM. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, typename workload_type_>
 int run_indexes_with_compute(utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
                              settings_t const& settings, std::span<int const> devices, nk_capability_t max_compute,

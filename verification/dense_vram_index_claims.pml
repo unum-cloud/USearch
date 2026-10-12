@@ -1,15 +1,15 @@
 /**
- *  @brief The CUDA index's host side: the claim under its spin mutex, the planes grown before it,
- *      the watermark each batch turns after its drain as a search's bound, and the admission ramp.
+ *  @brief The CUDA index's host side: the claim under its spin mutex, the flat matrices grown before
+ *      it, the watermark each batch turns after its drain as a search's bound, and the admission ramp.
  *
  *  From `include/usearch/dense/vram_nvidia_index.cuh`: one claim per batch under `claiming_`, a
- *  `fu::spin_mutex_t`, IDs dense from `claimed_rows_`, the planes grown under the mutex and
+ *  `fu::spin_mutex_t`, IDs dense from `claimed_rows_`, the flat matrices grown under the mutex and
  *  sentinel-filled before any launch, the claim stored only once the launch is accepted, the
  *  device's admission ramp on `published_rows`, a counter in device memory no host thread
  *  dereferences, and the watermark `last_visible_id_` turned once per batch.
  *
  *  Two inserters each submit one batch of two rows: the mutex, a relaxed read of the claim,
- *  `grow_rows_` when the planes are short, the launch, which carries the host's view to the device
+ *  `grow_rows_` when the flat matrices are short, the launch, which carries the host's view to the device
  *  and is accepted or rejected, the release store of the claim on acceptance alone, the release
  *  unlock; then an accepted batch drains and takes its turn, `publish_`: a wait until the watermark
  *  reaches its first ID, then a release store of its end. The first inserter's drain may fail
@@ -19,30 +19,30 @@
  *  `lock_if_free`, `contended_k` when the claim is held, else the growth, the rows landed, the
  *  relaxed restore of `published_rows`, the release store of the claim, the unlock, and the turn;
  *  or it dies before `finish`. A searcher takes its bound from `size()`, an acquire load of the
- *  watermark, reads the planes' extent the way `submit_search_`'s kernel touches them, reads every
+ *  watermark, reads the flat matrices' extent the way `submit_search_`'s kernel touches them, reads every
  *  row below the bound, and walks row 0's tail. The device serves the accepted batches one row at
  *  a time in any order, each row through the ramp: a relaxed load of `published_rows`, a wait
  *  while `id >= published + max(published, floor)`, one relaxed no-return add, and maybe a
  *  back-link appending the row into row 0's tail slot while it is empty, whatever batch row 0
  *  belongs to. The floor is one and a batch is two rows, so a batch served ahead of the one claimed
- *  before it waits on that one's adds. The planes' extent is `capacity()`, which the header derives
- *  from the planes' committed bytes and reads outside the claim: the one grower release-stores
- *  each plane's extent and `committed_bytes()` acquires it; the model folds the three planes into
- *  one word with the same orders.
+ *  before it waits on that one's adds. The flat matrices' extent is `capacity()`, which the header
+ *  derives from their committed bytes and reads outside the claim: the one grower release-stores
+ *  each flat matrix's extent and `committed_bytes()` acquires it; the model folds the vectors, norms
+ *  and neighbors into one word with the same orders.
  *
- *  The bound a searcher acquired lies inside the planes it sees mapped, and so does every ID the
+ *  The bound a searcher acquired lies inside the flat matrices it sees mapped, and so does every ID the
  *  device is assigned. Every row below the bound landed, and a row the walk reads landed in a
  *  batch that turned. One grower and one claim holder run at a time, every batch and load ends,
  *  the loader's verdict names the claim's state, and the claimed ranges are disjoint and lie
- *  inside the planes when each claim is stored. `far` is not run: the posted add is x86's, and the
+ *  inside the flat matrices when each claim is stored. `far` is not run: the posted add is x86's, and the
  *  ramp's add runs on the GPU.
  *
  *  @verify pass sc,rc11
  *  @verify fail rc11 watermark_order=order_relaxed: the turn's release store pairs with the acquire
- *      in `size()`, so a search's bound lies inside the planes the claim grew; relaxed, the searcher
- *      reads a bound past the planes' extent
+ *      in `size()`, so a search's bound lies inside the flat matrices the claim grew; relaxed, the
+ *      searcher reads a bound past their extent
  *  @verify fail rc11 size_order=order_relaxed: `size()` acquires the watermark the turn released;
- *      relaxed, the searcher reads a bound past the planes' extent
+ *      relaxed, the searcher reads a bound past the flat matrices' extent
  *  @verify fail sc claiming_mutex=false: `claiming_` keeps the growers and the claims apart;
  *      without it, two batches claim the same IDs
  *  @verify stuck sc unclaim_on_rejection=false: the claim is stored only once the launch is
@@ -70,7 +70,7 @@
 #define device_thread 4 // the thread every launch hands the host's view to
 #include "weak_memory.pml"
 
-// The words, by the index member each stands for; the planes' extent stands for `capacity()`, and
+// The words, by the index member each stands for; the flat matrices' extent stands for `capacity()`, and
 // row 0's tail for the slot a back-link appends into, zero while it names no row.
 #define claiming 0
 #define claimed_rows 1
@@ -156,7 +156,7 @@ inline unlock_claiming(t) {
     }
 }
 
-// grow_rows_: the planes' extent through `capacity()`, an acquire, committed and sentinel-filled
+// grow_rows_: the flat matrices' extent through `capacity()`, an acquire, committed and sentinel-filled
 // when short, and a stream synchronize before the claim may advance
 inline grow(t, rows, mapped) {
     atomic {
@@ -166,14 +166,14 @@ inline grow(t, rows, mapped) {
     };
     atomic {
         if
-        :: mapped < rows -> store(t, mapped_rows, order_release, rows); mapped = rows // the plane releases its extent
+        :: mapped < rows -> store(t, mapped_rows, order_release, rows); mapped = rows // the flat matrix releases its extent
         :: else
         fi;
         growing--
     }
 }
 
-// a claim of `rows` IDs from `first`: inside the planes, and apart from every range claimed before
+// a claim of `rows` IDs from `first`: inside the flat matrices, and apart from every range claimed before
 inline claim_range(who, first, rows) {
     assert(newest_value(mapped_rows) >= first + rows);
     assert(!claimed[0] || first >= range_first[0] + rows_per_batch || first + rows <= range_first[0]);
@@ -286,7 +286,7 @@ proctype loader(byte t) {
         };
         grow(t, total, mapped);
         // the plan's verdict: finished, the rows are claimed and restored; dead before `finish`,
-        // the planes stay grown and nothing is claimed, so the next batch reuses the base
+        // the flat matrices stay grown and nothing is claimed, so the next batch reuses the base
         if
         :: true ->
             atomic {

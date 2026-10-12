@@ -540,10 +540,10 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
     bench_context_type_ bench {launch.settings, kernel};
     streamed_t streamed {bench, sliced_vectors, source_queries};
 
-    // Owns the staging trampoline planes for the whole run.
+    // Owns the staging trampoline rows for the whole run.
     nk::tensor<scalar_t, std::allocator<scalar_t>, 3> staging;
-    // Owns the rescaling planes @c streamed_dataset::rescaling views.
-    nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_planes;
+    // Owns the rescaling rows `streamed_dataset::rescaling` views.
+    nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_rows;
     if constexpr (!streamed_t::zero_copy_k) {
         std::size_t threads = 0;
         if (fu_pool_threads_count(launch.machine.pool, &threads) != fu_success_k || !threads) {
@@ -562,14 +562,14 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
         streamed.staging = staging.span();
 
         if constexpr (streamed_t::scaled_k) {
-            rescaling_planes = nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::zeros(
-                                   {threads, rows_per_thread, dimensions})
-                                   .value;
-            if (rescaling_planes.empty()) {
+            rescaling_rows = nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::zeros(
+                                 {threads, rows_per_thread, dimensions})
+                                 .value;
+            if (rescaling_rows.empty()) {
                 fmt::println("Failed to allocate {} rescaling rows of {}d f32", batch_rows, dimensions);
                 return 1;
             }
-            streamed.rescaling = rescaling_planes.span();
+            streamed.rescaling = rescaling_rows.span();
             streamed.establish_scale();
         }
     }

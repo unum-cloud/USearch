@@ -5,10 +5,11 @@
  *  @brief The suite composer for the VRAM-resident index's smoke & concurrency tests, shared by the
  *      per-dtype shards and composed over each vendor's cell.
  *
- *  The shards are vendor-neutral C++, compiled once into each vendor's object library with that
- *  vendor's @c USEARCH_ARCH_<VENDOR>_ set. A vendor's test header specializes @ref vram_cell with
- *  its ledgered index, its sharded collection and their factory, so the scenarios stay templated
- *  on the index alone while the harness's live-bytes-must-balance ledger audits the GPU planes.
+ *  The shards are vendor-neutral C++, compiled once into the one object library, each instantiating
+ *  every vendor and composing over those @c USEARCH_ARCH_<VENDOR>_ carries. A vendor's test header,
+ *  free of its SDK like the library's own, specializes @ref vram_cell with its ledgered index, its
+ *  sharded collection and their factory, so the scenarios stay templated on the index alone while
+ *  the harness's live-bytes-must-balance ledger audits the GPU flat matrices.
  */
 #pragma once
 
@@ -16,22 +17,18 @@
 
 #include "dense.cuh"
 
-// The one place the test objects name a vendor: the cell this object library composes over.
-#if USEARCH_ARCH_CUDA_
-#include "vram_nvidia.hpp"
-#elif USEARCH_ARCH_ROCM_
 #include "vram_amd.hpp"
-#elif USEARCH_ARCH_METAL_
 #include "vram_apple.hpp"
-#endif // USEARCH_ARCH_CUDA_
+#include "vram_nvidia.hpp"
 
 namespace unum::usearch::test::dense {
 
-/** The vendor whose object library compiles this unit; internal, so each copy keeps its own. */
-constexpr gpu_vendor_t vram_object_vendor_k = USEARCH_ARCH_CUDA_    ? gpu_vendor_t::nvidia_k
-                                              : USEARCH_ARCH_ROCM_  ? gpu_vendor_t::amd_k
-                                              : USEARCH_ARCH_METAL_ ? gpu_vendor_t::apple_k
-                                                                    : gpu_vendor_t::unknown_k;
+/** Whether this build carries @p vendor_ 's GPUs; the shards instantiate every vendor, and the
+ *  ones it leaves out compose nothing. */
+template <gpu_vendor_t vendor_>
+inline constexpr bool vram_compiled = (vendor_ == gpu_vendor_t::nvidia_k && USEARCH_ARCH_CUDA_) ||
+                                      (vendor_ == gpu_vendor_t::amd_k && USEARCH_ARCH_ROCM_) ||
+                                      (vendor_ == gpu_vendor_t::apple_k && USEARCH_ARCH_METAL_);
 
 #pragma region Algebra
 
@@ -46,7 +43,8 @@ std::size_t dense_expect_vram_multiply(make_index_type_ const& make_index, alloc
     constexpr std::size_t rows_count = dense_thread_nodes_k, left_count = 4;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
-    index_type_ index = make_index(ledger);
+    std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
+    index_type_& index = *index_ptr;
     typename index_type_::traversal_context_t context {{}};
     failures += expect(index.reserve({rows_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "multiply"));
@@ -117,7 +115,8 @@ std::size_t test_dense_vram_attend_refused(make_index_type_ const& make_index) {
     allocation_ledger_t ledger;
     std::size_t failures = 0;
     {
-        index_type_ index = make_index(ledger);
+        std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
+        index_type_& index = *index_ptr;
         typename index_type_::traversal_context_t context {{}};
         failures += expect_eq(index
                                   .attend(typename index_type_::vectors_view_t {}, 1, nullptr, 1.f,
@@ -133,8 +132,9 @@ std::size_t test_dense_vram_attend_refused(make_index_type_ const& make_index) {
 template <typename index_type_>
     requires dense_device_resident<index_type_>
 std::size_t test_dense_foreign_metric() {
-    index_type_ index {index_type_::vector_dtype_k == nk_u1_k ? nk_kernel_angular_k : nk_kernel_hamming_k};
-    return expect_eq(index.reserve({64, connectivity_16_k, 64}).status, status_t::unknown_kind_k);
+    std::unique_ptr<index_type_> const index {new (std::nothrow) index_type_(
+        index_type_::vector_dtype_k == nk_u1_k ? nk_kernel_angular_k : nk_kernel_hamming_k)};
+    return expect_eq(index->reserve({64, connectivity_16_k, 64}).status, status_t::unknown_kind_k);
 }
 
 /** Device search under indexer heads against the @c f64 oracle, every node ID its stored row: a pool as wide as the
@@ -146,7 +146,8 @@ std::size_t dense_expect_vram_indexer_search(make_index_type_ const& make_index,
     constexpr std::size_t nodes_count = dense_thread_nodes_k, queries_count = 4, wanted = 16;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
-    index_type_ index = make_index(ledger);
+    std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
+    index_type_& index = *index_ptr;
     typename index_type_::traversal_context_t context {{}};
     failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     auto const vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexer"));
@@ -183,9 +184,16 @@ std::size_t test_dense_vram_indexer_search(make_index_type_ const& make_index, u
 
 #pragma endregion Algebra
 
+/** A vendor this build leaves out composes nothing, so its shards instantiate empty. */
+template <gpu_vendor_t vendor_, nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>
+std::size_t test_vram_configuration(char const*, u64_t) {
+    return 0;
+}
+
 /** Composes one (dtype, kernel) cell's suite over @p vendor_ 's ledgered index, reported under
  *  @p name prefixed by the vendor's toolkit. */
 template <gpu_vendor_t vendor_, nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>
+    requires vram_compiled<vendor_>
 std::size_t test_vram_configuration(char const* name, u64_t seed) {
     using cell_t = vram_cell<vendor_, dtype_, kernel_>;
     using index_t = typename cell_t::index_t;
@@ -220,8 +228,8 @@ std::size_t test_vram_configuration(char const* name, u64_t seed) {
     return report(vendor_name.c_str(), failures_count);
 }
 
-/** Per-dtype VRAM suite entries the shard translation units define for the vendor of their object
- *  library and its entry composes explicitly; each returns its shard's failure count. */
+/** Per-dtype VRAM suite entries the shard translation units define for every vendor and each
+ *  carried vendor's entry composes explicitly; each returns its shard's failure count. */
 template <gpu_vendor_t vendor_>
 std::size_t check_vram_index_bf16(settings_t const& settings);
 template <gpu_vendor_t vendor_>

@@ -31,13 +31,13 @@
 #define mutating 0
 #define last_visible_id(shard) (1 + (shard))
 #define sequence_word 3
-#define key(shard, id) (4 + (shard) * plane + (id))
+#define key(shard, id) (4 + (shard) * shard_rows + (id))
 
 // The sizes and values: two shards of two rows, one per claimer, a batch of one row per shard, the
 // keys, and the sequence word's unit, past the commits in flight it counts. A load runs beside one
 // batch, so no shard takes a third row.
 #define shards 2
-#define plane 2
+#define shard_rows 2
 #define unset 0
 #define key_of(t) (10 + (t))
 #define sequence_unit 4
@@ -64,8 +64,8 @@
 
 byte claims[shards];          // per shard, its claim: `claimed_rows_`
 bool kept[shards];            // per shard, a failure kept by a batch that stopped with rows claimed there
-byte owner[shards * plane];   // one past the thread that claimed the row; zero while unclaimed
-#define owner_of(shard, id) owner[(shard) * plane + (id)]
+byte owner[shards * shard_rows];   // one past the thread that claimed the row; zero while unclaimed
+#define owner_of(shard, id) owner[(shard) * shard_rows + (id)]
 bool committing[mutators];    // per mutator, whether its batch reached its commit
 byte part[mutators * shards]; // per mutator and shard, the row its batch landed at
 #define part_of(t, shard) part[(t) * shards + (shard)]
@@ -110,7 +110,7 @@ inline insert_batch(t) {
     fi;
     for (shard : 0 .. shards - 1) {
         first_node = claims[shard];
-        assert(first_node < plane);
+        assert(first_node < shard_rows);
         if
         :: key_before_turn -> store(t, key(shard, first_node), order_relaxed, key_of(t))
         :: else

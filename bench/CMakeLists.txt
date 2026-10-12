@@ -47,6 +47,7 @@ add_executable(
     dense/ram_index_algebra_i4.cpp
     dense/ram_index_algebra_u8.cpp
     dense/ram_index_algebra_u4.cpp
+    dense/ram_index_algebra_u1.cpp
 )
 add_executable(
     usearch_bench_dense_ram_indexes_algebra
@@ -61,6 +62,7 @@ add_executable(
     dense/ram_indexes_algebra_i4.cpp
     dense/ram_indexes_algebra_u8.cpp
     dense/ram_indexes_algebra_u4.cpp
+    dense/ram_indexes_algebra_u1.cpp
 )
 # The NVMe benches carry no f32 shard, since f32 is never a stored dtype.
 add_executable(
@@ -91,6 +93,7 @@ add_executable(
     dense/nvme_indexes_algebra_i4.cpp
     dense/nvme_indexes_algebra_u8.cpp
     dense/nvme_indexes_algebra_u4.cpp
+    dense/nvme_indexes_algebra_u1.cpp
 )
 foreach (
     bench_target_ IN
@@ -110,8 +113,8 @@ usearch_setup_target(usearch_bench_dense_ram_metric HOST)
 target_include_directories(usearch_bench_dense_ram_metric PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_bench_dense_ram_metric PRIVATE fmt::fmt)
 
-# The CUDA benches compile with the host compiler; each entry unit compiles once more with NVCC device-only, into the
-# binary's own fatbin of every ceiling's kernels.
+# The CUDA benches compile with the host compiler; each entry unit compiles host-only through Clang's CUDA mode and once
+# more with NVCC device-only, into the binary's own fatbin of every ceiling's kernels.
 if (USEARCH_BUILD_CUDA)
     find_package(CUDAToolkit REQUIRED)
     enable_language(ASM)
@@ -158,6 +161,7 @@ if (USEARCH_BUILD_CUDA)
         dense/vram_index_algebra_i4.cpp
         dense/vram_index_algebra_u8.cpp
         dense/vram_index_algebra_u4.cpp
+        dense/vram_index_algebra_u1.cpp
     )
     add_executable(
         usearch_bench_dense_vram_indexes_algebra
@@ -172,6 +176,7 @@ if (USEARCH_BUILD_CUDA)
         dense/vram_indexes_algebra_i4.cpp
         dense/vram_indexes_algebra_u8.cpp
         dense/vram_indexes_algebra_u4.cpp
+        dense/vram_indexes_algebra_u1.cpp
     )
     # A generation's kits join the bench only when every listed architecture runs them.
     usearch_cuda_capabilities(bench_cuda_capabilities_ "${USEARCH_CUDA_ARCHITECTURES}")
@@ -186,10 +191,8 @@ if (USEARCH_BUILD_CUDA)
         target_sources(${bench_target_} PRIVATE ${PROJECT_SOURCE_DIR}/src/types.cpp)
         target_compile_definitions(${bench_target_} PRIVATE "USEARCH_ARCH_CUDA_=1" ${bench_cuda_capabilities_})
         target_link_libraries(
-            ${bench_target_} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::static CUDA::toolkit
-                                     ${CMAKE_DL_LIBS}
+            ${bench_target_} PRIVATE fmt::fmt yyjson forkunion::static stringzilla::static ${CMAKE_DL_LIBS}
         )
-        set_source_files_properties(${bench_entry_} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xc++")
-        usearch_cuda_fatbin(${bench_target_} bench_vram_nvidia ${bench_entry_} ${bench_cuda_codes_})
+        usearch_gpu_bundle(${bench_target_} nvidia bench_vram_nvidia ${bench_entry_} ${bench_cuda_codes_})
     endforeach ()
 endif ()

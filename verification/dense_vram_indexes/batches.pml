@@ -4,7 +4,7 @@
  *
  *  `insert` takes the executor's hold and then `mutating_`, so two batches never interleave their
  *  claims, and the gate serializes the key columns' covers along with them, so the batches admit
- *  no rows against the key planes. Searches bound on each shard's watermark, which a batch turns
+ *  no rows against the key columns. Searches bound on each shard's watermark, which a batch turns
  *  on every shard inside one commit of a counted sequence word, as on the RAM shards.
  *
  *  @verify pass sc,rc11

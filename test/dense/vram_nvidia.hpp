@@ -2,8 +2,9 @@
  *  @file test/dense/vram_nvidia.hpp
  *  @author Ash Vardanian
  *  @date July 22, 2026
- *  @brief The NVIDIA index the residency-level VRAM scenarios run over: its ledgered plane backend,
- *      the device-bound scratch allocator and the cell the shared composers build it through.
+ *  @brief The NVIDIA index the residency-level VRAM scenarios run over: its ledgered flat-matrix
+ *      backend, the device-bound scratch allocator and the cell the shared composers build it
+ *      through.
  *
  *  Plain C++ over the NVIDIA faces, so the shared shards compile with the host compiler; the
  *  cells' kernels instantiate in @c vram_nvidia.cu, which also covers device attention, since its
@@ -32,10 +33,10 @@ struct selected_cuda_allocator : cuda_device_allocator<value_type_> {
         : cuda_device_allocator<value_type_>(other.stream(), other.device()) {}
 };
 
-/** Ledgered device allocator: the virtual-memory plane backend with every committed slab tallied
- *  into the harness's @c allocation_ledger_t, and a converting constructor from the harness's
- *  host-side @c counting_allocator - so @c make_ledgered_index constructs the CUDA index unchanged
- *  and the ledger provably balances device bytes. */
+/** Ledgered device allocator: the virtual-memory flat-matrix backend with every committed slab
+ *  tallied into the harness's @c allocation_ledger_t, and a converting constructor from the
+ *  harness's host-side @c counting_allocator - so @c make_ledgered_index constructs the CUDA index
+ *  unchanged and the ledger provably balances device bytes. */
 template <typename value_type_ = std::byte>
 struct counting_cuda_allocator {
     using value_type = value_type_;
@@ -107,8 +108,8 @@ struct dense_cuda_value_lookup {
 #endif
 };
 
-/** The NVIDIA index of one (dtype, kernel) cell over the ledgered planes, its sharded collection,
- *  and the factory the shared composers build the index with; device attention runs in
+/** The NVIDIA index of one (dtype, kernel) cell over the ledgered flat matrices, its sharded
+ *  collection, and the factory the shared composers build the index with; device attention runs in
  *  @c vram_nvidia.cu instead of the shared composers. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::nvidia_k, dtype_, kernel_> {
@@ -119,9 +120,9 @@ struct vram_cell<gpu_vendor_t::nvidia_k, dtype_, kernel_> {
     inline static constexpr char const* vendor_prefix_k = "cuda";
     inline static constexpr bool attends_k = true;
 
-    static index_t make_index(allocation_ledger_t& ledger) noexcept {
-        return index_t {kernel_, allocator_t {counting_allocator_t(ledger)},
-                        allocator_t {counting_allocator_t(ledger)}};
+    static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) noexcept {
+        return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel_, allocator_t {counting_allocator_t(ledger)},
+                                                                   allocator_t {counting_allocator_t(ledger)}));
     }
 };
 

@@ -477,7 +477,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const&, nk_kernel_kind_t ke
 
 /** The innermost hop: binds the concrete sharded-index instantiation, wires the typed source views
  *  and the batch-shaped staging into a @c streamed_dataset, builds the shards under @p kernel, and
- *  hands them to @p workload. Staging is one contiguous plane, sized after the executor spawns so
+ *  hands them to @p workload. Staging is one contiguous tensor, sized after the executor spawns so
  *  its rows follow the thread count. */
 template <typename dataset_scalar_type_, nk_dtype_t stored_dtype_, nk_capability_t capability_, typename wait_type_,
           typename workload_type_>
@@ -513,10 +513,10 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
     streamed_t streamed {bench, sliced_vectors, source_queries};
     if (!prepare(streamed, launch.machine.topology)) return 1;
 
-    // Owns the one staging plane both batched phases view.
+    // Owns the one staging tensor both batched phases view.
     nk::tensor<scalar_t, std::allocator<scalar_t>, 3> staging;
-    // Owns the rescaling plane @c streamed_dataset::rescaling views.
-    nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_plane;
+    // Owns the rescaling rows `streamed_dataset::rescaling` views.
+    nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_rows;
     if constexpr (!streamed_t::zero_copy_k) {
         std::size_t const threads = bench.executor.size();
         std::size_t const batch_rows = launch.settings.batch_per_core.value * threads;
@@ -529,13 +529,13 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
         streamed.staging = staging.span();
 
         if constexpr (streamed_t::scaled_k) {
-            rescaling_plane =
+            rescaling_rows =
                 nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::zeros({1, batch_rows, dimensions}).value;
-            if (rescaling_plane.empty()) {
+            if (rescaling_rows.empty()) {
                 fmt::println("Failed to allocate {} rescaling rows of {}d f32", batch_rows, dimensions);
                 return 1;
             }
-            streamed.rescaling = rescaling_plane.span();
+            streamed.rescaling = rescaling_rows.span();
             streamed.establish_scale();
         }
     }

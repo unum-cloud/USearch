@@ -312,9 +312,9 @@ struct allocation_ledger_t {
  *
  *  The default constructor exists only because @c nk::tensor requires a default-constructible
  *  allocator for its empty instances; a defaulted copy aborts on any real allocation, so
- *  every allocation on an audited plane provably flows through ledgered instances. The
- *  audit covers the planes instantiated with this allocator - the CPU cells ledger their
- *  vectors & neighbors planes, while per-context scratch stays on the plain heap.
+ *  every allocation on an audited matrix provably flows through ledgered instances. The audit
+ *  covers the matrices instantiated with this allocator - the CPU cells ledger their vectors
+ *  & neighbors matrices, while per-context scratch stays on the plain heap.
  */
 template <typename value_type_>
 struct counting_allocator {

@@ -56,10 +56,11 @@ usearch_setup_target(usearch_test_header_only_witness HOST)
 target_link_libraries(usearch_test_header_only_witness PRIVATE forkunion::header numkong::header)
 add_test(NAME usearch_test_header_only_witness COMMAND usearch_test_header_only_witness)
 
-# The one VRAM runner: every vendor compiles the vendor-neutral residency shards into an object library of its own, with
-# its `USEARCH_ARCH_<VENDOR>_` naming the cell they compose over, and registers its entry with the runner, which links
-# whichever vendors this build carries and names none of them.
-set(usearch_test_vram_shards_
+# The one VRAM runner: one object library compiles the per-dtype test shards once, each instantiating every vendor its
+# `USEARCH_ARCH_<VENDOR>_` carries, and each carried vendor's entry registers with the runner, which names none of them.
+# The library links in too, so the runner reaches every class arm it compiled through the C interface.
+add_library(
+    usearch_test_vram_shards OBJECT
     dense/vram_index_bf16.cpp
     dense/vram_index_f16.cpp
     dense/vram_index_e5m2.cpp
@@ -73,63 +74,43 @@ set(usearch_test_vram_shards_
     dense/vram_index_u1.cpp
     dense/vram_indexes.cpp
 )
-add_executable(usearch_test_vram dense_vram.cpp ${PROJECT_SOURCE_DIR}/src/types.cpp)
-usearch_keep_dense_dtypes(usearch_test_vram)
+usearch_keep_dense_dtypes(usearch_test_vram_shards)
+usearch_setup_target(usearch_test_vram_shards HOST)
+target_include_directories(usearch_test_vram_shards PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(
+    usearch_test_vram_shards
+    PRIVATE "USEARCH_ARCH_CUDA_=$<BOOL:${USEARCH_BUILD_CUDA}>" "USEARCH_ARCH_ROCM_=$<BOOL:${USEARCH_BUILD_ROCM}>"
+            "USEARCH_ARCH_METAL_=$<BOOL:${USEARCH_BUILD_METAL}>"
+)
+target_link_libraries(usearch_test_vram_shards PRIVATE fmt::fmt yyjson forkunion::static)
+add_executable(usearch_test_vram dense_vram.cpp)
 usearch_setup_target(usearch_test_vram HOST)
-target_link_libraries(usearch_test_vram PRIVATE fmt::fmt yyjson forkunion::static)
+target_link_libraries(
+    usearch_test_vram PRIVATE usearch_test_vram_shards fmt::fmt yyjson forkunion::static ${USEARCH_PUNNED_LIBRARIES}
+                              ${CMAKE_DL_LIBS}
+)
 add_test(NAME usearch_test_vram COMMAND usearch_test_vram)
 
-# The NVIDIA object compiles everything with the host compiler over the plain-C++ faces, and its entry once more with
-# NVCC device-only, into the suite's own fatbin of the cells' kernels and the attends over its device value lookups.
+# NVIDIA's entry compiles once more with NVCC device-only, into the suite's own fatbin of the shards' kernels and the
+# attends over its device value lookups, testing a generation's kits only when every listed architecture runs them.
 if (USEARCH_BUILD_CUDA)
     find_package(CUDAToolkit REQUIRED)
     enable_language(ASM)
     set(usearch_test_vram_nvidia_entry_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_nvidia.cu)
-    add_library(usearch_test_vram_nvidia OBJECT ${usearch_test_vram_shards_} ${usearch_test_vram_nvidia_entry_})
-    usearch_keep_dense_dtypes(usearch_test_vram_nvidia)
-    usearch_setup_target(usearch_test_vram_nvidia HOST)
-    target_include_directories(usearch_test_vram_nvidia PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    # The device pass tests a generation's kits only when every listed architecture runs them.
+    target_sources(usearch_test_vram_shards PRIVATE ${usearch_test_vram_nvidia_entry_})
     usearch_cuda_capabilities(test_cuda_capabilities_ "${USEARCH_CUDA_ARCHITECTURES}")
-    target_compile_definitions(usearch_test_vram_nvidia PRIVATE "USEARCH_ARCH_CUDA_=1" ${test_cuda_capabilities_})
-    target_link_libraries(usearch_test_vram_nvidia PRIVATE fmt::fmt yyjson forkunion::static CUDA::toolkit)
-    set_source_files_properties(${usearch_test_vram_nvidia_entry_} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xc++")
+    target_compile_definitions(usearch_test_vram_shards PRIVATE ${test_cuda_capabilities_})
     usearch_cuda_codes(test_cuda_codes_ "${USEARCH_CUDA_ARCHITECTURES}")
-    usearch_cuda_fatbin(
-        usearch_test_vram_nvidia test_vram_nvidia ${usearch_test_vram_nvidia_entry_} ${test_cuda_codes_}
+    usearch_gpu_bundle(
+        usearch_test_vram_shards nvidia test_vram_nvidia ${usearch_test_vram_nvidia_entry_} ${test_cuda_codes_}
     )
-    target_compile_definitions(usearch_test_vram PRIVATE "USEARCH_ARCH_CUDA_=1")
-    target_link_libraries(usearch_test_vram PRIVATE usearch_test_vram_nvidia CUDA::toolkit ${CMAKE_DL_LIBS})
 endif ()
 
-# The Apple object compiles everything with the host compiler; its kernels compile from embedded source at first use.
-if (USEARCH_BUILD_METAL)
-    add_library(usearch_test_vram_apple OBJECT ${usearch_test_vram_shards_} dense/vram_apple.cpp)
-    usearch_keep_dense_dtypes(usearch_test_vram_apple)
-    usearch_setup_target(usearch_test_vram_apple HOST)
-    target_include_directories(usearch_test_vram_apple PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-    target_compile_definitions(usearch_test_vram_apple PRIVATE "USEARCH_ARCH_METAL_=1")
-    target_link_libraries(usearch_test_vram_apple PRIVATE fmt::fmt yyjson forkunion::static)
-    target_compile_definitions(usearch_test_vram PRIVATE "USEARCH_ARCH_METAL_=1")
-    target_link_libraries(usearch_test_vram PRIVATE usearch_test_vram_apple ${CMAKE_DL_LIBS})
-endif ()
-
-# The AMD object compiles everything with the host compiler and links the CDNA3 floor unit, whose code object CDNA3 and
-# CDNA4 run.
+# The AMD shards run over the library's CDNA3 floor unit, whose code object CDNA3 and CDNA4 run, and the Apple kernels
+# compile from embedded source at first use.
 if (USEARCH_BUILD_ROCM)
-    add_library(usearch_test_vram_amd OBJECT ${usearch_test_vram_shards_} dense/vram_amd.cpp)
-    usearch_keep_dense_dtypes(usearch_test_vram_amd)
-    usearch_setup_target(usearch_test_vram_amd HOST)
-    target_include_directories(
-        usearch_test_vram_amd PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/dense
-    )
-    target_include_directories(usearch_test_vram_amd SYSTEM PRIVATE ${USEARCH_HIP_INCLUDE_DIR})
-    target_compile_definitions(usearch_test_vram_amd PRIVATE "USEARCH_ARCH_ROCM_=1" "__HIP_PLATFORM_AMD__")
-    target_link_libraries(usearch_test_vram_amd PRIVATE fmt::fmt yyjson forkunion::static)
-    target_include_directories(usearch_test_vram SYSTEM PRIVATE ${USEARCH_HIP_INCLUDE_DIR})
-    target_compile_definitions(usearch_test_vram PRIVATE "USEARCH_ARCH_ROCM_=1" "__HIP_PLATFORM_AMD__")
-    target_link_libraries(
-        usearch_test_vram PRIVATE usearch_test_vram_amd $<TARGET_OBJECTS:usearch_dense_vram_variants_amd_cdna3>
-                                  ${CMAKE_DL_LIBS}
-    )
+    target_sources(usearch_test_vram_shards PRIVATE dense/vram_amd.cpp)
+endif ()
+if (USEARCH_BUILD_METAL)
+    target_sources(usearch_test_vram_shards PRIVATE dense/vram_apple.cpp)
 endif ()

@@ -107,6 +107,16 @@ check_ids_capitalized_prose() {
     [ -z "$miscased" ] || fail "$miscased" "$file writes id or ids - the abbreviation is ID, plural IDs:"
 }
 
+# GPU rows live in flat matrices and flat columns, so the old "plane" names neither prose nor identifiers in the
+# sources that touch device storage. Hyphenated compounds like `tangent-plane` and words like `hyperplane` pass.
+planes_pattern='(^|[^[:alnum:]-])[Pp]lanes?([^[:alnum:]-]|$)'
+check_flat_storage_wording() {
+    local planes
+    planes=$(printf '%s\n' "$added" | grep -E "$planes_pattern" || true)
+    [ -z "$planes" ] || fail "$planes" \
+        "$file calls device row storage a plane - write flat matrix or flat column:"
+}
+
 # A Unicode arrow glued to its neighbor - `key→id` - reads as one token to searchers and
 # renderers alike; the arrow always gets whitespace on both sides.
 check_glued_arrows() {
@@ -1773,6 +1783,9 @@ judge_path() {
     test/harness.hpp | test/main.cpp | test/dense_vram.cpp | test/dense/vram_nvidia.cu | test/dense/vram_amd.cpp | \
         test/dense/vram_apple.cpp) ;;
     test/*.cpp | test/*.hpp | test/*.cu | test/*.cuh) check_test_bodies_quiet ;;
+    esac
+    case "$file" in
+    *vram* | *.cu | *.cuh | *.hip | *.metal) check_flat_storage_wording ;;
     esac
     case "$file" in
     *.c | *.h | *.hpp | *.cpp | *.cc | *.cxx | *.cu | *.cuh | *.hip | *.metal | *.py | *.pyi | *.rs | *.go | *.swift | \

@@ -3,40 +3,180 @@
  *  @author Ash Vardanian
  *  @date July 22, 2026
  *  @brief The one VRAM runner: resolves @c USEARCH_DEVICES against the process listing and runs
- *      each named device through the suites its vendor's test object registered.
+ *      each named device through the suites its vendor's test object registered, then through the
+ *      library's own arm for its class.
  *
- *  Every vendor links an object library of its own into @c usearch_test_vram, compiled from the
- *  same vendor-neutral shards over its cell, and registers one entry with @c vram_suites before
+ *  One object library carries the vendor-neutral shards, composed over the cell of every vendor
+ *  this build carries, and each carried vendor's entry registers with @c vram_suites before
  *  @c main runs. The runner names no vendor: a device whose vendor registered nothing is reported
  *  and skipped, and an unset @c USEARCH_DEVICES runs the first device of every vendor present.
+ *  The library's arms are reached as users reach them, through the C interface, which picks the
+ *  arm of the device's class, so every class the library compiles is covered on a device of that
+ *  class without instantiating its index again.
  */
-#include <vector> // `std::vector` - the selected devices
+#include <cstring> // `std::memcmp` - a match against its own key
+
+#include <vector> // `std::vector` - the selected devices and the keys
 
 #include <fmt/format.h>
 
 #include "harness.hpp"
+#include "usearch/dense_index.h"             // `usearch_dense_init_vram` - the library's arms
 #include "usearch/utilities/vram_device.hpp" // `gpu_devices` - the listing `USEARCH_DEVICES` indexes
 
 using namespace unum::usearch;
 using namespace unum::usearch::test;
 
-/** The devices @p settings names, or the first listed one of every vendor when it names none. An
- *  ordinal past the listing exits with status 1, after @c main printed the listing. */
-static std::vector<gpu_device_t> selected_devices(settings_t const& settings) {
+/** The positions in the listing @p settings names, or of the first listed device of every vendor
+ *  when it names none. An ordinal past the listing exits with status 1, after @c main printed the
+ *  listing. */
+static std::vector<std::uint32_t> selected_devices(settings_t const& settings) {
     std::span<gpu_device_t const> const listed = gpu_devices();
-    std::vector<gpu_device_t> selected;
+    std::vector<std::uint32_t> selected;
     for (std::uint32_t const ordinal : settings.devices) {
         if (ordinal < listed.size()) {
-            selected.push_back(listed[ordinal]);
+            selected.push_back(ordinal);
             continue;
         }
         fmt::println(stderr, "USEARCH_DEVICES names device {}, past the {} listed", ordinal, listed.size());
         std::exit(1);
     }
     if (settings.devices.empty())
-        for (gpu_device_t const& device : listed)
-            if (selected.empty() || selected.back().vendor != device.vendor) selected.push_back(device);
+        for (std::uint32_t ordinal = 0; ordinal != listed.size(); ++ordinal)
+            if (selected.empty() || listed[selected.back()].vendor != listed[ordinal].vendor)
+                selected.push_back(ordinal);
     return selected;
+}
+
+/** One stored scalar of the dtype ladder. */
+struct vram_arm_dtype_t {
+    usearch_scalar_t scalar;
+    char const* name;
+};
+
+/** The ladder's scalars in its order, of which the library compiles the first
+ *  @c USEARCH_DENSE_DTYPES. */
+inline constexpr vram_arm_dtype_t vram_arm_dtypes_k[] = {
+    {usearch_scalar_bf16_k, "bf16"}, {usearch_scalar_u1x8_k, "u1"},   {usearch_scalar_i8_k, "i8"},
+    {usearch_scalar_e4m3_k, "e4m3"}, {usearch_scalar_f16_k, "f16"},   {usearch_scalar_u8_k, "u8"},
+    {usearch_scalar_e5m2_k, "e5m2"}, {usearch_scalar_i4x2_k, "i4"},   {usearch_scalar_u4x2_k, "u4"},
+    {usearch_scalar_e3m2_k, "e3m2"}, {usearch_scalar_e2m3_k, "e2m3"},
+};
+
+/** The metrics each class arm compiles for the numeric dtypes, and for the bit-packed one. */
+inline constexpr usearch_dense_metric_t vram_arm_numeric_metrics_k[] = {
+    usearch_dense_metric_inner_k, usearch_dense_metric_angular_k, usearch_dense_metric_euclidean_k};
+inline constexpr usearch_dense_metric_t vram_arm_binary_metrics_k[] = {
+    usearch_dense_metric_inner_k, usearch_dense_metric_hamming_k, usearch_dense_metric_jaccard_k};
+
+/** The 128-bit key of row @p row, its identity in the low bytes. */
+static usearch_key_t vram_arm_key(std::size_t row) noexcept {
+    usearch_key_t key {};
+    for (std::size_t byte = 0; byte != 8; ++byte) key.bytes[15 - byte] = static_cast<std::uint8_t>(row >> (byte * 8));
+    return key;
+}
+
+/** Device @p ordinal 's arm of one dtype and metric through the C interface: every row goes in
+ *  under its key, and nine in ten find themselves first. The inner product has no such guarantee,
+ *  so every row of it must instead return the requested count, nearest first. */
+static std::size_t check_vram_arm(vram_arm_dtype_t const& dtype, usearch_dense_metric_t metric, std::int32_t ordinal,
+                                  u64_t seed) {
+    constexpr std::size_t rows_count = 512, dimensions = 256, wanted = 10;
+    auto const vectors = make_sketched_vectors<nk::f32_t>(rows_count, dimensions, stream_key(seed, dtype.name));
+    std::vector<usearch_key_t> keys(rows_count);
+    for (std::size_t row = 0; row != rows_count; ++row) keys[row] = vram_arm_key(row);
+    usearch_rows_view_t const rows {vectors.data(), static_cast<std::size_t>(vectors.stride_bytes(0)), dimensions,
+                                    usearch_scalar_f32_k};
+    usearch_vram_options_t const vram {&ordinal, 1};
+    std::size_t failures = 0;
+
+    usearch_outcome_t outcome {};
+    usearch_dense_index_t index = nullptr;
+    usearch_dense_init_vram_t init {};
+    init.index = &index;
+    init.outcome = &outcome;
+    init.metric = metric;
+    init.quantization = dtype.scalar;
+    init.dimensions = dimensions;
+    init.vram = vram;
+    usearch_dense_init_vram(&init);
+    failures += expect(!outcome.message);
+
+    usearch_executor_t executor = nullptr;
+    usearch_executor_for_vram_t placement {};
+    placement.executor = &executor;
+    placement.outcome = &outcome;
+    placement.vram = vram;
+    if (!failures) usearch_executor_for_vram(&placement);
+    failures += expect(!outcome.message);
+
+    usearch_dense_insert_t insert {};
+    insert.index = index;
+    insert.executor = executor;
+    insert.outcome = &outcome;
+    insert.count = rows_count;
+    insert.keys = {keys.data(), sizeof(usearch_key_t)};
+    insert.vectors = rows;
+    if (!failures) usearch_dense_insert(&insert);
+    failures += expect(!outcome.message);
+
+    usearch_arena_t arena = nullptr;
+    usearch_arena_init_t arena_init {};
+    arena_init.arena = &arena;
+    arena_init.outcome = &outcome;
+    if (!failures) usearch_arena_init(&arena_init);
+    failures += expect(!outcome.message);
+
+    usearch_matches_view_t matches {};
+    usearch_dense_search_t search {};
+    search.index = index;
+    search.executor = executor;
+    search.outcome = &outcome;
+    search.count = rows_count;
+    search.queries = rows;
+    search.matches = &matches;
+    search.arena = arena;
+    search.wanted = wanted;
+    if (!failures) usearch_dense_search(&search);
+    failures += expect(!outcome.message);
+
+    bool const is_inner = metric == usearch_dense_metric_inner_k;
+    std::size_t passed = 0;
+    if (!failures)
+        for (std::size_t row = 0; row != rows_count; ++row) {
+            std::size_t const found = matches.counts[row];
+            usearch_distance_t const* scores = &matches.scores[row * matches.columns];
+            bool ascending = true;
+            for (std::size_t column = 1; column < found; ++column) ascending &= scores[column - 1] <= scores[column];
+            bool const found_itself = found && std::memcmp(&matches.keys[row * matches.columns], &keys[row],
+                                                           sizeof(usearch_key_t)) == 0;
+            passed += ascending && (is_inner ? found == wanted : found_itself);
+        }
+    failures += expect(failures || (is_inner ? passed == rows_count : passed * 10 >= rows_count * 9));
+
+    usearch_arena_free(arena);
+    usearch_executor_free(executor);
+    usearch_dense_free(index);
+    return failures;
+}
+
+/** Device @p ordinal 's arm of every compiled dtype under every metric of its family, which the C
+ *  interface picks by the device's class. */
+static std::size_t check_vram_arms(settings_t const& settings, std::uint32_t ordinal) {
+    std::size_t failures_count = 0;
+    if (!settings.selects("vram_arms")) return failures_count;
+    for (std::size_t position = 0; position != USEARCH_DENSE_DTYPES; ++position) {
+        vram_arm_dtype_t const& dtype = vram_arm_dtypes_k[position];
+        std::span<usearch_dense_metric_t const> const metrics = dtype.scalar == usearch_scalar_u1x8_k
+                                                                    ? std::span {vram_arm_binary_metrics_k}
+                                                                    : std::span {vram_arm_numeric_metrics_k};
+        for (usearch_dense_metric_t const metric : metrics) {
+            std::string const name = fmt::format("arm {}+{}", dtype.name, usearch_dense_metric_name(metric));
+            failures_count += report(name.c_str(),
+                                     check_vram_arm(dtype, metric, static_cast<std::int32_t>(ordinal), settings.seed));
+        }
+    }
+    return failures_count;
 }
 
 int main() {
@@ -49,10 +189,11 @@ int main() {
                      usearch_gpu_class_name(static_cast<usearch_gpu_class_t>(listed[position].gpu_class)),
                      listed[position].vendor_ordinal, listed[position].compute_units,
                      listed[position].memory_bytes >> 20);
-    std::vector<gpu_device_t> const devices = selected_devices(settings);
-    if (devices.empty()) return fmt::println("- GPU: none listed"), 0;
+    std::vector<std::uint32_t> const ordinals = selected_devices(settings);
+    if (ordinals.empty()) return fmt::println("- GPU: none listed"), 0;
     std::size_t failures_count = 0;
-    for (gpu_device_t const& device : devices) {
+    for (std::uint32_t const ordinal : ordinals) {
+        gpu_device_t const& device = listed[ordinal];
         vram_suite_t const* suite = nullptr;
         for (vram_suite_t const& registered : vram_suites())
             if (registered.vendor == device.vendor) suite = &registered;
@@ -61,6 +202,7 @@ int main() {
             continue;
         }
         failures_count += suite->check(settings, device);
+        failures_count += check_vram_arms(settings, ordinal);
     }
     return report("total", failures_count) ? 1 : 0;
 }

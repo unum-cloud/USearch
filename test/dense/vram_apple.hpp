@@ -2,8 +2,8 @@
  *  @file test/dense/vram_apple.hpp
  *  @author Ash Vardanian
  *  @date October 11, 2026
- *  @brief The Apple index the residency-level VRAM scenarios run over: its ledgered plane backend
- *      and the cell the shared composers build it through.
+ *  @brief The Apple index the residency-level VRAM scenarios run over: its ledgered flat-matrix
+ *      backend and the cell the shared composers build it through.
  */
 #pragma once
 
@@ -13,9 +13,9 @@
 
 namespace unum::usearch::test::dense {
 
-/** Ledgered Metal plane backend: shared buffers on the device under test, each one tallied into
- *  the harness's @c allocation_ledger_t while it lives, so the ledger provably balances the Apple
- *  planes. */
+/** Ledgered Metal flat-matrix backend: shared buffers on the device under test, each one tallied
+ *  into the harness's @c allocation_ledger_t while it lives, so the ledger provably balances the
+ *  Apple flat matrices. */
 struct counting_metal_allocator_t {
     counting_metal_allocator_t() noexcept = default;
     counting_metal_allocator_t(counting_allocator_t const& host) noexcept : ledger_(host.ledger_) {}
@@ -39,17 +39,17 @@ struct counting_metal_allocator_t {
     allocation_ledger_t* ledger_ = nullptr;
 };
 
-/** The Apple index of one (dtype, kernel) cell over the ledgered planes, its one-shard collection,
- *  and the factory the shared composers build the index with. */
+/** The Apple index of one (dtype, kernel) cell over the ledgered flat matrices, its one-shard
+ *  collection, and the factory the shared composers build the index with. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::apple_k, dtype_, kernel_> {
     using index_t = vram_apple_index<dtype_, nk_cap_metal_k, counting_metal_allocator_t, counting_metal_allocator_t>;
     using indexes_t = vram_apple_indexes<u32_t, dtype_, nk_cap_metal_k>;
     inline static constexpr char const* vendor_prefix_k = "metal";
 
-    static index_t make_index(allocation_ledger_t& ledger) noexcept {
+    static std::unique_ptr<index_t> make_index(allocation_ledger_t& ledger) noexcept {
         counting_metal_allocator_t const allocator {counting_allocator_t(ledger)};
-        return index_t {kernel_, allocator, allocator};
+        return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel_, allocator, allocator));
     }
 };
 
