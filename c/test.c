@@ -1308,6 +1308,96 @@ void test_deferred_holds_arena(void) {
     printf("Test: Deferred Holds Arena - PASSED\n");
 }
 
+/** A three-part checkpoint loaded onto one GPU keeps a shard per part on it, and every row still
+ *  finds its own key across them. Skipped without a GPU. */
+void test_vram_parts_share_a_device(size_t const collection_size, size_t const dimensions) {
+    usearch_outcome_t outcome = {0};
+    size_t devices_count = 0;
+    usearch_gpu_devices(&(usearch_gpu_devices_t) {.outcome = &outcome, .devices_count = &devices_count});
+    if (!devices_count) return;
+    printf("Test: VRAM Parts Share a Device... %zu vectors, %zu dimensions\n", collection_size, dimensions);
+
+    // The three parts come from naming the first GPU thrice; the load names it once.
+    int32_t const devices[3] = {0, 0, 0};
+    usearch_vram_options_t const thrice = {.devices = devices, .devices_count = 3};
+    usearch_vram_options_t const once = {.devices = devices, .devices_count = 1};
+    usearch_dense_index_t index = NULL;
+    usearch_dense_init_vram(&(usearch_dense_init_vram_t) {.index = &index,
+                                                          .outcome = &outcome,
+                                                          .metric = usearch_dense_metric_angular_k,
+                                                          .quantization = usearch_scalar_bf16_k,
+                                                          .dimensions = dimensions,
+                                                          .vram = thrice});
+    expect(!outcome.message, outcome.message);
+    usearch_executor_t executor = NULL;
+    usearch_executor_for_vram(
+        &(usearch_executor_for_vram_t) {.executor = &executor, .outcome = &outcome, .vram = thrice});
+    expect(!outcome.message, outcome.message);
+
+    float* const data = create_vectors(collection_size, dimensions);
+    usearch_key_t* const keys = (usearch_key_t*)malloc(collection_size * sizeof(usearch_key_t));
+    expect(keys, "Failed to allocate keys");
+    for (size_t row = 0; row != collection_size; ++row) keys[row] = key_of(row);
+    size_t const row_bytes = dimensions * sizeof(float);
+    usearch_dense_insert(&(usearch_dense_insert_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = collection_size,
+                                                    .keys = {keys, sizeof(usearch_key_t)},
+                                                    .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+    char const path[] = "usearch-test-c-parts.json";
+    usearch_bytes_view_t const path_view = {(uint8_t const*)path, sizeof(path) - 1};
+    usearch_dense_save(
+        &(usearch_dense_save_t) {.index = index, .executor = executor, .outcome = &outcome, .path = path_view});
+    expect(!outcome.message, outcome.message);
+    usearch_executor_free(executor);
+    usearch_dense_free(index);
+
+    // An executor over the one named device drives every shard there, all on its one stream.
+    usearch_executor_for_vram(
+        &(usearch_executor_for_vram_t) {.executor = &executor, .outcome = &outcome, .vram = once});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_load_vram(&(usearch_dense_load_vram_t) {.index = &index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .path = path_view,
+                                                          .vram = once});
+    expect(!outcome.message, outcome.message);
+
+    // The matches land in host pages, so they read back whichever vendor's device walked.
+    usearch_arena_t const arena = create_arena(NULL);
+    usearch_matches_view_t matches = {0};
+    usearch_dense_search(&(usearch_dense_search_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = collection_size,
+                                                    .queries = {data, row_bytes, dimensions, usearch_scalar_f32_k},
+                                                    .matches = &matches,
+                                                    .arena = arena,
+                                                    .wanted = 1});
+    expect(!outcome.message, outcome.message);
+    size_t recalled = 0;
+    for (size_t row = 0; row != collection_size; ++row) {
+        usearch_key_t const expected = key_of(row);
+        recalled += matches.counts[row] && memcmp(matches.keys[row].bytes, expected.bytes, sizeof(expected.bytes)) == 0;
+    }
+    expect(recalled * 10 >= collection_size * 9, "Self-recall across parts sharing a device collapsed below 90%");
+
+    usearch_arena_free(arena);
+    usearch_dense_free(index);
+    usearch_executor_free(executor);
+    remove(path);
+    for (int part = 0; part != 4; ++part) {
+        char part_path[64];
+        snprintf(part_path, sizeof(part_path), "usearch-test-c-parts-%05d-of-00003.safegraphs", part);
+        remove(part_path);
+    }
+    free(keys);
+    free(data);
+    printf("Test: VRAM Parts Share a Device - PASSED\n");
+}
+
 int main(int argc, char* argv[]) {
     (void)argc;
     (void)argv;
@@ -1338,6 +1428,7 @@ int main(int argc, char* argv[]) {
     test_attend();
 #endif
     test_nvme_view(dimension_counts[0]);
+    test_vram_parts_share_a_device(collection_sizes[1], dimension_counts[1]);
     test_deferred_search();
     test_deferred_limit();
     test_free_finishes_deferred();

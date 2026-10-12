@@ -98,6 +98,9 @@ char const* metal_source() noexcept {
     return source;
 }
 
+/** Matches the widest register pool holds; wider walks clamp to it. */
+inline constexpr u32_t metal_widest_pool_k = 512;
+
 /** The walking kernels @c vram_apple_index.metal instantiates once per pool width. */
 enum class metal_kernel_t : u32_t {
     insert_k,
@@ -115,7 +118,7 @@ struct metal_arguments_t {
 };
 
 /** The counter words a launch binds: the batch's assigned rows, the published rows, then the walks'
- *  telemetry. */
+ *  telemetry, and the word an attend raises when a node has no value row. */
 enum class metal_counter_t : u32_t {
     assigned_k = 0,
     published_k,
@@ -128,6 +131,7 @@ enum class metal_counter_t : u32_t {
     locked_drops_k,
     saturations_k,
     changed_k,
+    missed_k,
     count_k = 16,
 };
 
@@ -186,15 +190,34 @@ struct metal_traversal_context {
      *  of several queues lands first. */
     status_t landed() const noexcept { return committed_.landed(); }
 
-    /** The telemetry word @p counter of the last call, read in place from shared memory. */
-    u32_t spent(metal_counter_t counter) const noexcept {
-        u32_t const* const words = reinterpret_cast<u32_t const*>(counters_.host);
-        return words[static_cast<u32_t>(counter)];
+    /** The telemetry of the last submission, zeroed when it was staged; read once it landed. */
+    vram_telemetry_block_t spent() const noexcept {
+        vram_telemetry_block_t block {};
+        block.hops = word_(metal_counter_t::hops_k);
+        block.scored = word_(metal_counter_t::scored_k);
+        block.restarts = word_(metal_counter_t::restarts_k);
+        block.lock_attempts = word_(metal_counter_t::lock_attempts_k);
+        block.lock_skips = word_(metal_counter_t::lock_skips_k);
+        block.reselections = word_(metal_counter_t::reselections_k);
+        block.locked_drops = word_(metal_counter_t::locked_drops_k);
+        block.visited_saturations = word_(metal_counter_t::saturations_k);
+        block.changed_nodes = word_(metal_counter_t::changed_k);
+        return block;
     }
+
+    /** Whether the last attend met a node its value lookup had no row for, which refuses it; read
+     *  once it landed. */
+    bool missed() const noexcept { return word_(metal_counter_t::missed_k) != 0; }
 
   private:
     template <nk_dtype_t, nk_capability_t, typename, typename, typename>
     friend struct vram_apple_index;
+
+    /** Where the last walk left its outputs in the staging, read back once the context lands. */
+    struct landing_t {
+        std::size_t rows = 0, count = 0;
+        std::size_t first_offset = 0, second_offset = 0, third_offset = 0;
+    };
 
     allocator_t queue_;
     metal_context_t* context_ = nullptr;
@@ -202,10 +225,17 @@ struct metal_traversal_context {
     metal_buffer_t counters_;
     metal_buffer_t arena_;
     metal_buffer_t staging_;
+    landing_t landing_;
 
     /** The last command buffer submitted through this context; its queue runs them in commit order,
      *  so this one landing means every earlier one did. */
     metal_launch_t committed_;
+
+    /** The counter word @p counter, read in place from shared memory. */
+    u32_t word_(metal_counter_t counter) const noexcept {
+        u32_t const* const words = reinterpret_cast<u32_t const*>(counters_.host);
+        return words[static_cast<u32_t>(counter)];
+    }
 
     /** Monotone epoch floor over the arena's visited slots, so the arena zeroes only when fresh or
      *  wrapped. */
@@ -332,6 +362,41 @@ struct vram_apple_index {
     }
     std::size_t row_bytes() const noexcept { return row_fragments() * fragment_bytes_k; }
 
+    /** Layout of one simdgroup's slice of the traversal arena. */
+    struct arena_shape_t {
+        u32_t visited_slots = 0;
+        u32_t visited_hash_shift = 0;
+        std::size_t slice_bytes = 0;
+    };
+
+    /** One simdgroup's arena slice for a walk expanding @p expansion candidates beside
+     *  @p cache_rows cached rows: the exact visited set, sized well past the expected visit count
+     *  so probing stays short, the frontier and batch spans, then the query and cache rows - in
+     *  device memory, since threadgroup memory would bound the row width. */
+    arena_shape_t arena_shape_for(u32_t expansion, std::size_t cache_rows) const noexcept {
+        u32_t const visited_slots = std::bit_ceil(64 * expansion);
+        std::size_t const spans_bytes = 32 * 8 + 64 * 8 + 64 * 8 + 64 * 4 + 32 * 4 + 64 * 4 + 64 * 4;
+        std::size_t const rows_bytes = row_bytes() * (1 + cache_rows);
+        return {visited_slots, 32 - static_cast<u32_t>(std::bit_width(visited_slots - 1)),
+                round_up_to_multiple<std::size_t>(rows_bytes + visited_slots * 8 + spans_bytes, 16)};
+    }
+
+    /** Whether a search or multiply launch seats on this device: every simdgroup in flight takes
+     *  the widest pool's slice and the @p fold_bytes an attend keeps past it, within one buffer. */
+    bool walk_scratch_fits(std::size_t fold_bytes = 0) const noexcept {
+        return groups_per_launch_k * simdgroups_per_group_k *
+                   (arena_shape_for(metal_widest_pool_k, 0).slice_bytes + fold_bytes) <=
+               device_.max_buffer_bytes;
+    }
+
+    /** Whether an insert or refine launch seats on this device: every simdgroup in flight takes
+     *  the widest pool's slice beside its candidate cache, within one buffer. */
+    bool build_scratch_fits() const noexcept {
+        return groups_per_launch_k * simdgroups_per_group_k *
+                   arena_shape_for(metal_widest_pool_k, cache_rows_k).slice_bytes <=
+               device_.max_buffer_bytes;
+    }
+
     /** Bytes this index occupies: its storage and its counters. */
     std::size_t memory_usage() const noexcept {
         return sizeof(vram_apple_index) + vectors_matrix_.bytes + norms_column_.bytes + neighbors_matrix_.bytes +
@@ -429,6 +494,17 @@ struct vram_apple_index {
         small_size_t expansion_factor = 0;
     };
 
+    /** The bytes a context grows to before it can insert @p rows rows: its counters, one arena
+     *  slice per simdgroup in flight, and the staged rows; zero before @c reserve freezes the
+     *  geometry. */
+    std::size_t traversal_memory_usage(std::size_t rows, insert_config_t config = {}) const noexcept {
+        if (!dimensions_) return 0;
+        u32_t const pool_slots = pool_slots_for_(config.expansion_factor, 4);
+        return static_cast<std::size_t>(metal_counter_t::count_k) * sizeof(u32_t) +
+               groups_for_(rows) * simdgroups_per_group_k * arena_shape_for(pool_slots * 32, cache_rows_k).slice_bytes +
+               rows * row_bytes();
+    }
+
     /** Telemetry of one @c insert() batch over the contiguous IDs @b [first_id,first_id+count). */
     struct [[nodiscard]] insert_result_t {
         std::size_t new_size = 0;
@@ -474,6 +550,28 @@ struct vram_apple_index {
         std::size_t tail_drops = 0;
         std::size_t visited_saturations = 0;
     };
+
+    /** The bytes a context grows to before it can search or multiply @p rows rows under @p config,
+     *  landing @c config.count columns per row: its counters, one arena slice per simdgroup in
+     *  flight, and the staged rows beside their outputs. */
+    std::size_t traversal_memory_usage(std::size_t rows, search_config_t config) const noexcept {
+        if (!dimensions_) return 0;
+        u32_t const expansion = max_of<u32_t>(
+            config.expansion_factor > config.count ? config.expansion_factor : config.count * 2,
+            static_cast<u32_t>(non_zero_expansion_factor(config)));
+        u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
+        u32_t const pool_slots = pool_slots_for_(expansion, count_slots > 2 ? count_slots : 2);
+        return static_cast<std::size_t>(metal_counter_t::count_k) * sizeof(u32_t) +
+               groups_for_(rows) * simdgroups_per_group_k * arena_shape_for(pool_slots * 32, 0).slice_bytes +
+               rows * (row_bytes() + config.count * (sizeof(node_id_t) + sizeof(distance_t)) + sizeof(u32_t));
+    }
+
+    /** The bytes a search under the indexer @p heads needs: the plain walk's, plus the staging of
+     *  the heads and their weights. */
+    std::size_t traversal_memory_usage(std::size_t rows, search_config_t config,
+                                       indexer_heads<scalar_t> const& heads) const noexcept {
+        return traversal_memory_usage(rows, config) + heads.heads.extent(0) * (row_bytes() + sizeof(f32_t));
+    }
 
     /** The nearest published neighbors of every query row, ascending, with sentinel IDs past the
      *  live matches. */
@@ -993,23 +1091,19 @@ struct vram_apple_index {
      *  epoch base into @p arguments. */
     status_t shape_arena_(traversal_context_t& context, metal_arguments_t& arguments, u32_t expansion,
                           std::size_t cache_rows, std::size_t work) noexcept {
-        u32_t const visited_slots = std::bit_ceil(64 * expansion);
-        std::size_t const slice_bytes = round_up_to_multiple<std::size_t>(
-            row_bytes() * (1 + cache_rows) + visited_slots * 8 + 32 * 8 + 64 * 8 + 64 * 8 + 64 * 4 + 32 * 4 + 64 * 4 +
-                64 * 4,
-            16);
+        arena_shape_t const shape = arena_shape_for(expansion, cache_rows);
         std::size_t const slices = groups_for_(work) * simdgroups_per_group_k;
         bool fresh = false;
-        if (status_t const sized = context.ensure_(context.arena_, slices * slice_bytes, fresh); failed(sized))
+        if (status_t const sized = context.ensure_(context.arena_, slices * shape.slice_bytes, fresh); failed(sized))
             return sized;
         if (fresh || context.epoch_floor_ + work > 0xFFFFFFFEull) {
             if (!fresh) std::memset(context.arena_.host, 0, context.arena_.bytes);
             context.epoch_floor_ = 0;
         }
-        arguments.visited_slots = visited_slots;
-        arguments.hash_shift = 32 - static_cast<u32_t>(std::bit_width(visited_slots - 1));
+        arguments.visited_slots = shape.visited_slots;
+        arguments.hash_shift = shape.visited_hash_shift;
         arguments.cache_rows = static_cast<u32_t>(cache_rows);
-        arguments.slice_bytes = static_cast<u32_t>(slice_bytes);
+        arguments.slice_bytes = static_cast<u32_t>(shape.slice_bytes);
         arguments.epoch_base = static_cast<u32_t>(context.epoch_floor_);
         context.epoch_floor_ += work;
         return status_t::success_k;
@@ -1108,19 +1202,39 @@ struct vram_apple_index {
 
 #pragma region Walks
 
-    /** The batched search over the @p visible rows, under any indexer @p heads. */
+    /** The batched search over the @p visible rows, under any indexer @p heads: submitted, awaited
+     *  and read back. */
     template <typename heads_type_>
     expected<search_result_t> search_(vectors_view_t queries, nk::matrix_span<node_id_t> result_ids,
                                       nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
                                       search_config_t config, std::size_t visible, heads_type_ const& heads) noexcept {
-        constexpr bool indexer_k = std::is_same_v<heads_type_, indexer_heads<scalar_t>>;
         std::size_t const queries_count = queries.extent(0);
         bool const wants_distances = result_distances.extent(0) != 0;
         if (!queries_count) return {{}, status_t::success_k};
-        if (result_ids.extent(0) != queries_count || result_ids.extent(1) < config.count || config.count > 512 ||
+        if (result_ids.extent(0) != queries_count || result_ids.extent(1) < config.count ||
             (wants_distances &&
              (result_distances.extent(0) != queries_count || result_distances.extent(1) < config.count)))
             return {{}, status_t::config_mismatch_k};
+        if (expected<search_result_t> const submitted = submit_search_(queries, context, config, visible, heads);
+            !submitted)
+            return submitted;
+        if (status_t const drained = context.drain(); failed(drained)) return {{}, drained};
+        land_search_(context, result_ids, result_distances);
+        return {spent_(context, config.count), status_t::success_k};
+    }
+
+    /** The submission half of @c search: stages the queries and any indexer @p heads and launches
+     *  the walks over the @p visible rows; until the context lands, its staging holds the matches
+     *  @ref land_search_ reads back. */
+    template <typename heads_type_ = dummy_heads_t>
+    expected<search_result_t> submit_search_(vectors_view_t queries, traversal_context_t& context,
+                                             search_config_t config, std::size_t visible,
+                                             heads_type_ const& heads = {}) noexcept {
+        constexpr bool indexer_k = std::is_same_v<heads_type_, indexer_heads<scalar_t>>;
+        std::size_t const queries_count = queries.extent(0);
+        context.landing_ = {};
+        if (!queries_count) return {{}, status_t::success_k};
+        if (config.count > metal_widest_pool_k) return {{}, status_t::config_mismatch_k};
         std::size_t heads_count = 0;
         if constexpr (indexer_k) {
             heads_count = heads.weights.extent(1);
@@ -1150,22 +1264,32 @@ struct vram_apple_index {
         }
         std::size_t const ids_offset = rows_bytes + weights_bytes;
         std::size_t const distances_offset = ids_offset + results * sizeof(node_id_t);
+        context.landing_ = {queries_count, config.count, ids_offset, distances_offset, 0};
         if (status_t const walked = launch_walk_(context, arguments, pool_slots, ids_offset, distances_offset,
                                                  distances_offset, queries_count * row_bytes(), rows_bytes,
                                                  metal_output_t::distances_k);
             failed(walked))
             return {{}, walked};
-        auto const* const ids = reinterpret_cast<node_id_t const*>(staging + ids_offset);
-        auto const* const distances = reinterpret_cast<distance_t const*>(staging + distances_offset);
-        for (std::size_t query = 0; query != queries_count; ++query)
-            for (std::size_t rank = 0; rank != config.count; ++rank) {
-                result_ids(query, rank) = ids[query * config.count + rank];
-                if (wants_distances) result_distances(query, rank) = distances[query * config.count + rank];
-            }
-        return {spent_(context, config.count), status_t::success_k};
+        return {{config.count}, status_t::success_k};
     }
 
-    /** The graph products over the @p visible rows. */
+    /** Copies the matches the last search on @p context left in its staging into @p result_ids
+     *  and, unless it is empty, @p result_distances; call it once the context landed. */
+    void land_search_(traversal_context_t const& context, nk::matrix_span<node_id_t> result_ids,
+                      nk::matrix_span<distance_t> result_distances) const noexcept {
+        auto const& landing = context.landing_;
+        bool const wants_distances = result_distances.extent(0) != 0;
+        auto const* const ids = reinterpret_cast<node_id_t const*>(context.staging_.host + landing.first_offset);
+        auto const* const distances = reinterpret_cast<distance_t const*>(context.staging_.host +
+                                                                          landing.second_offset);
+        for (std::size_t query = 0; query != landing.rows; ++query)
+            for (std::size_t rank = 0; rank != landing.count; ++rank) {
+                result_ids(query, rank) = ids[query * landing.count + rank];
+                if (wants_distances) result_distances(query, rank) = distances[query * landing.count + rank];
+            }
+    }
+
+    /** The graph products over the @p visible rows: submitted, awaited and read back. */
     expected<search_result_t> multiply_(vectors_view_t left, nk::matrix_span<node_id_t> node_ids,
                                         nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
                                         traversal_context_t& context, search_config_t config,
@@ -1174,6 +1298,23 @@ struct vram_apple_index {
         if (node_ids.extent(0) != rows_count || products.extent(0) != rows_count || products.extent(1) != wanted ||
             counts.size() != rows_count)
             return {{}, status_t::config_mismatch_k};
+        if (!rows_count) return {{}, status_t::success_k};
+        if (expected<search_result_t> const submitted = submit_multiply_(left, wanted, context, config, visible);
+            !submitted)
+            return submitted;
+        if (status_t const drained = context.drain(); failed(drained)) return {{}, drained};
+        search_result_t result = spent_(context, 0);
+        result.count = land_multiply_(context, node_ids, products, counts);
+        return {result, status_t::success_k};
+    }
+
+    /** The submission half of @c multiply: stages the rows and launches walks keeping up to
+     *  @p wanted pairs each over the @p visible rows; until the context lands, its staging holds
+     *  the pairs @ref land_multiply_ reads back. */
+    expected<search_result_t> submit_multiply_(vectors_view_t left, std::size_t wanted, traversal_context_t& context,
+                                               search_config_t config, std::size_t visible) noexcept {
+        std::size_t const rows_count = left.extent(0);
+        context.landing_ = {};
         if (!rows_count) return {{}, status_t::success_k};
         u32_t const pool_slots = pool_slots_for_(static_cast<u32_t>(non_zero_expansion_factor(config)), 2);
         std::size_t const rows_bytes = rows_count * row_bytes();
@@ -1186,24 +1327,34 @@ struct vram_apple_index {
         arguments.count = static_cast<u32_t>(wanted);
         std::size_t const products_offset = rows_bytes + ids_bytes;
         std::size_t const counts_offset = products_offset + products_bytes;
+        context.landing_ = {rows_count, wanted, rows_bytes, products_offset, counts_offset};
         if (status_t const walked = launch_walk_(context, arguments, pool_slots, rows_bytes, products_offset,
                                                  counts_offset, 0, 0, metal_output_t::products_k);
             failed(walked))
             return {{}, walked};
+        return {{}, status_t::success_k};
+    }
+
+    /** Copies the pairs and the scored counts the last multiply on @p context left in its staging
+     *  into @p node_ids, @p products and @p counts, and answers the pairs scored in all; call it
+     *  once the context landed. */
+    std::size_t land_multiply_(traversal_context_t const& context, nk::matrix_span<node_id_t> node_ids,
+                               nk::matrix_span<dot_result_t> products, std::span<u32_t> counts) const noexcept {
+        auto const& landing = context.landing_;
         byte_t const* const staging = context.staging_.host;
-        auto const* const ids = reinterpret_cast<node_id_t const*>(staging + rows_bytes);
-        auto const* const dots = reinterpret_cast<dot_t const*>(staging + products_offset);
-        auto const* const scored = reinterpret_cast<u32_t const*>(staging + counts_offset);
-        search_result_t result = spent_(context, 0);
-        for (std::size_t row = 0; row != rows_count; ++row) {
-            for (std::size_t pair = 0; pair != wanted; ++pair) {
-                node_ids(row, pair) = ids[row * wanted + pair];
-                products(row, pair) = dot_result_t::from_raw(dots[row * wanted + pair]);
+        auto const* const ids = reinterpret_cast<node_id_t const*>(staging + landing.first_offset);
+        auto const* const dots = reinterpret_cast<dot_t const*>(staging + landing.second_offset);
+        auto const* const scored = reinterpret_cast<u32_t const*>(staging + landing.third_offset);
+        std::size_t total = 0;
+        for (std::size_t row = 0; row != landing.rows; ++row) {
+            for (std::size_t pair = 0; pair != landing.count; ++pair) {
+                node_ids(row, pair) = ids[row * landing.count + pair];
+                products(row, pair) = dot_result_t::from_raw(dots[row * landing.count + pair]);
             }
             counts[row] = scored[row];
-            result.count += scored[row];
+            total += scored[row];
         }
-        return {result, status_t::success_k};
+        return total;
     }
 
     /** The single-query search over the @p visible rows. */
@@ -1254,8 +1405,8 @@ struct vram_apple_index {
         return {arguments, status_t::success_k};
     }
 
-    /** Launches the search kernel over the staged queries, its outputs at the given staging
-     *  offsets. */
+    /** Submits the search kernel over the staged queries, its outputs at the given staging offsets;
+     *  an empty index lands its sentinels at once. */
     status_t launch_walk_(traversal_context_t& context, metal_arguments_t const& arguments, u32_t pool_slots,
                           std::size_t ids_offset, std::size_t second_offset, std::size_t third_offset,
                           std::size_t heads_offset, std::size_t weights_offset, metal_output_t output) noexcept {
@@ -1283,21 +1434,18 @@ struct vram_apple_index {
         launch.bind(context.staging_, 11, heads_offset);
         launch.bind(context.staging_, 12, weights_offset);
         launch.bind_bytes(&keeps_word, sizeof(keeps_word), 13);
-        if (status_t const submitted = context.submit_(launch, groups_for_(arguments.queries_count),
-                                                       simdgroups_per_group_k * 32);
-            failed(submitted))
-            return submitted;
-        return context.drain();
+        return context.submit_(launch, groups_for_(arguments.queries_count), simdgroups_per_group_k * 32);
     }
 
     /** The telemetry the last walk on @p context spent, with @p count matches per query. */
     static search_result_t spent_(traversal_context_t const& context, std::size_t count) noexcept {
+        vram_telemetry_block_t const spent = context.spent();
         search_result_t result;
         result.count = count;
-        result.visited_members = context.spent(metal_counter_t::hops_k);
-        result.computed_distances = context.spent(metal_counter_t::scored_k);
-        result.restarts = context.spent(metal_counter_t::restarts_k);
-        result.visited_saturations = context.spent(metal_counter_t::saturations_k);
+        result.visited_members = spent.hops;
+        result.computed_distances = spent.scored;
+        result.restarts = spent.restarts;
+        result.visited_saturations = spent.visited_saturations;
         return result;
     }
 
