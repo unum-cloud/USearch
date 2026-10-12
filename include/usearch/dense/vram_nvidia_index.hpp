@@ -441,7 +441,18 @@ struct cuda_traversal_context {
                    : status_t::device_error_k;
     }
 
-    /** The telemetry of the last submission, zeroed when it was queued; read after a drain. */
+    /** Polls whether everything queued on this context's stream finished - @c success_k once it
+     *  has, @c deferred_k while any of it runs - without blocking, so one host thread awaits
+     *  whichever of several streams lands first. */
+    status_t landed() noexcept {
+        if (cuda_set_device(device()) != CUDA_SUCCESS) return status_t::device_error_k;
+        CUresult const queried = cuda_api().stream_query(stream());
+        return queried == CUDA_SUCCESS           ? status_t::success_k
+               : queried == CUDA_ERROR_NOT_READY ? status_t::deferred_k
+                                                 : status_t::device_error_k;
+    }
+
+    /** The telemetry of the last submission, zeroed when it was queued; read once it landed. */
     vram_telemetry_block_t spent() const noexcept {
         vram_telemetry_block_t snapshot = {};
         cuda_copy(&snapshot, telemetry_.get(), sizeof(snapshot));
@@ -449,7 +460,7 @@ struct cuda_traversal_context {
     }
 
     /** Whether the last attend met a node its value lookup had no row for, which refuses it; read
-     *  after a drain. */
+     *  once it landed. */
     bool missed() const noexcept {
         u32_t word = 0;
         cuda_copy(&word, missed_.get(), sizeof(word));

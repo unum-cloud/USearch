@@ -78,6 +78,7 @@ struct cuda_api_t {
     decltype(&::cuStreamCreate) stream_create = nullptr;
     decltype(&::cuStreamDestroy) stream_destroy = nullptr;
     decltype(&::cuStreamSynchronize) stream_synchronize = nullptr;
+    decltype(&::cuStreamQuery) stream_query = nullptr;
     decltype(&::cuModuleLoadData) module_load_data = nullptr;
     decltype(&::cuModuleUnload) module_unload = nullptr;
     decltype(&::cuModuleGetFunction) module_get_function = nullptr;
@@ -127,6 +128,7 @@ struct cuda_api_t {
             resolve_(library, "cuStreamCreate", api.stream_create) &&
             resolve_(library, "cuStreamDestroy_v2", api.stream_destroy) &&
             resolve_(library, "cuStreamSynchronize", api.stream_synchronize) &&
+            resolve_(library, "cuStreamQuery", api.stream_query) &&
             resolve_(library, "cuModuleLoadData", api.module_load_data) &&
             resolve_(library, "cuModuleUnload", api.module_unload) &&
             resolve_(library, "cuModuleGetFunction", api.module_get_function) &&
@@ -709,8 +711,9 @@ struct cuda_device_arena_t {
     int device_ = 0;
 };
 
-/** The streams a bulk verb advances on and the scratch they walk with - one of each per
- *  device. Work is queued, never waited on, so one host thread drives every device. */
+/** The streams a bulk verb advances on and the scratch they walk with - one of each per device,
+ *  which every shard there shares in order. Work is queued, never waited on, so one host thread
+ *  drives every device. */
 struct cuda_executor_t {
 
     /** Where a call names this executor, the C layer lands outputs in this arena. */
@@ -724,8 +727,7 @@ struct cuda_executor_t {
     /** One call's hold on the executor, released when it dies. */
     using claim_t = std::unique_lock<fu::spin_mutex_t>;
 
-    /** One device's stream and run; the arena is declared last so it frees onto a live
-     *  stream. */
+    /** One shard's stream and run; the arena is declared last so it frees onto a live stream. */
     struct stream_t {
 
         /** The device this stream was opened on - placement and launch target both. */
@@ -766,8 +768,8 @@ struct cuda_executor_t {
         return {std::move(executor), status_t::success_k};
     }
 
-    /** Opens one stream per named device, binding each first, since a stream is born on
-     *  the current device. */
+    /** Opens one stream per entry of @p devices, binding each first, since a stream is born on the
+     *  current device. */
     static expected<cuda_executor_t> spawn(std::span<int const> devices) noexcept {
         growing_buffer<stream_t> streams {global_allocator};
         if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
@@ -792,13 +794,13 @@ struct cuda_executor_t {
         return acquire(std::move(streams));
     }
 
-    /** Claims @p bytes_per_device of scratch on every stream, ahead of the fan-out that maps state
+    /** Claims @p bytes_per_stream of scratch on every stream, ahead of the fan-out that maps state
      *  onto it; the old run frees in stream order behind whatever still rides it. */
-    status_t reserve(std::size_t bytes_per_device) noexcept {
+    status_t reserve(std::size_t bytes_per_stream) noexcept {
         if (streams_.empty()) return status_t::uninitialized_k;
         for (stream_t& opened : streams_) {
             opened.arena.clear();
-            if (failed(opened.arena.reserve_exactly(bytes_per_device))) return status_t::bad_alloc_k;
+            if (failed(opened.arena.reserve_exactly(bytes_per_stream))) return status_t::bad_alloc_k;
         }
         return status_t::success_k;
     }
@@ -813,18 +815,18 @@ struct cuda_executor_t {
         return status_t::success_k;
     }
 
-    /** The stream driving @p index, in the order the devices were named. */
+    /** The stream at @p index, in the order the devices were named. */
     stream_t& stream(std::size_t index) noexcept { return streams_[index]; }
 
-    /** The device @p index drives - what a caller pairs its shards against. */
+    /** The device stream @p index drives - what a caller pairs its shards against. */
     int device(std::size_t index) const noexcept { return streams_[index].device; }
 
-    /** Devices this executor drives. */
+    /** Streams this executor drives, one per device. */
     std::size_t size() const noexcept { return streams_.size(); }
 
   private:
 
-    /** One stream per named device, in the caller's order. */
+    /** One stream per named entry, in the caller's order. */
     growing_buffer<stream_t> streams_ {global_allocator};
 
     /** Held by the one caller driving the streams; never swapped. */

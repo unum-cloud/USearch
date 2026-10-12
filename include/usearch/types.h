@@ -637,12 +637,14 @@ typedef struct usearch_ram_options_t {
 } usearch_ram_options_t;
 
 /**
- *  @brief The devices a VRAM-resident index places its shards in - one shard per named
- *      ordinal, sharded and never replicated, so eight devices host eight slices of one
- *      graph rather than eight copies of it.
+ *  @brief The devices a VRAM-resident index places its shards on - one shard per named ordinal,
+ *      sharded and never replicated, so eight devices host eight slices of one graph rather than
+ *      eight copies of it.
  *
  *  Names where the index lives, never who walks it: streams belong to the executor the verbs
- *  take.
+ *  take, one per device. A checkpoint of more parts than named devices keeps one shard per part,
+ *  part @c p on device @c p modulo their count, and shards sharing a device queue on its stream
+ *  in order.
  *
  *  Planes are device-resident, never migratable: an index outgrowing the named devices
  *  fails rather than paging to the host, and the answer is to name more devices.
@@ -879,10 +881,12 @@ typedef struct usearch_executor_for_vram_t {
     /** The devices of the indexes it will drive; copied, not borrowed. */
     usearch_vram_options_t vram;
 
-    /** The @b optional borrowed CUDA streams, one per device in @c vram order; @c NULL creates its own. */
+    /** The @b optional borrowed CUDA streams, one per device in @c vram order; @c NULL creates its
+     *  own. */
     void* const* streams;
 
-    /** The @b optional ceiling on scratch bytes per device; zero lets scratch grow as geometry asks. */
+    /** The @b optional ceiling on scratch bytes per stream; zero lets scratch grow as geometry
+     *  asks. */
     size_t scratch_limit;
 
     /** Deferred calls it tracks at once, sizing its deferred table; zero takes a default. */
@@ -890,12 +894,13 @@ typedef struct usearch_executor_for_vram_t {
 } usearch_executor_for_vram_t;
 
 /**
- *  @brief Opens one submission stream on every named device, or borrows the caller's, all of them
- *      driven by whichever host thread submits.
+ *  @brief Opens one submission stream on every distinct device @c vram names, or borrows the
+ *      caller's, all of them driven by whichever host thread submits.
  *
- *  One stream per device is the whole design: a single host thread keeps every device fed, and
- *  adding host threads would buy nothing, since the work has already left for the accelerator
- *  by the time one of them would return. A GPU executor never changes process-wide device flags.
+ *  One stream per device is the whole design: every shard on a device queues on its stream in
+ *  order, a single host thread keeps every device fed, and adding host threads would buy nothing,
+ *  since the work has already left for the accelerator by the time one of them would return. A
+ *  GPU executor never changes process-wide device flags.
  */
 USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* arguments);
 

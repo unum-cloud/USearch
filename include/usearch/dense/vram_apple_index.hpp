@@ -13,7 +13,8 @@
  *
  *  Metal promises no forward progress between command buffers, while an insert's admission ramp
  *  waits on rows earlier batches publish, so batches run one at a time; searches overlap them
- *  freely. The kernels compile from the embedded source at first use, per storage dtype.
+ *  freely. The kernels compile from the embedded source at the first @c reserve, once per storage
+ *  dtype and device.
  */
 #pragma once
 
@@ -176,8 +177,14 @@ struct metal_traversal_context {
     void* queue() const noexcept { return queue_.handle() ? queue_.handle() : context_->queue; }
     explicit operator bool() const noexcept { return context_ && counters_; }
 
-    /** Every verb waits for its command buffers, so a context never has work left to drain. */
-    status_t drain() noexcept { return status_t::success_k; }
+    /** Waits for the last command buffer this context committed - one queue's completion, the
+     *  executor's @c drain being the fleet's. */
+    status_t drain() noexcept { return committed_.drain(); }
+
+    /** Polls whether the last command buffer this context committed finished - @c success_k once
+     *  it has, @c deferred_k while it runs - without blocking, so one host thread awaits whichever
+     *  of several queues lands first. */
+    status_t landed() const noexcept { return committed_.landed(); }
 
     /** The telemetry word @p counter of the last call, read in place from shared memory. */
     u32_t spent(metal_counter_t counter) const noexcept {
@@ -196,9 +203,21 @@ struct metal_traversal_context {
     metal_buffer_t arena_;
     metal_buffer_t staging_;
 
+    /** The last command buffer submitted through this context; its queue runs them in commit order,
+     *  so this one landing means every earlier one did. */
+    metal_launch_t committed_;
+
     /** Monotone epoch floor over the arena's visited slots, so the arena zeroes only when fresh or
      *  wrapped. */
     u64_t epoch_floor_ = 0;
+
+    /** Dispatches @p launch over @p groups threadgroups of @p threads and keeps it as the command
+     *  buffer the context awaits. */
+    status_t submit_(metal_launch_t& launch, std::size_t groups, std::size_t threads) noexcept {
+        if (status_t const submitted = launch.submit(groups, threads); failed(submitted)) return submitted;
+        committed_ = std::move(launch);
+        return status_t::success_k;
+    }
 
     /** Grows @p buffer to at least @p bytes; answers whether it was reallocated, zeroed by
      *  Metal. */
@@ -391,6 +410,7 @@ struct vram_apple_index {
             device_ = specs;
             metal_context_t* const context = metal_context(device_.ordinal);
             if (!context) return {0, status_t::device_error_k};
+            if (status_t const loaded = load_pipelines_(); failed(loaded)) return {0, loaded};
             counters_ = metal_allocate(*context, static_cast<std::size_t>(metal_counter_t::count_k) * 4);
             if (!counters_) return {0, status_t::bad_alloc_k};
             dimensions_ = config.dimensions;
@@ -903,17 +923,18 @@ struct vram_apple_index {
         reset_counters_(counters_);
         claimed_rows_ = first_id + rows;
 
+        // Batches run one at a time, so the batch drains under its hold before the next claims.
         status_t launched = status_t::device_error_k;
         {
             std::shared_lock storage {storage_};
-            void* const pipeline = pipeline_(name_of_(metal_kernel_t::insert_k, pool_slots));
-            metal_launch_t launch {context.queue(), pipeline};
-            if (pipeline && launch) {
+            metal_launch_t launch {context.queue(), pipeline_(metal_kernel_t::insert_k, pool_slots)};
+            if (launch) {
                 bind_storage_(launch, arguments);
                 launch.bind(context.staging_, 4);
                 launch.bind(context.arena_, 5);
                 launch.bind(counters_, 6);
-                launched = launch.run(groups_for_(rows), simdgroups_per_group_k * 32);
+                launched = context.submit_(launch, groups_for_(rows), simdgroups_per_group_k * 32);
+                if (succeeded(launched)) launched = context.drain();
             }
         }
         if (failed(launched)) return {{first_id, static_cast<node_id_t>(first_id)}, fail_(launched)};
@@ -1025,10 +1046,27 @@ struct vram_apple_index {
         launch.bind(neighbors_matrix_, 3);
     }
 
-    /** The pipeline of kernel @p name for this dtype, built at first use. */
-    void* pipeline_(char const* name) const noexcept {
+    /** The pipeline of @p kernel at @p pool_slots slots, built at the first @c reserve. */
+    void* pipeline_(metal_kernel_t kernel, u32_t pool_slots) const noexcept {
+        return pipelines_[static_cast<u32_t>(kernel)][std::countr_zero(pool_slots) - 1];
+    }
+
+    /** Builds every pipeline this dtype's kernels need, once at the first @c reserve, so no launch
+     *  waits on the device's registry; @c contended_k while another index builds there. */
+    status_t load_pipelines_() noexcept {
         metal_context_t* const context = metal_context(device_.ordinal);
-        return context ? context->pipeline(metal_source<vector_dtype_>(), name) : nullptr;
+        if (!context) return status_t::device_error_k;
+        char const* const source = metal_source<vector_dtype_>();
+        for (u32_t kernel = 0; kernel != 3; ++kernel)
+            for (u32_t rung = 0; rung != 4; ++rung) {
+                auto const [pipeline, status] = context->pipeline(
+                    source, name_of_(static_cast<metal_kernel_t>(kernel), 2u << rung));
+                if (failed(status)) return status;
+                pipelines_[kernel][rung] = pipeline;
+            }
+        auto const [pipeline, status] = context->pipeline(source, "metal_derive_norms_kernel");
+        derive_norms_pipeline_ = pipeline;
+        return status;
     }
 
     /** The name of @p kernel's instantiation at @p pool_slots slots, a power of two up to 16. */
@@ -1054,15 +1092,16 @@ struct vram_apple_index {
         arguments.first_id = static_cast<u32_t>(first);
         arguments.end_id = static_cast<u32_t>(first + rows);
         metal_context_t* const context = metal_context(device_.ordinal);
-        void* const pipeline = pipeline_("metal_derive_norms_kernel");
-        if (!context || !pipeline) return status_t::device_error_k;
+        if (!context) return status_t::device_error_k;
         std::shared_lock storage {storage_};
-        metal_launch_t launch {context->queue, pipeline};
+        metal_launch_t launch {context->queue, derive_norms_pipeline_};
         if (!launch) return status_t::device_error_k;
         launch.bind_bytes(&arguments, sizeof(arguments), 0);
         launch.bind(vectors_matrix_, 1);
         launch.bind(norms_column_, 2);
-        return launch.run(groups_for_(rows), simdgroups_per_group_k * 32);
+        if (status_t const submitted = launch.submit(groups_for_(rows), simdgroups_per_group_k * 32); failed(submitted))
+            return submitted;
+        return launch.drain();
     }
 
 #pragma endregion Launches
@@ -1231,9 +1270,7 @@ struct vram_apple_index {
         }
         u32_t const keeps_word = keeps ? 1 : 0;
         std::shared_lock storage {storage_};
-        void* const pipeline = pipeline_(name_of_(metal_kernel_t::search_k, pool_slots));
-        if (!pipeline) return status_t::device_error_k;
-        metal_launch_t launch {context.queue(), pipeline};
+        metal_launch_t launch {context.queue(), pipeline_(metal_kernel_t::search_k, pool_slots)};
         if (!launch) return status_t::device_error_k;
         bind_storage_(launch, arguments);
         launch.bind(context.staging_, 4);
@@ -1246,7 +1283,11 @@ struct vram_apple_index {
         launch.bind(context.staging_, 11, heads_offset);
         launch.bind(context.staging_, 12, weights_offset);
         launch.bind_bytes(&keeps_word, sizeof(keeps_word), 13);
-        return launch.run(groups_for_(arguments.queries_count), simdgroups_per_group_k * 32);
+        if (status_t const submitted = context.submit_(launch, groups_for_(arguments.queries_count),
+                                                       simdgroups_per_group_k * 32);
+            failed(submitted))
+            return submitted;
+        return context.drain();
     }
 
     /** The telemetry the last walk on @p context spent, with @p count matches per query. */
@@ -1296,15 +1337,15 @@ struct vram_apple_index {
         status_t launched = status_t::device_error_k;
         {
             std::shared_lock storage {storage_};
-            void* const pipeline = pipeline_(name_of_(metal_kernel_t::refine_k, pool_slots));
-            metal_launch_t launch {context.queue(), pipeline};
-            if (pipeline && launch) {
+            metal_launch_t launch {context.queue(), pipeline_(metal_kernel_t::refine_k, pool_slots)};
+            if (launch) {
                 bind_storage_(launch, arguments);
                 launch.bind(context.staging_, 4);
                 launch.bind(context.arena_, 5);
                 launch.bind(counters_, 6);
                 launch.bind(context.staging_, 7, ids_bytes);
-                launched = launch.run(groups_for_(walk_count), simdgroups_per_group_k * 32);
+                launched = context.submit_(launch, groups_for_(walk_count), simdgroups_per_group_k * 32);
+                if (succeeded(launched)) launched = context.drain();
             }
         }
         if (failed(launched)) return {{}, launched};
@@ -1496,6 +1537,11 @@ struct vram_apple_index {
     /** The batches' counters: the assigned and published rows and the telemetry of the last insert
      *  or refine. */
     metal_buffer_t counters_;
+
+    /** Every walking kernel's pipeline per pool rung, and the norms derivation's, owned by the
+     *  device's registry. */
+    void* pipelines_[3][4] = {};
+    void* derive_norms_pipeline_ = nullptr;
 
     /** Shared by every walk while its command buffer runs, taken alone by growth. */
     mutable std::shared_mutex storage_;

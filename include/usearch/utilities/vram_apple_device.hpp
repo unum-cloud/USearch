@@ -20,14 +20,14 @@
 
 #include <dlfcn.h> // `dlopen`, `dlsym` - Metal, Foundation and the Objective-C runtime opened at first use
 
-#include <mutex>   // `std::mutex`, `std::unique_lock` - the pipeline registry and the executor's hold
+#include <mutex>   // `std::unique_lock`, `std::adopt_lock` - the pipeline registry and the executor's hold
 #include <span>    // `std::span` - the device list an executor opens over
 #include <utility> // `std::exchange`, `std::move`
 
 #include <objc/message.h> // `objc_msgSend` - declared only, for the table's type
 #include <objc/runtime.h> // `sel_registerName`, `objc_getClass`, `SEL` - declared only, for the table's types
 
-#include <forkunion/types.hpp> // `fu::spin_mutex_t` - the executor's hold
+#include <forkunion/types.hpp> // `fu::spin_mutex_t` - the pipeline registry and the executor's hold
 
 #include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - an executor's queues and the pipeline registry
 #include "usearch/utilities/types.hpp"
@@ -146,20 +146,21 @@ struct metal_context_t {
     void* device = nullptr;
     void* queue = nullptr;
     gpu_class_t gpu_class = gpu_class_t::unknown_k;
-    std::mutex lock;
+    fu::spin_mutex_t lock;
     growing_buffer<metal_pipeline_t> pipelines {global_allocator};
 
-    /** Kernel @p name's pipeline from the library built out of @p source, built on first use; null
-     *  when it fails. */
-    void* pipeline(char const* source, char const* name) noexcept {
-        std::unique_lock guard {lock};
+    /** Kernel @p name's pipeline from the library built out of @p source, built on first use;
+     *  @c contended_k while another thread holds the registry, @c device_error_k when it fails. */
+    expected<void*> pipeline(char const* source, char const* name) noexcept {
+        if (!lock.lock_if_free()) return {nullptr, status_t::contended_k};
+        std::unique_lock guard {lock, std::adopt_lock};
         void* library = nullptr;
         for (metal_pipeline_t const& entry : pipelines) {
             if (entry.source != source) continue;
             library = entry.library;
-            if (std::strcmp(entry.name, name) == 0) return entry.pipeline;
+            if (std::strcmp(entry.name, name) == 0) return {entry.pipeline, status_t::success_k};
         }
-        if (failed(pipelines.reserve(pipelines.size() + 1))) return nullptr;
+        if (failed(pipelines.reserve(pipelines.size() + 1))) return {nullptr, status_t::bad_alloc_k};
         metal_api_t const& api = metal_api();
         void* const pool = api.autorelease_pool_push();
         if (!library) {
@@ -180,8 +181,9 @@ struct metal_context_t {
             }
         }
         api.autorelease_pool_pop(pool);
-        if (pipeline) pipelines.push_back_reserved({source, name, library, pipeline});
-        return pipeline;
+        if (!pipeline) return {nullptr, status_t::device_error_k};
+        pipelines.push_back_reserved({source, name, library, pipeline});
+        return {pipeline, status_t::success_k};
     }
 };
 
@@ -355,12 +357,16 @@ struct metal_queue_t {
     void* handle_ = nullptr;
 };
 
-/** One command buffer being encoded on one queue: binds buffers and bytes, dispatches, and commits.
- *  Every call to a device runs through one of these, so encoders live on the caller's stack and any
- *  number of threads encode at once. */
+/** One command buffer being encoded on one queue: binds buffers and bytes, dispatches, and commits
+ *  without waiting. Every call to a device runs through one of these, so encoders live on the
+ *  caller's stack and any number of threads encode at once; a committed one stays retained, so its
+ *  owner polls or awaits it, and a queue runs its command buffers in commit order. */
 struct metal_launch_t {
     void* commands = nullptr;
     void* encoder = nullptr;
+
+    /** No command buffer - one with nothing left to run. */
+    metal_launch_t() noexcept = default;
 
     /** Opens one command buffer on @p queue with a compute encoder for @p pipeline. */
     metal_launch_t(void* queue, void* pipeline) noexcept {
@@ -373,7 +379,16 @@ struct metal_launch_t {
             metal_send<void>(encoder, "retain");
             metal_send<void>(encoder, "setComputePipelineState:", pipeline);
         }
+        // A command buffer without its encoder is never committed, so none is kept to await.
+        else if (commands) metal_send<void>(std::exchange(commands, nullptr), "release");
         api.autorelease_pool_pop(pool);
+    }
+    metal_launch_t(metal_launch_t&& other) noexcept
+        : commands(std::exchange(other.commands, nullptr)), encoder(std::exchange(other.encoder, nullptr)) {}
+    metal_launch_t& operator=(metal_launch_t&& other) noexcept {
+        metal_launch_t dying {std::move(*this)};
+        commands = std::exchange(other.commands, nullptr), encoder = std::exchange(other.encoder, nullptr);
+        return *this;
     }
     metal_launch_t(metal_launch_t const&) = delete;
     metal_launch_t& operator=(metal_launch_t const&) = delete;
@@ -382,6 +397,7 @@ struct metal_launch_t {
         if (commands) metal_send<void>(commands, "release");
     }
 
+    /** Whether the encoder is open, so the launch can still bind and dispatch. */
     explicit operator bool() const noexcept { return encoder != nullptr; }
 
     /** Binds @p buffer from @p offset at buffer slot @p index. */
@@ -394,9 +410,8 @@ struct metal_launch_t {
         metal_send<void>(encoder, "setBytes:length:atIndex:", arguments, bytes, index);
     }
 
-    /** Dispatches @p groups threadgroups of @p threads each, commits, and waits for completion;
-     *  answers whether the device finished it. */
-    status_t run(std::size_t groups, std::size_t threads) noexcept {
+    /** Dispatches @p groups threadgroups of @p threads each and commits, without waiting. */
+    status_t submit(std::size_t groups, std::size_t threads) noexcept {
         if (!encoder) return status_t::device_error_k;
         metal_send<void, metal_size_t, metal_size_t>(
             encoder, "dispatchThreadgroups:threadsPerThreadgroup:", metal_size_t {groups}, metal_size_t {threads});
@@ -404,10 +419,25 @@ struct metal_launch_t {
         metal_send<void>(encoder, "release");
         encoder = nullptr;
         metal_send<void>(commands, "commit");
-        metal_send<void>(commands, "waitUntilCompleted");
-        constexpr std::size_t completed_k = 4; // `MTLCommandBufferStatusCompleted`
-        return metal_send<std::size_t>(commands, "status") == completed_k ? status_t::success_k
-                                                                          : status_t::device_error_k;
+        return status_t::success_k;
+    }
+
+    /** Polls the committed command buffer - @c success_k once it completed, @c deferred_k while it
+     *  runs, @c device_error_k when it failed - without blocking; nothing committed has nothing to
+     *  run. */
+    status_t landed() const noexcept {
+        if (!commands || encoder) return status_t::success_k;
+        constexpr std::size_t completed_k = 4, error_k = 5; // `MTLCommandBufferStatusCompleted`, `...Error`
+        std::size_t const state = metal_send<std::size_t>(commands, "status");
+        return state == completed_k ? status_t::success_k
+               : state == error_k   ? status_t::device_error_k
+                                    : status_t::deferred_k;
+    }
+
+    /** Waits for the committed command buffer and answers whether the device finished it. */
+    status_t drain() noexcept {
+        if (commands && !encoder) metal_send<void>(commands, "waitUntilCompleted");
+        return landed();
     }
 };
 
@@ -441,9 +471,9 @@ struct metal_device_arena_t {
     int device_ = 0;
 };
 
-/** The queues a bulk verb submits to - one per device. Every call blocks until its command buffers
- *  complete, so one host thread drives every device, and the hold serializes callers as the CUDA
- *  executor's does. */
+/** The queues a bulk verb submits to - one per device, which every shard there shares in order.
+ *  Work is committed, never waited on, so one host thread drives every device, and the hold
+ *  serializes callers as the CUDA executor's does. */
 struct metal_executor_t {
 
     /** Where a call names this executor, the C layer lands outputs in this arena. */
@@ -467,7 +497,7 @@ struct metal_executor_t {
         return {claim_t {held_, std::adopt_lock}, status_t::success_k};
     }
 
-    /** Opens one queue on every named device. */
+    /** Opens one queue per entry of @p devices. */
     static expected<metal_executor_t> spawn(std::span<int const> devices) noexcept {
         if (devices.empty()) return {{}, status_t::config_mismatch_k};
         metal_executor_t executor;
@@ -495,11 +525,35 @@ struct metal_executor_t {
         return {std::move(executor), status_t::success_k};
     }
 
-    /** Every call already waited for its command buffers, so there is nothing left to drain. */
-    status_t drain() noexcept { return status_t::success_k; }
+    /** Waits for every command buffer committed to every queue - the fleet's completion: one empty
+     *  command buffer per queue, which completes only after every one committed before it. */
+    status_t drain() noexcept {
+        metal_api_t const& api = metal_api();
+        constexpr std::size_t completed_k = 4; // `MTLCommandBufferStatusCompleted`
+        for (metal_queue_t const& queue : streams_) {
+            metal_context_t* const context = metal_context(queue.device);
+            if (!context) return status_t::device_error_k;
+            void* const pool = api.autorelease_pool_push();
+            void* const commands = metal_send(queue.handle() ? queue.handle() : context->queue, "commandBuffer");
+            std::size_t state = 0;
+            if (commands) {
+                metal_send<void>(commands, "commit");
+                metal_send<void>(commands, "waitUntilCompleted");
+                state = metal_send<std::size_t>(commands, "status");
+            }
+            api.autorelease_pool_pop(pool);
+            if (state != completed_k) return status_t::device_error_k;
+        }
+        return status_t::success_k;
+    }
 
+    /** The queue at @p index, in the order the devices were named. */
     metal_queue_t& stream(std::size_t index) noexcept { return streams_[index]; }
+
+    /** The Apple ordinal queue @p index submits to - what a caller pairs its shards against. */
     int device(std::size_t index) const noexcept { return streams_[index].device; }
+
+    /** Queues this executor drives, one per device. */
     std::size_t size() const noexcept { return streams_.size(); }
 
   private:

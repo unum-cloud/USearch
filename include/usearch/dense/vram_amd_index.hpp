@@ -354,12 +354,23 @@ struct hip_traversal_context {
      *  completion, the executor's @c drain being the fleet's. Selects the context's device first,
      *  since a null stream is the current device's. */
     status_t drain() noexcept {
-        return hip_api().set_device(device()) == hipSuccess && hip_api().stream_synchronize(stream()) == hipSuccess
+        return hip_set_device(device()) == hipSuccess && hip_api().stream_synchronize(stream()) == hipSuccess
                    ? status_t::success_k
                    : status_t::device_error_k;
     }
 
-    /** The telemetry of the last submission, zeroed when it was queued; read after a drain. */
+    /** Polls whether everything queued on this context's stream finished - @c success_k once it
+     *  has, @c deferred_k while any of it runs - without blocking, so one host thread awaits
+     *  whichever of several streams lands first. */
+    status_t landed() noexcept {
+        if (hip_set_device(device()) != hipSuccess) return status_t::device_error_k;
+        hipError_t const queried = hip_api().stream_query(stream());
+        return queried == hipSuccess         ? status_t::success_k
+               : queried == hipErrorNotReady ? status_t::deferred_k
+                                             : status_t::device_error_k;
+    }
+
+    /** The telemetry of the last submission, zeroed when it was queued; read once it landed. */
     vram_telemetry_block_t spent() const noexcept {
         vram_telemetry_block_t snapshot = {};
         hip_api().copy(&snapshot, telemetry_.get(), sizeof(snapshot), hipMemcpyDeviceToHost);
@@ -367,7 +378,7 @@ struct hip_traversal_context {
     }
 
     /** Whether the last attend met a node its value lookup had no row for, which refuses it; read
-     *  after a drain. */
+     *  once it landed. */
     bool missed() const noexcept {
         u32_t word = 0;
         hip_api().copy(&word, missed_.get(), sizeof(word), hipMemcpyDeviceToHost);
@@ -754,7 +765,7 @@ struct vram_amd_index {
         connectivity_t const connectivity = config.connectivity;
         if (config.capacity > max_node_count_k) return {capacity(), status_t::overflow_k};
         if (!vectors_matrix_.reserved_bytes()) { // First reservation: bind the device, size the ceiling.
-            if (!hip_api() || hip_api().set_device(device_.ordinal) != hipSuccess) return {0, status_t::device_error_k};
+            if (hip_set_device(device_.ordinal) != hipSuccess) return {0, status_t::device_error_k};
             auto const [specs, status] = hip_device_specs_t::query(device_.ordinal);
             if (failed(status)) return {0, status};
             device_ = specs;

@@ -2,7 +2,7 @@
  *  @file include/usearch/dense/vram_amd_indexes.hpp
  *  @author Ash Vardanian
  *  @date October 11, 2026
- *  @brief The sharded index over AMD-resident dense shards - one per device - with
+ *  @brief The sharded index over AMD-resident dense shards - any number per device - with
  *      rotation-balanced insertion, merged cross-shard search, and SafeGraphs checkpoints.
  *
  *  The multi-shard layer over @c vram_amd_index: same-geometry shards, each owned and pinned to one
@@ -167,8 +167,8 @@ struct vram_amd_indexes {
     }
 
     /** Appends one shard the caller already built, consuming it; refuses any scoring by another
-     *  metric, any whose frozen geometry differs from the shards already here, any already
-     *  reserved, and any whose device already holds one - the index shards, never replicates.
+     *  metric, any whose frozen geometry differs from the shards already here, and any already
+     *  reserved. Several shards may share a device, each a slice of the graph rather than a copy.
      *  @ref reserve closes the shard set. */
     status_t emplace(std::unique_ptr<index_t>&& shard) noexcept {
         if (!shard || shard->kernel() != kernel_) return status_t::config_mismatch_k;
@@ -176,8 +176,6 @@ struct vram_amd_indexes {
         if (shard->capacity()) return status_t::config_mismatch_k;
         if (!shards_.empty() && (shard->dimensions() != dimensions() || shard->connectivity() != connectivity()))
             return status_t::config_mismatch_k;
-        for (shard_t const& one : shards_)
-            if (one.index->device_specs().ordinal == shard->device_specs().ordinal) return status_t::config_mismatch_k;
         return shards_.push_back(shard_t {std::move(shard), keys_column_t {allocator_}, {}});
     }
 
@@ -202,7 +200,7 @@ struct vram_amd_indexes {
     /** The metric every shard scores by, fixed at construction. */
     nk_kernel_kind_t kernel() const noexcept { return kernel_; }
 
-    /** Shards in the index, one per engaged device. */
+    /** Shards in the index, in placement order. */
     std::size_t shards_count() const noexcept { return shards_.size(); }
 
     /** The shard at @p shard, in placement order. */
@@ -397,7 +395,7 @@ struct vram_amd_indexes {
             if (share.launched + taking > share.rows) return status_t::config_mismatch_k;
             shard_t& one = owner_->shards_[shard];
             traversal_context_t& traversal = traversals_[shard];
-            if (hip_api().set_device(traversal.device()) != hipSuccess) return status_t::device_error_k;
+            if (hip_set_device(traversal.device()) != hipSuccess) return status_t::device_error_k;
             node_id_t const first_node = static_cast<node_id_t>(share.first_id + share.launched);
             for (std::size_t taken = 0; taken != taking; ++taken)
                 one.keys[first_node + static_cast<node_id_t>(taken)] = keys[first + taken * shards];
@@ -509,8 +507,7 @@ struct vram_amd_indexes {
             std::size_t const taking = rows_from_(rows, first_row_of_shard_(shard, shards, plan.rotation_), shards);
             plan.shares_.push_back_reserved({static_cast<node_id_t>(first_id), taking, 0});
             if (!taking) continue;
-            if (hip_api().set_device(one.index->device_specs().ordinal) != hipSuccess)
-                return {{}, status_t::device_error_k};
+            if (hip_set_device(one.index->device_specs().ordinal) != hipSuccess) return {{}, status_t::device_error_k};
             reserve_capacity_t const grown {first_id + taking, static_cast<connectivity_t>(connectivity()),
                                             dimensions()};
             if (status_t const reserved = one.index->reserve(grown).status; failed(reserved)) return {{}, reserved};
@@ -595,7 +592,7 @@ struct vram_amd_indexes {
         std::size_t const published = size();
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
-            if (hip_api().set_device(one.device_specs().ordinal) != hipSuccess) return {{}, status_t::device_error_k};
+            if (hip_set_device(one.device_specs().ordinal) != hipSuccess) return {{}, status_t::device_error_k};
             auto const [part, status] = one.refine({0, node_id_unknown_k}, traversals[shard], config);
             combine_refinement_(result, part);
             if (failed(status)) return {result, status};
@@ -625,7 +622,7 @@ struct vram_amd_indexes {
         health_result_t result;
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
-            if (hip_api().set_device(one.device_specs().ordinal) != hipSuccess) return {{}, status_t::device_error_k};
+            if (hip_set_device(one.device_specs().ordinal) != hipSuccess) return {{}, status_t::device_error_k};
             auto const [shard_health, status] = one.health(traversals[shard]);
             if (failed(status)) return {{}, status};
             combine_health_(result, shard_health);
@@ -651,42 +648,28 @@ struct vram_amd_indexes {
      *      the shards' key columns, so colliding ID spaces still land in one ranking.
      *  @param[inout] distances Distances of the same ranking, parallel to @p keys.
      *
-     *  A failing shard stops the scatter but keeps whatever earlier shards already merged, so the
+     *  The batched search over one row, so every shard walks at once and the rankings merge as
+     *  they land; each shard walks as broad as its expansion factor and keeps at most a context's
+     *  landing of matches. A failing shard keeps whatever the others already merged, so the
      *  reported count and the ranking always agree.
      */
     expected<search_result_t> search(vector_view_t query_vector, executor_t& executor, search_config_t config,
                                      std::span<key_t> keys, std::span<distance_t> distances) noexcept {
-        search_result_t merged;
-        if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {merged, paired};
-        // The executor serializes, never the index: a second caller with its own executor searches
-        // concurrently.
-        auto [claim, claim_status] = executor.claim();
-        if (failed(claim_status)) return {merged, claim_status};
-        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
-        if (status_t const readied = reserve_traversals_(traversals, executor, 1, config); failed(readied))
-            return {merged, readied};
-        growing_buffer<std::size_t, forkunion_allocator_t> visible {allocator_};
-        if (failed(visible.resize(shards_.size()))) return {merged, status_t::bad_alloc_k};
-        snapshot_(to_writable_span(visible));
-        status_t status = status_t::success_k;
-        for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
-            traversal_context_t& traversal = traversals[shard];
-            if (hip_api().set_device(traversal.device()) != hipSuccess) return {merged, status_t::device_error_k};
-            auto const [search_result, search_status] = shards_[shard].index->search_(query_vector, traversal, config,
-                                                                                      visible[shard]);
-            if (failed(search_status)) {
-                status = search_status;
-                break;
-            }
-            merged.visited_members += search_result.visited_members;
-            merged.computed_distances += search_result.computed_distances;
-            merged.restarts += search_result.restarts;
-            merged.tail_drops += search_result.tail_drops;
-            merged.visited_saturations += search_result.visited_saturations;
-            merged.count = merge_search_results(to_span(traversal.results), shards_[shard].keys, keys, distances,
-                                                merged.count);
-        }
-        return {merged, status};
+        if (shards_.empty()) return {{}, status_t::uninitialized_k};
+        if (!query_vector.is_contiguous()) return {{}, status_t::unsupported_layout_k};
+        std::size_t const expansion = shards_[0].index->non_zero_expansion_factor(config);
+        std::size_t const width = min_of(min_of(keys.size(), distances.size()),
+                                         min_of<std::size_t>(expansion, traversal_context_t::results_capacity_k));
+        if (!width) return {{}, pairs_with_(executor)};
+        config.expansion_factor = static_cast<typename index_t::small_size_t>(expansion);
+        config.count = static_cast<typename index_t::small_size_t>(width);
+        std::size_t count = 0;
+        expected<search_result_t> found = search_(vectors_view_t {query_vector.data(), 1u, query_vector.size()},
+                                                  executor, config, nk::matrix_span<key_t> {keys.data(), 1u, width},
+                                                  nk::matrix_span<distance_t> {distances.data(), 1u, width},
+                                                  std::span<std::size_t> {&count, 1u});
+        found.value.count = count;
+        return found;
     }
 
     /**
@@ -786,8 +769,8 @@ struct vram_amd_indexes {
                 left, shard_ids, shard_products, shard_counts, traversal, config, visible);
             return multiplied.status;
         };
-        // Shards append in placement order until a row fills, so rows truncate exactly as on the
-        // host.
+        // Shards append as they land until a row fills, so a full row keeps whichever pairs came
+        // first.
         auto merge_shard = [&](std::size_t shard, traversal_context_t const&) noexcept {
             nk::matrix_view<node_id_t> const shard_ids = ids_wide(nk::all, shard_columns(shard), nk::slice);
             nk::matrix_view<dot_result_t> const shard_products = products_wide(nk::all, shard_columns(shard),
@@ -1279,13 +1262,13 @@ struct vram_amd_indexes {
                     first += rows;
                 }
                 // Every plan finishes, an empty one included, since finishing releases the claim.
-                if (hip_api().set_device(owner_->shards_[shard].index->device_specs().ordinal) != hipSuccess)
+                // The keys ride the shard plan's stream, which its finish drains before publishing.
+                if (hip_set_device(owner_->shards_[shard].index->device_specs().ordinal) != hipSuccess)
                     return status_t::device_error_k;
                 if (status_t const uploaded = upload_keys_(owner_->shards_[shard], {plans_[shard].base, first},
-                                                           nullptr);
+                                                           plans_[shard].stream);
                     failed(uploaded))
                     return uploaded;
-                if (hip_api().stream_synchronize(nullptr) != hipSuccess) return status_t::device_error_k;
                 if (status_t const finished = plans_[shard].finish(); failed(finished)) return finished;
             }
             for (std::size_t shard = 0; shard != plans_.size(); ++shard)
@@ -1524,15 +1507,22 @@ struct vram_amd_indexes {
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel_, allocator, allocator));
     }
 
-    /** Whether @p executor drives exactly this index's devices, in this index's order - the pairing
-     *  every fan-out indexes by, checked once rather than searched per shard. */
+    /** Whether @p executor drives a stream on every shard's device - shards sharing a device share
+     *  its stream, and queue on it in order. */
     status_t pairs_with_(executor_t const& executor) const noexcept {
         if (shards_.empty()) return status_t::uninitialized_k;
-        if (executor.size() != shards_.size()) return status_t::config_mismatch_k;
         for (std::size_t shard = 0; shard != shards_.size(); ++shard)
-            if (executor.device(shard) != shards_[shard].index->device_specs().ordinal)
-                return status_t::config_mismatch_k;
+            if (stream_of_(executor, shard) == executor.size()) return status_t::config_mismatch_k;
         return status_t::success_k;
+    }
+
+    /** The position of the stream on shard @p shard 's device in @p executor, or its size when it
+     *  drives none there. */
+    std::size_t stream_of_(executor_t const& executor, std::size_t shard) const noexcept {
+        int const device = shards_[shard].index->device_specs().ordinal;
+        std::size_t stream = 0;
+        while (stream != executor.size() && executor.device(stream) != device) ++stream;
+        return stream;
     }
 
 #pragma region Insertion
@@ -1548,20 +1538,26 @@ struct vram_amd_indexes {
         return first < rows ? divide_round_up(rows - first, shards) : 0;
     }
 
-    /** Builds one traversal context per shard over its own stream and run, so a fan-out never
+    /** Builds one traversal context per shard over its device's stream and run, so a fan-out never
      *  allocates and never shares scratch; @p rows, and any indexer @p heads a search stages, size
-     *  them for the widest walk. */
+     *  them for the widest walk, and every stream holds a context for each shard it serves. */
     template <typename traversal_config_type_, typename... heads_types_>
     status_t reserve_traversals_(growing_buffer<traversal_context_t, forkunion_allocator_t>& traversals,
                                  executor_t& executor, std::size_t rows, traversal_config_type_ config,
                                  heads_types_ const&... heads) noexcept {
-        std::size_t bytes_per_device = 0;
+        std::size_t bytes_per_shard = 0, shards_per_stream = 0;
         for (shard_t const& one : shards_)
-            bytes_per_device = max_of(bytes_per_device, one.index->traversal_memory_usage(rows, config, heads...));
-        if (status_t const sized = executor.reserve(bytes_per_device); failed(sized)) return sized;
+            bytes_per_shard = max_of(bytes_per_shard, one.index->traversal_memory_usage(rows, config, heads...));
+        for (std::size_t stream = 0; stream != executor.size(); ++stream) {
+            std::size_t served = 0;
+            for (std::size_t shard = 0; shard != shards_.size(); ++shard)
+                served += stream_of_(executor, shard) == stream;
+            shards_per_stream = max_of(shards_per_stream, served);
+        }
+        if (status_t const sized = executor.reserve(bytes_per_shard * shards_per_stream); failed(sized)) return sized;
         if (failed(traversals.reserve_exactly(shards_.size()))) return status_t::bad_alloc_k;
         for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
-            typename executor_t::stream_t& stream = executor.stream(shard);
+            typename executor_t::stream_t& stream = executor.stream(stream_of_(executor, shard));
             traversals.push_back_reserved(traversal_context_t {
                 typename traversal_context_t::allocator_t {stream.arena, stream.handle, stream.device}});
             if (!traversals.back()) return status_t::bad_alloc_k;
@@ -1715,9 +1711,9 @@ struct vram_amd_indexes {
 
     /** Claims @p executor, sizes one context per shard for @p rows_count rows under @p config and
      *  any indexer @p heads, snapshots the shards' visible rows, queues @p submit under its
-     *  snapshot on every shard before awaiting any, drains every queued stream, hands each drained
-     *  shard and its context to @p merge, and sums the telemetry & the rows' @p counts; the first
-     *  refusal is the one kept. */
+     *  snapshot on every shard before awaiting any, hands each shard and its context to @p merge
+     *  as its stream lands - whichever lands first, so one merge overlaps the other walks - and
+     *  sums the telemetry & the rows' @p counts; the first refusal is the one kept. */
     template <typename submit_type_, typename merge_type_, typename... heads_types_>
     expected<search_result_t> for_each_shard_(executor_t& executor, std::size_t rows_count, search_config_t config,
                                               submit_type_&& submit, merge_type_&& merge,
@@ -1733,45 +1729,53 @@ struct vram_amd_indexes {
             return {{}, readied};
         std::size_t const shards = shards_.size();
         growing_buffer<std::size_t, forkunion_allocator_t> visible {allocator_};
-        if (failed(visible.resize(shards))) return {{}, status_t::bad_alloc_k};
+        growing_buffer<std::size_t, forkunion_allocator_t> pending {allocator_};
+        if (failed(visible.resize(shards)) || failed(pending.reserve_exactly(shards)))
+            return {{}, status_t::bad_alloc_k};
         snapshot_(to_writable_span(visible));
 
         // Queue every shard before awaiting any, so the batch costs the slowest device rather than
-        // the sum. From here to the drain there must be no return: the caller's rows and the
-        // landing are DMA targets on every queued stream.
+        // the sum. From here to the last landing there must be no return: the caller's rows and
+        // the landing are DMA targets on every queued stream - the refuser's included, since its
+        // upload may already be reading the caller's rows.
         status_t first_refusal = status_t::success_k;
         std::size_t queued = 0;
-        // A launch fails on a stream of any device but the current one.
-        for (; queued != shards; ++queued)
-            if (status_t const submitted = hip_api().set_device(traversals[queued].device()) == hipSuccess
+        for (; queued != shards; ++queued) {
+            pending.push_back_reserved(queued);
+            // A launch fails on a stream of any device but the current one.
+            if (status_t const submitted = hip_set_device(traversals[queued].device()) == hipSuccess
                                                ? submit(queued, traversals[queued], visible[queued])
                                                : status_t::device_error_k;
                 failed(submitted)) {
                 first_refusal = submitted;
                 break;
             }
-
-        // Await every stream that may carry queued transfers - the refuser included, since its
-        // upload may already be reading the caller's rows - and merge each drained shard's columns.
-        for (std::size_t shard = 0; shard != shards && shard <= queued; ++shard) {
-            if (status_t const drained = traversals[shard].drain(); failed(drained)) {
-                if (succeeded(first_refusal)) first_refusal = drained;
-                continue; // An undrained landing is unreadable - this shard merges nothing.
-            }
-            if (shard == queued) continue; // The refuser drained for the caller's sake, landed nothing.
-            merge(shard, traversals[shard]);
         }
 
-        // Every drained context's sink holds this call's spend on its shard.
         search_result_t merged;
-        for (std::size_t shard = 0; shard != shards && shard <= queued; ++shard) {
-            vram_telemetry_block_t const spent = traversals[shard].spent();
-            merged.visited_members += spent.hops;
-            merged.computed_distances += spent.scored;
-            merged.restarts += spent.restarts;
-            merged.tail_drops += spent.tail_drops;
-            merged.visited_saturations += spent.visited_saturations;
-        }
+        while (!pending.empty())
+            for (std::size_t position = 0; position < pending.size();) {
+                std::size_t const shard = pending[position];
+                status_t const landed = traversals[shard].landed();
+                if (landed == status_t::deferred_k) {
+                    ++position;
+                    continue;
+                }
+                pending[position] = pending.back();
+                pending.pop_back();
+                if (failed(landed)) {
+                    if (succeeded(first_refusal)) first_refusal = landed;
+                    continue; // An unlanded landing is unreadable - this shard merges nothing.
+                }
+                // A landed context's sink holds this call's spend on its shard.
+                vram_telemetry_block_t const spent = traversals[shard].spent();
+                merged.visited_members += spent.hops;
+                merged.computed_distances += spent.scored;
+                merged.restarts += spent.restarts;
+                merged.tail_drops += spent.tail_drops;
+                merged.visited_saturations += spent.visited_saturations;
+                if (shard != queued) merge(shard, traversals[shard]); // The refuser landed nothing to merge.
+            }
         for (std::size_t const count : counts) merged.count += count;
         return {merged, first_refusal};
     }
@@ -1877,11 +1881,12 @@ struct vram_amd_indexes {
                               safegraphs_header_t const& header, std::size_t first_row, std::size_t nodes,
                               save_config_t const& config, executor_t& executor) noexcept {
         index_t& one = *shards_[shard].index;
-        if (hip_api().set_device(one.device_specs().ordinal) != hipSuccess) return status_t::device_error_k;
+        if (hip_set_device(one.device_specs().ordinal) != hipSuccess) return status_t::device_error_k;
         typename index_t::columns_t const columns {header.rows_of(target, header.value, first_row, nodes),
                                                    header.rows_of(target, header.neighbors, first_row, nodes),
                                                    header.rows_of(target, header.norms, first_row, nodes)};
-        auto [inner, status] = one.plan_save(columns, config.synchronization, executor.stream(shard).handle,
+        auto [inner, status] = one.plan_save(columns, config.synchronization,
+                                             executor.stream(stream_of_(executor, shard)).handle,
                                              static_cast<node_id_t>(first_row));
         if (failed(status)) return status;
         plan.plans_.push_back_reserved(std::move(inner));
@@ -2106,8 +2111,9 @@ struct vram_amd_indexes {
         if (failed(plan.plans_.reserve_exactly(shards))) return status_t::bad_alloc_k;
         for (std::size_t shard = 0; shard != shards; ++shard) {
             index_t& one = *shards_[shard].index;
-            if (hip_api().set_device(one.device_specs().ordinal) != hipSuccess) return status_t::device_error_k;
-            auto [inner, status] = one.plan_load(shard_rows[shard], executor.stream(shard).handle);
+            if (hip_set_device(one.device_specs().ordinal) != hipSuccess) return status_t::device_error_k;
+            auto [inner, status] = one.plan_load(shard_rows[shard],
+                                                 executor.stream(stream_of_(executor, shard)).handle);
             if (failed(status)) return status;
             plan.plans_.push_back_reserved(std::move(inner));
             typename index_t::load_plan_t const& opened = plan.plans_[shard];

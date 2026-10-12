@@ -2167,14 +2167,15 @@ static void compose_capabilities(usearch_dense_index_handle_t& handle, multi_typ
         if (picked & named.bit) append_capability(handle, named.name);
 }
 
-/** The USearch device ordinal at @p position of @p vram, naming device zero when it names none. */
-static std::size_t named_ordinal(usearch_vram_options_t const& vram, std::size_t position) noexcept {
-    return vram.devices && vram.devices_count ? static_cast<std::size_t>(vram.devices[position]) : 0;
-}
-
 /** Devices @p vram names, one when it names none. */
 static std::size_t named_count(usearch_vram_options_t const& vram) noexcept {
     return vram.devices && vram.devices_count ? vram.devices_count : 1;
+}
+
+/** The USearch device ordinal shard @p shard of @p vram sits on - the named devices dealt
+ *  round-robin, device zero when it names none. */
+static std::size_t named_ordinal(usearch_vram_options_t const& vram, std::size_t shard) noexcept {
+    return vram.devices && vram.devices_count ? static_cast<std::size_t>(vram.devices[shard % vram.devices_count]) : 0;
 }
 
 /** Appends one VRAM shard per named USearch device ordinal, on that device's vendor ordinal. */
@@ -2182,8 +2183,8 @@ template <typename multi_type_>
     requires is_vram_index<multi_type_>
 static status_t place_shards(multi_type_& variant, usearch_vram_options_t const& vram) noexcept {
     std::span<gpu_device_t const> const devices = gpu_devices();
-    for (std::size_t position = 0; position != named_count(vram); ++position) {
-        std::size_t const ordinal = named_ordinal(vram, position);
+    for (std::size_t shard = 0; shard != named_count(vram); ++shard) {
+        std::size_t const ordinal = named_ordinal(vram, shard);
         if (ordinal >= devices.size()) return status_t::device_error_k;
         if (status_t const placed = specialized_index {variant}.emplace(
                 static_cast<int>(devices[ordinal].vendor_ordinal));
@@ -2375,8 +2376,8 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
 
 /** The class every named device shares, read off the process listing: an index spans one vendor,
  *  since its shards merge through peer copies, and one generation, since its arms run one class's
- *  kernels. Mixed vendors refuse with @c config_mismatch_k, and an unlisted ordinal or mixed
- *  generations with @c device_error_k. */
+ *  kernels. Mixed vendors or generations refuse with @c config_mismatch_k, and an unlisted
+ *  ordinal with @c device_error_k. */
 static expected<gpu_class_t> shared_gpu_class(usearch_vram_options_t const& vram) noexcept {
     std::span<gpu_device_t const> const devices = gpu_devices();
     gpu_device_t shared;
@@ -2384,8 +2385,8 @@ static expected<gpu_class_t> shared_gpu_class(usearch_vram_options_t const& vram
         std::size_t const ordinal = named_ordinal(vram, position);
         if (ordinal >= devices.size()) return {gpu_class_t::unknown_k, status_t::device_error_k};
         gpu_device_t const device = devices[ordinal];
-        if (position && device.vendor != shared.vendor) return {gpu_class_t::unknown_k, status_t::config_mismatch_k};
-        if (position && device.gpu_class != shared.gpu_class) return {gpu_class_t::unknown_k, status_t::device_error_k};
+        if (position && (device.vendor != shared.vendor || device.gpu_class != shared.gpu_class))
+            return {gpu_class_t::unknown_k, status_t::config_mismatch_k};
         shared = device;
     }
     return {shared.gpu_class, status_t::success_k};
@@ -2399,7 +2400,7 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
                                         nk_kernel_kind_t kernel, usearch_outcome_t* outcome) noexcept {
     auto const [gpu_class, status] = shared_gpu_class(vram);
     if (status == status_t::config_mismatch_k)
-        return propagate_error(status, outcome, "One index spans one GPU vendor"), nullptr;
+        return propagate_error(status, outcome, "One index spans one GPU vendor and generation"), nullptr;
     switch (gpu_class) {
 #if USEARCH_ARCH_CUDA_
     case gpu_class_t::nvidia_blackwellrtx_k:
@@ -2443,7 +2444,7 @@ static usearch_dense_index_t make_index(usearch_dense_metadata_t const& geometry
         return propagate_error(usearch_status_device_k, outcome,
                                std::variant_size_v<gpu_executor_t> == 1
                                    ? "This build carries no GPU backends"
-                                   : "The devices are not listed, or do not share one GPU generation"),
+                                   : "The devices are not listed, or this build carries no kernels for them"),
                nullptr;
     }
 }
@@ -2645,11 +2646,16 @@ template <typename multi_type_>
     requires is_vram_index<multi_type_>
 static usearch_executor_t call_executor_for(multi_type_& variant, usearch_executor_handle_t& call_executor,
                                             usearch_outcome_t* outcome) noexcept {
+    // One default stream or queue per distinct device, which every shard there shares.
     specialized_index const shards {variant};
     growing_buffer<int> devices {global_allocator};
-    if (failed(devices.resize(shards.shards_count())))
+    if (failed(devices.reserve_exactly(shards.shards_count())))
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the devices"), nullptr;
-    for (std::size_t shard = 0; shard != devices.size(); ++shard) devices[shard] = shards.device(shard);
+    for (std::size_t shard = 0; shard != shards.shards_count(); ++shard) {
+        bool opened = false;
+        for (int const earlier : devices) opened |= earlier == shards.device(shard);
+        if (!opened) devices.push_back_reserved(shards.device(shard));
+    }
     auto [built, status] = multi_type_::executor_t::on_default_streams(devices);
     if (failed(status)) return propagate_error(status, outcome), nullptr;
     call_executor.executor = gpu_executor_t {std::move(built)};
@@ -3213,7 +3219,19 @@ static void load_dense_index(source_type_ source, placement_type_ const& placeme
     if (failed(read_status)) return propagate_error(read_status, outcome), void();
     usearch_dense_metadata_t geometry {};
     adopt_metadata(checkpoint, &geometry);
-    usearch_dense_index_t const loaded = with_cell(geometry, placement, outcome);
+    // More parts than named devices keep a shard each, part `p` on device `p` modulo their count.
+    placement_type_ placed = placement;
+    growing_buffer<int32_t> dealt {global_allocator};
+    if constexpr (std::is_same_v<placement_type_, usearch_vram_options_t>)
+        if (checkpoint.parts > named_count(placement)) {
+            if (failed(dealt.resize(checkpoint.parts)))
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to deal the parts"), void();
+            for (std::size_t part = 0; part != dealt.size(); ++part)
+                dealt[part] = static_cast<int32_t>(named_ordinal(placement, part));
+            placed.devices = dealt.data();
+            placed.devices_count = checkpoint.parts;
+        }
+    usearch_dense_index_t const loaded = with_cell(geometry, placed, outcome);
     if (!loaded) return;
     bool const filled = std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
@@ -4158,16 +4176,17 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
     usearch_vram_options_t const& vram = arguments->vram;
     if (arguments->streams)
         return propagate_error(usearch_status_unsupported_k, outcome, "Borrowed streams are not wired yet"), void();
-    // The ABI names USearch ordinals, which the listing resolves to each vendor's own.
+    // The ABI names USearch ordinals, which the listing resolves to each vendor's own; the spawn
+    // keeps one stream per distinct device.
     std::span<gpu_device_t const> const listed = gpu_devices();
     growing_buffer<gpu_device_t> devices {global_allocator};
     if (failed(devices.resize(named_count(vram))))
         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to list the devices"), void();
-    for (std::size_t position = 0; position != devices.size(); ++position) {
-        std::size_t const ordinal = named_ordinal(vram, position);
+    for (std::size_t shard = 0; shard != devices.size(); ++shard) {
+        std::size_t const ordinal = named_ordinal(vram, shard);
         if (ordinal >= listed.size())
             return propagate_error(usearch_status_device_k, outcome, "A device ordinal is past the listing"), void();
-        devices[position] = listed[ordinal];
+        devices[shard] = listed[ordinal];
     }
     auto [spawned, status] = spawn_gpu_executor(devices);
     if (status == status_t::config_mismatch_k)

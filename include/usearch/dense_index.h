@@ -360,7 +360,8 @@ typedef struct usearch_dense_load_vram_t {
     /** The manifest of a sharded checkpoint, or a single @c .safegraphs monolith. */
     usearch_bytes_view_t path;
 
-    /** The devices to place the parts on, part @c p landing on device @c p modulo their count. */
+    /** The devices to place the parts on, part @c p landing on device @c p modulo their count, in
+     *  a shard of its own. */
     usearch_vram_options_t vram;
 
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */

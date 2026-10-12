@@ -23,7 +23,8 @@
 #include <span>    // `std::span` - the listing handed out
 #include <variant> // `std::variant`, `std::monostate` - one alternative per compiled vendor
 
-#include "usearch/utilities/types.hpp" // `gpu_device_t`, `USEARCH_ARCH_CUDA_` & its siblings
+#include "usearch/utilities/ram_buffers.hpp" // `growing_buffer` - the ordinals an executor opens over
+#include "usearch/utilities/types.hpp"       // `gpu_device_t`, `USEARCH_ARCH_CUDA_` & its siblings
 
 #if USEARCH_ARCH_CUDA_
 #include "usearch/utilities/vram_nvidia_device.hpp" // `nvidia_gpu_devices`, `cuda_executor_t`
@@ -111,21 +112,25 @@ inline std::span<gpu_device_t const> gpu_devices() noexcept {
     return {listing, count};
 }
 
-/** Spawns the executor of the one vendor every device in @p devices belongs to, over their vendor
- *  ordinals: @c config_mismatch_k when they span vendors, @c device_error_k when none is named or
- *  their vendor was not compiled in. */
+/** Spawns the executor of the one vendor every device in @p devices belongs to, one stream per
+ *  distinct device over their vendor ordinals, which every shard there shares:
+ *  @c config_mismatch_k when they span vendors, @c device_error_k when none is named or their
+ *  vendor was not compiled in. */
 inline expected<gpu_executor_t> spawn_gpu_executor(std::span<gpu_device_t const> devices) noexcept {
     if (devices.empty()) return {{}, status_t::device_error_k};
-    int ordinals[gpu_devices_capacity_k];
-    if (devices.size() > gpu_devices_capacity_k) return {{}, status_t::config_mismatch_k};
-    for (std::size_t position = 0; position != devices.size(); ++position) {
-        if (devices[position].vendor != devices[0].vendor) return {{}, status_t::config_mismatch_k};
-        ordinals[position] = static_cast<int>(devices[position].vendor_ordinal);
+    growing_buffer<int> ordinals {global_allocator};
+    if (failed(ordinals.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
+    for (gpu_device_t const& device : devices) {
+        if (device.vendor != devices[0].vendor) return {{}, status_t::config_mismatch_k};
+        int const ordinal = static_cast<int>(device.vendor_ordinal);
+        bool opened = false;
+        for (int const earlier : ordinals) opened |= earlier == ordinal;
+        if (!opened) ordinals.push_back_reserved(ordinal);
     }
     expected<gpu_executor_t> result {{}, status_t::device_error_k};
     for_each_gpu_vendor([&]<typename executor_type_>(std::type_identity<executor_type_>) noexcept {
         if (executor_type_::vendor_k != devices[0].vendor) return false;
-        auto [spawned, status] = executor_type_::spawn(std::span<int const> {ordinals, devices.size()});
+        auto [spawned, status] = executor_type_::spawn(to_span(ordinals));
         if (succeeded(status)) result.value = std::move(spawned);
         result.status = status;
         return true;

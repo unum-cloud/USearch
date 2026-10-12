@@ -72,6 +72,7 @@ struct hip_api_t {
     decltype(&::hipStreamCreateWithFlags) stream_create_with_flags = nullptr;
     decltype(&::hipStreamDestroy) stream_destroy = nullptr;
     decltype(&::hipStreamSynchronize) stream_synchronize = nullptr;
+    decltype(&::hipStreamQuery) stream_query = nullptr;
     decltype(&::hipModuleLoadData) module_load_data = nullptr;
     decltype(&::hipModuleUnload) module_unload = nullptr;
     decltype(&::hipModuleGetFunction) module_get_function = nullptr;
@@ -115,6 +116,7 @@ struct hip_api_t {
             resolve_(library, "hipStreamCreateWithFlags", runtime.stream_create_with_flags) &&
             resolve_(library, "hipStreamDestroy", runtime.stream_destroy) &&
             resolve_(library, "hipStreamSynchronize", runtime.stream_synchronize) &&
+            resolve_(library, "hipStreamQuery", runtime.stream_query) &&
             resolve_(library, "hipModuleLoadData", runtime.module_load_data) &&
             resolve_(library, "hipModuleUnload", runtime.module_unload) &&
             resolve_(library, "hipModuleGetFunction", runtime.module_get_function) &&
@@ -144,6 +146,20 @@ struct hip_api_t {
 inline hip_api_t const& hip_api() noexcept {
     static hip_api_t const api = hip_api_t::load();
     return api;
+}
+
+/** Makes HIP ordinal @p ordinal current on the calling thread, which every stream, allocation and
+ *  launch after it lands on - the twin of @c cuda_set_device. The runtime is asked only when this
+ *  thread last selected another device through here, so a caller switching devices on its own
+ *  must not interleave with USearch calls on the same thread. */
+inline hipError_t hip_set_device(int ordinal) noexcept {
+    thread_local int current = -1;
+    hip_api_t const& runtime = hip_api();
+    if (!runtime) return hipErrorNotInitialized;
+    if (current == ordinal) return hipSuccess;
+    hipError_t const selected = runtime.set_device(ordinal);
+    if (selected == hipSuccess) current = ordinal;
+    return selected;
 }
 
 /** The class whose kernels run on an AMD GPU of architecture @p arch_name, as the runtime spells
@@ -589,8 +605,7 @@ struct hip_device_arena_t {
     /** Carves @p count values on the arena's device, or null when it cannot grow. */
     template <typename value_type_>
     value_type_* allocate(std::size_t count) noexcept {
-        hip_api_t const& runtime = hip_api();
-        if (!runtime || runtime.set_device(device_) != hipSuccess) return nullptr;
+        if (hip_set_device(device_) != hipSuccess) return nullptr;
         return reinterpret_cast<value_type_*>(memory_.allocate(count * sizeof(value_type_), default_alignment_k));
     }
 
@@ -603,10 +618,10 @@ struct hip_device_arena_t {
     /** Copies @p bytes of host memory at @p source to @p destination in the arena,
      *  synchronously. */
     status_t upload(void* destination, void const* source, std::size_t bytes) noexcept {
-        hip_api_t const& runtime = hip_api();
-        if (!runtime || runtime.set_device(device_) != hipSuccess) return status_t::device_error_k;
-        return runtime.copy(destination, source, bytes, hipMemcpyHostToDevice) == hipSuccess ? status_t::success_k
-                                                                                             : status_t::device_error_k;
+        if (hip_set_device(device_) != hipSuccess) return status_t::device_error_k;
+        return hip_api().copy(destination, source, bytes, hipMemcpyHostToDevice) == hipSuccess
+                   ? status_t::success_k
+                   : status_t::device_error_k;
     }
 
     int device() const noexcept { return device_; }
@@ -616,8 +631,9 @@ struct hip_device_arena_t {
     int device_ = 0;
 };
 
-/** The streams a bulk verb advances on and the scratch they walk with - one of each per device.
- *  Work is queued, never waited on, so one host thread drives every device. */
+/** The streams a bulk verb advances on and the scratch they walk with - one of each per device,
+ *  which every shard there shares in order. Work is queued, never waited on, so one host thread
+ *  drives every device. */
 struct hip_executor_t {
     using device_arena_t = hip_device_arena_t;
     inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::amd_k;
@@ -629,7 +645,7 @@ struct hip_executor_t {
     /** One call's hold on the executor, released when it dies. */
     using claim_t = std::unique_lock<fu::spin_mutex_t>;
 
-    /** One device's stream and run; the arena is declared last so it frees onto a live stream. */
+    /** One shard's stream and run; the arena is declared last so it frees onto a live stream. */
     struct stream_t {
 
         /** The HIP ordinal this stream was opened on - placement and launch target both. */
@@ -669,15 +685,13 @@ struct hip_executor_t {
         return {std::move(executor), status_t::success_k};
     }
 
-    /** Opens one stream per named HIP ordinal, binding each first, since a stream is born on the
+    /** Opens one stream per entry of @p devices, binding each first, since a stream is born on the
      *  current device. */
     static expected<hip_executor_t> spawn(std::span<int const> devices) noexcept {
-        hip_api_t const& runtime = hip_api();
         growing_buffer<stream_t> streams {global_allocator};
-        if (!runtime) return {{}, status_t::device_error_k};
         if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
         for (int device : devices) {
-            if (runtime.set_device(device) != hipSuccess) return {{}, status_t::device_error_k};
+            if (hip_set_device(device) != hipSuccess) return {{}, status_t::device_error_k};
             stream_t opened {device, hip_stream_t {}};
             if (!opened.handle) return {{}, status_t::device_error_k};
             streams.push_back_reserved(std::move(opened));
@@ -688,24 +702,22 @@ struct hip_executor_t {
     /** The twin of @ref spawn over each named device's legacy default stream, for a call that names
      *  no executor; every use binds its device first, since a null stream is the current one's. */
     static expected<hip_executor_t> on_default_streams(std::span<int const> devices) noexcept {
-        hip_api_t const& runtime = hip_api();
         growing_buffer<stream_t> streams {global_allocator};
-        if (!runtime) return {{}, status_t::device_error_k};
         if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
         for (int device : devices) {
-            if (runtime.set_device(device) != hipSuccess) return {{}, status_t::device_error_k};
+            if (hip_set_device(device) != hipSuccess) return {{}, status_t::device_error_k};
             streams.push_back_reserved(stream_t {device, hip_stream_t {nullptr}});
         }
         return acquire(std::move(streams));
     }
 
-    /** Claims @p bytes_per_device of scratch on every stream, ahead of the fan-out that maps state
+    /** Claims @p bytes_per_stream of scratch on every stream, ahead of the fan-out that maps state
      *  onto it; the old run frees in stream order behind whatever still rides it. */
-    status_t reserve(std::size_t bytes_per_device) noexcept {
+    status_t reserve(std::size_t bytes_per_stream) noexcept {
         if (streams_.empty()) return status_t::uninitialized_k;
         for (stream_t& opened : streams_) {
             opened.arena.clear();
-            if (failed(opened.arena.reserve_exactly(bytes_per_device))) return status_t::bad_alloc_k;
+            if (failed(opened.arena.reserve_exactly(bytes_per_stream))) return status_t::bad_alloc_k;
         }
         return status_t::success_k;
     }
@@ -713,26 +725,25 @@ struct hip_executor_t {
     /** Waits for every transfer and launch queued on every stream - the fleet's completion; binds
      *  each device first, since a null stream is the current device's. */
     status_t drain() noexcept {
-        hip_api_t const& runtime = hip_api();
         for (stream_t& opened : streams_)
-            if (runtime.set_device(opened.device) != hipSuccess ||
-                runtime.stream_synchronize(opened.handle) != hipSuccess)
+            if (hip_set_device(opened.device) != hipSuccess ||
+                hip_api().stream_synchronize(opened.handle) != hipSuccess)
                 return status_t::device_error_k;
         return status_t::success_k;
     }
 
-    /** The stream driving @p index, in the order the devices were named. */
+    /** The stream at @p index, in the order the devices were named. */
     stream_t& stream(std::size_t index) noexcept { return streams_[index]; }
 
-    /** The HIP ordinal @p index drives - what a caller pairs its shards against. */
+    /** The HIP ordinal stream @p index drives - what a caller pairs its shards against. */
     int device(std::size_t index) const noexcept { return streams_[index].device; }
 
-    /** Devices this executor drives. */
+    /** Streams this executor drives, one per device. */
     std::size_t size() const noexcept { return streams_.size(); }
 
   private:
 
-    /** One stream per named device, in the caller's order. */
+    /** One stream per named entry, in the caller's order. */
     growing_buffer<stream_t> streams_ {global_allocator};
 
     /** Held by the one caller driving the streams; never swapped. */
@@ -774,10 +785,9 @@ struct hip_module_t {
     /** Loads @p code_object onto HIP ordinal @p device, binding it first, since a module loads into
      *  the current device; an offload bundle loads the entry matching the device's architecture. */
     static expected<hip_module_t> load(int device, bytes_view_t code_object) noexcept {
-        hip_api_t const& runtime = hip_api();
         hip_module_t module;
-        if (!runtime || runtime.set_device(device) != hipSuccess ||
-            runtime.module_load_data(&module.handle_, code_object.data()) != hipSuccess)
+        if (hip_set_device(device) != hipSuccess ||
+            hip_api().module_load_data(&module.handle_, code_object.data()) != hipSuccess)
             return {{}, status_t::device_error_k};
         return {std::move(module), status_t::success_k};
     }
