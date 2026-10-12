@@ -103,15 +103,6 @@ struct bench_indexes_context {
                                                                                  : settings.memory_domains.front()}) {}
 };
 
-/** The checkpoint manifest path: dtype, kernel and connectivity stamped into the name, so a
- *  geometry-mismatched run finds nothing rather than restoring the wrong graph. */
-template <typename indexes_type_>
-std::string checkpoint_path_of(settings_t const& settings, indexes_type_ const& indexes, std::string_view name) {
-    return fmt::format( //
-        "{}/{}-{}-{}-c{}.safegraphs.json", settings.checkpoints_dir, name, indexes_type_::scalar_t::dtype_name(),
-        nk_kernel_name(indexes.kernel()), settings.connectivity.value);
-}
-
 /** Serializes the sharded index as one SafeGraphs checkpoint - a monolith per shard and the
  *  manifest committed last - so later runs @c --load it instead of rebuilding. */
 template <typename streamed_dataset_type_>
@@ -123,6 +114,7 @@ bool save_indexes(streamed_dataset_type_& streamed) {
     safegraphs_custom_field_t const provenance[] = {{"scale", scale}};
     save_config_t config;
     config.layout = checkpoint_layout_t::distributed_k;
+    config.synchronization = synchronization_t::immutable_k;
     config.provenance = provenance;
     auto started = steady_clock_t::now();
     if (status_t const saved = bench.indexes.save(path, config, bench.executor); failed(saved)) {

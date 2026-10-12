@@ -1303,7 +1303,7 @@ std::size_t test_nvme_rewrites_refine(u64_t seed) {
     if (fixture.failures) return fixture.failures;
     f64_t const before = fixture.recall(source, fixture.driver.executor);
 
-    std::vector<byte_t> workspace = rewrite_workspace(512u << 10);
+    std::vector<byte_t> workspace = rewrite_workspace(64u << 10);
     nvme_checkpoint_t& target = fixture.checkpoint();
     auto const [refined, status] = refine(source, iota_view<std::size_t> {0, rewrite_rows_k}, target.manifest.data(),
                                           fixture.driver.executor, std::span {workspace});
@@ -1620,6 +1620,70 @@ std::size_t test_nvme_uuid_configuration(char const* name, u64_t seed) {
     failures_count += test_nvme_indexes_cursor<indexes_t, kernel_>(seed);
     failures_count += test_nvme_indexes_telemetry<indexes_t, kernel_>(seed);
     return report(name, failures_count);
+}
+
+/** A monolith keyed @c u32, as the benches write one, viewed by a @c uuid collection: the cursor,
+ *  the key scans and a ranking's resolved keys read every key zero-extended, big-endian as the
+ *  bindings render integer identities, at the distances the @c u32 view of the file ranks. */
+template <typename engine_type_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
+std::size_t test_nvme_widened_keys(char const* name, u64_t seed) {
+    using narrow_t = nvme_indexes<u32_t, dtype_, nk_cap_serial_k, engine_type_>;
+    using wide_t = nvme_indexes<uuid_t, dtype_, nk_cap_serial_k, engine_type_>;
+    using scalar_t = typename wide_t::scalar_t;
+    constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 8, wanted = 16;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    auto const number_of = [](uuid_t const& key) noexcept {
+        u64_t number = 0;
+        for (std::size_t byte = sizeof(key.bytes) - sizeof(number); byte != sizeof(key.bytes); ++byte)
+            number = number << 8 | std::to_integer<u64_t>(key.bytes[byte]);
+        return number;
+    };
+
+    nvme_reference<narrow_t> reference {"nvme_widened", kernel_, rows_count, dimensions, seed};
+    narrow_t narrow {forkunion_allocator_t {no_memory_domain_k}};
+    reference.view(narrow, checkpoint_layout_t::monolith_k);
+    wide_t wide {forkunion_allocator_t {no_memory_domain_k}};
+    std::size_t failures = reference.failures;
+    failures += expect_eq(wide.view(reference.checkpoint.monolith.data()), status_t::success_k);
+    dense_indexes_executor<narrow_t> narrow_driver;
+    dense_indexes_executor<wide_t> wide_driver;
+    if (failed(narrow_driver.status) || failed(wide_driver.status) || failures)
+        return report(name, failures + expect(false));
+    failures += expect_eq(wide.size(), rows_count);
+
+    std::vector<uuid_t> placed_keys(rows_count);
+    auto placed_rows = make_vectors<scalar_t>(rows_count, dimensions, 0);
+    typename wide_t::cursor_t cursor {wide};
+    failures += expect_eq(cursor.read(wide, std::span {placed_keys}, placed_rows.span(), wide_driver.executor).status,
+                          status_t::success_k);
+    std::vector<bool> seen(rows_count);
+    for (uuid_t const& key : placed_keys) {
+        u64_t const number = number_of(key);
+        bool const fresh = key == uuid_of(number) && number >= 1 && number <= rows_count && !seen[number - 1];
+        failures += expect(fresh);
+        if (fresh) seen[number - 1] = true;
+    }
+
+    std::array<uuid_t, 2> const probes {uuid_of(1), uuid_of(rows_count + 7)};
+    std::array<std::size_t, probes.size()> counted {};
+    failures += expect_eq(wide.count(std::span<uuid_t const> {probes}, std::span {counted}, wide_driver.executor),
+                          status_t::success_k);
+    failures += expect_eq(counted[0], 1u);
+    failures += expect_eq(counted[1], 0u);
+
+    // A walk as wide as the file ranks every row, so only ties may swap keys between the two views.
+    auto const queries = reference.leading_rows(queries_count);
+    nvme_rankings<narrow_t> narrow_rankings {queries_count, wanted};
+    nvme_rankings<wide_t> wide_rankings {queries_count, wanted};
+    failures += expect(succeeded(narrow_rankings.search(narrow, queries, narrow_driver.executor, rows_count).status));
+    failures += expect(succeeded(wide_rankings.search(wide, queries, wide_driver.executor, rows_count).status));
+    failures += expect(wide_rankings.counts == narrow_rankings.counts);
+    for (std::size_t slot = 0; slot != wide_rankings.keys.size(); ++slot) {
+        uuid_t const& key = wide_rankings.keys[slot];
+        failures += expect_eq(wide_rankings.distances[slot], narrow_rankings.distances[slot]);
+        failures += expect(key == uuid_of(number_of(key)) && number_of(key) <= rows_count);
+    }
+    return report(name, failures);
 }
 
 /** Composes one engine's rewrite suite over one (dtype, kernel) cell, skipping it where the host

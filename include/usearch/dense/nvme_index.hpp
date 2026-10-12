@@ -87,6 +87,9 @@ struct nvme_part_t {
     /** Bytes of one key row. */
     u32_t key_row_bytes = 0;
 
+    /** The key column's dtype, which @ref safegraphs_widened_key reads each row as. */
+    dtype_t key_dtype = dtype_t::unknown_k;
+
     /** Bytes of one value row. */
     u32_t value_row_bytes = 0;
 
@@ -414,17 +417,11 @@ struct nvme_index {
 
 #pragma region Opening
 
-    /** Whether a part's metadata token @p name is absent, or parses to @p parsed equal to the
-     *  @p wanted one. */
-    static bool agrees_(safegraphs_name_t const& name, int wanted, int parsed) noexcept {
-        return name.empty() || wanted == parsed;
-    }
-
     /** Opens the part at @p path, a file or device or, in SPDK builds, a transport ID: its medium
      *  for the engines, and its header vetted against this instantiation, against @p kernel unless
      *  it is @c nk_kernel_unknown_k, which then takes the metric the header names, and, unless
-     *  @p key_dtype is @c unknown_k, against the key column's dtype. A file's header comes through
-     *  one buffered read, a namespace's through blocking sector reads. */
+     *  @p key_dtype is @c unknown_k, for a key column no wider than it. A file's header comes
+     *  through one buffered read, a namespace's through blocking sector reads. */
     template <typename allocator_type_>
     static status_t open_part_(std::string_view path, dtype_t key_dtype, nk_kernel_kind_t& kernel,
                                allocator_type_ allocator, medium_t& medium, nvme_part_t& part) noexcept {
@@ -460,23 +457,21 @@ struct nvme_index {
         growing_buffer<byte_t, allocator_type_> header_bytes {allocator};
         if (status_t const read = nvme_read_header(source, header_bytes); failed(read)) return read;
 
-        safegraphs_name_t metric, quantization;
+        safegraphs_name_t metric;
         auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
             if (field.key == "metric") metric = safegraphs_name_t {field.value};
-            if (field.key == "quantization") quantization = safegraphs_name_t {field.value};
         };
         auto const [header, header_status] = safegraphs_read_header(to_span(header_bytes), allocator, per_custom_field);
         if (failed(header_status)) return header_status;
         if (header.key.offsets || header.value.offsets || header.neighbors.offsets) return status_t::config_mismatch_k;
-        if (header.value.dtype != safegraphs_value_dtype<scalar_t>() || header.neighbors.dtype != dtype_t::u32_k ||
+        if (header.value.dtype != dtype_of(scalar_t::dtype()) || header.neighbors.dtype != dtype_t::u32_k ||
             header.key.shape != column_shape_t {scalar_shape_t {}})
             return status_t::config_mismatch_k;
-        if (key_dtype != dtype_t::unknown_k && header.key.dtype != key_dtype) return status_t::config_mismatch_k;
+        if (key_dtype != dtype_t::unknown_k && !safegraphs_key_widens(header.key.dtype, key_dtype))
+            return status_t::config_mismatch_k;
         nk_kernel_kind_t const named = metric.empty() ? kernel
                                                       : nk_kernel_named(metric.characters, metric.view().size());
-        if ((kernel != nk_kernel_unknown_k && named != kernel) ||
-            !agrees_(quantization, vector_dtype_, nk_dtype_named(quantization.characters, quantization.view().size())))
-            return status_t::config_mismatch_k;
+        if (kernel != nk_kernel_unknown_k && named != kernel) return status_t::config_mismatch_k;
         std::size_t const nodes = header.nodes();
         std::size_t const dimensions = regular_width(header.value.shape).value_or(0);
         std::size_t const connectivity = regular_width(header.neighbors.shape).value_or(0);
@@ -489,6 +484,7 @@ struct nvme_index {
         part.dimensions = static_cast<u32_t>(dimensions);
         part.connectivity = static_cast<u32_t>(connectivity);
         part.key_row_bytes = static_cast<u32_t>(header.key.row_bytes());
+        part.key_dtype = header.key.dtype;
         part.value_row_bytes = static_cast<u32_t>(header.value.row_bytes());
         part.keys_begin = header.data_offset + header.key.data.first;
         part.values_begin = header.data_offset + header.value.data.first;
@@ -1074,7 +1070,9 @@ struct nvme_index {
             case purpose_t::expand_k: expand_(flight.issuer, flight_index); return true;
             case purpose_t::key_k: {
                 u32_t const slot_index = flight.issuer;
-                rows_[slot_index].resolve(flight.position, landed_row_(flight_index, purpose_t::key_k, flight_index));
+                byte_t const* const stored = landed_row_(flight_index, purpose_t::key_k, flight_index);
+                dtype_t const stored_dtype = parts_[shard_of_(flight)].key_dtype;
+                rows_[slot_index].resolve(flight.position, safegraphs_widened_key<key_t>(stored, stored_dtype));
                 release_flight_(flight_index);
                 --slots_[slot_index].resolving;
                 resolve_row_(slot_index);
@@ -1109,7 +1107,8 @@ struct nvme_index {
                     part.dimensions};
                 norms[lane] = norms_(shape_.kernel, vectors[lane]);
                 if constexpr (keyed)
-                    std::memcpy(&keys[lane], landed_row_(source, purpose_t::key_k, key_buffer_(source)), sizeof(key_t));
+                    keys[lane] = safegraphs_widened_key<key_t>(
+                        landed_row_(source, purpose_t::key_k, key_buffer_(source)), part.key_dtype);
             }
             std::span<key_t const> const lane_keys = std::span<key_t const>(keys).first(keyed ? fill : 0);
             scores_result<dot_result_t, 4> scores = dense::scores<capability_, scalar_t>(
@@ -1392,7 +1391,7 @@ struct nvme_index {
         }
         std::size_t outputs() const noexcept { return 0; }
         nvme_locator_t locator(std::size_t) const noexcept { return {}; }
-        void resolve(std::size_t, byte_t const*) noexcept {}
+        void resolve(std::size_t, key_t const&) noexcept {}
         status_t finish() noexcept { return status_t::success_k; }
     };
 

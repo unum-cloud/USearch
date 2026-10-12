@@ -155,9 +155,9 @@ bool prepare(streamed_dataset_type_& streamed, fu_pool_t pool) {
         return false;
     }
 
-    // The third dump is the ID → row map, the recall bookkeeping the index itself never stores.
+    // The keys are the ID → row map, the recall bookkeeping the index itself never stores.
     if (!bench.settings.load_name.empty() &&
-        !load_checkpoint(bench.settings, *bench.index, dimensions, std::span {streamed.id_to_row}, 0, 1))
+        !load_checkpoint(bench.settings, *bench.index, std::span {streamed.id_to_row}))
         return false;
 
     // A base that misses the skipped prefix would judge recall against rows the graph never saw.
@@ -374,14 +374,14 @@ bool run_refinement(streamed_dataset_type_& streamed, fu_pool_t pool) {
     return true;
 }
 
-/** Serializes the index as three RetriEval-layout matrices - vectors, neighbors, and the ID → row
- *  map - so later runs @c --load the base and stream only the topping. */
+/** Serializes the index as one SafeGraphs monolith keyed by the ID → row map, so later runs
+ *  @c --load the base and stream only the topping, and the NVMe benches view it. */
 template <typename streamed_dataset_type_>
 bool save_index(streamed_dataset_type_& streamed) {
     auto& bench = streamed.bench;
     auto started = steady_clock_t::now();
-    std::size_t const checkpoint_bytes = save_checkpoint(bench.settings, *bench.index, std::span {streamed.id_to_row},
-                                                         0, 1);
+    std::size_t const checkpoint_bytes = save_checkpoint(bench.settings, *bench.index,
+                                                         std::span<u32_t const> {streamed.id_to_row}, streamed.scale);
     if (!checkpoint_bytes) return false;
     double const seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
     fmt::println("Saved the index: {:.2f} GB in {:.2f} s", gigabytes(checkpoint_bytes), seconds);

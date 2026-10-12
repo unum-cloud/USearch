@@ -210,8 +210,7 @@ bool prepare(streamed_dataset_type_& streamed) {
         return false;
     }
 
-    if (!bench.settings.load_name.empty() &&
-        !load_checkpoint(bench.settings, index, dimensions, std::span {streamed.id_to_row}, 0, 1))
+    if (!bench.settings.load_name.empty() && !load_checkpoint(bench.settings, index, std::span {streamed.id_to_row}))
         return false;
 
     // A base that misses the skipped prefix would judge recall against rows the graph never saw.
@@ -360,13 +359,14 @@ bool run_refinement(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/** Serializes the device index as three RetriEval-layout matrices - vectors, neighbors, and the
- *  ID → row map. */
+/** Serializes the device index as one SafeGraphs monolith keyed by the ID → row map, the file every
+ *  residency loads and the NVMe benches view. */
 template <typename streamed_dataset_type_>
 bool save_index(streamed_dataset_type_& streamed) {
     auto& bench = streamed.bench;
     auto started = steady_clock_t::now();
-    std::size_t const total_bytes = save_checkpoint(bench.settings, *bench.index, std::span {streamed.id_to_row}, 0, 1);
+    std::size_t const total_bytes = save_checkpoint(bench.settings, *bench.index,
+                                                    std::span<u32_t const> {streamed.id_to_row}, streamed.scale);
     if (!total_bytes) return false;
     double const seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
     fmt::println("Saved the index: {:.2f} GB in {:.2f} s", gigabytes(total_bytes), seconds);

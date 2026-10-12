@@ -154,6 +154,15 @@ struct uuid_t {
 };
 static_assert(std::is_trivially_copyable_v<uuid_t> && sizeof(uuid_t) == 16);
 
+/** The @c uuid_t every binding renders the integer @p identity as: big-endian in the trailing
+ *  eight bytes. */
+constexpr uuid_t uuid_of(u64_t identity) noexcept {
+    uuid_t key {};
+    for (std::size_t byte = 0; byte != sizeof(identity); ++byte)
+        key.bytes[sizeof(key.bytes) - 1 - byte] = static_cast<std::byte>(identity >> (byte * 8));
+    return key;
+}
+
 /** The single-byte scalar every allocator deals in - the unit of raw storage. */
 using byte_t = std::byte;
 

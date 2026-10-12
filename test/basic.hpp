@@ -2668,6 +2668,8 @@ std::size_t test_basic_safegraphs_hostile(u64_t seed, std::string_view metric_to
         expect_refused([](std::vector<std::byte>& c) { c.resize(8); }, status_t::malformed_k);
         expect_refused([](std::vector<std::byte>& c) { c[0] ^= std::byte {1}; }, status_t::malformed_k);
         expect_refused(rewrite_header([](safegraphs_header_t& h) { h.alignment = 96; }), status_t::malformed_k);
+        // A non-power of two under the floor is refused too, before the floor could round it up.
+        expect_refused(rewrite_header([](safegraphs_header_t& h) { h.alignment = 3; }), status_t::malformed_k);
         expect_refused(rewrite_header([](safegraphs_header_t& h) {
                            h.key.dtype = h.key.dtype == dtype_t::u64_k ? dtype_t::u32_k : dtype_t::u64_k;
                        }),

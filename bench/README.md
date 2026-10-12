@@ -20,7 +20,7 @@ The search family searches the built index, by plain rows or by a lightning inde
 - `usearch_bench_dense_ram_indexes_search` builds one `dense::ram_indexes` over every memory domain and isolates what the C interface drives: admission, rotation across shards, batched verbs and SafeGraphs checkpoints.
 - `usearch_bench_dense_vram_index_search` builds one `dense::vram_nvidia_index` on one device and isolates batch-per-launch build and search, the kit generation ceiling and managed-memory flat matrices.
 - `usearch_bench_dense_vram_indexes_search` builds one `dense::vram_nvidia_indexes` with a shard per `USEARCH_DEVICES` ordinal and isolates what the C interface drives across GPUs: rotation across devices, scatter-gather search merged on the host, and SafeGraphs checkpoints.
-- `usearch_bench_dense_nvme_indexes_search` views the parts a sharded RAM or VRAM binary saved as one `dense::nvme_indexes`, building nothing in RAM, and isolates what storage adds to the batched search: the I/O transport, the queue depth, and the reads and bytes each query costs.
+- `usearch_bench_dense_nvme_indexes_search` views the checkpoint any RAM or VRAM binary saved as one `dense::nvme_indexes`, building nothing in RAM, and isolates what storage adds to the batched search: the I/O transport, the queue depth, and the reads and bytes each query costs.
 
 The algebra family measures the graph products `multiply` and the graph attention `attend` over the built index instead of searching it.
 
@@ -116,15 +116,31 @@ build_host_release/usearch_bench_dense_ram_index_search --vectors keys.bf16bin -
     --neighbors truth-global.ibin --metric dot
 ```
 
-### Storage
+### Checkpoints
 
-Both `nvme_indexes` binaries build nothing: they view the SafeGraphs parts a sharded RAM or VRAM binary wrote with `--save`, and take only the flags a view and its queries need.
-The first part's header names the stored dtype and the metric they dispatch on, and the factor the producer rescaled its rows by before a downcast, under which the queries are staged.
-Keys are dataset rows, so the search judges its hits against `--neighbors` directly, and refuses a ground truth that names a row past the ones the parts hold.
+Every `ram` and `vram` binary, single or sharded, saves its index with `--save` as SafeGraphs, so any residency loads it with `--load` and the `nvme` binaries view it in place.
+The name lands under `--checkpoints-dir`, stamped with the stored dtype, the metric and the connectivity, like `sift90m-u8-euclidean-c32.safegraphs`.
+A single index writes that one monolith; a sharded one writes a monolith per shard and commits a `.safegraphs.json` manifest beside them last.
+Keys are dataset rows, stored as `u32`, and widen on the way into a collection keyed `u64` or `uuid`, so the C interface opens a benchmark's checkpoint too.
+The header names the metric, the value column's dtype names the stored scalar, and a `scale` entry records the factor a downcast rescaled the rows by.
+
+The GPU builds a base an order of magnitude faster than the CPU, so the fast way to a large CPU graph is a GPU base topped up on the CPU: build the first rows on the device, save, then reload on the CPU and insert the rest.
+
+```sh
+build_cuda_release/usearch_bench_dense_vram_index_search --vectors data/sift-100m/base.100M.u8bin --metric euclidean --max-vectors 90000000 --save sift90m
+build_host_release/usearch_bench_dense_ram_index_search --vectors data/sift-100m/base.100M.u8bin --queries ... --neighbors ... --metric euclidean --load sift90m --skip-vectors 90000000
+```
+
+The second run reports `topping: 90000000 loaded rows`, inserts the remaining ten million, and judges the full graph against the 100M ground truth.
+A single index also loads a sharded checkpoint, its parts appended in order, while a sharded index restores one only when it covers every row of the view.
+
+Both `nvme_indexes` binaries build nothing: they view a checkpoint and take only the flags a view and its queries need.
+The first part's header names the metric they dispatch on and the stored dtype, and its `scale` is what the queries are staged under.
+The search judges its hits against `--neighbors` directly, and refuses a ground truth that names a row past the ones the parts hold.
 Every query is answered from storage in one batched call, which arms as many rows per thread as the queue depth holds, and the verb times each query from its first armed walk to its final write.
 The `Storage` block names the parts and the transport the engines opened, then each phase reports reads and kilobytes per query by purpose, the round trips, the IOPS and bandwidth it sustained, and the latency percentiles.
 
-- `--view` is required: the manifest or the monolith of the parts.
+- `--view` is required: the monolith, or the manifest of the parts.
 - `--paths` defaults to beside the manifest: one directory, file or device per part, comma-separated, to serve parts copied elsewhere.
 - `--queries` is required: query vectors in the RetriEval layout, cast to the parts' stored dtype.
 - `--neighbors` is required by the search binary: ground truth, `.ibin`, over the rows the parts hold.
@@ -158,19 +174,6 @@ build_cuda_release/usearch_bench_dense_vram_index_search \
 ```
 
 Judge the two builds at matched distance computations rather than matched knobs; the report prints the count for every phase.
-
-### Checkpoints
-
-A checkpoint is a name under `--checkpoints-dir`, stamped with the dtype, the metric and the connectivity, so any binary holding the same index shape restores it.
-The GPU builds a base an order of magnitude faster than the CPU, so the fast way to a large CPU graph is a GPU base topped up on the CPU: build the first rows on the device, save, then reload on the CPU and insert the rest.
-
-```sh
-build_cuda_release/usearch_bench_dense_vram_index_search --vectors data/sift-100m/base.100M.u8bin --metric euclidean --max-vectors 90000000 --save sift90m
-build_host_release/usearch_bench_dense_ram_index_search --vectors data/sift-100m/base.100M.u8bin --queries ... --neighbors ... --metric euclidean --load sift90m --skip-vectors 90000000
-```
-
-The second run reports `topping: 90000000 loaded rows`, inserts the remaining ten million, and judges the full graph against the 100M ground truth.
-Today this crosses only between the single-index binaries, which share one checkpoint layout; the sharded `_indexes_` binaries write SafeGraphs and restore a checkpoint only when it covers every row of the view.
 
 ### Algebra
 
@@ -216,6 +219,7 @@ build_host_release/usearch_bench_dense_ram_metric --filter 'dot/bf16/.*/1to[14]/
 
 Datasets live outside the repository and are reached through `data/<name>` symlinks, lowercase with dashes and the scale suffix last, such as `data/sift-10m`.
 The files follow the RetriEval layout: two little-endian `u32` counters, rows then columns, followed by the row-major payload, with the dtype carried by the extension, `.fbin` for `f32`, `.i8bin`, `.u8bin`, `.bf16bin`, and `.ibin` for `u32` neighbor IDs.
+Datasets and ground truth stay in this layout, while every index the benchmarks save is SafeGraphs, as [Checkpoints](#checkpoints) describes.
 
 | Dataset               | Stored dtype | Dimensions | Metric    | Scales        | Ground truth          |
 | :-------------------- | -----------: | ---------: | :-------- | :------------ | :-------------------- |

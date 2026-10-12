@@ -7,11 +7,13 @@ This page records only how USearch maps its indexes onto it.
 
 A `.safegraphs` file holds one flat graph: an 8-byte magic, a little-endian header length, a JSON header, and a data segment of Arrow-layout buffers, each starting on the header's `alignment` boundary.
 A dense index writes three regular columns.
-The `key` column holds one identity per node, `u32`, `u64` or `bin16` by the key's width.
-The `value` column holds one fixed-width vector per node, with sub-byte scalars packed into `u8` rows and the logical width in `shape_effective`.
+The `key` column holds one identity per node, `u32`, `u64` or `uuid` by the key's width.
+A reader takes keys no wider than its own and zero-extends them, an integer into a `uuid` big-endian in its trailing bytes, so the benchmarks' `u32` keys open in the C interface's `uuid` collections.
+The `value` column holds one fixed-width vector per node, its dtype the stored scalar's own token, `u1x8`, `i4x2` and `u4x2` naming the packed ones, and its shape the logical width.
 The `neighbors` column holds one fixed-degree row of `u32` node indices per node, where any index at or past the node count is a sentinel.
+A `norms` column follows where the index keeps norms: a sum and a sum of squares per node, in the dot product's dtype.
 A multi-index consolidates every shard into one such graph, rows in placement order and node IDs rebased, so the file reads as one index anywhere.
-The header carries `nodes`, `alignment`, the `metric` token, the stored scalar as `quantization`, and any provenance the caller adds.
+The header carries `alignment`, the `metric` token, and any provenance the caller adds.
 
 ## Distributed
 

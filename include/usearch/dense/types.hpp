@@ -37,6 +37,60 @@ using distance_t = f32_t;
  *  lock & empty-slot sentinel in neighbor lists of every index design. */
 inline constexpr node_id_t node_id_unknown_k = 0xFFFFFFFFu;
 
+/** The NumKong dtype a column of @p dtype stores, or @c nk_dtype_unknown_k where NumKong has
+ *  none. */
+constexpr nk_dtype_t nk_dtype_of(dtype_t dtype) noexcept {
+    switch (dtype) {
+    case dtype_t::f64_k: return nk_f64_k;
+    case dtype_t::f32_k: return nk_f32_k;
+    case dtype_t::bf16_k: return nk_bf16_k;
+    case dtype_t::f16_k: return nk_f16_k;
+    case dtype_t::e5m2_k: return nk_e5m2_k;
+    case dtype_t::e4m3_k: return nk_e4m3_k;
+    case dtype_t::e3m2_k: return nk_e3m2_k;
+    case dtype_t::e2m3_k: return nk_e2m3_k;
+    case dtype_t::i64_k: return nk_i64_k;
+    case dtype_t::i32_k: return nk_i32_k;
+    case dtype_t::i16_k: return nk_i16_k;
+    case dtype_t::i8_k: return nk_i8_k;
+    case dtype_t::i4x2_k: return nk_i4_k;
+    case dtype_t::u64_k: return nk_u64_k;
+    case dtype_t::u32_k: return nk_u32_k;
+    case dtype_t::u16_k: return nk_u16_k;
+    case dtype_t::u8_k: return nk_u8_k;
+    case dtype_t::u4x2_k: return nk_u4_k;
+    case dtype_t::u1x8_k: return nk_u1_k;
+    default: return nk_dtype_unknown_k;
+    }
+}
+
+/** The column dtype storing NumKong's @p dtype, or @c dtype_t::unknown_k where SafeGraphs has no
+ *  token. */
+constexpr dtype_t dtype_of(nk_dtype_t dtype) noexcept {
+    switch (dtype) {
+    case nk_f64_k: return dtype_t::f64_k;
+    case nk_f32_k: return dtype_t::f32_k;
+    case nk_bf16_k: return dtype_t::bf16_k;
+    case nk_f16_k: return dtype_t::f16_k;
+    case nk_e5m2_k: return dtype_t::e5m2_k;
+    case nk_e4m3_k: return dtype_t::e4m3_k;
+    case nk_e3m2_k: return dtype_t::e3m2_k;
+    case nk_e2m3_k: return dtype_t::e2m3_k;
+    case nk_i64_k: return dtype_t::i64_k;
+    case nk_i32_k: return dtype_t::i32_k;
+    case nk_i16_k: return dtype_t::i16_k;
+    case nk_i8_k: return dtype_t::i8_k;
+    case nk_i4_k: return dtype_t::i4x2_k;
+    case nk_u64_k: return dtype_t::u64_k;
+    case nk_u32_k: return dtype_t::u32_k;
+    case nk_u16_k: return dtype_t::u16_k;
+    case nk_u8_k: return dtype_t::u8_k;
+    case nk_u4_k: return dtype_t::u4x2_k;
+    case nk_u1_k: return dtype_t::u1x8_k;
+    default: return dtype_t::unknown_k;
+    }
+}
+
 /** One traversal candidate: a node ID paired with its distance to the query. */
 struct scored_node_t {
 

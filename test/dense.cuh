@@ -2965,7 +2965,7 @@ std::size_t dense_indexes_expect_norms(std::vector<std::byte> const& monolith, e
     auto const [header, header_status] = safegraphs_read_header(bytes_view_t {monolith});
     failures += expect(succeeded(header_status));
     if (!keeps_norms_k) return failures + expect(header.norms.dtype == dtype_t::unknown_k);
-    failures += expect(header.norms.dtype == safegraphs_value_dtype<dot_result_t>() &&
+    failures += expect(header.norms.dtype == dtype_of(dot_result_t::dtype()) &&
                        header.norms.shape == safegraphs_norms_shape_k && header.norms.nodes() == rows);
     if (failures) return failures;
 
@@ -2990,8 +2990,7 @@ std::size_t dense_indexes_expect_norms(std::vector<std::byte> const& monolith, e
         std::rotate(column.begin(), column.begin() + sizeof(norms_t), column.end());
         safegraphs_header_t patched = header;
         patched.norms = norms;
-        std::array<safegraphs_custom_field_t, 2> const fields {
-            {{"metric", nk_kernel_name(kernel_)}, {"quantization", nk_dtype_name(index_t::vector_dtype_k)}}};
+        std::array<safegraphs_custom_field_t, 1> const fields {{{"metric", nk_kernel_name(kernel_)}}};
         failures += expect(succeeded(safegraphs_write_header(bytes_span_t {copy}, patched, fields)));
         return copy;
     };

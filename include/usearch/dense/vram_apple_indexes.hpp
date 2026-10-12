@@ -832,9 +832,6 @@ struct vram_apple_indexes {
 
         /** The metric token the monolith recorded; empty when it omitted one. */
         safegraphs_name_t metric;
-
-        /** The stored scalar the monolith recorded; empty when it omitted one. */
-        safegraphs_name_t quantization;
     };
 
     /**
@@ -1159,18 +1156,18 @@ struct vram_apple_indexes {
                     if (status_t const covered = keys.cover(first + rows); failed(covered)) return covered;
                     auto [seats, seat_status] = owner_->locators_of_key_.claim(rows);
                     if (failed(seat_status)) return seat_status;
-                    // The key column is chunked, so the part's keys land run by run.
+                    // The key column is chunked, so the part's keys land run by run, each widened.
+                    std::size_t const stored_bytes = part.header.key.row_bytes();
                     bytes_view_t const part_keys = part.header.rows_of(part.monolith, part.header.key,
                                                                        landing.rows.first, rows);
-                    std::size_t read_bytes = 0;
-                    status_t read = status_t::success_k;
+                    if (part_keys.size() != rows * stored_bytes) return status_t::malformed_k;
+                    byte_t const* stored = part_keys.data();
                     keys.for_each_span({first, first + rows}, [&](std::span<key_t> run) noexcept {
-                        if (succeeded(read))
-                            read = copy_bytes(bytes_of(run.data(), run.size()),
-                                              part_keys.subspan(read_bytes, run.size_bytes()));
-                        read_bytes += run.size_bytes();
+                        for (key_t& key : run) {
+                            key = safegraphs_widened_key<key_t>(stored, part.header.key.dtype);
+                            stored += stored_bytes;
+                        }
                     });
-                    if (failed(read)) return read;
                     for (std::size_t row = 0; row != rows; ++row)
                         owner_->locators_of_key_.insert(seats, keys[first + row],
                                                         key_locator_t {shard, static_cast<node_id_t>(first + row)});
@@ -1617,12 +1614,12 @@ struct vram_apple_indexes {
 
     /** The value column's dtype - the stored scalar's own token, so a packed word's suffix carries
      *  the packing and the column's shape counts logical dimensions. */
-    inline static constexpr dtype_t value_column_dtype_k = safegraphs_value_dtype<scalar_t>();
+    inline static constexpr dtype_t value_column_dtype_k = dtype_of(scalar_t::dtype());
 
     /** The norms column's dtype: the dot product's own token where the shards keep norms, and
      *  @c unknown_k where they keep none, so no column is written and none is read. */
     dtype_t norms_column_dtype_() const noexcept {
-        return !shards_.empty() && shards_[0].index->stores_norms() ? safegraphs_value_dtype<dot_result_t>()
+        return !shards_.empty() && shards_[0].index->stores_norms() ? dtype_of(dot_result_t::dtype())
                                                                     : dtype_t::unknown_k;
     }
 
@@ -1652,13 +1649,12 @@ struct vram_apple_indexes {
         return divide_round_up<std::size_t>(dimensions(), nk::dimensions_per_value<scalar_t>());
     }
 
-    /** The custom fields every monolith carries: the metric, the stored scalar by its own name -
-     *  what a packed @c u8 column cannot say - and the caller's provenance. */
+    /** The custom fields every monolith carries: the metric and the caller's provenance; the value
+     *  column's own dtype names the stored scalar. */
     status_t custom_fields_(growing_buffer<safegraphs_custom_field_t, forkunion_allocator_t>& fields,
                             save_config_t const& config) const noexcept {
-        if (failed(fields.reserve_exactly(2 + config.provenance.size()))) return status_t::bad_alloc_k;
+        if (failed(fields.reserve_exactly(1 + config.provenance.size()))) return status_t::bad_alloc_k;
         fields.push_back_reserved({"metric", nk_kernel_name(kernel_)});
-        fields.push_back_reserved({"quantization", nk_dtype_name(vector_dtype_)});
         for (safegraphs_custom_field_t const& field : config.provenance) fields.push_back_reserved(field);
         return status_t::success_k;
     }
@@ -1784,7 +1780,6 @@ struct vram_apple_indexes {
     status_t describe_part_(part_t& part) const noexcept {
         auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
             if (field.key == "metric") part.metric = safegraphs_name_t {field.value};
-            if (field.key == "quantization") part.quantization = safegraphs_name_t {field.value};
         };
         auto const [header, status] = safegraphs_read_header(part.monolith, allocator_, per_custom_field);
         if (failed(status)) return status;
@@ -1847,22 +1842,19 @@ struct vram_apple_indexes {
         return status_t::success_k;
     }
 
-    /** Whether @p part can land here: three regular columns of the index's own dtypes, the tokens
-     *  it names agreeing with this index, the geometry @p first froze, and every column
-     *  describing the same rows. */
+    /** Whether @p part can land here: three regular columns of the index's own dtypes, its keys
+     *  no wider than the index's, the metric it names agreeing with this index, the geometry
+     *  @p first froze, and every column describing the same rows. */
     status_t vetted_part_(part_t const& part, safegraphs_header_t const& first) const noexcept {
         safegraphs_header_t const& header = part.header;
         if (header.key.offsets || header.value.offsets || header.neighbors.offsets) return status_t::config_mismatch_k;
-        if (header.key.dtype != key_dtype_k || header.value.dtype != value_column_dtype_k ||
+        if (!safegraphs_key_widens(header.key.dtype, key_dtype_k) || header.value.dtype != value_column_dtype_k ||
             header.neighbors.dtype != dtype_t::u32_k)
             return status_t::config_mismatch_k;
         if (header.key.shape != column_shape_t {scalar_shape_t {}} || header.value.shape != first.value.shape ||
             header.neighbors.shape != first.neighbors.shape)
             return status_t::config_mismatch_k;
         if (!part.metric.empty() && nk_kernel_named(part.metric.characters, part.metric.view().size()) != kernel_)
-            return status_t::config_mismatch_k;
-        if (!part.quantization.empty() &&
-            nk_dtype_named(part.quantization.characters, part.quantization.view().size()) != vector_dtype_)
             return status_t::config_mismatch_k;
         if (header.key.nodes() != part.nodes || header.value.nodes() != part.nodes ||
             header.neighbors.nodes() != part.nodes)

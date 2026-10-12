@@ -20,6 +20,8 @@ std::size_t test::dense::check_nvme_indexes(settings_t const& settings) {
 #endif
     failures_count += test_nvme_uuid_configuration<blocking_files_engine<>, nk_bf16_k, nk_kernel_dot_k>(
         "nvme bf16+dot+blocking+uuid", settings.seed);
+    failures_count += test_nvme_widened_keys<blocking_files_engine<>, nk_bf16_k, nk_kernel_dot_k>(
+        "nvme bf16+dot+blocking+widened", settings.seed);
     // The tiled scans: Arm SME and Intel AMX, each skipped where the build or the host lacks it.
     constexpr nk_capability_t sme_caps_k = static_cast<nk_capability_t>(nk_cap_serial_k | nk_cap_sme_k);
     constexpr nk_capability_t amx_caps_k = static_cast<nk_capability_t>(nk_cap_serial_k | nk_cap_sapphireamx_k);

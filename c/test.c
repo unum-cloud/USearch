@@ -1023,6 +1023,117 @@ void test_nvme_view(size_t const dimensions) {
     printf("Test: NVMe View - PASSED\n");
 }
 
+/** A SafeGraphs monolith shaped like a benchmark's save - `u32` keys, `bf16` rows, 16 neighbors
+ *  each - framed here by hand, opens through the NVMe view with every key zero-extended into the
+ *  16-byte ones the ABI speaks, so it counts and ranks under the identity it was saved with. */
+void test_nvme_view_narrow_keys(void) {
+    printf("Test: NVMe View of u32 Keys...\n");
+
+    enum { rows_count = 4, dimensions = 8, connectivity = 16, alignment = 64 };
+    enum { keys_bytes = rows_count * 4, values_bytes = rows_count * dimensions * 2 };
+    enum { values_first = alignment, neighbors_first = values_first + alignment };
+    enum { neighbors_bound = neighbors_first + rows_count * connectivity * 4 };
+    char json[512];
+    int json_length = snprintf(json, sizeof(json), "{\"__metadata__\":{\"alignment\":%d,\"metric\":\"dot\"},",
+                               alignment);
+    json_length += snprintf(json + json_length, sizeof(json) - (size_t)json_length,
+                            "\"key\":{\"dtype\":\"u32\",\"data\":[0,%d]},", keys_bytes);
+    json_length += snprintf(json + json_length, sizeof(json) - (size_t)json_length,
+                            "\"value\":{\"dtype\":\"bf16\",\"shape\":%d,\"data\":[%d,%d]},", dimensions, values_first,
+                            values_first + values_bytes);
+    json_length += snprintf(json + json_length, sizeof(json) - (size_t)json_length,
+                            "\"neighbors\":{\"dtype\":\"u32\",\"shape\":%d,\"data\":[%d,%d]}}", connectivity,
+                            neighbors_first, neighbors_bound);
+    size_t const data_offset = (16 + (size_t)json_length + alignment - 1) / alignment * alignment;
+    size_t const file_bytes = data_offset + neighbors_bound;
+    uint8_t* const file = (uint8_t*)calloc(file_bytes, 1);
+    expect(file, "Failed to allocate memory");
+    memcpy(file, "SAFEGRPH", 8);
+    for (unsigned byte_index = 0; byte_index != 8; ++byte_index)
+        file[8 + byte_index] = (uint8_t)((uint64_t)(data_offset - 16) >> (byte_index * 8));
+    memset(file + 16, ' ', data_offset - 16);
+    memcpy(file + 16, json, (size_t)json_length);
+
+    // Row `r` holds `r + 1` in every dimension, exact in `bf16`'s upper half of the `f32` bits, is
+    // keyed `100 + r`, and links every other row before the all-ones sentinels.
+    for (size_t row = 0; row != rows_count; ++row) {
+        uint8_t* const key = file + data_offset + row * 4;
+        for (unsigned byte_index = 0; byte_index != 4; ++byte_index)
+            key[byte_index] = (uint8_t)((100 + row) >> (byte_index * 8));
+        float const value = (float)(row + 1);
+        uint32_t bits;
+        memcpy(&bits, &value, sizeof(bits));
+        for (size_t position = 0; position != dimensions; ++position) {
+            uint8_t* const scalar = file + data_offset + values_first + (row * dimensions + position) * 2;
+            scalar[0] = (uint8_t)(bits >> 16);
+            scalar[1] = (uint8_t)(bits >> 24);
+        }
+        uint8_t* const neighbors = file + data_offset + neighbors_first + row * connectivity * 4;
+        memset(neighbors, 0xFF, connectivity * 4);
+        for (size_t other = 0, slot = 0; other != rows_count; ++other) {
+            if (other == row) continue;
+            memset(neighbors + slot * 4, 0, 4);
+            neighbors[slot * 4] = (uint8_t)other;
+            ++slot;
+        }
+    }
+    char const path[] = "usearch-test-c-nvme-u32.safegraphs";
+    FILE* const stream = fopen(path, "wb");
+    expect(stream && fwrite(file, 1, file_bytes, stream) == file_bytes && fclose(stream) == 0,
+           "Failed to write the hand-framed monolith");
+    free(file);
+
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t storage = NULL;
+    usearch_dense_index_t view = NULL;
+    usearch_bytes_view_t const path_view = {(uint8_t const*)path, sizeof(path) - 1};
+    usearch_executor_for_nvme(&(usearch_executor_for_nvme_t) {.executor = &storage, .outcome = &outcome, .threads = 2});
+    if (outcome.status == usearch_status_success_k)
+        usearch_dense_view_nvme(
+            &(usearch_dense_view_nvme_t) {.index = &view, .executor = storage, .outcome = &outcome, .path = path_view});
+    if (outcome.status == usearch_status_unsupported_k) {
+        printf("Test: NVMe View of u32 Keys - SKIPPED: %s\n", outcome.message);
+        usearch_executor_free(storage);
+        remove(path);
+        return;
+    }
+    expect(!outcome.message, outcome.message);
+
+    size_t entries = 0;
+    usearch_dense_count(&(usearch_dense_count_t) {.index = view,
+                                                  .executor = storage,
+                                                  .outcome = &outcome,
+                                                  .key = key_of(102),
+                                                  .entries = &entries});
+    expect(!outcome.message, outcome.message);
+    expect_eq(entries, 1, "A `u32` key must count once under its widened identity");
+
+    // Every row's dot with a positive query grows with its row number, so the last row ranks first.
+    float query[dimensions];
+    for (size_t position = 0; position != dimensions; ++position) query[position] = 1;
+    usearch_arena_t const arena = create_arena(storage);
+    usearch_matches_view_t matches = {0};
+    usearch_dense_search(
+        &(usearch_dense_search_t) {.index = view,
+                                   .executor = storage,
+                                   .outcome = &outcome,
+                                   .count = 1,
+                                   .queries = {query, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
+                                   .matches = &matches,
+                                   .arena = arena,
+                                   .wanted = 1});
+    expect(!outcome.message, outcome.message);
+    usearch_key_t const last = key_of(100 + rows_count - 1);
+    expect(matches.counts[0] == 1 && memcmp(matches.keys[0].bytes, last.bytes, sizeof(usearch_key_t)) == 0,
+           "A walk over `u32` keys must resolve them widened");
+
+    usearch_arena_free(arena);
+    usearch_dense_free(view);
+    usearch_executor_free(storage);
+    remove(path);
+    printf("Test: NVMe View of u32 Keys - PASSED\n");
+}
+
 /** A message is @c NULL exactly when the status is success, and the outcome a caller reuses is
  *  fully overwritten - the contract every binding branches on. Only the success half is
  *  exercised here; the failing verbs are the ones `src/` has yet to instantiate. */
@@ -1428,6 +1539,7 @@ int main(int argc, char* argv[]) {
     test_attend();
 #endif
     test_nvme_view(dimension_counts[0]);
+    test_nvme_view_narrow_keys();
     test_vram_parts_share_a_device(collection_sizes[1], dimension_counts[1]);
     test_deferred_search();
     test_deferred_limit();

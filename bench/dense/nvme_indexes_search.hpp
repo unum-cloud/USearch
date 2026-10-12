@@ -177,19 +177,20 @@ inline bool read_parts_header(settings_t& settings, nvme_settings_t& nvme) {
     if (!first.empty()) header = read_header_bytes(first);
     if (header.empty()) return fmt::println("Failed to read the SafeGraphs header of {}", first), false;
 
-    safegraphs_name_t metric, quantization, scale;
+    safegraphs_name_t metric, scale;
     auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
         if (field.key == "metric") metric = safegraphs_name_t {field.value};
-        if (field.key == "quantization") quantization = safegraphs_name_t {field.value};
         if (field.key == "scale") scale = safegraphs_name_t {field.value};
     };
-    if (failed(safegraphs_read_header(bytes_view_t {header}, std::allocator<byte_t> {}, per_custom_field).status))
+    auto const [parsed, parse_status] = safegraphs_read_header(bytes_view_t {header}, std::allocator<byte_t> {},
+                                                               per_custom_field);
+    if (failed(parse_status))
         return fmt::println("Failed to parse the SafeGraphs header of {}", first.empty() ? view : first), false;
     settings.kernel = nk_kernel_named(metric.characters, metric.view().size());
-    settings.stored_dtype = nk_dtype_named(quantization.characters, quantization.view().size());
+    settings.stored_dtype = nk_dtype_of(parsed.value.dtype);
     if (settings.kernel == nk_kernel_unknown_k || settings.stored_dtype == nk_dtype_unknown_k)
-        return fmt::println("The parts name metric \"{}\" and quantization \"{}\"; both are needed to dispatch",
-                            metric.view(), quantization.view()),
+        return fmt::println("The parts name metric \"{}\" and value dtype \"{}\"; both are needed to dispatch",
+                            metric.view(), dtype_name(parsed.value.dtype)),
                false;
     if (!scale.empty()) nvme.scale = std::strtof(scale.characters, nullptr);
     return true;

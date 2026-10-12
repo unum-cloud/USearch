@@ -94,7 +94,7 @@ struct save_config_t {
     synchronization_t synchronization = synchronization_t::concurrent_k;
 
     /** Free-form `__metadata__` strings - @c created_by, @c embedding_model, @c built_at;
-     *  the metric, quantization and alignment are the writer's own. */
+     *  the metric and alignment are the writer's own. */
     std::span<safegraphs_custom_field_t const> provenance = {};
 
     /** Whether this config can be written: a legal alignment, and no provenance key the
@@ -103,9 +103,7 @@ struct save_config_t {
         if (alignment < safegraphs_alignment_floor_k || !std::has_single_bit(alignment))
             return status_t::config_mismatch_k;
         for (safegraphs_custom_field_t const& field : provenance)
-            if (field.key == "metric" || field.key == "quantization" || field.key == "nodes" ||
-                field.key == "alignment")
-                return status_t::config_mismatch_k;
+            if (field.key == "metric" || field.key == "alignment") return status_t::config_mismatch_k;
         return status_t::success_k;
     }
 };
@@ -444,8 +442,14 @@ expected<safegraphs_header_t> safegraphs_read_header(bytes_view_t monolith, allo
     yyjson_val* root = yyjson_doc_get_root(document);
     if (yyjson_val* metadata = yyjson_obj_get(root, "__metadata__"); yyjson_is_obj(metadata)) {
         // A producer may declare any power of two; anything under the floor reads as the floor.
-        if (yyjson_val* alignment = yyjson_obj_get(metadata, "alignment"))
-            header.alignment = max_of<std::size_t>(yyjson_get_uint(alignment), safegraphs_alignment_floor_k);
+        if (yyjson_val* alignment = yyjson_obj_get(metadata, "alignment")) {
+            std::size_t declared = 0;
+            if (!safegraphs_addressable_(yyjson_get_uint(alignment), declared) || !std::has_single_bit(declared)) {
+                yyjson_doc_free(document);
+                return {header, status_t::malformed_k};
+            }
+            header.alignment = max_of<std::size_t>(declared, safegraphs_alignment_floor_k);
+        }
         yyjson_obj_iter entries = yyjson_obj_iter_with(metadata);
         while (yyjson_val* key = yyjson_obj_iter_next(&entries))
             if (yyjson_val* value = yyjson_obj_iter_get_val(key); yyjson_is_str(value))
@@ -464,7 +468,6 @@ expected<safegraphs_header_t> safegraphs_read_header(bytes_view_t monolith, allo
     header.key = key, header.value = value, header.neighbors = neighbors, header.norms = norms;
 
     // The data segment starts on the declared alignment boundary at or past the JSON's end.
-    if (!std::has_single_bit(header.alignment)) return {header, status_t::malformed_k};
     header.data_offset = round_up_to_multiple<std::size_t>(sizeof(prefix) + header_length, header.alignment);
     return {header, status_t::success_k};
 }
@@ -606,19 +609,38 @@ constexpr dtype_t safegraphs_key_dtype() noexcept {
     else return dtype_t::unknown_k;
 }
 
+/** Whether a key column of @p stored dtype loads into keys of @p wanted dtype: the same token, or a
+ *  narrower one zero-extended - @c u32 into @c u64 or @c uuid, @c u64 into @c uuid. */
+constexpr bool safegraphs_key_widens(dtype_t stored, dtype_t wanted) noexcept {
+    if (stored == wanted) return true;
+    if (stored == dtype_t::u32_k) return wanted == dtype_t::u64_k || wanted == dtype_t::uuid_k;
+    return stored == dtype_t::u64_k && wanted == dtype_t::uuid_k;
+}
+
+/** The key a column of @p stored dtype holds at @p source, widened as @ref safegraphs_key_widens
+ *  admits: copied as is at the key's own dtype, else read as a little-endian integer and
+ *  zero-extended - numerically into an integer key, through @ref uuid_of into a @c uuid. */
+template <typename key_type_>
+key_type_ safegraphs_widened_key(byte_t const* source, dtype_t stored) noexcept {
+    key_type_ key;
+    if (stored == safegraphs_key_dtype<key_type_>()) return std::memcpy(&key, source, sizeof(key)), key;
+    u64_t number;
+    if (stored == dtype_t::u32_k) {
+        u32_t narrow;
+        std::memcpy(&narrow, source, sizeof(narrow));
+        number = narrow;
+    }
+    else std::memcpy(&number, source, sizeof(number));
+    if constexpr (std::integral<key_type_>) return static_cast<key_type_>(number);
+    else return uuid_of(number);
+}
+
 /** The interchange token of one node ID: the interchange admits @c u32 and @c u64. */
 template <typename node_id_type_>
 constexpr dtype_t safegraphs_node_id_dtype() noexcept {
     if constexpr (sizeof(node_id_type_) == 4) return dtype_t::u32_k;
     else if constexpr (sizeof(node_id_type_) == 8) return dtype_t::u64_k;
     else return dtype_t::unknown_k;
-}
-
-/** The value column's dtype for a stored scalar - its own token, the packed families
- *  included, whose @c x2 and @c x8 suffixes let a shape count logical elements. */
-template <typename scalar_type_>
-constexpr dtype_t safegraphs_value_dtype() noexcept {
-    return dtype_named(scalar_type_::dtype_name());
 }
 
 /** What the regular columns need to be laid out: the node count, each column's element
@@ -716,11 +738,7 @@ struct safegraphs_metadata_t {
     /** The metric the graph was built for; empty when the producer omitted it. */
     safegraphs_name_t metric;
 
-    /** The stored scalar by its own name - what a packed @c u8 value column cannot say;
-     *  empty when the producer omitted it. */
-    safegraphs_name_t quantization;
-
-    /** Element type of every part's value column. */
+    /** Element type of every part's value column - the stored scalar's own token. */
     dtype_t value_dtype = dtype_t::unknown_k;
 
     /** Element type of every part's key column. */
@@ -880,11 +898,10 @@ expected<std::size_t> safegraphs_manifest_bytes(std::size_t parts, callback_type
 
 /** The metadata one monolith's header implies - the answer every schema question has,
  *  whether it was asked of a lone monolith or of a checkpoint's first part. */
-inline safegraphs_metadata_t safegraphs_metadata_of_(safegraphs_header_t const& header, safegraphs_name_t metric,
-                                                     safegraphs_name_t quantization) noexcept {
+inline safegraphs_metadata_t safegraphs_metadata_of_(safegraphs_header_t const& header,
+                                                     safegraphs_name_t metric) noexcept {
     safegraphs_metadata_t metadata;
     metadata.metric = metric;
-    metadata.quantization = quantization;
     metadata.value_dtype = header.value.dtype;
     metadata.key_dtype = header.key.dtype;
     metadata.value_shape = header.value.shape;
@@ -933,16 +950,14 @@ expected<safegraphs_metadata_t> safegraphs_read_manifest(std::string_view path, 
     if (first_relative.empty()) return {metadata, status_t::malformed_k};
     if (failed(resolve_status)) return {metadata, resolve_status};
     safegraphs_name_t metric;
-    safegraphs_name_t quantization;
     auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
         if (field.key == "metric") metric = safegraphs_name_t {field.value};
-        if (field.key == "quantization") quantization = safegraphs_name_t {field.value};
     };
     auto const [header, header_status] = safegraphs_read_header(first_path, allocator, per_custom_field);
     if (failed(header_status)) return {metadata, header_status};
     std::size_t const parts = metadata.parts;
     std::size_t const nodes = metadata.nodes;
-    metadata = safegraphs_metadata_of_(header, metric, quantization);
+    metadata = safegraphs_metadata_of_(header, metric);
     metadata.parts = parts;
     metadata.nodes = nodes ? nodes : metadata.nodes;
     return {metadata, status_t::success_k};
@@ -972,14 +987,12 @@ template <typename allocator_type_ = std::allocator<byte_t>>
 expected<safegraphs_metadata_t> safegraphs_read_metadata(bytes_view_t monolith,
                                                          allocator_type_ allocator = {}) noexcept {
     safegraphs_name_t metric;
-    safegraphs_name_t quantization;
     auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
         if (field.key == "metric") metric = safegraphs_name_t {field.value};
-        if (field.key == "quantization") quantization = safegraphs_name_t {field.value};
     };
     auto const [header, parse_status] = safegraphs_read_header(monolith, allocator, per_custom_field);
     if (failed(parse_status)) return {safegraphs_metadata_t {}, parse_status};
-    return {safegraphs_metadata_of_(header, metric, quantization), status_t::success_k};
+    return {safegraphs_metadata_of_(header, metric), status_t::success_k};
 }
 
 /** The metadata of a manifest or of a lone monolith at @p path - told apart by content,

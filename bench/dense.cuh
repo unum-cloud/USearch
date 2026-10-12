@@ -5,10 +5,10 @@
  *  @brief The backend-neutral benchmarking surface shared by every dense-index residency - volatile
  *      in-RAM, GPU-resident, and persisted alike.
  *
- *  Only what every binary shares lives here: the CLI option set, the RetriEval checkpoint naming
- *  and layout, the dataset streaming trampoline, and the process setup of the CPU binaries. The
- *  search telemetry and judgment live in @c dense_search.cuh, the algebra surface in
- *  @c dense_algebra.cuh. The run loops are backend property, so this header names no index and
+ *  Only what every binary shares lives here: the CLI option set, the SafeGraphs checkpoint naming
+ *  and the single-index monolith, the dataset streaming trampoline, and the process setup of the
+ *  CPU binaries. The search telemetry and judgment live in @c dense_search.cuh, the algebra surface
+ *  in @c dense_algebra.cuh. The run loops are backend property, so this header names no index and
  *  reads no index-specific members - the same surface compiles under host compilers and nvcc.
  */
 #pragma once
@@ -18,7 +18,7 @@
 #include <cstdlib> // `std::exit`
 #include <cstring> // `std::memcpy` - the checkpoint runs
 
-#include <algorithm>   // `std::ranges::find`, `std::copy_n`, `std::max`
+#include <algorithm>   // `std::ranges::find`, `std::max`
 #include <charconv>    // `std::from_chars` - the `--memory-domain` ordinal
 #include <ranges>      // `std::views::iota`, `std::views::filter`, `std::views::transform`
 #include <span>        // `std::span`
@@ -37,6 +37,7 @@
 #include <stringzilla/stringzilla.hpp>
 
 #include "usearch/utilities/safegraphs_format.hpp"
+#include "usearch/dense/types.hpp" // `dense::dtype_of` - the checkpoint columns
 
 #if !USEARCH_OS_WINDOWS_
 #include <unistd.h> // `isatty`
@@ -44,7 +45,7 @@
 
 #include "arguments.hpp" // `flag_t`, `count_t`, `counts_t`, `switch_t`, `parse_or_exit`
 #include "bench.hpp"
-#include "utilities/persisted_dataset.hpp" // `mapped_file_t`, `parse_matrix_header`, `matrix_save`
+#include "utilities/persisted_dataset.hpp" // `persisted_dataset`, `dtype_of_extension`, `mapped_file_t`
 
 namespace unum::usearch::bench {
 
@@ -327,7 +328,7 @@ struct settings_t {
     switch_t self_recall = switch_t::absent_k;
 
     /** Checkpoint name to serialize every domain index into after ingestion, resolved through
-     *  @ref checkpoint_paths_of. */
+     *  @ref checkpoint_path_of. */
     std::string_view save_name;
 
     /** Checkpoint name to restore domain indexes from before ingestion; pair it with
@@ -575,25 +576,24 @@ inline void print(settings_t const& settings) {
     }
 }
 
-/** The three matrix files one checkpointed slot spans - each a RetriEval-layout dump. */
-struct checkpoint_paths_t {
-    std::string vectors;
-    std::string neighbors;
-    std::string rows;
-};
-
-/** Resolves a user-facing checkpoint name into one slot's matrix-file paths. The stamp names what
- *  the payload depends on - stored dtype, distance kernel, connectivity - so any backend
- *  instantiating the same combination computes the same names, and a mismatched one finds
- *  nothing. */
+/** Resolves a user-facing checkpoint name into its SafeGraphs path: one monolith for a single
+ *  index, the manifest beside one monolith per shard for a sharded one. The stamp names what the
+ *  payload depends on - stored dtype, distance kernel, connectivity - so any backend instantiating
+ *  the same combination computes the same name, and a mismatched one finds nothing. */
 template <typename index_type_>
-static checkpoint_paths_t checkpoint_paths_of(settings_t const& settings, index_type_ const& index,
-                                              std::string_view name, std::size_t slot, std::size_t slot_count) {
-    std::string const prefix = fmt::format( //
-        "{}/{}-{}-{}-c{}-{}-{}", settings.checkpoints_dir, name, index_type_::scalar_t::dtype_name(),
-        nk_kernel_name(index.kernel()), settings.connectivity.value, slot, slot_count);
-    return {fmt::format("{}.vectors.{}bin", prefix, index_type_::scalar_t::dtype_name()), //
-            prefix + ".neighbors.ibin", prefix + ".rows.ibin"};
+std::string checkpoint_path_of(settings_t const& settings, index_type_ const& index, std::string_view name) {
+    constexpr bool sharded_k = requires(index_type_ const& indexes) { indexes.shards_count(); };
+    return fmt::format( //
+        "{}/{}-{}-{}-c{}.safegraphs{}", settings.checkpoints_dir, name, index_type_::scalar_t::dtype_name(),
+        nk_kernel_name(index.kernel()), settings.connectivity.value, sharded_k ? ".json" : "");
+}
+
+/** The norms column dtype a single index's checkpoint carries: the dot product's own token where
+ *  the index keeps norms, @c unknown_k where it keeps none. */
+template <typename index_type_>
+dtype_t checkpoint_norms_dtype(index_type_ const& index) noexcept {
+    using dot_result_t = typename index_type_::scalar_t::dot_result_t;
+    return index.stores_norms() ? usearch::dense::dtype_of(dot_result_t::dtype()) : dtype_t::unknown_k;
 }
 
 /** Maps the CLI neighbor-list degree onto the closed @c connectivity_t tiling set. */
@@ -605,126 +605,116 @@ inline connectivity_t connectivity_of(std::size_t degree) noexcept {
 }
 
 /**
- *  @brief Restores one index slot from its three RetriEval-layout matrix dumps, refilling the
- *      ID → row map the recall bookkeeping needs. Prints its own diagnostics.
+ *  @brief Restores a single index from a SafeGraphs checkpoint - its monolith, or else the manifest
+ *      a sharded save committed, whose parts append in order - and refills the ID → row map from
+ *      the keys. Prints its own diagnostics.
  *
- *  @param[in] settings Supplies @c load_name, @c checkpoints_dir and the @c connectivity.
- *  @param[inout] index A virgin index already reserved to the run's geometry, which the mapped
- *      headers are validated against.
- *  @param[in] dimensions Row width the vectors matrix must match.
+ *  @param[in] settings Supplies @c load_name and @c checkpoints_dir.
+ *  @param[inout] index A virgin index already reserved to the run's geometry, which every part's
+ *      header is vetted against.
  *  @param[out] id_to_row Landing for the restored map; spans at least the checkpoint's rows.
- *  @param[in] slot This index's position among the sibling slots.
- *  @param[in] slot_count Sibling slots the save spanned; both are baked into the file names.
- *  @return True on a fully restored slot; false after printing what failed.
+ *  @return True on a fully restored index; false after printing what failed.
  */
 template <typename index_type_>
-static bool load_checkpoint(settings_t const& settings, index_type_& index, std::size_t dimensions,
-                            std::span<u32_t> id_to_row, std::size_t slot, std::size_t slot_count) {
+static bool load_checkpoint(settings_t const& settings, index_type_& index, std::span<u32_t> id_to_row) {
     using scalar_t = typename index_type_::scalar_t;
-    checkpoint_paths_t const paths = checkpoint_paths_of(settings, index, settings.load_name, slot, slot_count);
-    auto [vectors_mapping, vectors_map_status] = mapped_file_t::read(paths.vectors);
-    auto [neighbors_mapping, neighbors_map_status] = mapped_file_t::read(paths.neighbors);
-    auto [rows_mapping, rows_map_status] = mapped_file_t::read(paths.rows);
-    if (failed(vectors_map_status) || failed(neighbors_map_status) || failed(rows_map_status)) {
-        fmt::println("Failed to map the {} checkpoint for slot {}", settings.load_name, slot);
-        return false;
-    }
-
-    auto const [vectors_extents,
-                vectors_status] = utilities::parse_matrix_header<scalar_t, u32_t>(vectors_mapping.view());
-    auto const [neighbors_extents,
-                neighbors_status] = utilities::parse_matrix_header<u32_t, u32_t>(neighbors_mapping.view());
-    auto const [map_extents, map_status] = utilities::parse_matrix_header<u32_t, u32_t>(rows_mapping.view());
-    bool const parsed = succeeded(vectors_status) && succeeded(neighbors_status) && succeeded(map_status);
-    std::size_t const loaded_nodes = vectors_extents.rows;
-    if (!parsed || vectors_extents.columns != dimensions || neighbors_extents.columns != settings.connectivity.value ||
-        map_extents.columns != 1 || neighbors_extents.rows != loaded_nodes || map_extents.rows != loaded_nodes ||
-        loaded_nodes > id_to_row.size()) {
-        fmt::println("Checkpoint {} disagrees with the run's geometry", settings.load_name);
-        return false;
-    }
-
-    nk::matrix_view<scalar_t> const vectors_view = utilities::view_matrix_payload<scalar_t, u32_t>(
-        vectors_mapping.view(), loaded_nodes, dimensions);
-    nk::matrix_view<u32_t> const neighbors_view = utilities::view_matrix_payload<u32_t, u32_t>(
-        neighbors_mapping.view(), loaded_nodes, settings.connectivity.value);
-    // Both the chunks and the mapped dumps are dense, so a chunk is one byte move.
-    std::size_t const vectors_row_bytes = static_cast<std::size_t>(vectors_view.stride_bytes(0));
-    std::size_t const neighbors_row_bytes = static_cast<std::size_t>(neighbors_view.stride_bytes(0));
-    bytes_view_t const vectors_source {reinterpret_cast<byte_t const*>(vectors_view.byte_data()),
-                                       loaded_nodes * vectors_row_bytes};
-    bytes_view_t const neighbors_source {reinterpret_cast<byte_t const*>(neighbors_view.byte_data()),
-                                         loaded_nodes * neighbors_row_bytes};
     using node_id_t = typename index_type_::node_id_t;
-    status_t const loaded = index.load({vectors_source, neighbors_source}, loaded_nodes,
-                                       {0, static_cast<node_id_t>(loaded_nodes)});
-    if (loaded != status_t::success_k) {
-        fmt::println("Failed to restore {}: status {}", paths.vectors, int(loaded));
-        return false;
+    typename index_type_::saved_shape_t const shape = index.saved_shape();
+    std::string const monolith_path = checkpoint_path_of(settings, index, settings.load_name);
+    std::vector<std::string> part_paths;
+    auto per_part = [&](safegraphs_part_t part) {
+        part_paths.push_back(fmt::format("{}/{}", settings.checkpoints_dir, part.path));
+    };
+    if (failed(safegraphs_read_manifest(monolith_path + ".json", std::allocator<byte_t> {}, per_part).status))
+        part_paths = {monolith_path};
+
+    std::size_t loaded = 0;
+    for (std::string const& path : part_paths) {
+        auto [mapping, map_status] = mapped_file_t::read(path);
+        if (failed(map_status)) {
+            fmt::println("Failed to map {}: {}", path, status_to_string(map_status));
+            return false;
+        }
+        bytes_view_t const monolith = mapping.view();
+        auto const [header, header_status] = safegraphs_read_header(monolith);
+        std::size_t const nodes = header.nodes();
+        if (failed(header_status) || header.key.offsets || header.value.offsets || header.neighbors.offsets ||
+            header.key.dtype != dtype_t::u32_k || header.value.dtype != usearch::dense::dtype_of(scalar_t::dtype()) ||
+            header.neighbors.dtype != dtype_t::u32_k || regular_width(header.value.shape) != shape.dimensions ||
+            regular_width(header.neighbors.shape) != shape.connectivity || header.monolith_bytes() > monolith.size() ||
+            nodes > id_to_row.size() - loaded) {
+            fmt::println("Checkpoint {} disagrees with the run's geometry", path);
+            return false;
+        }
+        // Each part's IDs are its own, so it appends as one source past every earlier part.
+        status_t const restored = index.load(
+            {header.data_of(monolith, header.value), header.data_of(monolith, header.neighbors),
+             header.norms_of(monolith, checkpoint_norms_dtype(index))},
+            nodes, {0, static_cast<node_id_t>(nodes)});
+        if (failed(restored)) {
+            fmt::println("Failed to restore {}: {}", path, status_to_string(restored));
+            return false;
+        }
+        std::memcpy(id_to_row.data() + loaded, header.data_of(monolith, header.key).data(), nodes * sizeof(u32_t));
+        loaded += nodes;
     }
-    nk::matrix_view<u32_t> const rows_view = utilities::view_matrix_payload<u32_t, u32_t>(rows_mapping.view(),
-                                                                                          loaded_nodes, 1);
-    std::copy_n(rows_view.data(), loaded_nodes, id_to_row.data());
     return true;
 }
 
 /**
- *  @brief Serializes one index slot as three RetriEval-layout matrices - vectors, neighbors and
- *      the ID → row map. Prints its own diagnostics.
+ *  @brief Serializes a single index as one SafeGraphs monolith whose keys are the ID → row map, so
+ *      every residency, sharded or not, and the NVMe benches read it back. Prints its own
+ *      diagnostics.
  *
  *  @param[in] settings Supplies @c save_name, @c checkpoints_dir and the @c connectivity.
  *  @param[inout] index The built index; @c save drains it under @c immutable_k, so no insertions
  *      may be in flight.
  *  @param[in] id_to_row The map filled during ingestion; its first @c saved_shape().nodes entries
- *      ride along as the third matrix.
- *  @param[in] slot This index's position among the sibling slots.
- *  @param[in] slot_count Sibling slots the save spans; both are baked into the file names.
- *  @return The serialized byte volume, or zero on failure - a real checkpoint never is.
+ *      become the key column.
+ *  @param[in] scale The factor the rows were rescaled by, which a view stages its queries under.
+ *  @return The monolith's bytes, or zero on failure - a real checkpoint never is.
  */
 template <typename index_type_>
-static std::size_t save_checkpoint(settings_t const& settings, index_type_& index, std::span<u32_t> id_to_row,
-                                   std::size_t slot, std::size_t slot_count) {
+static std::size_t save_checkpoint(settings_t const& settings, index_type_& index, std::span<u32_t const> id_to_row,
+                                   float scale) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     typename index_type_::saved_shape_t const shape = index.saved_shape();
-    auto vectors = nk::matrix<scalar_t>::zeros({shape.nodes, shape.dimensions}).value;
-    auto neighbors = nk::matrix<node_id_t>::zeros({shape.nodes, shape.connectivity}).value;
-    if (vectors.empty() || neighbors.empty()) {
-        fmt::println("Failed to stage {} rows for serialization", shape.nodes);
+    std::string const path = checkpoint_path_of(settings, index, settings.save_name);
+    std::string const scale_text = fmt::format("{}", scale);
+    safegraphs_custom_field_t const fields[] = {{"metric", nk_kernel_name(index.kernel())}, {"scale", scale_text}};
+    auto const [header, header_status] = safegraphs_regular_header(
+        {shape.nodes, dtype_t::u32_k, usearch::dense::dtype_of(scalar_t::dtype()), shape.dimensions, dtype_t::u32_k,
+         shape.connectivity, checkpoint_norms_dtype(index)},
+        safegraphs_alignment_default_k, fields);
+    if (failed(header_status) || id_to_row.size() < shape.nodes) {
+        fmt::println("Failed to frame {} rows for {}", shape.nodes, path);
         return 0;
     }
-    // The staged matrices are dense, so a chunk is one byte move.
-    std::size_t const vectors_row_bytes = static_cast<std::size_t>(vectors.stride_bytes(0));
-    std::size_t const neighbors_row_bytes = static_cast<std::size_t>(neighbors.stride_bytes(0));
-    bytes_span_t const vectors_target {reinterpret_cast<byte_t*>(vectors.data()), shape.nodes * vectors_row_bytes};
-    bytes_span_t const neighbors_target {reinterpret_cast<byte_t*>(neighbors.data()),
-                                         shape.nodes * neighbors_row_bytes};
+    auto [file, map_status] = mapped_file_t::write(path, header.monolith_bytes());
     // One step's rows at most: a storage chunk never holds more, and the device plan ignores it.
     auto scratch =
         nk::matrix<node_id_t>::zeros({min_of(shape.nodes, power_of_two<std::size_t>(20)), shape.connectivity}).value;
-    if (shape.nodes && scratch.empty()) {
-        fmt::println("Failed to stage the neighbor scratch for index {}", slot);
+    if (failed(map_status) || (shape.nodes && scratch.empty())) {
+        fmt::println("Failed to map {} or to stage the neighbor scratch", path);
         return 0;
     }
-    status_t const saved = index.save({vectors_target, neighbors_target}, synchronization_t::immutable_k,
-                                      scratch.span());
-    if (saved != status_t::success_k) {
-        fmt::println("Failed to serialize index {}: status {}", slot, int(saved));
+    bytes_span_t const monolith = file.span();
+    status_t const saved = index.save({header.rows_of(monolith, header.value, 0, shape.nodes),
+                                       header.rows_of(monolith, header.neighbors, 0, shape.nodes),
+                                       header.rows_of(monolith, header.norms, 0, shape.nodes)},
+                                      synchronization_t::immutable_k, scratch.span());
+    if (failed(saved)) {
+        fmt::println("Failed to serialize the index: {}", status_to_string(saved));
         return 0;
     }
-
-    checkpoint_paths_t const paths = checkpoint_paths_of(settings, index, settings.save_name, slot, slot_count);
-    nk::matrix_view<u32_t> const rows_map_view {id_to_row.data(), {shape.nodes, 1}};
-    bool const written =
-        utilities::matrix_save<scalar_t>(paths.vectors.c_str(), vectors.view()) == status_t::success_k &&
-        utilities::matrix_save<node_id_t>(paths.neighbors.c_str(), neighbors.view()) == status_t::success_k &&
-        utilities::matrix_save<u32_t>(paths.rows.c_str(), rows_map_view) == status_t::success_k;
-    if (!written) {
-        fmt::println("Failed to write the {} checkpoint for slot {}", settings.save_name, slot);
+    std::memcpy(header.rows_of(monolith, header.key, 0, shape.nodes).data(), id_to_row.data(),
+                shape.nodes * sizeof(u32_t));
+    if (failed(safegraphs_write_header(monolith, header, fields)) || failed(file.sync())) {
+        fmt::println("Failed to commit {}", path);
         return 0;
     }
-    return shape.nodes * (static_cast<std::size_t>(vectors.view().stride_bytes(0)) + //
-                          shape.connectivity * sizeof(node_id_t) + sizeof(u32_t));
+    return header.monolith_bytes();
 }
 
 #pragma endregion

@@ -11,7 +11,8 @@
 #pragma once
 
 #include "dense.cuh"
-#include "vram_index.cuh" // the vendor's `vram_cell`
+#include "nvme_indexes.hpp" // `nvme_reference`, `nvme_checkpoint_t` - the round trip through storage
+#include "vram_index.cuh"   // the vendor's `vram_cell`
 
 namespace unum::usearch::test::dense {
 
@@ -183,6 +184,46 @@ std::size_t test_dense_vram_indexes_indexer_search(u64_t seed) {
     }
 }
 
+/** A RAM group's monolith loaded into the VRAM collection and saved again comes back byte for byte,
+ *  norms included, and the NVMe tier views the VRAM save as it views the RAM one. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+std::size_t test_dense_vram_indexes_nvme_roundtrip(u64_t seed) {
+    using key_t = typename indexes_type_::key_t;
+    using nvme_t = nvme_indexes<key_t, indexes_type_::vector_dtype_k, nk_cap_serial_k, blocking_files_engine<>>;
+    using scalar_t = typename nvme_t::scalar_t;
+    std::size_t const rows_count = 2 * dense_thread_nodes_k;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+
+    nvme_reference<nvme_t> reference {"vram_nvme_roundtrip", kernel_, rows_count, dimensions, seed};
+    std::size_t failures = reference.failures;
+    failures += expect(succeeded(
+        reference.built.save(reference.checkpoint.monolith.data(), save_config_t {}, reference.builder.executor)));
+
+    indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(indexes)));
+    dense_indexes_executor<indexes_type_> driver;
+    if (failed(driver.status) || failures) return failures + expect(false);
+    nvme_checkpoint_t const resaved {"vram_nvme_resaved"};
+    failures += expect(
+        succeeded(indexes.load(reference.checkpoint.monolith.data(), load_config_t {}, driver.executor)));
+    failures += expect(succeeded(indexes.save(resaved.monolith.data(),
+                                              dense_indexes_save_config<indexes_type_>(checkpoint_layout_t::monolith_k),
+                                              driver.executor)));
+
+    auto [ram_file, ram_status] = mapped_file_t::read(reference.checkpoint.monolith.data());
+    auto [vram_file, vram_status] = mapped_file_t::read(resaved.monolith.data());
+    failures += expect(succeeded(ram_status) && succeeded(vram_status));
+    if (failures) return failures;
+    bytes_view_t const ram_bytes = ram_file.view(), vram_bytes = vram_file.view();
+    failures += expect(ram_bytes.size() == vram_bytes.size() &&
+                       std::memcmp(ram_bytes.data(), vram_bytes.data(), ram_bytes.size()) == 0);
+
+    nvme_t viewed {forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect_eq(viewed.view(resaved.monolith.data()), status_t::success_k);
+    failures += expect_eq(viewed.size(), rows_count);
+    return failures;
+}
+
 /** A vendor this build leaves out composes nothing, so its shard instantiates empty. */
 template <gpu_vendor_t vendor_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 std::size_t test_vram_indexes_configuration(char const*, u64_t) {
@@ -214,6 +255,7 @@ std::size_t test_vram_indexes_configuration(char const* name, u64_t seed) {
     failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);
     failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed);
     failures_count += test_dense_vram_indexes_indexer_search<indexes_t, kernel_>(seed);
+    failures_count += test_dense_vram_indexes_nvme_roundtrip<indexes_t, kernel_>(seed);
     return report(vendor_name.c_str(), failures_count);
 }
 

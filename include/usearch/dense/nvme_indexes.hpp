@@ -685,9 +685,7 @@ struct nvme_indexes {
             else return found;
         }
         nvme_locator_t locator(std::size_t output) const noexcept { return locators[output]; }
-        void resolve(std::size_t output, byte_t const* key) noexcept {
-            std::memcpy(&inputs.keys(row, output), key, sizeof(key_t));
-        }
+        void resolve(std::size_t output, key_t const& key) noexcept { inputs.keys(row, output) = key; }
         status_t finish() noexcept {
             inputs.counts[row] = found;
             return status_t::success_k;
@@ -740,9 +738,7 @@ struct nvme_indexes {
         void finish_walk(walk_t const&) noexcept {}
         std::size_t outputs() const noexcept { return pairs.written; }
         nvme_locator_t locator(std::size_t output) const noexcept { return locators[output]; }
-        void resolve(std::size_t output, byte_t const* key) noexcept {
-            std::memcpy(&inputs.keys(row, output), key, sizeof(key_t));
-        }
+        void resolve(std::size_t output, key_t const& key) noexcept { inputs.keys(row, output) = key; }
         status_t finish() noexcept {
             inputs.counts[row] = pairs.scored;
             return status_t::success_k;
@@ -808,7 +804,7 @@ struct nvme_indexes {
         void finish_walk(walk_t const&) noexcept {}
         std::size_t outputs() const noexcept { return 0; }
         nvme_locator_t locator(std::size_t) const noexcept { return {}; }
-        void resolve(std::size_t, byte_t const*) noexcept {}
+        void resolve(std::size_t, key_t const&) noexcept {}
         status_t finish() noexcept {
             if (failed(status)) return status;
             rescoring().finish();
@@ -1110,8 +1106,10 @@ struct nvme_indexes {
             run_t const run = run_of(task);
             byte_t const* const bytes = landed[0];
             std::size_t const row_bytes = static_cast<std::size_t>(extents[0].bytes / run.rows);
+            dtype_t const key_dtype = parts_[extents[0].shard].key_dtype;
             for (std::size_t row = 0; row != run.rows; ++row)
-                if (task < key_runs) std::memcpy(&keys[run.position + row], bytes + row * row_bytes, sizeof(key_t));
+                if (task < key_runs)
+                    keys[run.position + row] = safegraphs_widened_key<key_t>(bytes + row * row_bytes, key_dtype);
                 else
                     std::memcpy(vectors.row(run.position + row).as_vector().byte_data(), bytes + row * row_bytes,
                                 row_bytes);
@@ -1168,8 +1166,7 @@ struct nvme_indexes {
             nvme_part_t const& part = parts_[extent.shard];
             std::size_t const first = static_cast<std::size_t>((extent.begin - part.keys_begin) / part.key_row_bytes);
             for (std::size_t row = 0; row != extent.bytes / part.key_row_bytes; ++row) {
-                key_t key;
-                std::memcpy(&key, bytes + row * part.key_row_bytes, sizeof(key_t));
+                key_t const key = safegraphs_widened_key<key_t>(bytes + row * part.key_row_bytes, part.key_dtype);
                 std::size_t const slot = slot_of(key);
                 for (std::size_t position = heads[slot]; position != empty_k; position = chains[position])
                     on_hit(position, nvme_locator_t {extent.shard, static_cast<node_id_t>(first + row)});
@@ -1322,9 +1319,7 @@ struct nvme_indexes {
             nvme_part_t const& part = parts_[extents[1].shard];
             std::size_t const run_rows = static_cast<std::size_t>(extents[1].bytes / part.value_row_bytes);
             auto key_of = [&](std::size_t row) noexcept {
-                key_t key;
-                std::memcpy(&key, landed[0] + row * part.key_row_bytes, sizeof(key_t));
-                return key;
+                return safegraphs_widened_key<key_t>(landed[0] + row * part.key_row_bytes, part.key_dtype);
             };
             auto row_of = [&](std::size_t row) noexcept {
                 return vector_view_t {reinterpret_cast<scalar_t const*>(landed[1] + row * part.value_row_bytes),
@@ -2149,7 +2144,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
         void finish_walk(walk_t const&) noexcept {}
         std::size_t outputs() const noexcept { return 0; }
         nvme_locator_t locator(std::size_t) const noexcept { return {}; }
-        void resolve(std::size_t, byte_t const*) noexcept {}
+        void resolve(std::size_t, key_t const&) noexcept {}
         status_t finish() noexcept { return status_t::success_k; }
     };
 
@@ -2198,9 +2193,8 @@ struct [[nodiscard]] nvme_rewrite_plan {
         expansion_factor_ = config.expansion_factor ? config.expansion_factor : connectivity_ * 2;
         kernel_ = view.kernel();
         norms_bytes_ = view.stores_norms() ? sizeof(vector_norms_t) : 0;
-        if (failed(fields_.reserve_exactly(2 + config.provenance.size()))) return status_t::bad_alloc_k;
+        if (failed(fields_.reserve_exactly(1 + config.provenance.size()))) return status_t::bad_alloc_k;
         fields_.push_back_reserved({"metric", nk_kernel_name(kernel_)});
-        fields_.push_back_reserved({"quantization", nk_dtype_name(indexes_t::vector_dtype_k)});
         for (safegraphs_custom_field_t const& field : config.provenance) fields_.push_back_reserved(field);
         if (failed(keep_path_(manifest_, target)) || failed(keep_path_(stem_, safegraphs_stem(target))))
             return status_t::bad_alloc_k;
@@ -2215,7 +2209,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
         for (u32_t part = 0; part != view.parts_.size(); ++part) {
             nvme_part_t const& opened = view.parts_[part];
             if (opened.dimensions != dimensions_ || opened.connectivity != connectivity_ ||
-                opened.value_row_bytes != value_row_bytes_ || opened.key_row_bytes != sizeof(key_t))
+                opened.value_row_bytes != value_row_bytes_ || opened.key_dtype != safegraphs_key_dtype<key_t>())
                 return status_t::config_mismatch_k;
             if (!opened.nodes) continue;
             source_t source;
@@ -2239,11 +2233,11 @@ struct [[nodiscard]] nvme_rewrite_plan {
             safegraphs_regular_shape_t const shape {
                 rows[part],
                 safegraphs_key_dtype<key_t>(),
-                safegraphs_value_dtype<scalar_t>(),
+                dtype_of(scalar_t::dtype()),
                 dimensions_,
                 dtype_t::u32_k,
                 connectivity_,
-                norms_bytes_ ? safegraphs_value_dtype<dot_result_t>() : dtype_t::unknown_k};
+                norms_bytes_ ? dtype_of(dot_result_t::dtype()) : dtype_t::unknown_k};
             auto const [header, frame_status] = safegraphs_regular_header(shape, alignment_, to_span(fields_));
             if (failed(frame_status)) return frame_status;
             targets_.push_back_reserved(
@@ -2266,6 +2260,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
             viewed.dimensions = static_cast<u32_t>(dimensions_);
             viewed.connectivity = static_cast<u32_t>(connectivity_);
             viewed.key_row_bytes = static_cast<u32_t>(header.key.row_bytes());
+            viewed.key_dtype = header.key.dtype;
             viewed.value_row_bytes = static_cast<u32_t>(header.value.row_bytes());
             viewed.keys_begin = header.data_offset + header.key.data.first;
             viewed.values_begin = header.data_offset + header.value.data.first;

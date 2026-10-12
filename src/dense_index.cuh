@@ -3184,10 +3184,7 @@ static bytes_view_t as_bytes(usearch_bytes_view_t bytes) noexcept {
 static void adopt_metadata(safegraphs_metadata_t const& source, usearch_dense_metadata_t* metadata) noexcept {
     metadata->dimensions = regular_width(source.value_shape).value_or(0);
     metadata->connectivity = source.connectivity;
-    // Our own checkpoints name the stored scalar outright; a foreign file speaks only its column dtype.
-    std::string_view const quantization = source.quantization.empty() ? dtype_name(source.value_dtype)
-                                                                      : source.quantization.view();
-    metadata->quantization = usearch_scalar_of(nk_dtype_named(quantization.data(), quantization.size()));
+    metadata->quantization = usearch_scalar_of(dense::nk_dtype_of(source.value_dtype));
     std::string_view const metric = source.metric.view();
     metadata->metric = usearch_metric_of(nk_kernel_named(metric.data(), metric.size()));
 }
