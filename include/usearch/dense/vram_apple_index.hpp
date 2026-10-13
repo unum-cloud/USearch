@@ -38,6 +38,7 @@
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_apple_device.hpp"
 #include "usearch/dense/types.hpp"
+#include "usearch/dense/ram_metric.hpp" // `import_row` - rows cross into the shared staging in the stored scalar
 
 namespace unum::usearch::dense {
 
@@ -311,6 +312,10 @@ struct vram_apple_index {
     /** Rows of the per-simdgroup candidate cache, as on CUDA. */
     inline static constexpr std::size_t cache_rows_k = 64;
 
+    /** The host capability rows import into the shared staging at: the arm's own names only the
+     *  GPU, and every Apple silicon host has NEON. */
+    inline static constexpr nk_capability_t import_capability_k = nk_cap_serial_k | nk_cap_neon_k;
+
     /** The @p kernel every walk scores by, checked against the dtype at the first @c reserve, and
      *  one allocator per storage concern; the index pins itself to the vectors allocator's device
      *  and demands the neighbors allocator agree. */
@@ -506,15 +511,15 @@ struct vram_apple_index {
     };
 
     /** The bytes a context grows to before it can insert @p rows rows: its counters, one arena
-     *  slice per simdgroup in flight, and the staged rows; zero before @c reserve freezes the
-     *  geometry. */
+     *  slice per simdgroup in flight, and the staged rows beside the row an import widens through;
+     *  zero before @c reserve freezes the geometry. */
     std::size_t traversal_memory_usage(std::size_t rows, insert_config_t config = {}) const noexcept {
         if (!dimensions_) return 0;
         u32_t const pool_slots = pool_slots_for_(config.expansion_factor, 4);
         return static_cast<std::size_t>(metal_counter_t::count_k) * sizeof(u32_t) +
                groups_for_(rows) * simdgroups_per_group_k *
                    arena_shape_for(pool_slots * 32, frontier_kind_t::register_ladder_k, cache_rows_k).slice_bytes +
-               rows * row_bytes();
+               rows * row_bytes() + widened_bytes_();
     }
 
     /** Telemetry of one @c insert() batch over the contiguous IDs @b [first_id,first_id+count). */
@@ -531,13 +536,13 @@ struct vram_apple_index {
         std::size_t computed_distances_in_reverse_refines = 0;
     };
 
-    /** Inserts @p new_vectors under the next contiguous IDs, waits for the device, publishes them
+    /** Inserts @p new_rows under the next contiguous IDs, waits for the device, publishes them
      *  once every earlier batch has, and reports telemetry. */
-    expected<insert_result_t> insert(vectors_view_t new_vectors, node_ids_span_t assigned_ids,
-                                     traversal_context_t& context, insert_config_t config = {}) noexcept {
-        expected<insert_result_t> inserted = submit_insert_(new_vectors, assigned_ids, context, config);
-        if (!inserted || !new_vectors.extent(0)) return inserted;
-        if (status_t const published = publish_(inserted.value.first_id, new_vectors.extent(0)); failed(published))
+    expected<insert_result_t> insert(rows_view_t new_rows, node_ids_span_t assigned_ids, traversal_context_t& context,
+                                     insert_config_t config = {}) noexcept {
+        expected<insert_result_t> inserted = submit_insert_(new_rows, assigned_ids, context, config);
+        if (!inserted || !new_rows.rows) return inserted;
+        if (status_t const published = publish_(inserted.value.first_id, new_rows.rows); failed(published))
             return {{inserted.value.new_size, inserted.value.first_id}, published};
         return inserted;
     }
@@ -575,7 +580,8 @@ struct vram_apple_index {
         return static_cast<std::size_t>(metal_counter_t::count_k) * sizeof(u32_t) +
                groups_for_(rows) * simdgroups_per_group_k *
                    walk_arena_shape_(expansion, walk_slots_(expansion, count_slots > 2 ? count_slots : 2)).slice_bytes +
-               rows * (row_bytes() + config.count * (sizeof(node_id_t) + sizeof(distance_t)) + sizeof(u32_t));
+               rows * (row_bytes() + config.count * (sizeof(node_id_t) + sizeof(distance_t)) + sizeof(u32_t)) +
+               widened_bytes_();
     }
 
     /** The bytes a search under the indexer @p heads needs: the plain walk's, plus the staging of
@@ -587,7 +593,7 @@ struct vram_apple_index {
 
     /** The nearest published neighbors of every query row, ascending, with sentinel IDs past the
      *  live matches. */
-    expected<search_result_t> search(vectors_view_t queries, nk::matrix_span<node_id_t> result_ids,
+    expected<search_result_t> search(rows_view_t queries, nk::matrix_span<node_id_t> result_ids,
                                      nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
                                      search_config_t config = {}, completion_t = completion_t::blocking_k) noexcept {
         return search_(queries, result_ids, result_distances, context, config, size(), dummy_heads_t {});
@@ -595,7 +601,7 @@ struct vram_apple_index {
 
     /** The batched @c search ranked by a lightning indexer; a dot verb, refusing every other
      *  metric. */
-    expected<search_result_t> search(vectors_view_t queries, indexer_heads<scalar_t> const& heads,
+    expected<search_result_t> search(rows_view_t queries, indexer_heads<scalar_t> const& heads,
                                      nk::matrix_span<node_id_t> result_ids,
                                      nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
                                      search_config_t config = {}, completion_t = completion_t::blocking_k) noexcept
@@ -613,7 +619,7 @@ struct vram_apple_index {
 
     /** Graph products of every left-hand row: each keeps the pairs its walk scored, until its
      *  output row fills. */
-    expected<search_result_t> multiply(vectors_view_t left, nk::matrix_span<node_id_t> node_ids,
+    expected<search_result_t> multiply(rows_view_t left, nk::matrix_span<node_id_t> node_ids,
                                        nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
                                        traversal_context_t& context, search_config_t config = {},
                                        completion_t = completion_t::blocking_k) noexcept {
@@ -623,7 +629,7 @@ struct vram_apple_index {
 
     /** Device attention is NVIDIA's alone until its value lookup has a Metal ABI. */
     template <typename value_lookup_type_>
-    expected<search_result_t> attend(vectors_view_t, std::size_t, value_lookup_type_&&, f32_t, nk::matrix_span<f32_t>,
+    expected<search_result_t> attend(rows_view_t, std::size_t, value_lookup_type_&&, f32_t, rows_span_t,
                                      std::span<softmax_state_t>, traversal_context_t&, search_config_t = {},
                                      completion_t = completion_t::blocking_k) noexcept {
         return {{}, status_t::unsupported_k};
@@ -1004,29 +1010,30 @@ struct vram_apple_index {
     /** The device half of @c insert: claims the next rows, stages and runs the batch, and returns
      *  with the IDs, the rows invisible until the caller publishes them - which the sharded twin
      *  does for every step at once. */
-    expected<insert_result_t> submit_insert_(vectors_view_t new_vectors, node_ids_span_t assigned_ids,
+    expected<insert_result_t> submit_insert_(rows_view_t new_rows, node_ids_span_t assigned_ids,
                                              traversal_context_t& context, insert_config_t config) noexcept {
-        std::size_t const rows = new_vectors.extent(0);
+        std::size_t const rows = new_rows.rows;
         if (!rows) return {{claimed_rows_, static_cast<node_id_t>(claimed_rows_)}, status_t::success_k};
         if (!dimensions_) return {{}, status_t::uninitialized_k};
-        if (new_vectors.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
         if (assigned_ids.size() && assigned_ids.size() != rows) return {{}, status_t::config_mismatch_k};
         if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
-        if (new_vectors.stride_bytes(0) < static_cast<std::ptrdiff_t>(packed_row_bytes()))
-            return {{}, status_t::unsupported_layout_k};
+        if (status_t const refusal = rows_refusal_(new_rows); failed(refusal)) return {{}, refusal};
 
         std::unique_lock batch {batch_};
         std::size_t const first_id = claimed_rows_;
         if (rows > max_node_count_k - first_id) return {{}, status_t::overflow_k};
         if (status_t const grown = grow_rows_(first_id + rows); failed(grown)) return {{}, grown};
-        // Past the staged rows, every wave counts into its own words, zeroed here.
+        // Past the staged rows, every wave counts into its own words, zeroed here, then the row an
+        // import widens through.
         std::size_t const rows_bytes = rows * row_bytes();
         std::size_t const waves_bytes = insert_waves_(first_id, first_id + rows) * counters_bytes_k;
         bool fresh = false;
-        if (status_t const staged = context.ensure_(context.staging_, rows_bytes + waves_bytes, fresh); failed(staged))
+        if (status_t const staged = context.ensure_(context.staging_, rows_bytes + waves_bytes + widened_bytes_(),
+                                                    fresh);
+            failed(staged))
             return {{}, staged};
-        stage_rows_(context.staging_.host, new_vectors);
+        stage_rows_(context.staging_.host, new_rows, context.staging_.host + rows_bytes + waves_bytes);
         std::memset(context.staging_.host + rows_bytes, 0, waves_bytes);
         u32_t const pool_slots = pool_slots_for_(config.expansion_factor, 4);
         metal_arguments_t arguments = arguments_();
@@ -1129,13 +1136,29 @@ struct vram_apple_index {
         return status_t::success_k;
     }
 
-    /** Copies @p rows into @p staging at the vectors matrix pitch, the fragment padding zeroed. */
-    void stage_rows_(byte_t* staging, vectors_view_t rows) const noexcept {
-        std::size_t const scalar_row_bytes = packed_row_bytes();
-        for (std::size_t row = 0; row != rows.extent(0); ++row) {
+    /** Bytes of the f32 row an import widens f64 rows through before narrowing them at unit RMS. */
+    std::size_t widened_bytes_() const noexcept { return dimensions() * sizeof(f32_t); }
+
+    /** Why @p rows cannot cross into the staging: a width other than the index's, or rows closer
+     *  than one packed row apart, a zero stride repeating the first. */
+    status_t rows_refusal_(rows_view_t rows) const noexcept {
+        if (rows.columns != dimensions()) return status_t::config_mismatch_k;
+        if (rows.stride && rows.stride < packed_bytes(rows.dtype, rows.columns)) return status_t::unsupported_layout_k;
+        return status_t::success_k;
+    }
+
+    /** Imports @p rows into @p staging at the vectors matrix pitch in the stored scalar, the
+     *  fragment padding zeroed, widening through the f32 row at @p widened where they narrow at
+     *  unit RMS from f64. */
+    void stage_rows_(byte_t* staging, rows_view_t rows, byte_t* widened) const noexcept {
+        nk::vector_span<f32_t> const widened_row {reinterpret_cast<f32_t*>(widened), dimensions()};
+        for (std::size_t row = 0; row != rows.rows; ++row) {
             byte_t* const landing = staging + row * row_bytes();
-            std::memcpy(landing, rows.byte_data() + row * rows.stride_bytes(0), scalar_row_bytes);
-            std::memset(landing + scalar_row_bytes, 0, row_bytes() - scalar_row_bytes);
+            // Zeroed whole, not past the packed bytes, as packed casts write whole bytes only.
+            std::memset(landing, 0, row_bytes());
+            import_row<import_capability_k>(
+                rows, row, kernel_, nk::vector_span<scalar_t> {reinterpret_cast<scalar_t*>(landing), dimensions()},
+                widened_row);
         }
     }
 
@@ -1295,10 +1318,10 @@ struct vram_apple_index {
     /** The batched search over the @p visible rows, under any indexer @p heads: submitted, awaited
      *  and read back. */
     template <typename heads_type_>
-    expected<search_result_t> search_(vectors_view_t queries, nk::matrix_span<node_id_t> result_ids,
+    expected<search_result_t> search_(rows_view_t queries, nk::matrix_span<node_id_t> result_ids,
                                       nk::matrix_span<distance_t> result_distances, traversal_context_t& context,
                                       search_config_t config, std::size_t visible, heads_type_ const& heads) noexcept {
-        std::size_t const queries_count = queries.extent(0);
+        std::size_t const queries_count = queries.rows;
         bool const wants_distances = result_distances.extent(0) != 0;
         if (!queries_count) return {{}, status_t::success_k};
         if (result_ids.extent(0) != queries_count || result_ids.extent(1) < config.count ||
@@ -1317,11 +1340,10 @@ struct vram_apple_index {
      *  the walks over the @p visible rows; until the context lands, its staging holds the matches
      *  @ref land_search_ reads back. */
     template <typename heads_type_ = dummy_heads_t>
-    expected<search_result_t> submit_search_(vectors_view_t queries, traversal_context_t& context,
-                                             search_config_t config, std::size_t visible,
-                                             heads_type_ const& heads = {}) noexcept {
+    expected<search_result_t> submit_search_(rows_view_t queries, traversal_context_t& context, search_config_t config,
+                                             std::size_t visible, heads_type_ const& heads = {}) noexcept {
         constexpr bool indexer_k = std::is_same_v<heads_type_, indexer_heads<scalar_t>>;
-        std::size_t const queries_count = queries.extent(0);
+        std::size_t const queries_count = queries.rows;
         context.landing_ = {};
         if (!queries_count) return {{}, status_t::success_k};
         std::size_t heads_count = 0;
@@ -1348,7 +1370,8 @@ struct vram_apple_index {
         arguments.heads_count = static_cast<u32_t>(heads_count);
         byte_t* const staging = context.staging_.host;
         if constexpr (indexer_k) {
-            stage_rows_(staging + queries_count * row_bytes(), heads.heads);
+            stage_rows_(staging + queries_count * row_bytes(), heads.heads,
+                        staging + rows_bytes + weights_bytes + outputs_bytes);
             for (std::size_t query = 0; query != queries_count; ++query)
                 std::memcpy(staging + rows_bytes + query * heads_count * sizeof(f32_t),
                             heads.weights.byte_data() + query * heads.weights.stride_bytes(0),
@@ -1382,11 +1405,11 @@ struct vram_apple_index {
     }
 
     /** The graph products over the @p visible rows: submitted, awaited and read back. */
-    expected<search_result_t> multiply_(vectors_view_t left, nk::matrix_span<node_id_t> node_ids,
+    expected<search_result_t> multiply_(rows_view_t left, nk::matrix_span<node_id_t> node_ids,
                                         nk::matrix_span<dot_result_t> products, std::span<u32_t> counts,
                                         traversal_context_t& context, search_config_t config,
                                         std::size_t visible) noexcept {
-        std::size_t const rows_count = left.extent(0), wanted = node_ids.extent(1);
+        std::size_t const rows_count = left.rows, wanted = node_ids.extent(1);
         if (node_ids.extent(0) != rows_count || products.extent(0) != rows_count || products.extent(1) != wanted ||
             counts.size() != rows_count)
             return {{}, status_t::config_mismatch_k};
@@ -1403,9 +1426,9 @@ struct vram_apple_index {
     /** The submission half of @c multiply: stages the rows and launches walks keeping up to
      *  @p wanted pairs each over the @p visible rows; until the context lands, its staging holds
      *  the pairs @ref land_multiply_ reads back. */
-    expected<search_result_t> submit_multiply_(vectors_view_t left, std::size_t wanted, traversal_context_t& context,
+    expected<search_result_t> submit_multiply_(rows_view_t left, std::size_t wanted, traversal_context_t& context,
                                                search_config_t config, std::size_t visible) noexcept {
-        std::size_t const rows_count = left.extent(0);
+        std::size_t const rows_count = left.rows;
         context.landing_ = {};
         if (!rows_count) return {{}, status_t::success_k};
         u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
@@ -1477,26 +1500,26 @@ struct vram_apple_index {
 
     /** Validates @p queries, sizes the arena and the staging, and stages the query rows: what every
      *  walking verb does before its kernel, on the rung of @p pool_slots for a walk expanding
-     *  @p expansion. */
-    expected<metal_arguments_t> stage_walk_(vectors_view_t queries, traversal_context_t& context, u32_t expansion,
+     *  @p expansion; the row an import widens through follows the @p staging_bytes the verb asks
+     *  for. */
+    expected<metal_arguments_t> stage_walk_(rows_view_t queries, traversal_context_t& context, u32_t expansion,
                                             u32_t pool_slots, std::size_t staging_bytes, std::size_t visible) noexcept {
         if (!dimensions_) return {{}, status_t::uninitialized_k};
         if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
-        if (queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
-        if (queries.stride_bytes(0) < static_cast<std::ptrdiff_t>(packed_row_bytes()))
-            return {{}, status_t::unsupported_layout_k};
+        if (status_t const refusal = rows_refusal_(queries); failed(refusal)) return {{}, refusal};
         metal_arguments_t arguments = arguments_();
         arguments.expansion = expansion;
         if (status_t const sized = shape_arena_(context, arguments, walk_arena_shape_(expansion, pool_slots), 0,
-                                                queries.extent(0));
+                                                queries.rows);
             failed(sized))
             return {{}, sized};
         bool fresh = false;
-        if (status_t const staged = context.ensure_(context.staging_, staging_bytes, fresh); failed(staged))
+        if (status_t const staged = context.ensure_(context.staging_, staging_bytes + widened_bytes_(), fresh);
+            failed(staged))
             return {{}, staged};
-        stage_rows_(context.staging_.host, queries);
+        stage_rows_(context.staging_.host, queries, context.staging_.host + staging_bytes);
         arguments.sampling_bound = static_cast<u32_t>(visible);
-        arguments.queries_count = static_cast<u32_t>(queries.extent(0));
+        arguments.queries_count = static_cast<u32_t>(queries.rows);
         std::memset(context.counters_.host, 0, context.counters_.bytes);
         return {arguments, status_t::success_k};
     }

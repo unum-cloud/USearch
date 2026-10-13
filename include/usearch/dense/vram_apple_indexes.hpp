@@ -290,12 +290,12 @@ struct vram_apple_indexes {
 
         /** Runs rows @b [first_row,first_row+rows) of the plan under @p keys on their shards;
          *  mismatched arguments run nothing, any later refusal fails the plan. */
-        status_t insert(std::size_t first_row, std::span<key_t const> keys, vectors_view_t rows) noexcept {
+        status_t insert(std::size_t first_row, nk::vector_view<key_t> keys, rows_view_t rows) noexcept {
             if (!owner_) return status_t::uninitialized_k;
             if (failed(status_)) return status_;
-            std::size_t const count = rows.extent(0);
+            std::size_t const count = rows.rows;
             if (keys.size() != count || first_row > rows_ || count > rows_ - first_row ||
-                (count && rows.extent(1) != owner_->dimensions()))
+                (count && rows.columns != owner_->dimensions()))
                 return status_t::config_mismatch_k;
             if (!count) return status_t::success_k;
             std::size_t const shards = shares_.size();
@@ -359,9 +359,8 @@ struct vram_apple_indexes {
 
         /** Writes the keys of the step's rows shard @p shard takes, from @p first on in strides of
          *  the shard count, then runs those rows there. */
-        status_t launch_(std::size_t shard, std::size_t first, std::span<key_t const> keys,
-                         vectors_view_t rows) noexcept {
-            std::size_t const shards = shares_.size(), count = rows.extent(0);
+        status_t launch_(std::size_t shard, std::size_t first, nk::vector_view<key_t> keys, rows_view_t rows) noexcept {
+            std::size_t const shards = shares_.size(), count = rows.rows;
             std::size_t const taking = rows_from_(count, first, shards);
             share_t& share = shares_[shard];
             if (!taking) return status_t::success_k;
@@ -372,7 +371,8 @@ struct vram_apple_indexes {
             for (std::size_t taken = 0; taken != taking; ++taken)
                 one.keys[first_node + static_cast<node_id_t>(taken)] = keys[first + taken * shards];
             expected<insert_result_t> const inserted = one.index->submit_insert_(
-                rows(nk::range(first, count, shards), nk::slice), {}, traversals_[shard], config_);
+                {rows.row(first), taking, rows.columns, rows.stride * shards, rows.dtype}, {}, traversals_[shard],
+                config_);
             if (!inserted) return inserted.status;
             share.launched += taking;
             result_.visited_members += inserted.value.visited_members;
@@ -493,18 +493,18 @@ struct vram_apple_indexes {
      *      @ref plan_insert, one step over every row, and its @c finish.
      *
      *  @param[in] keys One caller identity per row; several rows may share one.
-     *  @param[in] new_vectors The batch, one row per entry, in the shards' stored scalar type.
+     *  @param[in] new_rows The batch, one row per entry, in any scalar NumKong casts.
      *  @param[inout] executor The queues, paired positionally with the shards.
      *  @param[in] config The per-shard insertion configuration, applied uniformly.
      */
-    expected<insert_result_t> insert(std::span<key_t const> keys, vectors_view_t new_vectors, executor_t& executor,
+    expected<insert_result_t> insert(std::span<key_t const> keys, rows_view_t new_rows, executor_t& executor,
                                      insert_config_t config = {}) noexcept {
-        if (keys.size() != new_vectors.extent(0)) return {{size()}, status_t::config_mismatch_k};
-        auto [plan, status] = plan_insert(new_vectors.extent(0), executor, config);
+        if (keys.size() != new_rows.rows) return {{size()}, status_t::config_mismatch_k};
+        auto [plan, status] = plan_insert(new_rows.rows, executor, config);
         if (failed(status)) return {{size()}, status};
         // A refused step leaves rows short, and `finish` reports the refusal it kept or the
         // shortfall.
-        [[maybe_unused]] status_t const launched = plan.insert(0, keys, new_vectors);
+        [[maybe_unused]] status_t const launched = plan.insert(0, keys, new_rows);
         return plan.finish();
     }
 
@@ -622,16 +622,17 @@ struct vram_apple_indexes {
      *  @brief Scatters a whole matrix of queries over every shard and gathers the rankings into one
      *      per query.
      *
-     *  @param[in] queries The batch, one query per row, in the shards' stored scalar type.
+     *  @param[in] queries The batch, one query per row, in any scalar NumKong casts.
      *  @param[inout] executor The queues, paired positionally with the shards.
      *  @param[in] config The per-shard search configuration, applied uniformly.
      *  @param[out] keys Merged rankings, one query per row, as many matches as its width.
-     *  @param[out] distances Distances of the same rankings, parallel to @p keys.
+     *  @param[out] distances The same rankings' distances in any score type, parallel to @p keys.
      *  @param[out] counts Per-query merged hit counts, one per query row.
      *  @return The merged hits summed over queries, and the telemetry summed over shards.
      */
-    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
+    template <typename score_type_>
+    expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
+                                     nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
                                      std::span<std::size_t> counts) noexcept {
         return search_(queries, executor, config, keys, distances, counts);
     }
@@ -640,7 +641,7 @@ struct vram_apple_indexes {
      *  the same @p heads, passed to it as is, so whichever shard scored them, the merged
      *  distances are: `1 − Σₕ wₕ · ReLU(qₕ · k)`. A dot verb: any other metric refuses with
      *  @c config_mismatch_k. */
-    expected<search_result_t> search(vectors_view_t queries, indexer_heads<scalar_t> const& heads, executor_t& executor,
+    expected<search_result_t> search(rows_view_t queries, indexer_heads<scalar_t> const& heads, executor_t& executor,
                                      search_config_t config, nk::matrix_span<key_t> keys,
                                      nk::matrix_span<distance_t> distances, std::span<std::size_t> counts) noexcept
         requires floating_scalar<scalar_t>
@@ -653,14 +654,16 @@ struct vram_apple_indexes {
      *  @brief Graph products of a whole matrix of left-hand rows against every shard: each row
      *      keeps the pairs its walks scored, keys resolved and dots at their native width.
      *
-     *  A full row keeps whichever pairs landed first. A refused shard keeps every shard already
-     *  landed, so the pairs and the counts always agree; the first refusal is what the merged
-     *  result reports. A metric other than dot refuses with @c config_mismatch_k.
+     *  A full row keeps whichever pairs landed first, its dots in any product type. A refused
+     *  shard keeps every shard already landed, so the pairs and the counts always agree; the first
+     *  refusal is what the merged result reports. A metric other than dot refuses with
+     *  @c config_mismatch_k.
      */
-    expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
-                                       nk::matrix_span<key_t> keys, nk::matrix_span<dot_result_t> products,
+    template <typename product_type_>
+    expected<search_result_t> multiply(rows_view_t left, executor_t& executor, search_config_t config,
+                                       nk::matrix_span<key_t> keys, nk::matrix_span<product_type_> products,
                                        std::span<std::size_t> counts) noexcept {
-        std::size_t const rows_count = left.extent(0), wanted = keys.extent(1);
+        std::size_t const rows_count = left.rows, wanted = keys.extent(1);
         std::size_t const shards = shards_.size();
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
@@ -668,7 +671,7 @@ struct vram_apple_indexes {
         if (status_t const refusal = rankings_refusal(rows_count, keys, products); failed(refusal))
             return {{}, refusal};
         if (!rows_count) return {{}, status_t::success_k};
-        if (left.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
+        if (left.columns != dimensions()) return {{}, status_t::config_mismatch_k};
 
         // Every shard lands its own columns of one host landing.
         std::size_t const landing_entries = rows_count * shards * wanted;
@@ -720,10 +723,10 @@ struct vram_apple_indexes {
      *  score lands below its exact value, never above. A metric other than dot refuses with
      *  @c config_mismatch_k.
      */
-    expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
+    expected<search_result_t> maxsim(rows_view_t queries, std::size_t rows_per_query, executor_t& executor,
                                      search_config_t config, nk::matrix_span<key_t> keys, nk::matrix_span<f64_t> scores,
                                      std::span<std::size_t> counts) noexcept {
-        std::size_t const rows_count = queries.extent(0);
+        std::size_t const rows_count = queries.rows;
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
         if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
@@ -758,18 +761,18 @@ struct vram_apple_indexes {
      *  with @c unsupported_k until the shards' Metal attend lands; @c config_mismatch_k unless the
      *  shards score by dot. */
     template <typename value_lookup_type_>
-    expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&&, f32_t,
-                                     nk::matrix_span<f32_t> outputs, std::span<softmax_state_t> carry,
-                                     executor_t& executor, search_config_t = {}) noexcept {
-        std::size_t const rows_count = queries.extent(0);
+    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&&, f32_t,
+                                     rows_span_t outputs, std::span<softmax_state_t> carry, executor_t& executor,
+                                     search_config_t = {}) noexcept {
+        std::size_t const rows_count = queries.rows;
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
         if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
-        if (outputs.extent(0) != rows_count || outputs.extent(1) != dimensions() || carry.size() != rows_count)
+        if (outputs.rows != rows_count || outputs.columns != dimensions() ||
+            (!carry.empty() && carry.size() != rows_count))
             return {{}, status_t::config_mismatch_k};
-        if (!outputs.is_contiguous()) return {{}, status_t::unsupported_layout_k};
         if (!rows_count) return {{}, status_t::success_k};
-        if (queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
+        if (queries.columns != dimensions()) return {{}, status_t::config_mismatch_k};
         return {{}, status_t::unsupported_k};
     }
 
@@ -1367,10 +1370,13 @@ struct vram_apple_indexes {
     }
 
     /** The batched @ref get: up to @p wanted rows of every key of @p keys, row q · @p wanted + i
-     *  being the i-th row of key q, and every key's true total in @p entries. */
-    status_t get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
-                 std::span<std::size_t> entries, executor_t&) const noexcept {
+     *  being the i-th row of key q, and every key's true total in @p entries; rows in any scalar
+     *  but the stored one refuse with @c unsupported_k. */
+    status_t get(std::span<key_t const> keys, rows_span_t rows, std::size_t wanted, std::span<std::size_t> entries,
+                 executor_t&) const noexcept {
         if (entries.size() != keys.size()) return status_t::config_mismatch_k;
+        if (!rows.holds<scalar_t>()) return status_t::unsupported_k;
+        vectors_span_t const vectors = rows.as<scalar_t>();
         if (status_t const refusal = rows_refusal(keys.size() * wanted, vectors, row_values_()); failed(refusal))
             return refusal;
         for (std::size_t position = 0; position != keys.size(); ++position) {
@@ -1490,11 +1496,11 @@ struct vram_apple_indexes {
     }
 
     /** The body of the batched @c search, passing any indexer @p heads to every shard as is. */
-    template <typename... heads_types_>
-    expected<search_result_t> search_(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                      nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
+    template <typename score_type_, typename... heads_types_>
+    expected<search_result_t> search_(rows_view_t queries, executor_t& executor, search_config_t config,
+                                      nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
                                       std::span<std::size_t> counts, heads_types_ const&... heads) noexcept {
-        std::size_t const queries_count = queries.extent(0);
+        std::size_t const queries_count = queries.rows;
         std::size_t const shards = shards_.size();
         if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
         if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
@@ -1503,7 +1509,7 @@ struct vram_apple_indexes {
         if (!queries_count) return {{}, status_t::success_k};
         // Vetted before anything is claimed or carved; the shards would refuse only after the
         // landing had been sized for a doomed call.
-        if (queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
+        if (queries.columns != dimensions()) return {{}, status_t::config_mismatch_k};
 
         // The host landing: every shard's matches, one wide matrix each, shard columns side by
         // side; never zeroed, since only columns a landed shard wrote are ever read. One row of

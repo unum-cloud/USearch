@@ -305,12 +305,12 @@ struct vram_nvidia_indexes {
         /** Launches rows @b [first_row,first_row+rows) of the plan under @p keys on their shards;
          *  the rows and the keys stay live until @ref finish. Mismatched arguments launch nothing,
          *  any later refusal fails the plan. */
-        status_t insert(std::size_t first_row, std::span<key_t const> keys, vectors_view_t rows) noexcept {
+        status_t insert(std::size_t first_row, nk::vector_view<key_t> keys, rows_view_t rows) noexcept {
             if (!owner_) return status_t::uninitialized_k;
             if (failed(status_)) return status_;
-            std::size_t const count = rows.extent(0);
+            std::size_t const count = rows.rows;
             if (keys.size() != count || first_row > rows_ || count > rows_ - first_row ||
-                (count && rows.extent(1) != owner_->dimensions()))
+                (count && rows.columns != owner_->dimensions()))
                 return status_t::config_mismatch_k;
             if (!count) return status_t::success_k;
             std::size_t const shards = shares_.size();
@@ -387,9 +387,8 @@ struct vram_nvidia_indexes {
 
         /** Writes the keys of the step's rows shard @p shard takes, from @p first on in strides of
          *  the shard count, then launches those rows there. */
-        status_t launch_(std::size_t shard, std::size_t first, std::span<key_t const> keys,
-                         vectors_view_t rows) noexcept {
-            std::size_t const shards = shares_.size(), count = rows.extent(0);
+        status_t launch_(std::size_t shard, std::size_t first, nk::vector_view<key_t> keys, rows_view_t rows) noexcept {
+            std::size_t const shards = shares_.size(), count = rows.rows;
             std::size_t const taking = rows_from_(count, first, shards);
             share_t& share = shares_[shard];
             if (!taking) return status_t::success_k;
@@ -407,7 +406,7 @@ struct vram_nvidia_indexes {
                 failed(uploaded))
                 return uploaded;
             expected<insert_result_t> const inserted = one.index->submit_insert_(
-                rows(nk::range(first, count, shards), nk::slice), {}, traversal, config_);
+                {rows.row(first), taking, rows.columns, rows.stride * shards, rows.dtype}, {}, traversal, config_);
             if (!inserted) return inserted.status;
             share.launched += taking;
             // A first ID other than the part's next one names a claimer outside the gate.
@@ -532,18 +531,19 @@ struct vram_nvidia_indexes {
      *  names a claimer outside this index and refuses the call as @c contended_k.
      *
      *  @param[in] keys One caller identity per row; several rows may share one.
-     *  @param[in] new_vectors The batch, one row per entry, in the shards' stored scalar type.
+     *  @param[in] new_rows The batch, one row per entry, in any scalar NumKong casts, imported on
+     *      each shard's device.
      *  @param[inout] executor The streams and their scratch, paired positionally with the shards.
      *  @param[in] config The per-shard insertion configuration, applied uniformly.
      */
-    expected<insert_result_t> insert(std::span<key_t const> keys, vectors_view_t new_vectors, executor_t& executor,
+    expected<insert_result_t> insert(std::span<key_t const> keys, rows_view_t new_rows, executor_t& executor,
                                      insert_config_t config = {}) noexcept {
-        if (keys.size() != new_vectors.extent(0)) return {{size()}, status_t::config_mismatch_k};
-        auto [plan, status] = plan_insert(new_vectors.extent(0), executor, config);
+        if (keys.size() != new_rows.rows) return {{size()}, status_t::config_mismatch_k};
+        auto [plan, status] = plan_insert(new_rows.rows, executor, config);
         if (failed(status)) return {{size()}, status};
         // A refused step leaves rows short, and `finish` reports the refusal it kept or the
         // shortfall.
-        [[maybe_unused]] status_t const launched = plan.insert(0, keys, new_vectors);
+        [[maybe_unused]] status_t const launched = plan.insert(0, keys, new_rows);
         return plan.finish();
     }
 
@@ -683,11 +683,12 @@ struct vram_nvidia_indexes {
      *  query: every shard walks the full batch, lands its matches in its own columns of one host
      *  landing, and the drained columns merge query by query through the key columns.
      *
-     *  @param[in] queries The batch, one query per row, in the shards' stored scalar type.
+     *  @param[in] queries The batch, one query per row, in any scalar NumKong casts, imported on
+     *      each shard's device.
      *  @param[inout] executor The contexts and streams, paired positionally with the shards.
      *  @param[in] config The per-shard search configuration, applied uniformly.
      *  @param[out] keys Merged rankings, one query per row, as many matches as its width.
-     *  @param[out] distances Distances of the same rankings, parallel to @p keys.
+     *  @param[out] distances The same rankings' distances in any score type, parallel to @p keys.
      *  @param[out] counts Per-query merged hit counts, one per query row.
      *  @return The merged hits summed over queries, and the telemetry summed over shards.
      *
@@ -695,8 +696,9 @@ struct vram_nvidia_indexes {
      *  the counts always agree; every queued stream is drained before returning, since the caller's
      *  queries and the call's own landing are DMA targets until then.
      */
-    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
+    template <typename score_type_>
+    expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
+                                     nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
                                      std::span<std::size_t> counts) noexcept {
         return search_(queries, executor, config, keys, distances, counts);
     }
@@ -705,7 +707,7 @@ struct vram_nvidia_indexes {
      *  same @p heads, passed to it as is, so whichever shard scored them, the merged distances are:
      *  `1 − Σₕ wₕ · ReLU(qₕ · k)`.
      *  A dot verb: any other metric refuses with @c config_mismatch_k. */
-    expected<search_result_t> search(vectors_view_t queries, indexer_heads<scalar_t> const& heads, executor_t& executor,
+    expected<search_result_t> search(rows_view_t queries, indexer_heads<scalar_t> const& heads, executor_t& executor,
                                      search_config_t config, nk::matrix_span<key_t> keys,
                                      nk::matrix_span<distance_t> distances, std::span<std::size_t> counts) noexcept
         requires floating_scalar<scalar_t>
@@ -718,12 +720,13 @@ struct vram_nvidia_indexes {
      *  @brief Graph products of a whole matrix of left-hand rows against every shard: each row
      *      keeps the pairs its walks scored, keys resolved and dots at their native width.
      *
-     *  @param[in] left The left-hand rows, one walk per row, in the shards' stored scalar type.
+     *  @param[in] left The left-hand rows, one walk per row, in the shards' stored scalar type, as
+     *      in @c search.
      *  @param[inout] executor The contexts and streams, paired positionally with the shards.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
      *  @param[out] keys The key of each kept pair, one left-hand row per row, as many pairs as its
      *      width.
-     *  @param[out] products The dot of each kept pair, parallel to @p keys.
+     *  @param[out] products The dot of each kept pair, parallel to @p keys, in any product type.
      *  @param[out] counts Pairs scored per row across every shard, above the row width when
      *      truncated.
      *
@@ -732,10 +735,11 @@ struct vram_nvidia_indexes {
      *  refusal is what the merged result reports. A metric other than dot refuses with
      *  @c config_mismatch_k.
      */
-    expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
-                                       nk::matrix_span<key_t> keys, nk::matrix_span<dot_result_t> products,
+    template <typename product_type_>
+    expected<search_result_t> multiply(rows_view_t left, executor_t& executor, search_config_t config,
+                                       nk::matrix_span<key_t> keys, nk::matrix_span<product_type_> products,
                                        std::span<std::size_t> counts) noexcept {
-        std::size_t const rows_count = left.extent(0), wanted = keys.extent(1);
+        std::size_t const rows_count = left.rows, wanted = keys.extent(1);
         std::size_t const shards = shards_.size();
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
@@ -743,7 +747,7 @@ struct vram_nvidia_indexes {
         if (status_t const refusal = rankings_refusal(rows_count, keys, products); failed(refusal))
             return {{}, refusal};
         if (!rows_count) return {{}, status_t::success_k};
-        if (left.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
+        if (left.columns != dimensions()) return {{}, status_t::config_mismatch_k};
 
         // Every shard lands its own columns of one host landing, and its context is sized for that
         // width.
@@ -812,10 +816,10 @@ struct vram_nvidia_indexes {
      *  a score lands below its exact value, never above. A metric other than dot refuses with
      *  @c config_mismatch_k.
      */
-    expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
+    expected<search_result_t> maxsim(rows_view_t queries, std::size_t rows_per_query, executor_t& executor,
                                      search_config_t config, nk::matrix_span<key_t> keys, nk::matrix_span<f64_t> scores,
                                      std::span<std::size_t> counts) noexcept {
-        std::size_t const rows_count = queries.extent(0);
+        std::size_t const rows_count = queries.rows;
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
         if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
@@ -851,17 +855,18 @@ struct vram_nvidia_indexes {
      *      its walks score into per-head partial rows and carries on its own device, and the first
      *      shard's device merges them by the flash rule, exact over the union.
      *
-     *  @param[in] queries The query heads, in the shards' stored scalar type; row t ·
-     *      @p head_count + h is head h of token t, and each token walks every shard once.
+     *  @param[in] queries The query heads, in the shards' stored scalar type as in @c search; row t
+     *      · @p head_count + h is head h of token t, and each token walks every shard once.
      *  @param[in] head_count The query heads sharing this key-value head; it must divide the rows.
      *  @param[in] value_lookup Device-callable: `value_lookup(key)` points at the key's value row
      *      on a 16-byte boundary, as wide as the keys and stored like them, in memory every shard's
      *      device reads; a null row refuses the call with @c shape_mismatch_k.
      *  @param[in] score_scale The factor turning a dot into a logit.
-     *  @param[out] outputs The attended rows, one per query row, as wide as the keys and packed, in
-     *      host or device memory.
+     *  @param[out] outputs The attended rows, one per query row, as wide as the keys, in host or
+     *      device memory; rows in any scalar but f32 cast on the first shard's device first, and
+     *      must fill whole bytes.
      *  @param[out] carry Each row's softmax state over every shard, one per row, in host or device
-     *      memory.
+     *      memory; an empty span skips them.
      *  @param[inout] executor The contexts and streams, paired positionally with the shards.
      *  @param[in] config The per-shard walk configuration, applied uniformly; @c count plays no
      *      part.
@@ -869,30 +874,29 @@ struct vram_nvidia_indexes {
      *      @c config_mismatch_k unless the shards score by dot.
      */
     template <typename value_lookup_type_>
-    expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
-                                     f32_t score_scale, nk::matrix_span<f32_t> outputs,
-                                     std::span<softmax_state_t> carry, executor_t& executor,
-                                     search_config_t config = {}) noexcept {
+    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
+                                     f32_t score_scale, rows_span_t outputs, std::span<softmax_state_t> carry,
+                                     executor_t& executor, search_config_t config = {}) noexcept {
         using shard_lookup_t = cuda_keyed_lookup<key_t, std::remove_cvref_t<value_lookup_type_>>;
-        std::size_t const rows_count = queries.extent(0), shards = shards_.size();
+        std::size_t const rows_count = queries.rows, shards = shards_.size();
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
         if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
-        if (outputs.extent(0) != rows_count || outputs.extent(1) != dimensions() || carry.size() != rows_count)
-            return {{}, status_t::config_mismatch_k};
-        if (!outputs.is_contiguous()) return {{}, status_t::unsupported_layout_k};
+        if (status_t const refusal = shards_[0].index->landing_refusal_(rows_count, outputs, carry); failed(refusal))
+            return {{}, refusal};
         if (!rows_count) return {{}, status_t::success_k};
-        if (queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
+        if (queries.columns != dimensions()) return {{}, status_t::config_mismatch_k};
 
         // Shard 0 stages one block of rows and carries per shard, its own first and the others
         // copied in.
-        std::size_t const outputs_bytes = outputs.numel() * sizeof(f32_t);
-        std::size_t const block_bytes = outputs_bytes + carry.size_bytes();
+        std::size_t const outputs_bytes = rows_count * dimensions() * sizeof(f32_t);
+        std::size_t const block_bytes = outputs_bytes + rows_count * sizeof(softmax_state_t);
         byte_t* blocks = nullptr;
         auto attend_shard = [&](std::size_t shard, traversal_context_t& traversal, std::size_t visible) noexcept {
             shard_lookup_t const lookup {shards_[shard].device_keys.base(), value_lookup};
             expected<f32_t*> const landed = shards_[shard].index->submit_attend_(
-                queries, head_count, lookup, score_scale, traversal, config, shard ? 1 : shards, visible);
+                queries, head_count, lookup, score_scale, traversal, config, shard ? 1 : shards,
+                shard ? 0 : shards_[0].index->exported_bytes_(outputs), visible);
             if (!landed) return landed.status;
             if (!shard) {
                 blocks = reinterpret_cast<byte_t*>(landed.value);
@@ -919,8 +923,8 @@ struct vram_nvidia_indexes {
             if (cuda_set_device(first.device) != cuda_success_k ||
                 failed(shards_[0].index->launch_merge_attention_(blocks, rows, static_cast<u32_t>(dimensions()),
                                                                  static_cast<u32_t>(shards), stream)) ||
-                cuda_copy_async(outputs.data(), blocks, outputs_bytes, stream) != cuda_success_k ||
-                cuda_copy_async(carry.data(), blocks + outputs_bytes, carry.size_bytes(), stream) != cuda_success_k ||
+                failed(shards_[0].index->land_attended_(reinterpret_cast<f32_t*>(blocks), shards, outputs, carry,
+                                                        stream)) ||
                 cuda_api().stream_synchronize(stream) != cuda_success_k)
                 merged = status_t::device_error_k;
         };
@@ -1524,16 +1528,19 @@ struct vram_nvidia_indexes {
      *      true total, each row riding one blocking device-to-host copy as in the single-key form.
      *
      *  @param[in] keys The keys to export, repeats and absent ones included.
-     *  @param[out] vectors @b [keys·wanted,dimensions]: row q · @p wanted + i is the i-th row of
-     *      key q; refused as @ref rows_refusal says.
+     *  @param[out] rows @b [keys·wanted,dimensions]: row q · @p wanted + i is the i-th row of key
+     *      q; refused as @ref rows_refusal says, and with @c unsupported_k in any scalar but the
+     *      stored one.
      *  @param[in] wanted Rows kept per key.
      *  @param[out] entries The true total under each key, parallel to @p keys; above @p wanted
      *      when its rows truncated, zero when absent.
      *  @param[inout] executor Unused here, as in the batched @ref count.
      */
-    status_t get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
-                 std::span<std::size_t> entries, executor_t&) const noexcept {
+    status_t get(std::span<key_t const> keys, rows_span_t rows, std::size_t wanted, std::span<std::size_t> entries,
+                 executor_t&) const noexcept {
         if (entries.size() != keys.size()) return status_t::config_mismatch_k;
+        if (!rows.holds<scalar_t>()) return status_t::unsupported_k;
+        vectors_span_t const vectors = rows.as<scalar_t>();
         if (status_t const refusal = rows_refusal(keys.size() * wanted, vectors, row_values_()); failed(refusal))
             return refusal;
         for (std::size_t position = 0; position != keys.size(); ++position) {
@@ -1698,11 +1705,11 @@ struct vram_nvidia_indexes {
     }
 
     /** The body of the batched @c search, passing any indexer @p heads to every shard as is. */
-    template <typename... heads_types_>
-    expected<search_result_t> search_(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                      nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
+    template <typename score_type_, typename... heads_types_>
+    expected<search_result_t> search_(rows_view_t queries, executor_t& executor, search_config_t config,
+                                      nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
                                       std::span<std::size_t> counts, heads_types_ const&... heads) noexcept {
-        std::size_t const queries_count = queries.extent(0);
+        std::size_t const queries_count = queries.rows;
         std::size_t const shards = shards_.size();
         if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
         if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
@@ -1711,7 +1718,7 @@ struct vram_nvidia_indexes {
         if (!queries_count) return {{}, status_t::success_k};
         // Vetted before anything is claimed or carved; the shards would refuse only after the
         // landing and the runs had been sized for a doomed call.
-        if (queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
+        if (queries.columns != dimensions()) return {{}, status_t::config_mismatch_k};
 
         // The host landing: every shard's matches, one wide matrix each, shard columns side by
         // side; never zeroed, since only columns a drained shard wrote are ever read. One row of

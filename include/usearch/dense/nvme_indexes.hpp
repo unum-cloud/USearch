@@ -219,11 +219,12 @@ struct nvme_indexes {
      *      flight on every thread of @p executor, and gathers each query's rankings into one by
      *      key.
      *
-     *  @param[in] queries The batch, one query per row, in the parts' stored scalar type.
+     *  @param[in] queries The batch, one query per row, in any scalar NumKong casts into the stored
+     *      one; every row slot imports its own.
      *  @param[inout] executor The threads, their engines and their scratch; held for the call.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
      *  @param[out] keys Merged rankings, one query per row, as many matches as its width.
-     *  @param[out] distances Distances of the same rankings, parallel to @p keys.
+     *  @param[out] distances The same rankings' distances as @p score_type_, parallel to @p keys.
      *  @param[out] counts Per-query merged hit counts, one per query row.
      *  @param[out] latencies Steady-clock nanoseconds per query row, from its first armed walk to
      *      its final write; empty collects none.
@@ -231,8 +232,9 @@ struct nvme_indexes {
      *  A failed read stops the call: the engines drain, every buffer returns, and the call answers
      *  @c io_k.
      */
-    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
+    template <typename score_type_>
+    expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
+                                     nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
                                      std::span<std::size_t> counts, std::span<u64_t> latencies = {}) noexcept {
         return search_if(queries, executor, config, keys, distances, counts, dummy_predicate_t {}, latencies);
     }
@@ -244,7 +246,7 @@ struct nvme_indexes {
      *  @param[in] heads The indexer heads of every query row.
      *  @return @c config_mismatch_k unless the parts rank by dot.
      */
-    expected<search_result_t> search(vectors_view_t queries, indexer_heads<scalar_t> const& heads, executor_t& executor,
+    expected<search_result_t> search(rows_view_t queries, indexer_heads<scalar_t> const& heads, executor_t& executor,
                                      search_config_t config, nk::matrix_span<key_t> keys,
                                      nk::matrix_span<distance_t> distances, std::span<std::size_t> counts,
                                      std::span<u64_t> latencies = {}) noexcept
@@ -265,9 +267,9 @@ struct nvme_indexes {
      *      value, so the predicate sees keys, never node IDs. A scan asks it only about rows closer
      *      than the worst match some query already holds.
      */
-    template <typename predicate_type_>
-    expected<search_result_t> search_if(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                        nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
+    template <typename score_type_, typename predicate_type_>
+    expected<search_result_t> search_if(rows_view_t queries, executor_t& executor, search_config_t config,
+                                        nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
                                         std::span<std::size_t> counts, predicate_type_&& predicate,
                                         std::span<u64_t> latencies = {}) noexcept {
         if (config.traversal == traversal_t::scan_k)
@@ -277,33 +279,36 @@ struct nvme_indexes {
 
     /**
      *  @brief Graph products of a whole matrix of left-hand rows against every shard: each row
-     *      keeps the pairs its walks scored, keys resolved and dots at their native width.
+     *      keeps the pairs its walks scored, keys resolved and dots cast into the products' scalar.
      *
-     *  @param[in] left The left-hand rows, one walk per row and shard, in the parts' stored scalar
-     *      type.
+     *  @param[in] left The left-hand rows, one walk per row and shard, in any scalar NumKong casts
+     *      into the stored one; every row slot imports its own.
      *  @param[inout] executor The threads, their engines and their scratch; held for the call.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
      *  @param[out] keys The key of each kept pair, one left-hand row per row, as many pairs as its
      *      width.
-     *  @param[out] products The dot of each kept pair, parallel to @p keys.
+     *  @param[out] products The dot of each kept pair as @p product_type_, parallel to @p keys.
      *  @param[out] counts Pairs scored per row across every shard, above the row width when
      *      truncated.
      *  @param[out] latencies Steady-clock nanoseconds per left-hand row, as @ref search collects
      *      them.
      *  @return @c config_mismatch_k unless the parts rank by dot.
      */
-    expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
-                                       nk::matrix_span<key_t> keys, nk::matrix_span<dot_result_t> products,
+    template <typename product_type_>
+    expected<search_result_t> multiply(rows_view_t left, executor_t& executor, search_config_t config,
+                                       nk::matrix_span<key_t> keys, nk::matrix_span<product_type_> products,
                                        std::span<std::size_t> counts, std::span<u64_t> latencies = {}) noexcept {
-        std::size_t const rows_count = left.extent(0);
+        std::size_t const rows_count = left.rows;
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (counts.size() != rows_count) return {{}, status_t::config_mismatch_k};
         if (status_t const refusal = rankings_refusal(rows_count, keys, products); failed(refusal))
             return {{}, refusal};
-        if (rows_count && left.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
-        typename multiply_row_t::inputs_t const inputs {left, keys, products, counts};
-        return walk_rows_<multiply_row_t>(rows_count, config, inputs, counts, latencies, executor);
+        if (rows_count && left.columns != dimensions()) return {{}, status_t::config_mismatch_k};
+        using row_t = multiply_row<product_type_>;
+        typename row_t::inputs_t const inputs {left, keys, products, counts};
+        return walk_rows_<row_t>(rows_count, config, inputs, staged_rows_bytes(vector_dtype_, 1, left.columns), counts,
+                                 latencies, executor);
     }
 
     /**
@@ -324,10 +329,10 @@ struct nvme_indexes {
      *      @ref search collects them; the reduction into queries follows the last token.
      *  @return @c config_mismatch_k unless the parts rank by dot.
      */
-    expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
+    expected<search_result_t> maxsim(rows_view_t queries, std::size_t rows_per_query, executor_t& executor,
                                      search_config_t config, nk::matrix_span<key_t> keys, nk::matrix_span<f64_t> scores,
                                      std::span<std::size_t> counts, std::span<u64_t> latencies = {}) noexcept {
-        std::size_t const rows_count = queries.extent(0);
+        std::size_t const rows_count = queries.rows;
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
@@ -336,13 +341,14 @@ struct nvme_indexes {
         if (status_t const refusal = rankings_refusal(groups_count, keys, scores); failed(refusal))
             return {{}, refusal};
         if (!groups_count) return {{}, status_t::success_k};
-        if (queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
+        if (queries.columns != dimensions()) return {{}, status_t::config_mismatch_k};
 
         // Every token row keeps its whole ranked pool, its keys resolved and merged across shards.
-        using row_t = search_row<dummy_heads_t, dummy_predicate_t>;
+        using row_t = search_row<dummy_heads_t, dummy_predicate_t, distance_t>;
         std::size_t const width = non_zero_expansion_factor(config);
         walk_shape_t const shape = index_t::template walk_shape_<row_t>(
-            to_span(media_), to_span(parts_), kernel_, executor.queue_depth(), executor.size(), rows_count, width);
+            to_span(media_), to_span(parts_), kernel_, executor.queue_depth(), executor.size(), rows_count, width,
+            staged_rows_bytes(vector_dtype_, 1, queries.columns));
         auto [call, call_status] = index_t::begin_call_(executor, to_span(media_), shape.scratch_bytes, shape.buffers,
                                                         shape.buffer_bytes);
         if (failed(call_status)) return {{}, call_status};
@@ -358,8 +364,8 @@ struct nvme_indexes {
         nk::matrix_span<key_t> const ranked_keys {row_keys.data(), rows_count, width};
         nk::matrix_span<distance_t> const ranked_distances {row_distances.data(), rows_count, width};
         dummy_predicate_t predicate;
-        typename row_t::inputs_t const inputs {
-            queries, nullptr, &predicate, width, ranked_keys, ranked_distances, to_writable_span(row_counts)};
+        typename row_t::inputs_t const inputs {queries, kernel_,     nullptr,          &predicate,
+                                               width,   ranked_keys, ranked_distances, to_writable_span(row_counts)};
         expected<search_result_t> ranked = index_t::template run_walks_<row_t>(
             to_span(media_), to_span(parts_), executor, shape, inputs, to_span(row_counts), latencies);
         if (!ranked) return ranked;
@@ -373,16 +379,19 @@ struct nvme_indexes {
      *      online softmax is order-free, and its rows normalize once after the last walk finishes.
      *
      *  @param[in] queries Row t · @p head_count + h is head h of token t; one walk per token and
-     *      shard.
+     *      shard. Any scalar NumKong casts into the stored one; every row slot imports its token's
+     *      heads.
      *  @param[in] head_count Query heads sharing this key-value head; it must divide the rows.
      *  @param[in] value_lookup Resolves a scored batch's keys to their value rows, as wide as the
      *      keys and stored like them: `void(std::span<key_t const>, std::span<vector_view_t>)`, one
      *      row per key. Keys are read beside the scored rows; one without a value row refuses with
      *      @c shape_mismatch_k.
      *  @param[in] score_scale The factor turning a dot into a logit.
-     *  @param[out] outputs The attended rows, one per query row, as wide as the keys and packed.
+     *  @param[out] outputs The attended rows, one per query row, as wide as the keys. Packed @c f32
+     *      rows accumulate in place, any others in the row slot's staging until the token exports
+     *      them.
      *  @param[out] carry Every query row's softmax state, which merges this call with other
-     *      branches.
+     *      branches, or empty to keep none.
      *  @param[inout] executor The threads, their engines and their scratch; held for the call.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
      *  @param[out] latencies Steady-clock nanoseconds per token, its heads walked together, as
@@ -391,23 +400,22 @@ struct nvme_indexes {
      *      by dot.
      */
     template <typename value_lookup_type_>
-    expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
-                                     f32_t score_scale, nk::matrix_span<f32_t> outputs,
-                                     std::span<softmax_state_t> carry, executor_t& executor,
-                                     search_config_t config = {}, std::span<u64_t> latencies = {}) noexcept {
-        std::size_t const rows_count = queries.extent(0), columns = queries.extent(1);
+    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
+                                     f32_t score_scale, rows_span_t outputs, std::span<softmax_state_t> carry,
+                                     executor_t& executor, search_config_t config = {},
+                                     std::span<u64_t> latencies = {}) noexcept {
+        std::size_t const rows_count = queries.rows, columns = queries.columns;
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
-        if (outputs.extent(0) != rows_count || outputs.extent(1) != columns || carry.size() != rows_count)
+        if (outputs.rows != rows_count || outputs.columns != columns || (!carry.empty() && carry.size() != rows_count))
             return {{}, status_t::config_mismatch_k};
-        if (!outputs.is_contiguous()) return {{}, status_t::unsupported_layout_k};
         if (!rows_count) return {{}, status_t::success_k};
         if (columns != dimensions()) return {{}, status_t::config_mismatch_k};
         using row_t = attend_row<value_lookup_type_>;
         typename row_t::inputs_t const inputs {queries, head_count, &value_lookup, score_scale, outputs, carry};
-        expected<search_result_t> attended = walk_rows_<row_t>(rows_count / head_count, config, inputs, {}, latencies,
-                                                               executor);
+        expected<search_result_t> attended = walk_rows_<row_t>(rows_count / head_count, config, inputs,
+                                                               row_t::staged_bytes(inputs), {}, latencies, executor);
         if (attended) attended.value.count = rows_count;
         return attended;
     }
@@ -450,20 +458,21 @@ struct nvme_indexes {
      *      the key columns, then one value-row read per kept row.
      *
      *  @param[in] keys The keys to export, repeats and absent ones included.
-     *  @param[out] vectors @b [keys·wanted,dimensions]: row q · @p wanted + i is the i-th row of
-     *      key q in shard and row order, a key holding more keeping its earliest; refused as
-     *      @ref rows_refusal says.
+     *  @param[out] vectors @b [keys·wanted,dimensions] in any scalar NumKong casts into, where row
+     *      q · @p wanted + i is the i-th row of key q in shard and row order, a key holding more
+     *      keeping its earliest; refused with @c config_mismatch_k when the rows are another count
+     *      or narrower than the index, while wider ones keep their tails.
      *  @param[in] wanted Rows kept per key.
      *  @param[out] entries The true total under each key, parallel to @p keys; above @p wanted when
      *      its rows truncated, zero when absent.
      *  @param[inout] executor The threads, their engines and their scratch; held for the call.
      */
-    status_t get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
-                 std::span<std::size_t> entries, executor_t& executor) const noexcept {
-        std::size_t const row_values = divide_round_up<std::size_t>(dimensions(), nk::dimensions_per_value<scalar_t>());
+    status_t get(std::span<key_t const> keys, rows_span_t vectors, std::size_t wanted, std::span<std::size_t> entries,
+                 executor_t& executor) const noexcept {
+        std::size_t const rows_count = keys.size() * wanted;
         if (entries.size() != keys.size()) return status_t::config_mismatch_k;
-        if (status_t const refusal = rows_refusal(keys.size() * wanted, vectors, row_values); failed(refusal))
-            return refusal;
+        if (vectors.rows != rows_count || (rows_count && vectors.columns < dimensions()))
+            return status_t::config_mismatch_k;
         if (parts_.empty()) return status_t::uninitialized_k;
         std::memset(entries.data(), 0, entries.size_bytes());
         if (keys.empty()) return status_t::success_k;
@@ -501,10 +510,11 @@ struct nvme_indexes {
             return {extent_t {locator.shard, part.values_begin + u64_t(locator.node) * part.value_row_bytes,
                               part.value_row_bytes}};
         };
-        auto consume = [&](std::size_t, std::size_t read, auto const&, auto const& rows) noexcept {
-            std::memcpy(vectors.row(read).as_vector().byte_data(), rows[0], parts_[kept[read].shard].value_row_bytes);
+        rows_span_t const target {vectors.data, rows_count, dimensions(), vectors.stride, vectors.dtype};
+        auto consume = [&](std::size_t, std::size_t read, auto const&, auto const& landed) noexcept {
+            export_row<capability_>(landed[0], vector_dtype_, target, read);
         };
-        return scan_reads_(executor, keys.size() * wanted, describe, consume).status;
+        return scan_reads_(executor, rows_count, describe, consume).status;
     }
 
 #pragma endregion Key Scans
@@ -565,8 +575,9 @@ struct nvme_indexes {
      *  ranking by locator, and the written locators resolve into keys once every walk finished. A
      *  filtered row reads every scored row's key beside its value, admitting into one pool per
      *  shard with each key kept beside its row, so its ranking merges keys directly and resolves
-     *  none. */
-    template <typename heads_type_, typename predicate_type_>
+     *  none. Each slot imports its query into its own staging, and distances land as
+     *  @p score_type_. */
+    template <typename heads_type_, typename predicate_type_, typename score_type_>
     struct search_row {
         using key_t = key_type_;
 
@@ -602,12 +613,13 @@ struct nvme_indexes {
 
         /** The batch every row of the call reads and writes. */
         struct inputs_t {
-            vectors_view_t queries;
+            rows_view_t queries;
+            nk_kernel_kind_t kernel = nk_kernel_unknown_k;
             heads_type_ const* heads = nullptr;
             predicate_type_* predicate = nullptr;
             std::size_t expansion_factor = 0;
             nk::matrix_span<key_t> keys;
-            nk::matrix_span<distance_t> distances;
+            nk::matrix_span<score_type_> distances;
             std::span<std::size_t> counts;
         };
 
@@ -616,6 +628,7 @@ struct nvme_indexes {
         growing_buffer<results_array_t, scratch_allocator_t> admitted;
         growing_buffer<key_t, scratch_allocator_t> admitted_keys;
         scratch_allocator_t allocator;
+        byte_t* staged = nullptr;
         std::size_t row = 0;
         std::size_t found = 0;
         vector_view_t query;
@@ -626,7 +639,8 @@ struct nvme_indexes {
         }
 
         status_t reserve(std::size_t shards, std::size_t connectivity) noexcept {
-            if (failed(locators.resize_uninitialized(inputs.keys.extent(1)))) return status_t::bad_alloc_k;
+            staged = allocator.allocate(staged_rows_bytes(vector_dtype_, 1, inputs.queries.columns));
+            if (!staged || failed(locators.resize_uninitialized(inputs.keys.extent(1)))) return status_t::bad_alloc_k;
             if constexpr (key_reads_k == nvme_key_reads_t::scored_k) {
                 if (failed(admitted.reserve_exactly(shards)) ||
                     failed(admitted_keys.resize_uninitialized(shards * inputs.expansion_factor)))
@@ -643,7 +657,9 @@ struct nvme_indexes {
         void arm(std::size_t new_row) noexcept {
             row = new_row;
             found = 0;
-            query = inputs.queries.row(row).as_vector();
+            query = import_staged_rows<capability_, scalar_t>(inputs.queries, row, 1, inputs.kernel, staged)
+                        .row(0)
+                        .as_vector();
             inputs.counts[row] = 0;
             for (results_array_t& pool : admitted) pool.clear();
         }
@@ -664,7 +680,7 @@ struct nvme_indexes {
             else return walk.results;
         }
         void finish_walk(walk_t const& walk) noexcept {
-            std::span<distance_t> const distances = to_span(inputs.distances.row(row).as_vector());
+            std::span<score_type_> const distances = to_span(inputs.distances.row(row).as_vector());
             if constexpr (key_reads_k == nvme_key_reads_t::scored_k) {
                 // The walk is over, so its pool's IDs become slots of the keys kept beside it,
                 // which merge directly.
@@ -693,37 +709,44 @@ struct nvme_indexes {
     };
 
     /** The rows of graph products: one fold per row spans its walks, each scored pair appended by
-     *  locator until the row fills, and the written locators resolve into keys. */
-    struct multiply_row_t {
+     *  locator until the row fills, its dot as @p product_type_, and the written locators resolve
+     *  into keys. Each slot imports its left-hand row into its own staging. */
+    template <typename product_type_>
+    struct multiply_row {
         using key_t = key_type_;
-        using fold_t = multiply_fold<nvme_locator_t, dot_result_t, nvme_shard_locators_t>;
+        using fold_t = multiply_fold<nvme_locator_t, product_type_, nvme_shard_locators_t>;
         inline static constexpr nvme_key_reads_t key_reads_k = nvme_key_reads_t::outputs_k;
 
         /** The batch every row of the call reads and writes. */
         struct inputs_t {
-            vectors_view_t left;
+            rows_view_t left;
             nk::matrix_span<key_t> keys;
-            nk::matrix_span<dot_result_t> products;
+            nk::matrix_span<product_type_> products;
             std::span<std::size_t> counts;
         };
 
         inputs_t const& inputs;
         growing_buffer<nvme_locator_t, scratch_allocator_t> locators;
+        byte_t* staged = nullptr;
         fold_t pairs;
         std::size_t row = 0;
         vector_view_t query;
         vector_norms_t query_norms {};
 
-        multiply_row_t(inputs_t const& inputs, scratch_allocator_t allocator) noexcept
-            : inputs(inputs), locators(allocator) {}
+        multiply_row(inputs_t const& inputs, scratch_allocator_t allocator) noexcept
+            : inputs(inputs), locators(allocator),
+              staged(allocator.allocate(staged_rows_bytes(vector_dtype_, 1, inputs.left.columns))) {}
 
         status_t reserve(std::size_t, std::size_t) noexcept {
-            return failed(locators.resize_uninitialized(inputs.keys.extent(1))) ? status_t::bad_alloc_k
-                                                                                : status_t::success_k;
+            return !staged || failed(locators.resize_uninitialized(inputs.keys.extent(1))) ? status_t::bad_alloc_k
+                                                                                           : status_t::success_k;
         }
         void arm(std::size_t new_row) noexcept {
             row = new_row;
-            query = inputs.left.row(row).as_vector();
+            // A product walks by dot, which never narrows at unit RMS.
+            query = import_staged_rows<capability_, scalar_t>(inputs.left, row, 1, nk_kernel_dot_k, staged)
+                        .row(0)
+                        .as_vector();
             inputs.counts[row] = 0;
             pairs = fold_t {to_writable_span(locators), to_span(inputs.products.row(row).as_vector())};
         }
@@ -747,50 +770,76 @@ struct nvme_indexes {
 
     /** The rows of attention, one per token: the token's heads rescore every scored batch of every
      *  walk into their running states, value rows looked up by the keys read beside the scored
-     *  rows. */
+     *  rows. Each slot imports its token's heads into its own staging, past them the @c f32 rows
+     *  and softmax states that outputs of another layout or an empty carry cannot hold. */
     template <typename value_lookup_type_>
     struct attend_row {
         using key_t = key_type_;
         using fold_t = dummy_fold_t;
         using rescoring_t = attention_rescoring<capability_, scalar_t, value_lookup_type_>;
+        using slice_t = arena_allocator<byte_t>;
         inline static constexpr nvme_key_reads_t key_reads_k = nvme_key_reads_t::scored_k;
 
         /** The batch every row of the call reads and writes. */
         struct inputs_t {
-            vectors_view_t queries;
+            rows_view_t queries;
             std::size_t head_count = 0;
             std::remove_reference_t<value_lookup_type_>* value_lookup = nullptr;
             f32_t score_scale = 1;
-            nk::matrix_span<f32_t> outputs;
+            rows_span_t outputs;
             std::span<softmax_state_t> carry;
         };
 
         inputs_t const& inputs;
+        byte_t* staged = nullptr;
         std::size_t token = 0;
         status_t status = status_t::success_k;
+        vectors_view_t heads;
         vector_view_t query;
         vector_norms_t query_norms {};
 
-        attend_row(inputs_t const& inputs, scratch_allocator_t) noexcept : inputs(inputs) {}
+        attend_row(inputs_t const& inputs, scratch_allocator_t allocator) noexcept
+            : inputs(inputs), staged(allocator.allocate(staged_bytes(inputs))) {}
 
-        /** The token's heads over its rows of the outputs and the carry, refusing into the row's
-         *  status. */
+        /** Bytes one slot stages: the token's imported heads, then their @c f32 rows and states. */
+        static std::size_t staged_bytes(inputs_t const& inputs) noexcept {
+            std::size_t const head_count = inputs.head_count, columns = inputs.queries.columns;
+            return staged_rows_bytes(vector_dtype_, head_count, columns) +
+                   slice_t::reserved_bytes(head_count * columns * sizeof(f32_t)) + head_count * sizeof(softmax_state_t);
+        }
+
+        /** Whether the outputs are packed @c f32 rows, which the heads accumulate into in place. */
+        bool in_place() const noexcept {
+            return inputs.outputs.template holds<f32_t>() &&
+                   inputs.outputs.stride == inputs.queries.columns * sizeof(f32_t);
+        }
+
+        /** The token's heads over its rows of the outputs and the carry, or the staged stand-ins
+         *  for them, refusing into the row's status. */
         rescoring_t rescoring() noexcept {
-            std::size_t const first = token * inputs.head_count;
-            nk::range_t const heads = nk::range(first, first + inputs.head_count);
-            return {inputs.queries(heads, nk::slice),
+            std::size_t const first = token * inputs.head_count, columns = inputs.queries.columns;
+            byte_t* const accumulators = staged + staged_rows_bytes(vector_dtype_, inputs.head_count, columns);
+            byte_t* const states = accumulators + slice_t::reserved_bytes(inputs.head_count * columns * sizeof(f32_t));
+            return {heads,
                     *inputs.value_lookup,
                     inputs.score_scale,
-                    inputs.outputs(heads, nk::slice),
-                    inputs.carry.subspan(first, inputs.head_count),
+                    {reinterpret_cast<f32_t*>(in_place() ? inputs.outputs.row(first) : accumulators), inputs.head_count,
+                     columns},
+                    inputs.carry.empty() ? std::span {reinterpret_cast<softmax_state_t*>(states), inputs.head_count}
+                                         : inputs.carry.subspan(first, inputs.head_count),
                     status};
         }
 
-        status_t reserve(std::size_t, std::size_t) noexcept { return status_t::success_k; }
+        status_t reserve(std::size_t, std::size_t) noexcept {
+            return staged ? status_t::success_k : status_t::bad_alloc_k;
+        }
         void arm(std::size_t new_token) noexcept {
             token = new_token;
             status = status_t::success_k;
-            query = inputs.queries.row(token * inputs.head_count).as_vector();
+            // Attention walks by dot, which never narrows at unit RMS.
+            heads = import_staged_rows<capability_, scalar_t>(inputs.queries, token * inputs.head_count,
+                                                              inputs.head_count, nk_kernel_dot_k, staged);
+            query = heads.row(0).as_vector();
             rescoring().clear();
         }
         void rescore(std::array<node_id_t, 4> const& ids, std::array<vector_view_t, 4> const& vectors,
@@ -807,38 +856,45 @@ struct nvme_indexes {
         void resolve(std::size_t, key_t const&) noexcept {}
         status_t finish() noexcept {
             if (failed(status)) return status;
-            rescoring().finish();
+            rescoring_t const attention = rescoring();
+            attention.finish();
+            if (!in_place())
+                for (std::size_t head = 0; head != inputs.head_count; ++head)
+                    export_row<capability_>(attention.outputs.row(head).data(), nk_f32_k, inputs.outputs,
+                                            token * inputs.head_count + head);
             return status_t::success_k;
         }
     };
 
     /** Walks @p rows_count rows of @p row_type_ over every shard, each walk as wide as @p config
-     *  asks. */
+     *  asks and each row staging @p staged_bytes of imported queries. */
     template <typename row_type_>
     expected<search_result_t> walk_rows_(std::size_t rows_count, search_config_t config,
-                                         typename row_type_::inputs_t const& inputs,
+                                         typename row_type_::inputs_t const& inputs, std::size_t staged_bytes,
                                          std::span<std::size_t const> counts, std::span<u64_t> latencies,
                                          executor_t& executor) noexcept {
         return index_t::template walk_rows_<row_type_>(to_span(media_), to_span(parts_), kernel_, executor, rows_count,
-                                                       non_zero_expansion_factor(config), inputs, counts, latencies);
+                                                       non_zero_expansion_factor(config), inputs, staged_bytes, counts,
+                                                       latencies);
     }
 
     /** The batched @ref search_if under @p heads, which only a @c dummy_predicate_t accompanies. */
-    template <typename heads_type_, typename predicate_type_>
-    expected<search_result_t> search_rows_(vectors_view_t queries, heads_type_ const& heads, executor_t& executor,
+    template <typename score_type_, typename heads_type_, typename predicate_type_>
+    expected<search_result_t> search_rows_(rows_view_t queries, heads_type_ const& heads, executor_t& executor,
                                            search_config_t config, nk::matrix_span<key_t> keys,
-                                           nk::matrix_span<distance_t> distances, std::span<std::size_t> counts,
+                                           nk::matrix_span<score_type_> distances, std::span<std::size_t> counts,
                                            predicate_type_& predicate, std::span<u64_t> latencies) noexcept {
-        std::size_t const queries_count = queries.extent(0);
+        std::size_t const queries_count = queries.rows;
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
         if (status_t const refusal = rankings_refusal(queries_count, keys, distances); failed(refusal))
             return {{}, refusal};
-        if (queries_count && queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
-        using row_t = search_row<heads_type_, predicate_type_>;
-        typename row_t::inputs_t const inputs {queries, &heads,    &predicate, non_zero_expansion_factor(config),
-                                               keys,    distances, counts};
-        return walk_rows_<row_t>(queries_count, config, inputs, counts, latencies, executor);
+        if (queries_count && queries.columns != dimensions()) return {{}, status_t::config_mismatch_k};
+        using row_t = search_row<heads_type_, predicate_type_, score_type_>;
+        typename row_t::inputs_t const inputs {
+            queries, kernel_, &heads, &predicate, non_zero_expansion_factor(config), keys, distances, counts};
+        return walk_rows_<row_t>(queries_count, config, inputs, staged_rows_bytes(vector_dtype_, 1, queries.columns),
+                                 counts, latencies, executor);
     }
 
 #pragma endregion Rows
@@ -1084,13 +1140,13 @@ struct nvme_indexes {
     }
 
     /** Copies the @p keys.size() placement-order rows from row @p first on into @p keys and, unless
-     *  it holds no rows, into @p vectors: each column scanned in runs of whole rows, one covering
-     *  read per run. */
-    expected<search_result_t> read_rows_(std::size_t first, std::span<key_t> keys, vectors_span_t vectors,
+     *  it holds no rows, exports them into @p vectors, as wide as the index: each column scanned in
+     *  runs of whole rows, one covering read per run. */
+    expected<search_result_t> read_rows_(std::size_t first, std::span<key_t> keys, rows_span_t vectors,
                                          executor_t& executor) const noexcept {
         std::size_t const count = keys.size();
         std::size_t const key_runs = runs_count_(first, count, key_column_k);
-        std::size_t const value_runs = vectors.extent(0) ? runs_count_(first, count, value_column_k) : 0;
+        std::size_t const value_runs = vectors.rows ? runs_count_(first, count, value_column_k) : 0;
         auto [call, call_status] = begin_scans_(executor, 1);
         if (failed(call_status)) return {{}, call_status};
         // Tasks below `key_runs` read keys, the rest read values.
@@ -1110,9 +1166,7 @@ struct nvme_indexes {
             for (std::size_t row = 0; row != run.rows; ++row)
                 if (task < key_runs)
                     keys[run.position + row] = safegraphs_widened_key<key_t>(bytes + row * row_bytes, key_dtype);
-                else
-                    std::memcpy(vectors.row(run.position + row).as_vector().byte_data(), bytes + row * row_bytes,
-                                row_bytes);
+                else export_row<capability_>(bytes + row * row_bytes, vector_dtype_, vectors, run.position + row);
         };
         auto const [reads, status] = scan_reads_(executor, key_runs + value_runs, describe, consume);
         search_result_t result;
@@ -1199,23 +1253,24 @@ struct nvme_indexes {
      *  time per query. Both finalize through the walk's quads kit. Every thread keeps its own
      *  matches of every query, and they merge once the column ends. @p predicate sees a row's key
      *  only once the row beats some query's worst match. One pass answers the whole batch, so
-     *  every latency is that pass.
+     *  every latency is that pass. The batch imports once into the first thread's arena, beside
+     *  its norms and packs.
      */
-    template <typename predicate_type_>
-    expected<search_result_t> scan_rows_(vectors_view_t queries, executor_t& executor, nk::matrix_span<key_t> keys,
-                                         nk::matrix_span<distance_t> distances, std::span<std::size_t> counts,
+    template <typename score_type_, typename predicate_type_>
+    expected<search_result_t> scan_rows_(rows_view_t query_rows, executor_t& executor, nk::matrix_span<key_t> keys,
+                                         nk::matrix_span<score_type_> distances, std::span<std::size_t> counts,
                                          predicate_type_& predicate, std::span<u64_t> latencies) noexcept {
         using slice_t = arena_allocator<byte_t>;
         using tiles_chain_t = tiles_chain<scalar_t, capability_>;
         using quads_kit_t = typename index_t::quads_kit_t;
         constexpr bool filtered_k = !std::is_same_v<std::remove_cv_t<predicate_type_>, dummy_predicate_t>;
-        std::size_t const queries_count = queries.extent(0), wanted = keys.extent(1), threads = executor.size();
+        std::size_t const queries_count = query_rows.rows, wanted = keys.extent(1), threads = executor.size();
         if (parts_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
         if (status_t const refusal = rankings_refusal(queries_count, keys, distances); failed(refusal))
             return {{}, refusal};
         if (!latencies.empty() && latencies.size() != queries_count) return {{}, status_t::config_mismatch_k};
-        if (queries_count && queries.extent(1) != dimensions()) return {{}, status_t::config_mismatch_k};
+        if (queries_count && query_rows.columns != dimensions()) return {{}, status_t::config_mismatch_k};
         std::memset(counts.data(), 0, counts.size_bytes());
         if (!queries_count || !wanted) return {{}, status_t::success_k};
         auto const started = std::chrono::steady_clock::now();
@@ -1239,7 +1294,9 @@ struct nvme_indexes {
                                         slice_t::reserved_bytes(queries_count * sizeof(u32_t)) +
                                         slice_t::reserved_bytes(queries_count * sizeof(distance_t)) +
                                         slice_t::reserved_bytes(stream_rows * pack_columns * sizeof(dot_result_t));
-        std::size_t const home_bytes = slice_t::reserved_bytes(packs * pack_stride) +
+        std::size_t const staged_bytes = staged_rows_bytes(vector_dtype_, queries_count, query_rows.columns);
+        std::size_t const home_bytes = slice_t::reserved_bytes(staged_bytes) +
+                                       slice_t::reserved_bytes(packs * pack_stride) +
                                        slice_t::reserved_bytes(padded_queries * sizeof(vector_norms_t)) +
                                        slice_t::reserved_bytes(padded_queries * sizeof(dot_result_t)) +
                                        slice_t::reserved_bytes(threads * sizeof(scan_share_t)) +
@@ -1250,12 +1307,15 @@ struct nvme_indexes {
             return arena.allocate(max_of<std::size_t>(bytes, 1), default_alignment_k);
         };
         arena_t& home = executor.arena(0);
+        auto* const staged = carve(home, staged_bytes);
         auto* const packed = carve(home, packs * pack_stride);
         auto* const norms = reinterpret_cast<vector_norms_t*>(carve(home, padded_queries * sizeof(vector_norms_t)));
         auto* const sumsqs = reinterpret_cast<dot_result_t*>(carve(home, padded_queries * sizeof(dot_result_t)));
         auto* const shares = reinterpret_cast<scan_share_t*>(carve(home, threads * sizeof(scan_share_t)));
         auto* const merged = reinterpret_cast<scan_match_t*>(carve(home, threads * wanted * sizeof(scan_match_t)));
-        if (!packed || !norms || !sumsqs || !shares || !merged) return {{}, status_t::bad_alloc_k};
+        if (!staged || !packed || !norms || !sumsqs || !shares || !merged) return {{}, status_t::bad_alloc_k};
+        vectors_view_t const queries = import_staged_rows<capability_, scalar_t>(query_rows, 0, queries_count, kernel_,
+                                                                                 staged);
         for (std::size_t thread = 0; thread != threads; ++thread) {
             arena_t& arena = executor.arena(thread);
             scan_share_t& share = *new (shares + thread) scan_share_t {
@@ -1630,27 +1690,26 @@ struct nvme_indexes_cursor {
     using indexes_t = indexes_type_;
     using key_t = typename indexes_t::key_t;
     using scalar_t = typename indexes_t::scalar_t;
-    using vectors_span_t = typename indexes_t::vectors_span_t;
     using executor_t = typename indexes_t::executor_t;
     using search_result_t = typename indexes_t::search_result_t;
 
     /** Starts at the first row of @p indexes, the one every later @ref read must name. */
     explicit nvme_indexes_cursor(indexes_t const&) noexcept {}
 
-    /** Copies up to @p keys.size() rows of @p indexes into @p keys, and their vectors in the stored
-     *  scalar type into @p vectors unless it holds no rows, through @p executor, advancing past
-     *  them; the result's @c count is the rows written and its @c scan_reads what they cost. An
-     *  export wanting vectors must offer at least as many rows as @p keys, each wide enough for a
-     *  stored row, or nothing is read and it answers @c config_mismatch_k. */
-    expected<search_result_t> read(indexes_t const& indexes, std::span<key_t> keys, vectors_span_t vectors,
+    /** Copies up to @p keys.size() rows of @p indexes into @p keys, and exports their vectors into
+     *  @p vectors in its scalar unless it holds no rows, through @p executor, advancing past them;
+     *  the result's @c count is the rows written and its @c scan_reads what they cost. An export
+     *  wanting vectors must offer at least as many rows as @p keys, each at least as wide as the
+     *  index, or nothing is read and it answers @c config_mismatch_k. */
+    expected<search_result_t> read(indexes_t const& indexes, std::span<key_t> keys, rows_span_t vectors,
                                    executor_t& executor) noexcept {
-        std::size_t const row_values = divide_round_up<std::size_t>(indexes.dimensions(),
-                                                                    nk::dimensions_per_value<scalar_t>());
-        if (vectors.extent(0) && (vectors.extent(0) < keys.size() || vectors.extent(1) < row_values))
+        std::size_t const dimensions = indexes.dimensions();
+        if (vectors.rows && (vectors.rows < keys.size() || vectors.columns < dimensions))
             return {{}, status_t::config_mismatch_k};
         std::size_t const left = indexes.size() - min_of(row_, indexes.size());
         if (!left || keys.empty()) return {{}, status_t::success_k};
-        expected<search_result_t> copied = indexes.read_rows_(row_, keys.first(min_of(keys.size(), left)), vectors,
+        rows_span_t const target {vectors.data, vectors.rows, dimensions, vectors.stride, vectors.dtype};
+        expected<search_result_t> copied = indexes.read_rows_(row_, keys.first(min_of(keys.size(), left)), target,
                                                               executor);
         if (copied) row_ += copied.value.count;
         return copied;
@@ -3204,7 +3263,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
             static_cast<node_id_t>(first), expansion_factor_};
         search_config_t config {};
         config.expansion_factor = static_cast<decltype(config.expansion_factor)>(expansion_factor_);
-        auto const [walked, walk_status] = target.view.template walk_rows_<row_t>(count, config, inputs, {}, {},
+        auto const [walked, walk_status] = target.view.template walk_rows_<row_t>(count, config, inputs, 0, {}, {},
                                                                                   executor);
         if (failed(walk_status)) return walk_status;
         absorb_walks_(walked);

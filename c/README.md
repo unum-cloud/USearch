@@ -234,7 +234,7 @@ Callers lend memory, never a way to allocate it: no allocator callback crosses t
 Every dense verb is exported for every residency, and the engine answers what a residency lacks with `usearch_status_unsupported_k`:
 
 - RAM answers every verb but `usearch_dense_view_ram`, `usearch_dense_search_stream_init` and `usearch_dense_merge`.
-- VRAM answers insertion, refinement, counting, attention and the serialization family, while `get`, `save_buffer`, `multiply`, `maxsim`, cursors and exact scans answer `usearch_status_unsupported_k`, and a search reports `usearch_status_device_k`, as [GPUs](#gpus) explains.
+- VRAM answers insertion, refinement, counting, `multiply`, `maxsim`, attention and the serialization family, while `get`, `save_buffer`, cursors and exact scans answer `usearch_status_unsupported_k`, and a search reports `usearch_status_device_k`, as [GPUs](#gpus) explains.
 - NVMe answers every read verb as RAM does, refuses every mutating one with `usearch_status_read_only_k`, and refuses saving, since a view already is its checkpoint.
 
 ### GPUs

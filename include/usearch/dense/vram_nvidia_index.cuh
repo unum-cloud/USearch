@@ -21,6 +21,10 @@
 #include <type_traits> // `std::is_same_v` - which rescoring a search walks under
 #include <utility>     // `std::index_sequence` - every rung of one dtype
 
+#include <numkong/types.h>       // `NUMKONG_ARCH_CUDA_`, which the two below test before including it
+#include <numkong/cast/simt.cuh> // `nk_cast_unit_simt_` - the import and export casts' device body
+#include <numkong/each/cuda.cuh> // `nk_each_rmscast_e4m3_cuda_vectors_` & kin - the unit-RMS import's device bodies
+
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/vram_nvidia_device.hpp"
 #include "usearch/dense/types.hpp"
@@ -891,6 +895,20 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     else if constexpr (kernel == cuda_kernel_t::reconnect_island_k)
         cuda_reconnect_island(graph.neighbors, graph.connectivity, graph.island_ids, graph.islands_count, graph.reached,
                               graph.rows_count, graph.seed_count, graph.in_links, graph.reconnected);
+    else if constexpr (kernel == cuda_kernel_t::cast_k) {
+        nk_size_t const threads = static_cast<nk_size_t>(gridDim.x) * blockDim.x;
+        for (nk_size_t unit = static_cast<nk_size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+             unit < arguments.cast.plan.units; unit += threads)
+            nk_cast_unit_simt_(&arguments.cast, unit);
+    }
+    else if constexpr (kernel == cuda_kernel_t::rmscast_k) {
+        // Only narrow floats take a unit-RMS import; every other dtype exports one never launched.
+        if constexpr (dtype_ == nk_f16_k) nk_each_rmscast_f16_cuda_vectors_(arguments.rmscast);
+        else if constexpr (dtype_ == nk_e4m3_k) nk_each_rmscast_e4m3_cuda_vectors_(arguments.rmscast);
+        else if constexpr (dtype_ == nk_e5m2_k) nk_each_rmscast_e5m2_cuda_vectors_(arguments.rmscast);
+        else if constexpr (dtype_ == nk_e2m3_k) nk_each_rmscast_e2m3_cuda_vectors_(arguments.rmscast);
+        else if constexpr (dtype_ == nk_e3m2_k) nk_each_rmscast_e3m2_cuda_vectors_(arguments.rmscast);
+    }
     else
         cuda_merge_attention(reinterpret_cast<byte_t*>(arguments.attend.outputs), arguments.attend.rows,
                              arguments.attend.columns, arguments.attend.shards);

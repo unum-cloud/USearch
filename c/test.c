@@ -391,7 +391,10 @@ void test_count_and_get(size_t const dimensions) {
         &(usearch_dense_reserve_t) {.index = index, .executor = executor, .outcome = &outcome, .capacity = 2});
     expect(!outcome.message, outcome.message);
 
-    float* const data = create_vectors(2, dimensions);
+    // Small integers through every nibble, which bf16, `i4x2` and `u1x8` all hold exactly.
+    float* const data = (float*)malloc(2 * dimensions * sizeof(float));
+    expect(data, "Failed to allocate memory");
+    for (size_t index = 0; index != 2 * dimensions; ++index) data[index] = (float)((int)(index % 16) - 8);
     usearch_key_t const keys[2] = {key_of(7), key_of(8)};
     size_t const row_bytes = dimensions * sizeof(float);
     usearch_dense_insert(&(usearch_dense_insert_t) {.index = index,
@@ -436,8 +439,96 @@ void test_count_and_get(size_t const dimensions) {
     expect(vectors.data != NULL, "Retrieval must land the rows in the arena");
     float const* const retrieved = (float const*)vectors.data;
     for (size_t position = 0; position != dimensions; ++position)
-        expect(fabsf(retrieved[position] - data[position]) <= fabsf(data[position]) / 128,
-               "A bf16 index must return rows within its 7-bit mantissa");
+        expect(retrieved[position] == data[position], "A bf16 index must return small integers exactly");
+
+    // Sub-byte rows come in whole bytes, as NumKong casts them and sub-byte indexes store them.
+    usearch_dense_get_t get_packed = {.index = index,
+                                      .executor = executor,
+                                      .outcome = &outcome,
+                                      .key = key_of(7),
+                                      .vectors = &vectors,
+                                      .written = &written,
+                                      .arena = arena,
+                                      .outputs_scalar = usearch_scalar_u1x8_k};
+    usearch_dense_get(&get_packed);
+    if (dimensions % 8)
+        expect_eq(outcome.status, usearch_status_shape_mismatch_k, "A bit row ending inside a byte is refused");
+    else {
+        expect(!outcome.message, outcome.message);
+        uint8_t const* const bits = (uint8_t const*)vectors.data;
+        for (size_t position = 0; position != dimensions; ++position)
+            expect(((bits[position / 8] >> (7 - position % 8)) & 1) == (data[position] != 0),
+                   "A bit row must hold whether each value is non-zero");
+    }
+    get_packed.outputs_scalar = usearch_scalar_i4x2_k;
+    usearch_dense_get(&get_packed);
+    if (dimensions % 2)
+        expect_eq(outcome.status, usearch_status_shape_mismatch_k, "A nibble row ending inside a byte is refused");
+    else {
+        expect(!outcome.message, outcome.message);
+        uint8_t const* const nibbles = (uint8_t const*)vectors.data;
+        for (size_t position = 0; position != dimensions; ++position) {
+            int const nibble = position % 2 ? nibbles[position / 2] & 0xF : nibbles[position / 2] >> 4;
+            expect((nibble ^ 8) - 8 == (int)data[position], "A nibble row must hold each value exactly");
+        }
+    }
+
+#if USEARCH_DENSE_DTYPES >= 4
+    // An angular index is blind to magnitude, so rows far below e4m3's smallest step keep their
+    // direction, whether they arrive as f32 or as f64.
+    usearch_dense_index_t narrow = NULL;
+    usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &narrow,
+                                                        .outcome = &outcome,
+                                                        .metric = usearch_dense_metric_angular_k,
+                                                        .quantization = usearch_scalar_e4m3_k,
+                                                        .dimensions = dimensions});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_reserve(
+        &(usearch_dense_reserve_t) {.index = narrow, .executor = executor, .outcome = &outcome, .capacity = 2});
+    expect(!outcome.message, outcome.message);
+    float* const tiny = (float*)malloc(dimensions * sizeof(float));
+    double* const tiny_wide = (double*)malloc(dimensions * sizeof(double));
+    expect(tiny && tiny_wide, "Failed to allocate the tiny rows");
+    for (size_t position = 0; position != dimensions; ++position)
+        tiny[position] = data[position] * 1e-4f, tiny_wide[position] = data[dimensions + position] * 1e-4;
+    usearch_dense_insert(&(usearch_dense_insert_t) {.index = narrow,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = 1,
+                                                    .keys = {&keys[0], sizeof(usearch_key_t)},
+                                                    .vectors = {tiny, row_bytes, dimensions, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_insert(&(usearch_dense_insert_t) {
+        .index = narrow,
+        .executor = executor,
+        .outcome = &outcome,
+        .count = 1,
+        .keys = {&keys[1], sizeof(usearch_key_t)},
+        .vectors = {tiny_wide, dimensions * sizeof(double), dimensions, usearch_scalar_f64_k}});
+    expect(!outcome.message, outcome.message);
+    for (size_t row = 0; row != 2; ++row) {
+        usearch_dense_get(&(usearch_dense_get_t) {.index = narrow,
+                                                  .executor = executor,
+                                                  .outcome = &outcome,
+                                                  .key = keys[row],
+                                                  .vectors = &vectors,
+                                                  .written = &written,
+                                                  .arena = arena,
+                                                  .outputs_scalar = usearch_scalar_f32_k});
+        expect(!outcome.message && written == 1, outcome.message);
+        float const* const direction = (float const*)vectors.data;
+        double dot = 0, original_norm = 0, direction_norm = 0;
+        for (size_t position = 0; position != dimensions; ++position) {
+            double const original = data[row * dimensions + position];
+            dot += original * direction[position];
+            original_norm += original * original, direction_norm += (double)direction[position] * direction[position];
+        }
+        expect(dot / sqrt(original_norm * direction_norm) > 0.99, "A tiny row must keep its direction in e4m3");
+    }
+    free(tiny_wide);
+    free(tiny);
+    usearch_dense_free(narrow);
+#endif
 
     usearch_dense_insert(
         &(usearch_dense_insert_t) {.index = index,
@@ -827,6 +918,21 @@ void test_attend(void) {
                    attended[pitch + 3] == 0,
                "The attended rows must be normalized and as wide as the keys");
     }
+
+    // Narrower outputs land the same rows to their own precision, and a NULL carry keeps no state.
+    attend.outputs_scalar = usearch_scalar_bf16_k;
+    attend.carry = NULL;
+    usearch_dense_attend(&attend);
+    expect(!outcome.message, outcome.message);
+    expect(outputs.scalar == usearch_scalar_bf16_k && outputs.stride == dimensions * sizeof(uint16_t),
+           "Outputs land packed in the scalar asked for");
+    uint16_t const* const narrowed = (uint16_t const*)outputs.data;
+    uint32_t const widened_bits = (uint32_t)narrowed[0] << 16;
+    float widened;
+    memcpy(&widened, &widened_bits, sizeof(widened));
+    expect(fabsf(widened - 4.25f / 1.875f) < 1e-2f, "A bf16 output must round the f32 one");
+    attend.outputs_scalar = 0;
+    attend.carry = carry;
 
     attend.head_count = 3;
     usearch_dense_attend(&attend);
@@ -1530,6 +1636,7 @@ int main(int argc, char* argv[]) {
         }
     test_add_progress();
     test_count_and_get(dimension_counts[0]);
+    test_count_and_get(dimension_counts[1]);
     test_arenas(dimension_counts[0]);
     test_walks_name_their_index(dimension_counts[0]);
 #if USEARCH_DENSE_DTYPES >= 2

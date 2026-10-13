@@ -633,9 +633,8 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
 
     // A named ceiling caps which kit-chain rows the cascade may select; "ampere" keeps just the floor.
     // Capping above what this binary compiled is harmless: a row also needs its tier compiled in.
-    nk_capability_t max_compute = cuda_compute_choices_k[std::size(cuda_compute_choices_k) - 1].bit;
-    if (device_cli.max_compute_name == "ampere") max_compute = nk_cap_ampere_k;
-    else if (!device_cli.max_compute_name.empty()) {
+    nk_capability_t max_compute = nk_cap_ampere_k;
+    if (!device_cli.max_compute_name.empty() && device_cli.max_compute_name != "ampere") {
         std::size_t const named = index_of_name(cuda_compute_choices_k, device_cli.max_compute_name);
         if (named == std::size(cuda_compute_choices_k)) {
             fmt::println(
@@ -669,6 +668,15 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
                          listed[position].vendor_ordinal);
         return 1;
     }
+    // Unnamed, the ceiling is the first device's own generation, as Hopper and both Blackwells run
+    // only their own kits.
+    if (device_cli.max_compute_name.empty()) switch (engaged.front().gpu_class) {
+        case gpu_class_t::nvidia_ada_k: max_compute = nk_cap_ada_k; break;
+        case gpu_class_t::nvidia_hopper_k: max_compute = nk_cap_hopper_k; break;
+        case gpu_class_t::nvidia_blackwell_k: max_compute = nk_cap_blackwell_k; break;
+        case gpu_class_t::nvidia_blackwellrtx_k: max_compute = nk_cap_blackwellrtx_k; break;
+        default: break;
+        }
     cuda_set_device(devices.front());
     fmt::println("USearch {}.{}.{}", USEARCH_VERSION_MAJOR, USEARCH_VERSION_MINOR, USEARCH_VERSION_PATCH);
     for (gpu_device_t const& device : engaged)

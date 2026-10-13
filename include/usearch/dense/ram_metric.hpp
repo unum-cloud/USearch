@@ -91,8 +91,10 @@
 #pragma once
 
 #include <cassert>
+#include <cstring> // `std::memcpy` - rows that already hold the target scalar move as bytes
 
 #include <array>
+#include <limits> // `std::numeric_limits` - the unit-RMS cast's epsilon
 #include <type_traits>
 #include <utility>
 
@@ -2300,6 +2302,158 @@ struct elementwise_chain {
         >::type;
     static constexpr nk_capability_t picked_k = kit_t::capability_k;
 };
+
+/** The kit narrowing f32 rows at unit RMS into @p scalar_type_, whose dot products land in f32; a
+ *  scalar without one has no @c kit_t, and bf16 needs none, as it keeps f32's exponent range. */
+template <typename scalar_type_, nk_capability_t caps_>
+struct rmscast_chain {};
+
+struct f16_serial_rmscast_kit_t;
+struct e4m3_serial_rmscast_kit_t;
+struct e5m2_serial_rmscast_kit_t;
+struct e2m3_serial_rmscast_kit_t;
+struct e3m2_serial_rmscast_kit_t;
+struct e4m3_haswell_rmscast_kit_t;
+struct e4m3_skylake_rmscast_kit_t;
+struct f16_neon_rmscast_kit_t;
+struct e4m3_neon_rmscast_kit_t;
+
+struct f16_serial_rmscast_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr auto rmscast = nk_each_rmscast_f16_serial;
+};
+struct e4m3_serial_rmscast_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr auto rmscast = nk_each_rmscast_e4m3_serial;
+};
+struct e5m2_serial_rmscast_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr auto rmscast = nk_each_rmscast_e5m2_serial;
+};
+struct e2m3_serial_rmscast_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr auto rmscast = nk_each_rmscast_e2m3_serial;
+};
+struct e3m2_serial_rmscast_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_serial_k;
+    static constexpr auto rmscast = nk_each_rmscast_e3m2_serial;
+};
+
+#if NUMKONG_TARGET_HASWELL
+struct e4m3_haswell_rmscast_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_haswell_k;
+    static constexpr auto rmscast = nk_each_rmscast_e4m3_haswell;
+};
+#endif // NUMKONG_TARGET_HASWELL
+
+#if NUMKONG_TARGET_SKYLAKE
+struct e4m3_skylake_rmscast_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_skylake_k;
+    static constexpr auto rmscast = nk_each_rmscast_e4m3_skylake;
+};
+#endif // NUMKONG_TARGET_SKYLAKE
+
+#if NUMKONG_TARGET_NEON
+struct f16_neon_rmscast_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr auto rmscast = nk_each_rmscast_f16_neon;
+};
+struct e4m3_neon_rmscast_kit_t {
+    static constexpr nk_capability_t capability_k = nk_cap_neon_k;
+    static constexpr auto rmscast = nk_each_rmscast_e4m3_neon;
+};
+#endif // NUMKONG_TARGET_NEON
+
+template <nk_capability_t caps_>
+struct rmscast_chain<nk::f16_t, caps_> {
+    using kit_t = typename first_available_kit<                                                  //
+        f16_serial_rmscast_kit_t,                                                                //
+        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, f16_neon_rmscast_kit_t> //
+        >::type;
+};
+
+template <nk_capability_t caps_>
+struct rmscast_chain<nk::e4m3_t, caps_> {
+    using kit_t = typename first_available_kit<                                                             //
+        e4m3_serial_rmscast_kit_t,                                                                          //
+        chain_layer<NUMKONG_TARGET_SKYLAKE && (caps_ & nk_cap_skylake_k) != 0, e4m3_skylake_rmscast_kit_t>, //
+        chain_layer<NUMKONG_TARGET_HASWELL && (caps_ & nk_cap_haswell_k) != 0, e4m3_haswell_rmscast_kit_t>, //
+        chain_layer<NUMKONG_TARGET_NEON && (caps_ & nk_cap_neon_k) != 0, e4m3_neon_rmscast_kit_t>           //
+        >::type;
+};
+
+template <nk_capability_t caps_>
+struct rmscast_chain<nk::e5m2_t, caps_> {
+    using kit_t = e5m2_serial_rmscast_kit_t;
+};
+
+template <nk_capability_t caps_>
+struct rmscast_chain<nk::e2m3_t, caps_> {
+    using kit_t = e2m3_serial_rmscast_kit_t;
+};
+
+template <nk_capability_t caps_>
+struct rmscast_chain<nk::e3m2_t, caps_> {
+    using kit_t = e3m2_serial_rmscast_kit_t;
+};
+
+/** Writes row @p row of @p source into @p target in @p scalar_type_: a byte move when the scalars
+ *  agree, else a cast, at unit RMS from @c f32 or @c f64 when @p kernel is angular and some kit
+ *  narrows into the scalar, as an angular index is blind to magnitude and narrow floats spend their
+ *  range on direction. NumKong narrows only from @c f32, so @c f64 rows widen into @p widened. */
+template <nk_capability_t capability_, nk::numeric_dtype scalar_type_>
+void import_row(rows_view_t source, std::size_t row, nk_kernel_kind_t kernel, nk::vector_span<scalar_type_> target,
+                nk::vector_span<f32_t> widened) noexcept {
+    using cast_kit_t = typename elementwise_chain<capability_>::kit_t;
+    byte_t const* const from = source.row(row);
+    std::size_t const columns = source.columns;
+    if (source.dtype == scalar_type_::dtype()) {
+        std::memcpy(target.byte_data(), from, packed_bytes(source.dtype, columns));
+        return;
+    }
+    [[maybe_unused]] nk_status_t status = nk_success_k;
+    if constexpr (requires { typename rmscast_chain<scalar_type_, capability_>::kit_t; })
+        if (kernel == nk_kernel_angular_k && (source.dtype == nk_f32_k || source.dtype == nk_f64_k)) {
+            f32_t const* wide = reinterpret_cast<f32_t const*>(from);
+            if (source.dtype == nk_f64_k) {
+                status = cast_kit_t::cast(from, nk_f64_k, widened.data(), nk_f32_k, columns, nullptr);
+                wide = widened.data();
+            }
+            status = rmscast_chain<scalar_type_, capability_>::kit_t::rmscast(
+                wide, nullptr, &target.data()->raw_, 1, 1, columns, columns * sizeof(f32_t),
+                packed_bytes(scalar_type_::dtype(), columns), std::numeric_limits<f32_t>::min(), nullptr);
+            assert(status == nk_success_k && "Every kit RMS-casts from f32");
+            return;
+        }
+    status = cast_kit_t::cast(from, source.dtype, target.byte_data(), scalar_type_::dtype(), columns, nullptr);
+    assert(status == nk_success_k && "Every kit casts every dtype pair");
+}
+
+/** Rows @b [first,first+count) of @p source in @p scalar_type_: borrowed when they already are,
+ *  else imported through @ref import_row into the leading rows of @p staging. */
+template <nk_capability_t capability_, nk::numeric_dtype scalar_type_>
+nk::matrix_view<scalar_type_> import_rows(rows_view_t source, std::size_t first, std::size_t count,
+                                          nk_kernel_kind_t kernel, nk::matrix_span<scalar_type_> staging,
+                                          nk::vector_span<f32_t> widened) noexcept {
+    if (source.template holds<scalar_type_>()) return source.slice(first, count).template as<scalar_type_>();
+    for (std::size_t row = 0; row != count; ++row)
+        import_row<capability_>(source, first + row, kernel, staging.row(row).as_vector(), widened);
+    return staging(nk::range(0, count), nk::slice);
+}
+
+/** Writes @p native, one row in @p native_dtype, as row @p row of @p target in its scalar: a byte
+ *  move when they agree, else a cast. */
+template <nk_capability_t capability_>
+void export_row(void const* native, nk_dtype_t native_dtype, rows_span_t target, std::size_t row) noexcept {
+    using cast_kit_t = typename elementwise_chain<capability_>::kit_t;
+    if (target.dtype == native_dtype) {
+        std::memcpy(target.row(row), native, packed_bytes(target.dtype, target.columns));
+        return;
+    }
+    [[maybe_unused]] nk_status_t const status = cast_kit_t::cast(native, native_dtype, target.row(row), target.dtype,
+                                                                 target.columns, nullptr);
+    assert(status == nk_success_k && "Every kit casts every dtype pair");
+}
 
 /** Scales each of @p heads @c f32 sums, at most eight, by its correction, then adds @p count value rows into it, each
  *  row's weights one tile over the heads. Each chunk of the rows widens once and stays in L1 while every head

@@ -101,8 +101,9 @@
  *  @c predicate is refused on VRAM with @c usearch_status_device_k even then, since a host predicate
  *  cannot narrow a device walk.
  *  @c usearch_dense_cursor_init answers on RAM, while VRAM rows are read back through a search.
- *  @c usearch_dense_get, @c usearch_dense_save_buffer, @c usearch_dense_multiply and
- *  @c usearch_dense_maxsim answer on RAM but not on VRAM, the first three waiting on device arenas.
+ *  @c usearch_dense_get and @c usearch_dense_save_buffer answer on RAM but not on VRAM, waiting on
+ *  device arenas, while @c usearch_dense_multiply and @c usearch_dense_maxsim stage on the arena's
+ *  host pages and land their outputs where it lives.
  *  A search with @c usearch_traversal_scan_k answers on RAM and NVMe, waiting on device scans.
  *  @c usearch_dense_attend answers on both, resolving value rows through @c value_lookup, a host
  *  function on RAM and a device one on VRAM.

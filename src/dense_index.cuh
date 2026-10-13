@@ -2729,6 +2729,13 @@ static bool arena_contains(usearch_arena_handle_t const& arena, void const* addr
     return arena.device_memory ? arena.device_memory.contains(address) : arena.memory.contains(address);
 }
 
+/** The GPU ordinal @p variant computes on, or @c host_device_k. */
+template <typename variant_type_>
+static int device_of(variant_type_& variant) noexcept {
+    if constexpr (is_vram_index<variant_type_>) return specialized_index {variant}.device(0);
+    else return host_device_k;
+}
+
 /** Holds @p arena for the call whose outcome is @p call and rewinds it, freeing the previous call's
  *  outputs, so an input of @p inputs still inside it is refused, as is an arena on another device
  *  than @p device. The call's @c call_outcome_t lets go of it before the final store. */
@@ -2752,12 +2759,26 @@ static usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcom
     return arena;
 }
 
-/** Carves @p count values of @p value_type_ out of a claimed @p arena, as host pages or on its
- *  device; null when the arena cannot grow. */
+/** Carves @p count values of @p value_type_ out of a claimed arena's host pages, @p staging, where
+ *  every verb computes, even one whose outputs @ref publish moves to a device; null when they
+ *  cannot grow. */
 template <typename value_type_>
-static value_type_* carve(usearch_arena_handle_t& arena, std::size_t count) noexcept {
-    if (arena.device_memory) return arena.device_memory.template allocate<value_type_>(count);
-    return reinterpret_cast<value_type_*>(arena.memory.allocate(count * sizeof(value_type_), default_alignment_k));
+static value_type_* carve(growing_arena<forkunion_allocator_t>& staging, std::size_t count) noexcept {
+    return reinterpret_cast<value_type_*>(staging.allocate(count * sizeof(value_type_), default_alignment_k));
+}
+
+/** Hands out the @p count values @ref carve put at @p output in @p arena: in place on host pages,
+ *  or re-pointed at one upload to its device. */
+template <typename value_type_>
+static status_t publish(usearch_arena_handle_t& arena, value_type_*& output, std::size_t count) noexcept {
+    if (!arena.device_memory || !output || !count) return status_t::success_k;
+    value_type_* const landed = arena.device_memory.template allocate<value_type_>(count);
+    if (!landed) return status_t::bad_alloc_k;
+    if (status_t const uploaded = arena.device_memory.upload(landed, output, count * sizeof(value_type_));
+        failed(uploaded))
+        return uploaded;
+    output = landed;
+    return status_t::success_k;
 }
 
 /**
@@ -2953,94 +2974,58 @@ static bool submitted(arguments_type_* arguments) noexcept {
 
 #pragma endregion Deferred Calls
 
-/** Bytes one packed row of @p dimensions spans in @p dtype. */
-static std::size_t packed_row_bytes(nk_dtype_t dtype, std::size_t dimensions) noexcept {
-    return divide_round_up<std::size_t>(nk_dtype_bits(dtype) * dimensions, 8);
+/** @p count rows of the C view @p rows as the engines take them, their scalar riding along. */
+static us::dense::rows_view_t rows_of(usearch_rows_view_t const& rows, std::size_t count) noexcept {
+    return {static_cast<byte_t const*>(rows.data), count, rows.columns, rows.stride, nk_dtype_of(rows.scalar)};
 }
 
-/** The export tail every row reader shares: @p fill produces up to @p rows rows in the stored type
- *  and reports how many, landing packed in @p landing when the two types agree and in a staged
- *  matrix converted row by row into @p target_dtype otherwise. */
-template <typename scalar_type_, typename fill_type_>
-static expected<std::size_t> export_rows(std::byte* landing, std::size_t rows, nk_dtype_t target_dtype,
-                                         std::size_t dimensions, nk_dtype_t stored_dtype, fill_type_&& fill) noexcept {
-    std::size_t const row_bytes = packed_row_bytes(target_dtype, dimensions);
-    std::size_t const tail_bits = nk_dtype_bits(target_dtype) * dimensions % 8;
-    if (target_dtype == stored_dtype)
-        return fill(nk::matrix_span<scalar_type_> {reinterpret_cast<char*>(landing),
-                                                   rows_shape_of<scalar_type_>(rows, row_bytes, dimensions)});
-    auto zeros = nk::matrix<scalar_type_>::zeros({rows, dimensions});
-    if (!zeros)
-        return {0, zeros.status == nk::status_t::bad_alloc_k ? status_t::bad_alloc_k : status_t::shape_mismatch_k};
-    nk::matrix<scalar_type_> staged = std::move(zeros.value);
-    expected<std::size_t> const exported = fill(staged.span());
-    for (std::size_t row = 0; exported && row != min_of(exported.value, rows); ++row) {
-        [[maybe_unused]] nk_status_t const cast = us::dense::elementwise_chain<nk_cap_any_k>::kit_t::cast(
-            staged.span().row(row).as_vector().byte_data(), stored_dtype, landing + row * row_bytes, target_dtype,
-            dimensions, nullptr);
-        assert(cast == nk_success_k && "The serial tier casts every dtype pair");
-        // Sub-byte kinds pack from the high bit, so a ragged row's last byte keeps loose low bits.
-        if (tail_bits) landing[(row + 1) * row_bytes - 1] &= static_cast<std::byte>(0xFFu << (8 - tail_bits));
-    }
-    return exported;
+/** The dtype of rows in @p scalar, @p columns wide, or unknown once @p outcome refuses a
+ *  scalar NumKong lacks or sub-byte rows ending inside a byte, which neither its casts nor
+ *  indexes hold. */
+static nk_dtype_t rows_dtype_of(usearch_scalar_t scalar, std::size_t columns, usearch_outcome_t* outcome) noexcept {
+    nk_dtype_t const dtype = nk_dtype_of(scalar);
+    if (dtype == nk_dtype_unknown_k) propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown scalar kind");
+    else if (columns % nk_dimensions_per_value(dtype))
+        return propagate_error(usearch_status_shape_mismatch_k, outcome, "Sub-byte rows come in whole bytes"),
+               nk_dtype_unknown_k;
+    return dtype;
 }
 
 /**
- *  @brief The one loop every row verb drives on an arm that serves it: converts @p rows chunk by
- *      chunk and hands each chunk to the sink @p make_sink builds.
+ *  @brief The one loop every row verb drives on an arm that serves it: hands @p rows to @p sink
+ *      chunk by chunk, each arm importing its rows into its own scalar.
  *
- *  Chunks hold whole queries of @p rows_per_query rows, and progress counts queries. The sink is built
- *  once per call, so its staging is too, and it writes its own outputs. Finishes @p outcome only on
- *  failure, leaving the success to the verb once its last output is written.
+ *  Chunks hold whole queries of @p rows_per_query rows, so a device batch stages a bounded run, and
+ *  progress counts queries. Finishes @p outcome only on failure, leaving the success to the verb
+ *  once its last output is written.
  */
-template <typename variant_type_, typename make_sink_type_>
+template <typename variant_type_, typename sink_type_>
 static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t executor_handle,         //
                                  std::size_t rows_count, usearch_rows_view_t const& rows,            //
                                  std::size_t rows_per_query, std::size_t expansion_factor,           //
                                  usearch_progress_callback_t progress, void* progress_state,         //
                                  usearch_dense_traversal_stats_t* stats, usearch_outcome_t* outcome, //
-                                 make_sink_type_&& make_sink) noexcept {
+                                 sink_type_&& sink) noexcept {
     if (stats) *stats = {};
     if (!rows_count) return true;
     if (!rows.data) return propagate_error(usearch_status_invalid_argument_k, outcome, "The rows must name storage");
-    nk_dtype_t const source_dtype = nk_dtype_of(rows.scalar);
-    if (source_dtype == nk_dtype_unknown_k)
-        return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown scalar kind");
+    nk_dtype_t const source_dtype = rows_dtype_of(rows.scalar, rows.columns, outcome);
+    if (source_dtype == nk_dtype_unknown_k) return false;
     usearch_executor_handle_t call_executor;
     typename variant_type_::executor_t* const executor = executor_of(variant, executor_handle, call_executor, outcome);
     if (!executor) return false;
-    using scalar_t = typename variant_type_::scalar_t;
     typename variant_type_::search_config_t search_config {};
     search_config.expansion_factor = static_cast<u32_t>(expansion_factor);
-
-    std::size_t const dimensions = specialized_index {variant}.dimensions();
-    if (rows.stride && rows.stride < packed_row_bytes(source_dtype, dimensions))
+    if (rows.stride && rows.stride < us::dense::packed_bytes(source_dtype, rows.columns))
         return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row");
 
-    // Rows that stage convert chunk by chunk, never splitting a query.
     std::size_t const chunk = rows_per_query *
                               max_of<std::size_t>(1, min_of(rows_count, increment_rows_k) / rows_per_query);
-    status_t staged = status_t::success_k;
-    auto sink = make_sink(chunk, staged);
-    if (failed(staged)) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to stage the outputs");
-    nk::matrix<scalar_t> staged_rows;
-    if (stages_rows<variant_type_>(source_dtype, rows.stride)) {
-        auto zeros = nk::matrix<scalar_t>::zeros({chunk, dimensions});
-        if (!zeros)
-            return propagate_error(zeros.status == nk::status_t::bad_alloc_k ? usearch_status_out_of_memory_k
-                                                                             : usearch_status_shape_mismatch_k,
-                                   outcome, "Failed to stage the converted rows");
-        staged_rows = std::move(zeros.value);
-    }
-
-    char const* const rows_base = static_cast<char const*>(rows.data);
-    std::size_t resolved = 0;
-    while (resolved != rows_count) {
+    us::dense::rows_view_t const all = rows_of(rows, rows_count);
+    for (std::size_t resolved = 0; resolved != rows_count;) {
         std::size_t const taking = min_of(chunk, rows_count - resolved);
-        nk::matrix_view<scalar_t> const chunk_rows = stored_rows_of<variant_type_>(
-            rows_base + resolved * rows.stride, taking, rows.stride, source_dtype, dimensions, staged_rows);
         expected<typename variant_type_::search_result_t> const found = sink(
-            specialized_index {variant}, chunk_rows, *executor, search_config, resolved, taking);
+            specialized_index {variant}, all.slice(resolved, taking), *executor, search_config, resolved, taking);
         if (!crossed(found, stats, outcome)) return false;
         resolved += taking;
         if (progress &&
@@ -3062,44 +3047,39 @@ struct matches_landing_t {
     usearch_matches_view_t view() const noexcept { return {keys, scores, counts, wanted}; }
 };
 
-/** Carves @p count rows of @p wanted matches out of a claimed @p arena; a zero @p wanted carves
- *  only the counts. False once @p outcome records why not. */
-static bool carve_matches(usearch_arena_handle_t& arena, std::size_t count, std::size_t wanted,
+/** Carves @p count rows of @p wanted matches out of a claimed arena's host pages, @p staging; a
+ *  zero @p wanted carves only the counts. False once @p outcome records why not. */
+static bool carve_matches(growing_arena<forkunion_allocator_t>& staging, std::size_t count, std::size_t wanted,
                           matches_landing_t& landing, usearch_outcome_t* outcome) noexcept {
     landing.wanted = wanted;
-    landing.counts = carve<std::size_t>(arena, count);
+    landing.counts = carve<std::size_t>(staging, count);
     if (wanted) {
-        landing.keys = carve<usearch_key_t>(arena, count * wanted);
-        landing.scores = carve<usearch_distance_t>(arena, count * wanted);
+        landing.keys = carve<usearch_key_t>(staging, count * wanted);
+        landing.scores = carve<usearch_distance_t>(staging, count * wanted);
     }
     if (landing.counts && (!wanted || (landing.keys && landing.scores))) return true;
     return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
 }
 
-/** Widens @p staged, the engine's scores tagged @p staged_dtype, into the ABI's doubles: in one
- *  cast when both matrices are packed, row by row otherwise. */
-template <typename score_type_>
-static void land_scores(nk::matrix_view<score_type_> staged, nk_dtype_t staged_dtype,
-                        nk::matrix_span<f64_t> scores) noexcept {
-    bool const packed = staged.is_contiguous() && scores.is_contiguous();
-    std::size_t const runs = packed ? 1 : staged.extent(0);
-    std::size_t const run_length = packed ? staged.extent(0) * staged.extent(1) : staged.extent(1);
-    for (std::size_t run = 0; run_length && run != runs; ++run) {
-        [[maybe_unused]] nk_status_t const cast = us::dense::elementwise_chain<nk_cap_any_k>::kit_t::cast(
-            staged.row(run).data(), staged_dtype, scores.row(run).data(), nk_f64_k, run_length, nullptr);
-        assert(cast == nk_success_k && "The serial tier casts every dtype pair");
-    }
+/** Hands out the @p count rows @ref carve_matches put in @p landing where @p arena hands outputs
+ *  out. False once @p outcome records why not. */
+static bool publish_matches(usearch_arena_handle_t& arena, std::size_t count, matches_landing_t& landing,
+                            usearch_outcome_t* outcome) noexcept {
+    std::size_t const entries = count * landing.wanted;
+    status_t status = publish(arena, landing.counts, count);
+    if (succeeded(status)) status = publish(arena, landing.keys, entries);
+    if (succeeded(status)) status = publish(arena, landing.scores, entries);
+    return succeeded(status) || propagate_error(status, outcome, "Failed to land the matches on the device");
 }
 
-/** The matching verbs' sink on one serving arm: keys land in @p landing as the walk writes them,
- *  viewed as one row of @c wanted per output row, and @p score_type_ scores, tagged @p score_dtype,
- *  stage at the engine's width and widen to the ABI's double, unless they already are doubles;
- *  @p rows_per_query input rows share one output row, and @p count output rows land. */
-template <typename score_type_, typename variant_type_, typename verb_type_>
+/** The matching verbs' sink on one serving arm: keys and scores land in @p landing as the walk
+ *  writes them, viewed as one row of @c wanted per output row; @p rows_per_query input rows share
+ *  one output row, and @p count output rows land. */
+template <typename variant_type_, typename verb_type_>
 static bool match_dense_rows(variant_type_& variant, usearch_executor_t executor,                //
                              std::size_t count, usearch_rows_view_t const& rows,                 //
                              std::size_t rows_per_query, matches_landing_t const& landing,       //
-                             nk_dtype_t score_dtype, std::size_t expansion_factor,               //
+                             std::size_t expansion_factor,                                       //
                              usearch_progress_callback_t progress, void* progress_state,         //
                              usearch_dense_traversal_stats_t* stats, usearch_outcome_t* outcome, //
                              verb_type_&& verb) noexcept {
@@ -3107,34 +3087,17 @@ static bool match_dense_rows(variant_type_& variant, usearch_executor_t executor
     static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk writes them");
     std::size_t const wanted = landing.wanted;
     nk::matrix_span<key_t> const keys {reinterpret_cast<key_t*>(landing.keys), count, wanted};
-    nk::matrix_span<f64_t> const scores {reinterpret_cast<f64_t*>(landing.scores), count, wanted};
-    // Doubles already are the ABI's width, so they land in the arena unstaged.
-    constexpr bool stages_scores_k = !std::is_same_v<score_type_, f64_t>;
-    auto make_sink = [&](std::size_t chunk, status_t& staged) noexcept {
-        growing_buffer<score_type_> staged_scores {global_allocator};
-        if (stages_scores_k && failed(staged_scores.resize(chunk / rows_per_query * wanted)))
-            staged = status_t::bad_alloc_k;
-        return [&, staged_scores = std::move(staged_scores)](
-                   specialized_index<variant_type_> view, typename variant_type_::vectors_view_t chunk_rows,
-                   typename variant_type_::executor_t& executor, typename variant_type_::search_config_t config,
-                   std::size_t resolved, std::size_t taking) mutable noexcept {
-            std::size_t const first = resolved / rows_per_query, matched = taking / rows_per_query;
-            nk::range_t const chunk_range = nk::range(first, first + matched);
-            std::span<std::size_t> const chunk_counts {landing.counts + first, matched};
-            if constexpr (!stages_scores_k)
-                return verb(view, chunk_rows, executor, config, keys(chunk_range, nk::slice),
-                            scores(chunk_range, nk::slice), chunk_counts);
-            else {
-                nk::matrix_span<score_type_> const chunk_scores {staged_scores.data(), matched, wanted};
-                expected<typename variant_type_::search_result_t> const found = verb(
-                    view, chunk_rows, executor, config, keys(chunk_range, nk::slice), chunk_scores, chunk_counts);
-                if (found) land_scores<score_type_>(chunk_scores, score_dtype, scores(chunk_range, nk::slice));
-                return found;
-            }
-        };
+    nk::matrix_span<f64_t> const scores {landing.scores, count, wanted};
+    auto sink = [&](specialized_index<variant_type_> view, us::dense::rows_view_t chunk_rows,
+                    typename variant_type_::executor_t& executor, typename variant_type_::search_config_t config,
+                    std::size_t resolved, std::size_t taking) noexcept {
+        std::size_t const first = resolved / rows_per_query, matched = taking / rows_per_query;
+        nk::range_t const chunk_range = nk::range(first, first + matched);
+        return verb(view, chunk_rows, executor, config, keys(chunk_range, nk::slice), scores(chunk_range, nk::slice),
+                    std::span<std::size_t> {landing.counts + first, matched});
     };
     return for_each_dense_chunk(variant, executor, count * rows_per_query, rows, rows_per_query, expansion_factor,
-                                progress, progress_state, stats, outcome, make_sink);
+                                progress, progress_state, stats, outcome, sink);
 }
 
 #pragma endregion Multi Verbs
@@ -3249,14 +3212,6 @@ static void visit_writable(usearch_dense_index_handle_t& index, usearch_outcome_
             else mutate(variant);
         },
         index.variants);
-}
-
-/** Lands one finished output row in @p arena, on its device or on the host; a device row rides one
- *  blocking upload, since the walk that produced it staged on the host. */
-static bool land_row(usearch_arena_handle_t& arena, std::byte* landing, void const* row, std::size_t bytes) noexcept {
-    if (arena.device_memory) return succeeded(arena.device_memory.upload(landing, row, bytes));
-    std::memcpy(landing, row, bytes);
-    return true;
 }
 
 /** Lists a spawned @p executor with a deferred table of @p deferred_limit slots and hands it out
@@ -3444,7 +3399,6 @@ USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
     usearch_dense_traversal_stats_t* const stats = arguments->stats;
     usearch_keys_view_t const keys = arguments->keys;
     usearch_rows_view_t const vectors = arguments->vectors;
-    usearch_progress_callback_t const progress = arguments->progress;
     std::size_t const count = arguments->count;
     if (stats) *stats = {};
     if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
@@ -3455,37 +3409,22 @@ USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
                void();
     if (rejects_columns(*arguments->index, count, vectors.columns, outcome)) return;
     visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
-        nk_dtype_t const source_dtype = nk_dtype_of(vectors.scalar);
-        if (source_dtype == nk_dtype_unknown_k)
-            return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown scalar kind"), void();
+        nk_dtype_t const source_dtype = rows_dtype_of(vectors.scalar, vectors.columns, outcome);
+        if (source_dtype == nk_dtype_unknown_k) return;
         usearch_executor_handle_t call_executor;
         typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
                                                                          outcome);
         if (!executor) return;
         using key_t = typename variant_type_::key_t;
+        static_assert(sizeof(key_t) == sizeof(usearch_key_t), "The engine reads the caller's keys in place");
         typename variant_type_::insert_config_t insert_config {};
         insert_config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
-
-        // An insertion takes one packed run of keys, so any other stride gathers into one first.
-        std::span<key_t const> uuids {reinterpret_cast<key_t const*>(keys.data), count};
-        growing_buffer<key_t> gathered_keys {global_allocator};
-        if (keys.stride != sizeof(usearch_key_t)) {
-            if (failed(gathered_keys.resize(count)))
-                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to gather the keys"), void();
-            for (std::size_t row = 0; row != count; ++row)
-                std::memcpy(&gathered_keys[row], reinterpret_cast<char const*>(keys.data) + row * keys.stride,
-                            sizeof(key_t));
-            uuids = {gathered_keys.data(), count};
-        }
-
-        std::size_t const dimensions = specialized_index {variant}.dimensions();
-        if (vectors.stride && vectors.stride < packed_row_bytes(source_dtype, dimensions))
+        if (vectors.stride && vectors.stride < us::dense::packed_bytes(source_dtype, vectors.columns))
             return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row"),
                    void();
-        insertion_rows_t const rows {static_cast<char const*>(vectors.data), vectors.stride, source_dtype, progress,
-                                     arguments->progress_state};
+        nk::vector_view<key_t> const uuids {reinterpret_cast<char const*>(keys.data), count, keys.stride};
         expected<typename variant_type_::insert_result_t> const inserted = specialized_index {variant}.add(
-            uuids, rows, *executor, insert_config);
+            uuids, rows_of(vectors, count), {arguments->progress, arguments->progress_state}, *executor, insert_config);
         if (crossed(inserted, stats, outcome)) propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
@@ -3558,10 +3497,10 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                 if (!arena) return;
                 if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
                 matches_landing_t landing;
-                if (!carve_matches(*arena, count, wanted, landing, outcome)) return;
+                if (!carve_matches(arena->memory, count, wanted, landing, outcome)) return;
                 auto search_with = [&](auto&& predicate) noexcept {
-                    return match_dense_rows<typename variant_type_::distance_t>(
-                        variant, arguments->executor, count, arguments->queries, 1, landing, nk_f32_k,
+                    return match_dense_rows(
+                        variant, arguments->executor, count, arguments->queries, 1, landing,
                         arguments->expansion_factor, arguments->progress, arguments->progress_state, arguments->stats,
                         outcome,
                         [&](auto view, auto rows, auto& executor, auto config, auto keys, auto distances, auto counts) {
@@ -3590,10 +3529,10 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
                 propagate_error(usearch_status_unsupported_k, outcome,
                                 "VRAM rows wait on device arenas, so a search reads them back");
             else {
-                using scalar_t = typename variant_type_::scalar_t;
-                nk_dtype_t const target_dtype = nk_dtype_of(scalar);
-                if (target_dtype == nk_dtype_unknown_k)
-                    return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown scalar kind"), void();
+                specialized_index view {variant};
+                std::size_t const dimensions = view.dimensions();
+                nk_dtype_t const target_dtype = rows_dtype_of(scalar, dimensions, outcome);
+                if (target_dtype == nk_dtype_unknown_k) return;
                 usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k,
                                                                   {}, outcome);
                 if (!arena) return;
@@ -3603,26 +3542,21 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
                 if (!executor) return;
                 // The single key rides the batched lookups, which size the landing first and fill
                 // it second.
-                specialized_index view {variant};
                 std::size_t entries = 0;
                 if (status_t const counted = view.count({&key, 1}, {&entries, 1}, *executor); failed(counted))
                     return propagate_error(counted, outcome), void();
                 if (!entries) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-                std::size_t const dimensions = view.dimensions();
-                std::size_t const row_bytes = packed_row_bytes(target_dtype, dimensions);
-                std::byte* const rows = carve<std::byte>(*arena, entries * row_bytes);
+                std::size_t const row_bytes = us::dense::packed_bytes(target_dtype, dimensions);
+                std::byte* const rows = carve<std::byte>(arena->memory, entries * row_bytes);
                 if (!rows)
                     return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-                expected<std::size_t> const exported = export_rows<scalar_t>(
-                    rows, entries, target_dtype, dimensions, variant_type_::vector_dtype_k,
-                    [&](nk::matrix_span<scalar_t> span) noexcept {
-                        std::size_t total = 0;
-                        status_t const got = view.get({&key, 1}, span, entries, {&total, 1}, *executor);
-                        return expected<std::size_t> {min_of(total, entries), got};
-                    });
-                if (!exported) return propagate_error(exported.status, outcome, "Failed to export the rows"), void();
+                std::size_t total = 0;
+                if (status_t const got = view.get({&key, 1}, {rows, entries, dimensions, row_bytes, target_dtype},
+                                                  entries, {&total, 1}, *executor);
+                    failed(got))
+                    return propagate_error(got, outcome, "Failed to export the rows"), void();
                 *arguments->vectors = {rows, row_bytes, dimensions, scalar};
-                if (arguments->written) *arguments->written = exported.value;
+                if (arguments->written) *arguments->written = min_of(total, entries);
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
         },
@@ -3687,9 +3621,6 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
     if (arguments->index != arguments->cursor->opened_on)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The cursor was opened on another index"),
                void();
-    nk_dtype_t const target_dtype = vectors ? nk_dtype_of(arguments->outputs_scalar) : nk_dtype_unknown_k;
-    if (vectors && target_dtype == nk_dtype_unknown_k)
-        return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown scalar kind"), void();
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k, {}, outcome);
     if (!arena) return;
     std::atomic_flag& busy = arguments->cursor->busy;
@@ -3702,13 +3633,16 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
                 propagate_error(usearch_status_unsupported_k, outcome,
                                 "A cursor walks host rows; VRAM rows are read back by key or search");
             else {
-                using scalar_t = typename cursor_type_::scalar_t;
                 using key_t = typename cursor_type_::key_t;
                 using indexes_t = typename cursor_type_::indexes_t;
                 static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk reads them");
-                if (!wanted) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
                 // A handle never changes its arm, so it is still the one the cursor was opened on.
                 auto& indexes = std::get<indexes_t>(arguments->index->variants);
+                std::size_t const dimensions = indexes.dimensions();
+                nk_dtype_t const target_dtype = vectors ? rows_dtype_of(arguments->outputs_scalar, dimensions, outcome)
+                                                        : nk_dtype_unknown_k;
+                if (vectors && target_dtype == nk_dtype_unknown_k) return;
+                if (!wanted) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
                 // An NVMe cursor reads its rows through an executor, a RAM one copies them.
                 usearch_executor_handle_t call_executor;
                 [[maybe_unused]] typename indexes_t::executor_t* executor = nullptr;
@@ -3716,24 +3650,21 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
                     executor = executor_of(indexes, arguments->executor, call_executor, outcome);
                     if (!executor) return;
                 }
-                std::size_t const dimensions = indexes.dimensions();
-                std::size_t const row_bytes = vectors ? packed_row_bytes(target_dtype, dimensions) : 0;
-                usearch_key_t* const keys = carve<usearch_key_t>(*arena, wanted);
-                std::byte* const rows = vectors && keys ? carve<std::byte>(*arena, wanted * row_bytes) : nullptr;
+                std::size_t const row_bytes = vectors ? us::dense::packed_bytes(target_dtype, dimensions) : 0;
+                usearch_key_t* const keys = carve<usearch_key_t>(arena->memory, wanted);
+                std::byte* const rows = vectors && keys ? carve<std::byte>(arena->memory, wanted * row_bytes) : nullptr;
                 if (!keys || (vectors && !rows))
                     return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
                 std::span<key_t> const identities {reinterpret_cast<key_t*>(keys), wanted};
-                auto read_into = [&](nk::matrix_span<scalar_t> span) noexcept -> expected<std::size_t> {
-                    if constexpr (is_nvme_index<indexes_t>) {
-                        auto const [scanned, status] = walk.read(indexes, identities, span, *executor);
-                        return {scanned.count, status};
-                    }
-                    else return {walk.read(indexes, identities, span), status_t::success_k};
-                };
-                expected<std::size_t> const read = vectors
-                                                       ? export_rows<scalar_t>(rows, wanted, target_dtype, dimensions,
-                                                                               indexes_t::vector_dtype_k, read_into)
-                                                       : read_into({});
+                us::dense::rows_span_t const landing = vectors ? us::dense::rows_span_t {rows, wanted, dimensions,
+                                                                                         row_bytes, target_dtype}
+                                                               : us::dense::rows_span_t {};
+                expected<std::size_t> read {0, status_t::success_k};
+                if constexpr (is_nvme_index<indexes_t>) {
+                    auto const [scanned, status] = walk.read(indexes, identities, landing, *executor);
+                    read = {scanned.count, status};
+                }
+                else read = {walk.read(indexes, identities, landing), status_t::success_k};
                 if (!read) return propagate_error(read.status, outcome, "Failed to export the rows"), void();
                 if (read.value) {
                     *arguments->keys = {keys, sizeof(usearch_key_t)};
@@ -3776,78 +3707,69 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
             if (variant.kernel() != nk_kernel_dot_k)
                 propagate_error(usearch_status_config_mismatch_k, outcome,
                                 "A product is a dot, so the kind must be inner product");
-            else if constexpr (is_vram_index<variant_type_>)
-                propagate_error(usearch_status_unsupported_k, outcome, "VRAM products wait on device arenas");
             else {
-                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k,
-                                                                  {arguments->left.data}, outcome);
+                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
+                                                                  device_of(variant), {arguments->left.data}, outcome);
                 if (!arena) return;
                 if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
                 using key_t = typename variant_type_::key_t;
-                using dot_result_t = typename variant_type_::dot_result_t;
                 static_assert(sizeof(key_t) == sizeof(usearch_key_t), "Keys land in the arena as the walk writes them");
-                growing_buffer<std::size_t> scored {global_allocator};
-                growing_buffer<dot_result_t> staged_products {global_allocator};
+                // A row's scored count lands one past its offset, which it becomes once compacted.
+                std::size_t* offsets = carve<std::size_t>(arena->memory, count + 1);
+                if (!offsets)
+                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+                std::span<std::size_t> const scored {offsets + 1, count};
                 usearch_key_t* keys = nullptr;
-                if (failed(scored.resize(count)))
-                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to stage the counts"),
-                           void();
-                // Every row keeps the pairs its walks scored until `width` of them fill its row:
-                // keys in the arena, compacted once the counts are known, and products staged.
+                usearch_distance_t* scores = nullptr;
+                // Every row keeps the pairs its walks scored until `width` of them fill its row,
+                // compacted once the counts are known.
                 auto walk = [&](std::size_t width, usearch_progress_callback_t progress) noexcept {
-                    keys = width ? carve<usearch_key_t>(*arena, count * width) : nullptr;
-                    if ((width && !keys) || failed(staged_products.resize(count * width)))
-                        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to stage the products");
+                    keys = width ? carve<usearch_key_t>(arena->memory, count * width) : nullptr;
+                    scores = width ? carve<usearch_distance_t>(arena->memory, count * width) : nullptr;
+                    if (width && (!keys || !scores))
+                        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
                     nk::matrix_span<key_t> const kept_keys {reinterpret_cast<key_t*>(keys), count, width};
-                    nk::matrix_span<dot_result_t> const kept_products {staged_products.data(), count, width};
-                    auto make_sink = [&](std::size_t, status_t&) noexcept {
-                        return [&](specialized_index<variant_type_> view,
-                                   typename variant_type_::vectors_view_t chunk_rows,
-                                   typename variant_type_::executor_t& executor,
-                                   typename variant_type_::search_config_t config, std::size_t resolved,
-                                   std::size_t taking) noexcept {
-                            nk::range_t const chunk = nk::range(resolved, resolved + taking);
-                            return view.multiply(chunk_rows, executor, config, kept_keys(chunk, nk::slice),
-                                                 kept_products(chunk, nk::slice),
-                                                 to_writable_span(scored).subspan(resolved, taking));
-                        };
+                    nk::matrix_span<f64_t> const kept_scores {scores, count, width};
+                    auto sink = [&](specialized_index<variant_type_> view, us::dense::rows_view_t chunk_rows,
+                                    typename variant_type_::executor_t& executor,
+                                    typename variant_type_::search_config_t config, std::size_t resolved,
+                                    std::size_t taking) noexcept {
+                        nk::range_t const chunk = nk::range(resolved, resolved + taking);
+                        return view.multiply(chunk_rows, executor, config, kept_keys(chunk, nk::slice),
+                                             kept_scores(chunk, nk::slice), scored.subspan(resolved, taking));
                     };
                     return for_each_dense_chunk(variant, arguments->executor, count, arguments->left, 1,
                                                 arguments->expansion_factor, progress, arguments->progress_state,
-                                                arguments->stats, outcome, make_sink);
+                                                arguments->stats, outcome, sink);
                 };
                 // Keeping every pair needs the widest row first, which only a counting walk can tell.
                 std::size_t width = arguments->wanted;
                 if (!width) {
                     if (!walk(0, nullptr)) return;
-                    for (std::size_t row = 0; row != count; ++row) width = max_of(width, scored[row]);
+                    for (std::size_t const row_scored : scored) width = max_of(width, row_scored);
                 }
                 if (!walk(width, arguments->progress)) return;
 
-                std::size_t* const offsets = carve<std::size_t>(*arena, count + 1);
-                if (!offsets)
-                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
                 std::size_t required = 0;
                 offsets[0] = 0;
-                for (std::size_t row = 0; row != count; ++row)
-                    offsets[row + 1] = offsets[row] + min_of(scored[row], width), required += scored[row];
-                std::size_t const written = offsets[count];
-                usearch_distance_t* const scores = written ? carve<usearch_distance_t>(*arena, written) : nullptr;
-                if (written && !scores)
-                    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-                nk::matrix_view<dot_result_t> const kept_products {staged_products.data(), count, width};
                 for (std::size_t row = 0; row != count; ++row) {
-                    std::size_t const kept = offsets[row + 1] - offsets[row];
+                    std::size_t const row_scored = offsets[row + 1], kept = min_of(row_scored, width);
+                    required += row_scored;
+                    offsets[row + 1] = offsets[row] + kept;
                     if (!kept) continue;
                     // A run starts no later than its own row, so moving rows in order
                     // overwrites only rows already moved.
                     std::memmove(keys + offsets[row], keys + row * width, kept * sizeof(usearch_key_t));
-                    [[maybe_unused]] nk_status_t const cast = us::dense::elementwise_chain<nk_cap_any_k>::kit_t::cast(
-                        kept_products.row(row).data(), dot_result_t::dtype(), scores + offsets[row], nk_f64_k, kept,
-                        nullptr);
-                    assert(cast == nk_success_k && "The serial tier casts every dtype pair");
+                    std::memmove(scores + offsets[row], scores + row * width, kept * sizeof(usearch_distance_t));
                 }
-                *arguments->products = {written ? keys : nullptr, scores, offsets};
+                std::size_t const written = offsets[count];
+                if (!written) keys = nullptr, scores = nullptr;
+                status_t landed = publish(*arena, keys, written);
+                if (succeeded(landed)) landed = publish(*arena, scores, written);
+                if (succeeded(landed)) landed = publish(*arena, offsets, count + 1);
+                if (failed(landed))
+                    return propagate_error(landed, outcome, "Failed to land the products on the device"), void();
+                *arguments->products = {keys, scores, offsets};
                 if (arguments->written) *arguments->written = written;
                 if (arguments->required) *arguments->required = required;
                 propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -3869,14 +3791,13 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
     *arguments->outputs = {};
     if (!arguments->queries.data)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The queries must name storage"), void();
-    nk_dtype_t const outputs_dtype = nk_dtype_of(outputs_scalar);
-    if (outputs_dtype == nk_dtype_unknown_k)
-        return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown scalar kind"), void();
     std::size_t const columns = arguments->queries.columns;
+    nk_dtype_t const outputs_dtype = rows_dtype_of(outputs_scalar, columns, outcome);
+    if (outputs_dtype == nk_dtype_unknown_k) return;
     if (count % head_count)
         return propagate_error(usearch_status_shape_mismatch_k, outcome, "The heads must divide the rows"), void();
     if (rejects_columns(*arguments->index, count, columns, outcome)) return;
-    std::size_t const row_bytes = packed_row_bytes(outputs_dtype, columns);
+    std::size_t const row_bytes = us::dense::packed_bytes(outputs_dtype, columns);
     f32_t const requested_scale = arguments->score_scale;
 
     std::visit(
@@ -3890,60 +3811,38 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                                gpu_vendor_of_index<variant_type_>() != gpu_vendor_t::nvidia_k)
                 propagate_error(usearch_status_unsupported_k, outcome, "Device attention runs on NVIDIA alone");
             else {
-                int device = host_device_k;
-                if constexpr (is_vram_index<variant_type_>) device = specialized_index {variant}.device(0);
-                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, device,
-                                                                  {arguments->queries.data, carry}, outcome);
+                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
+                                                                  device_of(variant), {arguments->queries.data, carry},
+                                                                  outcome);
                 if (!arena) return;
                 if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-                std::byte* const landing = carve<std::byte>(*arena, count * row_bytes);
+                std::byte* landing = carve<std::byte>(arena->memory, count * row_bytes);
                 if (!landing)
                     return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
                 typename specialized_index<variant_type_>::attend_lookup_t const value_lookup {
                     arguments->value_lookup, arguments->value_lookup_state,
                     usearch_scalar_of(variant_type_::vector_dtype_k), columns};
-                // Outputs stage as `f32` and narrow one row at a time; the carry stages beside them.
-                auto make_sink = [&](std::size_t chunk, status_t& staged) noexcept {
-                    growing_buffer<f32_t> staged_outputs {global_allocator};
-                    growing_buffer<us::dense::softmax_state_t> staged_carry {global_allocator};
-                    growing_buffer<std::byte> narrowed {global_allocator};
-                    if (failed(staged_outputs.resize(chunk * columns)) || failed(staged_carry.resize(chunk)) ||
-                        failed(narrowed.resize(row_bytes)))
-                        staged = status_t::bad_alloc_k;
-                    return [&, staged_outputs = std::move(staged_outputs), staged_carry = std::move(staged_carry),
-                            narrowed = std::move(narrowed)](specialized_index<variant_type_> view,
-                                                            typename variant_type_::vectors_view_t chunk_rows,
-                                                            typename variant_type_::executor_t& executor,
-                                                            typename variant_type_::search_config_t config,
-                                                            std::size_t resolved, std::size_t taking) mutable noexcept {
-                        f32_t const score_scale = requested_scale > 0
-                                                      ? requested_scale
-                                                      : 1 / std::sqrt(static_cast<f32_t>(view.dimensions()));
-                        nk::matrix_span<f32_t> const attended {staged_outputs.data(), taking, columns};
-                        expected<typename variant_type_::search_result_t> found = view.attend(
-                            chunk_rows, head_count, value_lookup, score_scale, attended, {staged_carry.data(), taking},
-                            executor, config);
-                        if (!found) return found;
-                        for (std::size_t row = 0; row != taking; ++row) {
-                            std::byte* const target = landing + (resolved + row) * row_bytes;
-                            [[maybe_unused]] nk_status_t const cast =
-                                us::dense::elementwise_chain<nk_cap_any_k>::kit_t::cast(
-                                    attended.row(row).data(), nk_f32_k,
-                                    device == host_device_k ? target : narrowed.data(), outputs_dtype, columns,
-                                    nullptr);
-                            assert(cast == nk_success_k && "The serial tier casts every dtype pair");
-                            if (device != host_device_k && !land_row(*arena, target, narrowed.data(), row_bytes))
-                                return found.status = status_t::device_error_k, found;
-                            if (carry)
-                                carry[resolved + row] = std::bit_cast<usearch_dense_softmax_state_t>(staged_carry[row]);
-                        }
-                        return found;
-                    };
+                us::dense::rows_span_t const outputs {landing, count, columns, row_bytes, outputs_dtype};
+                // The engine's carry mirrors the C one, so it writes the caller's states in place.
+                std::span<us::dense::softmax_state_t> const carried {
+                    reinterpret_cast<us::dense::softmax_state_t*>(carry), carry ? count : 0};
+                auto sink = [&](specialized_index<variant_type_> view, us::dense::rows_view_t chunk_rows,
+                                typename variant_type_::executor_t& executor,
+                                typename variant_type_::search_config_t config, std::size_t resolved,
+                                std::size_t taking) noexcept {
+                    f32_t const score_scale = requested_scale > 0
+                                                  ? requested_scale
+                                                  : 1 / std::sqrt(static_cast<f32_t>(view.dimensions()));
+                    return view.attend(chunk_rows, head_count, value_lookup, score_scale,
+                                       outputs.slice(resolved, taking),
+                                       carried.empty() ? carried : carried.subspan(resolved, taking), executor, config);
                 };
                 if (!for_each_dense_chunk(variant, arguments->executor, count, arguments->queries, head_count,
                                           arguments->expansion_factor, arguments->progress, arguments->progress_state,
-                                          arguments->stats, outcome, make_sink))
+                                          arguments->stats, outcome, sink))
                     return;
+                if (status_t const landed = publish(*arena, landing, count * row_bytes); failed(landed))
+                    return propagate_error(landed, outcome, "Failed to land the outputs on the device"), void();
                 *arguments->outputs = {landing, row_bytes, columns, outputs_scalar};
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
@@ -3966,22 +3865,21 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
             if (variant.kernel() != nk_kernel_dot_k)
                 propagate_error(usearch_status_config_mismatch_k, outcome,
                                 "Late interaction sums maxima over logits, so the kind must be inner product");
-            else if constexpr (is_vram_index<variant_type_>)
-                propagate_error(usearch_status_unsupported_k, outcome, "VRAM late interaction waits on device arenas");
             else {
-                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k,
-                                                                  {arguments->queries.data}, outcome);
+                usearch_arena_handle_t* const arena = claim_arena(
+                    arguments->arena, arguments->outcome, device_of(variant), {arguments->queries.data}, outcome);
                 if (!arena) return;
                 if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
                 matches_landing_t landing;
-                if (!carve_matches(*arena, count, wanted, landing, outcome)) return;
-                if (!match_dense_rows<f64_t>(
-                        variant, arguments->executor, count, arguments->queries, rows_per_query, landing, nk_f64_k,
+                if (!carve_matches(arena->memory, count, wanted, landing, outcome)) return;
+                if (!match_dense_rows(
+                        variant, arguments->executor, count, arguments->queries, rows_per_query, landing,
                         arguments->expansion_factor, arguments->progress, arguments->progress_state, arguments->stats,
                         outcome,
                         [&](auto view, auto rows, auto& executor, auto config, auto keys, auto scores, auto counts) {
                             return view.maxsim(rows, rows_per_query, executor, config, keys, scores, counts);
-                        }))
+                        }) ||
+                    !publish_matches(*arena, count, landing, outcome))
                     return;
                 *arguments->matches = landing.view();
                 propagate_error(usearch_status_success_k, outcome, nullptr);
@@ -4064,7 +3962,7 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
                 if (!executor) return;
                 auto const [length, status] = specialized_index {variant}.storage_requirements();
                 if (failed(status)) return propagate_error(status, outcome), void();
-                std::byte* const monolith = carve<std::byte>(*arena, length);
+                std::byte* const monolith = carve<std::byte>(arena->memory, length);
                 if (!monolith)
                     return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
                 shard_ticks_t ticks {arguments->progress, arguments->progress_state,

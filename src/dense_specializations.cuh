@@ -66,8 +66,8 @@ inline constexpr scalar_dtype_pair_t scalar_dtype_pairs_k[] = {
     {usearch_scalar_f64_k, nk_f64_k},   {usearch_scalar_f32_k, nk_f32_k},   {usearch_scalar_bf16_k, nk_bf16_k},
     {usearch_scalar_f16_k, nk_f16_k},   {usearch_scalar_e5m2_k, nk_e5m2_k}, {usearch_scalar_e4m3_k, nk_e4m3_k},
     {usearch_scalar_e3m2_k, nk_e3m2_k}, {usearch_scalar_e2m3_k, nk_e2m3_k}, {usearch_scalar_i8_k, nk_i8_k},
-    {usearch_scalar_i4x2_k, nk_i4_k},   {usearch_scalar_u8_k, nk_u8_k},     {usearch_scalar_u4x2_k, nk_u4_k},
-    {usearch_scalar_u1x8_k, nk_u1_k},
+    {usearch_scalar_i4x2_k, nk_i4_k},   {usearch_scalar_i32_k, nk_i32_k},   {usearch_scalar_u8_k, nk_u8_k},
+    {usearch_scalar_u4x2_k, nk_u4_k},   {usearch_scalar_u1x8_k, nk_u1_k},
 };
 
 inline nk_dtype_t nk_dtype_of(usearch_scalar_t scalar) noexcept {
@@ -522,42 +522,6 @@ inline bool crossed(expected<value_type_> const& result, usearch_dense_traversal
 /** The C key struct and the engine's @c utilities::uuid_t share sixteen bytes - one bit cast in. */
 inline us::utilities::uuid_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<us::utilities::uuid_t>(key); }
 
-/** One strided C matrix's rank-2 shape: NumKong counts the last extent in logical dimensions, so
- *  a packed row is as wide as the index; a zero stride means contiguous rows. */
-template <typename scalar_type_>
-inline nk::shape_storage_<2> rows_shape_of(std::size_t rows_count, std::size_t stride,
-                                           std::size_t dimensions) noexcept {
-    std::size_t const row_values = divide_round_up<std::size_t>(dimensions, nk::dimensions_per_value<scalar_type_>());
-    std::ptrdiff_t const row_bytes = static_cast<std::ptrdiff_t>(stride ? stride : row_values * sizeof(scalar_type_));
-    return {{rows_count, dimensions}, {row_bytes, static_cast<std::ptrdiff_t>(sizeof(scalar_type_))}, 2};
-}
-
-/** Whether rows reach an arm only through @p staged: a foreign scalar converts, and a zero stride,
- *  which repeats the first row, is materialized into the rows an arm walks. */
-template <typename multi_type_>
-inline bool stages_rows(nk_dtype_t source_dtype, std::size_t row_bytes) noexcept {
-    return source_dtype != multi_type_::vector_dtype_k || !row_bytes;
-}
-
-/** A chunk's rows in @p multi_type_ 's stored scalar: the caller's own when they match, else cast
- *  into @p staged from its row @p staged_first on. */
-template <typename multi_type_>
-inline nk::matrix_view<typename multi_type_::scalar_t> stored_rows_of( //
-    char const* rows, std::size_t rows_count, std::size_t row_bytes, nk_dtype_t source_dtype, std::size_t dimensions,
-    nk::matrix<typename multi_type_::scalar_t>& staged, std::size_t staged_first = 0) noexcept {
-    using scalar_t = typename multi_type_::scalar_t;
-    if (!stages_rows<multi_type_>(source_dtype, row_bytes))
-        return {rows, rows_shape_of<scalar_t>(rows_count, row_bytes, dimensions)};
-    for (std::size_t row = 0; row != rows_count; ++row) {
-        [[maybe_unused]] nk_status_t const cast = us::dense::elementwise_chain<nk_cap_any_k>::kit_t::cast(
-            rows + row * row_bytes, source_dtype, staged.span().row(staged_first + row).as_vector().byte_data(),
-            multi_type_::vector_dtype_k, dimensions, nullptr);
-        assert(cast == nk_success_k && "The serial tier casts every dtype pair");
-    }
-    return {staged.span().row(staged_first).as_vector().byte_data(),
-            rows_shape_of<scalar_t>(rows_count, 0, dimensions)};
-}
-
 #pragma endregion Scaffolding
 
 #pragma region Specialized Index
@@ -717,26 +681,11 @@ struct shard_ticks_t {
     }
 };
 
-/** One insertion's C rows and its handler: yields a chunk in an arm's stored scalar, and reports
- *  each chunk once it lands. Every row is claimed before the first report and a dispensed row
- *  cannot be withdrawn, so the handler's answer is ignored. */
-struct insertion_rows_t {
-    char const* data;
-    std::size_t row_bytes;
-    nk_dtype_t source_dtype;
+/** One insertion's handler, told of each chunk once it lands. Every row is claimed before the first
+ *  report and a dispensed row cannot be withdrawn, so the handler's answer is ignored. */
+struct insertion_progress_t {
     usearch_progress_callback_t progress;
     void* progress_state;
-
-    /** Rows @b [first,first+taking) as @p index stores them, staged into @p staged from its row
-     *  @p staged_first on when the caller's own differ. */
-    template <typename multi_type_>
-    nk::matrix_view<typename multi_type_::scalar_t> operator()(multi_type_ const& index, std::size_t first,
-                                                               std::size_t taking,
-                                                               nk::matrix<typename multi_type_::scalar_t>& staged,
-                                                               std::size_t staged_first) const noexcept {
-        return stored_rows_of<multi_type_>(data + first * row_bytes, taking, row_bytes, source_dtype,
-                                           index.dimensions(), staged, staged_first);
-    }
 
     /** Tells the handler, if any, that @p landed of @p total rows landed. */
     void report(std::size_t landed, std::size_t total) const noexcept {
@@ -753,8 +702,6 @@ template <typename index_type_>
 struct specialized_index {
     using key_t = typename index_type_::key_t;
     using executor_t = typename index_type_::executor_t;
-    using vectors_view_t = typename index_type_::vectors_view_t;
-    using vectors_span_t = typename index_type_::vectors_span_t;
     using reserve_capacity_t = typename index_type_::reserve_capacity_t;
     using insert_config_t = typename index_type_::insert_config_t;
     using insert_result_t = typename index_type_::insert_result_t;
@@ -763,8 +710,11 @@ struct specialized_index {
     using refine_config_t = typename index_type_::refine_config_t;
     using refine_result_t = typename index_type_::refine_result_t;
     using health_result_t = typename index_type_::health_result_t;
+    using rows_view_t = us::dense::rows_view_t;
+    using rows_span_t = us::dense::rows_span_t;
+    using keys_view_t = nk::vector_view<key_t>;
     using keys_span_t = nk::matrix_span<key_t>;
-    using distances_span_t = nk::matrix_span<typename index_type_::distance_t>;
+    using scores_span_t = nk::matrix_span<f64_t>;
     using counts_span_t = std::span<std::size_t>;
 
     /** What an attend resolves value rows through: a host callback per batch on RAM, a device call per key on GPU. */
@@ -788,31 +738,30 @@ struct specialized_index {
     std::size_t memory_usage() const noexcept;
     expected<std::size_t> storage_requirements() const noexcept;
     status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) noexcept;
-    status_t get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
-                 std::span<std::size_t> entries, executor_t& executor) noexcept;
+    status_t get(std::span<key_t const> keys, rows_span_t vectors, std::size_t wanted, std::span<std::size_t> entries,
+                 executor_t& executor) noexcept;
     status_t reserve(reserve_capacity_t config) noexcept;
     status_t clear() noexcept;
 
     /** Lands @p rows under @p keys through one plan, a step per chunk, and publishes them all at once. */
-    expected<insert_result_t> add(std::span<key_t const> keys, insertion_rows_t const& rows, executor_t& executor,
-                                  insert_config_t config) noexcept;
+    expected<insert_result_t> add(keys_view_t keys, rows_view_t rows, insertion_progress_t const& progress,
+                                  executor_t& executor, insert_config_t config) noexcept;
     expected<refine_result_t> refine(executor_t& executor, refine_config_t config, shard_ticks_t& ticks) noexcept;
     expected<health_result_t> health(executor_t& executor) noexcept;
-    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     keys_span_t keys, distances_span_t distances, counts_span_t counts,
+    expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
+                                     keys_span_t keys, scores_span_t distances, counts_span_t counts,
                                      dummy_predicate_t) noexcept;
-    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     keys_span_t keys, distances_span_t distances, counts_span_t counts,
+    expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
+                                     keys_span_t keys, scores_span_t distances, counts_span_t counts,
                                      key_predicate_t& predicate) noexcept
         requires is_ram_index<index_type_>;
-    expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
-                                       keys_span_t keys, nk::matrix_span<typename index_type_::dot_result_t> products,
-                                       counts_span_t counts) noexcept;
-    expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
-                                     search_config_t config, keys_span_t keys, nk::matrix_span<f64_t> scores,
+    expected<search_result_t> multiply(rows_view_t left, executor_t& executor, search_config_t config, keys_span_t keys,
+                                       scores_span_t products, counts_span_t counts) noexcept;
+    expected<search_result_t> maxsim(rows_view_t queries, std::size_t rows_per_query, executor_t& executor,
+                                     search_config_t config, keys_span_t keys, scores_span_t scores,
                                      counts_span_t counts) noexcept;
-    expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
-                                     f32_t score_scale, nk::matrix_span<f32_t> outputs,
+    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
+                                     f32_t score_scale, rows_span_t outputs,
                                      std::span<us::dense::softmax_state_t> carry, executor_t& executor,
                                      search_config_t config) noexcept;
     status_t save(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
@@ -877,7 +826,7 @@ status_t specialized_index<index_type_>::count(std::span<key_t const> keys, std:
     return index.count(keys, entries, executor);
 }
 template <typename index_type_>
-status_t specialized_index<index_type_>::get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
+status_t specialized_index<index_type_>::get(std::span<key_t const> keys, rows_span_t vectors, std::size_t wanted,
                                              std::span<std::size_t> entries, executor_t& executor) noexcept {
     return index.get(keys, vectors, wanted, entries, executor);
 }
@@ -891,33 +840,21 @@ status_t specialized_index<index_type_>::clear() noexcept {
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::insert_result_t> specialized_index<index_type_>::add(
-    std::span<key_t const> keys, insertion_rows_t const& rows, executor_t& executor, insert_config_t config) noexcept {
-    using scalar_t = typename index_type_::scalar_t;
+    keys_view_t keys, rows_view_t rows, insertion_progress_t const& progress, executor_t& executor,
+    insert_config_t config) noexcept {
     std::size_t const count = keys.size();
-    bool const staging = stages_rows<index_type_>(rows.source_dtype, rows.row_bytes);
-    // Only a handler or a staged copy splits the call, and one plan still publishes every chunk at once.
-    std::size_t const chunk = rows.progress || staging ? min_of(count, increment_rows_k) : count;
-    // A device step reads its rows until `finish`, so device chunks stage side by side rather than over each other.
-    std::size_t const staged_rows = is_ram_index<index_type_> ? chunk : count;
-    nk::matrix<scalar_t> staged;
-    if (staging) {
-        auto zeros = nk::matrix<scalar_t>::zeros({staged_rows, index.dimensions()});
-        if (!zeros)
-            return {{}, zeros.status == nk::status_t::bad_alloc_k ? status_t::bad_alloc_k : status_t::shape_mismatch_k};
-        staged = std::move(zeros.value);
-    }
-
+    // Only a handler splits the call, and one plan still publishes every chunk at once.
+    std::size_t const chunk = progress.progress ? min_of(count, increment_rows_k) : count;
     auto [plan, status] = index.plan_insert(count, executor, config);
     if (failed(status)) return {{}, status};
     for (std::size_t landed = 0; landed != count;) {
         std::size_t const taking = min_of(chunk, count - landed);
-        std::size_t const staged_first = is_ram_index<index_type_> ? 0 : landed;
-        vectors_view_t const chunk_rows = rows(index, landed, taking, staged, staged_first);
-        std::span<key_t const> const chunk_keys = keys.subspan(landed, taking);
-        if constexpr (is_ram_index<index_type_>) plan.insert(landed, chunk_keys, chunk_rows);
-        else if (failed(plan.insert(landed, chunk_keys, chunk_rows))) break;
+        if constexpr (is_ram_index<index_type_>)
+            plan.insert(landed, keys[nk::range(landed, landed + taking)], rows.slice(landed, taking));
+        else if (failed(plan.insert(landed, keys[nk::range(landed, landed + taking)], rows.slice(landed, taking))))
+            break;
         landed += taking;
-        rows.report(landed, count);
+        progress.report(landed, count);
     }
     // After a failed device step, `finish` publishes nothing and reports the failure the plan kept.
     return plan.finish();
@@ -935,13 +872,13 @@ expected<typename specialized_index<index_type_>::health_result_t> specialized_i
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
-    vectors_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, distances_span_t distances,
+    rows_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t distances,
     counts_span_t counts, dummy_predicate_t) noexcept {
     return index.search(queries, executor, config, keys, distances, counts);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
-    vectors_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, distances_span_t distances,
+    rows_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t distances,
     counts_span_t counts, key_predicate_t& predicate) noexcept
     requires is_ram_index<index_type_>
 {
@@ -949,21 +886,20 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::multiply(
-    vectors_view_t left, executor_t& executor, search_config_t config, keys_span_t keys,
-    nk::matrix_span<typename index_type_::dot_result_t> products, counts_span_t counts) noexcept {
+    rows_view_t left, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t products,
+    counts_span_t counts) noexcept {
     return index.multiply(left, executor, config, keys, products, counts);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::maxsim(
-    vectors_view_t queries, std::size_t rows_per_query, executor_t& executor, search_config_t config, keys_span_t keys,
-    nk::matrix_span<f64_t> scores, counts_span_t counts) noexcept {
+    rows_view_t queries, std::size_t rows_per_query, executor_t& executor, search_config_t config, keys_span_t keys,
+    scores_span_t scores, counts_span_t counts) noexcept {
     return index.maxsim(queries, rows_per_query, executor, config, keys, scores, counts);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
-    vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale,
-    nk::matrix_span<f32_t> outputs, std::span<us::dense::softmax_state_t> carry, executor_t& executor,
-    search_config_t config) noexcept {
+    rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
+    std::span<us::dense::softmax_state_t> carry, executor_t& executor, search_config_t config) noexcept {
     return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
 }
 template <typename index_type_>
@@ -1001,13 +937,13 @@ template <typename index_type_>
 struct specialized_index<index_type_> {
     using key_t = typename index_type_::key_t;
     using executor_t = typename index_type_::executor_t;
-    using vectors_view_t = typename index_type_::vectors_view_t;
-    using vectors_span_t = typename index_type_::vectors_span_t;
     using search_config_t = typename index_type_::search_config_t;
     using search_result_t = typename index_type_::search_result_t;
     using health_result_t = typename index_type_::health_result_t;
+    using rows_view_t = us::dense::rows_view_t;
+    using rows_span_t = us::dense::rows_span_t;
     using keys_span_t = nk::matrix_span<key_t>;
-    using distances_span_t = nk::matrix_span<typename index_type_::distance_t>;
+    using scores_span_t = nk::matrix_span<f64_t>;
     using counts_span_t = std::span<std::size_t>;
     using attend_lookup_t = value_lookup_t;
 
@@ -1022,22 +958,21 @@ struct specialized_index<index_type_> {
     std::size_t memory_usage() const noexcept;
     expected<health_result_t> health(executor_t& executor) noexcept;
     status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) noexcept;
-    status_t get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
-                 std::span<std::size_t> entries, executor_t& executor) noexcept;
-    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     keys_span_t keys, distances_span_t distances, counts_span_t counts,
+    status_t get(std::span<key_t const> keys, rows_span_t vectors, std::size_t wanted, std::span<std::size_t> entries,
+                 executor_t& executor) noexcept;
+    expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
+                                     keys_span_t keys, scores_span_t distances, counts_span_t counts,
                                      dummy_predicate_t) noexcept;
-    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     keys_span_t keys, distances_span_t distances, counts_span_t counts,
+    expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
+                                     keys_span_t keys, scores_span_t distances, counts_span_t counts,
                                      key_predicate_t& predicate) noexcept;
-    expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
-                                       keys_span_t keys, nk::matrix_span<typename index_type_::dot_result_t> products,
-                                       counts_span_t counts) noexcept;
-    expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
-                                     search_config_t config, keys_span_t keys, nk::matrix_span<f64_t> scores,
+    expected<search_result_t> multiply(rows_view_t left, executor_t& executor, search_config_t config, keys_span_t keys,
+                                       scores_span_t products, counts_span_t counts) noexcept;
+    expected<search_result_t> maxsim(rows_view_t queries, std::size_t rows_per_query, executor_t& executor,
+                                     search_config_t config, keys_span_t keys, scores_span_t scores,
                                      counts_span_t counts) noexcept;
-    expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
-                                     f32_t score_scale, nk::matrix_span<f32_t> outputs,
+    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup,
+                                     f32_t score_scale, rows_span_t outputs,
                                      std::span<us::dense::softmax_state_t> carry, executor_t& executor,
                                      search_config_t config) noexcept;
 };
@@ -1091,44 +1026,43 @@ status_t specialized_index<index_type_>::count(std::span<key_t const> keys, std:
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
-status_t specialized_index<index_type_>::get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
+status_t specialized_index<index_type_>::get(std::span<key_t const> keys, rows_span_t vectors, std::size_t wanted,
                                              std::span<std::size_t> entries, executor_t& executor) noexcept {
     return index.get(keys, vectors, wanted, entries, executor);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
-    vectors_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, distances_span_t distances,
+    rows_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t distances,
     counts_span_t counts, dummy_predicate_t) noexcept {
     return index.search(queries, executor, config, keys, distances, counts);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::search(
-    vectors_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, distances_span_t distances,
+    rows_view_t queries, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t distances,
     counts_span_t counts, key_predicate_t& predicate) noexcept {
     return index.search_if(queries, executor, config, keys, distances, counts, predicate);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::multiply(
-    vectors_view_t left, executor_t& executor, search_config_t config, keys_span_t keys,
-    nk::matrix_span<typename index_type_::dot_result_t> products, counts_span_t counts) noexcept {
+    rows_view_t left, executor_t& executor, search_config_t config, keys_span_t keys, scores_span_t products,
+    counts_span_t counts) noexcept {
     return index.multiply(left, executor, config, keys, products, counts);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::maxsim(
-    vectors_view_t queries, std::size_t rows_per_query, executor_t& executor, search_config_t config, keys_span_t keys,
-    nk::matrix_span<f64_t> scores, counts_span_t counts) noexcept {
+    rows_view_t queries, std::size_t rows_per_query, executor_t& executor, search_config_t config, keys_span_t keys,
+    scores_span_t scores, counts_span_t counts) noexcept {
     return index.maxsim(queries, rows_per_query, executor, config, keys, scores, counts);
 }
 template <typename index_type_>
     requires is_nvme_index<index_type_>
 expected<typename specialized_index<index_type_>::search_result_t> specialized_index<index_type_>::attend(
-    vectors_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale,
-    nk::matrix_span<f32_t> outputs, std::span<us::dense::softmax_state_t> carry, executor_t& executor,
-    search_config_t config) noexcept {
+    rows_view_t queries, std::size_t head_count, attend_lookup_t value_lookup, f32_t score_scale, rows_span_t outputs,
+    std::span<us::dense::softmax_state_t> carry, executor_t& executor, search_config_t config) noexcept {
     return index.attend(queries, head_count, value_lookup, score_scale, outputs, carry, executor, config);
 }
 

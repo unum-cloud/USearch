@@ -15,6 +15,10 @@
 #include <cstddef> // `std::size_t`
 #include <utility> // `std::index_sequence` - every rung of one dtype
 
+#include <numkong/types.h>       // `NUMKONG_ARCH_ROCM_`, which the two below test before including it
+#include <numkong/cast/simt.cuh> // `nk_cast_unit_simt_` - the import casts' device body
+#include <numkong/each/rocm.cuh> // `nk_each_rmscast_e4m3_rocm_vectors_` & kin - the unit-RMS import's device bodies
+
 #include "usearch/dense/vram_queue.cuh"
 #include "usearch/dense/vram_index.cuh"
 #include "usearch/dense/vram_amd_metric.hip"
@@ -431,6 +435,20 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_warp_t::width_k) a
         amd_reachability_islands(graph.reached, graph.rows_count, graph.island_ids, graph.counter);
     else if constexpr (kernel == amd_kernel_t::reached_in_links_k)
         amd_reached_in_links(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached, graph.in_links);
+    else if constexpr (kernel == amd_kernel_t::cast_k) {
+        nk_size_t const threads = static_cast<nk_size_t>(gridDim.x) * blockDim.x;
+        for (nk_size_t unit = static_cast<nk_size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+             unit < arguments.cast.plan.units; unit += threads)
+            nk_cast_unit_simt_(&arguments.cast, unit);
+    }
+    else if constexpr (kernel == amd_kernel_t::rmscast_k) {
+        // Only narrow floats take a unit-RMS import; every other dtype exports one never launched.
+        if constexpr (dtype_ == nk_f16_k) nk_each_rmscast_f16_rocm_vectors_(arguments.rmscast);
+        else if constexpr (dtype_ == nk_e4m3_k) nk_each_rmscast_e4m3_rocm_vectors_(arguments.rmscast);
+        else if constexpr (dtype_ == nk_e5m2_k) nk_each_rmscast_e5m2_rocm_vectors_(arguments.rmscast);
+        else if constexpr (dtype_ == nk_e2m3_k) nk_each_rmscast_e2m3_rocm_vectors_(arguments.rmscast);
+        else if constexpr (dtype_ == nk_e3m2_k) nk_each_rmscast_e3m2_rocm_vectors_(arguments.rmscast);
+    }
     else
         amd_reconnect_island(graph.neighbors, graph.connectivity, graph.island_ids, graph.islands_count, graph.reached,
                              graph.rows_count, graph.seed_count, graph.in_links, graph.reconnected);

@@ -339,7 +339,8 @@ typedef struct usearch_rows_view_t {
     /** Bytes between the starts of consecutive rows; zero repeats the first row. */
     size_t stride;
 
-    /** Values per row; an input's must match the frozen geometry, or it is refused. */
+    /** Values per row; an input's must match the frozen geometry, and sub-byte rows of either kind
+     *  must fill whole bytes, or they are refused. */
     size_t columns;
 
     /** The scalar type the rows hold, converted on the way in where it differs. */

@@ -683,11 +683,12 @@ struct nvme_index {
 
     /** The shape of a walk of @p rows_count rows of @p row_type_ over every part in @p parts, each
      *  walk @p expansion_factor wide and ranking by @p kernel, on @p threads engines @p queue_depth
-     *  reads deep. */
+     *  reads deep, every row in flight staging @p staged_bytes of imported queries. */
     template <typename row_type_>
     static walk_shape_t walk_shape_(std::span<medium_t const> media, std::span<nvme_part_t const> parts,
                                     nk_kernel_kind_t kernel, std::size_t queue_depth, std::size_t threads,
-                                    std::size_t rows_count, std::size_t expansion_factor) noexcept {
+                                    std::size_t rows_count, std::size_t expansion_factor,
+                                    std::size_t staged_bytes) noexcept {
         using slice_t = arena_allocator<byte_t>;
         std::size_t const connectivity = parts[0].connectivity;
         walk_shape_t shape;
@@ -714,6 +715,7 @@ struct nvme_index {
                                          visited_set_t::memory_usage(expansion_factor * connectivity));
         shape.scratch_bytes = walks * per_walk + slice_t::reserved_bytes(walks * sizeof(walk_t)) +
                               slice_t::reserved_bytes(rows * sizeof(row_type_)) +
+                              rows * slice_t::reserved_bytes(staged_bytes) +
                               slice_t::reserved_bytes(rows * sizeof(row_slot_t)) +
                               slice_t::reserved_bytes(flights * sizeof(flight_t)) +
                               slice_t::reserved_bytes(flights * sizeof(u32_t)) +
@@ -1323,18 +1325,19 @@ struct nvme_index {
     }
 
     /** The batch @ref run_walks_ walks, inside a call of its own: @p rows_count rows over every
-     *  part in @p parts, each walk @p expansion_factor wide and ranking by @p kernel. */
+     *  part in @p parts, each walk @p expansion_factor wide and ranking by @p kernel, and each row
+     *  staging @p staged_bytes of imported queries. */
     template <typename row_type_>
     static expected<search_result_t> walk_rows_(std::span<medium_t const> media, std::span<nvme_part_t const> parts,
                                                 nk_kernel_kind_t kernel, executor_t& executor, std::size_t rows_count,
                                                 std::size_t expansion_factor,
-                                                typename row_type_::inputs_t const& inputs,
+                                                typename row_type_::inputs_t const& inputs, std::size_t staged_bytes,
                                                 std::span<std::size_t const> counts,
                                                 std::span<u64_t> latencies) noexcept {
         if (parts.empty()) return {{}, status_t::uninitialized_k};
         if (!rows_count) return {{}, status_t::success_k};
         walk_shape_t const shape = walk_shape_<row_type_>(media, parts, kernel, executor.queue_depth(), executor.size(),
-                                                          rows_count, expansion_factor);
+                                                          rows_count, expansion_factor, staged_bytes);
         auto [call, call_status] = begin_call_(executor, media, shape.scratch_bytes, shape.buffers, shape.buffer_bytes);
         if (failed(call_status)) return {{}, call_status};
         return run_walks_<row_type_>(media, parts, executor, shape, inputs, counts, latencies);
@@ -1410,7 +1413,7 @@ struct nvme_index {
         using row_t = node_search_row<heads_type_>;
         typename row_t::inputs_t const inputs {queries, &heads, node_ids, distances, counts};
         return walk_rows_<row_t>(std::span<medium_t const>(&medium_, 1), std::span<nvme_part_t const>(&part_, 1),
-                                 kernel_, executor, queries_count, non_zero_expansion_factor(config), inputs, counts,
+                                 kernel_, executor, queries_count, non_zero_expansion_factor(config), inputs, 0, counts,
                                  {});
     }
 

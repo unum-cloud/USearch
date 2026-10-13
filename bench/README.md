@@ -252,28 +252,34 @@ Unless a row says otherwise the configuration is the default: connectivity 32, e
 
 SIFT, `u8`, euclidean, 10,000,000 rows of 128 dimensions.
 
-| Machine                                            | Class      |  Insertions |      Queries | Recall@10 | Date       |
-| :------------------------------------------------- | :--------- | ----------: | -----------: | --------: | :--------- |
-| Intel i9-13950HX, 8P+16E cores, 1 domain, 4K pages | `haswell`  |  12.8 k IPS |   46.9 k QPS |     98.5% | 2026-09-02 |
-| NVIDIA RTX 4060 Laptop, 24 SMs, 8 GB               | `ada`      | 114.5 k IPS |  210.9 k QPS |     98.6% | 2026-09-02 |
-| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages  | `neonsdot` | 23.05 k IPS |  75.15 k QPS |   98.800% | 2026-10-11 |
-| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory   | `metal`    | 72.96 k IPS | 176.48 k QPS |   98.860% | 2026-10-11 |
+| Machine                                            | Class       |  Insertions |      Queries | Recall@10 | Date       |
+| :------------------------------------------------- | :---------- | ----------: | -----------: | --------: | :--------- |
+| Intel i9-13950HX, 8P+16E cores, 1 domain, 4K pages | `haswell`   |  12.8 k IPS |   46.9 k QPS |     98.5% | 2026-09-02 |
+| NVIDIA RTX 4060 Laptop, 24 SMs, 8 GB               | `ada`       | 114.5 k IPS |  210.9 k QPS |     98.6% | 2026-09-02 |
+| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages  | `neonsdot`  | 23.05 k IPS |  75.15 k QPS |   98.800% | 2026-10-11 |
+| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory   | `metal`     | 72.96 k IPS | 176.48 k QPS |   98.860% | 2026-10-11 |
+| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB     | `blackwell` | 42.96 k IPS | 198.30 k QPS |   97.680% | 2026-10-12 |
 
 The Apple M5 Pro run recovered 96.703% of the true top-10 entries; three checkpoint reloads measured 71.62–76.97 k QPS at 98.800% Recall@10.
 The Metal run used batches of 4096 & expansion 256/96 (a 128-entry search pool), recovering 97.336% of the true top-10 entries; Queries is the median of three passes after a 100-query warmup.
+The B300 run used the `ampere` kit, the only one `u8` euclidean has, searched a reloaded checkpoint 128 wide & recovered 96.257% of the true top-10 entries.
+Its pools of 64, 128, 256 & 512 measured 340.9 k QPS at 94.810%, 198.3 k at 97.680%, 79.0 k at 99.010% & 32.9 k at 99.490% Recall@10.
 
 ### 100M
 
 SIFT, `u8`, euclidean, 100,000,000 rows of 128 dimensions, and SpaceV, `i8`, euclidean, 100,000,000 rows of 100 dimensions.
 
-| Machine                                           | Class      | Dataset |  Insertions |      Queries | Recall@10 | Date       |
-| :------------------------------------------------ | :--------- | :------ | ----------: | -----------: | --------: | :--------- |
-| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages | `neonsdot` | SIFT    | 16.86 k IPS |   5.63 k QPS |   96.410% | 2026-10-11 |
-| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory  | `metal`    | SIFT    | 61.99 k IPS | 146.82 k QPS |   97.650% | 2026-10-11 |
+| Machine                                           | Class       | Dataset |  Insertions |      Queries | Recall@10 | Date       |
+| :------------------------------------------------ | :---------- | :------ | ----------: | -----------: | --------: | :--------- |
+| Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages | `neonsdot`  | SIFT    | 16.86 k IPS |   5.63 k QPS |   96.410% | 2026-10-11 |
+| Apple M5 Pro, 20 GPU cores, 64 GiB shared memory  | `metal`     | SIFT    | 61.99 k IPS | 146.82 k QPS |   97.650% | 2026-10-11 |
+| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB    | `blackwell` | SIFT    | 41.54 k IPS | 178.66 k QPS |   95.320% | 2026-10-12 |
 
-The CPU build took 1h 38m 51s & queries recovered 93.205% of the true top-10 entries.
+The CPU run's queries recovered 93.205% of the true top-10 entries.
 Three checkpoint reloads measured 4.52–4.98 k QPS at 96.410–96.440% Recall@10.
-The Metal run used the same batching & timing as the 10M run, taking 26m 53s to build & recovering 94.688% of the true top-10 entries.
+The Metal run used the same batching & timing as the 10M run, recovering 94.688% of the true top-10 entries.
+The B300 run searched its reloaded checkpoint 128 wide & recovered 92.715% of the true top-10 entries.
+Its pools of 64, 128, 256 & 512 measured 312.9 k QPS at 90.420%, 178.7 k at 95.320%, 73.8 k at 97.650% & 31.3 k at 98.780% Recall@10.
 
 ### 1B
 

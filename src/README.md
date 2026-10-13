@@ -42,8 +42,9 @@ The arms are aliases over those templates, keyed by the storage dtype and the cl
 An arm's executor type is its residency, so `is_ram_index`, `is_nvme_index` and `is_vram_index` read it rather than a second tag that could disagree.
 The core verbs land on `specialized_index` members of the same names, `count`, `get`, `reserve`, `clear`, `refine`, `health`, `search`, `multiply`, `maxsim`, `attend`, `save` and `load`.
 `insert` becomes `add`, one plan with a step per chunk that publishes every row at once.
-Rows whose scalar differs from the stored one cast through NumKong into a staged matrix, 4096 rows at a time, while matching rows reach the arm in place.
-Progress callbacks tick once per such chunk, and scores staged at the engine's width widen to the ABI's `double` as they land in the arena.
+Rows reach every arm in the caller's scalar as a `dense::rows_view_t`, and each arm imports them into its stored scalar per thread, in scratch its executor already owns, so the C layer never stages a row.
+Scores land in the arena as the ABI's `double` straight from the engines, and row outputs export into the scalar the caller asks for.
+Progress callbacks tick once per chunk of 4096 rows, which also bounds each device batch's staging.
 
 ## Dispatch over Capability Kits
 

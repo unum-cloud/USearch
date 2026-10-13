@@ -310,6 +310,116 @@ status_t rows_refusal(std::size_t rows, nk::matrix_span<value_type_> span, std::
     return status_t::success_k;
 }
 
+/** Bytes @p count logical values of @p dtype span packed back to back. */
+inline std::size_t packed_bytes(nk_dtype_t dtype, std::size_t count) noexcept {
+    return divide_round_up<std::size_t>(nk_dtype_bits(dtype) * count, 8);
+}
+
+/** One strided matrix's rank-2 shape: NumKong counts the last extent in logical dimensions, so a
+ *  packed row is as wide as @p columns; a zero @p stride means packed rows. */
+template <typename scalar_type_>
+nk::shape_storage_<2> rows_shape_of(std::size_t rows, std::size_t stride, std::size_t columns) noexcept {
+    std::size_t const row_values = divide_round_up<std::size_t>(columns, nk::dimensions_per_value<scalar_type_>());
+    std::ptrdiff_t const row_bytes = static_cast<std::ptrdiff_t>(stride ? stride : row_values * sizeof(scalar_type_));
+    return {{rows, columns}, {row_bytes, static_cast<std::ptrdiff_t>(sizeof(scalar_type_))}, 2};
+}
+
+/** A scalar rows may hold: a NumKong scalar, or a builtin float the engines keep as their own. */
+template <typename scalar_type_>
+concept row_scalar = nk::numeric_dtype<scalar_type_> || std::is_same_v<scalar_type_, f32_t> ||
+                     std::is_same_v<scalar_type_, f64_t>;
+
+/** The NumKong dtype rows of @p scalar_type_ hold. */
+template <row_scalar scalar_type_>
+constexpr nk_dtype_t dtype_of() noexcept {
+    if constexpr (std::is_same_v<scalar_type_, f32_t>) return nk_f32_k;
+    else if constexpr (std::is_same_v<scalar_type_, f64_t>) return nk_f64_k;
+    else return scalar_type_::dtype();
+}
+
+/**
+ *  @brief Rows in any scalar NumKong casts, @b [rows,columns] in logical values, @c stride bytes
+ *      apart; a zero stride repeats the first row.
+ *
+ *  Every verb takes its input rows this way and imports them into its arm's scalar per thread, so
+ *  a typed view converts and passes untouched when it already holds that scalar. Sub-byte rows
+ *  fill whole bytes, as NumKong casts them and sub-byte indexes store them.
+ */
+struct rows_view_t {
+    byte_t const* data = nullptr;
+    std::size_t rows = 0;
+    std::size_t columns = 0;
+    std::size_t stride = 0;
+    nk_dtype_t dtype = nk_dtype_unknown_k;
+
+    rows_view_t() = default;
+    rows_view_t(byte_t const* data, std::size_t rows, std::size_t columns, std::size_t stride,
+                nk_dtype_t dtype) noexcept
+        : data(data), rows(rows), columns(columns), stride(stride), dtype(dtype) {}
+    template <row_scalar scalar_type_>
+    rows_view_t(nk::matrix_view<scalar_type_> typed) noexcept
+        : data(reinterpret_cast<byte_t const*>(typed.byte_data())), rows(typed.extent(0)), columns(typed.extent(1)),
+          stride(static_cast<std::size_t>(typed.stride_bytes(0))), dtype(dtype_of<scalar_type_>()) {}
+    template <row_scalar scalar_type_>
+    rows_view_t(nk::matrix_span<scalar_type_> typed) noexcept : rows_view_t(nk::matrix_view<scalar_type_>(typed)) {}
+
+    byte_t const* row(std::size_t row) const noexcept { return data + row * stride; }
+
+    /** Rows @b [first,first+count). */
+    rows_view_t slice(std::size_t first, std::size_t count) const noexcept {
+        return {row(first), count, columns, stride, dtype};
+    }
+
+    /** Whether the rows can be borrowed as @p scalar_type_ in place: that scalar, not repeated. */
+    template <row_scalar scalar_type_>
+    bool holds() const noexcept {
+        return dtype == dtype_of<scalar_type_>() && stride;
+    }
+
+    /** The rows as @p scalar_type_, which they must @ref holds. */
+    template <row_scalar scalar_type_>
+    nk::matrix_view<scalar_type_> as() const noexcept {
+        return {reinterpret_cast<char const*>(data), rows_shape_of<scalar_type_>(rows, stride, columns)};
+    }
+};
+
+/** Rows a verb writes out in the caller's scalar, the writable twin of @c rows_view_t: packed
+ *  within a row, filling whole bytes, @c stride bytes apart. */
+struct rows_span_t {
+    byte_t* data = nullptr;
+    std::size_t rows = 0;
+    std::size_t columns = 0;
+    std::size_t stride = 0;
+    nk_dtype_t dtype = nk_dtype_unknown_k;
+
+    rows_span_t() = default;
+    rows_span_t(byte_t* data, std::size_t rows, std::size_t columns, std::size_t stride, nk_dtype_t dtype) noexcept
+        : data(data), rows(rows), columns(columns), stride(stride), dtype(dtype) {}
+    template <row_scalar scalar_type_>
+    rows_span_t(nk::matrix_span<scalar_type_> typed) noexcept
+        : data(reinterpret_cast<byte_t*>(typed.byte_data())), rows(typed.extent(0)), columns(typed.extent(1)),
+          stride(static_cast<std::size_t>(typed.stride_bytes(0))), dtype(dtype_of<scalar_type_>()) {}
+
+    byte_t* row(std::size_t row) const noexcept { return data + row * stride; }
+
+    /** Rows @b [first,first+count). */
+    rows_span_t slice(std::size_t first, std::size_t count) const noexcept {
+        return {row(first), count, columns, stride, dtype};
+    }
+
+    /** Whether the rows already are @p scalar_type_, so a verb may write them in place. */
+    template <row_scalar scalar_type_>
+    bool holds() const noexcept {
+        return dtype == dtype_of<scalar_type_>();
+    }
+
+    /** The rows as @p scalar_type_, which they must @ref holds. */
+    template <row_scalar scalar_type_>
+    nk::matrix_span<scalar_type_> as() const noexcept {
+        return {reinterpret_cast<char*>(data), rows_shape_of<scalar_type_>(rows, stride, columns)};
+    }
+};
+
 /** One ranked hit while @c maxsim_reducer folds a query, then one document's summed maxima. */
 template <typename key_type_>
 struct maxsim_entry {

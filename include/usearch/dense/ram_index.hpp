@@ -167,16 +167,16 @@ concept fold = requires(fold_type_& fold, std::span<scored_node_t const> scored_
     { fold.absorb(scored_nodes, dots) } noexcept -> std::same_as<walk_demand_t>;
 };
 
-/** Graph products of one left-hand row as a fold: each scored pair appends its resolved ID and native
- *  dot until the row is full, while @c scored keeps counting past it. */
-template <typename id_type_, typename dot_result_type_, typename resolve_type_ = std::identity>
+/** Graph products of one left-hand row as a fold: each scored pair appends its resolved ID and
+ *  its dot as @p product_type_ until the row is full, while @c scored keeps counting past it. */
+template <typename id_type_, typename product_type_, typename resolve_type_ = std::identity>
 struct multiply_fold {
 
     /** The row's ID output. */
     std::span<id_type_> ids;
 
     /** The row's product output, positionally paired with @c ids. */
-    std::span<dot_result_type_> products;
+    std::span<product_type_> products;
 
     /** Maps a walked node ID to the ID the row reports. */
     resolve_type_ resolve = {};
@@ -187,11 +187,12 @@ struct multiply_fold {
     /** Pairs scored, written or not - above the row's width when it was truncated. */
     std::size_t scored = 0;
 
+    template <typename dot_result_type_>
     walk_demand_t absorb(std::span<scored_node_t const> scored_nodes, std::span<dot_result_type_ const> dots) noexcept {
         std::size_t const writable = min_of<std::size_t>(scored_nodes.size(), ids.size() - written);
         for (std::size_t lane = 0; lane != writable; ++lane) {
             ids[written + lane] = resolve(scored_nodes[lane].node_id);
-            products[written + lane] = dots[lane];
+            products[written + lane] = static_cast<product_type_>(dots[lane]);
         }
         written += writable;
         scored += scored_nodes.size();
@@ -412,6 +413,27 @@ struct attention_rescoring {
 
 #pragma endregion Rescorings
 
+/** Bytes a verb stages for @p rows rows of @p columns imported as @p dtype: the @c f32 row an
+ *  @c f64 input widens through, then the rows, each on its own line. */
+inline std::size_t staged_rows_bytes(nk_dtype_t dtype, std::size_t rows, std::size_t columns) noexcept {
+    using slice_t = arena_allocator<byte_t>;
+    return slice_t::reserved_bytes(columns * sizeof(f32_t)) +
+           slice_t::reserved_bytes(rows * packed_bytes(dtype, columns));
+}
+
+/** Rows @b [first,first+count) of @p source as @p scalar_type_, through @ref import_rows into
+ *  @p staged laid out as @ref staged_rows_bytes counts it. */
+template <nk_capability_t capability_, nk::numeric_dtype scalar_type_>
+nk::matrix_view<scalar_type_> import_staged_rows(rows_view_t source, std::size_t first, std::size_t count,
+                                                 nk_kernel_kind_t kernel, byte_t* staged) noexcept {
+    std::size_t const columns = source.columns;
+    byte_t* const rows = staged + staged_rows_bytes(scalar_type_::dtype(), 0, columns);
+    return import_rows<capability_>(
+        source, first, count, kernel,
+        nk::matrix_span<scalar_type_> {reinterpret_cast<char*>(rows), rows_shape_of<scalar_type_>(count, 0, columns)},
+        nk::vector_span<f32_t> {reinterpret_cast<f32_t*>(staged), columns});
+}
+
 /** Per-thread traversal scratch: candidate queues, visited set, neighbor selection buffers and
  *  the running telemetry counters - one instance per scanning thread. */
 template <                                          //
@@ -492,11 +514,12 @@ struct traversal_context {
     /** Stored norms, parallel to @c staged_vectors. */
     norms_tensor_t staged_norms;
 
-    /** One block of queries packed for a matrix engine - an exact scan's operand, idle
-     *  during walks. */
-    bytes_tensor_t packed_queries;
+    /** One verb's queries in the stored scalar, laid out as @ref staged_rows_bytes counts them,
+     *  then whatever the verb keeps past them: an attended token's rows and states, or a scan's
+     *  packed block. */
+    bytes_tensor_t staged_queries;
 
-    /** The raw dots one step of stored rows scores against @c packed_queries, @b [rows,queries]. */
+    /** The raw dots one step of stored rows scores against a packed block, @b [rows,queries]. */
     dots_tensor_t step_dots;
 
     /** Total one-to-one distance computations, padding lanes excluded. Every counter here runs
@@ -549,15 +572,22 @@ struct traversal_context {
         return status_t::success_k;
     }
 
-    /** Sizes the exact scan's matrix-engine scratch: @p packed_bytes of packed queries and a
-     *  @p rows by @p columns dots tile; geometry freezes once, so the tensors allocate once per
-     *  context. */
-    status_t reserve_tiles(std::size_t packed_bytes, std::size_t rows, std::size_t columns) noexcept {
-        if (packed_queries.numel() >= packed_bytes && step_dots.numel() >= rows * columns) return status_t::success_k;
-        auto packed = bytes_tensor_t::zeros({packed_bytes}, visits_allocator_t(allocator_));
+    /** Grows @c staged_queries to @p bytes through the context's own allocator; a grown buffer
+     *  keeps nothing, so a verb sizes it before staging into it. */
+    status_t reserve_queries(std::size_t bytes) noexcept {
+        if (staged_queries.numel() >= bytes) return status_t::success_k;
+        auto staged = bytes_tensor_t::zeros({bytes}, visits_allocator_t(allocator_));
+        if (!staged) return status_t::bad_alloc_k;
+        staged_queries = std::move(staged.value);
+        return status_t::success_k;
+    }
+
+    /** Sizes the exact scan's @p rows by @p columns dots tile; geometry freezes once, so it
+     *  allocates once per context. */
+    status_t reserve_tiles(std::size_t rows, std::size_t columns) noexcept {
+        if (step_dots.numel() >= rows * columns) return status_t::success_k;
         auto dots = dots_tensor_t::zeros({rows, columns}, dots_allocator_t(allocator_));
-        if (!packed || !dots) return status_t::bad_alloc_k;
-        packed_queries = std::move(packed.value);
+        if (!dots) return status_t::bad_alloc_k;
         step_dots = std::move(dots.value);
         return status_t::success_k;
     }
@@ -964,7 +994,8 @@ struct ram_index {
                                 context_t::results_array_t::memory_usage(sizes.refining_candidates)) +
                             arena_t::reserved_bytes(context_t::frontier_queue_t::memory_usage(sizes.frontier)) +
                             arena_t::reserved_bytes(context_t::visited_set_t::memory_usage(sizes.visited)) +
-                            context_t::neighbors_memory_usage(node_connectivity);
+                            context_t::neighbors_memory_usage(node_connectivity) +
+                            staged_rows_bytes(vector_dtype_, 1, frozen.dimensions());
         return bytes;
     }
 
@@ -974,6 +1005,7 @@ struct ram_index {
      *
      *  Idempotent and monotone. The pools and the neighbor scratch never allocate again and the
      *  frontier sheds within its reservation; the visited set alone may re-table as a walk widens.
+     *  The staged queries hold one imported row, so a landing row or a lone query never grows them.
      */
     status_t reserve_traversal(traversal_context_t& context, insert_config_t config = {}) noexcept {
         geometry_t const frozen = geometry();
@@ -986,7 +1018,8 @@ struct ram_index {
         if (status_t const sized = reserve_queues_(context, queue_sizes_(expansion_factor, node_connectivity));
             failed(sized))
             return sized;
-        return context.reserve_neighbors(node_connectivity);
+        if (status_t const sized = context.reserve_neighbors(node_connectivity); failed(sized)) return sized;
+        return context.reserve_queries(staged_rows_bytes(vector_dtype_, 1, frozen.dimensions()));
     }
 
 #pragma endregion Reservation
@@ -1055,8 +1088,7 @@ struct ram_index {
         geometry_t const frozen = geometry();
         if (!frozen) return {{size()}, status_t::uninitialized_k};
 
-        // The copy below takes its width from the geometry, not from the caller's matrix, so a
-        // narrower row would be over-read.
+        // Every row lands in a slot as wide as the geometry, so a wider row would overflow it.
         if (new_vectors.extent(1) != frozen.dimensions()) return {{size()}, status_t::config_mismatch_k};
 
         if (status_t const sized = reserve_traversal(context, config); failed(sized)) return {{size()}, sized};
@@ -1184,12 +1216,13 @@ struct ram_index {
         // An empty range takes no turn: its first ID opens the next range too, which may publish first.
         if (!claim) return;
         bool const report_assigned_ids = assigned_ids.size() != 0;
+        rows_view_t const new_rows = new_vectors;
         iota_view<node_id_t> const range = dispense_(std::move(claim));
         for (node_id_t const new_node_id : range) {
             std::size_t const row = new_node_id - range.first;
             if (report_assigned_ids) assigned_ids[row] = new_node_id;
             on_assigned(new_node_id);
-            wire_(new_node_id, new_vectors.row(row).as_vector(), context, config);
+            wire_(new_node_id, new_rows, row, context, config);
         }
         await_turn_(range);
         publish_(range);
@@ -2878,15 +2911,15 @@ struct ram_index {
     }
 
     /**
-     *  @brief Wires the dispensed row @p new_node_id: lands @p new_vector and its norms, walks the graph,
-     *      writes the neighbors and unlocks slot zero, then back-links. Moves no watermark, so the
-     *      row's range publishes whole through @ref publish_.
+     *  @brief Wires the dispensed row @p new_node_id: lands row @p new_row of @p new_rows and its
+     *      norms, walks the graph, writes the neighbors and unlocks slot zero, then back-links.
+     *      Moves no watermark, so the row's range publishes whole through @ref publish_.
      *
      *  The walk admits the rows below its watermark snapshot and the rows dispensed before it began
      *  whose slot zero shows them published. The row is already dispensed, so a refused walk wires a
      *  thinner node rather than abandoning an ID nothing will ever publish.
      */
-    void wire_(node_id_t new_node_id, vector_view_t new_vector, traversal_context_t& context,
+    void wire_(node_id_t new_node_id, rows_view_t new_rows, std::size_t new_row, traversal_context_t& context,
                insert_config_t config) noexcept {
         geometry_t const frozen = geometry();
         location_t const new_location = chunk_schedule_t::locate(new_node_id);
@@ -2897,10 +2930,13 @@ struct ram_index {
         context.frontier.clear();
         context.visited.clear();
 
-        // Norms derive from the owned copy - the exact bytes future distance computations
-        // stream. Both sides share `scalar_t`, so this is a byte move, never a conversion.
+        // Norms derive from the owned copy - the exact bytes future distance computations stream -
+        // and landing it is the import, a byte move when the scalars agree. An `f64` row widens
+        // through the head of the staged queries, which an insertion walks without.
         vector_span_t const owned_vector = vector_span_for(new_location);
-        std::memcpy(owned_vector.byte_data(), new_vector.byte_data(), stored_row_values(frozen) * sizeof(scalar_t));
+        nk::vector_span<f32_t> const widened {reinterpret_cast<f32_t*>(context.staged_queries.data()),
+                                              frozen.dimensions()};
+        import_row<capability_>(new_rows, new_row, kernel_, owned_vector, widened);
         vector_norms_t const new_norms = norms(owned_vector);
         if (stores_norms()) norm_ref_for(new_location) = new_norms;
 
@@ -3151,6 +3187,15 @@ struct ram_index {
         return {result, status_t::success_k};
     }
 
+    /** Rows @b [first,first+count) of @p rows in the stored scalar: borrowed when they already are,
+     *  else imported into @p context 's staged queries, sized for them beforehand. */
+    vectors_view_t import_rows_(rows_view_t rows, std::size_t first, std::size_t count,
+                                traversal_context_t& context) const noexcept {
+        assert(context.staged_queries.numel() >= staged_rows_bytes(vector_dtype_, count, rows.columns) &&
+               "The staged queries are sized before rows import into them");
+        return import_staged_rows<capability_, scalar_t>(rows, first, count, kernel_, context.staged_queries.data());
+    }
+
     /** Queries one exact-scan block takes: a whole number of tiles when a matrix engine multiplies
      *  the scalar and @p queries_count fills one, shared across @p threads up to the kit's pack;
      *  else one query. */
@@ -3171,14 +3216,21 @@ struct ram_index {
      *
      *  A block of many queries streams through the matrix engine, a single query through the 4-way
      *  kits; both finalize through @c quads_kit_t, so the distances match the walk's. @p admits
-     *  sees a row only once it beats some query's worst match, and at most once per block.
+     *  sees a row only once it beats some query's worst match, and at most once per block. The
+     *  block imports into @p context 's staged queries first, as cheap beside a scan as its pack.
      */
     template <typename admits_type_, typename land_type_>
-    status_t scan_(vectors_view_t block, admits_type_&& admits, land_type_&& land, traversal_context_t& context,
+    status_t scan_(rows_view_t block, admits_type_&& admits, land_type_&& land, traversal_context_t& context,
                    node_id_t first_invisible_id) noexcept {
+        if (!first_invisible_id) return status_t::success_k;
+        // Every kernel takes its width from the geometry, so a narrower block would be over-read.
+        if (block.columns != dimensions()) return status_t::config_mismatch_k;
         if constexpr (tiles_chain_t::has_tiles_k)
-            if (block.extent(0) > 1) return scan_tiles_(block, admits, land, context, first_invisible_id);
-        return scan_quads_(block.row(0).as_vector(), admits, land, context, first_invisible_id);
+            if (block.rows > 1) return scan_tiles_(block, admits, land, context, first_invisible_id);
+        if (failed(context.reserve_queries(staged_rows_bytes(vector_dtype_, 1, block.columns))))
+            return status_t::bad_alloc_k;
+        return scan_quads_(import_rows_(block, 0, 1, context).row(0).as_vector(), admits, land, context,
+                           first_invisible_id);
     }
 
     /** One query against every row, four rows per kernel call, each landing as it beats the worst
@@ -3212,28 +3264,33 @@ struct ram_index {
         return status_t::success_k;
     }
 
-    /** A block of queries packed once, and every chunk streamed against the pack through
-     *  @c scan_tiles. */
+    /** A block of queries imported and packed once, and every chunk streamed against the pack
+     *  through @c scan_tiles. */
     template <typename admits_type_, typename land_type_>
-    status_t scan_tiles_(vectors_view_t block, admits_type_& admits, land_type_& land, traversal_context_t& context,
+    status_t scan_tiles_(rows_view_t block, admits_type_& admits, land_type_& land, traversal_context_t& context,
                          node_id_t first_invisible_id) noexcept
         requires tiles_chain_t::has_tiles_k
     {
         using tiles_kit_t = typename tiles_chain_t::kit_t;
-        std::size_t const columns = block.extent(0), dimensions = this->dimensions();
+        std::size_t const columns = block.rows, dimensions = this->dimensions();
+        // The pack lands past the imported rows, so both are sized before either lands.
+        std::size_t const staged_bytes = staged_rows_bytes(vector_dtype_, columns, dimensions);
         nk_size_t packed_bytes = 0;
         if (tiles_kit_t::pack_size(tiles_kit_t::pack_columns_k, dimensions, &packed_bytes) != nk_success_k ||
-            failed(context.reserve_tiles(packed_bytes, tiles_kit_t::stream_rows_k, tiles_kit_t::pack_columns_k)))
+            failed(context.reserve_queries(staged_bytes + packed_bytes)) ||
+            failed(context.reserve_tiles(tiles_kit_t::stream_rows_k, tiles_kit_t::pack_columns_k)))
             return status_t::bad_alloc_k;
-        [[maybe_unused]] nk_status_t const packed = tiles_kit_t::pack(
-            block.raw_values_data(), columns, dimensions, static_cast<std::size_t>(block.stride_bytes(0)),
-            context.packed_queries.data(), 0, columns, nullptr);
-        assert(packed == nk_success_k && "A matrix engine packs any block");
+        vectors_view_t const queries = import_rows_(block, 0, columns, context);
+        byte_t* const packed = context.staged_queries.data() + staged_bytes;
+        [[maybe_unused]] nk_status_t const packing = tiles_kit_t::pack(
+            queries.raw_values_data(), columns, dimensions, static_cast<std::size_t>(queries.stride_bytes(0)), packed,
+            0, columns, nullptr);
+        assert(packing == nk_success_k && "A matrix engine packs any block");
 
         alignas(16) std::array<dot_result_t, tiles_kit_t::pack_columns_k> query_sumsqs {};
         std::array<distance_t, tiles_kit_t::pack_columns_k> thresholds;
         for (std::size_t column = 0; column != columns; ++column) {
-            query_sumsqs[column] = norms(block.row(column).as_vector()).sumsq;
+            query_sumsqs[column] = norms(queries.row(column).as_vector()).sumsq;
             thresholds[column] = std::numeric_limits<distance_t>::max();
         }
         for (std::size_t chunk = 0, first = 0; first < first_invisible_id;
@@ -3247,8 +3304,8 @@ struct ram_index {
                                                  {padded.stride_bytes(0), padded.stride_bytes(1)},
                                                  2};
             scan_tiles<tiles_kit_t, quads_kit_t>(
-                kernel_, vectors_view_t {padded.byte_data(), logical}, static_cast<node_id_t>(first),
-                context.packed_queries.data(), std::span<dot_result_t const>(query_sumsqs).first(columns),
+                kernel_, vectors_view_t {padded.byte_data(), logical}, static_cast<node_id_t>(first), packed,
+                std::span<dot_result_t const>(query_sumsqs).first(columns),
                 std::span<distance_t>(thresholds).first(columns), context.step_dots.span(),
                 [&](std::size_t row) noexcept { return norm_for({chunk, row}).sumsq; }, admits, land);
         }

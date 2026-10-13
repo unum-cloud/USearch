@@ -131,7 +131,6 @@ struct ram_indexes {
     using distance_t = typename index_t::distance_t;
     using scalar_t = typename index_t::scalar_t;
     using dot_result_t = typename scalar_t::dot_result_t;
-    using vectors_span_t = nk::matrix_span<scalar_t>;
     using traversal_context_t = typename index_t::traversal_context_t;
     using vector_view_t = typename index_t::vector_view_t;
     using vectors_view_t = typename index_t::vectors_view_t;
@@ -365,20 +364,22 @@ struct ram_indexes {
      *  call at a time.
      *
      *  @param[in] keys One caller identity per row; several rows may share one.
-     *  @param[in] new_vectors The batch, one row per entry, in the shards' stored scalar type.
+     *  @param[in] new_rows The batch, one row per entry, in any scalar NumKong casts into the
+     *      stored one.
      *  @param[inout] executor The threads and their scratch.
      *  @param[in] config The per-shard insertion configuration, applied uniformly.
      */
-    expected<insert_result_t> insert(std::span<key_t const> keys, vectors_view_t new_vectors, executor_t& executor,
+    expected<insert_result_t> insert(std::span<key_t const> keys, rows_view_t new_rows, executor_t& executor,
                                      insert_config_t config = {}) noexcept {
         insert_result_t result;
         result.new_size = size();
-        if (keys.size() != new_vectors.extent(0)) return {result, status_t::config_mismatch_k};
-        // The copy takes its width from the geometry, and a row refused past the dispense would stall its shard.
-        if (dimensions() && new_vectors.extent(1) != dimensions()) return {result, status_t::config_mismatch_k};
-        auto [plan, status] = plan_insert(new_vectors.extent(0), executor, config);
+        if (keys.size() != new_rows.rows) return {result, status_t::config_mismatch_k};
+        // Rows land in slots as wide as the geometry, and a row refused past the dispense would
+        // stall its shard.
+        if (dimensions() && new_rows.columns != dimensions()) return {result, status_t::config_mismatch_k};
+        auto [plan, status] = plan_insert(new_rows.rows, executor, config);
         if (failed(status)) return {result, status};
-        plan.insert(0, keys, new_vectors);
+        plan.insert(0, keys, new_rows);
         return plan.finish();
     }
 
@@ -409,18 +410,19 @@ struct ram_indexes {
         insert_plan_t& operator=(insert_plan_t const&) = delete;
 
         /**
-         *  @brief Lands rows @p first_row onward of the plan, one per row of @p rows under its key in
-         *      @p keys, fanned out over the executor's threads; cannot fail.
+         *  @brief Lands rows @p first_row onward of the plan, one per row of @p rows under its key
+         *      in @p keys, fanned out over the executor's threads, each imported into the stored
+         *      scalar as it lands; cannot fail.
          *
          *  The first step dispenses every shard's range under the dispensing mutex, so no two
          *  batches' ranges cross order between the shards. Rows outside the plan or of another
          *  width land nothing, and @ref finish refuses until every row landed. One caller at a
          *  time, like the executor.
          */
-        void insert(std::size_t first_row, std::span<key_t const> keys, vectors_view_t rows) noexcept {
-            std::size_t const count = rows.extent(0);
+        void insert(std::size_t first_row, nk::vector_view<key_t> keys, rows_view_t rows) noexcept {
+            std::size_t const count = rows.rows;
             if (!owner_ || !count || keys.size() != count || first_row > rows_ || count > rows_ - first_row ||
-                rows.extent(1) != owner_->dimensions())
+                rows.columns != owner_->dimensions())
                 return;
             if (ranges_.empty()) {
                 std::lock_guard<fu::spin_mutex_t> const dispensing {owner_->dispensing_};
@@ -432,7 +434,7 @@ struct ram_indexes {
                 key_locator_t const locator = locator_of_(first_row + task);
                 shard_t& one = owner_->shards_[locator.shard];
                 one.keys[locator.node] = keys[task];
-                one.index->wire_(locator.node, rows.row(task).as_vector(), traversals_[thread], config_);
+                one.index->wire_(locator.node, rows, task, traversals_[thread], config_);
             };
             drain_in_order_(count, land_row);
             landed_rows_ += count;
@@ -762,20 +764,22 @@ struct ram_indexes {
      *      the executor-driven sibling of @ref search, taking the executor exactly where the
      *      single form takes a context.
      *
-     *  @param[in] queries The batch, one query per row, in the shards' stored scalar type.
+     *  @param[in] queries The batch, one query per row, in any scalar NumKong casts into the stored
+     *      one; each thread imports its own.
      *  @param[inout] executor The threads and their scratch; one query occupies one at a time.
      *  @param[in] config The per-shard search configuration, applied uniformly; a
      *      @c traversal_t::scan_k scan scores every published row exactly instead, ignoring the
      *      breadth.
      *  @param[out] keys Merged rankings, one query per row, as many matches as its width.
-     *  @param[out] distances Distances of the same rankings, parallel to @p keys.
+     *  @param[out] distances The same rankings' distances as @p score_type_, parallel to @p keys.
      *  @param[out] counts Per-query merged hit counts, one per query row.
      *
      *  A thread that fails stops its own query and leaves the rest to finish; the first failure is
      *  what the merged result reports, and every other query's outputs stand.
      */
-    expected<search_result_t> search(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                     nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
+    template <typename score_type_>
+    expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
+                                     nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
                                      std::span<std::size_t> counts) noexcept {
         return search_if(queries, executor, config, keys, distances, counts, dummy_predicate_t {});
     }
@@ -787,7 +791,7 @@ struct ram_indexes {
      *  @param[in] heads The indexer heads of every query row.
      *  @return @c config_mismatch_k unless the shards walk by dot.
      */
-    expected<search_result_t> search(vectors_view_t queries, indexer_heads<scalar_t> const& heads, executor_t& executor,
+    expected<search_result_t> search(rows_view_t queries, indexer_heads<scalar_t> const& heads, executor_t& executor,
                                      search_config_t config, nk::matrix_span<key_t> keys,
                                      nk::matrix_span<distance_t> distances, std::span<std::size_t> counts) noexcept
         requires floating_scalar<scalar_t>
@@ -805,9 +809,9 @@ struct ram_indexes {
      *      than the worst match their query already holds, so a selective filter is called far less
      *      often than rows are scored.
      */
-    template <typename predicate_type_>
-    expected<search_result_t> search_if(vectors_view_t queries, executor_t& executor, search_config_t config,
-                                        nk::matrix_span<key_t> keys, nk::matrix_span<distance_t> distances,
+    template <typename score_type_, typename predicate_type_>
+    expected<search_result_t> search_if(rows_view_t queries, executor_t& executor, search_config_t config,
+                                        nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
                                         std::span<std::size_t> counts, predicate_type_&& predicate) noexcept {
         if (config.traversal == traversal_t::scan_k)
             return scan_rows_(queries, executor, keys, distances, counts, predicate);
@@ -816,14 +820,15 @@ struct ram_indexes {
 
     /**
      *  @brief Graph products of a whole matrix of left-hand rows against every shard: each row keeps
-     *      the pairs its walks scored, keys resolved and dots at their native width.
+     *      the pairs its walks scored, keys resolved and dots cast into the products' scalar.
      *
-     *  @param[in] left The left-hand rows, one walk per row, in the shards' stored scalar type.
+     *  @param[in] left The left-hand rows, one walk per row, in any scalar NumKong casts into the
+     *      stored one; each thread imports its own.
      *  @param[inout] executor The threads and their scratch; one row occupies one at a time.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
      *  @param[out] keys The key of each kept pair, one left-hand row per row, as many pairs
      *      as its width.
-     *  @param[out] products The dot of each kept pair, parallel to @p keys.
+     *  @param[out] products The dot of each kept pair as @p product_type_, parallel to @p keys.
      *  @param[out] counts Pairs scored per row across every shard, above the row width when
      *      truncated.
      *
@@ -831,10 +836,11 @@ struct ram_indexes {
      *  leaves the rest to finish; the first failure is what the merged result reports. Refused with
      *  @c config_mismatch_k unless the shards walk by dot.
      */
-    expected<search_result_t> multiply(vectors_view_t left, executor_t& executor, search_config_t config,
-                                       nk::matrix_span<key_t> keys, nk::matrix_span<dot_result_t> products,
+    template <typename product_type_>
+    expected<search_result_t> multiply(rows_view_t left, executor_t& executor, search_config_t config,
+                                       nk::matrix_span<key_t> keys, nk::matrix_span<product_type_> products,
                                        std::span<std::size_t> counts) noexcept {
-        std::size_t const rows_count = left.extent(0);
+        std::size_t const rows_count = left.rows;
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != rows_count) return {{}, status_t::config_mismatch_k};
@@ -844,13 +850,14 @@ struct ram_indexes {
 
         auto multiply_row = [&](std::size_t row, std::size_t, traversal_context_t& traversal,
                                 std::span<node_id_t const> watermarks) noexcept {
-            multiply_fold<key_t, dot_result_t, keyed_ids<keys_column_t>> fold {to_span(keys.row(row).as_vector()),
-                                                                               to_span(products.row(row).as_vector())};
+            vector_view_t const left_row = shards_[0].index->import_rows_(left, row, 1, traversal).row(0).as_vector();
+            multiply_fold<key_t, product_type_, keyed_ids<keys_column_t>> fold {to_span(keys.row(row).as_vector()),
+                                                                                to_span(products.row(row).as_vector())};
             status_t refusal = status_t::success_k;
             for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
                 fold.resolve.keys = &shards_[shard].keys;
                 expected<search_result_t> const walked = shards_[shard].index->walk_(
-                    left.row(row).as_vector(), fold, dummy_rescoring_t {}, traversal, config, watermarks[shard]);
+                    left_row, fold, dummy_rescoring_t {}, traversal, config, watermarks[shard]);
                 if (!walked) {
                     refusal = walked.status;
                     break;
@@ -859,7 +866,8 @@ struct ram_indexes {
             counts[row] = fold.scored;
             return refusal;
         };
-        return for_each_row_(rows_count, executor, config, multiply_row, counts);
+        return for_each_row_(rows_count, executor, config, staged_rows_bytes(vector_dtype_, 1, left.columns),
+                             multiply_row, counts);
     }
 
     /**
@@ -880,10 +888,10 @@ struct ram_indexes {
      *  score lands below its exact value, never above. Refused with @c config_mismatch_k unless the
      *  shards walk by dot.
      */
-    expected<search_result_t> maxsim(vectors_view_t queries, std::size_t rows_per_query, executor_t& executor,
+    expected<search_result_t> maxsim(rows_view_t queries, std::size_t rows_per_query, executor_t& executor,
                                      search_config_t config, nk::matrix_span<key_t> keys, nk::matrix_span<f64_t> scores,
                                      std::span<std::size_t> counts) noexcept {
-        std::size_t const rows_count = queries.extent(0);
+        std::size_t const rows_count = queries.rows;
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (!rows_per_query || rows_count % rows_per_query) return {{}, status_t::shape_mismatch_k};
@@ -917,45 +925,56 @@ struct ram_indexes {
      *      walks every shard in turn, folding into one running state per head, since the shards are disjoint
      *      and online softmax is order-free, and its rows normalize once after the last shard.
      *
-     *  @param[in] queries Row t · @p head_count + h is head h of token t; one walk per token and shard.
+     *  @param[in] queries Row t · @p head_count + h is head h of token t; one walk per token and
+     *      shard. Any scalar NumKong casts into the stored one; each thread imports its own
+     *      token's heads.
      *  @param[in] head_count Query heads sharing this key-value head; it must divide the rows.
      *  @param[in] value_lookup Resolves a scored batch's keys to their value rows, as wide as the keys and stored
      *      like them: `void(std::span<key_t const>, std::span<vector_view_t>)`, one row per key. Keys come from
      *      each shard's key column, so only scored nodes resolve; one without a row refuses with
      *      @c shape_mismatch_k.
      *  @param[in] score_scale The factor turning a dot into a logit.
-     *  @param[out] outputs The attended rows, one per query row, as wide as the keys and packed.
-     *  @param[out] carry Every query row's softmax state, which merges this call with other branches.
+     *  @param[out] outputs The attended rows, one per query row, as wide as the keys.
+     *      Packed @c f32 rows accumulate in place, any others in the thread's staged queries
+     *      until their token exports them.
+     *  @param[out] carry Every query row's softmax state, which merges this call with other
+     *      branches, or empty to keep none.
      *  @param[inout] executor The threads and their scratch; one token occupies one at a time.
      *  @param[in] config The per-shard walk configuration, applied uniformly.
      *  @return The query rows attended in @c count, or @c config_mismatch_k unless the shards walk
      *      by dot.
      */
     template <typename value_lookup_type_>
-    expected<search_result_t> attend(vectors_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
-                                     f32_t score_scale, nk::matrix_span<f32_t> outputs,
-                                     std::span<softmax_state_t> carry, executor_t& executor,
-                                     search_config_t config = {}) noexcept {
-        std::size_t const rows_count = queries.extent(0), columns = queries.extent(1);
+    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
+                                     f32_t score_scale, rows_span_t outputs, std::span<softmax_state_t> carry,
+                                     executor_t& executor, search_config_t config = {}) noexcept {
+        std::size_t const rows_count = queries.rows, columns = queries.columns;
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
-        if (outputs.extent(0) != rows_count || outputs.extent(1) != columns || carry.size() != rows_count)
+        if (outputs.rows != rows_count || outputs.columns != columns || (!carry.empty() && carry.size() != rows_count))
             return {{}, status_t::config_mismatch_k};
-        if (!outputs.is_contiguous()) return {{}, status_t::unsupported_layout_k};
         if (!rows_count) return {{}, status_t::success_k};
 
+        // Past the token's imported heads, their `f32` rows, then their softmax states.
+        using slice_t = arena_allocator<byte_t>;
+        bool const in_place = outputs.template holds<f32_t>() && outputs.stride == columns * sizeof(f32_t);
+        std::size_t const heads_bytes = staged_rows_bytes(vector_dtype_, head_count, columns);
+        std::size_t const accumulators_bytes = slice_t::reserved_bytes(head_count * columns * sizeof(f32_t));
         auto attend_token = [&](std::size_t token, std::size_t, traversal_context_t& traversal,
                                 std::span<node_id_t const> watermarks) noexcept {
             std::size_t const first = token * head_count;
+            byte_t* const accumulators = traversal.staged_queries.data() + heads_bytes;
+            byte_t* const states = accumulators + accumulators_bytes;
             status_t status = status_t::success_k;
             shard_value_lookup<value_lookup_type_> shard_lookup {nullptr, value_lookup};
             attention_rescoring<capability_, scalar_t, decltype(shard_lookup)> const attention {
-                queries(nk::range(first, first + head_count), nk::slice),
+                shards_[0].index->import_rows_(queries, first, head_count, traversal),
                 shard_lookup,
                 score_scale,
-                outputs(nk::range(first, first + head_count), nk::slice),
-                carry.subspan(first, head_count),
+                {reinterpret_cast<f32_t*>(in_place ? outputs.row(first) : accumulators), head_count, columns},
+                carry.empty() ? std::span {reinterpret_cast<softmax_state_t*>(states), head_count}
+                              : carry.subspan(first, head_count),
                 status};
             attention.clear();
             for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
@@ -967,9 +986,14 @@ struct ram_indexes {
                 if (failed(status)) return status;
             }
             attention.finish();
+            if (!in_place)
+                for (std::size_t head = 0; head != head_count; ++head)
+                    export_row<capability_>(attention.outputs.row(head).data(), nk_f32_k, outputs, first + head);
             return status_t::success_k;
         };
-        expected<search_result_t> attended = for_each_row_(rows_count / head_count, executor, config, attend_token, {});
+        std::size_t const staged_bytes = heads_bytes + accumulators_bytes + head_count * sizeof(softmax_state_t);
+        expected<search_result_t> attended = for_each_row_(rows_count / head_count, executor, config, staged_bytes,
+                                                           attend_token, {});
         if (attended) attended.value.count = rows_count;
         return attended;
     }
@@ -1491,19 +1515,20 @@ struct ram_indexes {
     bool contains(key_t const& key) const noexcept { return locators_of_key_.contains(key); }
 
     /**
-     *  @brief Copies up to @p wanted rows stored under @p key into @p vectors and reports the
-     *      @b true total under that key - a return above @p wanted means the copy truncated, so
-     *      the caller resizes and asks again; zero means absent.
+     *  @brief Exports up to @p wanted rows stored under @p key into @p vectors in their scalar, and
+     *      reports the @b true total under that key - a return above @p wanted means the copy
+     *      truncated, so the caller resizes and asks again; zero means absent.
      *
-     *  Safe against concurrent insertions, which only ever add.
+     *  Rows at least as wide as the index take its columns and keep their tails. Safe against
+     *  concurrent insertions, which only ever add.
      */
-    std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted) const noexcept {
-        std::size_t const row_bytes = row_values_() * sizeof(scalar_t);
+    std::size_t get(key_t const& key, rows_span_t vectors, std::size_t wanted) const noexcept {
+        rows_span_t const target {vectors.data, vectors.rows, dimensions(), vectors.stride, vectors.dtype};
         std::size_t total = 0;
         locators_of_key_.find_each(key, [&](key_locator_t locator) noexcept {
-            if (total < wanted && total < vectors.extent(0)) {
+            if (total < wanted && total < target.rows) {
                 vector_view_t const stored = shards_[locator.shard].index->vector(locator.node);
-                std::memcpy(vectors.row(total).as_vector().byte_data(), stored.byte_data(), row_bytes);
+                export_row<capability_>(stored.byte_data(), vector_dtype_, target, total);
             }
             ++total;
         });
@@ -1544,23 +1569,23 @@ struct ram_indexes {
      *      true total, one key per task over the executor's threads.
      *
      *  @param[in] keys The keys to export, repeats and absent ones included.
-     *  @param[out] vectors @b [keys·wanted,dimensions]: row q · @p wanted + i is the i-th row of
-     *      key q; refused as @ref rows_refusal says.
+     *  @param[out] vectors @b [keys·wanted,dimensions] in any scalar NumKong casts into, where row
+     *      q · @p wanted + i is the i-th row of key q; refused with @c config_mismatch_k when the
+     *      rows are another count or narrower than the index.
      *  @param[in] wanted Rows kept per key.
      *  @param[out] entries The true total under each key, parallel to @p keys; above @p wanted
      *      when its rows truncated, zero when absent.
-     *  @param[inout] executor The threads the copies fan out over.
+     *  @param[inout] executor The threads the exports fan out over.
      */
-    status_t get(std::span<key_t const> keys, vectors_span_t vectors, std::size_t wanted,
-                 std::span<std::size_t> entries, executor_t& executor) const noexcept {
+    status_t get(std::span<key_t const> keys, rows_span_t vectors, std::size_t wanted, std::span<std::size_t> entries,
+                 executor_t& executor) const noexcept {
+        std::size_t const rows = keys.size() * wanted;
         if (entries.size() != keys.size()) return status_t::config_mismatch_k;
-        if (status_t const refusal = rows_refusal(keys.size() * wanted, vectors, row_values_()); failed(refusal))
-            return refusal;
+        if (vectors.rows != rows || (rows && vectors.columns < dimensions())) return status_t::config_mismatch_k;
         auto [executor_claim, claim_status] = executor.claim();
         if (failed(claim_status)) return claim_status;
         return executor.for_tasks(keys.size(), [&](std::size_t position, std::size_t, std::size_t) noexcept {
-            std::size_t const first = position * wanted;
-            entries[position] = get(keys[position], vectors(nk::range(first, first + wanted), nk::slice), wanted);
+            entries[position] = get(keys[position], vectors.slice(position * wanted, wanted), wanted);
         });
     }
 
@@ -1735,11 +1760,11 @@ struct ram_indexes {
      *  engine for the scalar, streams through it; a single query scores four rows at a time. Either
      *  way the shards' own kit finalizes the distances, so they match the walk's.
      */
-    template <typename predicate_type_>
-    expected<search_result_t> scan_rows_(vectors_view_t queries, executor_t& executor, nk::matrix_span<key_t> keys,
-                                         nk::matrix_span<distance_t> distances, std::span<std::size_t> counts,
+    template <typename score_type_, typename predicate_type_>
+    expected<search_result_t> scan_rows_(rows_view_t queries, executor_t& executor, nk::matrix_span<key_t> keys,
+                                         nk::matrix_span<score_type_> distances, std::span<std::size_t> counts,
                                          predicate_type_&& predicate) noexcept {
-        std::size_t const queries_count = queries.extent(0), wanted = keys.extent(1);
+        std::size_t const queries_count = queries.rows, wanted = keys.extent(1);
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
         if (status_t const refusal = rankings_refusal(queries_count, keys, distances); failed(refusal))
@@ -1751,18 +1776,18 @@ struct ram_indexes {
         auto scan_block = [&](std::size_t block, std::size_t, traversal_context_t& traversal,
                               std::span<node_id_t const> watermarks) noexcept {
             std::size_t const first = block * width;
-            vectors_view_t const block_queries = queries(nk::range(first, min_of(first + width, queries_count)),
-                                                         nk::slice);
+            rows_view_t const block_queries = queries.slice(first, min_of(width, queries_count - first));
             for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
                 shard_t const& one = shards_[shard];
                 // Each scanned match merges into its query's row as it beats the worst one there.
                 auto land = [&](std::size_t column, scored_node_t const candidate) noexcept {
                     std::size_t const query = first + column;
-                    std::span<distance_t> const distances_row = to_span(distances.row(query).as_vector());
+                    std::span<score_type_> const distances_row = to_span(distances.row(query).as_vector());
                     counts[query] = merge_search_results(std::span(&candidate, 1), one.keys,
                                                          to_span(keys.row(query).as_vector()), distances_row,
                                                          counts[query]);
-                    return counts[query] == wanted ? distances_row.back() : std::numeric_limits<distance_t>::max();
+                    return counts[query] == wanted ? static_cast<distance_t>(distances_row.back())
+                                                   : std::numeric_limits<distance_t>::max();
                 };
                 status_t scanned = status_t::success_k;
                 if constexpr (std::is_same_v<std::decay_t<predicate_type_>, dummy_predicate_t>)
@@ -1775,16 +1800,18 @@ struct ram_indexes {
             }
             return status_t::success_k;
         };
-        return for_each_row_(divide_round_up(queries_count, width), executor, search_config_t {}, scan_block, counts);
+        // Every shard's scan sizes the staging its block imports and packs into.
+        return for_each_row_(divide_round_up(queries_count, width), executor, search_config_t {}, 0, scan_block,
+                             counts);
     }
 
     /** The batched @ref search_if under @p heads, which only a @c dummy_predicate_t accompanies. */
-    template <typename heads_type_, typename predicate_type_>
-    expected<search_result_t> search_rows_(vectors_view_t queries, heads_type_ const& heads, executor_t& executor,
+    template <typename score_type_, typename heads_type_, typename predicate_type_>
+    expected<search_result_t> search_rows_(rows_view_t queries, heads_type_ const& heads, executor_t& executor,
                                            search_config_t config, nk::matrix_span<key_t> keys,
-                                           nk::matrix_span<distance_t> distances, std::span<std::size_t> counts,
+                                           nk::matrix_span<score_type_> distances, std::span<std::size_t> counts,
                                            predicate_type_&& predicate) noexcept {
-        std::size_t const queries_count = queries.extent(0);
+        std::size_t const queries_count = queries.rows;
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
         if (status_t const refusal = rankings_refusal(queries_count, keys, distances); failed(refusal))
@@ -1794,8 +1821,9 @@ struct ram_indexes {
         auto search_row = [&](std::size_t query, std::size_t, traversal_context_t& traversal,
                               std::span<node_id_t const> watermarks) noexcept {
             std::span<key_t> const keys_row = to_span(keys.row(query).as_vector());
-            std::span<distance_t> const distances_row = to_span(distances.row(query).as_vector());
-            vector_view_t const query_vector = queries.row(query).as_vector();
+            std::span<score_type_> const distances_row = to_span(distances.row(query).as_vector());
+            vector_view_t const query_vector =
+                shards_[0].index->import_rows_(queries, query, 1, traversal).row(0).as_vector();
             std::size_t found_count = 0;
             status_t refusal = status_t::success_k;
             for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
@@ -1822,15 +1850,18 @@ struct ram_indexes {
             counts[query] = found_count;
             return refusal;
         };
-        return for_each_row_(queries_count, executor, config, search_row, counts);
+        return for_each_row_(queries_count, executor, config, staged_rows_bytes(vector_dtype_, 1, queries.columns),
+                             search_row, counts);
     }
 
-    /** Claims @p executor, sizes one traversal per thread, runs @p per_row over every row with its thread,
-     *  that thread's traversal and a fresh snapshot of the watermarks, and sums the threads' telemetry & the
-     *  rows' @p counts; a row that refuses stops itself, and the first refusal is the one kept. */
+    /** Claims @p executor, sizes one traversal per thread with @p staged_bytes of staged queries,
+     *  runs @p per_row over every row with its thread, that thread's traversal and a fresh snapshot
+     *  of the watermarks, and sums the threads' telemetry & the rows' @p counts; a row that refuses
+     *  stops itself, and the first refusal is the one kept. */
     template <typename per_row_type_>
     expected<search_result_t> for_each_row_(std::size_t rows_count, executor_t& executor, search_config_t config,
-                                            per_row_type_&& per_row, std::span<std::size_t const> counts) noexcept {
+                                            std::size_t staged_bytes, per_row_type_&& per_row,
+                                            std::span<std::size_t const> counts) noexcept {
         // One caller per executor, and the arenas grow to the widest geometry ever asked of them.
         // Only `scan_rows_` scans, and it drives the rows under a walk's sizing.
         if (config.traversal != traversal_t::walk_k) return {{}, status_t::unsupported_k};
@@ -1845,6 +1876,8 @@ struct ram_indexes {
         if (status_t const ready = reserve_traversals_(traversals, executor, insert_config_t {config.expansion_factor});
             failed(ready))
             return {{}, ready};
+        for (traversal_context_t& traversal : traversals)
+            if (failed(traversal.reserve_queries(staged_bytes))) return {{}, status_t::bad_alloc_k};
 
         status_t first_refusal = status_t::success_k;
         auto each_row = [&](std::size_t row, std::size_t thread, std::size_t) noexcept {
@@ -1901,11 +1934,6 @@ struct ram_indexes {
     status_t loadable_() const noexcept {
         if (shards_.empty()) return status_t::uninitialized_k;
         return size() ? status_t::config_mismatch_k : status_t::success_k;
-    }
-
-    /** Storage values per stored row - the copy width of every column. */
-    std::size_t row_values_() const noexcept {
-        return divide_round_up<std::size_t>(dimensions(), nk::dimensions_per_value<scalar_t>());
     }
 
     /** The custom fields every monolith carries: the metric and the caller's provenance; the value
@@ -2348,27 +2376,26 @@ struct ram_indexes_cursor {
     using indexes_t = indexes_type_;
     using key_t = typename indexes_t::key_t;
     using scalar_t = typename indexes_t::scalar_t;
-    using vectors_span_t = typename indexes_t::vectors_span_t;
 
     /** Enters the first shard of @p indexes, the one every later @ref read must name. */
     explicit ram_indexes_cursor(indexes_t const& indexes) noexcept { enter_(indexes); }
 
-    /** Copies up to @p keys.size() rows of @p indexes into @p keys - and their vectors in the stored scalar type
-     *  into @p vectors, unless it holds no rows - advancing past them and reporting the rows written. An export
-     *  wanting vectors must offer at least as many rows as @p keys, each wide enough for a stored row, or nothing
-     *  is read. */
-    std::size_t read(indexes_t const& indexes, std::span<key_t> keys, vectors_span_t vectors) noexcept {
-        bool const with_vectors = vectors.extent(0) != 0;
-        std::size_t const row_values = indexes.row_values_();
-        if (with_vectors && (vectors.extent(0) < keys.size() || vectors.extent(1) < row_values)) return 0;
-        std::size_t const row_bytes = row_values * sizeof(scalar_t);
+    /** Copies up to @p keys.size() rows of @p indexes into @p keys, and exports their vectors into
+     *  @p vectors in its scalar unless it holds no rows, advancing past them and reporting the rows
+     *  written. An export wanting vectors must offer at least as many rows as @p keys, each at
+     *  least as wide as the index, or nothing is read. */
+    std::size_t read(indexes_t const& indexes, std::span<key_t> keys, rows_span_t vectors) noexcept {
+        bool const with_vectors = vectors.rows != 0;
+        std::size_t const dimensions = indexes.dimensions();
+        if (with_vectors && (vectors.rows < keys.size() || vectors.columns < dimensions)) return 0;
+        rows_span_t const target {vectors.data, vectors.rows, dimensions, vectors.stride, vectors.dtype};
         std::size_t written = 0;
         for (; written != keys.size() && shard_ < indexes.shards_.size(); ++written) {
             auto const& shard = indexes.shards_[shard_];
             keys[written] = shard.keys[node_];
             if (with_vectors)
-                std::memcpy(vectors.row(written).as_vector().byte_data(), shard.index->vector(node_).byte_data(),
-                            row_bytes);
+                export_row<indexes_t::capability_k>(shard.index->vector(node_).byte_data(), indexes_t::vector_dtype_k,
+                                                    target, written);
             if (++node_ != visible_) continue;
             ++shard_;
             enter_(indexes);
