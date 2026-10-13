@@ -30,4 +30,13 @@ if (USEARCH_BUILD_LIB_C)
     setup_target(usearch_c)
     setup_target(usearch_static_c)
 
+    if (USEARCH_INSTALL)
+        install(TARGETS usearch_c usearch_static_c
+                LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+                RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+        install(FILES ${CMAKE_CURRENT_SOURCE_DIR}/usearch.h
+                DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    endif ()
+
 endif ()
