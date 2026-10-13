@@ -143,6 +143,19 @@ inline std::optional<std::vector<std::uint32_t>> parse_ordinals(std::string_view
     return ordinals;
 }
 
+/** Comma-separated paths in the grammar of @c usearch_nvme_options_t::paths: files, block devices
+ *  or SPDK transport IDs like "trtype:PCIe traddr:0000:01:00.0". */
+inline std::optional<std::vector<std::string_view>> parse_paths(std::string_view text) {
+    std::vector<std::string_view> paths;
+    for (std::size_t begin = 0; begin <= text.size();) {
+        std::size_t const end = min_of(text.find(',', begin), text.size());
+        if (end == begin) return std::nullopt;
+        paths.push_back(text.substr(begin, end - begin));
+        begin = end + 1;
+    }
+    return paths;
+}
+
 /** Every setting the suites read, its default as the initializer, filled once by @c read_settings. */
 struct settings_t {
 
@@ -156,6 +169,10 @@ struct settings_t {
     /** USearch device ordinals the GPU suites run on, positions in @c gpu_devices; none runs the
      *  first device of every vendor present. Override: @c USEARCH_DEVICES, comma-separated. */
     std::vector<std::uint32_t> devices;
+
+    /** NVMe namespaces the SPDK suites view, as @c usearch_nvme_options_t::paths names them; none
+     *  saves the part they would view instead. Override: @c USEARCH_NVME_PATHS, comma-separated. */
+    std::vector<std::string_view> nvme_paths;
 
     /** Whether @p name passes the filter. */
     bool selects(std::string_view name) const {
@@ -183,6 +200,8 @@ inline settings_t read_settings() noexcept {
     settings.seed = env_seed("USEARCH_SEED", settings.seed);
     settings.devices = env_parsed("USEARCH_DEVICES", settings.devices, parse_ordinals,
                                   "comma-separated unsigned device ordinals");
+    settings.nvme_paths = env_parsed("USEARCH_NVME_PATHS", settings.nvme_paths, parse_paths,
+                                     "comma-separated files, block devices or transport IDs");
     return settings;
 }
 
@@ -192,6 +211,8 @@ inline void print(settings_t const& settings) {
     fmt::println("- Filter: {}", settings.filter.empty() ? std::string_view("none") : settings.filter);
     if (settings.devices.empty()) fmt::println("- Devices: first of each vendor");
     else fmt::println("- Devices: {}", fmt::join(settings.devices, ","));
+    if (settings.nvme_paths.empty()) fmt::println("- NVMe paths: none");
+    else fmt::println("- NVMe paths: {}", fmt::join(settings.nvme_paths, ","));
 }
 
 /** One vendor's VRAM suites, as its test object registers them with the runner. */

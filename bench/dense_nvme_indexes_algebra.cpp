@@ -209,8 +209,8 @@ int bench_dense_nvme_indexes_algebra(int argc, char const* const* argv) {
                 return fmt::println(stderr, "The parts were built for {}, but multiply and attend walk dot alone",
                                     nk_kernel_name(launch.settings.kernel)),
                        1;
-            if (launch.settings.vectors_path.empty() && algebra.reference_path.empty())
-                return fmt::println(stderr, "The oracle attends over --vectors, so pass them or a --reference"), 1;
+            if (launch.settings.base_vectors_path.empty() && algebra.reference_path.empty())
+                return fmt::println(stderr, "The oracle attends over --base-vectors, so pass them or a --reference"), 1;
             return dispatch_stored_value<dataset_scalar_type_, nk_bf16_k, nk_f16_k, nk_e5m2_k, nk_e4m3_k, nk_e3m2_k,
                                          nk_e2m3_k, nk_i8_k, nk_i4_k, nk_u8_k, nk_u4_k, nk_u1_k>(
                 launch.settings.stored_dtype,

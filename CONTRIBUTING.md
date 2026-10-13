@@ -75,6 +75,9 @@ Both lists come from the C interface, the same strings the bindings report.
 Unset, it takes the first device of every vendor present, and an ordinal past the listing prints the listing and exits 1.
 It links one object library per vendor the build carries, and each device opens with its vendor's line: `- CUDA: <device> nvidia-<class> #<ordinal>, <N> SMs, <M> MiB`, `- ROCm: device #<ordinal> amd-cdna<N>` or `- Metal: device #<ordinal> apple-metal<N>`.
 Without any GPU it prints `- GPU: none listed` and exits 0, skipping every GPU test.
+`USEARCH_NVME_PATHS` names NVMe namespaces the same way, comma-separated in the grammar of `usearch_nvme_options_t::paths`: files, block devices or SPDK transport IDs like `trtype:PCIe traddr:0000:01:00.0`.
+Unset, the SPDK suite saves `usearch-nvme-spdk.safegraphs` under `TMPDIR` for a rig to copy onto a namespace, and the next run, naming that namespace, views the copy.
+`usearch_test_c` reads `USEARCH_SEED` and `USEARCH_FILTER` too, the filter as a substring of its test names.
 
 Those three configurations, and the benchmarking one from [bench/README.md](bench/README.md), are also packaged as CMake presets, so the flag soup below is optional:
 

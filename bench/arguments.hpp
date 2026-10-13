@@ -9,18 +9,22 @@
  *  comma-separated. A text value views the tail of its @c argv entry, so it is null-terminated; list items are
  *  not. Copied from UStore's @c tools/arguments.hpp, keeping the destinations these binaries take.
  *
+ *  Every flag also reads its default from a @c RETRIEVAL_ variable named after it, the one
+ *  RetriEval reads, so @c --top-k defaults to @c RETRIEVAL_TOP_K and the command line overrides it.
+ *
  *  @code
  *  count_t top_k {.value = 10};
- *  std::string_view vectors_path;
+ *  std::string_view base_vectors_path;
  *  std::array<flag_t, 2> const flags {{
- *      {"--vectors", "path", "base vectors, `.fbin` family", &vectors_path},
+ *      {"--base-vectors", "path", "base vectors, `.fbin` family", &base_vectors_path},
  *      {"--top-k", "count", "matches per query to judge", &top_k},
  *  }};
- *  parse_or_exit(argc, argv, "usearch_bench_dense_ram_index --vectors <path> [flags]", flags);
+ *  parse_or_exit(argc, argv, "usearch_bench_dense_ram_index --base-vectors <path> [flags]", flags);
  *  @endcode
  */
 #pragma once
 
+#include <cctype>  // `std::toupper`, for the variable names
 #include <cstddef> // `std::size_t`
 #include <cstdint> // `std::uint64_t`
 #include <cstdlib> // `std::exit`, `std::strtod`, `std::getenv`
@@ -32,6 +36,7 @@
 #include <optional>     // `std::optional`
 #include <random>       // `std::random_device`
 #include <span>         // `std::span`
+#include <string>       // `std::string`, for the variable names
 #include <string_view>  // `std::string_view`
 #include <system_error> // `std::errc`
 #include <variant>      // `std::variant`
@@ -310,6 +315,26 @@ inline counts_t env_devices() {
     return "a value";
 }
 
+/** The variable that sets @p flag's default, the name RetriEval reads too: `--top-k` reads
+ *  `RETRIEVAL_TOP_K`. */
+[[nodiscard]] inline std::string retrieval_variable(flag_t const& flag) {
+    std::string variable = "RETRIEVAL_";
+    for (char const letter : flag.name.substr(2))
+        variable += letter == '-' ? '_' : static_cast<char>(std::toupper(static_cast<unsigned char>(letter)));
+    return variable;
+}
+
+/** Writes @p value, a variable's text, into @p flag: a switch takes 1, 0, true or false, the rest
+ *  parse as on the command line. */
+[[nodiscard]] inline argument_status_t assign_variable_(flag_t const& flag, std::string_view value) noexcept {
+    auto const* toggle = std::get_if<switch_t*>(&flag.destination);
+    if (!toggle) return assign_(flag, value);
+    bool const present = value == "1" || value == "true";
+    if (!present && value != "0" && value != "false") return argument_status_t::unexpected_value_k;
+    **toggle = present ? switch_t::present_k : switch_t::absent_k;
+    return argument_status_t::parsed_k;
+}
+
 /** Prints @p synopsis and one aligned line per flag, generated from the same table that parses. */
 inline void print_usage(std::string_view synopsis, std::span<flag_t const> flags) {
     constexpr std::size_t column_k = 34;
@@ -317,15 +342,29 @@ inline void print_usage(std::string_view synopsis, std::span<flag_t const> flags
     for (flag_t const& flag : flags) {
         std::size_t const width = flag.name.size() + (flag.placeholder.empty() ? 0 : flag.placeholder.size() + 3);
         std::size_t const padding = width < column_k ? column_k - width : 1;
-        if (flag.placeholder.empty()) fmt::println("  {}{:{}}{}", flag.name, "", padding, flag.help);
-        else fmt::println("  {} <{}>{:{}}{}", flag.name, flag.placeholder, "", padding, flag.help);
+        if (flag.placeholder.empty())
+            fmt::println("  {}{:{}}{} [env: {}]", flag.name, "", padding, flag.help, retrieval_variable(flag));
+        else
+            fmt::println("  {} <{}>{:{}}{} [env: {}]", flag.name, flag.placeholder, "", padding, flag.help,
+                         retrieval_variable(flag));
     }
     fmt::println("  --help{:{}}print this message", "", column_k - 6);
 }
 
-/** Parses @p argv against @p flags. On `--help` prints the usage and exits with status 0; on the first argument that
- *  fails prints one line, like `--top-k="0" does not parse, expected a positive count`, and exits with status 1. */
+/** Parses @p argv against @p flags, each defaulting to its @ref retrieval_variable when set, so one
+ *  environment drives these binaries and RetriEval alike. On `--help` prints the usage and exits
+ *  with status 0; on the first variable or argument that fails prints one line, like
+ *  `--top-k="0" does not parse, expected a positive count`, and exits with status 1. */
 inline void parse_or_exit(int argc, char const* const* argv, std::string_view synopsis, std::span<flag_t const> flags) {
+    for (flag_t const& flag : flags) {
+        std::string const variable = retrieval_variable(flag);
+        char const* const value = std::getenv(variable.c_str());
+        if (!value || !*value || assign_variable_(flag, value) == argument_status_t::parsed_k) continue;
+        bool const toggle = std::holds_alternative<switch_t*>(flag.destination);
+        fmt::println(stderr, "{}=\"{}\" does not parse, expected {}", variable, value,
+                     toggle ? "1, 0, true or false" : grammar(flag));
+        std::exit(1);
+    }
     arguments_t const parsed = parse_arguments(argc, argv, flags, {});
     if (parsed.status == argument_status_t::parsed_k) return;
     if (parsed.status == argument_status_t::help_k) {

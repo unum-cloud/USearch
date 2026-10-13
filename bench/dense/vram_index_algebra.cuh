@@ -64,7 +64,7 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
     typename index_t::search_config_t config;
     config.expansion_factor = static_cast<typename bench_t::small_size_t>(settings.expansion_search.value);
     config.synchronization = synchronization_t::immutable_k;
-    std::size_t const batch_rows = streamed_batch_rows(settings, query_count);
+    std::size_t const batch_rows = query_batch_rows(settings, query_count);
 
     auto node_ids = nk::matrix<node_id_t>::zeros({batch_rows, wanted}).value;
     auto products = nk::matrix<dot_result_t>::zeros({batch_rows, wanted}).value;

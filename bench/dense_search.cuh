@@ -163,7 +163,7 @@ inline void report_search_metrics(settings_t const& settings, std::size_t query_
     };
     fmt::println("\nQueries");
     fmt::println("  queries: {} at top-{}{}", query_count, settings.top_k.value,
-                 settings.self_recall == switch_t::present_k ? " · self-recall" : "");
+                 settings.self_search == switch_t::present_k ? " · self-search" : "");
     fmt::println("  threads: {}", threads);
     fmt::println("  wall: {:.2f} s", seconds);
     fmt::println("  throughput: {} QPS", humanized(double(query_count) / seconds));
@@ -258,7 +258,7 @@ ranking_verdict_t judge_ranking(std::span<key_type_ const> returned, std::span<k
  *  recall/overlap/ndcg against the ground truth - one sweep per query either way. */
 inline void judge_hits(settings_t const& settings, bench_results_t const& results, nk::matrix_view<u32_t> ground_truth,
                        std::size_t query_count) {
-    if (settings.self_recall == switch_t::present_k) {
+    if (settings.self_search == switch_t::present_k) {
         std::size_t found_at_1 = 0, found_at_k = 0;
         for (std::size_t query = 0; query != query_count; ++query) {
             auto const returned = to_span(results.hit_rows.row(query).as_vector()).first(results.hit_counts[query]);
@@ -318,7 +318,8 @@ struct bench_indexer_heads {
     /** The heads widened to @c f32, @b [queries·heads,dimensions], and their signed weights, @b [queries,heads]. */
     nk::matrix<f32_t> widened_heads, weights;
 
-    /** The heads in the stored scalar, and without `--queries` every query's `Σₕ wₕ·qₕ` navigation row. */
+    /** The heads in the stored scalar, and without `--query-vectors` every query's `Σₕ wₕ·qₕ`
+     *  navigation row. */
     std::vector<scalar_type_> heads, navigation;
 
     bool engaged() const noexcept { return weights.extent(0) != 0; }
@@ -346,8 +347,8 @@ bool scores_indexer(index_type_ const& index) noexcept {
     return index.kernel() == nk_kernel_dot_k && !nk::is_integral_dtype<typename index_type_::scalar_t>();
 }
 
-/** Reads the RetriEval matrix @p path through the opener of `--vectors`, in whichever scalar its extension names,
- *  widened into @p widened. */
+/** Reads the RetriEval matrix @p path through the opener of `--base-vectors`, in whichever scalar
+ *  its extension names, widened into @p widened. */
 inline bool read_widened_rows(std::string_view path, nk::matrix<f32_t>& widened) {
     return open_dataset(path, {}, {},
                         [&]<typename file_scalar_type_>(utilities::persisted_dataset<file_scalar_type_> const& file) {
@@ -362,9 +363,9 @@ inline bool read_widened_rows(std::string_view path, nk::matrix<f32_t>& widened)
 }
 
 /** Opens `--heads` and `--weights` over the searched queries of @p streamed as @p index ranks them,
- *  casting the heads, and without `--queries` their `Σₕ wₕ·qₕ` navigation rows, into the stored
- *  scalar under the staging scale, so the walks score against the same keys; without `--heads` it
- *  opens nothing. */
+ *  casting the heads, and without `--query-vectors` their `Σₕ wₕ·qₕ` navigation rows, into the
+ *  stored scalar under the staging scale, so the walks score against the same keys; without
+ *  `--heads` it opens nothing. */
 template <typename index_type_, typename streamed_dataset_type_>
 bool open_indexer_heads(index_type_ const& index, streamed_dataset_type_ const& streamed,
                         bench_indexer_heads<typename index_type_::scalar_t>& heads) {
@@ -372,17 +373,17 @@ bool open_indexer_heads(index_type_ const& index, streamed_dataset_type_ const& 
     settings_t const& settings = streamed.bench.settings;
     if (settings.heads_path.empty() && settings.weights_path.empty()) return true;
     if (!scores_indexer(index)) return fmt::println("--heads ranks floating-point keys under --metric dot"), false;
-    if (settings.self_recall == switch_t::present_k)
-        return fmt::println("--heads brings its own queries, so --self-recall has none to judge"), false;
+    if (settings.self_search == switch_t::present_k)
+        return fmt::println("--heads brings its own queries, so --self-search has none to judge"), false;
     if (!read_widened_rows(settings.heads_path, heads.widened_heads) ||
         !read_widened_rows(settings.weights_path, heads.weights))
         return false;
     std::size_t const dimensions = streamed.queries.extent(1), queries_count = heads.weights.extent(0);
     if (heads.widened_heads.extent(1) != dimensions || heads.widened_heads.extent(0) != queries_count * heads.count())
         return fmt::println("--heads must hold {} rows of {}d per --weights row", heads.count(), dimensions), false;
-    if (!settings.queries_path.empty() && streamed.queries.extent(0) < queries_count)
-        return fmt::println("--queries must hold a row per --weights row"), false;
-    if (settings.queries_path.empty()) {
+    if (!settings.query_vectors_path.empty() && streamed.queries.extent(0) < queries_count)
+        return fmt::println("--query-vectors must hold a row per --weights row"), false;
+    if (settings.query_vectors_path.empty()) {
         std::vector<f32_t> navigation(queries_count * dimensions, 0);
         for (std::size_t query = 0; query != queries_count; ++query)
             for (std::size_t head = 0; head != heads.count(); ++head)
@@ -467,8 +468,8 @@ std::vector<exact_row_t> exact_best_rows(exact_scorer_t& scorer, nk::matrix_view
     return best;
 }
 
-/** Judges the hits against `--neighbors`, or an indexer run without them against the exact oracle over its first
- *  `--oracle-queries`. */
+/** Judges the hits against `--query-neighbors`, or an indexer run without them against the exact
+ *  oracle over its first `--oracle-queries`. */
 template <typename scalar_type_, typename dataset_scalar_type_>
 void judge_search(settings_t const& settings, bench_indexer_heads<scalar_type_> const& heads,
                   bench_results_t const& results, nk::matrix_view<u32_t> ground_truth,

@@ -18,8 +18,8 @@
  *
  *  @code{.sh}
  *  for domain in 0 1; do
- *  usearch_bench_dense_ram_index_search --memory-domain $domain --vectors base.10M.bf16bin \
- *  --first-vector $((domain * 5000000)) --max-vectors 5000000 --self-recall &
+ *  usearch_bench_dense_ram_index_search --memory-domain $domain --base-vectors base.10M.bf16bin \
+ *  --first-vector $((domain * 5000000)) --max-base-vectors 5000000 --self-search &
  *  done; wait
  *  @endcode
  */
@@ -526,7 +526,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
         return 1;
     }
     std::size_t rows = total_rows - first_row;
-    if (launch.settings.max_vectors.value) rows = std::min(rows, launch.settings.max_vectors.value);
+    if (launch.settings.max_base_vectors.value) rows = std::min(rows, launch.settings.max_base_vectors.value);
     nk::matrix_view<dataset_scalar_type_> const dataset_vectors = dataset.vectors();
     nk::matrix_view<dataset_scalar_type_> const sliced_vectors = dataset_vectors(nk::range(first_row, first_row + rows),
                                                                                  nk::slice);
@@ -550,23 +550,18 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
             fmt::println("Failed to read the pool's thread count");
             return 1;
         }
-        std::size_t const batch_rows = launch.settings.batch_per_core.value * threads;
-        std::size_t const rows_per_thread = divide_round_up(batch_rows, threads);
-        staging =
-            nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::zeros({threads, rows_per_thread, dimensions}).value;
+        // Every task inserts or searches its one staged row before the thread stages the next.
+        staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::zeros({threads, 1, dimensions}).value;
         if (staging.empty()) {
-            fmt::println("Failed to allocate {} staging rows of {}d {}", batch_rows, dimensions,
-                         scalar_t::dtype_name());
+            fmt::println("Failed to allocate {} staging rows of {}d {}", threads, dimensions, scalar_t::dtype_name());
             return 1;
         }
         streamed.staging = staging.span();
 
         if constexpr (streamed_t::scaled_k) {
-            rescaling_rows = nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::zeros(
-                                 {threads, rows_per_thread, dimensions})
-                                 .value;
+            rescaling_rows = nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3>::zeros({threads, 1, dimensions}).value;
             if (rescaling_rows.empty()) {
-                fmt::println("Failed to allocate {} rescaling rows of {}d f32", batch_rows, dimensions);
+                fmt::println("Failed to allocate {} rescaling rows of {}d f32", threads, dimensions);
                 return 1;
             }
             streamed.rescaling = rescaling_rows.span();
@@ -574,10 +569,11 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
         }
     }
 
-    if (dataset.has_ground_truth() && !launch.settings.max_vectors.value && !first_row)
+    if (dataset.has_ground_truth() && !launch.settings.max_base_vectors.value && !first_row)
         streamed.ground_truth = dataset.neighbors();
     else if (dataset.has_ground_truth())
-        fmt::println("Ground truth ignored: --max-vectors or --first-vector reshapes the graph it was computed for");
+        fmt::println(
+            "Ground truth ignored: --max-base-vectors or --first-vector reshapes the graph it was computed for");
 
     if (!prepare(streamed, launch.machine.pool)) return 1;
     if (!run_insertion(streamed, launch.machine.pool)) return 1;

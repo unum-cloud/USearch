@@ -9,22 +9,23 @@
  *  part's header names the stored dtype and the metric the cascade instantiates, and the factor the
  *  producer rescaled its rows by. Every query is answered from storage in one batched call, each
  *  timed by the verb from its first armed walk to its final write, and every read counted by
- *  purpose. Keys are dataset rows, so the merged rankings judge directly against `--neighbors`.
+ *  purpose. Keys are dataset rows, so the merged rankings judge directly against
+ *  `--query-neighbors`.
  *
  *  @code{.sh}
- *  usearch_bench_dense_nvme_indexes_search --view /mnt/nvme0/sift10m.safegraphs.json --queries ... --neighbors ... \
- *      --transport linux-uring --queue-depth 512
+ *  usearch_bench_dense_nvme_indexes_search --view /mnt/nvme0/sift10m.safegraphs.json \
+ *      --query-vectors ... --query-neighbors ... --transport linux-uring --queue-depth 512
  *  @endcode
  */
 #pragma once
 
-#include <cstdlib> // `std::strtof` - the recorded scale
+#include <cstdlib> // `std::strtof` - the recorded scale, `std::getenv` - `USEARCH_NVME_PATHS`
 
 #include <algorithm>    // `std::min`, `std::nth_element`
 #include <array>        // `std::array`
 #include <bit>          // `std::bit_cast` - the header prefix
 #include <chrono>       // `std::chrono::steady_clock`
-#include <filesystem>   // `std::filesystem::is_directory` - a part moved by `--paths`
+#include <filesystem>   // `std::filesystem::is_directory` - a part moved by `USEARCH_NVME_PATHS`
 #include <span>         // `std::span`
 #include <string>       // `std::string`
 #include <string_view>  // `std::string_view`
@@ -72,8 +73,9 @@ struct nvme_settings_t {
     /** The manifest or the monolith the parts are viewed through. */
     std::string_view view_path;
 
-    /** Where to serve each part from instead, comma-separated: a directory holding the part's file,
-     *  or a file or device holding the part itself; empty serves every part beside the manifest. */
+    /** Where to serve each part from instead, from @c USEARCH_NVME_PATHS, comma-separated: a
+     *  directory holding the part's file, or a file or device holding the part itself; empty
+     *  serves every part beside the manifest. */
     std::string_view paths_list;
     std::vector<std::string> paths;
 
@@ -90,14 +92,12 @@ struct nvme_settings_t {
     f32_t scale = 1;
 };
 
-/** The flags both NVMe binaries take: the parts and where they are served from, the queries, the
- *  engines, and the walks. */
-inline std::array<flag_t, 9> nvme_flags(settings_t& settings, nvme_settings_t& nvme) noexcept {
+/** The flags both NVMe binaries take: the parts, the queries, the engines, and the walks. */
+inline std::array<flag_t, 8> nvme_flags(settings_t& settings, nvme_settings_t& nvme) noexcept {
     return {{
         {"--view", "path", "manifest or monolith of the saved parts", &nvme.view_path},
-        {"--paths", "list", "comma-separated directory, file or device per part; beside the manifest by default",
-         &nvme.paths_list},
-        {"--queries", "path", "query vectors, `.fbin` family, cast to the parts' stored dtype", &settings.queries_path},
+        {"--query-vectors", "path", "query vectors, `.fbin` family, cast to the parts' stored dtype",
+         &settings.query_vectors_path},
         {"--transport", "name", "auto, blocking, linux-aio or linux-uring; auto by default", &nvme.transport_name},
         {"--queue-depth", "reads", "reads every thread's engine keeps outstanding; 512 by default", &nvme.queue_depth},
         {"--expansion-search", "breadth", "search candidate pool; 96 by default", &settings.expansion_search},
@@ -112,15 +112,15 @@ inline std::array<flag_t, 9> nvme_flags(settings_t& settings, nvme_settings_t& n
  *  lightning indexer's heads to rank by. */
 inline std::array<flag_t, 3> nvme_search_flags(settings_t& settings) noexcept {
     return {{
-        {"--neighbors", "path", "ground truth over the dataset rows the parts' keys name, `.ibin`",
-         &settings.neighbors_path},
+        {"--query-neighbors", "path", "ground truth over the dataset rows the parts' keys name, `.ibin`",
+         &settings.query_neighbors_path},
         {"--heads", "path", "any `.fbin`-family file, every query's indexer heads", &settings.heads_path},
         {"--weights", "path", "any `.fbin`-family file, one row of head weights per query", &settings.weights_path},
     }};
 }
 
-/** Resolves the transport name and splits the part paths, printing the first flag that does not
- *  parse. */
+/** Resolves the transport name and splits the part paths @c USEARCH_NVME_PATHS names, printing the
+ *  first flag that does not parse. */
 inline bool resolve_nvme_settings(nvme_settings_t& nvme) {
     if (!nvme.transport_name.empty()) {
         auto const named = std::ranges::find(transport_names_k, nvme.transport_name);
@@ -130,6 +130,8 @@ inline bool resolve_nvme_settings(nvme_settings_t& nvme) {
                    false;
         nvme.transport = transports_k[named - transport_names_k.begin()];
     }
+    char const* const listed = std::getenv("USEARCH_NVME_PATHS");
+    nvme.paths_list = listed ? listed : "";
     for (std::string_view list = nvme.paths_list; !list.empty();) {
         std::size_t const comma = list.find(',');
         nvme.paths.emplace_back(list.substr(0, comma));
@@ -152,7 +154,7 @@ inline std::vector<byte_t> read_header_bytes(std::string_view path) {
 }
 
 /** Reads the stored dtype and the metric into @p settings, and the scale into @p nvme, from the
- *  first part's header, wherever `--view` and `--paths` serve that part from. */
+ *  first part's header, wherever `--view` and @c USEARCH_NVME_PATHS serve that part from. */
 inline bool read_parts_header(settings_t& settings, nvme_settings_t& nvme) {
     std::string_view const view = nvme.view_path;
     std::vector<byte_t> header = read_header_bytes(view);
@@ -200,10 +202,10 @@ inline bool read_parts_header(settings_t& settings, nvme_settings_t& nvme) {
  *  scale as the parts' header names them. */
 inline void print(settings_t const& settings, nvme_settings_t const& nvme) {
     fmt::println("- View: {}", nvme.view_path);
-    fmt::println("- Paths: {}", nvme.paths_list.empty() ? "beside the manifest" : nvme.paths_list);
-    fmt::println("- Queries: {}", settings.queries_path);
-    if (!settings.neighbors_path.empty()) fmt::println("- Neighbors: {}", settings.neighbors_path);
-    if (!settings.vectors_path.empty()) fmt::println("- Vectors: {}", settings.vectors_path);
+    fmt::println("- NVMe paths: {}", nvme.paths_list.empty() ? "beside the manifest" : nvme.paths_list);
+    fmt::println("- Query vectors: {}", settings.query_vectors_path);
+    if (!settings.query_neighbors_path.empty()) fmt::println("- Query neighbors: {}", settings.query_neighbors_path);
+    if (!settings.base_vectors_path.empty()) fmt::println("- Base vectors: {}", settings.base_vectors_path);
     fmt::println("- Stored dtype: {}", dtype_name(settings.stored_dtype));
     fmt::println("- Metric: {}", nk_kernel_name(settings.kernel));
     fmt::println("- Scale: {}", nvme.scale);
@@ -326,7 +328,7 @@ bool run_nvme_search(streamed_dataset_type_& streamed) {
     for (std::size_t query = 0; query != truth.extent(0); ++query)
         for (u32_t const row : to_span(truth.row(query).as_vector())) farthest = std::max(farthest, row);
     if (farthest >= rows)
-        return fmt::println("--neighbors names row {}, past the {} rows the parts hold", farthest, rows), false;
+        return fmt::println("--query-neighbors names row {}, past the {} rows the parts hold", farthest, rows), false;
 
     bench_indexer_heads<scalar_t> heads;
     if (!open_indexer_heads(nvme.viewed, streamed, heads)) return false;
@@ -407,11 +409,11 @@ int view_and_run(bench_launch<dataset_scalar_type_> const& launch, nvme_settings
     context_t context {launch.settings};
     if (!open_nvme(nvme, launch.machine.topology, context)) return 1;
     if (dataset.dimensions() != context.viewed.dimensions())
-        return fmt::println("--queries holds {}d rows, but the parts store {}d", dataset.dimensions(),
+        return fmt::println("--query-vectors holds {}d rows, but the parts store {}d", dataset.dimensions(),
                             context.viewed.dimensions()),
                1;
 
-    vectors_t const vectors = launch.settings.vectors_path.empty() ? vectors_t {} : dataset.vectors();
+    vectors_t const vectors = launch.settings.base_vectors_path.empty() ? vectors_t {} : dataset.vectors();
     streamed_dataset<dataset_scalar_type_, context_t> streamed {context, vectors, dataset.queries()};
     streamed.ground_truth = dataset.neighbors();
     streamed.scale = nvme.scale;
@@ -459,9 +461,9 @@ int run_nvme_bench(int argc, char const* const* argv, char const* binary_name, n
     auto const append = [&](auto const& added) { flags.insert(flags.end(), added.begin(), added.end()); };
     append(nvme_flags(settings, nvme));
     (append(binary_flags(settings)), ...);
-    parse_or_exit(argc, argv, fmt::format("{} --view <path> --queries <path> [flags]", binary_name), flags);
-    if (nvme.view_path.empty() || settings.queries_path.empty())
-        return fmt::println(stderr, "--view and --queries are required, see --help"), 1;
+    parse_or_exit(argc, argv, fmt::format("{} --view <path> --query-vectors <path> [flags]", binary_name), flags);
+    if (nvme.view_path.empty() || settings.query_vectors_path.empty())
+        return fmt::println(stderr, "--view and --query-vectors are required, see --help"), 1;
     resolve_max_compute(settings);
     if (!resolve_nvme_settings(nvme) || !read_parts_header(settings, nvme)) return 1;
 
@@ -470,10 +472,11 @@ int run_nvme_bench(int argc, char const* const* argv, char const* binary_name, n
     print(machine);
     print(settings, nvme);
 
-    // Without `--vectors` the queries stand in as the opened base, which no phase then reads.
-    std::string_view const base = settings.vectors_path.empty() ? settings.queries_path : settings.vectors_path;
+    // Without `--base-vectors` the queries stand in as the opened base, which no phase then reads.
+    std::string_view const base = settings.base_vectors_path.empty() ? settings.query_vectors_path
+                                                                     : settings.base_vectors_path;
     int const exit_code = open_dataset(
-        base, settings.queries_path, settings.neighbors_path,
+        base, settings.query_vectors_path, settings.query_neighbors_path,
         [&]<typename dataset_scalar_type_>(utilities::persisted_dataset<dataset_scalar_type_> const& dataset) {
             return on_launch(bench_launch<dataset_scalar_type_> {dataset, settings, machine});
         });

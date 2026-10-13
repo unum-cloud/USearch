@@ -30,16 +30,24 @@ def parse_seed(text: str) -> int:
     return int.from_bytes(os.urandom(4), "little") if text == "random" else int(text)
 
 
+def add_flag(parser: argparse.ArgumentParser, flag: str, default, **options):
+    """Adds `flag`, defaulting to its `RETRIEVAL_*` variable, the name the C++ benches and RetriEval read."""
+    variable = "RETRIEVAL_" + flag.removeprefix("--").replace("-", "_").upper()
+    # A string default parses through `type`, as the command line would.
+    help = f"{options.pop('help')} [env: {variable}]"
+    parser.add_argument(flag, default=os.environ.get(variable, default), help=help, **options)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Benchmark the dense index for speed and recall.")
-    parser.add_argument("--count", type=int, default=100_000, help="Vectors to index.")
-    parser.add_argument("--dims", type=int, default=256, help="Dimensions per vector.")
-    parser.add_argument("--queries", type=int, default=1_000, help="Query rows per search.")
-    parser.add_argument("--top-k", type=int, default=10, help="Matches to retrieve per query.")
-    parser.add_argument("--metric", type=str, default="angular", help="Distance function.")
-    parser.add_argument("--quantization", type=str, default="bf16", help="Stored scalar type.")
-    parser.add_argument("--dtype", type=str, default="f32", help="Input scalar type.")
-    parser.add_argument("--seed", type=parse_seed, default=42, help="Seed of every random draw, or random to draw one.")
+    add_flag(parser, "--count", 100_000, type=int, help="Vectors to index.")
+    add_flag(parser, "--dims", 256, type=int, help="Dimensions per vector.")
+    add_flag(parser, "--queries", 1_000, type=int, help="Query rows per search.")
+    add_flag(parser, "--top-k", 10, type=int, help="Matches to retrieve per query.")
+    add_flag(parser, "--metric", "angular", type=str, help="Distance function.")
+    add_flag(parser, "--quantization", "bf16", type=str, help="Stored scalar type.")
+    add_flag(parser, "--dtype", "f32", type=str, help="Input scalar type.")
+    add_flag(parser, "--seed", "42", type=parse_seed, help="Seed of every random draw, or random to draw one.")
     arguments = parser.parse_args()
 
     print(f"Generating {arguments.count} x {arguments.dims} vectors with seed {arguments.seed}")

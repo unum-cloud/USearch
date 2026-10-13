@@ -21,8 +21,9 @@
 #include <stdbool.h> // `bool`
 #include <stdint.h>  // `uint8_t`, `uint64_t`
 #include <stdio.h>   // `printf`
-#include <stdlib.h>  // `malloc`, `free`
-#include <string.h>  // `memset`, `memcmp`
+#include <stdlib.h>  // `malloc`, `free`, `getenv`, `strtoul`, `srand`
+#include <string.h>  // `memset`, `memcmp`, `strstr`
+#include <time.h>    // `time`, for a drawn seed
 
 /* `dbghelp.h` needs types `windows.h` defines, so a blank line keeps clang-format from sorting it first. */
 #if defined(_WIN32)
@@ -35,7 +36,7 @@
 #include <unistd.h>   // `STDERR_FILENO`
 #endif
 
-#include <usearch/dense_index.h>
+#include "usearch/dense_index.h"
 
 static void usearch_write_backtrace(int signal_number) {
     fprintf(stderr, "\n[usearch] Fatal signal %d. Back-trace:\n", signal_number);
@@ -90,6 +91,27 @@ void expect(bool must_be_true, char const* message) {
 }
 
 #define expect_eq(a, b, message) expect(a == b, message)
+
+/** A substring of the tests to run, from `USEARCH_FILTER`; `NULL` runs every test. */
+static char const* test_filter = NULL;
+
+/** Whether the test @p name passes `USEARCH_FILTER`. */
+static bool selected(char const* name) { return !test_filter || strstr(name, test_filter) != NULL; }
+
+/** The seed of `rand`: 42, unless `USEARCH_SEED` names another or is "random", which draws one
+ *  from the clock. */
+static unsigned read_seed(void) {
+    char const* const text = getenv("USEARCH_SEED");
+    if (!text || !*text) return 42;
+    if (strcmp(text, "random") == 0) return (unsigned)time(NULL);
+    char* end = NULL;
+    unsigned long const seed = strtoul(text, &end, 10);
+    if (*end) {
+        fprintf(stderr, "USEARCH_SEED=\"%s\" does not parse, expected an unsigned integer or random\n", text);
+        exit(1);
+    }
+    return (unsigned)seed;
+}
 
 /**
  * @brief Creates and initializes vectors with random float values.
@@ -1623,36 +1645,43 @@ int main(int argc, char* argv[]) {
     printf("USearch %s\n", usearch_version_name());
     printf("- Compiled for: %s\n", usearch_capabilities_compiled());
     printf("- This machine: %s\n", usearch_capabilities_available());
+    unsigned const seed = read_seed();
+    char const* const filter = getenv("USEARCH_FILTER");
+    if (filter && *filter) test_filter = filter;
+    srand(seed);
+    printf("- Seed: %u\n", seed);
+    printf("- Filter: %s\n", test_filter ? test_filter : "none");
 
-    test_library_probes();
-    test_outcome_contract(64);
+    if (selected("library_probes")) test_library_probes();
+    if (selected("outcome_contract")) test_outcome_contract(64);
 
     size_t const collection_sizes[] = {11, 512};
     size_t const dimension_counts[] = {83, 256};
     for (size_t size_index = 0; size_index != 2; ++size_index)
         for (size_t dimension_index = 0; dimension_index != 2; ++dimension_index) {
-            test_init(collection_sizes[size_index], dimension_counts[dimension_index]);
-            test_add_and_search(collection_sizes[size_index], dimension_counts[dimension_index]);
+            if (selected("init")) test_init(collection_sizes[size_index], dimension_counts[dimension_index]);
+            if (selected("add_and_search"))
+                test_add_and_search(collection_sizes[size_index], dimension_counts[dimension_index]);
         }
-    test_add_progress();
-    test_count_and_get(dimension_counts[0]);
-    test_count_and_get(dimension_counts[1]);
-    test_arenas(dimension_counts[0]);
-    test_walks_name_their_index(dimension_counts[0]);
+    if (selected("add_progress")) test_add_progress();
+    if (selected("count_and_get")) test_count_and_get(dimension_counts[0]);
+    if (selected("count_and_get")) test_count_and_get(dimension_counts[1]);
+    if (selected("arenas")) test_arenas(dimension_counts[0]);
+    if (selected("walks_name_their_index")) test_walks_name_their_index(dimension_counts[0]);
 #if USEARCH_DENSE_DTYPES >= 2
-    test_multiply_packed();
+    if (selected("multiply_packed")) test_multiply_packed();
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-    test_attend();
+    if (selected("attend")) test_attend();
 #endif
-    test_nvme_view(dimension_counts[0]);
-    test_nvme_view_narrow_keys();
-    test_vram_parts_share_a_device(collection_sizes[1], dimension_counts[1]);
-    test_deferred_search();
-    test_deferred_limit();
-    test_free_finishes_deferred();
-    test_blocking_runs_after_earlier();
-    test_deferred_holds_arena();
+    if (selected("nvme_view")) test_nvme_view(dimension_counts[0]);
+    if (selected("nvme_view_narrow_keys")) test_nvme_view_narrow_keys();
+    if (selected("vram_parts_share_a_device")) test_vram_parts_share_a_device(collection_sizes[1], dimension_counts[1]);
+    if (selected("deferred_search")) test_deferred_search();
+    if (selected("deferred_limit")) test_deferred_limit();
+    if (selected("free_finishes_deferred")) test_free_finishes_deferred();
+    if (selected("blocking_runs_after_earlier")) test_blocking_runs_after_earlier();
+    if (selected("deferred_holds_arena")) test_deferred_holds_arena();
 
     printf("All tests passed!\n");
     return 0;

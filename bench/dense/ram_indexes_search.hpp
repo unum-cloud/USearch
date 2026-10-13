@@ -235,8 +235,8 @@ bool run_insertion(streamed_dataset_type_& streamed) {
 
     typename index_t::insert_config_t config;
     config.expansion_factor = static_cast<small_size_t>(bench.settings.expansion_add.value);
-    std::size_t const batch_rows = streamed_dataset_type_::zero_copy_k ? rows : streamed.staging.extent(1);
-    std::vector<key_t> keys(std::min(batch_rows, rows));
+    std::size_t const batch_rows = insert_batch_rows(bench.settings, rows);
+    std::vector<key_t> keys(batch_rows);
     typename index_t::insert_result_t sums;
 
     auto started = steady_clock_t::now();
@@ -383,10 +383,8 @@ bool run_search(streamed_dataset_type_& streamed) {
     // The search phase runs strictly after ingestion, so the mutation-free contract holds.
     config.synchronization = synchronization_t::immutable_k;
 
-    std::size_t const batch_rows = streamed_dataset_type_::zero_copy_k || !heads.navigation.empty()
-                                       ? search_count
-                                       : streamed.staging.extent(1);
-    std::vector<std::size_t> counts(std::min(batch_rows, search_count));
+    std::size_t const batch_rows = query_batch_rows(bench.settings, search_count);
+    std::vector<std::size_t> counts(batch_rows);
     telemetry_lane_t sums;
 
     auto started = steady_clock_t::now();
@@ -490,7 +488,7 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
         return 1;
     }
     std::size_t rows = total_rows - first_row;
-    if (launch.settings.max_vectors.value) rows = std::min(rows, launch.settings.max_vectors.value);
+    if (launch.settings.max_base_vectors.value) rows = std::min(rows, launch.settings.max_base_vectors.value);
     nk::matrix_view<dataset_scalar_type_> const dataset_vectors = dataset.vectors();
     nk::matrix_view<dataset_scalar_type_> const sliced_vectors = dataset_vectors(nk::range(first_row, first_row + rows),
                                                                                  nk::slice);
@@ -510,8 +508,10 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
     // Owns the rescaling rows `streamed_dataset::rescaling` views.
     nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_rows;
     if constexpr (!streamed_t::zero_copy_k) {
-        std::size_t const threads = bench.executor.size();
-        std::size_t const batch_rows = launch.settings.batch_per_core.value * threads;
+        // The trampoline serves both phases, so it follows the larger of the two batches.
+        std::size_t const searchable_rows = std::max(rows, source_queries.extent(0));
+        std::size_t const batch_rows = std::max(insert_batch_rows(launch.settings, rows),
+                                                query_batch_rows(launch.settings, searchable_rows));
         staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::zeros({1, batch_rows, dimensions}).value;
         if (staging.empty()) {
             fmt::println("Failed to allocate {} staging rows of {}d {}", batch_rows, dimensions,
@@ -532,10 +532,11 @@ int stage_and_run(bench_launch<dataset_scalar_type_> const& launch, nk_kernel_ki
         }
     }
 
-    if (dataset.has_ground_truth() && !launch.settings.max_vectors.value && !first_row)
+    if (dataset.has_ground_truth() && !launch.settings.max_base_vectors.value && !first_row)
         streamed.ground_truth = dataset.neighbors();
     else if (dataset.has_ground_truth())
-        fmt::println("Ground truth ignored: --max-vectors or --first-vector reshapes the graph it was computed for");
+        fmt::println(
+            "Ground truth ignored: --max-base-vectors or --first-vector reshapes the graph it was computed for");
 
     if (!run_insertion(streamed)) return 1;
     if (!run_refinement(streamed)) return 1;
@@ -649,12 +650,13 @@ int run_cpu_indexes_bench(int argc, char const* const* argv, char const* binary_
         }
         settings.threads.value = threads;
     }
+    settings.cores = settings.threads.value;
     print(machine);
     print(settings);
     if (!huge_pages_provisioned(machine, settings)) return 1;
 
     int const exit_code = open_dataset(
-        settings.vectors_path, settings.queries_path, settings.neighbors_path,
+        settings.base_vectors_path, settings.query_vectors_path, settings.query_neighbors_path,
         [&]<typename dataset_scalar_type_>(utilities::persisted_dataset<dataset_scalar_type_> const& dataset) {
             return on_launch(bench_launch<dataset_scalar_type_> {dataset, settings, machine});
         });

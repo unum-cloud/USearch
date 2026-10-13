@@ -56,18 +56,19 @@ systemd-run --user --scope -p MemoryMax=16G -p MemorySwapMax=0 -- build_host_rel
 ### Running
 
 The search binaries share one dataset triple and one tuning vocabulary, and the algebra binaries take the same build flags; `--help` prints the full list for each.
+Flags share RetriEval's names, and each one defaults to the environment variable RetriEval reads for it, `--top-k` to `RETRIEVAL_TOP_K`, so one environment drives both harnesses and the command line overrides it.
 
 ```sh
 build_host_release/usearch_bench_dense_ram_indexes_search \
-    --vectors data/sift-10m/base.10M.u8bin \
-    --queries data/sift-10m/query.public.10K.u8bin \
-    --neighbors data/sift-10m/groundtruth.public.10K.ibin \
+    --base-vectors data/sift-10m/base.10M.u8bin \
+    --query-vectors data/sift-10m/query.public.10K.u8bin \
+    --query-neighbors data/sift-10m/groundtruth.public.10K.ibin \
     --stored-dtype u8 --metric euclidean --connectivity 32 --expansion-add 256 --expansion-search 96
 ```
 
-- `--vectors` is required: base vectors in the RetriEval layout, one of `.fbin`, `.bf16bin`, `.f16bin`, `.i8bin`, `.u8bin`, `.u1x8bin`.
-- `--queries` defaults to the first 1000 vectors: query vectors of the same dtype.
-- `--neighbors` defaults to none: ground truth, `.ibin`; recall is skipped without it.
+- `--base-vectors` is required: base vectors in the RetriEval layout, one of `.fbin`, `.bf16bin`, `.f16bin`, `.i8bin`, `.u8bin`, `.u1x8bin`.
+- `--query-vectors` defaults to the first 1000 base vectors: query vectors of the same dtype.
+- `--query-neighbors` defaults to none: ground truth, `.ibin`; recall is skipped without it.
 - `--stored-dtype` defaults to the file's dtype: `f32`, `bf16`, `f16`, `e5m2`, `e4m3`, `e3m2`, `e2m3`, `i8`, `i4`, `u8`, `u4` or `u1`, cast on ingest; `f32` skips, as no CPU kit takes it yet.
 - `--metric` defaults to `angular`: `dot`, `angular`, `euclidean`, `hamming` or `jaccard`; the last two for `u1`.
 - `--connectivity` defaults to `32`: the graph degree, 16, 32 or 128.
@@ -76,44 +77,44 @@ build_host_release/usearch_bench_dense_ram_indexes_search \
 - `--max-refines` defaults to `0`: upper bound on refinement passes after ingestion.
 - `--expansion-refine` defaults to twice the connectivity: candidate pool while refining.
 - `--top-k` defaults to `10`: matches judged per query.
-- `--max-vectors` defaults to the whole file: cap on ingested rows.
-- `--self-recall` defaults to off: judge every stored vector as its own query.
+- `--max-base-vectors` defaults to the whole file: cap on ingested rows.
+- `--self-search` defaults to off: judge every stored vector as its own query; its variable takes `1`, `0`, `true` or `false`.
 - `--save` defaults to none: checkpoint name to write after ingestion.
 - `--load` defaults to none: checkpoint name to restore, then insert only the rows past `--skip-vectors`.
-- `--checkpoints-dir` defaults to `/tmp`: directory for checkpoint blobs.
+- `--checkpoints-dir` defaults to the temporary directory, which follows `TMPDIR`: directory for checkpoint blobs.
 - `--skip-vectors` defaults to `0`: rows the loaded checkpoint already covers.
+- `--inserts-per-core` defaults to `2048`: rows each insert call takes per CPU thread or GPU multiprocessor.
+- `--queries-per-core` defaults to `2048`: queries each search call takes per CPU thread or GPU multiprocessor.
 - `--max-compute` defaults to the newest detected: kernel kit ceiling by microarchitecture, or `serial`; on the GPU by generation, or `ampere`.
 - `--max-schedule` defaults to the newest offered: wait instruction ceiling, or `standard`; CPU only.
 - `--threads` defaults to 7/8 of the logical cores: executor threads; CPU only.
 - `--memory-domain` defaults to the heap: NUMA domain to pin, or `all` on the multi-index; CPU only.
-- `--batch-per-core` defaults to `4`: staging rows per thread for a file cast on ingest; CPU only.
 - `--first-vector` defaults to `0`: first dataset row viewed, to slice one file across runs; CPU only.
 - `--huge-pages` defaults to `0`: huge pages provisioned before launch; the run fails rather than measuring base pages; CPU only.
 - `USEARCH_DEVICES` - an environment variable, not a flag - names USearch device ordinals, positions in `usearch_gpu_devices`, like `0` or `0,1`; the single-device binaries take the first, the sharded ones place one shard per ordinal, and unset takes the first NVIDIA device; GPU only.
 - `--merge` and `--expansion-merge` are reserved for stitching the device shards into one graph, and `usearch_bench_dense_vram_indexes_search` refuses them until `dense::vram_nvidia_indexes` has a merge verb.
 - `--managed-memory` defaults to off: managed-memory flat matrices oversubscribing VRAM; GPU only, refused by both `vram_indexes` binaries.
-- `--batch` defaults to `65536`: rows and queries per launch; GPU only.
 
-A bad value prints one line, like `--top-k="0" does not parse, expected a positive count`, and exits with status 1.
+A bad value prints one line, like `--top-k="0" does not parse, expected a positive count` or `RETRIEVAL_TOP_K="0" does not parse, expected a positive count`, and exits with status 1.
 
-Recall is judged against `--neighbors` as recall@1, recall@k, overlap@k and ndcg@k.
-A ground truth is computed for the whole file, so `--max-vectors` reshapes the graph it describes and the harness drops it, printing a notice; `--self-recall` judges connectivity instead and needs no ground truth at all.
+Recall is judged against `--query-neighbors` as recall@1, recall@k, overlap@k and ndcg@k.
+A ground truth is computed for the whole file, so `--max-base-vectors` reshapes the graph it describes and the harness drops it, printing a notice; `--self-search` judges connectivity instead and needs no ground truth at all.
 Judge GPU builds through a reload: a search issued right after a bulk build runs against a device still settling, and the checkpoint path is exactly what the C interface exposes.
 
 ### Indexer Heads
 
 Every search binary can rank its searches by a lightning indexer, as DeepSeek V4 and GLM 5 pick sparse-attention keys: a key scores `Σₕ wₕ·ReLU(qₕ·k)` and sits at distance `1 − score`.
-The indexer ranks floating-point keys under the dot kernel, and its walks navigate by the `--queries` rows when given, or by `Σₕ wₕ·qₕ` otherwise.
+The indexer ranks floating-point keys under the dot kernel, and its walks navigate by the `--query-vectors` rows when given, or by `Σₕ wₕ·qₕ` otherwise.
 
 - `--heads` defaults to none: every query's heads as consecutive rows of any `.fbin`-family file, cast to the stored dtype; needs `--weights`.
 - `--weights` defaults to none: one row of signed head weights per query in any `.fbin`-family file, with the model's scale folded in.
-- `--oracle-queries` defaults to `16`: queries an exact `f64` oracle judges when no `--neighbors` gives their truth.
+- `--oracle-queries` defaults to `16`: queries an exact `f64` oracle judges when no `--query-neighbors` gives their truth.
 
-An indexer's selection is judged against the exact scan's top rows, saved once as `--neighbors`:
+An indexer's selection is judged against the exact scan's top rows, saved once as `--query-neighbors`:
 
 ```sh
-build_host_release/usearch_bench_dense_ram_index_search --vectors keys.bf16bin --heads queries.bf16bin --weights weights.fbin \
-    --neighbors truth-global.ibin --metric dot
+build_host_release/usearch_bench_dense_ram_index_search --base-vectors keys.bf16bin --heads queries.bf16bin \
+    --weights weights.fbin --query-neighbors truth-global.ibin --metric dot
 ```
 
 ### Checkpoints
@@ -127,8 +128,8 @@ The header names the metric, the value column's dtype names the stored scalar, a
 The GPU builds a base an order of magnitude faster than the CPU, so the fast way to a large CPU graph is a GPU base topped up on the CPU: build the first rows on the device, save, then reload on the CPU and insert the rest.
 
 ```sh
-build_cuda_release/usearch_bench_dense_vram_index_search --vectors data/sift-100m/base.100M.u8bin --metric euclidean --max-vectors 90000000 --save sift90m
-build_host_release/usearch_bench_dense_ram_index_search --vectors data/sift-100m/base.100M.u8bin --queries ... --neighbors ... --metric euclidean --load sift90m --skip-vectors 90000000
+build_cuda_release/usearch_bench_dense_vram_index_search --base-vectors data/sift-100m/base.100M.u8bin --metric euclidean --max-base-vectors 90000000 --save sift90m
+build_host_release/usearch_bench_dense_ram_index_search --base-vectors data/sift-100m/base.100M.u8bin --query-vectors ... --query-neighbors ... --metric euclidean --load sift90m --skip-vectors 90000000
 ```
 
 The second run reports `topping: 90000000 loaded rows`, inserts the remaining ten million, and judges the full graph against the 100M ground truth.
@@ -136,27 +137,27 @@ A single index also loads a sharded checkpoint, its parts appended in order, whi
 
 Both `nvme_indexes` binaries build nothing: they view a checkpoint and take only the flags a view and its queries need.
 The first part's header names the metric they dispatch on and the stored dtype, and its `scale` is what the queries are staged under.
-The search judges its hits against `--neighbors` directly, and refuses a ground truth that names a row past the ones the parts hold.
+The search judges its hits against `--query-neighbors` directly, and refuses a ground truth that names a row past the ones the parts hold.
 Every query is answered from storage in one batched call, which arms as many rows per thread as the queue depth holds, and the verb times each query from its first armed walk to its final write.
 The `Storage` block names the parts and the transport the engines opened, then each phase reports reads and kilobytes per query by purpose, the round trips, the IOPS and bandwidth it sustained, and the latency percentiles.
 
 - `--view` is required: the monolith, or the manifest of the parts.
-- `--paths` defaults to beside the manifest: one directory, file or device per part, comma-separated, to serve parts copied elsewhere.
-- `--queries` is required: query vectors in the RetriEval layout, cast to the parts' stored dtype.
-- `--neighbors` is required by the search binary: ground truth, `.ibin`, over the rows the parts hold.
+- `USEARCH_NVME_PATHS`, an environment variable like `USEARCH_DEVICES`, defaults to beside the manifest: one directory, file or device per part, comma-separated, to serve parts copied elsewhere.
+- `--query-vectors` is required: query vectors in the RetriEval layout, cast to the parts' stored dtype.
+- `--query-neighbors` is required by the search binary: ground truth, `.ibin`, over the rows the parts hold.
 - `--transport` defaults to `auto`: `blocking`, `linux-aio` or `linux-uring`; `auto` takes io_uring, then AIO, then blocking reads, whichever the host admits first.
 - `--queue-depth` defaults to `512`: reads each thread's engine keeps outstanding, which bounds the rows and the hops it overlaps.
 - `--expansion-search`, `--top-k`, `--threads`, `--max-compute`, `--heads` and `--weights` read as in [Running](#running) and [Indexer Heads](#indexer-heads).
 
-The algebra binary views only parts built for `dot`, looks the `--values` rows up by key, and runs its oracle over `--vectors`, the base file the keys index, which it needs only without a `--reference`.
+The algebra binary views only parts built for `dot`, looks the `--values` rows up by key, and runs its oracle over `--base-vectors`, the base file the keys index, which it needs only without a `--reference`.
 
 ```sh
 cmake --preset host_release && cmake --build --preset host_release --target usearch_bench_dense_ram_indexes_search usearch_bench_dense_nvme_indexes_search usearch_bench_dense_nvme_indexes_algebra
-build_host_release/usearch_bench_dense_ram_indexes_search --vectors data/sift-10m/base.10M.u8bin --metric euclidean \
-    --save sift10m --checkpoints-dir /mnt/nvme0
+build_host_release/usearch_bench_dense_ram_indexes_search --base-vectors data/sift-10m/base.10M.u8bin \
+    --metric euclidean --save sift10m --checkpoints-dir /mnt/nvme0
 build_host_release/usearch_bench_dense_nvme_indexes_search --view /mnt/nvme0/sift10m-u8-euclidean-c32.safegraphs.json \
-    --queries data/sift-10m/query.public.10K.u8bin --neighbors data/sift-10m/groundtruth.public.10K.ibin \
-    --transport linux-uring --queue-depth 512
+    --query-vectors data/sift-10m/query.public.10K.u8bin \
+    --query-neighbors data/sift-10m/groundtruth.public.10K.ibin --transport linux-uring --queue-depth 512
 ```
 
 ### Refinement
@@ -168,8 +169,8 @@ This is what a cheap ingestion pays for - a narrow `--expansion-add` topped with
 
 ```sh
 build_cuda_release/usearch_bench_dense_vram_index_search \
-    --vectors data/sift-10m/base.10M.u8bin --queries data/sift-10m/query.public.10K.u8bin \
-    --neighbors data/sift-10m/groundtruth.public.10K.ibin --stored-dtype u8 --metric euclidean \
+    --base-vectors data/sift-10m/base.10M.u8bin --query-vectors data/sift-10m/query.public.10K.u8bin \
+    --query-neighbors data/sift-10m/groundtruth.public.10K.ibin --stored-dtype u8 --metric euclidean \
     --connectivity 16 --expansion-add 32 --expansion-search 64 --max-refines 2 --expansion-refine 128
 ```
 
@@ -183,8 +184,8 @@ They store only the dot kernel's dtypes, `bf16` through `u1`, so an `.fbin` file
 
 ```sh
 build_host_release/usearch_bench_dense_ram_index_algebra \
-    --vectors data/wiki-1m/base.1M.fbin \
-    --queries data/wiki-1m/query.public.100K.fbin \
+    --base-vectors data/wiki-1m/base.1M.fbin \
+    --query-vectors data/wiki-1m/query.public.100K.fbin \
     --stored-dtype bf16 --oracle-queries 16
 ```
 
@@ -240,7 +241,7 @@ mkdir -p ~/datasets/sift-10m && ln -sfn ~/datasets/sift-10m data/sift-10m && cd 
     printf '\x80\x96\x98\x00' | dd of=base.10M.u8bin bs=1 count=4 conv=notrunc status=none
 ```
 
-The Yandex ground truth is published against the full 1B set only, so a 10M or 100M slice of Deep or T2I is judged by `--self-recall`.
+The Yandex ground truth is published against the full 1B set only, so a 10M or 100M slice of Deep or T2I is judged by `--self-search`.
 Every other recipe is in RetriEval's README under the same names.
 
 ## Results

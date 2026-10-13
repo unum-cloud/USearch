@@ -110,21 +110,19 @@ struct cuda_cli_t {
 };
 
 /**
- *  @brief The flags every CUDA binary takes: the device memory and the launch shape.
+ *  @brief The flags every CUDA binary takes: the compute ceiling and the device memory.
  *
  *  @verbatim
  *  --max-compute      the newest compiled  Compute ceiling by GPU generation, or ampere
  *  --managed-memory   off                  Managed-memory flat matrices oversubscribing VRAM
- *  --batch            65536                Rows and queries per launch
  *  @endverbatim
  */
-inline std::array<flag_t, 3> cuda_flags(settings_t& settings, cuda_cli_t& device_cli) noexcept {
+inline std::array<flag_t, 2> cuda_flags(cuda_cli_t& device_cli) noexcept {
     return {{
         {"--max-compute", "name", "compute ceiling by GPU generation, like `hopper`, or `ampere`; newest by default",
          &device_cli.max_compute_name},
         {"--managed-memory", "", "managed-memory flat matrices: oversubscribe VRAM through the pager, host-RAM ceiling",
          &device_cli.managed_memory},
-        {"--batch", "rows", "rows & queries per launch; 65536 by default", &settings.batch},
     }};
 }
 
@@ -224,12 +222,6 @@ bool prepare(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/** `--batch` rows per launch, capped by @p total_rows: the insert path drains through a bounded admission window, so
- *  bigger batches only amortize transfers. */
-inline std::size_t streamed_batch_rows(settings_t const& settings, std::size_t total_rows) noexcept {
-    return std::min(settings.batch.value, total_rows);
-}
-
 /** Stages up to @p batch_rows rows of @p source starting at @p first_row into one device-ready
  *  host matrix - a zero-copy view when the scalars match, or the trampoline's contiguous rows
  *  after per-row rescale and cast. Both phases share it. */
@@ -248,8 +240,8 @@ typename streamed_dataset_type_::bench_t::vectors_view_t stage_batch(
     }
 }
 
-/** Streams the un-ingested topping into the index, `--batch` rows per launch, and keeps the
- *  ID → row bookkeeping dense. */
+/** Streams the un-ingested topping into the index, `--inserts-per-core` rows per multiprocessor in
+ *  each launch, and keeps the ID → row bookkeeping dense. */
 template <typename streamed_dataset_type_>
 bool run_insertion(streamed_dataset_type_& streamed) {
     using bench_t = typename streamed_dataset_type_::bench_t;
@@ -268,7 +260,7 @@ bool run_insertion(streamed_dataset_type_& streamed) {
 
     typename index_t::insert_config_t config;
     config.expansion_factor = static_cast<small_size_t>(bench.settings.expansion_add.value);
-    std::size_t const batch_rows = streamed_batch_rows(bench.settings, inserted_rows);
+    std::size_t const batch_rows = insert_batch_rows(bench.settings, inserted_rows);
     std::vector<node_id_t> batch_ids(batch_rows);
 
     progress_bar_t progress {"inserting", inserted_rows, bench.settings.terminal};
@@ -396,7 +388,7 @@ bool run_search(streamed_dataset_type_& streamed) {
     config.expansion_factor = static_cast<small_size_t>(settings.expansion_search.value);
     config.count = static_cast<small_size_t>(top_k);
     config.synchronization = synchronization_t::immutable_k;
-    std::size_t const batch_rows = streamed_batch_rows(settings, query_count);
+    std::size_t const batch_rows = query_batch_rows(settings, query_count);
     auto found_ids = nk::matrix<node_id_t>::zeros({batch_rows, top_k}).value;
     auto found_distances = nk::matrix<distance_t>::zeros({batch_rows, top_k}).value;
     if (found_ids.empty() || found_distances.empty()) {
@@ -490,7 +482,7 @@ int stream_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dat
 
     std::size_t const dimensions = dataset.dimensions();
     std::size_t rows = dataset.vectors().extent(0);
-    if (settings.max_vectors.value) rows = std::min(rows, settings.max_vectors.value);
+    if (settings.max_base_vectors.value) rows = std::min(rows, settings.max_base_vectors.value);
 
     // Self-queries keep the harness usable on a lone vectors file, without recall.
     nk::matrix_view<dataset_scalar_type_> const source_queries =
@@ -505,8 +497,10 @@ int stream_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dat
     // Owns the rescaling rows `streamed_dataset::rescaling` views.
     nk::tensor<nk::f32_t, std::allocator<nk::f32_t>, 3> rescaling_rows;
     if constexpr (!streamed_t::zero_copy_k) {
-        // The trampoline serves both phases, so it follows the larger of the two row counts.
-        std::size_t const batch_rows = streamed_batch_rows(settings, std::max(rows, source_queries.extent(0)));
+        // The trampoline serves both phases, so it follows the larger of the two batches.
+        std::size_t const searchable_rows = std::max(rows, source_queries.extent(0));
+        std::size_t const batch_rows = std::max(insert_batch_rows(settings, rows),
+                                                query_batch_rows(settings, searchable_rows));
         staging = nk::tensor<scalar_t, std::allocator<scalar_t>, 3>::zeros({1, batch_rows, dimensions}).value;
         if (staging.empty()) {
             fmt::println("Failed to allocate {} staging rows of {}d {}", batch_rows, dimensions,
@@ -527,9 +521,9 @@ int stream_and_run(utilities::persisted_dataset<dataset_scalar_type_> const& dat
         }
     }
 
-    if (dataset.has_ground_truth() && !settings.max_vectors.value) streamed.ground_truth = dataset.neighbors();
+    if (dataset.has_ground_truth() && !settings.max_base_vectors.value) streamed.ground_truth = dataset.neighbors();
     else if (dataset.has_ground_truth())
-        fmt::println("Ground truth ignored: --max-vectors truncates the graph it was computed for");
+        fmt::println("Ground truth ignored: --max-base-vectors truncates the graph it was computed for");
     return phases(streamed) ? 0 : 1;
 }
 
@@ -625,10 +619,10 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
     std::vector<flag_t> flags;
     auto const append = [&](auto const& added) { flags.insert(flags.end(), added.begin(), added.end()); };
     append(common_flags(settings));
-    append(cuda_flags(settings, device_cli));
+    append(cuda_flags(device_cli));
     append(indexer_flags(settings));
     (append(binary_flags(settings)), ...);
-    parse_or_exit(argc, argv, fmt::format("{} --vectors <path> [flags]", binary_name), flags);
+    parse_or_exit(argc, argv, fmt::format("{} --base-vectors <path> [flags]", binary_name), flags);
     resolve_common_names(settings);
 
     // A named ceiling caps which kit-chain rows the cascade may select; "ampere" keeps just the floor.
@@ -678,6 +672,7 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
         default: break;
         }
     cuda_set_device(devices.front());
+    for (gpu_device_t const& device : engaged) settings.cores += device.compute_units;
     fmt::println("USearch {}.{}.{}", USEARCH_VERSION_MAJOR, USEARCH_VERSION_MINOR, USEARCH_VERSION_PATCH);
     for (gpu_device_t const& device : engaged)
         fmt::println("- Device {}: {} · {} SMs · {:.2f} GB", device.vendor_ordinal, device.name, device.compute_units,
@@ -685,15 +680,15 @@ int run_cuda_bench(int argc, char const* const* argv, char const* binary_name, o
     print(settings);
     fmt::println("- Max compute: {}", bit_name(cuda_compute_choices_k, max_compute, "ampere"));
     fmt::println("- Managed memory: {}", device_cli.managed_memory == switch_t::present_k);
-    fmt::println("- Batch: {}", settings.batch.value);
 
     cuda_address_space_t const storage_space = device_cli.managed_memory == switch_t::present_k
                                                    ? cuda_address_space_t::managed_k
                                                    : cuda_address_space_t::device_k;
-    return open_dataset(
-        settings.vectors_path, settings.queries_path, settings.neighbors_path, [&](auto const& dataset) {
-            return on_dataset(dataset, settings, std::span<int const> {devices}, max_compute, storage_space);
-        });
+    return open_dataset(settings.base_vectors_path, settings.query_vectors_path, settings.query_neighbors_path,
+                        [&](auto const& dataset) {
+                            return on_dataset(dataset, settings, std::span<int const> {devices}, max_compute,
+                                              storage_space);
+                        });
 }
 
 #pragma endregion

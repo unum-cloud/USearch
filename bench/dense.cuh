@@ -18,14 +18,16 @@
 #include <cstdlib> // `std::exit`
 #include <cstring> // `std::memcpy` - the checkpoint runs
 
-#include <algorithm>   // `std::ranges::find`, `std::max`
-#include <charconv>    // `std::from_chars` - the `--memory-domain` ordinal
-#include <ranges>      // `std::views::iota`, `std::views::filter`, `std::views::transform`
-#include <span>        // `std::span`
-#include <string>      // `std::string`
-#include <string_view> // `std::string_view`
-#include <type_traits> // `std::integral_constant` for the dispatch chains
-#include <vector>      // `std::vector`
+#include <algorithm>    // `std::ranges::find`, `std::max`
+#include <charconv>     // `std::from_chars` - the `--memory-domain` ordinal
+#include <filesystem>   // `std::filesystem::temp_directory_path` - the default checkpoints dir
+#include <ranges>       // `std::views::iota`, `std::views::filter`, `std::views::transform`
+#include <span>         // `std::span`
+#include <string>       // `std::string`
+#include <string_view>  // `std::string_view`
+#include <system_error> // `std::error_code`
+#include <type_traits>  // `std::integral_constant` for the dispatch chains
+#include <vector>       // `std::vector`
 
 #include <fmt/format.h>
 #include <fmt/ranges.h> // `fmt::join`
@@ -247,24 +249,29 @@ inline constexpr nk_kernel_kind_t metrics_k[] = {nk_kernel_dot_k, nk_kernel_angu
 /**
  *  @brief Every flag a benchmark binary reads, its default as the initializer, filled once in @c main.
  *
+ *  Each flag also reads its default from its @c RETRIEVAL_ variable, like @c RETRIEVAL_TOP_K for
+ *  @c --top-k.
+ *
  *  @verbatim
- *  --vectors           required                Base vectors, .fbin family
- *  --queries           the first 1000 vectors  Query vectors of the same dtype
- *  --neighbors         none, recall skipped    Ground truth, .ibin
- *  --stored-dtype      the file's dtype        Stored dtype, cast on ingest
- *  --metric            angular                 Distance kernel for building and searching
- *  --connectivity      32                      Graph degree: 16, 32 or 128
- *  --expansion-add     256                     Candidate pool while inserting
- *  --expansion-search  96                      Candidate pool while searching
- *  --max-refines       0                       Upper bound on refinement passes after ingestion
- *  --expansion-refine  twice the connectivity  Candidate pool while refining
- *  --top-k             10                      Matches per query to judge
- *  --max-vectors       the whole file          Cap on ingested rows
- *  --self-recall       off                     Query every stored vector for itself
- *  --save              none                    Checkpoint name to serialize the indexes into
- *  --load              none                    Checkpoint name to restore, then insert past it
- *  --checkpoints-dir   /tmp                    Directory for checkpoint blobs
- *  --skip-vectors      0                       Rows the loaded checkpoint already covers
+ *  --base-vectors      required                     Base vectors, .fbin family
+ *  --query-vectors     the first 1000 base vectors  Query vectors of the same dtype
+ *  --query-neighbors   none, recall skipped         Ground truth, .ibin
+ *  --stored-dtype      the file's dtype             Stored dtype, cast on ingest
+ *  --metric            angular                      Distance kernel for building and searching
+ *  --connectivity      32                           Graph degree: 16, 32 or 128
+ *  --expansion-add     256                          Candidate pool while inserting
+ *  --expansion-search  96                           Candidate pool while searching
+ *  --max-refines       0                            Upper bound on refinement passes after ingestion
+ *  --expansion-refine  twice the connectivity       Candidate pool while refining
+ *  --top-k             10                           Matches per query to judge
+ *  --max-base-vectors  the whole file               Cap on ingested rows
+ *  --self-search       off                          Query every stored vector for itself
+ *  --save              none                         Checkpoint name to serialize the indexes into
+ *  --load              none                         Checkpoint name to restore, then insert past it
+ *  --checkpoints-dir   the temporary directory      Directory for checkpoint blobs
+ *  --skip-vectors      0                            Rows the loaded checkpoint already covers
+ *  --inserts-per-core  2048                         Rows per insert call for each thread or multiprocessor
+ *  --queries-per-core  2048                         Queries per search call for each thread or multiprocessor
  *  @endverbatim
  *
  *  The CPU binaries add @ref cpu_flags and the GPU binaries their own in @c dense/vram_index_search.cuh.
@@ -272,13 +279,13 @@ inline constexpr nk_kernel_kind_t metrics_k[] = {nk_kernel_dot_k, nk_kernel_angu
 struct settings_t {
 
     /** The base vectors file, in the RetriEval `.fbin` extension family; argv-backed, so null-terminated. */
-    std::string_view vectors_path;
+    std::string_view base_vectors_path;
 
     /** Optional query vectors of the same dtype; absent means self-queries. */
-    std::string_view queries_path;
+    std::string_view query_vectors_path;
 
     /** Optional `.ibin` ground-truth neighbors; absent skips the quality judgment. */
-    std::string_view neighbors_path;
+    std::string_view query_neighbors_path;
 
     /** The stored dtype as named, and the representation it resolves to; unknown means "as the file". */
     std::string_view stored_dtype_name;
@@ -307,8 +314,15 @@ struct settings_t {
     /** Worker threads; absent takes 7/8 of the available logical cores, resolved against the machine. */
     count_t threads;
 
-    /** Staging trampoline rows per thread, so the trampoline holds this many times the thread count. */
-    count_t batch_per_core {.value = 4};
+    /** Rows each insert call takes per core the run drives, after StringWars' per-core batches. */
+    count_t inserts_per_core {.value = 2048};
+
+    /** Queries each search call takes per core the run drives. */
+    count_t queries_per_core {.value = 2048};
+
+    /** Cores the run drives, resolved at launch: the threads on CPU, the engaged devices'
+     *  multiprocessors on GPU. */
+    std::size_t cores = 0;
 
     /** Neighbors-list width per node; must match a `connectivity_t` tiling. */
     count_t connectivity {.value = 32};
@@ -325,7 +339,7 @@ struct settings_t {
 
     /** Search every ingested vector for itself instead of the query file - the
      *  calibration-free navigability probe, with a search phase as long as the ingestion. */
-    switch_t self_recall = switch_t::absent_k;
+    switch_t self_search = switch_t::absent_k;
 
     /** Checkpoint name to serialize every domain index into after ingestion, resolved through
      *  @ref checkpoint_path_of. */
@@ -336,13 +350,13 @@ struct settings_t {
     std::string_view load_name;
 
     /** Directory the checkpoint blobs land in; point 100M-scale runs at a real disk. */
-    std::string_view checkpoints_dir = "/tmp";
+    std::string_view checkpoints_dir;
 
     /** Rows the loaded indexes already cover; ingestion resumes right after them. */
     count_t skip_vectors {.minimum = 0};
 
     /** Cap on ingested rows; absent ingests the whole file. */
-    count_t max_vectors;
+    count_t max_base_vectors;
 
     /** First dataset row to view - slices one file across independent runs. */
     count_t first_vector {.minimum = 0};
@@ -365,16 +379,14 @@ struct settings_t {
     /** Refinement candidate pool; absent takes the index's default, twice the connectivity. */
     count_t expansion_refine;
 
-    /** Rows and queries per GPU launch. */
-    count_t batch {.value = 65536};
-
     /** Any `.fbin`-family file of every query's indexer heads, consecutive rows per query; needs `--weights`. */
     std::string_view heads_path;
 
     /** Any `.fbin`-family file of one row of signed head weights per query, with the model's scale folded in. */
     std::string_view weights_path;
 
-    /** Queries the exact oracle judges: an indexer search without `--neighbors`, and attention. */
+    /** Queries the exact oracle judges: an indexer search without `--query-neighbors`, and
+     *  attention. */
     count_t oracle_queries {.value = 16};
 
     /** Whether stdout is a terminal, probed once, so progress redraws one line instead of printing deciles. */
@@ -383,11 +395,12 @@ struct settings_t {
 
 /** The flags every binary takes: the dataset, the stored dtype and metric, the graph and its refinement, the
  *  judged depth, the view, and the checkpoints. */
-inline std::array<flag_t, 17> common_flags(settings_t& settings) noexcept {
+inline std::array<flag_t, 19> common_flags(settings_t& settings) noexcept {
     return {{
-        {"--vectors", "path", "base vectors, `.fbin` family", &settings.vectors_path},
-        {"--queries", "path", "query vectors, same dtype; the first 1000 vectors by default", &settings.queries_path},
-        {"--neighbors", "path", "ground truth, `.ibin`", &settings.neighbors_path},
+        {"--base-vectors", "path", "base vectors, `.fbin` family", &settings.base_vectors_path},
+        {"--query-vectors", "path", "query vectors, same dtype; the first 1000 base vectors by default",
+         &settings.query_vectors_path},
+        {"--query-neighbors", "path", "ground truth, `.ibin`", &settings.query_neighbors_path},
         {"--stored-dtype", "name", "stored dtype, cast on ingest; the file's dtype by default",
          &settings.stored_dtype_name},
         {"--metric", "name", "dot, angular, euclidean, hamming or jaccard; angular by default", &settings.metric_name},
@@ -399,13 +412,30 @@ inline std::array<flag_t, 17> common_flags(settings_t& settings) noexcept {
         {"--expansion-refine", "breadth", "refinement candidate pool; twice the connectivity by default",
          &settings.expansion_refine},
         {"--top-k", "count", "matches per query to judge; 10 by default", &settings.top_k},
-        {"--max-vectors", "count", "cap on ingested rows; the whole file by default", &settings.max_vectors},
-        {"--self-recall", "", "query every stored vector for itself instead of the query file", &settings.self_recall},
+        {"--max-base-vectors", "count", "cap on ingested rows; the whole file by default", &settings.max_base_vectors},
+        {"--self-search", "", "query every stored vector for itself instead of the query file", &settings.self_search},
         {"--save", "name", "checkpoint name to serialize every index into after ingestion", &settings.save_name},
         {"--load", "name", "checkpoint name to restore, then insert the rows past --skip-vectors", &settings.load_name},
-        {"--checkpoints-dir", "dir", "directory for checkpoint blobs; /tmp by default", &settings.checkpoints_dir},
+        {"--checkpoints-dir", "dir", "directory for checkpoint blobs; the temporary directory by default",
+         &settings.checkpoints_dir},
         {"--skip-vectors", "count", "rows the loaded checkpoint already covers; 0 by default", &settings.skip_vectors},
+        {"--inserts-per-core", "rows", "rows per insert call, per CPU thread or GPU multiprocessor; 2048 by default",
+         &settings.inserts_per_core},
+        {"--queries-per-core", "rows", "queries per search call, per CPU thread or GPU multiprocessor; 2048 by default",
+         &settings.queries_per_core},
     }};
+}
+
+/** Rows each insert call takes: `--inserts-per-core` for every core the run drives, capped by
+ *  @p total_rows. */
+inline std::size_t insert_batch_rows(settings_t const& settings, std::size_t total_rows) noexcept {
+    return std::min(settings.inserts_per_core.value * settings.cores, total_rows);
+}
+
+/** Queries each search call takes: `--queries-per-core` for every core the run drives, capped by
+ *  @p total_rows. */
+inline std::size_t query_batch_rows(settings_t const& settings, std::size_t total_rows) noexcept {
+    return std::min(settings.queries_per_core.value * settings.cores, total_rows);
 }
 
 /** The flags every binary takes to rank its searches by a lightning indexer's heads instead of plain rows, and the
@@ -414,7 +444,7 @@ inline std::array<flag_t, 3> indexer_flags(settings_t& settings) noexcept {
     return {{
         {"--heads", "path", "any `.fbin`-family file, every query's indexer heads", &settings.heads_path},
         {"--weights", "path", "any `.fbin`-family file, one row of head weights per query", &settings.weights_path},
-        {"--oracle-queries", "count", "queries the exact oracle judges without --neighbors; 16 by default",
+        {"--oracle-queries", "count", "queries the exact oracle judges without --query-neighbors; 16 by default",
          &settings.oracle_queries},
     }};
 }
@@ -427,12 +457,11 @@ inline std::array<flag_t, 3> indexer_flags(settings_t& settings) noexcept {
  *  --max-schedule    the newest offered        Scheduling ceiling by wait instruction, or standard
  *  --threads         7/8 of the logical cores  Worker threads
  *  --memory-domain   the heap                  NUMA domain to pin to; all in dense_ram_indexes
- *  --batch-per-core  4                         Staging trampoline rows per thread
  *  --first-vector    0                         First dataset row to view
  *  --huge-pages      0                         Huge pages provisioned before launch, enforced
  *  @endverbatim
  */
-inline std::array<flag_t, 7> cpu_flags(settings_t& settings) noexcept {
+inline std::array<flag_t, 6> cpu_flags(settings_t& settings) noexcept {
     return {{
         {"--max-compute", "name", "compute ceiling by microarchitecture, like `icelake`, or `serial`",
          &settings.max_compute_name},
@@ -441,7 +470,6 @@ inline std::array<flag_t, 7> cpu_flags(settings_t& settings) noexcept {
         {"--threads", "count", "threads; 7/8 of the logical cores by default", &settings.threads},
         {"--memory-domain", "id", "pin memory & threads to one NUMA domain; `all` in `dense_ram_indexes` only",
          &settings.memory_domain_name},
-        {"--batch-per-core", "rows", "staging trampoline rows per thread; 4 by default", &settings.batch_per_core},
         {"--first-vector", "row", "first dataset row to view; 0 by default", &settings.first_vector},
         {"--huge-pages", "count", "huge pages provisioned before launch; enforced, so base-page fallbacks fail fast",
          &settings.huge_pages},
@@ -460,12 +488,10 @@ template <typename names_type_>
 inline void resolve_common_names(settings_t& settings) {
     auto const dtype_names = stored_dtypes_k | std::views::transform(dtype_name);
     auto const metric_names = metrics_k | std::views::transform(nk_kernel_name);
-    nk_dtype_t const file_dtype = utilities::dtype_of_extension(settings.vectors_path);
+    nk_dtype_t const file_dtype = utilities::dtype_of_extension(settings.base_vectors_path);
     if (file_dtype == nk_dtype_unknown_k || file_dtype == nk_u32_k) {
-        fmt::println(
-            stderr,
-            "--vectors=\"{}\" does not parse, expected a .fbin, .bf16bin, .f16bin, .i8bin, .u8bin " "or .u1x8bin path",
-            settings.vectors_path);
+        fmt::println(stderr, "--base-vectors=\"{}\" does not parse, expected a {} path", settings.base_vectors_path,
+                     ".fbin, .bf16bin, .f16bin, .i8bin, .u8bin or .u1x8bin");
         std::exit(1);
     }
     settings.stored_dtype = file_dtype;
@@ -517,7 +543,7 @@ settings_t read_settings(int argc, char const* const* argv, std::string_view bin
     append(cpu_flags(settings));
     append(indexer_flags(settings));
     (append(binary_flags(settings)), ...);
-    parse_or_exit(argc, argv, fmt::format("{} --vectors <path> [flags]", binary_name), flags);
+    parse_or_exit(argc, argv, fmt::format("{} --base-vectors <path> [flags]", binary_name), flags);
     resolve_common_names(settings);
     resolve_max_compute(settings);
 
@@ -545,28 +571,29 @@ inline void print(settings_t const& settings) {
     auto const count_or_else = [](count_t const& count, std::string_view fallback) {
         return count.value ? fmt::format("{}", count.value) : std::string(fallback);
     };
-    fmt::println("- Vectors: {}", settings.vectors_path);
-    fmt::println("- Queries: {}", or_else(settings.queries_path, "the first 1000 vectors"));
-    fmt::println("- Neighbors: {}", or_else(settings.neighbors_path, "none"));
+    fmt::println("- Base vectors: {}", settings.base_vectors_path);
+    fmt::println("- Query vectors: {}", or_else(settings.query_vectors_path, "the first 1000 base vectors"));
+    fmt::println("- Query neighbors: {}", or_else(settings.query_neighbors_path, "none"));
     fmt::println("- Stored dtype: {}", dtype_name(settings.stored_dtype));
     fmt::println("- Metric: {}", nk_kernel_name(settings.kernel));
     fmt::println("- Max compute: {}", or_else(settings.max_compute_name, "the newest detected"));
     fmt::println("- Max schedule: {}", or_else(settings.max_schedule_name, "the newest offered"));
     fmt::println("- Memory domain: {}", or_else(settings.memory_domain_name, "the heap"));
     fmt::println("- Threads: {}", count_or_else(settings.threads, "7/8 of the logical cores"));
-    fmt::println("- Batch per core: {}", settings.batch_per_core.value);
+    fmt::println("- Inserts per core: {}", settings.inserts_per_core.value);
+    fmt::println("- Queries per core: {}", settings.queries_per_core.value);
     fmt::println("- Connectivity: {}", settings.connectivity.value);
     fmt::println("- Expansion add: {}", settings.expansion_add.value);
     fmt::println("- Expansion search: {}", settings.expansion_search.value);
     fmt::println("- Max refines: {}", settings.max_refines.value);
     fmt::println("- Expansion refine: {}", count_or_else(settings.expansion_refine, "twice the connectivity"));
     fmt::println("- Top k: {}", settings.top_k.value);
-    fmt::println("- Max vectors: {}", count_or_else(settings.max_vectors, "the whole file"));
+    fmt::println("- Max base vectors: {}", count_or_else(settings.max_base_vectors, "the whole file"));
     fmt::println("- First vector: {}", settings.first_vector.value);
-    fmt::println("- Self recall: {}", settings.self_recall == switch_t::present_k);
+    fmt::println("- Self search: {}", settings.self_search == switch_t::present_k);
     fmt::println("- Save: {}", or_else(settings.save_name, "none"));
     fmt::println("- Load: {}", or_else(settings.load_name, "none"));
-    fmt::println("- Checkpoints dir: {}", settings.checkpoints_dir);
+    fmt::println("- Checkpoints dir: {}", or_else(settings.checkpoints_dir, "the temporary directory"));
     fmt::println("- Skip vectors: {}", settings.skip_vectors.value);
     fmt::println("- Huge pages: {}", settings.huge_pages.value);
     if (!settings.heads_path.empty()) {
@@ -576,6 +603,14 @@ inline void print(settings_t const& settings) {
     }
 }
 
+/** The directory checkpoints land in: `--checkpoints-dir`, else the temporary one, which follows
+ *  `TMPDIR`. */
+inline std::filesystem::path checkpoints_folder(settings_t const& settings) {
+    std::error_code error;
+    if (settings.checkpoints_dir.empty()) return std::filesystem::temp_directory_path(error);
+    return std::filesystem::path(settings.checkpoints_dir);
+}
+
 /** Resolves a user-facing checkpoint name into its SafeGraphs path: one monolith for a single
  *  index, the manifest beside one monolith per shard for a sharded one. The stamp names what the
  *  payload depends on - stored dtype, distance kernel, connectivity - so any backend instantiating
@@ -583,9 +618,10 @@ inline void print(settings_t const& settings) {
 template <typename index_type_>
 std::string checkpoint_path_of(settings_t const& settings, index_type_ const& index, std::string_view name) {
     constexpr bool sharded_k = requires(index_type_ const& indexes) { indexes.shards_count(); };
-    return fmt::format( //
-        "{}/{}-{}-{}-c{}.safegraphs{}", settings.checkpoints_dir, name, index_type_::scalar_t::dtype_name(),
-        nk_kernel_name(index.kernel()), settings.connectivity.value, sharded_k ? ".json" : "");
+    std::string const file = fmt::format( //
+        "{}-{}-{}-c{}.safegraphs{}", name, index_type_::scalar_t::dtype_name(), nk_kernel_name(index.kernel()),
+        settings.connectivity.value, sharded_k ? ".json" : "");
+    return (checkpoints_folder(settings) / file).string();
 }
 
 /** The norms column dtype a single index's checkpoint carries: the dot product's own token where
@@ -623,7 +659,7 @@ static bool load_checkpoint(settings_t const& settings, index_type_& index, std:
     std::string const monolith_path = checkpoint_path_of(settings, index, settings.load_name);
     std::vector<std::string> part_paths;
     auto per_part = [&](safegraphs_part_t part) {
-        part_paths.push_back(fmt::format("{}/{}", settings.checkpoints_dir, part.path));
+        part_paths.push_back((checkpoints_folder(settings) / part.path).string());
     };
     if (failed(safegraphs_read_manifest(monolith_path + ".json", std::allocator<byte_t> {}, per_part).status))
         part_paths = {monolith_path};
@@ -760,10 +796,10 @@ constexpr float component_max() noexcept {
  *  @brief The data-side of a run: typed views over the source rows and the bounded staging
  *      matrix the streaming @c nk::cast trampolines through, one vector at a time.
  *
- *  The staging matrix holds `--batch` rows for every thread together, never a whole-dataset
- *  copy; each thread rotates through its own contiguous area, so concurrent tasks never share a
- *  row. When the file scalar matches the stored one the staging is empty and every access is a
- *  zero-copy view into the mapping.
+ *  The staging matrix holds one batched call's rows, or a row per thread for one-row calls, never a
+ *  whole-dataset copy; each thread rotates through its own contiguous area, so concurrent tasks
+ *  never share a row. When the file scalar matches the stored one the staging is empty and every
+ *  access is a zero-copy view into the mapping.
  */
 template <typename dataset_scalar_type_, typename bench_context_type_>
 struct streamed_dataset {
@@ -849,10 +885,10 @@ struct streamed_dataset {
     }
 };
 
-/** The rows a search phase answers: every ingested row under self-recall, else the query rows. */
+/** The rows a search phase answers: every ingested row under self-search, else the query rows. */
 template <typename streamed_dataset_type_>
 auto searched_rows(streamed_dataset_type_ const& streamed) noexcept {
-    return streamed.bench.settings.self_recall == switch_t::present_k ? streamed.vectors : streamed.queries;
+    return streamed.bench.settings.self_search == switch_t::present_k ? streamed.vectors : streamed.queries;
 }
 
 #pragma endregion
@@ -1019,12 +1055,13 @@ int run_cpu_bench(int argc, char const* const* argv, char const* binary_name, on
         fmt::println("Failed to spawn {} threads", settings.threads.value);
         return 1;
     }
+    settings.cores = settings.threads.value;
     print(machine);
     print(settings);
     if (!huge_pages_provisioned(machine, settings)) return 1;
 
     int const exit_code = open_dataset(
-        settings.vectors_path, settings.queries_path, settings.neighbors_path,
+        settings.base_vectors_path, settings.query_vectors_path, settings.query_neighbors_path,
         [&]<typename dataset_scalar_type_>(utilities::persisted_dataset<dataset_scalar_type_> const& dataset) {
             return on_launch(bench_launch<dataset_scalar_type_> {dataset, settings, machine});
         });

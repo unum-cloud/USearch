@@ -9,7 +9,8 @@
  *  @c dense/nvme_indexes_search.hpp; this header swaps its search phase for the batched @c multiply
  *  and @c attend from storage, pinned to the dot kernel both are defined over. Value rows are
  *  addressed by key, a dataset row, and the first `--oracle-queries` rows are judged against the
- *  exact attention oracle of @c dense_algebra.cuh, over `--vectors` or read from `--reference`.
+ *  exact attention oracle of @c dense_algebra.cuh, over `--base-vectors` or read from
+ *  `--reference`.
  */
 #pragma once
 
@@ -32,8 +33,9 @@ namespace unum::usearch::bench::dense {
  *  oracle attends over, and how many queries it judges. */
 inline std::array<flag_t, 2> nvme_algebra_flags(settings_t& settings) noexcept {
     return {{
-        {"--vectors", "path", "base vectors, a row per key, `.fbin` family; the oracle's alone, without --reference",
-         &settings.vectors_path},
+        {"--base-vectors", "path",
+         "base vectors, a row per key, `.fbin` family; the oracle's alone, without --reference",
+         &settings.base_vectors_path},
         {"--oracle-queries", "count", "queries the exact oracle judges; 16 by default", &settings.oracle_queries},
     }};
 }
@@ -95,7 +97,7 @@ bool run_nvme_algebra(streamed_dataset_type_& streamed, algebra_settings_t const
                                 nodes_count, key_rows),
                    false;
         if (streamed.vectors.extent(0) < key_rows)
-            return fmt::println("--vectors holds {} rows, but the keys reach row {}", streamed.vectors.extent(0),
+            return fmt::println("--base-vectors holds {} rows, but the keys reach row {}", streamed.vectors.extent(0),
                                 key_rows - 1),
                    false;
         streamed.vectors = streamed.vectors(nk::range(std::size_t {0}, key_rows), nk::slice);

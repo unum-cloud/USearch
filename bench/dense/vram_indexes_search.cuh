@@ -120,8 +120,8 @@ bool prepare_indexes(streamed_dataset_type_& streamed) {
     return true;
 }
 
-/** Streams the un-ingested topping into the shards, `--batch` rows per call keyed by their dataset rows, every
- *  call dealing its rows across the devices. */
+/** Streams the un-ingested topping into the shards, `--inserts-per-core` rows per multiprocessor in
+ *  each call, keyed by their dataset rows, every call dealing its rows across the devices. */
 template <typename streamed_dataset_type_>
 bool run_indexes_insertion(streamed_dataset_type_& streamed) {
     using bench_t = typename streamed_dataset_type_::bench_t;
@@ -140,7 +140,7 @@ bool run_indexes_insertion(streamed_dataset_type_& streamed) {
 
     typename index_t::insert_config_t config;
     config.expansion_factor = static_cast<small_size_t>(bench.settings.expansion_add.value);
-    std::size_t const batch_rows = streamed_batch_rows(bench.settings, inserted_rows);
+    std::size_t const batch_rows = insert_batch_rows(bench.settings, inserted_rows);
     std::vector<key_t> keys(batch_rows);
     telemetry_lane_t sums;
 
@@ -285,7 +285,7 @@ bool run_indexes_search(streamed_dataset_type_& streamed) {
     config.expansion_factor = static_cast<small_size_t>(settings.expansion_search.value);
     config.count = static_cast<small_size_t>(wanted);
     config.synchronization = synchronization_t::immutable_k;
-    std::size_t const batch_rows = streamed_batch_rows(settings, query_count);
+    std::size_t const batch_rows = query_batch_rows(settings, query_count);
     std::vector<std::size_t> counts(batch_rows);
     telemetry_lane_t sums;
 

@@ -20,16 +20,17 @@
 
 #include <cstdint> // `std::uintptr_t`, for the checkpoint paths' per-run salt
 #include <cstdio>  // `std::remove`, `std::rename`, `std::snprintf`, for the checkpoint's files
-#include <cstdlib> // `std::getenv`, for the directory parts land in
 
-#include <algorithm>   // `std::is_sorted`, `std::nth_element`, `std::upper_bound`
-#include <array>       // `std::array`
-#include <atomic>      // `std::atomic`, for the failing engines' countdown
-#include <bit>         // `std::bit_cast`, for `uuid_t` keys from numbers
-#include <memory>      // `std::unique_ptr`, for the rewrites' checkpoints
-#include <string>      // `std::string`, for the relocation's directory
-#include <string_view> // `std::string_view`
-#include <vector>      // `std::vector`
+#include <algorithm>    // `std::is_sorted`, `std::nth_element`, `std::upper_bound`
+#include <array>        // `std::array`
+#include <atomic>       // `std::atomic`, for the failing engines' countdown
+#include <bit>          // `std::bit_cast`, for `uuid_t` keys from numbers
+#include <filesystem>   // `std::filesystem::temp_directory_path`, the directory parts land in
+#include <memory>       // `std::unique_ptr`, for the rewrites' checkpoints
+#include <string>       // `std::string`, for the relocation's directory
+#include <string_view>  // `std::string_view`
+#include <system_error> // `std::error_code`, for the temporary directory
+#include <vector>       // `std::vector`
 
 #include <fmt/format.h>
 
@@ -72,6 +73,12 @@ u64_t nvme_key_number(key_type_ const& key) noexcept {
     else return static_cast<u64_t>(key);
 }
 
+/** The file @p name in the temporary directory, which follows @c TMPDIR. */
+inline std::string temporary_path(std::string_view name) {
+    std::error_code error;
+    return (std::filesystem::temp_directory_path(error) / name).string();
+}
+
 /** Where one NVMe scenario's checkpoint lands under @c TMPDIR, named per process and scenario, and
  *  removed with it. */
 struct nvme_checkpoint_t {
@@ -86,12 +93,10 @@ struct nvme_checkpoint_t {
     std::size_t parts = 0;
 
     explicit nvme_checkpoint_t(std::string_view scenario) noexcept {
-        char const* const directory = std::getenv("TMPDIR");
-        std::string_view folder = directory && *directory ? directory : "/tmp";
-        if (folder.ends_with('/')) folder.remove_suffix(1);
         u64_t const salt = mix_bits(reinterpret_cast<std::uintptr_t>(this) ^ fnv1a64(scenario)) & 0xFFFFFFFFu;
-        fmt::format_to_n(manifest.data(), manifest.size() - 1, "{}/usearch-nvme-{:08x}.safegraphs.json", folder, salt);
-        fmt::format_to_n(monolith.data(), monolith.size() - 1, "{}/usearch-nvme-{:08x}.safegraphs", folder, salt);
+        std::string const stem = temporary_path(fmt::format("usearch-nvme-{:08x}.safegraphs", salt));
+        fmt::format_to_n(manifest.data(), manifest.size() - 1, "{}.json", stem);
+        fmt::format_to_n(monolith.data(), monolith.size() - 1, "{}", stem);
     }
     nvme_checkpoint_t(nvme_checkpoint_t const&) = delete;
     nvme_checkpoint_t& operator=(nvme_checkpoint_t const&) = delete;
@@ -1712,23 +1717,21 @@ std::size_t test_nvme_rewrites_configuration(char const* name, u64_t seed) {
  *  @brief The SPDK engine over a monolith copied onto an NVMe namespace, judged against the
  *      blocking engine over the monolith's file, every verb alike.
  *
- *  Runs in two passes around a rig: with @c USEARCH_TEST_SPDK_PART alone it saves the monolith to
- *  that file for the rig to copy onto a namespace, and with @c USEARCH_TEST_SPDK_PATH naming the
- *  copy as a transport-ID path it views the copy directly and through a relocation of the file's
- *  view onto it.
+ *  Runs in two passes around a rig: with no @p nvme_paths it saves the monolith as
+ *  `usearch-nvme-spdk.safegraphs` under @c TMPDIR for the rig to copy onto a namespace, and with
+ *  @c USEARCH_NVME_PATHS naming that namespace's transport ID it views the copy directly and
+ *  through a relocation of the file's view onto it.
  */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-std::size_t test_nvme_spdk_configuration(char const* name, u64_t seed) {
+std::size_t test_nvme_spdk_configuration(char const* name, u64_t seed, std::span<std::string_view const> nvme_paths) {
     using files_t = nvme_indexes<u32_t, dtype_, nk_cap_serial_k, blocking_files_engine<>>;
     using spdk_t = nvme_indexes<u32_t, dtype_, nk_cap_serial_k, linux_spdk_engine<>>;
     using key_t = typename files_t::key_t;
     using scalar_t = typename files_t::scalar_t;
     constexpr std::size_t rows_count = 2 * dense_thread_nodes_k, queries_count = 8, wanted = 16;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
-    char const* const part = std::getenv("USEARCH_TEST_SPDK_PART");
-    char const* const path = std::getenv("USEARCH_TEST_SPDK_PATH");
-    if (!part || !*part) return report(name, "no part named in USEARCH_TEST_SPDK_PART");
-    if (!path || !*path) {
+    std::string const part = temporary_path("usearch-nvme-spdk.safegraphs");
+    if (nvme_paths.empty()) {
         nvme_reference<files_t> reference {"nvme_spdk", kernel_, rows_count, dimensions, seed};
         save_config_t config;
         config.layout = checkpoint_layout_t::monolith_k;
@@ -1740,10 +1743,9 @@ std::size_t test_nvme_spdk_configuration(char const* name, u64_t seed) {
     std::size_t failures = 0;
     files_t files {forkunion_allocator_t {no_memory_domain_k}};
     spdk_t direct {forkunion_allocator_t {no_memory_domain_k}}, relocated {forkunion_allocator_t {no_memory_domain_k}};
-    std::array<std::string_view, 1> const paths {path};
     failures += expect_eq(files.view(part), status_t::success_k);
-    failures += expect_eq(direct.view(path), status_t::success_k);
-    failures += expect_eq(relocated.view(part, std::span {paths}), status_t::success_k);
+    failures += expect_eq(direct.view(nvme_paths.front()), status_t::success_k);
+    failures += expect_eq(relocated.view(part, nvme_paths.first(1)), status_t::success_k);
     failures += expect_eq(direct.size(), rows_count);
     failures += expect_eq(relocated.size(), rows_count);
     dense_indexes_executor<files_t> files_driver;

@@ -51,7 +51,7 @@ std::size_t test::dense::check_nvme_indexes(settings_t const& settings) {
 #endif // USEARCH_WITH_LINUX_URING
 #if USEARCH_WITH_LINUX_SPDK
     failures_count += test_nvme_spdk_configuration<nk_bf16_k, nk_kernel_dot_k>("nvme bf16+dot+linux-spdk",
-                                                                               settings.seed);
+                                                                               settings.seed, settings.nvme_paths);
 #endif
     return failures_count;
 }

@@ -12,8 +12,8 @@
  *  @c dense_algebra.cuh:
  *
  *  @code{.sh}
- *  usearch_bench_dense_ram_index_algebra --vectors data/wiki-1m/base.1M.fbin \
- *  --queries data/wiki-1m/query.public.100K.fbin --stored-dtype bf16 --oracle-queries 16
+ *  usearch_bench_dense_ram_index_algebra --base-vectors data/wiki-1m/base.1M.fbin \
+ *  --query-vectors data/wiki-1m/query.public.100K.fbin --stored-dtype bf16 --oracle-queries 16
  *  @endcode
  */
 #pragma once
