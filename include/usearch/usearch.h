@@ -15,7 +15,7 @@
 
 #include "usearch/dense_index.h"
 #include "usearch/geospatial_index.h"
-#include "usearch/matrix_index.h"
+#include "usearch/shapes_index.h"
 #include "usearch/sequence_index.h"
 
 #endif // UNUM_USEARCH_H

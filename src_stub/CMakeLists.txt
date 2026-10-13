@@ -7,7 +7,7 @@
 #
 # The file names match what `c/` produces - `libusearch_shared` and `libusearch_static` - and land in a directory of
 # their own, so a suite chooses an implementation with one `-L` and the two libraries can never shadow one another.
-set(USEARCH_STUB_SOURCES types.cpp dense.cpp sequence.cpp matrix.cpp geospatial.cpp)
+set(USEARCH_STUB_SOURCES types.cpp dense.cpp sequence.cpp shapes.cpp geospatial.cpp)
 
 find_package(Threads REQUIRED)
 

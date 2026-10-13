@@ -12,7 +12,7 @@ cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_LIB_C=1 -D U
 
 That leaves both libraries in `build_release/`, carrying all eleven dense storage types; precompiled ones ship on the [releases page](https://github.com/unum-cloud/USearch/releases).
 Put `include/` on the include path and link either library.
-One header, `usearch/usearch.h`, pulls in every modality: `dense_index.h`, `sequence_index.h`, `matrix_index.h` and `geospatial_index.h`.
+One header, `usearch/usearch.h`, pulls in every modality: `dense_index.h`, `sequence_index.h`, `shapes_index.h` and `geospatial_index.h`.
 `ctest --test-dir build_release -R usearch_test_c` runs the smoke test in `c/test.c`.
 
 `-D USEARCH_BUILD_LIB_C_STUB=1` adds a brute-force stand-in under the same library names in `build_release/stub/`.

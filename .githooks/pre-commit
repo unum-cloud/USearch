@@ -295,7 +295,7 @@ check_region_lengths() {
 }
 
 # Namespaces mirror directories. A nameless `namespace {` hides helpers in a scope no path names, and a
-# namespace no directory backs, like `stub::matrix` for `src_stub/matrix.cpp`, invents structure the tree
+# namespace no directory backs, like `stub::shapes` for `src_stub/shapes.cpp`, invents structure the tree
 # does not have. Allowed names: `unum`, `usearch`, the sibling libraries' roots, a directory on the file's
 # path (`src_stub` answers for `stub`), and a directory beside the file. A header under
 # `include/usearch/<dir>/` opens exactly `unum::usearch::<dir>`; only `utilities/types.hpp` also opens the

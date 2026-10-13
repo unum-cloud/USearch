@@ -17,9 +17,9 @@ usearch/sequence_index.h
 .. doxygenfile:: sequence_index.h
 
 ========================
-usearch/matrix_index.h
+usearch/shapes_index.h
 ========================
-.. doxygenfile:: matrix_index.h
+.. doxygenfile:: shapes_index.h
 
 ============================
 usearch/geospatial_index.h

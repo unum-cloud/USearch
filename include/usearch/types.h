@@ -6,7 +6,7 @@
  *      outcomes, executors, arenas, and library introspection.
  *
  *  Everything the modality headers have in common - @c dense_index.h, @c sequence_index.h,
- *  @c matrix_index.h, and @c geospatial_index.h - and nothing they don't. Include @c usearch.h for
+ *  @c shapes_index.h, and @c geospatial_index.h - and nothing they don't. Include @c usearch.h for
  *  all of them, or a modality header alone, since each pulls this one in. The C vocabulary sits
  *  beside its C++ twin @c types.hpp, so one installed tree serves both languages and the headers
  *  pair by stem.

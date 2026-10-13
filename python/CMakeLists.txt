@@ -21,7 +21,7 @@ python_add_library(
     types.c
     dense_index.c
     sequence_index.c
-    matrix_index.c
+    shapes_index.c
     geospatial_index.c
 )
 

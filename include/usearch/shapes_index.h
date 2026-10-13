@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/matrix_index.h
+ *  @file include/usearch/shapes_index.h
  *  @author Ash Vardanian
  *  @date August 15, 2026
  *  @brief The matrix-modality C interface: similarity search over rank-2 tensors - sets of

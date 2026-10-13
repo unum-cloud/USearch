@@ -7,7 +7,7 @@ They expose dense indexes; the other modalities are declared and raise `NotImple
 
 - `usearch.DenseIndex` mirrors `usearch/dense_index.h` and is the one instantiated today.
 - `usearch.SequenceIndex` mirrors `usearch/sequence_index.h`.
-- `usearch.MatrixIndex` mirrors `usearch/matrix_index.h`.
+- `usearch.MatrixIndex` mirrors `usearch/shapes_index.h`.
 - `usearch.GeospatialIndex` mirrors `usearch/geospatial_index.h`.
 
 ## Installation

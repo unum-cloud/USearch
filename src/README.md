@@ -11,7 +11,7 @@ None of it is a public header: the C libraries, the C test and every binding lin
 - `dense_specializations.cuh` spells one arm: the scalar and capability tables, the CPU and GPU classes with the ForkUnion primitives they pair, and the `specialized_index` view every class unit instantiates.
 - `dense/ram_variants_<class>.cpp`, `dense/nvme_variants_<class>.cpp` and `dense/vram_variants_<class>.{cu,hip,cpp}` are the class units, each instantiating `specialized_index` over its class's arms, one per storage dtype the class advances.
 - `sequence.cpp` instantiates the sequence checkpoint verbs over the default index, so they keep compiling until the sequence modality's entry points land.
-  So far `sequence_index.h`, `matrix_index.h` and `geospatial_index.h` are answered only by the brute-force stand-in in `src_stub/`.
+  So far `sequence_index.h`, `shapes_index.h` and `geospatial_index.h` are answered only by the brute-force stand-in in `src_stub/`.
 
 ## From a Verb to an Engine Template
 

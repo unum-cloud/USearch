@@ -1,9 +1,9 @@
 /**
- *  @file python/matrix_index.c
+ *  @file python/shapes_index.c
  *  @author Ash Vardanian
  *  @date August 16, 2026
  *  @brief Similarity search over rank-2 tensors - the CPython twin of
- *      `include/usearch/matrix_index.h`.
+ *      `include/usearch/shapes_index.h`.
  *
  *  Entries are token matrices rather than vectors, so the geometry is a column count with an
  *  optionally frozen row count, and the metrics score whole matrices against each other -

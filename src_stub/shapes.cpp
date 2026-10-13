@@ -1,5 +1,5 @@
 /**
- *  @file src_stub/matrix.cpp
+ *  @file src_stub/shapes.cpp
  *  @author Ash Vardanian
  *  @date September 5, 2026
  *  @brief A brute-force stand-in for the @c usearch_matrix_* C ABI, scoring every stored matrix
@@ -33,7 +33,7 @@
 #include <vector>    // `std::vector`
 
 #include "usearch/types.h"
-#include "usearch/matrix_index.h"
+#include "usearch/shapes_index.h"
 
 #include "lib.hpp"
 

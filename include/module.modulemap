@@ -5,7 +5,7 @@ module USearchC {
     header "usearch/types.h"
     header "usearch/dense_index.h"
     header "usearch/sequence_index.h"
-    header "usearch/matrix_index.h"
+    header "usearch/shapes_index.h"
     header "usearch/geospatial_index.h"
     export *
 }
