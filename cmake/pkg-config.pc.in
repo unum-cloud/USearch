@@ -1,4 +1,7 @@
-Name: ${PROJECT_NAME}
+prefix=@CMAKE_INSTALL_PREFIX@
+includedir=@CMAKE_INSTALL_FULL_INCLUDEDIR@
+
+Name: @PROJECT_NAME@
 Description: Smaller & Faster Single-File Vector Search Engine from Unum
-Version: ${PROJECT_VERSION}
-Cflags: -I${CMAKE_INSTALL_FULL_INCLUDEDIR}
+Version: @PROJECT_VERSION@
+Cflags: -I${includedir}
