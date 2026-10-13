@@ -155,7 +155,7 @@ if (USEARCH_USE_NUMKONG)
     )
 endif ()
 # Install a pkg-config file, so other tools can find this
-configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkg-config.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc")
+configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/pkg-config.pc.in" "${CMAKE_CURRENT_BINARY_DIR}/${PROJECT_NAME}.pc" @ONLY)
 
 # Install a custom package version config file instead of write_basic_package_version_file to ensure that it's
 # architecture-independent https://github.com/nlohmann/json/issues/1697
