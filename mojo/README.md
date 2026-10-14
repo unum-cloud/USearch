@@ -245,7 +245,7 @@ The candidate-pool breadth rides each call as `expansion_factor` rather than the
 ### Filtering & Progress
 
 A `predicate` in the `DenseSearchConfig` admits only the keys it approves, while non-matching entries still route the traversal, so recall does not collapse at low selectivity.
-It is the address of a `usearch_predicate_t` compiled in C, and its state crosses beside it as an address.
+It is the address of a `usearch_predicate_callback_t` compiled in C, judging a batch of keys per call, and its state crosses beside it as an address.
 
 ```mojo
 var admitted = index.search(queries, 10, arena, DenseSearchConfig(predicate=admits_even, predicate_state=tenant))
@@ -369,7 +369,7 @@ print(library.version_name(), library.capabilities_available())
 - __Progress handlers and cancellation.__
   A handler returns a verdict, and a Mojo 1.1 `def ... abi("C")` that returns a value does not lower to the C calling convention, so every `progress` slot crosses as `NULL_ADDRESS`.
 - __Predicates written in Mojo.__
-  A predicate returns a verdict too, for the same reason, so `predicate` takes the address of one compiled in C.
+  `predicate` takes the address of a `usearch_predicate_callback_t` compiled in C.
 - __Deferred cursors and streams.__
   `DenseIndexDeferredOn` offers neither, since their pulls block.
 

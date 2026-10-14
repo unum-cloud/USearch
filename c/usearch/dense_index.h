@@ -756,11 +756,8 @@ typedef struct usearch_dense_search_t {
     /** How rows are reached: a walk, the default, or an exact scan of every row on RAM and NVMe. */
     usearch_traversal_t traversal;
 
-    /** The @b optional per-key admission callback; @c NULL admits everything. */
+    /** The @b optional admission filter, asked about a scored quad of candidates at a time. */
     usearch_predicate_t predicate;
-
-    /** Opaque pointer forwarded into every @c predicate call. */
-    void* predicate_state;
 
     /** The @b optional handler, called with queries resolved. */
     usearch_progress_t progress;
@@ -790,16 +787,17 @@ typedef struct usearch_dense_search_t {
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
  *  the traversal rather than terminating it, so recall does not collapse at low selectivity - the
  *  walk crosses rejected regions to reach admitted ones behind them. The cost is that the
- *  predicate is called far more often than @c wanted, once per scored candidate, so it
- *  belongs on the caller's fast path - and it is invoked concurrently from the executor's threads,
- *  so it must tolerate that.
+ *  predicate judges far more keys than @c wanted, every scored candidate, asked about a quad of
+ *  them at a time, so it belongs on the caller's fast path - and it is invoked concurrently from
+ *  the executor's threads, so it must tolerate that.
  *
  *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL, since a
  *  query resolved before the stop is indistinguishable from one that never ran.
  *
  *  @code{.c}
- *  static usearch_admission_t admits_tenant(usearch_key_t key, void* state) {
- *      return key.bytes[0] == *(uint8_t const*)state ? usearch_admit_k : usearch_reject_k;
+ *  static void admits_tenant(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count, void* state) {
+ *      for (size_t i = 0; i != count; ++i)
+ *          admissions[i] = keys[i].bytes[0] == *(uint8_t const*)state ? usearch_admit_k : usearch_reject_k;
  *  }
  *
  *  uint8_t tenant = 7;
@@ -809,7 +807,7 @@ typedef struct usearch_dense_search_t {
  *      .index = index, .executor = executor, .outcome = &outcome,
  *      .count = 32, .queries = {rows_base, 256 * sizeof(float), 256, usearch_scalar_f32_k},
  *      .matches = &matches, .arena = arena, .wanted = 10,
- *      .predicate = admits_tenant, .predicate_state = &tenant});
+ *      .predicate = {admits_tenant, &tenant}});
  *  // Row 3's nearest key, valid until the next call given `arena`.
  *  usearch_key_t nearest = matches.keys[3 * matches.wanted];
  *  @endcode

@@ -586,11 +586,8 @@ typedef struct usearch_matrix_search_t {
     /** The @b optional candidate-pool breadth the walk explores; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional per-key admission callback; @c NULL admits everything. */
+    /** The @b optional admission filter, asked about a batch of candidates at a time. */
     usearch_predicate_t predicate;
-
-    /** Opaque pointer forwarded into every @c predicate call. */
-    void* predicate_state;
 
     /** The @b optional handler, called with queries resolved and their count. */
     usearch_progress_callback_t progress;

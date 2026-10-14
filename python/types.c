@@ -1321,31 +1321,34 @@ usearch_progress_t usearch_py_progress_registered(usearch_py_callback_t* callbac
 }
 
 /**
- *  @brief Re-enters Python for one admission decision, from whichever library thread traverses.
+ *  @brief Re-enters Python for one batch of admission decisions, from whichever library thread
+ *      traverses, taking the GIL once per batch.
  *
  *  A worker's thread state dies with the callback and the caller's would surface the exception
  *  at an unrelated return, so a raising predicate latches its failure into the call for the answer
  *  to raise, and every later decision rejects without re-entering Python.
  */
-static usearch_admission_t predicate_trampoline(usearch_key_t key, void* state) {
+static void predicate_trampoline(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count,
+                                 void* state) {
     usearch_py_callback_t const* const callback = (usearch_py_callback_t const*)state;
-    if (usearch_py_callback_raised(callback->call)) return usearch_reject_k;
+    for (size_t index = 0; index != count; ++index) admissions[index] = usearch_reject_k;
+    if (usearch_py_callback_raised(callback->call)) return;
     PyGILState_STATE const gil_state = PyGILState_Ensure();
-    usearch_admission_t admitted = usearch_reject_k;
-    PyObject* const key_object = usearch_py_key_to_object(key);
-    PyObject* const verdict = key_object ? PyObject_CallOneArg(callback->callable, key_object) : NULL;
-    Py_XDECREF(key_object);
-    if (verdict) {
-        admitted = PyObject_IsTrue(verdict) > 0 ? usearch_admit_k : usearch_reject_k;
-        Py_DECREF(verdict);
+    for (size_t index = 0; index != count && !PyErr_Occurred(); ++index) {
+        PyObject* const key_object = usearch_py_key_to_object(keys[index]);
+        PyObject* const verdict = key_object ? PyObject_CallOneArg(callback->callable, key_object) : NULL;
+        Py_XDECREF(key_object);
+        if (verdict) {
+            admissions[index] = PyObject_IsTrue(verdict) > 0 ? usearch_admit_k : usearch_reject_k;
+            Py_DECREF(verdict);
+        }
     }
     if (PyErr_Occurred()) usearch_py_callback_latch(callback->call);
     PyGILState_Release(gil_state);
-    return admitted;
 }
 
-usearch_predicate_t usearch_py_predicate_registered(usearch_py_callback_t const* callback) {
-    return callback->callable ? predicate_trampoline : NULL;
+usearch_predicate_t usearch_py_predicate_registered(usearch_py_callback_t* callback) {
+    return (usearch_predicate_t) {.callback = callback->callable ? predicate_trampoline : NULL, .state = callback};
 }
 
 #pragma endregion Calls

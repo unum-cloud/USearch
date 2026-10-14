@@ -31,8 +31,9 @@
  *  never checked against each other, so the bit-set kinds read whatever rows they are handed where
  *  the engine admits @c u1x8 alone. @c values_per_key bounds nothing - a key holds as many entries
  *  as it is handed, the header naming no failure for exceeding it. A walk and a scan rank alike,
- *  both being exact here, and both ask the predicate about every row, where the engine's scan asks
- *  only about rows closer than the worst match a query already holds.
+ *  both being exact here, and both ask the predicate about every row in one call per query, where
+ *  the engine asks about a quad at a time and its scan only about rows closer than the worst match
+ *  a query already holds.
  *  Refinement keeps no edges to re-select, so its @c changed is a constant zero rather than a
  *  settling signal, and a caller must not read it as one. Residency and huge pages are inert, a
  *  view copies its checkpoint rather than mapping it, and only the RAM verbs answer - every VRAM
@@ -224,7 +225,7 @@ static double dot_product(std::span<double const> first, std::span<double const>
 static std::size_t search_rows(dense_index_t& index, usearch_rows_view_t const& queries, std::size_t count,
                                ranked_landing_t const& landing, std::size_t expansion_factor,
                                usearch_traversal_t traversal, usearch_dense_traversal_stats_t* stats,
-                               usearch_predicate_t predicate, void* predicate_state, usearch_progress_t progress) {
+                               usearch_predicate_t predicate, usearch_progress_t progress) {
     std::size_t const rows = index.entries.size();
     std::size_t const dimensions = index.options.dimensions;
     std::size_t const query_bytes = row_extent(queries.scalar, dimensions);
@@ -237,7 +238,7 @@ static std::size_t search_rows(dense_index_t& index, usearch_rows_view_t const& 
     for (std::size_t query = 0; query != count; ++query) {
         read_row(row_at<std::byte>(queries.data, query, queries.stride, query_bytes), queries.scalar, query_row);
         rank<dense_payload_t>(
-            std::span<dense_entry_t const>(index.entries).first(rows), admitting(predicate, predicate_state),
+            std::span<dense_entry_t const>(index.entries).first(rows), predicate,
             [&](dense_payload_t const& payload) { return distance(index.options.metric, query_row, payload); }, ranked);
         landing.write(query, ranked);
         if (stats) {
@@ -620,8 +621,7 @@ void usearch_dense_search(usearch_dense_search_t* arguments) {
 
     std::shared_lock readers(index.mutex);
     std::size_t const answered = search_rows(index, arguments->queries, count, landing, arguments->expansion_factor,
-                                             traversal, arguments->stats, arguments->predicate,
-                                             arguments->predicate_state, arguments->progress);
+                                             traversal, arguments->stats, arguments->predicate, arguments->progress);
     if (reject_cancelled(answered, count, outcome)) return;
     *arguments->matches = landing.view();
 }
@@ -760,7 +760,7 @@ void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* argume
     {
         std::shared_lock readers(index.mutex);
         rank<dense_payload_t>(
-            index.entries, admitting(nullptr, nullptr),
+            index.entries, usearch_predicate_t {},
             [&](dense_payload_t const& payload) { return distance(index.options.metric, query_row, payload); },
             stream->ranked);
     }

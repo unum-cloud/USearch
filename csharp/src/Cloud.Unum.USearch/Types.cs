@@ -1636,6 +1636,16 @@ internal struct NativeProgress
     public nuint Steps;
 }
 
+/// <summary>Which candidate keys a filtered search may report, laid out as <c>usearch_predicate_t</c>.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct NativePredicate
+{
+    /// <summary>The optional handler; null admits every key.</summary>
+    public delegate* unmanaged[Cdecl]<Key*, Admission*, nuint, IntPtr, void> Callback;
+    /// <summary>Opaque pointer forwarded into every handler call.</summary>
+    public IntPtr State;
+}
+
 /// <summary>The arguments of <c>usearch_executor_for_ram</c>.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeExecutorForRam

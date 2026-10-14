@@ -500,11 +500,8 @@ typedef struct usearch_sequence_search_t {
      *  literature; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional per-key admission callback; @c NULL admits everything. */
+    /** The @b optional admission filter, asked about a batch of candidates at a time. */
     usearch_predicate_t predicate;
-
-    /** Opaque pointer forwarded into every @c predicate call. */
-    void* predicate_state;
 
     /** The @b optional handler, called with queries resolved and their count. */
     usearch_progress_callback_t progress;
@@ -524,8 +521,8 @@ typedef struct usearch_sequence_search_t {
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
  *  the traversal rather than terminating it, so recall does not collapse at low selectivity - the
  *  walk crosses rejected regions to reach admitted ones behind them. The cost is that the
- *  predicate is called far more often than @c wanted, once per scored candidate, so it
- *  belongs on the caller's fast path.
+ *  predicate judges far more keys than @c wanted, every scored candidate, asked about a batch of
+ *  them at a time, so it belongs on the caller's fast path.
  *
  *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL.
  */

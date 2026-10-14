@@ -1527,6 +1527,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         return value;
     }
 
+    private static final MemoryLayout PREDICATE = MemoryLayout.structLayout(
+                    Library.POINTER.withName("callback"), Library.POINTER.withName("state"))
+            .withName("predicate");
     private static final MemoryLayout PROGRESS = MemoryLayout.structLayout(
                     Library.POINTER.withName("callback"),
                     Library.POINTER.withName("state"),
@@ -1653,8 +1656,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("expansion_factor"),
                     Library.ENUM.withName("traversal"),
                     Library.padding(),
-                    Library.POINTER.withName("predicate"),
-                    Library.POINTER.withName("predicate_state"),
+                    PREDICATE,
                     PROGRESS,
                     STATS));
 

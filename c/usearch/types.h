@@ -703,10 +703,21 @@ typedef enum usearch_admission_t {
     usearch_admit_k = 1,
 } usearch_admission_t;
 
-/** Type-punned per-key admission predicate for filtered searches. The batched
- *  span-admission form exists only in the C++ layer - a C callback per candidate quad
- *  would cost more than it amortizes. */
-typedef usearch_admission_t (*usearch_predicate_t)(usearch_key_t, void*);
+/** Admits or rejects @p count candidate keys at once, never zero, writing one admission per key
+ *  into @p admissions, a buffer the library owns for the call, so a handler backed by an external
+ *  store answers them in one round trip. Called concurrently from the executor's threads. */
+typedef void (*usearch_predicate_callback_t)(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count,
+                                             void* state);
+
+/** Which candidate keys a filtered search may report: a handler and the state it is called with. */
+typedef struct usearch_predicate_t {
+
+    /** The @b optional handler; @c NULL admits every key. */
+    usearch_predicate_callback_t callback;
+
+    /** Opaque pointer forwarded into every @c callback call. */
+    void* state;
+} usearch_predicate_t;
 
 /** Whether the operation a handler is watching carries on or unwinds. */
 typedef enum usearch_continuation_t {

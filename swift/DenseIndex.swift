@@ -1631,7 +1631,7 @@ struct DenseCall {
         landing.anchor(config.stats)
         let matches = landing.slots(usearch_matches_view_t())
         let write = landing.lend(arena)
-        let (predicate, predicateState) = landing.lend(config.predicate)
+        let predicate = landing.lend(config.predicate)
         let progress = landing.lend(config.progress, steps: config.progressSteps)
         var arguments = usearch_dense_search_t(
             index: handle,
@@ -1646,7 +1646,6 @@ struct DenseCall {
             expansion_factor: config.expansionFactor,
             traversal: config.traversal.raw,
             predicate: predicate,
-            predicate_state: predicateState,
             progress: progress,
             stats: config.stats?.raw
         )
@@ -1891,29 +1890,31 @@ private final class AdmissionState {
     }
 }
 
-/// The admission trampoline the engine calls from the executor's threads. A thrown error is
-/// latched and rejects the key, so nothing unwinds out of this frame and into C.
-private let admissionTrampoline: usearch_predicate_t = { key, state in
+/// The admission trampoline the engine calls from the executor's threads with a batch of keys. A
+/// thrown error is latched and rejects its key, so nothing unwinds out of this frame and into C.
+private let admissionTrampoline: usearch_predicate_callback_t = { keys, admissions, count, state in
+    guard let keys, let admissions else { return }
     // A lost state means the trampoline is broken. Admitting would turn a filtered search into
     // an unfiltered one and answer wrong rows without saying so.
-    guard let state else { return usearch_reject_k }
+    guard let state else { return admissions.update(repeating: usearch_reject_k, count: count) }
     let admission = Unmanaged<AdmissionState>.fromOpaque(state).takeUnretainedValue()
-    do {
-        return try admission.admits(Key(raw: key)) ? usearch_admit_k : usearch_reject_k
-    }
-    catch {
-        admission.landing.latch(error)
-        return usearch_reject_k
+    for index in 0 ..< count {
+        do {
+            admissions[index] = try admission.admits(Key(raw: keys[index])) ? usearch_admit_k : usearch_reject_k
+        }
+        catch {
+            admission.landing.latch(error)
+            admissions[index] = usearch_reject_k
+        }
     }
 }
 
 extension Landing {
-    /// Lends an optional predicate as the callback and state pair a search takes; nil lends nulls.
-    fileprivate func lend(
-        _ predicate: (@Sendable (Key) throws -> Bool)?
-    ) -> (usearch_predicate_t?, UnsafeMutableRawPointer?) {
-        guard let predicate else { return (nil, nil) }
-        return (admissionTrampoline, place(AdmissionState(admits: predicate, landing: self)))
+    /// Lends an optional predicate as the struct a search takes; nil lends nulls.
+    fileprivate func lend(_ predicate: (@Sendable (Key) throws -> Bool)?) -> usearch_predicate_t {
+        guard let predicate else { return usearch_predicate_t(callback: nil, state: nil) }
+        let state = place(AdmissionState(admits: predicate, landing: self))
+        return usearch_predicate_t(callback: admissionTrampoline, state: state)
     }
 }
 

@@ -234,7 +234,17 @@ pub struct usearch_nvme_options_t {
     pub paths_count: usize,
 }
 
-pub type usearch_predicate_t = Option<unsafe extern "C" fn(usearch_key_t, *mut c_void) -> c_int>;
+/// Admits or rejects a batch of candidate keys, one admission per key.
+pub type usearch_predicate_callback_t =
+    Option<unsafe extern "C" fn(*const usearch_key_t, *mut c_int, usize, *mut c_void)>;
+
+/// Mirrors `usearch_predicate_t`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct usearch_predicate_t {
+    pub callback: usearch_predicate_callback_t,
+    pub state: *mut c_void,
+}
 
 /// Periodic advance report and the caller's chance to stop the call.
 pub type usearch_progress_callback_t = Option<unsafe extern "C" fn(usize, usize, *mut c_void) -> c_int>;
@@ -1123,25 +1133,33 @@ pub(crate) fn lower_progress(
 pub type Predicate<'a> = dyn Fn(Key) -> bool + Sync + 'a;
 
 /// # Safety
-/// `state` must address the live [`Callbacks`] of the call the callback was passed to, lending a `&Predicate`.
-unsafe extern "C" fn admission_trampoline(key: Key, state: *mut c_void) -> c_int {
+/// `state` must address the live [`Callbacks`] of the call the callback was passed to, lending a `&Predicate`,
+/// and `keys` and `admissions` must each address `count` elements.
+unsafe extern "C" fn admission_trampoline(keys: *const Key, admissions: *mut c_int, count: usize, state: *mut c_void) {
     let callbacks = &*state.cast::<Callbacks>();
     let predicate = *callbacks.predicate.get().cast::<&Predicate>();
-    callbacks.guard(0, || c_int::from(predicate(key)))
+    let keys = std::slice::from_raw_parts(keys, count);
+    let admissions = std::slice::from_raw_parts_mut(admissions, count);
+    for (key, admission) in keys.iter().zip(admissions) {
+        *admission = callbacks.guard(0, || c_int::from(predicate(*key)));
+    }
 }
 
-/// Lends an optional predicate as the callback and state pair every filtering verb takes, so the
-/// trampoline is never paired with the wrong state; `None` lends nulls.
-pub(crate) fn lower_predicate(
-    predicate: &Option<&Predicate>,
-    callbacks: &Callbacks,
-) -> (usearch_predicate_t, *mut c_void) {
+/// Lends an optional predicate as the struct every filtering verb takes, so the trampoline is never
+/// paired with the wrong state; `None` lends nulls.
+pub(crate) fn lower_predicate(predicate: &Option<&Predicate>, callbacks: &Callbacks) -> usearch_predicate_t {
     match predicate {
         Some(predicate) => {
             callbacks.predicate.set(ptr::from_ref(predicate).cast());
-            (Some(admission_trampoline), callbacks.state())
+            usearch_predicate_t {
+                callback: Some(admission_trampoline),
+                state: callbacks.state(),
+            }
         }
-        None => (None, ptr::null_mut()),
+        None => usearch_predicate_t {
+            callback: None,
+            state: ptr::null_mut(),
+        },
     }
 }
 

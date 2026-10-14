@@ -800,17 +800,6 @@ value_ read_pod(bytes_view_t source) {
 
 #pragma region Ranking
 
-/** Whether a filtered search admits one key. Named states, never a bare @c bool. */
-enum class admission_t : bool { rejected_k, admitted_k };
-
-/** Wraps the ABI's predicate pair once, at the boundary; a null predicate admits every key. */
-inline std::function<admission_t(usearch_key_t)> admitting(usearch_predicate_t predicate, void* state) {
-    if (!predicate) return [](usearch_key_t) { return admission_t::admitted_k; };
-    return [predicate, state](usearch_key_t key) {
-        return predicate(key, state) == usearch_admit_k ? admission_t::admitted_k : admission_t::rejected_k;
-    };
-}
-
 /** One scored pair, in the order a search reports them. */
 struct match_t {
 
@@ -849,17 +838,22 @@ inline bool carve_ranked(usearch_arena_handle_t& arena, std::size_t count, std::
            (landing.counts = carve<std::size_t>(arena, count, outcome));
 }
 
-/** Scores @p entries into @p ranked, nearest first. The sort is stable because every
- *  modality's docblock promises ties fall in insertion order. */
+/** Scores the @p entries that @p predicate admits, judged in one call, into @p ranked, nearest
+ *  first. The sort is stable because every modality's docblock promises ties fall in insertion
+ *  order. */
 template <typename payload_>
-void rank(std::span<entry<payload_> const> entries, std::function<admission_t(usearch_key_t)> const& admits,
+void rank(std::span<entry<payload_> const> entries, usearch_predicate_t predicate,
           std::function<double(payload_ const&)> const& score, std::vector<match_t>& ranked) {
+    std::vector<usearch_admission_t> admissions(entries.size(), usearch_admit_k);
+    if (predicate.callback && !entries.empty()) {
+        std::vector<usearch_key_t> keys(entries.size());
+        for (std::size_t row = 0; row != entries.size(); ++row) keys[row] = entries[row].key;
+        predicate.callback(keys.data(), admissions.data(), keys.size(), predicate.state);
+    }
     ranked.clear();
     ranked.reserve(entries.size());
-    for (entry<payload_> const& row : entries) {
-        if (admits(row.key) == admission_t::rejected_k) continue;
-        ranked.push_back({score(row.payload), row.key});
-    }
+    for (std::size_t row = 0; row != entries.size(); ++row)
+        if (admissions[row] == usearch_admit_k) ranked.push_back({score(entries[row].payload), entries[row].key});
     std::stable_sort(ranked.begin(), ranked.end(),
                      [](match_t const& left, match_t const& right) { return left.distance < right.distance; });
 }

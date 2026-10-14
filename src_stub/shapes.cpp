@@ -198,7 +198,7 @@ static bool land_entries(matrix_index_t const& index, std::span<std::size_t cons
 static std::size_t search_tape(matrix_index_t& index, usearch_tape_view_t queries, std::size_t count,
                                ranked_landing_t const& landing, std::size_t expansion_factor,
                                usearch_matrix_traversal_stats_t* stats, usearch_predicate_t predicate,
-                               void* predicate_state, usearch_progress_callback_t progress, void* progress_state) {
+                               usearch_progress_callback_t progress, void* progress_state) {
     std::size_t const rows = index.entries.size();
     std::size_t const columns = index.options.columns;
     if (stats && expansion_factor) stats->computed_distances += expansion_factor * count;
@@ -208,7 +208,7 @@ static std::size_t search_tape(matrix_index_t& index, usearch_tape_view_t querie
     for (std::size_t query = 0; query != count; ++query) {
         read_matrix(queries, query, columns, query_matrix);
         rank<matrix_payload_t>(
-            std::span<matrix_entry_t const>(index.entries).first(rows), admitting(predicate, predicate_state),
+            std::span<matrix_entry_t const>(index.entries).first(rows), predicate,
             [&](matrix_payload_t const& payload) { return distance(index, query_matrix, payload); }, ranked);
         landing.write(query, ranked);
         if (stats) {
@@ -563,8 +563,8 @@ void usearch_matrix_search(usearch_matrix_search_t* arguments) {
 
     std::shared_lock readers(index.mutex);
     std::size_t const answered = search_tape(index, queries, count, landing, arguments->expansion_factor,
-                                             arguments->stats, arguments->predicate, arguments->predicate_state,
-                                             arguments->progress, arguments->progress_state);
+                                             arguments->stats, arguments->predicate, arguments->progress,
+                                             arguments->progress_state);
     if (reject_cancelled(answered, count, outcome)) return;
     *arguments->matches = landing.view();
 }

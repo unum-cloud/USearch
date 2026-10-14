@@ -582,13 +582,21 @@ template <nk_dtype_t dtype_>
 using vram_apple_indexes = us::dense::vram_apple_indexes<us::utilities::uuid_t, dtype_>;
 #endif
 
-/** The C predicate lifted onto the index's key vocabulary. */
+/** The C predicate lifted onto the index's key vocabulary, judging every quad the walk scores in
+ *  one call through buffers of the C types. */
 struct key_predicate_t {
-    usearch_predicate_t callback;
-    void* state;
+    usearch_predicate_t predicate;
 
-    admission_t operator()(us::utilities::uuid_t key) const noexcept {
-        return static_cast<admission_t>(callback(std::bit_cast<usearch_key_t>(key), state));
+    void operator()(std::span<us::utilities::uuid_t const> keys, std::span<admission_t> admissions) const noexcept {
+        if (keys.empty()) return;
+        std::array<usearch_key_t, 4> c_keys;
+        std::array<usearch_admission_t, 4> c_admissions;
+        assert(keys.size() <= c_keys.size() && "Walks judge a quad at a time");
+        for (std::size_t index = 0; index != keys.size(); ++index)
+            c_keys[index] = std::bit_cast<usearch_key_t>(keys[index]);
+        predicate.callback(c_keys.data(), c_admissions.data(), keys.size(), predicate.state);
+        for (std::size_t index = 0; index != keys.size(); ++index)
+            admissions[index] = static_cast<admission_t>(c_admissions[index]);
     }
 };
 

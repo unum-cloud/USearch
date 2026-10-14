@@ -203,7 +203,6 @@ pub struct usearch_dense_search_t {
     pub expansion_factor: usize,
     pub traversal: usearch_traversal_t,
     pub predicate: usearch_predicate_t,
-    pub predicate_state: *mut c_void,
     pub progress: usearch_progress_t,
     pub stats: *mut usearch_dense_traversal_stats_t,
 }
@@ -2283,7 +2282,7 @@ impl<'arena, Queries: RowsView> Calling for DenseSearch<'_, 'arena, Queries> {
     ) -> Result<Self::Arguments> {
         let batch = self.queries.batch()?;
         self.count = batch.count;
-        let (predicate, predicate_state) = lower_predicate(&self.config.predicate, callbacks);
+        let predicate = lower_predicate(&self.config.predicate, callbacks);
         let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         Ok(usearch_dense_search_t {
             index: self.handles.index,
@@ -2298,7 +2297,6 @@ impl<'arena, Queries: RowsView> Calling for DenseSearch<'_, 'arena, Queries> {
             expansion_factor: self.config.expansion_factor,
             traversal: self.config.traversal as usearch_traversal_t,
             predicate,
-            predicate_state,
             progress,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
         })

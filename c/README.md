@@ -401,8 +401,9 @@ In most engines, you'd have to manually perform paging requests, successively fi
 In USearch you can pass a predicate to the search, which is applied during graph traversal.
 
 ```c
-usearch_admission_t admits_tenant(usearch_key_t key, void* state) {
-    return key.bytes[0] == *(uint8_t const*)state ? usearch_admit_k : usearch_reject_k;
+void admits_tenant(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count, void* state) {
+    for (size_t i = 0; i != count; ++i)
+        admissions[i] = keys[i].bytes[0] == *(uint8_t const*)state ? usearch_admit_k : usearch_reject_k;
 }
 
 uint8_t tenant = 7;
@@ -414,11 +415,12 @@ usearch_dense_search(&(usearch_dense_search_t) {.index = index,
                                                 .matches = &matches,
                                                 .arena = arena,
                                                 .wanted = 10,
-                                                .predicate = admits_tenant,
-                                                .predicate_state = &tenant});
+                                                .predicate = {admits_tenant, &tenant}});
 ```
 
-Rejected entries still route the walk, so recall holds at low selectivity, and the predicate runs once per scored candidate, concurrently on the executor's threads, so it must be fast and tolerate that.
+The predicate judges a batch of candidates per call, a quad of them at a time during a walk, so a handler backed by an external store answers each batch in one round trip.
+
+Rejected entries still route the walk, so recall holds at low selectivity, and the predicate judges every scored candidate, concurrently on the executor's threads, so it must be fast and tolerate that.
 An exact scan asks it only about rows closer than the worst match a query already holds, which makes the scan the fallback for filters too selective for a walk to cross.
 A host predicate cannot narrow a device walk, so a VRAM search with one reports `usearch_status_device_k`.
 

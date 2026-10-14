@@ -1336,7 +1336,6 @@ func (receiver denseReceiver) search(completion C.usearch_completion_t, queries 
 		return lent.refuse(refusal)
 	}
 	matches := pin(&lent.call, new(C.usearch_matches_view_t))
-	predicate, predicateState := lent.predicate(config.Predicate)
 	C.usearch_dense_search(&C.usearch_dense_search_t{
 		index:            index,
 		executor:         executor,
@@ -1349,8 +1348,7 @@ func (receiver denseReceiver) search(completion C.usearch_completion_t, queries 
 		wanted:           C.size_t(wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
 		traversal:        C.usearch_traversal_t(config.Traversal),
-		predicate:        predicate,
-		predicate_state:  predicateState,
+		predicate:        lent.predicate(config.Predicate),
 		progress:         lent.progress(config.Progress, config.ProgressSteps),
 		stats:            lent.stats(config.Stats),
 	})

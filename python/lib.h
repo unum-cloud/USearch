@@ -424,8 +424,9 @@ int usearch_py_callback_raised(usearch_py_call_t* call);
  *  passed no handler. */
 usearch_progress_t usearch_py_progress_registered(usearch_py_callback_t* callback, size_t steps);
 
-/** The predicate trampoline to register for @p callback, or NULL when the caller passed no predicate. */
-usearch_predicate_t usearch_py_predicate_registered(usearch_py_callback_t const* callback);
+/** The predicate to register for @p callback; its trampoline is NULL when the caller passed no
+ *  predicate. */
+usearch_predicate_t usearch_py_predicate_registered(usearch_py_callback_t* callback);
 
 #pragma endregion Calls
 

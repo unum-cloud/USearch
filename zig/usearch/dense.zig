@@ -546,8 +546,7 @@ const usearch_dense_search_t = extern struct {
     wanted: usize,
     expansion_factor: usize,
     traversal: Traversal,
-    predicate: ?PredicateFunction,
-    predicate_state: ?*anyopaque,
+    predicate: Predicate,
     progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
 };
@@ -1513,8 +1512,7 @@ pub const DenseSearch = struct {
             .wanted = self.wanted,
             .expansion_factor = self.config.expansion_factor,
             .traversal = self.config.traversal,
-            .predicate = self.config.predicate.callback,
-            .predicate_state = self.config.predicate.state,
+            .predicate = self.config.predicate,
             .progress = .of(self.config.progress, self.config.progress_steps),
             .stats = self.config.stats,
         };

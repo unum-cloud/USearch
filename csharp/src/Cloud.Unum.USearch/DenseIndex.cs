@@ -1347,8 +1347,9 @@ internal unsafe struct DenseSearchCall(
                 Count = (nuint)queries.Rows, Queries = queries.AsView(rows),
                 Matches = (NativeMatchesView*)landing->View, Arena = lent.Pointer, Wanted = bound,
                 ExpansionFactor = (nuint)expansionFactor, Traversal = traversal,
-                Predicate = this._admitting is null ? null : &Admitting.Admits,
-                PredicateState = this._admitting is null ? IntPtr.Zero : GCHandle.ToIntPtr(this._registration),
+                Predicate = this._admitting is null
+                    ? default
+                    : new NativePredicate { Callback = &Admitting.Admits, State = GCHandle.ToIntPtr(this._registration) },
                 Stats = (NativeDenseTraversalStats*)landing->Report,
             };
             usearch_dense_search(&arguments);
@@ -1676,17 +1677,25 @@ internal sealed class Admitting(Func<Key, bool> admits)
     private ExceptionDispatchInfo? _escaped;
 
     /// <summary>
-    /// The per-key admission callback the engine calls from its own worker threads, reaching the
-    /// managed predicate through the state pointer the search registered alongside it.
+    /// The admission callback the engine calls from its own worker threads with a batch of
+    /// candidates, reaching the managed predicate through the state pointer the search registered
+    /// alongside it.
     /// </summary>
-    /// <param name="key">The candidate entry's identity.</param>
+    /// <param name="keys">The candidate entries' identities.</param>
+    /// <param name="admissions">Receives whether each key joins the matches.</param>
+    /// <param name="count">How many keys the batch holds.</param>
     /// <param name="state">The registered trampoline, forwarded verbatim.</param>
-    /// <returns>Whether the key joins the matches.</returns>
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    internal static Admission Admits(Key key, IntPtr state) =>
-        GCHandle.FromIntPtr(state).Target is Admitting trampoline && trampoline.Admit(key)
-            ? Admission.Admit
-            : Admission.Reject;
+    internal static unsafe void Admits(Key* keys, Admission* admissions, nuint count, IntPtr state)
+    {
+        Admitting? trampoline = GCHandle.FromIntPtr(state).Target as Admitting;
+        for (nuint index = 0; index != count; ++index)
+        {
+            admissions[index] = trampoline is not null && trampoline.Admit(keys[index])
+                ? Admission.Admit
+                : Admission.Reject;
+        }
+    }
 
     /// <summary>Rethrows the first exception the predicate threw, with its own type and stack.</summary>
     internal void Rethrow() => this._escaped?.Throw();
@@ -2350,8 +2359,7 @@ internal unsafe struct NativeDenseSearch
     public nuint Wanted;
     public nuint ExpansionFactor;
     public Traversal Traversal;
-    public delegate* unmanaged[Cdecl]<Key, IntPtr, Admission> Predicate;
-    public IntPtr PredicateState;
+    public NativePredicate Predicate;
     public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }

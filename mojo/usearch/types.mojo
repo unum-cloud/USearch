@@ -498,6 +498,17 @@ struct ProgressArguments(Defaultable, ImplicitlyCopyable):
         self.steps = c_size_t(0)
 
 
+@fieldwise_init
+struct PredicateArguments(ImplicitlyCopyable):
+    """`usearch_predicate_t`: which candidate keys a filtered search may report - a handler and the
+    state it is called with."""
+
+    var callback: Address
+    """A `usearch_predicate_callback_t` compiled in C; `NULL_ADDRESS` admits every key."""
+    var state: Address
+    """Forwarded into every `callback` call."""
+
+
 # endregion Residency & Execution
 
 # region Byte Runs

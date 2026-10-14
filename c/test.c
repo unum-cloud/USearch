@@ -171,10 +171,13 @@ usearch_arena_t create_arena(usearch_executor_t const executor) {
     return arena;
 }
 
-/** Admits the keys whose integer identity is even. */
-usearch_admission_t admits_even(usearch_key_t key, void* state) {
-    (void)state;
-    return key.bytes[15] % 2 == 0 ? usearch_admit_k : usearch_reject_k;
+/** Admits the keys whose integer identity is even, recording in @p state the widest batch it was
+ *  asked about. */
+void admits_even(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count, void* state) {
+    size_t* const widest = (size_t*)state;
+    if (count > *widest) *widest = count;
+    for (size_t index = 0; index != count; ++index)
+        admissions[index] = keys[index].bytes[15] % 2 == 0 ? usearch_admit_k : usearch_reject_k;
 }
 
 /** Initializes an index twice, checking the outcome at each step, and reserves capacity,
@@ -285,6 +288,7 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
     // Approximate search may miss, but a self-query missing itself often means a broken graph.
     expect(recalled * 10 >= collection_size * 9, "Self-recall collapsed below 90%");
 
+    size_t widest_batch = 0;
     usearch_dense_search(&(usearch_dense_search_t) {.index = index,
                                                     .executor = executor,
                                                     .outcome = &outcome,
@@ -293,10 +297,11 @@ void test_add_and_search(size_t const collection_size, size_t const dimensions) 
                                                     .matches = &matches,
                                                     .arena = arena,
                                                     .wanted = 1,
-                                                    .predicate = admits_even});
+                                                    .predicate = {admits_even, &widest_batch}});
     expect(!outcome.message, outcome.message);
     for (size_t row = 0; row != collection_size; ++row)
         expect(matches.counts[row] == 0 || matches.keys[row].bytes[15] % 2 == 0, "A predicate must narrow the matches");
+    expect(widest_batch != 0 && widest_batch <= 4, "A walk must ask its predicate about one scored quad at a time");
 
     // Where the walk may miss a few self-queries, an exact scan finds every one.
     usearch_dense_search(&(usearch_dense_search_t) {.index = index,

@@ -25,9 +25,9 @@ Two Mojo 1.1 facts shape the callback slots. A closure capturing anything cannot
 all, so a callback's state crosses beside it as an `Address`; and a `def ... abi("C")` that returns
 a value does not in fact lower to the C calling convention, so the engine calling one jumps into a
 corrupted frame. The value lookup of `attend` returns nothing, so it is a Mojo function - a
-`ValueLookup`. The admission predicate of `search` returns a verdict, so it crosses as a raw
-`Address` that a kernel built in C can fill; progress handlers return one too, so every `progress`
-slot crosses with a `NULL_ADDRESS` callback.
+`ValueLookup`. The admission predicate of `search` crosses as a raw `Address` that a kernel built in
+C fills; progress handlers return a verdict, so every `progress` slot crosses with a `NULL_ADDRESS`
+callback.
 
 Telemetry is a lent output. Every config of a verb that reports traversal statistics takes an
 optional `stats` pointer, which the engine overwrites whole on every call it is passed to.
@@ -58,6 +58,7 @@ from usearch.types import (
     NULL_ADDRESS,
     NvmeOptions,
     Outcome,
+    PredicateArguments,
     ProgressArguments,
     RamOptions,
     RowsView,
@@ -545,10 +546,9 @@ struct DenseRefineConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
 struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopyable):
     """The knobs of `usearch_dense_search_t`; zeroed or absent ones derive what the C interface derives.
 
-    A `predicate` narrows the matches to the entries it admits, and is an address rather than a Mojo
-    function, because a `def ... abi("C")` that returns a value does not lower to the C calling
-    convention in Mojo 1.1. Any `usearch_predicate_t` compiled in C installs unchanged. Non-matching
-    entries still route the traversal, so the predicate is called once per scored candidate,
+    A `predicate` narrows the matches to the entries it admits: the address of a
+    `usearch_predicate_callback_t` compiled in C, which installs unchanged. Non-matching entries still
+    route the traversal, so the predicate judges every scored candidate, a quad of them per call,
     concurrently from the executor's threads.
 
     Parameters:
@@ -560,7 +560,7 @@ struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
     var traversal: Traversal
     """A walk, or an exact scan of every row on RAM and NVMe handles; VRAM answers `UNSUPPORTED`."""
     var predicate: Address
-    """A `usearch_predicate_t` that must outlive the call; `NULL_ADDRESS` admits all."""
+    """A `usearch_predicate_callback_t` that must outlive the call; `NULL_ADDRESS` admits all."""
     var predicate_state: Address
     """The opaque state forwarded into every predicate call."""
     var stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]]
@@ -582,7 +582,7 @@ struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
         Args:
             expansion_factor: The candidate-pool breadth the walk explores; zero derives.
             traversal: A walk, or an exact scan of every row on RAM and NVMe handles.
-            predicate: A `usearch_predicate_t` that must outlive the call; `NULL_ADDRESS` admits all.
+            predicate: A `usearch_predicate_callback_t` that must outlive the call; `NULL_ADDRESS` admits all.
             predicate_state: The opaque state forwarded into every predicate call.
             stats: Receives this call's traversal telemetry; absent skips reporting.
         """
@@ -904,8 +904,7 @@ struct DenseSearchArguments(ImplicitlyCopyable):
     var wanted: c_size_t
     var expansion_factor: c_size_t
     var traversal: Traversal
-    var predicate: Address
-    var predicate_state: Address
+    var predicate: PredicateArguments
     var progress: ProgressArguments
     var stats: Address
 
@@ -1551,8 +1550,7 @@ struct _DenseSearchCall[origin: MutOrigin](Call):
                 c_size_t(self.wanted),
                 c_size_t(self.expansion_factor),
                 self.traversal,
-                self.predicate,
-                self.predicate_state,
+                PredicateArguments(self.predicate, self.predicate_state),
                 ProgressArguments(),
                 self.stats,
             ),

@@ -3480,7 +3480,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
     if (rejects_columns(*arguments->index, count, arguments->queries.columns, outcome)) return;
     if (arguments->traversal != usearch_traversal_walk_k && arguments->traversal != usearch_traversal_scan_k)
         return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown traversal"), void();
-    key_predicate_t keyed {arguments->predicate, arguments->predicate_state};
+    key_predicate_t keyed {arguments->predicate};
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
             if constexpr (is_vram_index<variant_type_>) {
@@ -3488,8 +3488,9 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                     propagate_error(usearch_status_unsupported_k, outcome, "Scans run on RAM and NVMe handles");
                 else
                     propagate_error(usearch_status_device_k, outcome,
-                                    keyed.callback ? "A host predicate cannot narrow a device walk"
-                                                   : "A VRAM search waits on device merges into a device arena");
+                                    keyed.predicate.callback
+                                        ? "A host predicate cannot narrow a device walk"
+                                        : "A VRAM search waits on device merges into a device arena");
             }
             else {
                 usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k,
@@ -3507,7 +3508,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                             return view.search(rows, executor, config, keys, distances, counts, predicate);
                         });
                 };
-                if (!(keyed.callback ? search_with(keyed) : search_with(dummy_predicate_t {}))) return;
+                if (!(keyed.predicate.callback ? search_with(keyed) : search_with(dummy_predicate_t {}))) return;
                 *arguments->matches = landing.view();
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }

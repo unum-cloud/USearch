@@ -1138,7 +1138,6 @@ static PyObject* DenseIndex_search(PyObject* self, PyObject* const* args, Py_ssi
         .expansion_factor = expansion_factor,
         .traversal = (usearch_traversal_t)traversal,
         .predicate = usearch_py_predicate_registered(&call->predicate),
-        .predicate_state = &call->predicate,
         .progress = usearch_py_progress_registered(&call->reports.progress, progress_steps),
         .stats = &call->reports.stats,
     };

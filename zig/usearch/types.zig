@@ -589,8 +589,8 @@ pub const Continuation = enum(c_int) {
 
 /// Mirrors `usearch_progress_callback_t`.
 pub const ProgressFunction = *const fn (usize, usize, ?*anyopaque) callconv(.c) Continuation;
-/// Mirrors `usearch_predicate_t`.
-pub const PredicateFunction = *const fn (Key, ?*anyopaque) callconv(.c) Admission;
+/// Mirrors `usearch_predicate_callback_t`.
+pub const PredicateFunction = *const fn ([*]const Key, [*]Admission, usize, ?*anyopaque) callconv(.c) void;
 
 /// A progress handler as the C interface carries it: a `usearch_progress_callback_t` and the state
 /// forwarded into it. Build one with `ProgressCallback.of`; the default reports nowhere.
@@ -634,25 +634,27 @@ pub const usearch_progress_t = extern struct {
     }
 };
 
-/// A per-key admission filter as the C interface carries it: a `usearch_predicate_t` and the
-/// state forwarded into it. Build one with `Predicate.of`; the default admits everything.
-pub const Predicate = struct {
+/// Which candidate keys a filtered search may report: a handler and the state forwarded into it.
+/// Build one with `Predicate.of`; the default admits everything. Mirrors `usearch_predicate_t`.
+pub const Predicate = extern struct {
+    /// The optional handler; null admits every key.
     callback: ?PredicateFunction = null,
+    /// Opaque pointer forwarded into every `callback` call.
     state: ?*anyopaque = null,
 
-    /// Wraps `admits` in a trampoline generated per call site. Pass `{}` for a predicate needing
-    /// no context, and a single-item pointer otherwise.
+    /// Wraps `admits` in a trampoline generated per call site, asking it about each key of a batch.
+    /// Pass `{}` for a predicate needing no context, and a single-item pointer otherwise.
     ///
-    /// It runs once per scored candidate, far more often than `wanted`, and concurrently from the
+    /// It judges every scored candidate, far more than `wanted`, and runs concurrently from the
     /// executor's threads - so it belongs on the caller's fast path and must tolerate that.
     pub fn of(context: anytype, comptime admits: fn (@TypeOf(context), Key) Admission) Predicate {
         const Context = @TypeOf(context);
         checkContext(Context);
         return .{
             .callback = struct {
-                fn admit(key: Key, state: ?*anyopaque) callconv(.c) Admission {
-                    if (Context == void) return admits({}, key);
-                    return admits(@ptrCast(@alignCast(state.?)), key);
+                fn admit(keys: [*]const Key, admissions: [*]Admission, count: usize, state: ?*anyopaque) callconv(.c) void {
+                    for (keys[0..count], admissions[0..count]) |key, *admission| admission.* =
+                        if (Context == void) admits({}, key) else admits(@ptrCast(@alignCast(state.?)), key);
                 }
             }.admit,
             .state = contextPointer(Context, context),

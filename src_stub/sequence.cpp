@@ -298,7 +298,7 @@ static bool land_entries(sequence_index_t const& index, std::span<std::size_t co
 static std::size_t search_tape(sequence_index_t& index, usearch_tape_view_t queries, std::size_t count,
                                ranked_landing_t const& landing, std::size_t expansion_factor,
                                usearch_sequence_traversal_stats_t* stats, usearch_predicate_t predicate,
-                               void* predicate_state, usearch_progress_callback_t progress, void* progress_state) {
+                               usearch_progress_callback_t progress, void* progress_state) {
     std::size_t const rows = index.entries.size();
     if (stats && expansion_factor) stats->computed_distances += expansion_factor * count;
 
@@ -307,7 +307,7 @@ static std::size_t search_tape(sequence_index_t& index, usearch_tape_view_t quer
     for (std::size_t query = 0; query != count; ++query) {
         bytes_view_t const query_view = viewed(queries, query);
         rank<sequence_payload_t>(
-            std::span<sequence_entry_t const>(index.entries).first(rows), admitting(predicate, predicate_state),
+            std::span<sequence_entry_t const>(index.entries).first(rows), predicate,
             [&](sequence_payload_t const& payload) { return distance(index, query_view, payload, scratch); }, ranked);
         landing.write(query, ranked);
         if (stats) {
@@ -667,8 +667,8 @@ void usearch_sequence_search(usearch_sequence_search_t* arguments) {
 
     std::shared_lock readers(index.mutex);
     std::size_t const answered = search_tape(index, queries, count, landing, arguments->expansion_factor,
-                                             arguments->stats, arguments->predicate, arguments->predicate_state,
-                                             arguments->progress, arguments->progress_state);
+                                             arguments->stats, arguments->predicate, arguments->progress,
+                                             arguments->progress_state);
     if (reject_cancelled(answered, count, outcome)) return;
     *arguments->matches = landing.view();
 }

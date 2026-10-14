@@ -261,12 +261,11 @@ struct geospatial_search_scratch_t {
 /** One query's whole scan. The query converts once, then every entry scores against it. */
 static void rank(geospatial_index_t const& index, geospatial_emplaced_t const& query, usearch_geospatial_mode_t mode,
                  usearch_geospatial_axes_t axes, usearch_geospatial_tolerance_t const* tolerance, std::size_t rows,
-                 usearch_predicate_t predicate, void* predicate_state, geospatial_search_scratch_t& scratch,
-                 std::vector<match_t>& ranked) {
+                 usearch_predicate_t predicate, geospatial_search_scratch_t& scratch, std::vector<match_t>& ranked) {
     double const speed = speed_of(tolerance);
     convert_set(query.points, index.options.layout, axes, speed, scratch.query_positions);
     us::stub::rank<geospatial_payload_t>(
-        std::span<geospatial_entry_t const>(index.entries).first(rows), admitting(predicate, predicate_state),
+        std::span<geospatial_entry_t const>(index.entries).first(rows), predicate,
         [&](geospatial_payload_t const& payload) {
             convert_stored(payload, index.options.layout, axes, speed, scratch.widened, scratch.entry_positions);
             return distance(scratch.query_positions, scratch.entry_positions, mode);
@@ -290,7 +289,7 @@ static std::size_t search_queries(geospatial_index_t& index, arguments_ const& a
     std::vector<match_t> ranked;
     for (std::size_t query = 0; query != count; ++query) {
         rank(index, *arguments.queries[query], arguments.mode, arguments.axes, &arguments.tolerance, rows,
-             arguments.predicate, arguments.predicate_state, scratch, ranked);
+             arguments.predicate, scratch, ranked);
         landing.write(query, ranked);
         if (stats) {
             stats->visited_members += rows;
@@ -679,7 +678,7 @@ void usearch_geospatial_within(usearch_geospatial_within_t* arguments) {
     offsets[0] = 0;
     for (std::size_t query = 0; query != count; ++query) {
         rank(index, *arguments->queries[query], arguments->mode, arguments->axes, &tolerance, rows,
-             arguments->predicate, arguments->predicate_state, scratch, ranked);
+             arguments->predicate, scratch, ranked);
         // Ranked nearest first, so each ball is a prefix, and only the walk learns how long it runs.
         std::size_t inside = 0;
         while (inside != ranked.size() && ranked[inside].distance <= tolerance.metres) ++inside;

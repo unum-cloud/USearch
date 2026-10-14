@@ -458,7 +458,7 @@ index.on(pool).insert(keys, RowsView.of(Array(1.0f, 0.0f, 0.0f, 1.0f), 2))
 ## What This Binding Does Not Expose
 
 The filtered search of the C interface stays unbound.
-Its predicate runs on the engine's own worker threads, which are not attached to the JVM, so every candidate would pay an attach, an upcall, and an exception check.
+Its predicate runs on the engine's own worker threads, which are not attached to the JVM, so every batch of candidates would pay an attach, an upcall, and an exception check.
 A predicate that threw would also unwind through native frames that cannot handle it.
 Filter the results of `search` instead, or narrow the index.
 Progress handlers stay unbound for the same reason, which is what makes an insertion batch all-or-nothing here.

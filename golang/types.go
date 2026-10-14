@@ -522,14 +522,19 @@ type upcall struct {
 }
 
 //export usearchAdmits
-func usearchAdmits(key C.usearch_key_t, state unsafe.Pointer) (admission C.usearch_admission_t) {
+func usearchAdmits(keys *C.usearch_key_t, admissions *C.usearch_admission_t, count C.size_t, state unsafe.Pointer) {
 	upcall := (*cgo.Handle)(state).Value().(upcall)
-	admission = C.usearch_reject_k
-	defer func() { upcall.call.latch(recover()) }() // a panic unwinding through C frames would skip their unlocks
-	if upcall.value.(Predicate)(keyFromRaw(key)) {
-		admission = C.usearch_admit_k
+	verdicts := unsafe.Slice(admissions, count)
+	for index := range verdicts {
+		verdicts[index] = C.usearch_reject_k
 	}
-	return admission
+	defer func() { upcall.call.latch(recover()) }() // a panic unwinding through C frames would skip their unlocks
+	predicate := upcall.value.(Predicate)
+	for index, key := range unsafe.Slice(keys, count) {
+		if predicate(keyFromRaw(key)) {
+			verdicts[index] = C.usearch_admit_k
+		}
+	}
 }
 
 //export usearchContinues
@@ -543,12 +548,12 @@ func usearchContinues(completed, total C.size_t, state unsafe.Pointer) (continua
 	return continuation
 }
 
-// predicate lends an optional predicate as the callback and state pair a filtering verb takes.
-func (call *call) predicate(predicate Predicate) (C.usearch_predicate_t, unsafe.Pointer) {
+// predicate lends an optional predicate as the struct a filtering verb takes.
+func (call *call) predicate(predicate Predicate) C.usearch_predicate_t {
 	if predicate == nil {
-		return nil, nil
+		return C.usearch_predicate_t{}
 	}
-	return C.usearch_go_admits(), call.callback(predicate)
+	return C.usearch_predicate_t{callback: C.usearch_go_admits(), state: call.callback(predicate)}
 }
 
 // progress lends an optional handler and its report count as the struct a reporting verb takes.
