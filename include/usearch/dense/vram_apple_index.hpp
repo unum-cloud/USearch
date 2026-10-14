@@ -47,6 +47,7 @@ namespace unum::usearch::dense {
 #pragma clang diagnostic ignored "-Wc23-extensions"
 #endif
 
+#if USEARCH_ARCH_METAL_
 /** The MSL kits, embedded so the kernels compile on the device without a Metal toolchain. */
 inline constexpr char metal_metric_source_k[] = {
 #embed "vram_apple_metric.metal" suffix(, 0)
@@ -56,6 +57,11 @@ inline constexpr char metal_metric_source_k[] = {
 inline constexpr char metal_index_source_k[] = {
 #embed "vram_apple_index.metal" suffix(, 0)
 };
+#else
+// A unit without Metal compiles no pipeline, and NVCC's front end knows no `#embed`.
+inline constexpr char metal_metric_source_k[] = {0};
+inline constexpr char metal_index_source_k[] = {0};
+#endif
 
 #if defined(__clang__)
 #pragma clang diagnostic pop
@@ -113,27 +119,34 @@ struct metal_arguments_t {
     u32_t sampling_bound = 0, queries_count = 0, count = 0, epoch_base = 0;
     u32_t visited_slots = 0, hash_shift = 0, cache_rows = 0, slice_bytes = 0;
     u32_t heads_count = 0, row_fragments_magic = 0, use_node_ids = 0, expansion = 0;
-    u32_t tail_entries = 0;
+    u32_t tail_entries = 0, first_guest = 0;
 };
 
-/** The counter words a launch binds: the batch's assigned rows, the published rows, then the walks'
- *  telemetry, and the word an attend raises when a node has no value row. */
+/** The counter words a launch binds: the batch's assigned rows, the published rows, the changed
+ *  nodes and the word an attend raises when a node has no value row, then the walks' telemetry,
+ *  each tally a low and a high word, so a batch's totals outgrow 32 bits as on CUDA and HIP. */
 enum class metal_counter_t : u32_t {
     assigned_k = 0,
-    published_k,
-    hops_k,
-    scored_k,
-    restarts_k,
-    lock_attempts_k,
-    lock_skips_k,
-    reselections_k,
-    locked_drops_k,
-    saturations_k,
-    changed_k,
-    missed_k,
-    tail_drops_k,
-    count_k = 16,
+    published_k = 1,
+    changed_k = 2,
+    missed_k = 3,
+    hops_k = 4,
+    scored_k = 6,
+    restarts_k = 8,
+    lock_attempts_k = 10,
+    lock_skips_k = 12,
+    reselections_k = 14,
+    locked_drops_k = 16,
+    saturations_k = 18,
+    tail_drops_k = 20,
+    count_k = 24,
 };
+
+/** The tally at @p counter in @p words: its low word joined with the high word it carries into. */
+inline u64_t metal_tally(u32_t const* words, metal_counter_t counter) noexcept {
+    u32_t const low = static_cast<u32_t>(counter);
+    return words[low] | u64_t {words[low + 1]} << 32;
+}
 
 /** What a search launch lands: ranked distances, or every scored pair of a product. */
 enum class metal_output_t : bool { distances_k, products_k };
@@ -144,23 +157,21 @@ enum class metal_output_t : bool { distances_k, products_k };
 template <typename buffers_allocator_type_ = metal_shared_allocator_t>
 struct metal_traversal_context {
 
-    /** The queue the context submits to, named an allocator because the residency-level harnesses
+    /** The stream the context submits to, named an allocator because the residency-level harnesses
      *  build every context from its @c allocator_t. */
-    using allocator_t = metal_queue_t;
+    using allocator_t = metal_stream_t;
 
-    /** The backend of the arena, the staging and the counters, on the queue's device. */
+    /** The backend of the arena, the staging and the counters, on the stream's device. */
     using buffers_allocator_t = buffers_allocator_type_;
 
-    /** Matches the single-query verb lands at most. */
-    inline static constexpr u32_t results_capacity_k = 64;
-
-    /** The single-query verb's landing: ascending matches in inline storage. */
+    /** The single-query verb's landing, grown to the walk's breadth: the ascending matches, then,
+     *  past them, the IDs and distances read back from the staging. */
     struct results_t {
-        scored_node_t entries_[results_capacity_k];
+        growing_buffer<scored_node_t> entries_ {global_allocator};
         std::size_t count_ = 0;
 
-        scored_node_t* data() noexcept { return entries_; }
-        scored_node_t const* data() const noexcept { return entries_; }
+        scored_node_t* data() noexcept { return entries_.data(); }
+        scored_node_t const* data() const noexcept { return entries_.data(); }
         scored_node_t& operator[](std::size_t rank) noexcept { return entries_[rank]; }
         scored_node_t const& operator[](std::size_t rank) const noexcept { return entries_[rank]; }
         std::size_t size() const noexcept { return count_; }
@@ -168,47 +179,51 @@ struct metal_traversal_context {
 
     results_t results;
 
-    /** Binds the context to @p queue's device; buffers wait for the first verb. */
-    metal_traversal_context(allocator_t queue = {}) noexcept
-        : queue_(std::move(queue)), context_(metal_context(queue_.device)), buffers_allocator_(queue_.device) {
+    /** Binds the context to @p stream's device; buffers wait for the first verb. */
+    metal_traversal_context(allocator_t stream = {}) noexcept
+        : stream_(std::move(stream)), context_(metal_context(stream_.device)), buffers_allocator_(stream_.device) {
         if (context_) counters_ = buffers_allocator_.allocate(static_cast<std::size_t>(metal_counter_t::count_k) * 4);
     }
     metal_traversal_context(metal_traversal_context&&) noexcept = default;
     metal_traversal_context(metal_traversal_context const&) = delete;
     metal_traversal_context& operator=(metal_traversal_context const&) = delete;
 
-    int device() const noexcept { return queue_.device; }
-    void* queue() const noexcept { return queue_.handle() ? queue_.handle() : context_->queue; }
+    int device() const noexcept { return stream_.device; }
+    void* stream() const noexcept { return stream_.handle() ? stream_.handle() : context_->queue; }
     explicit operator bool() const noexcept { return context_ && counters_; }
 
-    /** Waits for the last command buffer this context committed - one queue's completion, the
+    /** Waits for the last command buffer this context committed - one stream's completion, the
      *  executor's @c drain being the fleet's. */
     status_t drain() noexcept { return committed_.drain(); }
 
     /** Polls whether the last command buffer this context committed finished - @c success_k once
      *  it has, @c deferred_k while it runs - without blocking, so one host thread awaits whichever
-     *  of several queues lands first. */
+     *  of several streams lands first. */
     status_t landed() const noexcept { return committed_.landed(); }
 
     /** The telemetry of the last submission, zeroed when it was staged; read once it landed. */
     vram_telemetry_block_t spent() const noexcept {
+        u32_t const* const words = reinterpret_cast<u32_t const*>(counters_.host);
         vram_telemetry_block_t block {};
-        block.hops = word_(metal_counter_t::hops_k);
-        block.scored = word_(metal_counter_t::scored_k);
-        block.restarts = word_(metal_counter_t::restarts_k);
-        block.lock_attempts = word_(metal_counter_t::lock_attempts_k);
-        block.lock_skips = word_(metal_counter_t::lock_skips_k);
-        block.reselections = word_(metal_counter_t::reselections_k);
-        block.locked_drops = word_(metal_counter_t::locked_drops_k);
-        block.visited_saturations = word_(metal_counter_t::saturations_k);
-        block.changed_nodes = word_(metal_counter_t::changed_k);
-        block.tail_drops = word_(metal_counter_t::tail_drops_k);
+        block.hops = metal_tally(words, metal_counter_t::hops_k);
+        block.scored = metal_tally(words, metal_counter_t::scored_k);
+        block.restarts = metal_tally(words, metal_counter_t::restarts_k);
+        block.lock_attempts = metal_tally(words, metal_counter_t::lock_attempts_k);
+        block.lock_skips = metal_tally(words, metal_counter_t::lock_skips_k);
+        block.reselections = metal_tally(words, metal_counter_t::reselections_k);
+        block.locked_drops = metal_tally(words, metal_counter_t::locked_drops_k);
+        block.visited_saturations = metal_tally(words, metal_counter_t::saturations_k);
+        block.changed_nodes = words[static_cast<u32_t>(metal_counter_t::changed_k)];
+        block.tail_drops = metal_tally(words, metal_counter_t::tail_drops_k);
         return block;
     }
 
     /** Whether the last attend met a node its value lookup had no row for, which refuses it; read
      *  once it landed. */
-    bool missed() const noexcept { return word_(metal_counter_t::missed_k) != 0; }
+    bool missed() const noexcept {
+        u32_t const* const words = reinterpret_cast<u32_t const*>(counters_.host);
+        return words[static_cast<u32_t>(metal_counter_t::missed_k)] != 0;
+    }
 
   private:
     template <nk_dtype_t, nk_capability_t, typename, typename, typename>
@@ -220,7 +235,7 @@ struct metal_traversal_context {
         std::size_t first_offset = 0, second_offset = 0, third_offset = 0;
     };
 
-    allocator_t queue_;
+    allocator_t stream_;
     metal_context_t* context_ = nullptr;
     buffers_allocator_t buffers_allocator_;
     metal_buffer_t counters_;
@@ -228,15 +243,9 @@ struct metal_traversal_context {
     metal_buffer_t staging_;
     landing_t landing_;
 
-    /** The last command buffer submitted through this context; its queue runs them in commit order,
-     *  so this one landing means every earlier one did. */
+    /** The last command buffer submitted through this context; its stream runs them in commit
+     *  order, so this one landing means every earlier one did. */
     metal_launch_t committed_;
-
-    /** The counter word @p counter, read in place from shared memory. */
-    u32_t word_(metal_counter_t counter) const noexcept {
-        u32_t const* const words = reinterpret_cast<u32_t const*>(counters_.host);
-        return words[static_cast<u32_t>(counter)];
-    }
 
     /** Monotone epoch floor over the arena's visited slots, so the arena zeroes only when fresh or
      *  wrapped. */
@@ -387,8 +396,10 @@ struct vram_apple_index {
     arena_shape_t arena_shape_for(u32_t expansion, frontier_kind_t frontier_kind,
                                   std::size_t cache_rows) const noexcept {
         u32_t const visited_slots = std::bit_ceil(64 * expansion);
-        u32_t const tail_entries = frontier_kind == frontier_kind_t::wide_arena_k ? 32 * expansion : 0;
-        std::size_t const spans_bytes = 32 * 8 + 64 * 8 + 64 * 8 + 64 * 4 + 32 * 4 + 64 * 4 + 64 * 4;
+        u32_t const tail_entries = frontier_kind == frontier_kind_t::wide_arena_k
+                                       ? static_cast<u32_t>(connectivity()) * expansion
+                                       : 0;
+        std::size_t const spans_bytes = 32 * 8 + 64 * 8 + 64 * 8 + 64 * 4 + 32 * 4 + 64 * 4 + 64 * 4 + 64 * 4;
         std::size_t const rows_bytes = row_bytes() * (1 + cache_rows);
         return {visited_slots, 32 - static_cast<u32_t>(std::bit_width(visited_slots - 1)), tail_entries,
                 round_up_to_multiple<std::size_t>(rows_bytes + (visited_slots + tail_entries) * 8 + spans_bytes, 16)};
@@ -515,10 +526,10 @@ struct vram_apple_index {
      *  zero before @c reserve freezes the geometry. */
     std::size_t traversal_memory_usage(std::size_t rows, insert_config_t config = {}) const noexcept {
         if (!dimensions_) return 0;
-        u32_t const pool_slots = pool_slots_for_(config.expansion_factor, 4);
+        u32_t const pool_slots = walk_slots_(config.expansion_factor, 4);
         return static_cast<std::size_t>(metal_counter_t::count_k) * sizeof(u32_t) +
                groups_for_(rows) * simdgroups_per_group_k *
-                   arena_shape_for(pool_slots * 32, frontier_kind_t::register_ladder_k, cache_rows_k).slice_bytes +
+                   walk_arena_shape_(config.expansion_factor, pool_slots, cache_rows_k).slice_bytes +
                rows * row_bytes() + widened_bytes_();
     }
 
@@ -574,7 +585,7 @@ struct vram_apple_index {
     std::size_t traversal_memory_usage(std::size_t rows, search_config_t config) const noexcept {
         if (!dimensions_) return 0;
         u32_t const expansion = max_of<u32_t>(
-            config.expansion_factor > config.count ? config.expansion_factor : config.count * 2,
+            config.expansion_factor >= config.count ? config.expansion_factor : config.count * 2,
             static_cast<u32_t>(non_zero_expansion_factor(config)));
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
         return static_cast<std::size_t>(metal_counter_t::count_k) * sizeof(u32_t) +
@@ -655,49 +666,24 @@ struct vram_apple_index {
      */
     expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
                                      refine_config_t config = {}) noexcept {
-        std::unique_lock batch {batch_};
-        std::size_t const rows = size();
-        refine_result_t result;
-        auto add_walks = [&](refine_result_t const& walked) noexcept {
-            result.visited_nodes += walked.visited_nodes;
-            result.changed_nodes += walked.changed_nodes;
-            result.visited_members += walked.visited_members;
-            result.computed_distances += walked.computed_distances;
-            result.restarts += walked.restarts;
-        };
-        node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
-        if (nodes.first < bound) {
-            auto const [walked, status] = refine_pass_(context, config, {nodes.first, bound}, {});
-            if (failed(status)) return {result, status};
-            add_walks(walked);
-        }
-        if (!rows) return {result, status_t::success_k};
+        return refine_(nodes, 0, context, config);
+    }
 
-        audit_t audit;
-        if (failed(audit.reached.resize(rows)) || failed(audit.frontier.resize(rows)) ||
-            failed(audit.next_frontier.resize(rows)) || failed(audit.islands.reserve_exactly(rows)))
-            return {result, status_t::bad_alloc_k};
-        audit_(audit);
-        result.sweeps += audit.sweeps;
-        result.islands_found = audit.islands.size();
-        for (std::size_t islands_before = audit.islands.size(); !audit.islands.empty();) {
-            auto const [healed, healed_status] = refine_pass_(
-                context, config, {0, static_cast<node_id_t>(audit.islands.size())}, to_span(audit.islands));
-            if (failed(healed_status)) return {result, healed_status};
-            add_walks(healed);
-            audit_(audit);
-            result.sweeps += audit.sweeps;
-            if (audit.islands.empty()) break;
-            result.islands_reconnected += reconnect_(audit);
-            audit_(audit);
-            result.sweeps += audit.sweeps;
-            // A round that frees no island frees none on the next either, since the picks it needs
-            // are unreached.
-            if (audit.islands.size() >= islands_before) break;
-            islands_before = audit.islands.size();
-        }
-        result.reachable_nodes = rows - audit.islands.size();
-        return {result, status_t::success_k};
+    /**
+     *  @brief Links two parts no edge joins, the rows below @p first_guest and the rows from it on,
+     *      as a shard that absorbed another's rows holds them.
+     *
+     *  One @c refine pass runs over every row, in which each node first walks the other part alone,
+     *  from an empty pool and landmarks drawn there, then its own neighbors and the whole graph,
+     *  and re-selects from the union.
+     *
+     *  The heal runs as in @c refine. The live graph stays as it was through the walks, so a cross
+     *  walk never leaves the other part. With no row on either side of @p first_guest it is a plain
+     *  @c refine of every row.
+     */
+    expected<refine_result_t> stitch(node_id_t first_guest, traversal_context_t& context,
+                                     refine_config_t config = {}) noexcept {
+        return refine_({0, node_id_unknown_k}, first_guest < size() ? first_guest : 0, context, config);
     }
 
     /** Measures forward reachability from as many stride-spread landmarks as one search draws, on
@@ -858,7 +844,15 @@ struct vram_apple_index {
         load_plan_t& operator=(load_plan_t&&) = delete;
         load_plan_t(load_plan_t const&) = delete;
         load_plan_t& operator=(load_plan_t const&) = delete;
-        ~load_plan_t() noexcept = default;
+
+        /** An unfinished plan turns its rows back to sentinels under the hold, since the next claim
+         *  lands on them without growing. */
+        ~load_plan_t() noexcept {
+            if (!index_ || !rows) return;
+            std::size_t const neighbors_row_bytes = index_->connectivity() * sizeof(u32_t);
+            std::memset(index_->neighbors_matrix_.host + static_cast<std::size_t>(base) * neighbors_row_bytes, 0xFF,
+                        rows * neighbors_row_bytes);
+        }
 
         struct step_t {
             std::size_t position = 0;
@@ -1035,15 +1029,16 @@ struct vram_apple_index {
             return {{}, staged};
         stage_rows_(context.staging_.host, new_rows, context.staging_.host + rows_bytes + waves_bytes);
         std::memset(context.staging_.host + rows_bytes, 0, waves_bytes);
-        u32_t const pool_slots = pool_slots_for_(config.expansion_factor, 4);
+        u32_t const pool_slots = walk_slots_(config.expansion_factor, 4);
         metal_arguments_t arguments = arguments_();
-        if (status_t const sized = shape_arena_(
-                context, arguments, arena_shape_for(pool_slots * 32, frontier_kind_t::register_ladder_k, cache_rows_k),
-                cache_rows_k, rows);
+        if (status_t const sized = shape_arena_(context, arguments,
+                                                walk_arena_shape_(config.expansion_factor, pool_slots, cache_rows_k),
+                                                cache_rows_k, rows);
             failed(sized))
             return {{}, sized};
         arguments.first_id = static_cast<u32_t>(first_id);
         arguments.end_id = static_cast<u32_t>(first_id + rows);
+        arguments.expansion = config.expansion_factor;
         reset_counters_(counters_);
         claimed_rows_ = first_id + rows;
 
@@ -1055,23 +1050,29 @@ struct vram_apple_index {
             if (succeeded(launched)) launched = context.drain();
         }
         if (failed(launched)) return {{first_id, static_cast<node_id_t>(first_id)}, fail_(launched)};
-        // Every wave's tallies fold into the batch's counters; their assigned words are spent.
+        // Every wave's published rows and tallies fold into the batch's counters; their assigned
+        // words are spent.
         u32_t* const counters = reinterpret_cast<u32_t*>(counters_.host);
+        u32_t const published = static_cast<u32_t>(metal_counter_t::published_k);
         for (std::size_t offset = rows_bytes; offset != rows_bytes + waves_bytes; offset += counters_bytes_k) {
             u32_t const* const wave = reinterpret_cast<u32_t const*>(context.staging_.host + offset);
-            for (u32_t word = static_cast<u32_t>(metal_counter_t::published_k);
-                 word != static_cast<u32_t>(metal_counter_t::count_k); ++word)
-                counters[word] += wave[word];
+            counters[published] += wave[published];
+            for (u32_t word = static_cast<u32_t>(metal_counter_t::hops_k);
+                 word != static_cast<u32_t>(metal_counter_t::count_k); word += 2) {
+                metal_counter_t const tally = static_cast<metal_counter_t>(word);
+                u64_t const total = metal_tally(counters, tally) + metal_tally(wave, tally);
+                counters[word] = static_cast<u32_t>(total), counters[word + 1] = static_cast<u32_t>(total >> 32);
+            }
         }
 
         insert_result_t result;
         result.first_id = static_cast<node_id_t>(first_id);
         result.new_size = first_id + rows;
-        result.visited_members = counter_(counters_, metal_counter_t::hops_k);
-        result.computed_distances = counter_(counters_, metal_counter_t::scored_k);
-        result.restarts = counter_(counters_, metal_counter_t::restarts_k);
-        result.unlinked_neighbors = counter_(counters_, metal_counter_t::lock_skips_k);
-        result.visited_saturations = counter_(counters_, metal_counter_t::saturations_k);
+        result.visited_members = metal_tally(counters, metal_counter_t::hops_k);
+        result.computed_distances = metal_tally(counters, metal_counter_t::scored_k);
+        result.restarts = metal_tally(counters, metal_counter_t::restarts_k);
+        result.unlinked_neighbors = metal_tally(counters, metal_counter_t::lock_skips_k);
+        result.visited_saturations = metal_tally(counters, metal_counter_t::saturations_k);
         for (std::size_t row = 0; row != assigned_ids.size(); ++row)
             assigned_ids[row] = static_cast<node_id_t>(first_id + row);
         return {result, status_t::success_k};
@@ -1169,10 +1170,6 @@ struct vram_apple_index {
         std::memset(words, 0, counters.bytes);
         words[static_cast<u32_t>(metal_counter_t::published_k)] = published;
     }
-    static u32_t counter_(metal_buffer_t const& counters, metal_counter_t counter) noexcept {
-        u32_t const* const words = reinterpret_cast<u32_t const*>(counters.host);
-        return words[static_cast<u32_t>(counter)];
-    }
 
     /** Binds the arguments, the two matrices and the norms column, the vectors standing in for an
      *  empty norms column. */
@@ -1195,8 +1192,7 @@ struct vram_apple_index {
     }
 
     /** Builds every pipeline this dtype's kernels need, once at the first @c reserve, so no launch
-     *  waits on the device's registry; @c contended_k while another index builds there. Only the
-     *  search walks past the widest pool, so only it builds the arena rung. */
+     *  waits on the device's registry, the arena frontier's rung included. */
     status_t load_pipelines_() noexcept {
         metal_context_t* const context = metal_context(device_.ordinal);
         if (!context) return status_t::device_error_k;
@@ -1204,7 +1200,6 @@ struct vram_apple_index {
         for (u32_t kernel = 0; kernel != 3; ++kernel)
             for (u32_t rung = 0; rung != rungs_k; ++rung) {
                 char const* const name = names_k[kernel][rung];
-                if (!name) continue;
                 auto const [pipeline, status] = context->pipeline(source, name);
                 if (failed(status)) return status;
                 pipelines_[kernel][rung] = pipeline;
@@ -1219,8 +1214,10 @@ struct vram_apple_index {
 
     /** The kernels' instantiations by rung, as @ref rung_of_ orders them. */
     inline static constexpr char const* names_k[3][rungs_k] = {
-        {nullptr, "metal_insert_kernel_2", "metal_insert_kernel_4", "metal_insert_kernel_8", "metal_insert_kernel_16"},
-        {nullptr, "metal_refine_kernel_2", "metal_refine_kernel_4", "metal_refine_kernel_8", "metal_refine_kernel_16"},
+        {"metal_insert_kernel_0", "metal_insert_kernel_2", "metal_insert_kernel_4", "metal_insert_kernel_8",
+         "metal_insert_kernel_16"},
+        {"metal_refine_kernel_0", "metal_refine_kernel_2", "metal_refine_kernel_4", "metal_refine_kernel_8",
+         "metal_refine_kernel_16"},
         {"metal_search_kernel_0", "metal_search_kernel_2", "metal_search_kernel_4", "metal_search_kernel_8",
          "metal_search_kernel_16"},
     };
@@ -1238,10 +1235,11 @@ struct vram_apple_index {
         return expansion > vram_widest_pool_slots_k * 32 ? 0 : pool_slots_for_(expansion, default_slots);
     }
 
-    /** The arena slice of a walk expanding @p expansion on the rung of @p pool_slots. */
-    arena_shape_t walk_arena_shape_(u32_t expansion, u32_t pool_slots) const noexcept {
-        return pool_slots ? arena_shape_for(pool_slots * 32, frontier_kind_t::register_ladder_k, 0)
-                          : arena_shape_for(expansion, frontier_kind_t::wide_arena_k, 0);
+    /** The arena slice of a walk expanding @p expansion on the rung of @p pool_slots, beside the
+     *  @p cache_rows cached rows a builder keeps. */
+    arena_shape_t walk_arena_shape_(u32_t expansion, u32_t pool_slots, std::size_t cache_rows = 0) const noexcept {
+        return pool_slots ? arena_shape_for(pool_slots * 32, frontier_kind_t::register_ladder_k, cache_rows)
+                          : arena_shape_for(expansion, frontier_kind_t::wide_arena_k, cache_rows);
     }
 
     /** Bytes of one launch's counter words. */
@@ -1264,8 +1262,8 @@ struct vram_apple_index {
     }
 
     /** Submits the rows @p arguments names in waves, each committed behind the last on the
-     *  context's queue, so every ID a wave admits walks rows already published. Each wave counts
-     *  into its own words past the staged rows, since nothing on the queue zeroes one between
+     *  context's stream, so every ID a wave admits walks rows already published. Each wave counts
+     *  into its own words past the staged rows, since nothing on the stream zeroes one between
      *  waves. */
     status_t launch_insert_(metal_arguments_t const& arguments, u32_t pool_slots,
                             traversal_context_t& context) noexcept {
@@ -1278,7 +1276,7 @@ struct vram_apple_index {
             wave_arguments.first_id = wave_first;
             wave_arguments.end_id = wave_end;
             wave_arguments.epoch_base = arguments.epoch_base + offset;
-            metal_launch_t launch {context.queue(), pipeline_(metal_kernel_t::insert_k, pool_slots)};
+            metal_launch_t launch {context.stream(), pipeline_(metal_kernel_t::insert_k, pool_slots)};
             if (!launch) return status_t::device_error_k;
             bind_storage_(launch, wave_arguments);
             launch.bind(context.staging_, 4, std::size_t {offset} * row_bytes());
@@ -1355,7 +1353,7 @@ struct vram_apple_index {
         }
         // The expansion covers the count, so the ladder's pool holds every rank, and past it the
         // arena frontier ranks everything it saw.
-        u32_t const expansion = config.expansion_factor > config.count ? config.expansion_factor : config.count * 2;
+        u32_t const expansion = config.expansion_factor >= config.count ? config.expansion_factor : config.count * 2;
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
         u32_t const pool_slots = walk_slots_(expansion, count_slots > 2 ? count_slots : 2);
         std::size_t const results = queries_count * config.count;
@@ -1480,11 +1478,13 @@ struct vram_apple_index {
         if (!visible) return {{}, status_t::success_k};
         if (query_vector.size() != dimensions()) return {{}, status_t::config_mismatch_k};
         u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
-        u32_t const count = min_of<u32_t>(min_of<u32_t>(traversal_context_t::results_capacity_k, expansion),
-                                          static_cast<u32_t>(visible));
-        node_id_t staged_ids[traversal_context_t::results_capacity_k];
-        distance_t staged_distances[traversal_context_t::results_capacity_k];
+        u32_t const count = min_of<u32_t>(expansion, static_cast<u32_t>(visible));
+        if (failed(context.results.entries_.reserve(std::size_t {count} * 2))) return {{}, status_t::bad_alloc_k};
+        context.results.entries_.extend_uninitialized(std::size_t {count} * 2);
+        node_id_t* const staged_ids = reinterpret_cast<node_id_t*>(context.results.entries_.data() + count);
+        distance_t* const staged_distances = reinterpret_cast<distance_t*>(staged_ids + count);
         vectors_view_t const one_query {query_vector.data(), {1, query_vector.size()}};
+        config.expansion_factor = expansion;
         config.count = count;
         expected<search_result_t> result = search_(one_query, nk::matrix_span<node_id_t> {staged_ids, {1, count}},
                                                    nk::matrix_span<distance_t> {staged_distances, {1, count}}, context,
@@ -1540,7 +1540,7 @@ struct vram_apple_index {
         }
         u32_t const keeps_word = keeps ? 1 : 0;
         std::shared_lock storage {storage_};
-        metal_launch_t launch {context.queue(), pipeline_(metal_kernel_t::search_k, pool_slots)};
+        metal_launch_t launch {context.stream(), pipeline_(metal_kernel_t::search_k, pool_slots)};
         if (!launch) return status_t::device_error_k;
         bind_storage_(launch, arguments);
         launch.bind(context.staging_, 4);
@@ -1573,11 +1573,62 @@ struct vram_apple_index {
 
 #pragma region Refinement Passes
 
+    /** @c refine over @p nodes, and @c stitch when @p first_guest splits the rows in two: the pass
+     *  over the range, then the heal, whose passes walk no part first. */
+    expected<refine_result_t> refine_(iota_view<node_id_t> nodes, node_id_t first_guest, traversal_context_t& context,
+                                      refine_config_t config) noexcept {
+        std::unique_lock batch {batch_};
+        std::size_t const rows = size();
+        refine_result_t result;
+        auto add_walks = [&](refine_result_t const& walked) noexcept {
+            result.visited_nodes += walked.visited_nodes;
+            result.changed_nodes += walked.changed_nodes;
+            result.visited_members += walked.visited_members;
+            result.computed_distances += walked.computed_distances;
+            result.restarts += walked.restarts;
+        };
+        node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
+        if (nodes.first < bound) {
+            auto const [walked, status] = refine_pass_(context, config, {nodes.first, bound}, {}, first_guest);
+            if (failed(status)) return {result, status};
+            add_walks(walked);
+        }
+        if (!rows) return {result, status_t::success_k};
+
+        audit_t audit;
+        if (failed(audit.reached.resize(rows)) || failed(audit.frontier.resize(rows)) ||
+            failed(audit.next_frontier.resize(rows)) || failed(audit.islands.reserve_exactly(rows)))
+            return {result, status_t::bad_alloc_k};
+        audit_(audit);
+        result.sweeps += audit.sweeps;
+        result.islands_found = audit.islands.size();
+        for (std::size_t islands_before = audit.islands.size(); !audit.islands.empty();) {
+            auto const [healed, healed_status] = refine_pass_(
+                context, config, {0, static_cast<node_id_t>(audit.islands.size())}, to_span(audit.islands));
+            if (failed(healed_status)) return {result, healed_status};
+            add_walks(healed);
+            audit_(audit);
+            result.sweeps += audit.sweeps;
+            if (audit.islands.empty()) break;
+            result.islands_reconnected += reconnect_(audit);
+            audit_(audit);
+            result.sweeps += audit.sweeps;
+            // A round that frees no island frees none on the next either, since the picks it needs
+            // are unreached.
+            if (audit.islands.size() >= islands_before) break;
+            islands_before = audit.islands.size();
+        }
+        result.reachable_nodes = rows - audit.islands.size();
+        return {result, status_t::success_k};
+    }
+
     /** Re-selects @p nodes, or the IDs @p node_ids lists with @p nodes spanning its offsets, into a
-     *  shadow matrix on the device, then lands every walked row in the live matrix and counts the
-     *  rows that changed. */
+     *  shadow matrix on the device, each node walking the part @p first_guest splits off first when
+     *  it is nonzero, then lands every walked row in the live matrix and counts the rows that
+     *  changed. */
     expected<refine_result_t> refine_pass_(traversal_context_t& context, refine_config_t config,
-                                           iota_view<node_id_t> nodes, std::span<u32_t const> node_ids) noexcept {
+                                           iota_view<node_id_t> nodes, std::span<u32_t const> node_ids,
+                                           node_id_t first_guest = 0) noexcept {
         std::size_t const rows = size();
         if (!rows || nodes.first >= nodes.bound) return {{}, status_t::success_k};
         if (!dimensions_) return {{}, status_t::uninitialized_k};
@@ -1591,23 +1642,28 @@ struct vram_apple_index {
         if (status_t const staged = context.ensure_(context.staging_, ids_bytes + shadow_bytes, fresh); failed(staged))
             return {{}, staged};
         if (ids_bytes) std::memcpy(context.staging_.host, node_ids.data(), ids_bytes);
-        u32_t const pool_slots = pool_slots_for_(static_cast<u32_t>(non_zero_expansion_factor(config)), 4);
+        u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
+        u32_t const pool_slots = walk_slots_(expansion, 4);
+        // A stitch walks twice into one visited set, so its slice is shaped for both walks.
+        u32_t const walks = first_guest ? 2 : 1;
         metal_arguments_t arguments = arguments_();
-        if (status_t const sized = shape_arena_(
-                context, arguments, arena_shape_for(pool_slots * 32, frontier_kind_t::register_ladder_k, cache_rows_k),
-                cache_rows_k, walk_count);
+        if (status_t const sized = shape_arena_(context, arguments,
+                                                walk_arena_shape_(expansion * walks, pool_slots * walks, cache_rows_k),
+                                                cache_rows_k, walk_count);
             failed(sized))
             return {{}, sized};
         arguments.first_id = nodes.first;
+        arguments.expansion = expansion;
         arguments.end_id = nodes.bound;
         arguments.sampling_bound = static_cast<u32_t>(rows);
         arguments.use_node_ids = node_ids.empty() ? 0 : 1;
+        arguments.first_guest = first_guest;
         reset_counters_(counters_);
 
         status_t launched = status_t::device_error_k;
         {
             std::shared_lock storage {storage_};
-            metal_launch_t launch {context.queue(), pipeline_(metal_kernel_t::refine_k, pool_slots)};
+            metal_launch_t launch {context.stream(), pipeline_(metal_kernel_t::refine_k, pool_slots)};
             if (launch) {
                 bind_storage_(launch, arguments);
                 launch.bind(context.staging_, 4);
@@ -1632,10 +1688,11 @@ struct vram_apple_index {
             std::memcpy(row, picked, connectivity * sizeof(u32_t));
             ++result.changed_nodes;
         }
+        u32_t const* const counters = reinterpret_cast<u32_t const*>(counters_.host);
         result.visited_nodes = walk_count;
-        result.visited_members = counter_(counters_, metal_counter_t::hops_k);
-        result.computed_distances = counter_(counters_, metal_counter_t::scored_k);
-        result.restarts = counter_(counters_, metal_counter_t::restarts_k);
+        result.visited_members = metal_tally(counters, metal_counter_t::hops_k);
+        result.computed_distances = metal_tally(counters, metal_counter_t::scored_k);
+        result.restarts = metal_tally(counters, metal_counter_t::restarts_k);
         return {result, status_t::success_k};
     }
 
@@ -1743,7 +1800,10 @@ struct vram_apple_index {
     }
 
     std::size_t claimed_() const noexcept { return claimed_rows_; }
-    u32_t published_() const noexcept { return counter_(counters_, metal_counter_t::published_k); }
+    u32_t published_() const noexcept {
+        u32_t const* const words = reinterpret_cast<u32_t const*>(counters_.host);
+        return words[static_cast<u32_t>(metal_counter_t::published_k)];
+    }
 
     /** Turns the watermark from @p first over @p rows once every batch claimed before has turned
      *  it. */
