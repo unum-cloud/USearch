@@ -7,7 +7,7 @@
  *
  *  The Apple twin of @c vram_nvidia_indexes: same-geometry shards, each owned and pinned to one
  *  Apple GPU, viewed as one index. Insertions rotate across the shards so they fill evenly and each
- *  holds a representative sample; searches submit to every shard's queue before awaiting any and
+ *  holds a representative sample; searches submit to every shard's stream before awaiting any and
  *  gather through @ref merge_search_results as each lands, resolving matches into the caller's
  *  keys. Checkpoints ride the SafeGraphs interchange - one consolidated monolith, or one per shard
  *  beside a manifest - written positionally with every header last, so a failed save reads as
@@ -80,7 +80,7 @@ struct vram_apple_indexes {
     using keys_column_t =
         chunked_column<key_t, chunk_schedule<10, 20>, index_t::max_node_count_k, forkunion_allocator_t>;
 
-    /** The queues every bulk verb submits to; it names no index, so one executor serves every
+    /** The streams every bulk verb submits to; it names no index, so one executor serves every
      *  instantiation. */
     using executor_t = metal_executor_t;
     using traversal_context_t = typename index_t::traversal_context_t;
@@ -150,9 +150,10 @@ struct vram_apple_indexes {
         std::swap(routed_rows_, other.routed_rows_);
     }
 
-    /** Appends one shard built here on @p device, for callers with none to hand over. */
-    status_t emplace(int device) noexcept {
-        std::unique_ptr<index_t> shard = build_(device);
+    /** Appends one shard built here on the device @p stream names, for callers with none to hand
+     *  over. */
+    status_t emplace(typename executor_t::stream_t const& stream) noexcept {
+        std::unique_ptr<index_t> shard = build_(stream.handle.device);
         if (!shard) return status_t::bad_alloc_k;
         return emplace(std::move(shard));
     }
@@ -437,7 +438,7 @@ struct vram_apple_indexes {
      *      claims the locator seats.
      *
      *  @param[in] rows Rows in the batch; the plan's steps run each exactly once, in any order.
-     *  @param[inout] executor The queues, paired positionally with the shards.
+     *  @param[inout] executor The streams, paired positionally with the shards.
      *  @param[in] config The per-shard insertion configuration, applied uniformly.
      */
     expected<insert_plan_t> plan_insert(std::size_t rows, executor_t& executor, insert_config_t config = {}) noexcept {
@@ -450,7 +451,7 @@ struct vram_apple_indexes {
             plan.owner_ = this;
             return {std::move(plan), status_t::success_k};
         }
-        // Two holds: the executor's guards the queues, the index's keeps batches from interleaving
+        // Two holds: the executor's guards the streams, the index's keeps batches from interleaving
         // claims.
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
@@ -494,7 +495,7 @@ struct vram_apple_indexes {
      *
      *  @param[in] keys One caller identity per row; several rows may share one.
      *  @param[in] new_rows The batch, one row per entry, in any scalar NumKong casts.
-     *  @param[inout] executor The queues, paired positionally with the shards.
+     *  @param[inout] executor The streams, paired positionally with the shards.
      *  @param[in] config The per-shard insertion configuration, applied uniformly.
      */
     expected<insert_result_t> insert(std::span<key_t const> keys, rows_view_t new_rows, executor_t& executor,
@@ -525,7 +526,7 @@ struct vram_apple_indexes {
      *  @brief Re-selects the neighbors of every stored node and heals whatever that strands, one
      *      shard at a time.
      *
-     *  @param[inout] executor The queues, one per shard.
+     *  @param[inout] executor The streams, one per shard.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
      *  @param[in] on_visited Fires per shard with the nodes swept so far and the population; a
      *      @c cancel_k answer stops before the next shard, reported as @c cancelled_k.
@@ -553,6 +554,106 @@ struct vram_apple_indexes {
             if (failed(status)) return {result, status};
             if (on_visited(result.visited_nodes, published) == continuation_t::cancel_k)
                 return {result, status_t::cancelled_k};
+        }
+        return {result, status_t::success_k};
+    }
+
+    /**
+     *  @brief Moves every row of @p donor into this index: donor shard @c s appends to shard @c s
+     *      modulo the shard count with its edges rebased and its keys beside it.
+     *
+     *  One refine over every row of each shard that took an appended part then links it with the
+     *  resident part: each row first walks across into the other part alone, from landmarks drawn
+     *  there, then its own neighbors and the whole graph, and re-selects from the union, so both
+     *  parts gain links across. A shard empty beforehand keeps the first part landing in it as its
+     *  resident part, and a shard left with no appended part only heals, so the reported reach
+     *  covers every shard.
+     *
+     *  A donor shard crosses through host columns as a checkpoint does. Every row lands and the
+     *  donor empties before the first refine. The donor keeps its shards, and an index never
+     *  reserved takes its geometry. Insertions and searches may not overlap on either index.
+     *
+     *  @param[inout] donor The index giving its rows up.
+     *  @param[inout] executor The streams, driving every device of both indexes.
+     *  @param[in] config The refine's knobs; zeros mean "derive from connectivity".
+     *  @retval config_mismatch_k Another metric or geometry, a device the executor does not drive,
+     *      or @p donor being this index.
+     *  @retval others A failure while landing leaves the donor shards appended so far in both
+     *      indexes, with nothing rolled back; one while refining leaves every row here, merely
+     *      less linked.
+     */
+    expected<refine_result_t> absorb(vram_apple_indexes& donor, executor_t& executor,
+                                     refine_config_t config = {}) noexcept {
+        if (&donor == this || donor.kernel_ != kernel_) return {{}, status_t::config_mismatch_k};
+        if (status_t const kept = status(); failed(kept)) return {{}, kept};
+        if (status_t const kept = donor.status(); failed(kept)) return {{}, kept};
+        std::size_t const incoming = donor.size(), shards = shards_.size();
+        if (!incoming) return {{}, status_t::success_k};
+        if (capacity() && (donor.dimensions() != dimensions() || donor.connectivity() != connectivity()))
+            return {{}, status_t::config_mismatch_k};
+        if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
+        if (status_t const paired = donor.pairs_with_(executor); failed(paired)) return {{}, paired};
+        auto [claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
+        if (!mutating_.lock_if_free()) return {{}, status_t::contended_k};
+        std::lock_guard const mutating {mutating_, std::adopt_lock};
+        if (!donor.mutating_.lock_if_free()) return {{}, status_t::contended_k};
+        std::lock_guard const donating {donor.mutating_, std::adopt_lock};
+        if (!capacity())
+            if (status_t const reserved =
+                    reserve({incoming, static_cast<connectivity_t>(donor.connectivity()), donor.dimensions()}).status;
+                failed(reserved))
+                return {{}, reserved};
+
+        growing_buffer<iota_view<node_id_t>, forkunion_allocator_t> appended_parts {allocator_};
+        growing_buffer<byte_t, forkunion_allocator_t> staged {allocator_};
+        if (failed(appended_parts.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
+        for (shard_t const& one : shards_)
+            appended_parts.push_back_reserved(
+                {static_cast<node_id_t>(one.index->size()), static_cast<node_id_t>(one.index->size())});
+        for (std::size_t from = 0; from != donor.shards_.size(); ++from) {
+            index_t const& source = *donor.shards_[from].index;
+            std::size_t const into = from % shards, rows = source.size();
+            if (!rows) continue;
+            std::size_t const vectors_bytes = rows * source.packed_row_bytes();
+            std::size_t const neighbors_bytes = rows * connectivity() * sizeof(node_id_t);
+            std::size_t const norms_bytes = source.stores_norms() ? rows * sizeof(typename index_t::norms_t) : 0;
+            if (failed(staged.resize_uninitialized(vectors_bytes + neighbors_bytes + norms_bytes)))
+                return {{}, status_t::bad_alloc_k};
+            bytes_span_t const bytes = to_writable_span(staged);
+            typename index_t::columns_t const columns {bytes.first(vectors_bytes),
+                                                       bytes.subspan(vectors_bytes, neighbors_bytes),
+                                                       bytes.subspan(vectors_bytes + neighbors_bytes)};
+            if (status_t const saved = source.save(columns, synchronization_t::immutable_k); failed(saved))
+                return {{}, saved};
+            auto [plan, status] = shards_[into].index->plan_load({columns.vectors, columns.neighbors, columns.norms},
+                                                                 rows, {0, static_cast<node_id_t>(rows)});
+            if (failed(status)) return {{}, status};
+            for (typename index_t::load_plan_t::step_t const step : plan.steps())
+                if (status_t const loaded = plan.load(step); failed(loaded)) return {{}, loaded};
+            keys_column_t& keys = donor.shards_[from].keys;
+            if (status_t const landed = land_rows_(into, plan.base, rows,
+                                                   [&](std::size_t row) noexcept { return keys[row]; });
+                failed(landed))
+                return {{}, landed};
+            appended_parts[into].bound = static_cast<node_id_t>(plan.base + rows);
+            // An empty shard keeps its first part resident, so later parts still walk across.
+            if (!plan.base) appended_parts[into].first = appended_parts[into].bound;
+            if (status_t const finished = plan.finish(); failed(finished)) return {{}, finished};
+        }
+        if (status_t const cleared = donor.clear(); failed(cleared)) return {{}, cleared};
+
+        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
+        if (status_t const ready = open_traversals_(traversals, executor); failed(ready)) return {{}, ready};
+        refine_result_t result;
+        for (std::size_t shard = 0; shard != shards; ++shard) {
+            index_t& one = *shards_[shard].index;
+            iota_view<node_id_t> const appended = appended_parts[shard];
+            iota_view<node_id_t> const nodes = appended.empty() ? appended
+                                                                : iota_view<node_id_t> {0, node_id_unknown_k};
+            auto const [part, status] = one.refine(nodes, traversals[shard], config, appended.first);
+            combine_refinement_(result, part);
+            if (failed(status)) return {result, status};
         }
         return {result, status_t::success_k};
     }
@@ -588,27 +689,25 @@ struct vram_apple_indexes {
      *      distance - the end-to-end multi-shard lookup.
      *
      *  @param[in] query_vector The query, in the shards' stored scalar type.
-     *  @param[inout] executor The queues, paired positionally with the shards.
+     *  @param[inout] executor The streams, paired positionally with the shards.
      *  @param[in] config The per-shard search configuration, applied uniformly.
      *  @param[inout] keys Keys of the merged ranking; its length is the capacity. Resolved through
      *      the shards' key columns, so colliding ID spaces still land in one ranking.
      *  @param[inout] distances Distances of the same ranking, parallel to @p keys.
      *
      *  The batched search over one row, so every shard walks at once and the rankings merge as
-     *  they land; each shard walks as broad as its expansion factor and keeps at most a context's
-     *  landing of matches. A failing shard keeps whatever the others already merged, so the
-     *  reported count and the ranking always agree.
+     *  they land; each shard walks as broad as its expansion factor and keeps at most that many
+     *  matches. A failing shard keeps whatever the others already merged, so the reported count
+     *  and the ranking always agree.
      */
     expected<search_result_t> search(vector_view_t query_vector, executor_t& executor, search_config_t config,
                                      std::span<key_t> keys, std::span<distance_t> distances) noexcept {
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (!query_vector.is_contiguous()) return {{}, status_t::unsupported_layout_k};
         std::size_t const expansion = shards_[0].index->non_zero_expansion_factor(config);
-        std::size_t const width = min_of(min_of(keys.size(), distances.size()),
-                                         min_of<std::size_t>(expansion, traversal_context_t::results_capacity_k));
+        std::size_t const width = min_of(min_of(keys.size(), distances.size()), expansion);
         if (!width) return {{}, pairs_with_(executor)};
         config.expansion_factor = static_cast<typename index_t::small_size_t>(expansion);
-        config.count = static_cast<typename index_t::small_size_t>(width);
         std::size_t count = 0;
         expected<search_result_t> found = search_(vectors_view_t {query_vector.data(), 1u, query_vector.size()},
                                                   executor, config, nk::matrix_span<key_t> {keys.data(), 1u, width},
@@ -623,8 +722,9 @@ struct vram_apple_indexes {
      *      per query.
      *
      *  @param[in] queries The batch, one query per row, in any scalar NumKong casts.
-     *  @param[inout] executor The queues, paired positionally with the shards.
-     *  @param[in] config The per-shard search configuration, applied uniformly.
+     *  @param[inout] executor The streams, paired positionally with the shards.
+     *  @param[in] config The per-shard search configuration, applied uniformly; the width of
+     *      @p keys sets its @c count.
      *  @param[out] keys Merged rankings, one query per row, as many matches as its width.
      *  @param[out] distances The same rankings' distances in any score type, parallel to @p keys.
      *  @param[out] counts Per-query merged hit counts, one per query row.
@@ -739,7 +839,6 @@ struct vram_apple_indexes {
         // Every token row keeps its whole ranked pool, its keys resolved and merged across the
         // shards.
         std::size_t const width = shards_[0].index->non_zero_expansion_factor(config);
-        config.count = static_cast<typename index_t::small_size_t>(width);
         growing_buffer<key_t, forkunion_allocator_t> row_keys {allocator_};
         growing_buffer<distance_t, forkunion_allocator_t> row_distances {allocator_};
         growing_buffer<std::size_t, forkunion_allocator_t> row_counts {allocator_};
@@ -1017,7 +1116,7 @@ struct vram_apple_indexes {
      *      @c <stem>-00001-of-0000S.safegraphs.
      *  @param[in] config The layout, alignment, certified contract and provenance; the device
      *      storage cannot be settlement-probed, so @c concurrent_k refuses.
-     *  @param[inout] executor The queues, held until the plan dies.
+     *  @param[inout] executor The streams, held until the plan dies.
      */
     expected<save_plan_t> plan_save(std::string_view path, save_config_t const& config, executor_t& executor) noexcept {
         if (status_t const ready = saveable_(config, executor); failed(ready)) return {{}, ready};
@@ -1155,25 +1254,16 @@ struct vram_apple_indexes {
                     std::size_t const rows = landing.rows.size();
                     if (landing.shard != shard || !rows) continue;
                     part_t const& part = parts_[landing.part];
-                    keys_column_t& keys = owner_->shards_[shard].keys;
-                    if (status_t const covered = keys.cover(first + rows); failed(covered)) return covered;
-                    auto [seats, seat_status] = owner_->locators_of_key_.claim(rows);
-                    if (failed(seat_status)) return seat_status;
-                    // The key column is chunked, so the part's keys land run by run, each widened.
                     std::size_t const stored_bytes = part.header.key.row_bytes();
                     bytes_view_t const part_keys = part.header.rows_of(part.monolith, part.header.key,
                                                                        landing.rows.first, rows);
                     if (part_keys.size() != rows * stored_bytes) return status_t::malformed_k;
-                    byte_t const* stored = part_keys.data();
-                    keys.for_each_span({first, first + rows}, [&](std::span<key_t> run) noexcept {
-                        for (key_t& key : run) {
-                            key = safegraphs_widened_key<key_t>(stored, part.header.key.dtype);
-                            stored += stored_bytes;
-                        }
-                    });
-                    for (std::size_t row = 0; row != rows; ++row)
-                        owner_->locators_of_key_.insert(seats, keys[first + row],
-                                                        key_locator_t {shard, static_cast<node_id_t>(first + row)});
+                    auto const key_of = [&](std::size_t row) noexcept {
+                        return safegraphs_widened_key<key_t>(part_keys.data() + row * stored_bytes,
+                                                             part.header.key.dtype);
+                    };
+                    if (status_t const landed = owner_->land_rows_(shard, first, rows, key_of); failed(landed))
+                        return landed;
                     first += rows;
                 }
                 // Every plan finishes, an empty one included, since finishing releases the claim.
@@ -1339,9 +1429,9 @@ struct vram_apple_indexes {
      *      the caller resizes and asks again; zero means absent.
      *
      *  Safe against concurrent insertions, which only ever add; each row is read in place from
-     *  unified memory.
+     *  unified memory, so the executor rides in the signature unused, as in the batched @ref count.
      */
-    std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted) const noexcept {
+    std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted, executor_t&) const noexcept {
         std::size_t total = 0;
         locators_of_key_.find_each(key, [&](key_locator_t locator) noexcept {
             if (total < wanted && total < vectors.extent(0)) [[maybe_unused]]
@@ -1373,7 +1463,7 @@ struct vram_apple_indexes {
      *  being the i-th row of key q, and every key's true total in @p entries; rows in any scalar
      *  but the stored one refuse with @c unsupported_k. */
     status_t get(std::span<key_t const> keys, rows_span_t rows, std::size_t wanted, std::span<std::size_t> entries,
-                 executor_t&) const noexcept {
+                 executor_t& executor) const noexcept {
         if (entries.size() != keys.size()) return status_t::config_mismatch_k;
         if (!rows.holds<scalar_t>()) return status_t::unsupported_k;
         vectors_span_t const vectors = rows.as<scalar_t>();
@@ -1381,7 +1471,8 @@ struct vram_apple_indexes {
             return refusal;
         for (std::size_t position = 0; position != keys.size(); ++position) {
             std::size_t const first = position * wanted;
-            entries[position] = get(keys[position], vectors(nk::range(first, first + wanted), nk::slice), wanted);
+            entries[position] = get(keys[position], vectors(nk::range(first, first + wanted), nk::slice), wanted,
+                                    executor);
         }
         return status_t::success_k;
     }
@@ -1394,8 +1485,8 @@ struct vram_apple_indexes {
         return std::unique_ptr<index_t>(new (std::nothrow) index_t(kernel_, allocator, allocator));
     }
 
-    /** Whether @p executor drives a queue on every shard's device - shards sharing a device share
-     *  its queue, and queue on it in order. */
+    /** Whether @p executor drives a stream on every shard's device - shards sharing a device share
+     *  its stream, and queue on it in order. */
     status_t pairs_with_(executor_t const& executor) const noexcept {
         if (shards_.empty()) return status_t::uninitialized_k;
         for (std::size_t shard = 0; shard != shards_.size(); ++shard)
@@ -1403,7 +1494,7 @@ struct vram_apple_indexes {
         return status_t::success_k;
     }
 
-    /** The position of the queue on shard @p shard 's device in @p executor, or its size when it
+    /** The position of the stream on shard @p shard 's device in @p executor, or its size when it
      *  drives none there. */
     std::size_t stream_of_(executor_t const& executor, std::size_t shard) const noexcept {
         int const device = shards_[shard].index->device_specs().ordinal;
@@ -1423,15 +1514,33 @@ struct vram_apple_indexes {
         return first < rows ? divide_round_up(rows - first, shards) : 0;
     }
 
-    /** Opens one traversal context per shard over its device's queue, so a fan-out never shares
+    /** Opens one traversal context per shard over its device's stream, so a fan-out never shares
      *  scratch; each grows its buffers at its first verb. */
     status_t open_traversals_(growing_buffer<traversal_context_t, forkunion_allocator_t>& traversals,
                               executor_t& executor) noexcept {
         if (failed(traversals.reserve_exactly(shards_.size()))) return status_t::bad_alloc_k;
         for (std::size_t shard = 0; shard != shards_.size(); ++shard) {
-            traversals.push_back_reserved(traversal_context_t {executor.stream(stream_of_(executor, shard)).share()});
+            traversals.push_back_reserved(
+                traversal_context_t {executor.stream(stream_of_(executor, shard)).handle.share()});
             if (!traversals.back()) return status_t::bad_alloc_k;
         }
+        return status_t::success_k;
+    }
+
+    /** Lands the keys of @p rows rows appended at @p first on shard @p shard, row @c r taking
+     *  @p key_of (r): written to the key column and entered into the locator map. */
+    template <typename key_of_type_>
+    status_t land_rows_(std::size_t shard, std::size_t first, std::size_t rows, key_of_type_&& key_of) noexcept {
+        shard_t& one = shards_[shard];
+        if (status_t const covered = one.keys.cover(first + rows); failed(covered)) return covered;
+        auto [seats, seat_status] = locators_of_key_.claim(rows);
+        if (failed(seat_status)) return seat_status;
+        std::size_t written = 0;
+        one.keys.for_each_span({first, first + rows}, [&](std::span<key_t> run) noexcept {
+            for (key_t& key : run) key = key_of(written++);
+        });
+        for (std::size_t row = first; row != first + rows; ++row)
+            locators_of_key_.insert(seats, one.keys[row], key_locator_t {shard, static_cast<node_id_t>(row)});
         return status_t::success_k;
     }
 
@@ -1510,6 +1619,7 @@ struct vram_apple_indexes {
         // Vetted before anything is claimed or carved; the shards would refuse only after the
         // landing had been sized for a doomed call.
         if (queries.columns != dimensions()) return {{}, status_t::config_mismatch_k};
+        config.count = static_cast<typename index_t::small_size_t>(keys.extent(1));
 
         // The host landing: every shard's matches, one wide matrix each, shard columns side by
         // side; never zeroed, since only columns a landed shard wrote are ever read. One row of
@@ -1551,7 +1661,7 @@ struct vram_apple_indexes {
 
     /** Claims @p executor, opens one context per shard, snapshots the shards' visible rows, submits
      *  @p submit under its snapshot on every shard before awaiting any, hands each shard and its
-     *  context to @p merge as its queue lands - whichever lands first, so one merge overlaps the
+     *  context to @p merge as its stream lands - whichever lands first, so one merge overlaps the
      *  other walks - and sums the telemetry & the rows' @p counts; the first refusal is the one
      *  kept. */
     template <typename submit_type_, typename merge_type_>
@@ -1868,7 +1978,7 @@ struct vram_apple_indexes {
         return status_t::success_k;
     }
 
-    /** Takes the two holds a load runs under - the executor's queues and the insertion gate - and
+    /** Takes the two holds a load runs under - the executor's streams and the insertion gate - and
      *  checks emptiness beneath them, where no batch can land before the load does. */
     status_t gate_load_(load_plan_t& plan, executor_t& executor) noexcept {
         auto [claim, claim_status] = executor.claim();

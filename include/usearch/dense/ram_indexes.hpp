@@ -619,62 +619,109 @@ struct ram_indexes {
     template <typename progress_type_ = dummy_progress_t>
     expected<refine_result_t> refine(executor_t& executor, refine_config_t config = {},
                                      progress_type_&& on_visited = {}) noexcept {
-        std::size_t const shards = shards_.size();
-        if (!shards) return {{}, status_t::uninitialized_k};
+        if (shards_.empty()) return {{}, status_t::uninitialized_k};
         auto [executor_claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
-
-        // A re-selection walks like any other query, so it sizes like one; the arenas rewind before the bitsets land.
-        insert_config_t const walk_config {config.expansion_factor};
-        if (status_t const sized = executor.reserve(shards_[0].index->traversal_memory_usage(walk_config));
-            failed(sized))
-            return {{}, sized};
-        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
-        if (status_t const ready = reserve_traversals_(traversals, executor, walk_config); failed(ready))
-            return {{}, ready};
-        growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
-        growing_buffer<typename index_t::refine_plan_t, forkunion_allocator_t> plans {allocator_};
-        if (failed(cursors.resize(shards)) || failed(plans.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
-        for (std::size_t shard = 0; shard != shards; ++shard) {
-            auto [plan, status] = shards_[shard].index->plan_refine({0, node_id_unknown_k}, traversals[0], config);
-            if (failed(status)) return {{}, status};
-            plans.push_back_reserved(std::move(plan));
-        }
-
-        std::size_t const published = size();
-        // Every step bumps it, so it takes its own line, away from the locals every worker reads.
-        alignas(default_alignment_k) std::size_t swept = 0;
-        bool cancelled = false;
-        auto run_step = [&](std::size_t shard, typename index_t::refine_plan_t::step_t const& step, std::size_t thread,
-                            nk::matrix_span<node_id_t>) noexcept -> status_t {
-            bool const reselecting = plans[shard].reselecting();
-            if (status_t const ran = plans[shard].run(step, traversals[thread]); failed(ran)) return ran;
-            if (!reselecting) return status_t::success_k;
-            std::size_t const done = atomic_ref<std::size_t>(swept).fetch_add(step.nodes.size(),
-                                                                              std::memory_order_relaxed) +
-                                     step.nodes.size();
-            return on_visited(done, published) == continuation_t::cancel_k ? status_t::cancelled_k
-                                                                           : status_t::success_k;
+        auto const every_node = [&](std::size_t shard, traversal_context_t& traversal) noexcept {
+            return shards_[shard].index->plan_refine({0, node_id_unknown_k}, traversal, config);
         };
-        std::span<std::size_t> const cursors_span = to_writable_span(cursors);
-        status_t outcome = status_t::success_k;
-        bool pending = true;
-        while (pending) {
-            std::memset(cursors_span.data(), 0, cursors_span.size_bytes());
-            status_t const drained = drain_steps_(plans, cursors_span, executor, 0, run_step);
-            // A cancelled re-selection still advances into the heal, so a stopped pass never leaves islands.
-            if (drained == status_t::cancelled_k) cancelled = true;
-            else if (failed(drained)) {
-                outcome = drained;
-                break;
-            }
-            pending = false;
-            for (typename index_t::refine_plan_t& plan : plans) pending |= plan.advance();
-        }
+        return refine_shards_(executor, config, every_node, on_visited);
+    }
 
-        refine_result_t result;
-        for (typename index_t::refine_plan_t const& plan : plans) combine_refinement_(result, plan.finish().value);
-        return {result, failed(outcome) ? outcome : cancelled ? status_t::cancelled_k : status_t::success_k};
+    /**
+     *  @brief Moves every row of @p donor into this index: donor shard @c s appends to shard @c s
+     *      modulo the shard count with its edges rebased and its keys beside it.
+     *
+     *  A refine then re-selects every row of each shard that took an appended part, each first
+     *  walking across into the other part alone, every shard's plan drained over the threads at
+     *  once. A shard empty beforehand keeps the first part landing in it as its resident part, and
+     *  a shard left with no appended part only heals.
+     *
+     *  A donor shard crosses through one host copy of its columns, as a checkpoint does. Every row
+     *  lands and the donor empties before the refine. Appended rows publish with their keys, so
+     *  searches of this index run throughout, while emptying the donor rebuilds its shards, so
+     *  nothing may search it; insertions may not overlap on either index. The donor keeps its
+     *  shards, and an index never reserved takes its geometry.
+     *
+     *  @param[inout] donor The index giving its rows up.
+     *  @param[inout] executor The threads and their scratch.
+     *  @param[in] config The refine's knobs; zeros mean "derive from connectivity".
+     *  @retval config_mismatch_k Another metric or geometry, or @p donor being this index.
+     *  @retval others A failure while landing leaves the donor shards appended so far in both
+     *      indexes, with nothing rolled back; one while refining leaves every row here, merely
+     *      less linked.
+     */
+    expected<refine_result_t> absorb(ram_indexes& donor, executor_t& executor, refine_config_t config = {}) noexcept {
+        if (shards_.empty()) return {{}, status_t::uninitialized_k};
+        if (&donor == this || donor.kernel_ != kernel_) return {{}, status_t::config_mismatch_k};
+        std::size_t const incoming = donor.size(), shards = shards_.size();
+        if (!incoming) return {{}, status_t::success_k};
+        if (capacity() && (donor.dimensions() != dimensions() || donor.connectivity() != connectivity()))
+            return {{}, status_t::config_mismatch_k};
+        auto [executor_claim, claim_status] = executor.claim();
+        if (failed(claim_status)) return {{}, claim_status};
+        if (!capacity())
+            if (status_t const reserved =
+                    reserve({incoming, static_cast<connectivity_t>(donor.connectivity()), donor.dimensions()}).status;
+                failed(reserved))
+                return {{}, reserved};
+
+        // A save rebases one storage chunk of neighbor IDs at a time, and no chunk outgrows a slab
+        // or its shard.
+        std::size_t scratch_rows = 0;
+        for (shard_t const& one : donor.shards_) scratch_rows = max_of(scratch_rows, one.index->size());
+        scratch_rows = min_of(scratch_rows, power_of_two<std::size_t>(index_t::chunk_schedule_t::slab_rows_log2_k));
+        growing_buffer<node_id_t, forkunion_allocator_t> scratch {allocator_};
+        growing_buffer<byte_t, forkunion_allocator_t> staged {allocator_};
+        growing_buffer<iota_view<node_id_t>, forkunion_allocator_t> appended_parts {allocator_};
+        if (failed(scratch.resize_uninitialized(scratch_rows * connectivity())) ||
+            failed(appended_parts.reserve_exactly(shards)))
+            return {{}, status_t::bad_alloc_k};
+        for (shard_t const& one : shards_)
+            appended_parts.push_back_reserved(
+                {static_cast<node_id_t>(one.index->size()), static_cast<node_id_t>(one.index->size())});
+        for (std::size_t from = 0; from != donor.shards_.size(); ++from) {
+            index_t& source = *donor.shards_[from].index;
+            std::size_t const into = from % shards, rows = source.size();
+            if (!rows) continue;
+            std::size_t const vectors_bytes = rows * index_t::stored_row_values(source.geometry()) * sizeof(scalar_t);
+            std::size_t const neighbors_bytes = rows * connectivity() * sizeof(node_id_t);
+            std::size_t const norms_bytes = source.stores_norms() ? rows * sizeof(typename index_t::vector_norms_t) : 0;
+            if (failed(staged.resize_uninitialized(vectors_bytes + neighbors_bytes + norms_bytes)))
+                return {{}, status_t::bad_alloc_k};
+            bytes_span_t const bytes = to_writable_span(staged);
+            typename index_t::columns_t const columns {bytes.first(vectors_bytes),
+                                                       bytes.subspan(vectors_bytes, neighbors_bytes),
+                                                       bytes.subspan(vectors_bytes + neighbors_bytes)};
+            if (status_t const saved = source.save(columns, synchronization_t::immutable_k,
+                                                   {scratch.data(), scratch_rows, connectivity()});
+                failed(saved))
+                return {{}, saved};
+            auto [plan, status] = shards_[into].index->plan_load({columns.vectors, columns.neighbors, columns.norms},
+                                                                 rows, {0, static_cast<node_id_t>(rows)});
+            if (failed(status)) return {{}, status};
+            for (typename index_t::load_plan_t::step_t const step : plan.steps())
+                if (status_t const loaded = plan.load(step); failed(loaded)) return {{}, loaded};
+            keys_column_t& keys = donor.shards_[from].keys;
+            if (status_t const landed = land_rows_(into, plan.base, rows,
+                                                   [&](std::size_t row) noexcept { return keys[row]; });
+                failed(landed))
+                return {{}, landed};
+            appended_parts[into].bound = static_cast<node_id_t>(plan.base + rows);
+            // An empty shard keeps its first part resident, so later parts still walk across.
+            if (!plan.base) appended_parts[into].first = appended_parts[into].bound;
+            if (status_t const finished = plan.finish(); failed(finished)) return {{}, finished};
+        }
+        if (status_t const cleared = donor.clear(); failed(cleared)) return {{}, cleared};
+        // A shard that took an appended part refines every row across its appended base; one that
+        // took none only heals.
+        auto const across_plan = [&](std::size_t shard, traversal_context_t& traversal) noexcept {
+            iota_view<node_id_t> const appended = appended_parts[shard];
+            iota_view<node_id_t> const nodes = appended.empty() ? appended
+                                                                : iota_view<node_id_t> {0, node_id_unknown_k};
+            return shards_[shard].index->plan_refine(nodes, traversal, config, appended.first);
+        };
+        return refine_shards_(executor, config, across_plan, dummy_progress_t {});
     }
 
 #pragma endregion Refinement
@@ -1347,25 +1394,16 @@ struct ram_indexes {
                     std::size_t const rows = landing.rows.size();
                     if (landing.shard != shard || !rows) continue;
                     part_t const& part = parts_[landing.part];
-                    keys_column_t& keys = owner_->shards_[shard].keys;
-                    if (status_t const covered = keys.cover(first + rows); failed(covered)) return covered;
-                    auto [seats, seat_status] = owner_->locators_of_key_.claim(rows);
-                    if (failed(seat_status)) return seat_status;
-                    // The key column is chunked, so the part's keys land run by run, each widened.
                     std::size_t const stored_bytes = part.header.key.row_bytes();
                     bytes_view_t const part_keys = part.header.rows_of(part.monolith, part.header.key,
                                                                        landing.rows.first, rows);
                     if (part_keys.size() != rows * stored_bytes) return status_t::malformed_k;
-                    byte_t const* stored = part_keys.data();
-                    keys.for_each_span({first, first + rows}, [&](std::span<key_t> run) noexcept {
-                        for (key_t& key : run) {
-                            key = safegraphs_widened_key<key_t>(stored, part.header.key.dtype);
-                            stored += stored_bytes;
-                        }
-                    });
-                    for (std::size_t row = 0; row != rows; ++row)
-                        owner_->locators_of_key_.insert(seats, keys[first + row],
-                                                        key_locator_t {shard, static_cast<node_id_t>(first + row)});
+                    auto const key_of = [&](std::size_t row) noexcept {
+                        return safegraphs_widened_key<key_t>(part_keys.data() + row * stored_bytes,
+                                                             part.header.key.dtype);
+                    };
+                    if (status_t const landed = owner_->land_rows_(shard, first, rows, key_of); failed(landed))
+                        return landed;
                     first += rows;
                 }
                 if (status_t const finished = plans_[shard].finish(); failed(finished)) return finished;
@@ -1520,9 +1558,11 @@ struct ram_indexes {
      *      truncated, so the caller resizes and asks again; zero means absent.
      *
      *  Rows at least as wide as the index take its columns and keep their tails. Safe against
-     *  concurrent insertions, which only ever add.
+     *  concurrent insertions, which only ever add. The executor rides in the signature unused,
+     *  since one key's rows copy on the calling thread, so a caller drives a host index exactly as
+     *  it drives a device one.
      */
-    std::size_t get(key_t const& key, rows_span_t vectors, std::size_t wanted) const noexcept {
+    std::size_t get(key_t const& key, rows_span_t vectors, std::size_t wanted, executor_t&) const noexcept {
         rows_span_t const target {vectors.data, vectors.rows, dimensions(), vectors.stride, vectors.dtype};
         std::size_t total = 0;
         locators_of_key_.find_each(key, [&](key_locator_t locator) noexcept {
@@ -1585,7 +1625,7 @@ struct ram_indexes {
         auto [executor_claim, claim_status] = executor.claim();
         if (failed(claim_status)) return claim_status;
         return executor.for_tasks(keys.size(), [&](std::size_t position, std::size_t, std::size_t) noexcept {
-            entries[position] = get(keys[position], vectors.slice(position * wanted, wanted), wanted);
+            entries[position] = get(keys[position], vectors.slice(position * wanted, wanted), wanted, executor);
         });
     }
 
@@ -1653,9 +1693,88 @@ struct ram_indexes {
         return status_t::success_k;
     }
 
+    /** Lands the keys of @p rows rows appended at @p first on shard @p shard, row @c r taking
+     *  @p key_of (r): written to the key column and entered into the locator map. */
+    template <typename key_of_type_>
+    status_t land_rows_(std::size_t shard, std::size_t first, std::size_t rows, key_of_type_&& key_of) noexcept {
+        shard_t& one = shards_[shard];
+        if (status_t const covered = one.keys.cover(first + rows); failed(covered)) return covered;
+        auto [seats, seat_status] = locators_of_key_.claim(rows);
+        if (failed(seat_status)) return seat_status;
+        std::size_t written = 0;
+        one.keys.for_each_span({first, first + rows}, [&](std::span<key_t> run) noexcept {
+            for (key_t& key : run) key = key_of(written++);
+        });
+        for (std::size_t row = first; row != first + rows; ++row)
+            locators_of_key_.insert(seats, one.keys[row], key_locator_t {shard, static_cast<node_id_t>(row)});
+        return status_t::success_k;
+    }
+
 #pragma endregion Insertion
 
 #pragma region Health
+
+    /** Drains the @c refine_plan_t that @p plan_of (s, traversal) opens on every shard @c s over
+     *  the threads, phase by phase, under the claim the caller holds; @p on_visited answers as in
+     *  @ref refine. */
+    template <typename plan_of_type_, typename progress_type_>
+    expected<refine_result_t> refine_shards_(executor_t& executor, refine_config_t config, plan_of_type_ const& plan_of,
+                                             progress_type_&& on_visited) noexcept {
+        std::size_t const shards = shards_.size();
+        // A re-selection walks like any other query, so it sizes like one; the arenas rewind before
+        // the bitsets land.
+        insert_config_t const walk_config {config.expansion_factor};
+        if (status_t const sized = executor.reserve(shards_[0].index->traversal_memory_usage(walk_config));
+            failed(sized))
+            return {{}, sized};
+        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
+        if (status_t const ready = reserve_traversals_(traversals, executor, walk_config); failed(ready))
+            return {{}, ready};
+        growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
+        growing_buffer<typename index_t::refine_plan_t, forkunion_allocator_t> plans {allocator_};
+        if (failed(cursors.resize(shards)) || failed(plans.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
+        for (std::size_t shard = 0; shard != shards; ++shard) {
+            auto [plan, status] = plan_of(shard, traversals[0]);
+            if (failed(status)) return {{}, status};
+            plans.push_back_reserved(std::move(plan));
+        }
+
+        std::size_t const published = size();
+        // Every step bumps it, so it takes its own line, away from the locals every worker reads.
+        alignas(default_alignment_k) std::size_t swept = 0;
+        bool cancelled = false;
+        auto run_step = [&](std::size_t shard, typename index_t::refine_plan_t::step_t const& step, std::size_t thread,
+                            nk::matrix_span<node_id_t>) noexcept -> status_t {
+            bool const reselecting = plans[shard].reselecting();
+            if (status_t const ran = plans[shard].run(step, traversals[thread]); failed(ran)) return ran;
+            if (!reselecting) return status_t::success_k;
+            std::size_t const done = atomic_ref<std::size_t>(swept).fetch_add(step.nodes.size(),
+                                                                              std::memory_order_relaxed) +
+                                     step.nodes.size();
+            return on_visited(done, published) == continuation_t::cancel_k ? status_t::cancelled_k
+                                                                           : status_t::success_k;
+        };
+        std::span<std::size_t> const cursors_span = to_writable_span(cursors);
+        status_t outcome = status_t::success_k;
+        bool pending = true;
+        while (pending) {
+            std::memset(cursors_span.data(), 0, cursors_span.size_bytes());
+            status_t const drained = drain_steps_(plans, cursors_span, executor, 0, run_step);
+            // A cancelled re-selection still advances into the heal, so a stopped pass never
+            // leaves islands.
+            if (drained == status_t::cancelled_k) cancelled = true;
+            else if (failed(drained)) {
+                outcome = drained;
+                break;
+            }
+            pending = false;
+            for (typename index_t::refine_plan_t& plan : plans) pending |= plan.advance();
+        }
+
+        refine_result_t result;
+        for (typename index_t::refine_plan_t const& plan : plans) combine_refinement_(result, plan.finish().value);
+        return {result, failed(outcome) ? outcome : cancelled ? status_t::cancelled_k : status_t::success_k};
+    }
 
     /** Folds one shard's pass into the index's: counts add, and the depth is the deepest shard's. */
     static void combine_refinement_(refine_result_t& into, refine_result_t const& one) noexcept {

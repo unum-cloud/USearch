@@ -119,7 +119,7 @@ struct metal_arguments_t {
     u32_t sampling_bound = 0, queries_count = 0, count = 0, epoch_base = 0;
     u32_t visited_slots = 0, hash_shift = 0, cache_rows = 0, slice_bytes = 0;
     u32_t heads_count = 0, row_fragments_magic = 0, use_node_ids = 0, expansion = 0;
-    u32_t tail_entries = 0, first_guest = 0;
+    u32_t tail_entries = 0, appended_base = 0;
 };
 
 /** The counter words a launch binds: the batch's assigned rows, the published rows, the changed
@@ -660,30 +660,64 @@ struct vram_apple_index {
      *      ones it holds, then heals whatever no search can reach. An empty range heals.
      *
      *  The walk lands the re-selection in a shadow matrix that replaces the walked rows once the
-     *  device finishes; unlike the CUDA pass no reverse merge follows, since the heal's audit and
+     *  device finishes; unlike the CUDA pass no back-link merge follows, since the heal's audit and
      *  reconnection, run on the host over unified memory, restore whatever a re-selection strands.
+     *
+     *  An @p appended_base inside the published IDs splits the rows into two parts no edge joins,
+     *  the resident part below it and the appended part from it on, as a shard that absorbed
+     *  another's rows holds them. Each node of @p nodes then first walks across into the other part
+     *  alone, from an empty pool and landmarks drawn there, before its own neighbors and the whole
+     *  graph, and re-selects from the union. The live graph stays as it was through the walks, so a
+     *  walk across never leaves the other part, and the heal's passes walk no part first.
+     *
      *  Demands an exclusive caller.
      */
     expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
-                                     refine_config_t config = {}) noexcept {
-        return refine_(nodes, 0, context, config);
-    }
+                                     refine_config_t config = {}, node_id_t appended_base = 0) noexcept {
+        std::unique_lock batch {batch_};
+        std::size_t const rows = size();
+        refine_result_t result;
+        auto add_walks = [&](refine_result_t const& walked) noexcept {
+            result.visited_nodes += walked.visited_nodes;
+            result.changed_nodes += walked.changed_nodes;
+            result.visited_members += walked.visited_members;
+            result.computed_distances += walked.computed_distances;
+            result.restarts += walked.restarts;
+        };
+        node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
+        if (nodes.first < bound) {
+            auto const [walked, status] = refine_pass_(context, config, {nodes.first, bound}, {},
+                                                       appended_base < rows ? appended_base : 0);
+            if (failed(status)) return {result, status};
+            add_walks(walked);
+        }
+        if (!rows) return {result, status_t::success_k};
 
-    /**
-     *  @brief Links two parts no edge joins, the rows below @p first_guest and the rows from it on,
-     *      as a shard that absorbed another's rows holds them.
-     *
-     *  One @c refine pass runs over every row, in which each node first walks the other part alone,
-     *  from an empty pool and landmarks drawn there, then its own neighbors and the whole graph,
-     *  and re-selects from the union.
-     *
-     *  The heal runs as in @c refine. The live graph stays as it was through the walks, so a cross
-     *  walk never leaves the other part. With no row on either side of @p first_guest it is a plain
-     *  @c refine of every row.
-     */
-    expected<refine_result_t> stitch(node_id_t first_guest, traversal_context_t& context,
-                                     refine_config_t config = {}) noexcept {
-        return refine_({0, node_id_unknown_k}, first_guest < size() ? first_guest : 0, context, config);
+        audit_t audit;
+        if (failed(audit.reached.resize(rows)) || failed(audit.frontier.resize(rows)) ||
+            failed(audit.next_frontier.resize(rows)) || failed(audit.islands.reserve_exactly(rows)))
+            return {result, status_t::bad_alloc_k};
+        audit_(audit);
+        result.sweeps += audit.sweeps;
+        result.islands_found = audit.islands.size();
+        for (std::size_t islands_before = audit.islands.size(); !audit.islands.empty();) {
+            auto const [healed, healed_status] = refine_pass_(
+                context, config, {0, static_cast<node_id_t>(audit.islands.size())}, to_span(audit.islands));
+            if (failed(healed_status)) return {result, healed_status};
+            add_walks(healed);
+            audit_(audit);
+            result.sweeps += audit.sweeps;
+            if (audit.islands.empty()) break;
+            result.islands_reconnected += reconnect_(audit);
+            audit_(audit);
+            result.sweeps += audit.sweeps;
+            // A round that frees no island frees none on the next either, since the picks it needs
+            // are unreached.
+            if (audit.islands.size() >= islands_before) break;
+            islands_before = audit.islands.size();
+        }
+        result.reachable_nodes = rows - audit.islands.size();
+        return {result, status_t::success_k};
     }
 
     /** Measures forward reachability from as many stride-spread landmarks as one search draws, on
@@ -1573,62 +1607,13 @@ struct vram_apple_index {
 
 #pragma region Refinement Passes
 
-    /** @c refine over @p nodes, and @c stitch when @p first_guest splits the rows in two: the pass
-     *  over the range, then the heal, whose passes walk no part first. */
-    expected<refine_result_t> refine_(iota_view<node_id_t> nodes, node_id_t first_guest, traversal_context_t& context,
-                                      refine_config_t config) noexcept {
-        std::unique_lock batch {batch_};
-        std::size_t const rows = size();
-        refine_result_t result;
-        auto add_walks = [&](refine_result_t const& walked) noexcept {
-            result.visited_nodes += walked.visited_nodes;
-            result.changed_nodes += walked.changed_nodes;
-            result.visited_members += walked.visited_members;
-            result.computed_distances += walked.computed_distances;
-            result.restarts += walked.restarts;
-        };
-        node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
-        if (nodes.first < bound) {
-            auto const [walked, status] = refine_pass_(context, config, {nodes.first, bound}, {}, first_guest);
-            if (failed(status)) return {result, status};
-            add_walks(walked);
-        }
-        if (!rows) return {result, status_t::success_k};
-
-        audit_t audit;
-        if (failed(audit.reached.resize(rows)) || failed(audit.frontier.resize(rows)) ||
-            failed(audit.next_frontier.resize(rows)) || failed(audit.islands.reserve_exactly(rows)))
-            return {result, status_t::bad_alloc_k};
-        audit_(audit);
-        result.sweeps += audit.sweeps;
-        result.islands_found = audit.islands.size();
-        for (std::size_t islands_before = audit.islands.size(); !audit.islands.empty();) {
-            auto const [healed, healed_status] = refine_pass_(
-                context, config, {0, static_cast<node_id_t>(audit.islands.size())}, to_span(audit.islands));
-            if (failed(healed_status)) return {result, healed_status};
-            add_walks(healed);
-            audit_(audit);
-            result.sweeps += audit.sweeps;
-            if (audit.islands.empty()) break;
-            result.islands_reconnected += reconnect_(audit);
-            audit_(audit);
-            result.sweeps += audit.sweeps;
-            // A round that frees no island frees none on the next either, since the picks it needs
-            // are unreached.
-            if (audit.islands.size() >= islands_before) break;
-            islands_before = audit.islands.size();
-        }
-        result.reachable_nodes = rows - audit.islands.size();
-        return {result, status_t::success_k};
-    }
-
     /** Re-selects @p nodes, or the IDs @p node_ids lists with @p nodes spanning its offsets, into a
-     *  shadow matrix on the device, each node walking the part @p first_guest splits off first when
-     *  it is nonzero, then lands every walked row in the live matrix and counts the rows that
-     *  changed. */
+     *  shadow matrix on the device, each node first walking across into the other part when
+     *  @p appended_base is nonzero, then lands every walked row in the live matrix and counts the
+     *  rows that changed. */
     expected<refine_result_t> refine_pass_(traversal_context_t& context, refine_config_t config,
                                            iota_view<node_id_t> nodes, std::span<u32_t const> node_ids,
-                                           node_id_t first_guest = 0) noexcept {
+                                           node_id_t appended_base = 0) noexcept {
         std::size_t const rows = size();
         if (!rows || nodes.first >= nodes.bound) return {{}, status_t::success_k};
         if (!dimensions_) return {{}, status_t::uninitialized_k};
@@ -1644,8 +1629,8 @@ struct vram_apple_index {
         if (ids_bytes) std::memcpy(context.staging_.host, node_ids.data(), ids_bytes);
         u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
         u32_t const pool_slots = walk_slots_(expansion, 4);
-        // A stitch walks twice into one visited set, so its slice is shaped for both walks.
-        u32_t const walks = first_guest ? 2 : 1;
+        // Walking across makes two walks into one visited set, so the slice is shaped for both.
+        u32_t const walks = appended_base ? 2 : 1;
         metal_arguments_t arguments = arguments_();
         if (status_t const sized = shape_arena_(context, arguments,
                                                 walk_arena_shape_(expansion * walks, pool_slots * walks, cache_rows_k),
@@ -1657,7 +1642,7 @@ struct vram_apple_index {
         arguments.end_id = nodes.bound;
         arguments.sampling_bound = static_cast<u32_t>(rows);
         arguments.use_node_ids = node_ids.empty() ? 0 : 1;
-        arguments.first_guest = first_guest;
+        arguments.appended_base = appended_base;
         reset_counters_(counters_);
 
         status_t launched = status_t::device_error_k;

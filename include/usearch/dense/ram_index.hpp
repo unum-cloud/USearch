@@ -1456,14 +1456,14 @@ struct ram_index {
 
         /** An unbound pass over @p audit - what a refused plan answers with. */
         explicit refine_plan_t(health_plan_t&& audit) noexcept : audit(std::move(audit)) {}
-        refine_plan_t(ram_index& index, health_plan_t&& audit, iota_view<node_id_t> nodes,
+        refine_plan_t(ram_index& index, health_plan_t&& audit, iota_view<node_id_t> nodes, node_id_t appended_base,
                       std::size_t expansion_factor) noexcept
-            : audit(std::move(audit)), index_(&index), nodes_(nodes), expansion_factor_(expansion_factor),
-              phase_(nodes.empty() ? phase_t::sweep_k : phase_t::reselect_k) {}
+            : audit(std::move(audit)), index_(&index), nodes_(nodes), appended_base_(appended_base),
+              expansion_factor_(expansion_factor), phase_(nodes.empty() ? phase_t::sweep_k : phase_t::reselect_k) {}
         refine_plan_t(refine_plan_t&& other) noexcept
             : audit(std::move(other.audit)), index_(std::exchange(other.index_, nullptr)), nodes_(other.nodes_),
-              expansion_factor_(other.expansion_factor_), phase_(other.phase_), swept_after_(other.swept_after_),
-              islands_before_(other.islands_before_), tally_(other.tally_) {}
+              appended_base_(other.appended_base_), expansion_factor_(other.expansion_factor_), phase_(other.phase_),
+              swept_after_(other.swept_after_), islands_before_(other.islands_before_), tally_(other.tally_) {}
         refine_plan_t(refine_plan_t const&) = delete;
         refine_plan_t& operator=(refine_plan_t const&) = delete;
 
@@ -1561,9 +1561,11 @@ struct ram_index {
             std::size_t const restarts_before = context.restarts;
             std::size_t const saturated_walks_before = context.saturated_walks;
             std::size_t visited = 0, changed = 0;
+            // Only the planned range walks across; the heal rounds re-select as a plain pass does.
+            node_id_t const appended_base = phase_ == phase_t::reselect_k ? appended_base_ : 0;
             for (node_id_t node_id = step.nodes.first; node_id < step.nodes.bound; ++node_id) {
                 if (phase_ == phase_t::reselect_islands_k && audit.reached(node_id)) continue;
-                changed += index_->refine_one_(node_id, audit.visible, expansion_factor_, context);
+                changed += index_->refine_one_(node_id, audit.visible, appended_base, expansion_factor_, context);
                 ++visited;
             }
             add_(tally_.visited_nodes, visited);
@@ -1641,6 +1643,9 @@ struct ram_index {
         /** The IDs the first phase re-selects, clamped to the audit's watermark. */
         iota_view<node_id_t> nodes_;
 
+        /** The first row of the appended part, every row below it resident; zero for no parts. */
+        node_id_t appended_base_ = 0;
+
         /** Breadth of every re-selection walk. */
         std::size_t expansion_factor_ = 0;
 
@@ -1657,16 +1662,26 @@ struct ram_index {
         refine_result_t tally_;
     };
 
-    /** Opens a refinement pass over @p nodes, clamped to the published IDs, with a fresh audit seeded like
-     *  @ref plan_health; an empty range heals alone. The bitsets come from @p context 's allocator. */
+    /**
+     *  @brief Opens a refinement pass over @p nodes, clamped to the published IDs, with a fresh
+     *      audit seeded like @ref plan_health; an empty range heals alone. The bitsets come from
+     *      @p context 's allocator.
+     *
+     *  An @p appended_base inside the published IDs splits the rows into the resident part below it
+     *  and the appended part from it on: every node of @p nodes first walks across into the other
+     *  part alone, the resident rows into the appended part and the appended rows into the resident
+     *  one, then re-selects as a plain pass does from that walk's pool and its own. A part whose
+     *  neighbors all stay inside it is then seen from the other, which a walk seeded by those
+     *  neighbors never reaches.
+     */
     expected<refine_plan_t> plan_refine(iota_view<node_id_t> nodes, traversal_context_t& context,
-                                        refine_config_t config = {}) noexcept {
+                                        refine_config_t config = {}, node_id_t appended_base = 0) noexcept {
         auto [audit, status] = plan_health(context);
         if (failed(status)) return {refine_plan_t {std::move(audit)}, status};
         if (!geometry()) return {refine_plan_t {std::move(audit)}, status_t::uninitialized_k};
         node_id_t const bound = min_of(nodes.bound, audit.visible);
         iota_view<node_id_t> const planned {min_of(nodes.first, bound), bound};
-        return {refine_plan_t {*this, std::move(audit), planned, non_zero_expansion_factor(config)},
+        return {refine_plan_t {*this, std::move(audit), planned, appended_base, non_zero_expansion_factor(config)},
                 status_t::success_k};
     }
 
@@ -3026,10 +3041,13 @@ struct ram_index {
      *  @brief One node's re-selection: its neighbors seed the walk, the insertion's own selection
      *      picks the new ones, the rewrite runs under the node's lock, and every kept neighbor is
      *      back-linked. No distance math runs under a lock.
+     *
+     *  Under a nonzero @p appended_base, a walk across into the other part alone fills the pool
+     *  first.
      *  @return Whether the new neighbors differ as a set from the ones read.
      */
-    bool refine_one_(node_id_t node_id, node_id_t first_invisible_id, std::size_t expansion_factor,
-                     traversal_context_t& context) noexcept {
+    bool refine_one_(node_id_t node_id, node_id_t first_invisible_id, node_id_t appended_base,
+                     std::size_t expansion_factor, traversal_context_t& context) noexcept {
         std::size_t const node_connectivity = connectivity();
         location_t const location = chunk_schedule_t::locate(node_id);
         vector_view_t const own_vector = vector_for(location);
@@ -3043,6 +3061,14 @@ struct ram_index {
         context.frontier.clear();
         context.visited.clear();
         [[maybe_unused]] membership_t const self_marked = context.visited.insert(node_id);
+        // The pass rewires both parts in place meanwhile, so only the admission keeps this walk
+        // inside the other.
+        part_admission_t const across = node_id < appended_base
+                                            ? part_admission_t {appended_base, first_invisible_id}
+                                            : part_admission_t {0, min_of(appended_base, first_invisible_id)};
+        if (across.first_id < across.first_invisible_id &&
+            failed(search_around(own_vector, own_norms, across, expansion_factor, context, context.results)))
+            ++context.saturated_walks;
         small_size_t const staged_count = stage_neighbors_(own_neighbors, node_id, context);
         std::span<node_id_t const> const seeds {context.staged_ids.data(), staged_count};
         if (failed(search_around(own_vector, own_norms, snapshot_admission_t {first_invisible_id}, expansion_factor,
@@ -3322,7 +3348,30 @@ struct ram_index {
         /** Whether the walk may locate @p node_id. */
         bool admits(node_id_t node_id) const noexcept { return node_id < first_invisible_id; }
 
+        /** Landmarks come from the IDs from this one on. */
+        node_id_t sampling_first() const noexcept { return 0; }
+
         /** Landmarks come from the IDs below this bound, the snapshot. */
+        node_id_t sampling_bound() const noexcept { return first_invisible_id; }
+    };
+
+    /** What a walk across walks: one part's published IDs alone, whatever the pass rewires
+     *  meanwhile. */
+    struct part_admission_t {
+
+        /** The part's first ID. */
+        node_id_t first_id = 0;
+
+        /** One past the part's last ID, which the walk treats as its watermark snapshot. */
+        node_id_t first_invisible_id = 0;
+
+        /** Whether the walk may locate @p node_id. */
+        bool admits(node_id_t node_id) const noexcept { return node_id >= first_id && node_id < first_invisible_id; }
+
+        /** Landmarks come from the part alone, from its first ID on. */
+        node_id_t sampling_first() const noexcept { return first_id; }
+
+        /** Landmarks come from the part alone, below its bound. */
         node_id_t sampling_bound() const noexcept { return first_invisible_id; }
     };
 
@@ -3350,6 +3399,9 @@ struct ram_index {
             return index->neighbors_for(chunk_schedule_t::locate(candidate_id)).peek_first() != node_id_unknown_k;
         }
 
+        /** Landmarks come from the IDs from this one on. */
+        node_id_t sampling_first() const noexcept { return 0; }
+
         /** Landmarks come from the IDs below this bound, every one dispensed ahead of the walking row, which
          *  rows wired in dispensed order have mostly published. */
         node_id_t sampling_bound() const noexcept { return node_id; }
@@ -3362,8 +3414,8 @@ struct ram_index {
      *      @c sated_k once the fold asks the walk to end - the last two end the walk rather than
      *      failing it. A failed status means scratch could not grow.
      *
-     *  Uniform draws that collide with @c visited fall back to cyclic linear probing below the
-     *  bound @p admission sets, so every call makes strict progress without retry budgets. Only
+     *  Uniform draws that collide with @c visited fall back to cyclic linear probing within the
+     *  range @p admission sets, so every call makes strict progress without retry budgets. Only
      *  transiently locked nodes are re-rolled, like the traversal itself; past the snapshot a row
      *  may stay unpublished for the whole walk, so those re-rolls stop once they outnumber the IDs
      *  there.
@@ -3389,9 +3441,9 @@ struct ram_index {
             return {walk_step_t::exhausted_k, seen};
         // `visited` may also hold IDs no draw names, like an insertion's later siblings, so the size
         // check is conservative: it can only under-sample, never let the probe loop spin.
-        node_id_t const sampling_bound = admission.sampling_bound();
+        node_id_t const sampling_first = admission.sampling_first(), sampling_bound = admission.sampling_bound();
         node_id_t unpublished_draws = 0;
-        while (landmarks_in_batch != landmarks_ids.size() && visited.size() < sampling_bound) {
+        while (landmarks_in_batch != landmarks_ids.size() && visited.size() < sampling_bound - sampling_first) {
             // Caller-staged seeds go first, each taken once and skipped when unpublished or
             // already visited; past them, draw uniformly and probe forward cyclically.
             node_id_t landmark_node_id;
@@ -3401,9 +3453,10 @@ struct ram_index {
                 if (!admission.admits(landmark_node_id) || visited.contains(landmark_node_id)) continue;
             }
             else {
-                landmark_node_id = uniform_below<node_id_t> {sampling_bound}(context.random_generator);
+                landmark_node_id = sampling_first +
+                                   uniform_below<node_id_t> {sampling_bound - sampling_first}(context.random_generator);
                 while (visited.contains(landmark_node_id))
-                    landmark_node_id = landmark_node_id + 1 == sampling_bound ? 0 : landmark_node_id + 1;
+                    landmark_node_id = landmark_node_id + 1 == sampling_bound ? sampling_first : landmark_node_id + 1;
             }
 
             location_t const landmark_location = chunk_schedule_t::locate(landmark_node_id);

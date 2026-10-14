@@ -211,7 +211,7 @@ struct cuda_refine_t {
     u32_t* assigned_rows = nullptr;
     u32_t const* node_ids = nullptr;
     u32_t sampling_bound = 0;
-    u32_t first_guest = 0;
+    u32_t appended_base = 0;
 };
 
 /** A search's landing, mirroring the shared search sink. */
@@ -332,8 +332,8 @@ enum class cuda_kernel_t : u32_t {
     search_indexer_k,
     multiply_k,
     attend_k,
-    merge_links_k,
-    scatter_links_k,
+    merge_back_links_k,
+    scatter_back_links_k,
     derive_norms_k,
     mark_seeds_k,
     reachability_sweep_k,
@@ -383,8 +383,8 @@ inline constexpr cuda_rung_t cuda_rungs[] = {
     {cuda_kernel_t::multiply_k, 4},
     {cuda_kernel_t::multiply_k, 8},
     {cuda_kernel_t::multiply_k, 16},
-    {cuda_kernel_t::merge_links_k, 0},
-    {cuda_kernel_t::scatter_links_k, 0},
+    {cuda_kernel_t::merge_back_links_k, 0},
+    {cuda_kernel_t::scatter_back_links_k, 0},
     {cuda_kernel_t::derive_norms_k, 0},
     {cuda_kernel_t::mark_seeds_k, 0},
     {cuda_kernel_t::reachability_sweep_k, 0},
@@ -1344,37 +1344,79 @@ struct vram_nvidia_index {
      *  re-selects them and reconnects whatever stays unreached into a reached pick or the landmark
      *  covering it.
      *
+     *  An @p appended_base inside the published IDs splits the rows into two parts no edge joins,
+     *  the resident part below it and the appended part from it on, as a shard that absorbed
+     *  another's rows holds them. Each node of @p nodes then first walks across into the other part
+     *  alone, from an empty pool and landmarks drawn there, before its own neighbors and the whole
+     *  graph, and re-selects from the union. The live graph stays as it was through the walks, so a
+     *  walk across never leaves the other part, and the heal's passes walk no part first.
+     *
      *  Demands an exclusive caller: the merge writes live neighbors with plain stores. A stopped
      *  sequence of passes leaves the graph correct and merely less improved.
      *
      *  @param[in] nodes The ID range to walk; IDs at or past @c size() are skipped.
      *  @param[inout] context The driving context; its arena grows to the pass's shape.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
+     *  @param[in] appended_base The first row of the appended part; zero, or one at or past
+     *      @c size(), refines with no parts.
      */
     expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
-                                     refine_config_t config = {}) noexcept {
-        return refine_(nodes, 0, context, config);
-    }
+                                     refine_config_t config = {}, node_id_t appended_base = 0) noexcept {
+        std::size_t const rows = size();
+        refine_result_t result;
+        auto add_walks = [&](refine_result_t const& walked) noexcept {
+            result.visited_nodes += walked.visited_nodes;
+            result.changed_nodes += walked.changed_nodes;
+            result.visited_members += walked.visited_members;
+            result.computed_distances += walked.computed_distances;
+            result.restarts += walked.restarts;
+        };
+        node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
+        if (nodes.first < bound) {
+            auto const [walked, status] = refine_pass_(context, config, {nodes.first, bound}, {},
+                                                       appended_base < rows ? appended_base : 0);
+            if (failed(status)) return {result, status};
+            add_walks(walked);
+        }
+        if (!rows) return {result, status_t::success_k};
 
-    /**
-     *  @brief Links two parts no edge joins, the rows below @p first_guest and the rows from it on,
-     *      as a shard that absorbed another's rows holds them.
-     *
-     *  One @c refine pass runs over every row, in which each node first walks the other part alone,
-     *  from an empty pool and landmarks drawn there, then its own neighbors and the whole graph,
-     *  and re-selects from the union.
-     *
-     *  The scatter, the merge and the heal run as in @c refine. The live graph stays as it was
-     *  through the walks, so a cross walk never leaves the other part. With no row on either side
-     *  of @p first_guest it is a plain @c refine of every row.
-     *
-     *  @param[in] first_guest The first row of the absorbed part.
-     *  @param[inout] context The driving context; its arena grows to the pass's shape.
-     *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
-     */
-    expected<refine_result_t> stitch(node_id_t first_guest, traversal_context_t& context,
-                                     refine_config_t config = {}) noexcept {
-        return refine_({0, node_id_unknown_k}, first_guest < size() ? first_guest : 0, context, config);
+        auto [audit, reserve_status] = reserve_audit_(context, rows);
+        if (failed(reserve_status)) return {result, reserve_status};
+        u32_t islands = 0;
+        auto survey = [&]() noexcept {
+            auto const [unreached, audit_status] = audit_(context, audit);
+            islands = unreached;
+            result.sweeps += audit.sweeps;
+            return audit_status;
+        };
+        if (status_t const audited = survey(); failed(audited)) return {result, audited};
+        result.islands_found = islands;
+        for (u32_t islands_before = islands; islands;) {
+            // The island IDs replace the range: offsets below their count index them.
+            auto const [healed, healed_status] = refine_pass_(context, config, {0, islands},
+                                                              {audit.island_ids, islands});
+            if (failed(healed_status)) return {result, healed_status};
+            add_walks(healed);
+            if (status_t const audited = survey(); failed(audited)) return {result, audited};
+            if (!islands) break;
+            // The reached in-links first, so no reconnection takes the last link a reached node is
+            // found through.
+            if (cuda_fill_async(audit.in_links, 0, rows * sizeof(u32_t), context.stream()) != cuda_success_k)
+                return {result, status_t::device_error_k};
+            if (status_t const launched = launch_reconnect_islands_(audit, islands, rows, context.stream());
+                failed(launched))
+                return {result, launched};
+            if (status_t const audited = survey(); failed(audited)) return {result, audited};
+            // A round that frees no island frees none on the next either, since the picks it needs
+            // are unreached.
+            if (islands >= islands_before) break;
+            islands_before = islands;
+        }
+        auto const [reconnected, read_status] = read_counter_(audit.reconnected, context.stream());
+        if (failed(read_status)) return {result, read_status};
+        result.islands_reconnected = reconnected;
+        result.reachable_nodes = rows - islands;
+        return {result, status_t::success_k};
     }
 
     /** Measures forward reachability from as many stride-spread landmarks as one search draws -
@@ -2482,78 +2524,18 @@ struct vram_nvidia_index {
         /** The register ladder's width the walks keep, zero for the arena frontier. */
         u32_t pool_slots = 0;
 
-        /** The first guest of a stitch, zero for a plain refine. */
-        u32_t first_guest = 0;
+        /** The first row of the appended part, zero for a plain refine. */
+        u32_t appended_base = 0;
     };
 
-    /** @c refine over @p nodes, and @c stitch when @p first_guest splits the rows in two: the pass
-     *  over the range, then the heal, whose passes walk no part first. */
-    expected<refine_result_t> refine_(iota_view<node_id_t> nodes, node_id_t first_guest, traversal_context_t& context,
-                                      refine_config_t config) noexcept {
-        std::size_t const rows = size();
-        refine_result_t result;
-        auto add_walks = [&](refine_result_t const& walked) noexcept {
-            result.visited_nodes += walked.visited_nodes;
-            result.changed_nodes += walked.changed_nodes;
-            result.visited_members += walked.visited_members;
-            result.computed_distances += walked.computed_distances;
-            result.restarts += walked.restarts;
-        };
-        node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
-        if (nodes.first < bound) {
-            auto const [walked, status] = refine_pass_(context, config, {nodes.first, bound}, {}, first_guest);
-            if (failed(status)) return {result, status};
-            add_walks(walked);
-        }
-        if (!rows) return {result, status_t::success_k};
-
-        auto [audit, reserve_status] = reserve_audit_(context, rows);
-        if (failed(reserve_status)) return {result, reserve_status};
-        u32_t islands = 0;
-        auto survey = [&]() noexcept {
-            auto const [unreached, audit_status] = audit_(context, audit);
-            islands = unreached;
-            result.sweeps += audit.sweeps;
-            return audit_status;
-        };
-        if (status_t const audited = survey(); failed(audited)) return {result, audited};
-        result.islands_found = islands;
-        for (u32_t islands_before = islands; islands;) {
-            // The island IDs replace the range: offsets below their count index them.
-            auto const [healed, healed_status] = refine_pass_(context, config, {0, islands},
-                                                              {audit.island_ids, islands});
-            if (failed(healed_status)) return {result, healed_status};
-            add_walks(healed);
-            if (status_t const audited = survey(); failed(audited)) return {result, audited};
-            if (!islands) break;
-            // The reached in-links first, so no reconnection takes the last link a reached node is
-            // found through.
-            if (cuda_fill_async(audit.in_links, 0, rows * sizeof(u32_t), context.stream()) != cuda_success_k)
-                return {result, status_t::device_error_k};
-            if (status_t const launched = launch_reconnect_islands_(audit, islands, rows, context.stream());
-                failed(launched))
-                return {result, launched};
-            if (status_t const audited = survey(); failed(audited)) return {result, audited};
-            // A round that frees no island frees none on the next either, since the picks it needs
-            // are unreached.
-            if (islands >= islands_before) break;
-            islands_before = islands;
-        }
-        auto const [reconnected, read_status] = read_counter_(audit.reconnected, context.stream());
-        if (failed(read_status)) return {result, read_status};
-        result.islands_reconnected = reconnected;
-        result.reachable_nodes = rows - islands;
-        return {result, status_t::success_k};
-    }
-
-    /** The three-pass refinement engine behind @c refine() and @c stitch(): the walk covers
-     *  @p nodes, or under a device-resident @p node_ids the listed IDs with @p nodes spanning the
-     *  array's offsets, each node walking the part @p first_guest splits off first when it is
-     *  nonzero; the reverse passes re-select the walked rows and the rows they pick, and leave
-     *  every other row as it was. */
+    /** The three-pass refinement engine behind @c refine(): the walk covers @p nodes, or under a
+     *  device-resident @p node_ids the listed IDs with @p nodes spanning the array's offsets, each
+     *  node first walking across into the other part when @p appended_base is nonzero; the
+     *  back-link passes re-select the walked rows and the rows they pick, and leave every other row
+     *  as it was. */
     expected<refine_result_t> refine_pass_(traversal_context_t& context, refine_config_t config,
                                            iota_view<node_id_t> nodes, std::span<u32_t const> node_ids,
-                                           node_id_t first_guest = 0) noexcept {
+                                           node_id_t appended_base = 0) noexcept {
         std::size_t const nodes_count = size();
         if (!nodes_count) return {{}, status_t::success_k};
         if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
@@ -2589,8 +2571,8 @@ struct vram_nvidia_index {
         // kernel carries, or walked exactly past them.
         u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
         u32_t const pool_slots = pool_slots_for_(expansion, 4);
-        // A stitch walks twice into one visited set, so its slice is shaped for both walks.
-        u32_t const walks = first_guest ? 2 : 1;
+        // Walking across makes two walks into one visited set, so the slice is shaped for both.
+        u32_t const walks = appended_base ? 2 : 1;
         cuda_arena_shape_t const arena_shape = build_arena_shape_(expansion * walks, pool_slots * walks);
         std::size_t const arena_warps = static_cast<std::size_t>(device_.multiprocessor_count) *
                                         insert_blocks_per_multiprocessor_k * vram_warps_per_block_k;
@@ -2626,7 +2608,7 @@ struct vram_nvidia_index {
         launch.expansion = expansion;
         launch.epoch_base = epoch_base;
         launch.pool_slots = pool_slots;
-        launch.first_guest = first_guest;
+        launch.appended_base = appended_base;
         // A walk short of the whole graph starts from the live neighbors copied into the shadow
         // verbatim, so a row it never rewrites but one of its picks lands in merges its own
         // neighbors with the new reverse links.
@@ -2640,7 +2622,7 @@ struct vram_nvidia_index {
         // forward & reverse candidates into its final live row. A heal round over island IDs
         // re-selects the islands' own rows alone: re-judging the rows they pick would drop the
         // links that reconnected earlier islands.
-        if (status_t const launched = launch_merge_(launch, context); failed(launched)) return {{}, launched};
+        if (status_t const launched = launch_back_links_(launch, context); failed(launched)) return {{}, launched};
         // The claim counts are the completion oracle: every offset claimed means every row landed.
         u32_t claimed[2] = {};
         vram_telemetry_block_t spent = {};
@@ -2956,7 +2938,7 @@ struct vram_nvidia_index {
                             launch.claims,
                             launch.node_ids,
                             launch.nodes_count,
-                            launch.first_guest};
+                            launch.appended_base};
         return launch_(kernel_function_(cuda_kernel_t::refine_k, launch.pool_slots),
                        static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k,
                        vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, context.stream(), arguments);
@@ -2964,7 +2946,7 @@ struct vram_nvidia_index {
 
     /** Scatters the walked rows' shadow neighbors into the reverse buckets, then merges every
      *  touched row's forward and reverse candidates into its live neighbors. */
-    status_t launch_merge_(refine_launch_t const& launch, traversal_context_t& context) noexcept {
+    status_t launch_back_links_(refine_launch_t const& launch, traversal_context_t& context) noexcept {
         cuda_stream_handle_t const stream = context.stream();
         u32_t const blocks = static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k;
         cuda_arguments_t arguments {};
@@ -2979,8 +2961,8 @@ struct vram_nvidia_index {
         graph.bucket_ids = launch.buckets;
         graph.bucket_counts = launch.bucket_counts;
         graph.touched = {launch.touched};
-        if (status_t const launched = launch_(kernel_function_(cuda_kernel_t::scatter_links_k, 0), blocks, 0, stream,
-                                              arguments);
+        if (status_t const launched = launch_(kernel_function_(cuda_kernel_t::scatter_back_links_k, 0), blocks, 0,
+                                              stream, arguments);
             failed(launched))
             return launched;
         // The merge sweeps the whole ID space and skips the rows the scatter left untouched.
@@ -2998,7 +2980,7 @@ struct vram_nvidia_index {
                             nullptr,
                             launch.nodes_count,
                             0};
-        return launch_(kernel_function_(cuda_kernel_t::merge_links_k, 0), blocks,
+        return launch_(kernel_function_(cuda_kernel_t::merge_back_links_k, 0), blocks,
                        vram_warps_per_block_k * arguments.refine.scratch_bytes_per_warp, stream, arguments);
     }
 

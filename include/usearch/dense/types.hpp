@@ -264,7 +264,8 @@ inline constexpr u32_t vram_resident_blocks_per_multiprocessor_k = 3;
 inline constexpr u32_t vram_cache_rows_k = 64;
 
 /** Ceiling on concurrently in-flight candidate-vector gathers per lane - the memory-parallelism
- *  window over the @b candidate axis, never the dimension axis. */
+ *  window over the @b candidate axis; the NVIDIA index also caps the lanes sharing one row at it,
+ *  so a wide row takes more steps rather than more reductions. */
 inline constexpr u32_t vram_max_gathers_in_flight_k = 8;
 
 /** IDs the first insert wave over an empty shard admits at once; every later wave doubles, as wide

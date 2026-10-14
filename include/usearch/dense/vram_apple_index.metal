@@ -60,7 +60,7 @@ struct metal_arguments_t {
     uint sampling_bound, queries_count, count, epoch_base;
     uint visited_slots, hash_shift, cache_rows, slice_bytes;
     uint heads_count, row_fragments_magic, use_node_ids, expansion;
-    uint tail_entries, first_guest;
+    uint tail_entries, appended_base;
 };
 
 struct metal_walk_t;
@@ -1041,11 +1041,11 @@ inline void metal_refine(constant metal_arguments_t& arguments, device uint4* ve
         pool.reset(walk);
         metal_fold_t fold {};
         walk.test_and_set(node_id);
-        // A stitch walks the other part first, from landmarks there alone, as the CUDA and HIP refines do.
-        if (arguments.first_guest) {
-            bool const guest = node_id >= arguments.first_guest;
-            metal_search_ahead(walk, pool, query_norms, guest ? 0 : arguments.first_guest,
-                               guest ? arguments.first_guest : arguments.sampling_bound, arguments.sampling_bound,
+        // The walk across runs first, from the other part's landmarks alone, as the CUDA and HIP refines do.
+        if (arguments.appended_base) {
+            bool const appended = node_id >= arguments.appended_base;
+            metal_search_ahead(walk, pool, query_norms, appended ? 0 : arguments.appended_base,
+                               appended ? arguments.appended_base : arguments.sampling_bound, arguments.sampling_bound,
                                fold);
             pool.renew();
         }

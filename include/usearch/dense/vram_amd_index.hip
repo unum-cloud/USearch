@@ -94,7 +94,7 @@ __device__ __forceinline__ vram_refine_view<kit_> amd_view(amd_refine_t const& r
             refine.assigned_rows,
             refine.node_ids,
             refine.sampling_bound,
-            refine.first_guest};
+            refine.appended_base};
 }
 template <vram_quads_kit kit_>
 __device__ __forceinline__ vram_search_sink<kit_> amd_view(amd_search_sink_t const& sink) noexcept {
@@ -258,8 +258,9 @@ __device__ __forceinline__ void amd_walk_wide(vram_search_view<kit_> const& view
 /** One wavefront merges one touched node's forward and reverse candidates into its final
  *  neighbors. */
 template <vram_quads_kit kit_, vram_schedule schedule_>
-__device__ __forceinline__ void amd_merge_links(vram_refine_view<kit_> const& view, u32_t const* bucket_ids,
-                                                u32_t const* bucket_counts, u32_t bucket_width, hip_bitset_t touched) {
+__device__ __forceinline__ void amd_merge_back_links(vram_refine_view<kit_> const& view, u32_t const* bucket_ids,
+                                                     u32_t const* bucket_counts, u32_t bucket_width,
+                                                     hip_bitset_t touched) {
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ typename kit_::norms_t cache_norms[vram_warps_per_block_k][vram_cache_rows_k];
     __shared__ vram_gathered<kit_> gathered[vram_warps_per_block_k];
@@ -279,7 +280,7 @@ __device__ __forceinline__ void amd_merge_links(vram_refine_view<kit_> const& vi
         if (!amd_bitset_contains(touched, node_id)) continue;
 
         vram_telemetry_t telemetry;
-        vram_merge_links_one<kit_>( //
+        vram_merge_back_links_one<kit_>( //
             view, bucket_ids, bucket_counts, bucket_width, node_id, cache, schedule, cache_norms[warp], gathered[warp],
             telemetry, lane);
         telemetry.template flush<hip_warp_t, vram_traversal_t::searching_k>(view.telemetry, lane);
@@ -288,10 +289,10 @@ __device__ __forceinline__ void amd_merge_links(vram_refine_view<kit_> const& vi
 
 /** Scatters the walked rows' shadow neighbors in reverse, marking every row the merge
  *  re-selects. */
-__device__ __forceinline__ void amd_scatter_links(u32_t const* shadow_neighbors, u32_t rows_count, u32_t first_id,
-                                                  u32_t walk_count, u32_t const* node_ids, u32_t connectivity,
-                                                  u32_t bucket_width, u32_t* bucket_ids, u32_t* bucket_counts,
-                                                  hip_bitset_t touched) {
+__device__ __forceinline__ void amd_scatter_back_links(u32_t const* shadow_neighbors, u32_t rows_count, u32_t first_id,
+                                                       u32_t walk_count, u32_t const* node_ids, u32_t connectivity,
+                                                       u32_t bucket_width, u32_t* bucket_ids, u32_t* bucket_counts,
+                                                       hip_bitset_t touched) {
     vram_grid_warp_t const warp = vram_grid_warp<hip_warp_t>();
     for (u32_t offset = warp.index; offset < walk_count; offset += warp.count) {
         u32_t const row = node_ids ? node_ids[offset] : first_id + offset;
@@ -458,12 +459,13 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_warp_t::width_k) a
     else if constexpr (kernel == amd_kernel_t::multiply_k)
         amd_walk_rung<kit_t, slots_>(amd_view<kit_t>(arguments.search), amd_view<kit_t>(arguments.multiply_sink),
                                      vram_no_rescoring {});
-    else if constexpr (kernel == amd_kernel_t::merge_links_k)
-        amd_merge_links<kit_t, schedule_t>(amd_view<kit_t>(arguments.refine), graph.bucket_ids, graph.bucket_counts,
-                                           graph.bucket_width, graph.touched);
-    else if constexpr (kernel == amd_kernel_t::scatter_links_k)
-        amd_scatter_links(graph.neighbors, graph.rows_count, graph.first_id, graph.walk_count, graph.node_ids,
-                          graph.connectivity, graph.bucket_width, graph.bucket_ids, graph.bucket_counts, graph.touched);
+    else if constexpr (kernel == amd_kernel_t::merge_back_links_k)
+        amd_merge_back_links<kit_t, schedule_t>(amd_view<kit_t>(arguments.refine), graph.bucket_ids,
+                                                graph.bucket_counts, graph.bucket_width, graph.touched);
+    else if constexpr (kernel == amd_kernel_t::scatter_back_links_k)
+        amd_scatter_back_links(graph.neighbors, graph.rows_count, graph.first_id, graph.walk_count, graph.node_ids,
+                               graph.connectivity, graph.bucket_width, graph.bucket_ids, graph.bucket_counts,
+                               graph.touched);
     else if constexpr (kernel == amd_kernel_t::derive_norms_k)
         amd_derive_norms<kit_t>(amd_view<kit_t>(graph.storage), graph.first_id, graph.rows_count);
     else if constexpr (kernel == amd_kernel_t::mark_seeds_k)

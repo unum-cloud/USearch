@@ -243,10 +243,10 @@ __device__ __forceinline__ void cuda_refine(vram_refine_view<kit_> const& view) 
  *  re-selects. The walked rows are the range from @p first_id, or a heal round's islands listed in
  *  @p node_ids, which mark only themselves and land in no bucket; appends past @p bucket_width are
  *  counted, never written. */
-__device__ __forceinline__ void cuda_scatter_links(u32_t const* shadow_neighbors, u32_t rows_count, u32_t first_id,
-                                                   u32_t walk_count, u32_t const* node_ids, u32_t connectivity,
-                                                   u32_t bucket_width, u32_t* bucket_ids, u32_t* bucket_counts,
-                                                   cuda_bitset_t touched) {
+__device__ __forceinline__ void cuda_scatter_back_links(u32_t const* shadow_neighbors, u32_t rows_count, u32_t first_id,
+                                                        u32_t walk_count, u32_t const* node_ids, u32_t connectivity,
+                                                        u32_t bucket_width, u32_t* bucket_ids, u32_t* bucket_counts,
+                                                        cuda_bitset_t touched) {
     vram_grid_warp_t const warp = vram_grid_warp<cuda_warp_t>();
     for (u32_t offset = warp.index; offset < walk_count; offset += warp.count) {
         u32_t const row = node_ids ? node_ids[offset] : first_id + offset;
@@ -265,9 +265,9 @@ __device__ __forceinline__ void cuda_scatter_links(u32_t const* shadow_neighbors
 /** One warp merges one node's forward & reverse candidates into its final neighbors, assigning
  *  itself node IDs from the pass counter. */
 template <vram_quads_kit kit_, vram_schedule schedule_>
-__device__ __forceinline__ void cuda_merge_links(vram_refine_view<kit_> const& view, u32_t const* bucket_ids,
-                                                 u32_t const* bucket_counts, u32_t bucket_width,
-                                                 cuda_bitset_t touched) {
+__device__ __forceinline__ void cuda_merge_back_links(vram_refine_view<kit_> const& view, u32_t const* bucket_ids,
+                                                      u32_t const* bucket_counts, u32_t bucket_width,
+                                                      cuda_bitset_t touched) {
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ typename kit_::norms_t cache_norms[vram_warps_per_block_k][vram_cache_rows_k];
     __shared__ vram_gathered<kit_> gathered[vram_warps_per_block_k];
@@ -287,7 +287,7 @@ __device__ __forceinline__ void cuda_merge_links(vram_refine_view<kit_> const& v
         if (!cuda_bitset_contains(touched, node_id)) continue;
 
         vram_telemetry_t telemetry;
-        vram_merge_links_one<kit_>( //
+        vram_merge_back_links_one<kit_>( //
             view, bucket_ids, bucket_counts, bucket_width, node_id, cache, schedule, cache_norms[warp], gathered[warp],
             telemetry, lane);
         telemetry.template flush<cuda_warp_t, vram_traversal_t::searching_k>(view.telemetry, lane);
@@ -815,7 +815,7 @@ __device__ __forceinline__ vram_refine_view<kit_> cuda_view(cuda_refine_t const&
             refine.assigned_rows,
             refine.node_ids,
             refine.sampling_bound,
-            refine.first_guest};
+            refine.appended_base};
 }
 template <vram_quads_kit kit_>
 __device__ __forceinline__ vram_search_sink<kit_> cuda_view(cuda_search_sink_t const& sink) noexcept {
@@ -853,7 +853,7 @@ constexpr u32_t cuda_resident_blocks(cuda_kernel_t kernel, u32_t slots) noexcept
     switch (kernel) {
     case cuda_kernel_t::insert_k:
     case cuda_kernel_t::refine_k: return cuda_insert_blocks_per_multiprocessor_k;
-    case cuda_kernel_t::merge_links_k: return vram_resident_blocks_per_multiprocessor_k;
+    case cuda_kernel_t::merge_back_links_k: return vram_resident_blocks_per_multiprocessor_k;
     case cuda_kernel_t::search_k:
     case cuda_kernel_t::search_indexer_k:
     case cuda_kernel_t::multiply_k:
@@ -909,13 +909,13 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
             cuda_heads_rescoring<kit_t> {reinterpret_cast<typename kit_t::fragment_t const*>(heads.heads), nullptr,
                                          heads.heads_count, heads.row_fragments});
     }
-    else if constexpr (kernel == cuda_kernel_t::merge_links_k)
-        cuda_merge_links<kit_t, schedule_t>(cuda_view<kit_t>(arguments.refine), graph.bucket_ids, graph.bucket_counts,
-                                            graph.bucket_width, graph.touched);
-    else if constexpr (kernel == cuda_kernel_t::scatter_links_k)
-        cuda_scatter_links(graph.neighbors, graph.rows_count, graph.first_id, graph.walk_count, graph.node_ids,
-                           graph.connectivity, graph.bucket_width, graph.bucket_ids, graph.bucket_counts,
-                           graph.touched);
+    else if constexpr (kernel == cuda_kernel_t::merge_back_links_k)
+        cuda_merge_back_links<kit_t, schedule_t>(cuda_view<kit_t>(arguments.refine), graph.bucket_ids,
+                                                 graph.bucket_counts, graph.bucket_width, graph.touched);
+    else if constexpr (kernel == cuda_kernel_t::scatter_back_links_k)
+        cuda_scatter_back_links(graph.neighbors, graph.rows_count, graph.first_id, graph.walk_count, graph.node_ids,
+                                graph.connectivity, graph.bucket_width, graph.bucket_ids, graph.bucket_counts,
+                                graph.touched);
     else if constexpr (kernel == cuda_kernel_t::derive_norms_k)
         cuda_derive_norms<kit_t>(cuda_view<kit_t>(graph.storage), graph.first_id, graph.rows_count);
     else if constexpr (kernel == cuda_kernel_t::mark_seeds_k)

@@ -725,7 +725,7 @@ typedef struct usearch_matrix_merge_t {
 
 /**
  *  @brief Absorbs every handle in @c donors into @c index - cheaper than re-inserting their
- *      matrices one by one, wiring cross-links via landmark stitching. Donor handles are
+ *      matrices one by one, wiring cross-links by walks across from landmarks. Donor handles are
  *      consumed and must not be used afterwards, not even for @c usearch_matrix_free.
  *
  *  Readers of @c index may keep searching throughout, since unpublished entries hide behind

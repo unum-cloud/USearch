@@ -1286,15 +1286,16 @@ struct vram_refine_view {
      *  @c end_id, which under an ID array is its length. */
     u32_t sampling_bound = 0;
 
-    /** The first guest of a stitch, where the rows a shard absorbed begin: each node first walks
-     *  the other part alone. Zero for a plain refine, which has no parts. */
-    u32_t first_guest = 0;
+    /** The first row of the appended part, where the rows a shard absorbed begin: each node first
+     *  walks across into the other part alone. Zero for a plain refine, which has no parts. */
+    u32_t appended_base = 0;
 };
 
 /** Re-selects the neighbors of @p node_id: the node's own vector is the query, its current
  *  neighbors seed the walk so every one already wired competes in the re-selection, and the diverse
- *  selection lands in the shadow slots. Under a stitch the node first walks the other part from an
- *  empty pool, so that part's nearest compete too. Read-only on the live storage. */
+ *  selection lands in the shadow slots. Under an appended part the node first walks across into the
+ *  other part from an empty pool, so that part's nearest compete too. Read-only on the live
+ *  storage. */
 template <vram_quads_kit kit_, vram_schedule schedule_, typename frontier_>
 __device__ __forceinline__ void vram_refine_one( //
     vram_refine_view<kit_> const& view, node_id_t node_id, vram_visited_set<typename kit_::warp_t>& visited,
@@ -1315,13 +1316,13 @@ __device__ __forceinline__ void vram_refine_one( //
     context.frontier.reset(lane);
     visited.test_and_set(node_id, lane);
 
-    // A stitch walks the other part first, with landmarks from there alone: the live graph links no
+    // The walk across runs first, with landmarks from the other part alone: the live graph links no
     // part to the other, so the walk stays there, and its nearest would lose to the own neighbors.
-    if (view.first_guest) {
-        bool const guest = node_id >= view.first_guest;
+    if (view.appended_base) {
+        bool const appended = node_id >= view.appended_base;
         vram_search_ahead<kit_>( //
-            storage, query_span, query_state, guest ? 0 : view.first_guest,
-            guest ? view.first_guest : view.sampling_bound, view.sampling_bound, visited, gathered, context, lane);
+            storage, query_span, query_state, appended ? 0 : view.appended_base,
+            appended ? view.appended_base : view.sampling_bound, view.sampling_bound, visited, gathered, context, lane);
         context.frontier.renew();
     }
 
@@ -1379,7 +1380,7 @@ __device__ __forceinline__ void vram_for_each_link(u32_t const* neighbors, u32_t
  *  ones. The neighbors land in the live matrix with plain stores, since the pass owns the graph
  *  exclusively. The ascending scores and the kept cache positions lie past the cache's last row. */
 template <vram_quads_kit kit_, vram_schedule schedule_>
-__device__ __forceinline__ void vram_merge_links_one( //
+__device__ __forceinline__ void vram_merge_back_links_one( //
     vram_refine_view<kit_> const& view, u32_t const* bucket_ids, u32_t const* bucket_counts, u32_t bucket_width,
     node_id_t node_id, vram_vector_cache<typename kit_::fragment_t> cache, schedule_& schedule,
     typename kit_::norms_t (&cache_norms)[vram_cache_rows_k], vram_gathered<kit_>& gathered,

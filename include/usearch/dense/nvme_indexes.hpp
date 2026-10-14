@@ -34,9 +34,9 @@
  *    target keeps.
  *  - @b Build builds contiguous blocks of rows in a RAM index inside the workspace and writes their
  *    rows.
- *  - @b Select re-selects target rows by walks of the target itself, or in RAM when a whole part
+ *  - @b Re-select re-selects target rows by walks of the target itself, or in RAM when a whole part
  *    fits.
- *  - @b Reverse merges the back-links the selections spilled into bucket files on disk.
+ *  - @b Back-link merges the back-links the re-selections spilled into bucket files on disk.
  *  - @b Heal sweeps reachability from the landmarks every audit seeds from, and links islands back
  *    in.
  */
@@ -1738,11 +1738,11 @@ enum class nvme_rewrite_phase_t : u8_t {
     /** Builds one block of target rows in a RAM index and writes their neighbors. */
     build_k,
 
-    /** Re-selects target rows: guests, repaired rows, or the refined range. */
-    select_k,
+    /** Re-selects target rows: the appended part, repaired rows, or the refined range. */
+    reselect_k,
 
     /** Applies one bucket of spilled back-links. */
-    reverse_k,
+    back_link_k,
 
     /** Sweeps reachability, then links islands back in. */
     heal_k,
@@ -1842,8 +1842,8 @@ struct nvme_workspace_allocator {
 template <typename indexes_type_>
 struct nvme_rewrite_plan;
 
-/** Stitches @p sources into one target part: the largest part hosts and keeps its IDs, every other
- *  part lands after it with its edges rebased, its rows walk the target and link in, their
+/** Merges @p sources into one target part: the largest part stays resident and keeps its IDs, every
+ *  other part lands after it with its edges rebased, its rows walk the target and link in, their
  *  back-links are spilled and merged, then the target heals. The sources are borrowed until the
  *  plan dies, and the target names none of their files. */
 template <typename indexes_type_>
@@ -1868,8 +1868,8 @@ expected<nvme_rewrite_plan<indexes_type_>> plan_refine(indexes_type_ const& sour
                                                        nvme_rewrite_config_t const& config = {}) noexcept;
 
 /** Builds one graph over every row of the parts at @p sources, their neighbors ignored, in
- *  contiguous blocks the workspace holds as a RAM index, then stitches the blocks as a merge
- *  does. */
+ *  contiguous blocks the workspace holds as a RAM index, then links the later blocks across as a
+ *  merge does. */
 template <typename indexes_type_>
 expected<nvme_rewrite_plan<indexes_type_>> plan_build(std::span<std::string_view const> sources,
                                                       std::string_view target, bytes_span_t workspace,
@@ -1940,8 +1940,8 @@ struct [[nodiscard]] nvme_rewrite_plan {
         case nvme_rewrite_phase_t::route_k: return route_(step, executor);
         case nvme_rewrite_phase_t::copy_k: return copy_(step, executor);
         case nvme_rewrite_phase_t::build_k: return build_(step, executor);
-        case nvme_rewrite_phase_t::select_k: return select_(step, executor);
-        case nvme_rewrite_phase_t::reverse_k: return reverse_(step, executor);
+        case nvme_rewrite_phase_t::reselect_k: return reselect_(step, executor);
+        case nvme_rewrite_phase_t::back_link_k: return back_link_(step, executor);
         case nvme_rewrite_phase_t::heal_k: return heal_(step, executor);
         default: return status_t::uninitialized_k;
         }
@@ -2042,15 +2042,15 @@ struct [[nodiscard]] nvme_rewrite_plan {
      *  counts within one line. */
     inline static constexpr std::size_t route_block_k = default_alignment_k / sizeof(u8_t);
 
-    /** Slices a select step carves off the workspace, every carve padding its slice by less than
+    /** Slices a re-select step carves off the workspace, every carve padding its slice by less than
      *  one alignment, so each budget sets one alignment aside per slice. */
-    inline static constexpr std::size_t select_slices_k = 11;
+    inline static constexpr std::size_t reselect_slices_k = 11;
 
-    /** Slices a reverse step carves before its batches. */
-    inline static constexpr std::size_t reverse_slices_k = 2;
+    /** Slices a back-link step carves before its batches. */
+    inline static constexpr std::size_t back_link_slices_k = 2;
 
-    /** Slices each batch of a reverse step carves. */
-    inline static constexpr std::size_t reverse_batch_slices_k = 9;
+    /** Slices each batch of a back-link step carves. */
+    inline static constexpr std::size_t back_link_batch_slices_k = 9;
 
     /** Slices a heal carves. */
     inline static constexpr std::size_t heal_slices_k = 4;
@@ -2145,16 +2145,16 @@ struct [[nodiscard]] nvme_rewrite_plan {
         }
     };
 
-    /** The rows of a select batch: every scored row of every walk is offered to the row's pool with
-     *  its bytes, the row itself excepted. */
-    struct select_row_t {
+    /** The rows of a re-select batch: every scored row of every walk is offered to the row's pool
+     *  with its bytes, the row itself excepted. */
+    struct reselect_row_t {
         using key_t = typename indexes_t::key_t;
         inline static constexpr nvme_key_reads_t key_reads_k = nvme_key_reads_t::outputs_k;
 
         /** Offers every scored lane of a quad to the row's pool with the bytes its rescoring
          *  saw. */
         struct fold_t {
-            select_row_t* row = nullptr;
+            reselect_row_t* row = nullptr;
 
             walk_demand_t absorb(std::span<scored_node_t const> scored, std::span<dot_result_t const>) const noexcept {
                 inputs_t const& inputs = row->inputs;
@@ -2185,13 +2185,14 @@ struct [[nodiscard]] nvme_rewrite_plan {
         /** The quad being scored, between its rescoring and its fold. */
         std::array<vector_view_t, 4> landed {};
 
-        select_row_t(inputs_t const& inputs, scratch_allocator_t) noexcept : inputs(inputs) {}
+        reselect_row_t(inputs_t const& inputs, scratch_allocator_t) noexcept : inputs(inputs) {}
 
         status_t reserve(std::size_t, std::size_t) noexcept { return status_t::success_k; }
+
+        /** Arms @p new_row; its pool keeps what earlier walks of the batch kept. */
         void arm(std::size_t new_row) noexcept {
             row = new_row;
             query = inputs.queries.row(row).as_vector();
-            inputs.pools.counts[row] = 0;
         }
         void rescore(std::array<node_id_t, 4> const&, std::array<vector_view_t, 4> const& vectors,
                      std::array<vector_norms_t, 4> const&, scores_result<dot_result_t, 4>&, std::size_t,
@@ -2342,16 +2343,17 @@ struct [[nodiscard]] nvme_rewrite_plan {
      *  the plan runs. */
     status_t size_steps_(std::size_t routing_bytes) noexcept {
         std::size_t const copy_reserved = routing_bytes + copy_slices_() * default_alignment_k;
-        std::size_t const select_reserved = select_slices_k * default_alignment_k;
-        // A reverse's proposals take at most half the workspace, and its batches whatever is left.
-        std::size_t const reverse_reserved = workspace_.size() / 2 +
-                                             (reverse_slices_k + reverse_batch_slices_k) * default_alignment_k;
+        std::size_t const reselect_reserved = reselect_slices_k * default_alignment_k;
+        // A back-link step's proposals take at most half the workspace, its batches the rest.
+        std::size_t const back_link_reserved = workspace_.size() / 2 +
+                                               (back_link_slices_k + back_link_batch_slices_k) * default_alignment_k;
         copy_rows_ = workspace_.size() > copy_reserved ? (workspace_.size() - copy_reserved) / copy_row_bytes_() : 0;
-        select_rows_ = workspace_.size() > select_reserved ? (workspace_.size() - select_reserved) / select_row_bytes_()
-                                                           : 0;
+        reselect_rows_ = workspace_.size() > reselect_reserved
+                             ? (workspace_.size() - reselect_reserved) / reselect_row_bytes_()
+                             : 0;
         bucket_rows_ = workspace_.size() / 2 / (sizeof(u32_t) + connectivity_ * sizeof(scored_node_t));
-        bool const reverses = workspace_.size() >= reverse_reserved + reverse_row_bytes_();
-        if (!copy_rows_ || !select_rows_ || !bucket_rows_ || !reverses) return status_t::bad_alloc_k;
+        bool const back_links_fit = workspace_.size() >= back_link_reserved + back_link_row_bytes_();
+        if (!copy_rows_ || !reselect_rows_ || !bucket_rows_ || !back_links_fit) return status_t::bad_alloc_k;
         return status_t::success_k;
     }
 
@@ -2387,7 +2389,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
                         failed(listed))
                         return listed;
             return status_t::success_k;
-        case nvme_rewrite_phase_t::select_k:
+        case nvme_rewrite_phase_t::reselect_k:
             for (std::size_t part = 0; part != selected_.size(); ++part) {
                 iota_view<std::size_t> const rows = selected_[part];
                 std::size_t const nodes = targets_[part].view.size();
@@ -2395,14 +2397,14 @@ struct [[nodiscard]] nvme_rewrite_plan {
                 std::size_t const step_rows = rows.size() == nodes &&
                                                       ram_fits_(nodes, neighbors_row_bytes_(), refine_slices_k)
                                                   ? nodes
-                                                  : select_rows_;
+                                                  : reselect_rows_;
                 for (std::size_t first = rows.first; first < rows.bound; first += step_rows)
                     if (status_t const listed = add_step_(part, first, min_of(first + step_rows, rows.bound));
                         failed(listed))
                         return listed;
             }
             return status_t::success_k;
-        case nvme_rewrite_phase_t::reverse_k:
+        case nvme_rewrite_phase_t::back_link_k:
             for (std::size_t part = 0; part != targets_.size(); ++part)
                 for (std::size_t bucket = bucket_bases_[part]; bucket != bucket_bases_[part + 1]; ++bucket) {
                     if (!buckets_[bucket].bytes) continue;
@@ -2452,19 +2454,19 @@ struct [[nodiscard]] nvme_rewrite_plan {
         return fences_.empty() ? row : row * 2;
     }
 
-    /** Bytes a select step carves per row: the query, the neighbors in and out and as they were,
+    /** Bytes a re-select step carves per row: the query, the neighbors in and out and as they were,
      *  the pool with its rows, the selection scratch, the back-links and the reads of the current
      *  neighbors. */
-    std::size_t select_row_bytes_() const noexcept {
+    std::size_t reselect_row_bytes_() const noexcept {
         std::size_t const slots = pool_slots_();
         return value_row_bytes_ + 2 * neighbors_row_bytes_() + sizeof(u32_t) +
                slots * (sizeof(scored_node_t) + value_row_bytes_ + sizeof(u32_t)) + selection_bytes_() +
                connectivity_ * (sizeof(proposal_t) + sizeof(u32_t));
     }
 
-    /** Bytes a reverse batch carves per target row: the row in and out, its own value row, a pool
+    /** Bytes a back-link batch carves per target row: the row in and out, its own value row, a pool
      *  of twice the connectivity with its rows, the selection scratch and the reads. */
-    std::size_t reverse_row_bytes_() const noexcept {
+    std::size_t back_link_row_bytes_() const noexcept {
         std::size_t const slots = connectivity_ * 2;
         return neighbors_row_bytes_() + value_row_bytes_ + sizeof(u32_t) +
                slots * (sizeof(scored_node_t) + value_row_bytes_ + sizeof(u32_t)) + selection_bytes_() +
@@ -3222,13 +3224,14 @@ struct [[nodiscard]] nvme_rewrite_plan {
 
 #pragma endregion RAM Blocks
 
-#pragma region Select and Reverse
+#pragma region Reselection and Back Links
 
-    /** Re-selects target rows @p step.nodes: each walks the target part from random landmarks, its
+    /** Re-selects target rows @p step.nodes: each walks the target part from random landmarks, the
+     *  appended part of a merge or a build walking across into the resident part alone first, its
      *  pool keeping the best rows it scored and its current neighbors, then a diverse pick lands as
      *  its row and spills its back-links. A whole part the workspace holds is refined in RAM
      *  instead. */
-    status_t select_(step_t const& step, executor_t& executor) noexcept {
+    status_t reselect_(step_t const& step, executor_t& executor) noexcept {
         target_t& target = targets_[step.part];
         std::size_t const nodes = target.view.size(), count = step.nodes.size(), first = step.nodes.first;
         if (count == nodes && ram_fits_(nodes, neighbors_row_bytes_(), refine_slices_k))
@@ -3257,12 +3260,25 @@ struct [[nodiscard]] nvme_rewrite_plan {
             return read;
 
         pools_t const pools {entries, vectors, counts, slots, value_row_bytes_};
-        using row_t = select_row_t;
+        std::memset(counts, 0, count * sizeof(u32_t));
+        using row_t = reselect_row_t;
         typename row_t::inputs_t const inputs {
             vectors_view_t {reinterpret_cast<scalar_t const*>(queries), count, dimensions_}, pools,
             static_cast<node_id_t>(first), expansion_factor_};
         search_config_t config {};
         config.expansion_factor = static_cast<decltype(config.expansion_factor)>(expansion_factor_);
+        // Appended rows first walk across into the resident part alone, since no resident row links
+        // to them yet: the part read as ending at the appended base draws and expands nothing past
+        // it, and both walks fill the same pools.
+        if (appended_base_ && first >= appended_base_) {
+            u32_t& part_nodes = target.view.parts_[0].nodes;
+            u32_t const all_nodes = std::exchange(part_nodes, static_cast<u32_t>(appended_base_));
+            auto const [crossed, cross_status] = target.view.template walk_rows_<row_t>(count, config, inputs, 0, {},
+                                                                                        {}, executor);
+            part_nodes = all_nodes;
+            if (failed(cross_status)) return cross_status;
+            absorb_walks_(crossed);
+        }
         auto const [walked, walk_status] = target.view.template walk_rows_<row_t>(count, config, inputs, 0, {}, {},
                                                                                   executor);
         if (failed(walk_status)) return walk_status;
@@ -3336,7 +3352,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
      *  distinct proposals, then in batches the workspace holds, a touched row re-selects among its
      *  current neighbors and those proposals, every candidate's value row read, and the batch's
      *  rows write back in one run. */
-    status_t reverse_(step_t const& step, executor_t& executor) noexcept {
+    status_t back_link_(step_t const& step, executor_t& executor) noexcept {
         target_t& target = targets_[step.part];
         nvme_part_t const& part = part_of_(target);
         std::size_t const nodes = target.view.size(), connectivity = connectivity_, rows = step.nodes.size();
@@ -3370,9 +3386,9 @@ struct [[nodiscard]] nvme_rewrite_plan {
             }
         }
 
-        std::size_t const batch_reserved = reverse_batch_slices_k * default_alignment_k;
+        std::size_t const batch_reserved = back_link_batch_slices_k * default_alignment_k;
         std::size_t const batch_rows = min_of(rows, batch_space.size() > batch_reserved
-                                                        ? (batch_space.size() - batch_reserved) / reverse_row_bytes_()
+                                                        ? (batch_space.size() - batch_reserved) / back_link_row_bytes_()
                                                         : 0);
         if (!batch_rows) return status_t::bad_alloc_k;
         for (std::size_t batch_first = 0; batch_first < rows; batch_first += batch_rows) {
@@ -3458,7 +3474,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
         return status_t::success_k;
     }
 
-#pragma endregion Select and Reverse
+#pragma endregion Reselection and Back Links
 
 #pragma region Heal
 
@@ -3571,8 +3587,12 @@ struct [[nodiscard]] nvme_rewrite_plan {
     /** Every target part, in manifest order. */
     growing_buffer<target_t, forkunion_allocator_t> targets_ {allocator_};
 
-    /** The target rows the select phase re-selects, per target part. */
+    /** The target rows the re-select phase re-selects, per target part. */
     growing_buffer<iota_view<std::size_t>, forkunion_allocator_t> selected_ {allocator_};
+
+    /** The first row of the appended part of a merge or a build, every row below it resident and
+     *  linking to no appended row yet; zero for every other rewrite. */
+    std::size_t appended_base_ = 0;
 
     /** The key fences of a split by keys; empty for every other rewrite. */
     std::span<key_t const> fences_;
@@ -3590,11 +3610,11 @@ struct [[nodiscard]] nvme_rewrite_plan {
     growing_buffer<bucket_t, forkunion_allocator_t> buckets_ {allocator_};
     growing_buffer<std::size_t, forkunion_allocator_t> bucket_bases_ {allocator_};
 
-    /** Rows one bucket, one copy step, one select step and one build step cover, all derived from
-     *  the workspace; no build steps at zero. */
+    /** Rows one bucket, one copy step, one re-select step and one build step cover, all derived
+     *  from the workspace; no build steps at zero. */
     std::size_t bucket_rows_ = 0;
     std::size_t copy_rows_ = 0;
-    std::size_t select_rows_ = 0;
+    std::size_t reselect_rows_ = 0;
     std::size_t build_rows_ = 0;
 
     nvme_rewrite_phase_t phase_ = nvme_rewrite_phase_t::finish_k;
@@ -3622,16 +3642,16 @@ expected<nvme_rewrite_plan<indexes_type_>> plan_merge(std::span<indexes_type_ co
             return {std::move(plan), added};
     if (plan.sources_.empty()) return {std::move(plan), status_t::uninitialized_k};
 
-    // The largest part hosts and keeps its IDs; every other part lands after it with its own edges
-    // rebased, so a guest's walk navigates its own part and its old neighbors compete with what the
-    // walk finds.
-    std::size_t host = 0, rows = 0;
+    // The largest part stays resident and keeps its IDs; every other part lands after it with its
+    // own edges rebased, so an appended row's walk navigates its own part and its old neighbors
+    // compete with what the walk finds.
+    std::size_t resident = 0, rows = 0;
     for (std::size_t part = 0; part != plan.sources_.size(); ++part) {
-        if (plan.sources_[part].rows > plan.sources_[host].rows) host = part;
+        if (plan.sources_[part].rows > plan.sources_[resident].rows) resident = part;
         rows += plan.sources_[part].rows;
     }
     if (rows >= node_id_unknown_k) return {std::move(plan), status_t::overflow_k};
-    std::swap(plan.sources_[0], plan.sources_[host]);
+    std::swap(plan.sources_[0], plan.sources_[resident]);
     for (std::size_t part = 0, base = 0; part != plan.sources_.size(); base += plan.sources_[part].rows, ++part) {
         plan.sources_[part].base = base;
         plan.sources_[part].kept = {0, plan.sources_[part].rows};
@@ -3641,6 +3661,7 @@ expected<nvme_rewrite_plan<indexes_type_>> plan_merge(std::span<indexes_type_ co
     if (status_t const created = plan.open_targets_(target_rows); failed(created)) return {std::move(plan), created};
     if (failed(plan.selected_.push_back(iota_view<std::size_t> {plan.sources_[0].rows, rows})))
         return {std::move(plan), status_t::bad_alloc_k};
+    plan.appended_base_ = plan.sources_[0].rows;
     status_t const started = plan.start_();
     return {std::move(plan), started};
 }
@@ -3755,9 +3776,11 @@ expected<nvme_rewrite_plan<indexes_type_>> plan_build(std::span<std::string_view
     if (status_t const sized = plan.size_steps_(0); failed(sized)) return {std::move(plan), sized};
     std::array<std::size_t, 1> const target_rows {rows};
     if (status_t const created = plan.open_targets_(target_rows); failed(created)) return {std::move(plan), created};
-    // The first block hosts, and every later block links in by walks as a merge's guests do.
+    // The first block stays resident, and every later block links in by walks across as a merge's
+    // appended part does.
     if (failed(plan.selected_.push_back(iota_view<std::size_t> {min_of(plan.build_rows_, rows), rows})))
         return {std::move(plan), status_t::bad_alloc_k};
+    plan.appended_base_ = min_of(plan.build_rows_, rows);
     status_t const started = plan.start_();
     return {std::move(plan), started};
 }
