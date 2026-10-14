@@ -92,7 +92,8 @@ build_host_release/usearch_bench_dense_ram_indexes_search \
 - `--first-vector` defaults to `0`: first dataset row viewed, to slice one file across runs; CPU only.
 - `--huge-pages` defaults to `0`: huge pages provisioned before launch; the run fails rather than measuring base pages; CPU only.
 - `USEARCH_DEVICES` - an environment variable, not a flag - names USearch device ordinals, positions in `usearch_gpu_devices`, like `0` or `0,1`; the single-device binaries take the first, the sharded ones place one shard per ordinal, and unset takes the first NVIDIA device; GPU only.
-- `--merge` and `--expansion-merge` are reserved for stitching the device shards into one graph, and `usearch_bench_dense_vram_indexes_search` refuses them until `dense::vram_nvidia_indexes` has a merge verb.
+- `--merge` defaults to off: the inserted rows' second half builds as an index of its own, absorbed into the first half's before refinement and search, and the merge reports its wall time, distances and visits; `usearch_bench_dense_vram_indexes_search` only.
+- `--expansion-merge` defaults to `--expansion-add`: candidate pool of the absorbing refine, whose rows walk across the appended part; only with `--merge`.
 - `--managed-memory` defaults to off: managed-memory flat matrices oversubscribing VRAM; GPU only, refused by both `vram_indexes` binaries.
 
 A bad value prints one line, like `--top-k="0" does not parse, expected a positive count` or `RETRIEVAL_TOP_K="0" does not parse, expected a positive count`, and exits with status 1.
@@ -259,12 +260,7 @@ SIFT, `u8`, euclidean, 10,000,000 rows of 128 dimensions.
 | NVIDIA RTX 4060 Laptop, 24 SMs, 8 GB               | `ada`       | 114.5 k IPS |  210.9 k QPS |     98.6% | 2026-09-02 |
 | Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages  | `neonsdot`  | 23.05 k IPS |  75.15 k QPS |   98.800% | 2026-10-11 |
 | Apple M5 Pro, 20 GPU cores, 64 GiB shared memory   | `metal`     | 72.96 k IPS | 176.48 k QPS |   98.860% | 2026-10-11 |
-| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB     | `blackwell` | 42.96 k IPS | 198.30 k QPS |   97.680% | 2026-10-12 |
-
-The Apple M5 Pro run recovered 96.703% of the true top-10 entries; three checkpoint reloads measured 71.62–76.97 k QPS at 98.800% Recall@10.
-The Metal run used batches of 4096 & expansion 256/96 (a 128-entry search pool), recovering 97.336% of the true top-10 entries; Queries is the median of three passes after a 100-query warmup.
-The B300 run used the `ampere` kit, the only one `u8` euclidean has, searched a reloaded checkpoint 128 wide & recovered 96.257% of the true top-10 entries.
-Its pools of 64, 128, 256 & 512 measured 340.9 k QPS at 94.810%, 198.3 k at 97.680%, 79.0 k at 99.010% & 32.9 k at 99.490% Recall@10.
+| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB     | `blackwell` | 59.89 k IPS | 235.81 k QPS |   97.726% | 2026-10-14 |
 
 ### 100M
 
@@ -274,13 +270,7 @@ SIFT, `u8`, euclidean, 100,000,000 rows of 128 dimensions, and SpaceV, `i8`, euc
 | :------------------------------------------------ | :---------- | :------ | ----------: | -----------: | --------: | :--------- |
 | Apple M5 Pro, 6S+12P cores, 16 threads, 16K pages | `neonsdot`  | SIFT    | 16.86 k IPS |   5.63 k QPS |   96.410% | 2026-10-11 |
 | Apple M5 Pro, 20 GPU cores, 64 GiB shared memory  | `metal`     | SIFT    | 61.99 k IPS | 146.82 k QPS |   97.650% | 2026-10-11 |
-| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB    | `blackwell` | SIFT    | 41.54 k IPS | 178.66 k QPS |   95.320% | 2026-10-12 |
-
-The CPU run's queries recovered 93.205% of the true top-10 entries.
-Three checkpoint reloads measured 4.52–4.98 k QPS at 96.410–96.440% Recall@10.
-The Metal run used the same batching & timing as the 10M run, recovering 94.688% of the true top-10 entries.
-The B300 run searched its reloaded checkpoint 128 wide & recovered 92.715% of the true top-10 entries.
-Its pools of 64, 128, 256 & 512 measured 312.9 k QPS at 90.420%, 178.7 k at 95.320%, 73.8 k at 97.650% & 31.3 k at 98.780% Recall@10.
+| NVIDIA B300 MIG 1g.34gb slice, 18 SMs, 30.5 GB    | `blackwell` | SIFT    | 56.52 k IPS | 214.77 k QPS |   95.190% | 2026-10-14 |
 
 ### 1B
 

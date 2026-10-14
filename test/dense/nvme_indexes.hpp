@@ -1102,6 +1102,26 @@ struct rewrite_fixture {
         expect_reachable(viewed);
     }
 
+    /** At least the suite's share of @p count stored rows from @p first find themselves in
+     *  @p viewed, judged by distance band, so the rows of one part cannot hide behind another's. */
+    void expect_self_recall(nvme_t& viewed, std::size_t first, std::size_t count, char const* label) {
+        nvme_rankings<nvme_t> ranked {count, rewrite_wanted_k};
+        failures += expect_eq(
+            ranked.search(viewed, vectors(nk::range(first, first + count), nk::slice), driver.executor, 0).status,
+            status_t::success_k);
+        std::size_t hits = 0;
+        for (std::size_t row = 0; row != count; ++row)
+            for (auto const distance : ranked.distances_of(row))
+                if (distance < dense_self_match_tolerance_k && distance > -dense_self_match_tolerance_k) {
+                    ++hits;
+                    break;
+                }
+        if (hits * 100 < count * dense_minimal_recall_percent_k) {
+            fmt::println(stderr, "  {} {}: {} of {} rows find themselves", scenario, label, hits, count);
+            ++failures;
+        }
+    }
+
     /** Every row of @p viewed is reachable from the audit's landmarks. */
     void expect_reachable(nvme_t& viewed) {
         auto const [health, health_status] = viewed.health(driver.executor);
@@ -1202,6 +1222,10 @@ std::size_t test_nvme_rewrites_merge_steps(u64_t seed) {
     nvme_type_ viewed = fixture.view(target.manifest.data());
     fixture.expect_keys(viewed);
     fixture.expect_recall(viewed, "of three parts");
+    // The second source's monolith is the largest part and stays resident;
+    // the first source's two parts are appended.
+    fixture.expect_self_recall(viewed, 0, rewrite_queries_k, "appended rows");
+    fixture.expect_self_recall(viewed, first_rows, rewrite_queries_k, "resident rows");
     return fixture.failures;
 }
 
@@ -1331,7 +1355,7 @@ std::size_t test_nvme_rewrites_refine(u64_t seed) {
 }
 
 /** Building rows four times what the workspace holds as one RAM index runs at least four blocks,
- *  stitches them, and recalls within the margin of a RAM build of every row.
+ *  links them across, and recalls within the margin of a RAM build of every row.
  *
  *  A RAM index takes its chunk directories and its first chunk before it holds a row, 1.8 MB with
  *  128-byte cache lines, so the workspace is measured on this host: that fixed cost, plus a quarter
@@ -1389,11 +1413,13 @@ std::size_t test_nvme_rewrites_build(u64_t seed) {
     nvme_type_ viewed = fixture.view(target.manifest.data());
     fixture.expect_keys(viewed);
     fixture.expect_recall(viewed, "in blocks", fixture.recall(group, fixture.builder.executor));
+    fixture.expect_self_recall(viewed, 0, rewrite_queries_k, "first block");
+    fixture.expect_self_recall(viewed, rows_count - rewrite_queries_k, rewrite_queries_k, "last block");
     return fixture.failures;
 }
 
-/** A merge dropped after its first select step leaves no manifest, no part and no spill behind, so
- *  nothing views. */
+/** A merge dropped after its first re-select step leaves no manifest, no part and no spill behind,
+ *  so nothing views. */
 template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_rewrites_dropped(u64_t seed) {
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
@@ -1408,12 +1434,12 @@ std::size_t test_nvme_rewrites_dropped(u64_t seed) {
         auto [plan, status] = plan_merge(std::span<nvme_type_ const* const>(sources), target.manifest.data(),
                                          std::span {workspace});
         fixture.failures += expect_eq(status, status_t::success_k);
-        while (succeeded(status) && plan.phase() != nvme_rewrite_phase_t::select_k) {
+        while (succeeded(status) && plan.phase() != nvme_rewrite_phase_t::reselect_k) {
             for (auto const step : plan.steps())
                 fixture.failures += expect_eq(plan.run(step, fixture.driver.executor), status_t::success_k);
             if (!plan.advance()) break;
         }
-        fixture.failures += expect(plan.phase() == nvme_rewrite_phase_t::select_k);
+        fixture.failures += expect(plan.phase() == nvme_rewrite_phase_t::reselect_k);
         auto const steps = plan.steps();
         fixture.failures += expect_eq(plan.run(steps[0], fixture.driver.executor), status_t::success_k);
         fixture.failures += expect_eq(plan.finish().status, status_t::cancelled_k);
@@ -1486,11 +1512,11 @@ struct nvme_staged_indexes {
         return succeeded(viewed.count({&key, 1}, {&entries, 1}, reader.executor)) ? entries : 0;
     }
     bool contains(key_t const& key) noexcept { return count(key) != 0; }
-    std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted) noexcept {
+    std::size_t get(key_t const& key, vectors_span_t vectors, std::size_t wanted, executor_t& executor) noexcept {
         std::size_t entries = 0;
         std::size_t const rows = min_of(wanted, vectors.extent(0));
         status_t const gotten = viewed.get({&key, 1}, vectors(nk::range(std::size_t {0}, rows), nk::slice), rows,
-                                           {&entries, 1}, reader.executor);
+                                           {&entries, 1}, executor);
         return succeeded(gotten) ? entries : 0;
     }
     status_t count(std::span<key_t const> keys, std::span<std::size_t> entries, executor_t& executor) noexcept {

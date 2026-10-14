@@ -219,6 +219,10 @@ inline void print(settings_t const& settings) {
 struct vram_suite_t {
     gpu_vendor_t vendor = gpu_vendor_t::unknown_k;
     std::size_t (*check)(settings_t const& settings, gpu_device_t const& device) = nullptr;
+
+    /** Copies @p bytes of the vendor's device memory at @p device to @p host and waits, true once
+     *  they landed. */
+    bool (*download)(void* host, void const* device, std::size_t bytes) = nullptr;
 };
 
 /** Registers @p added when it names a check, and answers every suite registered so far. */

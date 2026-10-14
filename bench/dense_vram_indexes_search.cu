@@ -132,17 +132,19 @@ extern template int dense::run_indexes_with_stored_dtype<nk::u1x8_t, nk_u1_k>( /
     utilities::persisted_dataset<nk::u1x8_t> const&, settings_t const&, std::span<int const>, nk_capability_t);
 
 /**
- *  @brief The flags only the multi-device search binary takes: the shard merge.
+ *  @brief The flags only the multi-device search binary takes: the merge of two
+ *      separately built halves.
  *
  *  @verbatim
- *  --merge            off                  Stitch the shards into one graph after ingest
- *  --expansion-merge  --expansion-add      Candidate pool while merging
+ *  --merge            off                  Build the inserted rows' second half apart, absorb it before refining
+ *  --expansion-merge  --expansion-add      Candidate pool of the absorbing refine
  *  @endverbatim
  */
 std::array<flag_t, 2> merge_flags(settings_t& settings) noexcept {
     return {{
-        {"--merge", "", "stitch the shards into one graph after ingest; single-walk queries", &settings.merge},
-        {"--expansion-merge", "breadth", "merge candidate pool; inherits --expansion-add by default",
+        {"--merge", "", "build the inserted rows' second half as its own index and absorb it before refining",
+         &settings.merge},
+        {"--expansion-merge", "breadth", "absorbing refine's candidate pool; inherits --expansion-add by default",
          &settings.expansion_merge},
     }};
 }
@@ -153,8 +155,8 @@ int bench_dense_vram_indexes_search(int argc, char const* const* argv) {
                                 utilities::persisted_dataset<dataset_scalar_type_> const& dataset,
                                 settings_t const& settings, std::span<int const> devices, nk_capability_t max_compute,
                                 cuda_address_space_t storage_space) {
-        if (settings.merge == switch_t::present_k || settings.expansion_merge.value)
-            return fmt::println(stderr, "--merge has no verb in the sharded index; queries scatter to every shard"), 1;
+        if (settings.expansion_merge.value && settings.merge != switch_t::present_k)
+            return fmt::println(stderr, "--expansion-merge sizes the refine only --merge runs"), 1;
         if (storage_space == cuda_address_space_t::managed_k)
             return fmt::println(stderr,
                                 "--managed-memory pages one index's flat matrices; every shard here stays in VRAM"),

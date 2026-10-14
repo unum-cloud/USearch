@@ -353,6 +353,14 @@ static usearch_continuation_t record_progress(size_t completed, size_t total, vo
     return usearch_continue_k;
 }
 
+/** Stops a call at its first report. */
+static usearch_continuation_t cancel_progress(size_t completed, size_t total, void* state) {
+    (void)completed;
+    (void)total;
+    (void)state;
+    return usearch_cancel_k;
+}
+
 /** A batch the handler hears about in several steps still lands whole: every step is reported in
  *  order up to the whole batch, and every row is published. */
 void test_add_progress(void) {
@@ -399,6 +407,103 @@ void test_add_progress(void) {
     usearch_executor_free(executor);
     usearch_dense_free(index);
     printf("Test: Add Progress - PASSED\n");
+}
+
+/** The first of four indexes over the quarters of one dataset absorbs the rest: a handler
+ *  cancelling at its first report keeps that donor absorbed and leaves the rest live, which a
+ *  second call absorbs. Every donor slot is nulled as it is consumed, the handler hears each donor,
+ *  the sizes add up, and every key resolves to one reachable row. */
+void test_absorb(size_t const dimensions) {
+    printf("Test: Absorb... %zu dimensions\n", dimensions);
+
+    enum { indexes_count = 4, rows_per_index = 300, rows_count = indexes_count * rows_per_index };
+    usearch_outcome_t outcome = {0};
+    // Two threads, as the C++ suites drive: every key's count is a fan-out of its own.
+    usearch_executor_t executor = NULL;
+    usearch_executor_for_ram(&(usearch_executor_for_ram_t) {.executor = &executor, .outcome = &outcome, .threads = 2});
+    expect(!outcome.message, outcome.message);
+    float* const data = create_vectors(rows_count, dimensions);
+    usearch_key_t* const keys = (usearch_key_t*)malloc(rows_count * sizeof(usearch_key_t));
+    expect(keys, "Failed to allocate keys");
+    for (size_t row = 0; row != rows_count; ++row) keys[row] = key_of(row);
+    usearch_dense_index_t indexes[indexes_count];
+    for (size_t which = 0; which != indexes_count; ++which) {
+        indexes[which] = create_index(dimensions);
+        usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = indexes[which],
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .capacity = rows_per_index});
+        expect(!outcome.message, outcome.message);
+        usearch_dense_insert(
+            &(usearch_dense_insert_t) {.index = indexes[which],
+                                       .executor = executor,
+                                       .outcome = &outcome,
+                                       .count = rows_per_index,
+                                       .keys = {keys + which * rows_per_index, sizeof(usearch_key_t)},
+                                       .vectors = {data + which * rows_per_index * dimensions,
+                                                   dimensions * sizeof(float), dimensions, usearch_scalar_f32_k}});
+        expect(!outcome.message, outcome.message);
+    }
+
+    usearch_dense_absorb(&(usearch_dense_absorb_t) {.index = indexes[0],
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = indexes_count - 1,
+                                                    .donors = indexes + 1,
+                                                    .progress = cancel_progress});
+    expect_eq(outcome.status, usearch_status_cancelled_k, "A cancelling handler must stop the absorb");
+    expect(indexes[1] == NULL && indexes[2] != NULL && indexes[3] != NULL,
+           "Only the donor absorbed before the cancel may be nulled");
+    usearch_dense_index_description_t description = {0};
+    usearch_dense_describe(&(usearch_dense_describe_t) {.index = indexes[0],
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect_eq(description.size, 2 * rows_per_index, "The donor absorbed before the cancel must stay absorbed");
+
+    progress_reports_t reports = {0, 0, 0, true};
+    usearch_dense_absorb(&(usearch_dense_absorb_t) {.index = indexes[0],
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .count = indexes_count - 2,
+                                                    .donors = indexes + 2,
+                                                    .progress = record_progress,
+                                                    .progress_state = &reports});
+    expect(!outcome.message, outcome.message);
+    expect(indexes[2] == NULL && indexes[3] == NULL, "Every consumed donor slot must be nulled");
+    expect(reports.ascending && reports.calls == indexes_count - 2 && reports.completed == indexes_count - 2,
+           "The handler must hear each donor once absorbed");
+
+    usearch_dense_describe(&(usearch_dense_describe_t) {.index = indexes[0],
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect_eq(description.size, rows_count, "The absorbed sizes must add up");
+    for (size_t row = 0; row != rows_count; ++row) {
+        size_t entries = 0;
+        usearch_dense_count(&(usearch_dense_count_t) {.index = indexes[0],
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .key = keys[row],
+                                                      .entries = &entries});
+        expect(!outcome.message, outcome.message);
+        expect_eq(entries, 1, "Every key must resolve to one absorbed row");
+    }
+    usearch_dense_reachability_t reachability = {0};
+    usearch_dense_health(&(usearch_dense_health_t) {.index = indexes[0],
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .reachability = &reachability});
+    expect(!outcome.message, outcome.message);
+    expect_eq(reachability.reachable, rows_count, "Every absorbed row must stay reachable");
+
+    free(keys);
+    free(data);
+    usearch_executor_free(executor);
+    usearch_dense_free(indexes[0]);
+    printf("Test: Absorb - PASSED\n");
 }
 
 /** Reads entries back by key. `usearch_dense_get` sizes its own output, landing every row under
@@ -1412,7 +1517,12 @@ void drain(usearch_executor_t executor) {
 void test_deferred_search(void) {
     printf("Test: Deferred Search\n");
     float* const rows = create_vectors(deferred_rows, deferred_dimensions);
-    usearch_executor_t const executor = create_executor(0);
+    // Landmarks are drawn per thread, so only one as wide as a call without an executor
+    // draws the same.
+    usearch_outcome_t spawned = {0};
+    usearch_executor_t executor = NULL;
+    usearch_executor_for_ram(&(usearch_executor_for_ram_t) {.executor = &executor, .outcome = &spawned, .threads = 1});
+    expect(!spawned.message, spawned.message);
     usearch_dense_index_t const index = create_filled_index(rows, executor);
     search_outputs_t blocking = {.arena = create_arena(executor)};
     search_outputs_t deferred = {.arena = create_arena(executor)};
@@ -1547,8 +1657,8 @@ void test_deferred_holds_arena(void) {
     printf("Test: Deferred Holds Arena - PASSED\n");
 }
 
-/** A three-part checkpoint loaded onto one GPU keeps a shard per part on it, and every row still
- *  finds its own key across them. Skipped without a GPU. */
+/** A three-part checkpoint loaded onto one GPU keeps a shard per part on it, loads every row, and
+ *  reaches exactly the rows the saved graph reached. Skipped without a GPU. */
 void test_vram_parts_share_a_device(size_t const collection_size, size_t const dimensions) {
     usearch_outcome_t outcome = {0};
     size_t devices_count = 0;
@@ -1578,12 +1688,24 @@ void test_vram_parts_share_a_device(size_t const collection_size, size_t const d
     expect(keys, "Failed to allocate keys");
     for (size_t row = 0; row != collection_size; ++row) keys[row] = key_of(row);
     size_t const row_bytes = dimensions * sizeof(float);
+    usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = index,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .capacity = collection_size});
+    expect(!outcome.message, outcome.message);
     usearch_dense_insert(&(usearch_dense_insert_t) {.index = index,
                                                     .executor = executor,
                                                     .outcome = &outcome,
                                                     .count = collection_size,
                                                     .keys = {keys, sizeof(usearch_key_t)},
                                                     .vectors = {data, row_bytes, dimensions, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+    // Insertions may strand rows, so the reload is judged against the saved graph's own audit.
+    usearch_dense_reachability_t saved_reachability = {0};
+    usearch_dense_health(&(usearch_dense_health_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .reachability = &saved_reachability});
     expect(!outcome.message, outcome.message);
     char const path[] = "usearch-test-c-parts.json";
     usearch_bytes_view_t const path_view = {(uint8_t const*)path, sizeof(path) - 1};
@@ -1604,8 +1726,25 @@ void test_vram_parts_share_a_device(size_t const collection_size, size_t const d
                                                           .vram = once});
     expect(!outcome.message, outcome.message);
 
-    // The matches land in host pages, so they read back whichever vendor's device walked.
-    usearch_arena_t const arena = create_arena(NULL);
+    usearch_dense_index_description_t description = {0};
+    usearch_dense_describe(&(usearch_dense_describe_t) {.index = index,
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect_eq(description.size, collection_size, "The parts must load every saved row onto one device");
+    usearch_dense_reachability_t reachability = {0};
+    usearch_dense_health(&(usearch_dense_health_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .reachability = &reachability});
+    expect(!outcome.message, outcome.message);
+    expect(reachability.audited == saved_reachability.audited && reachability.reachable == saved_reachability.reachable,
+           "The loaded parts must reach exactly the rows the saved ones did");
+
+    // The matches land in device memory, which plain C cannot read;
+    // the C++ VRAM suite checks their recall.
+    usearch_arena_t const arena = create_arena(executor);
     usearch_matches_view_t matches = {0};
     usearch_dense_search(&(usearch_dense_search_t) {.index = index,
                                                     .executor = executor,
@@ -1616,12 +1755,7 @@ void test_vram_parts_share_a_device(size_t const collection_size, size_t const d
                                                     .arena = arena,
                                                     .wanted = 1});
     expect(!outcome.message, outcome.message);
-    size_t recalled = 0;
-    for (size_t row = 0; row != collection_size; ++row) {
-        usearch_key_t const expected = key_of(row);
-        recalled += matches.counts[row] && memcmp(matches.keys[row].bytes, expected.bytes, sizeof(expected.bytes)) == 0;
-    }
-    expect(recalled * 10 >= collection_size * 9, "Self-recall across parts sharing a device collapsed below 90%");
+    expect(matches.keys && matches.counts, "A VRAM search must land its matches in the arena");
 
     usearch_arena_free(arena);
     usearch_dense_free(index);
@@ -1664,6 +1798,7 @@ int main(int argc, char* argv[]) {
                 test_add_and_search(collection_sizes[size_index], dimension_counts[dimension_index]);
         }
     if (selected("add_progress")) test_add_progress();
+    if (selected("absorb")) test_absorb(dimension_counts[0]);
     if (selected("count_and_get")) test_count_and_get(dimension_counts[0]);
     if (selected("count_and_get")) test_count_and_get(dimension_counts[1]);
     if (selected("arenas")) test_arenas(dimension_counts[0]);

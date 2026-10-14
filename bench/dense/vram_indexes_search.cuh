@@ -56,6 +56,10 @@ struct cuda_indexes_context {
     /** The sharded index under measurement. */
     indexes_t indexes;
 
+    /** Under `--merge`, the index the inserted rows' second half builds, absorbed into @c indexes
+     *  before the refinement; placed on the same devices, and empty otherwise. */
+    indexes_t donor;
+
     /** One stream per device, paired positionally with the shards. */
     cuda_executor_t executor;
 
@@ -63,11 +67,19 @@ struct cuda_indexes_context {
     bench_results_t results;
 
     cuda_indexes_context(settings_t const& settings, std::span<int const> devices, nk_kernel_kind_t kernel) noexcept
-        : settings(settings), devices(devices), indexes(kernel, forkunion_allocator_t {no_memory_domain_k}) {}
+        : settings(settings), devices(devices), indexes(kernel, forkunion_allocator_t {no_memory_domain_k}),
+          donor(kernel, forkunion_allocator_t {no_memory_domain_k}) {}
 };
 
-/** Places one shard per engaged device, opens a stream on each, restores a checkpoint, and reserves for the
- *  viewed rows it lacks - everything fallible, before any clock. */
+/** The first row the `--merge` donor takes - the second half of the rows the run inserts - or
+ *  @p rows without the flag. */
+inline std::size_t donated_from(settings_t const& settings, std::size_t rows) noexcept {
+    std::size_t const skipped = settings.skip_vectors.value;
+    return settings.merge == switch_t::present_k ? skipped + (rows - skipped) / 2 : rows;
+}
+
+/** Opens a stream on each engaged device, places one shard per stream, restores a checkpoint, and
+ *  reserves for the viewed rows it lacks - everything fallible, before any clock. */
 template <typename streamed_dataset_type_>
 bool prepare_indexes(streamed_dataset_type_& streamed) {
     auto& bench = streamed.bench;
@@ -84,11 +96,6 @@ bool prepare_indexes(streamed_dataset_type_& streamed) {
         return false;
     }
 
-    for (int const device : bench.devices)
-        if (failed(bench.indexes.emplace(device))) {
-            fmt::println("Failed to place the shard on device {}", device);
-            return false;
-        }
     // The executor pairs its streams with the shards positionally, so it opens them in placement order.
     auto [executor, status] = cuda_executor_t::spawn(bench.devices);
     if (failed(status)) {
@@ -96,6 +103,13 @@ bool prepare_indexes(streamed_dataset_type_& streamed) {
         return false;
     }
     bench.executor = std::move(executor);
+    bool const merging = bench.settings.merge == switch_t::present_k;
+    for (std::size_t shard = 0; shard != bench.executor.size(); ++shard)
+        if (failed(bench.indexes.emplace(bench.executor.stream(shard))) ||
+            (merging && failed(bench.donor.emplace(bench.executor.stream(shard))))) {
+            fmt::println("Failed to place the shard on device {}", bench.executor.device(shard));
+            return false;
+        }
 
     // The checkpoint's own summary sizes the reservation inside `load`, so shards reach it bare.
     if (!bench.settings.load_name.empty()) {
@@ -115,6 +129,11 @@ bool prepare_indexes(streamed_dataset_type_& streamed) {
     if (rows != bench.settings.skip_vectors.value &&
         failed(bench.indexes.reserve({rows, connectivity, dimensions}).status)) {
         fmt::println("Failed to reserve {} × {}d over {} shards", rows, dimensions, bench.indexes.shards_count());
+        return false;
+    }
+    std::size_t const donated = rows - donated_from(bench.settings, rows);
+    if (donated && failed(bench.donor.reserve({donated, connectivity, dimensions}).status)) {
+        fmt::println("Failed to reserve the {} rows the merge donor builds", donated);
         return false;
     }
     return true;
@@ -144,15 +163,18 @@ bool run_indexes_insertion(streamed_dataset_type_& streamed) {
     std::vector<key_t> keys(batch_rows);
     telemetry_lane_t sums;
 
+    // Under `--merge` the rows past the split build the donor, so no batch straddles it.
+    std::size_t const split = donated_from(bench.settings, rows) - bench.settings.skip_vectors.value;
     progress_bar_t progress {"inserting", inserted_rows, bench.settings.terminal};
     auto started = steady_clock_t::now();
     for (std::size_t offset = 0; offset < inserted_rows;) {
         std::size_t const first_row = bench.settings.skip_vectors.value + offset;
-        std::size_t const batch = std::min(batch_rows, inserted_rows - offset);
+        std::size_t const batch = std::min(batch_rows, (offset < split ? split : inserted_rows) - offset);
         std::iota(keys.begin(), keys.begin() + batch, static_cast<key_t>(first_row));
         auto const staged = stage_batch(streamed, streamed.vectors, first_row, batch);
-        auto const [result, status] = bench.indexes.insert(std::span<key_t const> {keys.data(), batch}, staged,
-                                                           bench.executor, config);
+        auto& into = offset < split ? bench.indexes : bench.donor;
+        auto const [result, status] = into.insert(std::span<key_t const> {keys.data(), batch}, staged, bench.executor,
+                                                  config);
         if (failed(status)) {
             fmt::println("Insertion refused a batch of {} rows at row {}: {}", batch, first_row,
                          status_to_string(status));
@@ -184,6 +206,44 @@ bool run_indexes_insertion(streamed_dataset_type_& streamed) {
     fmt::println("  visited: {}", humanized(sums.visited_members));
     fmt::println("  restarts: {}", sums.restarts);
     fmt::println("  saturated: {}", sums.saturated_walks);
+    return true;
+}
+
+/** Under `--merge`, absorbs the donor the second half built into the first half's index, its rows
+ *  appended and linked in by one refine across the appended part of each shard that took them,
+ *  `--expansion-merge` wide, while the other shards heal. */
+template <typename streamed_dataset_type_>
+bool run_indexes_merge(streamed_dataset_type_& streamed) {
+    using bench_t = typename streamed_dataset_type_::bench_t;
+    using indexes_t = typename bench_t::indexes_t;
+    using small_size_t = typename bench_t::small_size_t;
+    auto& bench = streamed.bench;
+    std::size_t const donated = bench.donor.size();
+    if (!donated) return true;
+
+    std::size_t const expansion = bench.settings.expansion_merge.value ? bench.settings.expansion_merge.value
+                                                                       : bench.settings.expansion_add.value;
+    typename indexes_t::refine_config_t config;
+    config.expansion_factor = static_cast<small_size_t>(expansion);
+    std::size_t const hosted = bench.indexes.size();
+    auto started = steady_clock_t::now();
+    auto const [merged, status] = bench.indexes.absorb(bench.donor, bench.executor, config);
+    double const seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
+    if (failed(status)) {
+        fmt::println("Absorbing {} rows into {} failed: {}", donated, hosted, status_to_string(status));
+        return false;
+    }
+    fmt::println("\nMerge");
+    fmt::println("  shape: {} rows absorbed into {}, expansion {}", donated, hosted,
+                 bench.indexes.shard(0).non_zero_expansion_factor(config));
+    fmt::println("  changed: {} of {} re-selected", merged.changed_nodes, merged.visited_nodes);
+    fmt::println("  wall: {:.2f} s", seconds);
+    fmt::println("  throughput: {} IPS", humanized(double(donated) / seconds));
+    fmt::println("  distances: {}", humanized(merged.computed_distances));
+    fmt::println("  visited: {}", humanized(merged.visited_members));
+    fmt::println("  restarts: {}", merged.restarts);
+    fmt::println("  islands: {} found, {} reconnected", merged.islands_found, merged.islands_reconnected);
+    fmt::println("  reachable: {} of {} · {} sweeps", merged.reachable_nodes, bench.indexes.size(), merged.sweeps);
     return true;
 }
 
@@ -358,8 +418,9 @@ int stage_indexes_and_run(utilities::persisted_dataset<dataset_scalar_type_> con
                           std::span<int const> devices, nk_kernel_kind_t kernel, workload_type_ const& workload) {
     cuda_indexes_context<vram_nvidia_indexes<u32_t, stored_dtype_, capability_>> bench {settings, devices, kernel};
     return stream_and_run(dataset, bench, [&](auto& streamed) {
-        return prepare_indexes(streamed) && run_indexes_insertion(streamed) && run_indexes_refinement(streamed) &&
-               (settings.save_name.empty() || save_indexes(streamed)) && workload.run(streamed);
+        return prepare_indexes(streamed) && run_indexes_insertion(streamed) && run_indexes_merge(streamed) &&
+               run_indexes_refinement(streamed) && (settings.save_name.empty() || save_indexes(streamed)) &&
+               workload.run(streamed);
     });
 }
 

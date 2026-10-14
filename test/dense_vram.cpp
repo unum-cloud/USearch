@@ -14,6 +14,8 @@
  *  arm of the device's class, so every class the library compiles is covered on a device of that
  *  class without instantiating its index again.
  */
+#include <cstdint> // `std::uintptr_t` - the checkpoint path's per-run salt
+#include <cstdio>  // `std::remove` - the reloaded checkpoint's files
 #include <cstring> // `std::memcmp` - a match against its own key
 
 #include <vector> // `std::vector` - the selected devices and the keys
@@ -76,18 +78,22 @@ static usearch_key_t vram_arm_key(std::size_t row) noexcept {
     return key;
 }
 
-/** Device @p ordinal 's arm of one dtype and metric through the C interface: every row goes in
- *  under its key, and nine in ten find themselves first. The inner product has no such guarantee,
- *  so every row of it must instead return the requested count, nearest first. */
+/** Device @p ordinal 's arm of one dtype and metric through the C interface, as @p shards shards
+ *  on that device: every row goes in under its key, and nine in ten find themselves first. The
+ *  inner product has no such guarantee, so every row of it must instead return the requested
+ *  count, nearest first. The matches land in the executor's device arena and come back through
+ *  @p suite. Three shards are then saved as three parts and loaded back onto the device, a shard
+ *  per part, and judged again. */
 static std::size_t check_vram_arm(vram_arm_dtype_t const& dtype, usearch_dense_metric_t metric, std::int32_t ordinal,
-                                  u64_t seed) {
+                                  std::size_t shards, vram_suite_t const& suite, u64_t seed) {
     constexpr std::size_t rows_count = 512, dimensions = 256, wanted = 10;
     auto const vectors = make_sketched_vectors<nk::f32_t>(rows_count, dimensions, stream_key(seed, dtype.name));
     std::vector<usearch_key_t> keys(rows_count);
     for (std::size_t row = 0; row != rows_count; ++row) keys[row] = vram_arm_key(row);
     usearch_rows_view_t const rows {vectors.data(), static_cast<std::size_t>(vectors.stride_bytes(0)), dimensions,
                                     usearch_scalar_f32_k};
-    usearch_vram_options_t const vram {&ordinal, 1};
+    std::int32_t const devices[] = {ordinal, ordinal, ordinal};
+    usearch_vram_options_t const vram {devices, shards};
     std::size_t failures = 0;
 
     usearch_outcome_t outcome {};
@@ -110,6 +116,14 @@ static std::size_t check_vram_arm(vram_arm_dtype_t const& dtype, usearch_dense_m
     if (!failures) usearch_executor_for_vram(&placement);
     failures += expect(!outcome.message);
 
+    usearch_dense_reserve_t reserve {};
+    reserve.index = index;
+    reserve.executor = executor;
+    reserve.outcome = &outcome;
+    reserve.capacity = rows_count;
+    if (!failures) usearch_dense_reserve(&reserve);
+    failures += expect(!outcome.message);
+
     usearch_dense_insert_t insert {};
     insert.index = index;
     insert.executor = executor;
@@ -123,36 +137,78 @@ static std::size_t check_vram_arm(vram_arm_dtype_t const& dtype, usearch_dense_m
     usearch_arena_t arena = nullptr;
     usearch_arena_init_t arena_init {};
     arena_init.arena = &arena;
+    arena_init.executor = executor;
     arena_init.outcome = &outcome;
     if (!failures) usearch_arena_init(&arena_init);
     failures += expect(!outcome.message);
 
-    usearch_matches_view_t matches {};
-    usearch_dense_search_t search {};
-    search.index = index;
-    search.executor = executor;
-    search.outcome = &outcome;
-    search.count = rows_count;
-    search.queries = rows;
-    search.matches = &matches;
-    search.arena = arena;
-    search.wanted = wanted;
-    if (!failures) usearch_dense_search(&search);
-    failures += expect(!outcome.message);
-
     bool const is_inner = metric == usearch_dense_metric_inner_k;
-    std::size_t passed = 0;
-    if (!failures)
-        for (std::size_t row = 0; row != rows_count; ++row) {
-            std::size_t const found = matches.counts[row];
-            usearch_distance_t const* scores = &matches.scores[row * matches.columns];
-            bool ascending = true;
-            for (std::size_t column = 1; column < found; ++column) ascending &= scores[column - 1] <= scores[column];
-            bool const found_itself = found && std::memcmp(&matches.keys[row * matches.columns], &keys[row],
-                                                           sizeof(usearch_key_t)) == 0;
-            passed += ascending && (is_inner ? found == wanted : found_itself);
-        }
-    failures += expect(failures || (is_inner ? passed == rows_count : passed * 10 >= rows_count * 9));
+    auto search_every_row = [&] {
+        usearch_matches_view_t matches {};
+        usearch_dense_search_t search {};
+        search.index = index;
+        search.executor = executor;
+        search.outcome = &outcome;
+        search.count = rows_count;
+        search.queries = rows;
+        search.matches = &matches;
+        search.arena = arena;
+        search.wanted = wanted;
+        if (!failures) usearch_dense_search(&search);
+        failures += expect(!outcome.message);
+
+        std::vector<usearch_key_t> found_keys(rows_count * matches.columns);
+        std::vector<usearch_distance_t> found_scores(rows_count * matches.columns);
+        std::vector<std::size_t> found_counts(rows_count);
+        if (!failures)
+            failures += expect(
+                suite.download(found_keys.data(), matches.keys, found_keys.size() * sizeof(usearch_key_t)) &&
+                suite.download(found_scores.data(), matches.scores, found_scores.size() * sizeof(usearch_distance_t)) &&
+                suite.download(found_counts.data(), matches.counts, found_counts.size() * sizeof(std::size_t)));
+
+        std::size_t passed = 0;
+        if (!failures)
+            for (std::size_t row = 0; row != rows_count; ++row) {
+                std::size_t const found = found_counts[row];
+                usearch_distance_t const* scores = &found_scores[row * matches.columns];
+                bool ascending = true;
+                for (std::size_t column = 1; column < found; ++column)
+                    ascending &= scores[column - 1] <= scores[column];
+                bool const found_itself = found && std::memcmp(&found_keys[row * matches.columns], &keys[row],
+                                                               sizeof(usearch_key_t)) == 0;
+                passed += ascending && (is_inner ? found == wanted : found_itself);
+            }
+        failures += expect(failures || (is_inner ? passed == rows_count : passed * 10 >= rows_count * 9));
+    };
+    search_every_row();
+
+    if (shards == 3) {
+        std::string const stem = fmt::format("/tmp/usearch-vram-arm-{:x}", reinterpret_cast<std::uintptr_t>(&vectors));
+        std::string const manifest = stem + ".json";
+        usearch_dense_save_t save {};
+        save.index = index;
+        save.executor = executor;
+        save.outcome = &outcome;
+        save.path = {reinterpret_cast<std::uint8_t const*>(manifest.data()), manifest.size()};
+        if (!failures) usearch_dense_save(&save);
+        failures += expect(!outcome.message);
+
+        usearch_dense_free(index);
+        index = nullptr;
+        usearch_dense_load_vram_t load {};
+        load.index = &index;
+        load.executor = executor;
+        load.outcome = &outcome;
+        load.path = save.path;
+        load.vram = {devices, 1};
+        if (!failures) usearch_dense_load_vram(&load);
+        failures += expect(!outcome.message);
+        search_every_row();
+
+        std::remove(manifest.c_str());
+        for (std::size_t part = 1; part <= shards; ++part)
+            std::remove(fmt::format("{}-{:05}-of-{:05}.safegraphs", stem, part, shards).c_str());
+    }
 
     usearch_arena_free(arena);
     usearch_executor_free(executor);
@@ -161,8 +217,9 @@ static std::size_t check_vram_arm(vram_arm_dtype_t const& dtype, usearch_dense_m
 }
 
 /** Device @p ordinal 's arm of every compiled dtype under every metric of its family, which the C
- *  interface picks by the device's class. */
-static std::size_t check_vram_arms(settings_t const& settings, std::uint32_t ordinal) {
+ *  interface picks by the device's class, as one shard and as three, reading the matches back
+ *  through @p suite. */
+static std::size_t check_vram_arms(settings_t const& settings, std::uint32_t ordinal, vram_suite_t const& suite) {
     std::size_t failures_count = 0;
     if (!settings.selects("vram_arms")) return failures_count;
     for (std::size_t position = 0; position != USEARCH_DENSE_DTYPES; ++position) {
@@ -170,11 +227,13 @@ static std::size_t check_vram_arms(settings_t const& settings, std::uint32_t ord
         std::span<usearch_dense_metric_t const> const metrics = dtype.scalar == usearch_scalar_u1x8_k
                                                                     ? std::span {vram_arm_binary_metrics_k}
                                                                     : std::span {vram_arm_numeric_metrics_k};
-        for (usearch_dense_metric_t const metric : metrics) {
-            std::string const name = fmt::format("arm {}+{}", dtype.name, usearch_dense_metric_name(metric));
-            failures_count += report(name.c_str(),
-                                     check_vram_arm(dtype, metric, static_cast<std::int32_t>(ordinal), settings.seed));
-        }
+        for (usearch_dense_metric_t const metric : metrics)
+            for (std::size_t const shards : {std::size_t {1}, std::size_t {3}}) {
+                std::string const name = fmt::format("arm {}+{} {}-shard", dtype.name,
+                                                     usearch_dense_metric_name(metric), shards);
+                failures_count += report(name.c_str(), check_vram_arm(dtype, metric, static_cast<std::int32_t>(ordinal),
+                                                                      shards, suite, settings.seed));
+            }
     }
     return failures_count;
 }
@@ -202,7 +261,7 @@ int main() {
             continue;
         }
         failures_count += suite->check(settings, device);
-        failures_count += check_vram_arms(settings, ordinal);
+        failures_count += check_vram_arms(settings, ordinal, *suite);
     }
     return report("total", failures_count) ? 1 : 0;
 }

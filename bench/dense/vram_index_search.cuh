@@ -159,7 +159,10 @@ struct cuda_bench_context {
     /** The one index under measurement. */
     std::unique_ptr<index_t> index;
 
-    /** The one context driving every batched verb. */
+    /** The one stream on @c device every transfer and launch of this run rides. */
+    cuda_executor_t executor;
+
+    /** The one context driving every batched verb, over the executor's stream. */
     std::unique_ptr<traversal_t> traversal;
 
     /** One accumulation lane - the launches are sequential on one stream. */
@@ -208,7 +211,14 @@ bool prepare(streamed_dataset_type_& streamed) {
         return false;
     }
 
-    if (!bench.settings.load_name.empty() && !load_checkpoint(bench.settings, index, std::span {streamed.id_to_row}))
+    auto [executor, spawn_status] = cuda_executor_t::spawn(std::span<int const> {&bench.device, 1});
+    if (failed(spawn_status)) {
+        fmt::println("Failed to open a stream on device {}", bench.device);
+        return false;
+    }
+    bench.executor = std::move(executor);
+    if (!bench.settings.load_name.empty() &&
+        !load_checkpoint(bench.settings, index, std::span {streamed.id_to_row}, bench.executor.stream(0)))
         return false;
 
     // A base that misses the skipped prefix would judge recall against rows the graph never saw.
@@ -218,7 +228,7 @@ bool prepare(streamed_dataset_type_& streamed) {
         return false;
     }
 
-    bench.traversal = std::make_unique<traversal_t>(typename traversal_t::allocator_t {nullptr, bench.device});
+    bench.traversal = std::make_unique<traversal_t>(typename traversal_t::allocator_t {bench.executor.stream(0)});
     return true;
 }
 
@@ -358,7 +368,8 @@ bool save_index(streamed_dataset_type_& streamed) {
     auto& bench = streamed.bench;
     auto started = steady_clock_t::now();
     std::size_t const total_bytes = save_checkpoint(bench.settings, *bench.index,
-                                                    std::span<u32_t const> {streamed.id_to_row}, streamed.scale);
+                                                    std::span<u32_t const> {streamed.id_to_row}, streamed.scale,
+                                                    bench.executor.stream(0));
     if (!total_bytes) return false;
     double const seconds = stdc::duration<double>(steady_clock_t::now() - started).count();
     fmt::println("Saved the index: {:.2f} GB in {:.2f} s", gigabytes(total_bytes), seconds);

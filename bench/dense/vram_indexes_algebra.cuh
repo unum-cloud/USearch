@@ -86,13 +86,16 @@ bool run_indexes_algebra(streamed_dataset_type_& streamed, algebra_settings_t co
     // Every shard's device reads the one table, so it lives in managed memory, each device keeping a read-only copy.
     std::size_t const row_bytes = inputs.value_row_bytes(), pitch = round_up_to_multiple<std::size_t>(row_bytes, 16);
     std::size_t const attend_rows = round_up_to_multiple(batch_rows, head_count);
-    cuda_managed_allocator<byte_t> device_values;
-    auto device_outputs = cuda_make_unique(cuda_device_allocator_t {nullptr, bench.devices.front()},
-                                           attend_rows * columns * sizeof(f32_t));
-    if (failed(device_values.reserve_range(nodes_count * pitch, bench.devices.front())) || !device_outputs ||
+    // The executor opened its streams in placement order, so the first rides the first
+    // shard's device.
+    cuda_executor_t::stream_t const& first = bench.executor.stream(0);
+    cuda_managed_allocator<byte_t> device_values {first.device};
+    auto device_outputs = cuda_make_unique(cuda_device_allocator_t {first}, attend_rows * columns * sizeof(f32_t));
+    if (failed(device_values.reserve_range(nodes_count * pitch)) || !device_outputs ||
+        cuda_set_device(first.device) != cuda_success_k ||
         cuda_copy_2d_async(device_values.base(), pitch, inputs.node_values.data(), row_bytes, row_bytes, nodes_count,
-                           nullptr) != cuda_success_k ||
-        cuda_api().stream_synchronize(nullptr) != cuda_success_k ||
+                           first.handle) != cuda_success_k ||
+        cuda_api().stream_synchronize(first.handle) != cuda_success_k ||
         cuda_api().memory_advise(cuda_address(device_values.base()), nodes_count * pitch, cuda_advise_read_mostly_k,
                                  cuda_memory_location_t {}) != cuda_success_k) {
         fmt::println("Failed to place {:.2f} GB of values in managed memory", gigabytes(nodes_count * pitch));

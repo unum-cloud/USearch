@@ -91,13 +91,13 @@ bool run_algebra(streamed_dataset_type_& streamed, algebra_settings_t const& alg
     // Rows a 16-byte pitch apart, the alignment the lookup's fragment rows promise.
     std::size_t const row_bytes = inputs.value_row_bytes(), pitch = round_up_to_multiple<std::size_t>(row_bytes, 16);
     std::size_t const attend_rows = round_up_to_multiple(batch_rows, head_count);
-    auto device_values = cuda_make_unique(cuda_device_allocator_t {nullptr, bench.device}, nodes_count * pitch);
-    auto device_outputs = cuda_make_unique(cuda_device_allocator_t {nullptr, bench.device},
-                                           attend_rows * columns * sizeof(f32_t));
+    cuda_executor_t::stream_t const& stream = bench.executor.stream(0);
+    auto device_values = cuda_make_unique(cuda_device_allocator_t {stream}, nodes_count * pitch);
+    auto device_outputs = cuda_make_unique(cuda_device_allocator_t {stream}, attend_rows * columns * sizeof(f32_t));
     if (!device_values || !device_outputs ||
         cuda_copy_2d_async(device_values.get(), pitch, inputs.node_values.data(), row_bytes, row_bytes, nodes_count,
-                           nullptr) != cuda_success_k ||
-        cuda_api().stream_synchronize(nullptr) != cuda_success_k) {
+                           stream.handle) != cuda_success_k ||
+        cuda_api().stream_synchronize(stream.handle) != cuda_success_k) {
         fmt::println("Failed to place {:.2f} GB of values on device {}", gigabytes(nodes_count * pitch), bench.device);
         return false;
     }

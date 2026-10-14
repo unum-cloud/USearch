@@ -8,8 +8,9 @@
  *  The shards are vendor-neutral C++, compiled once into the one object library, each instantiating
  *  every vendor and composing over those @c USEARCH_ARCH_<VENDOR>_ carries. A vendor's test header,
  *  free of its SDK like the library's own, specializes @ref vram_cell with its ledgered index, its
- *  sharded collection and their factory, so the scenarios stay templated on the index alone while
- *  the harness's live-bytes-must-balance ledger audits the GPU flat matrices.
+ *  sharded collection and their factory over the stream its entry opened, so the scenarios stay
+ *  templated on the index alone while the harness's live-bytes-must-balance ledger audits the GPU
+ *  flat matrices.
  */
 #pragma once
 
@@ -45,7 +46,7 @@ std::size_t dense_expect_vram_multiply(make_index_type_ const& make_index, alloc
     std::size_t failures = 0;
     std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
     index_type_& index = *index_ptr;
-    typename index_type_::traversal_context_t context {{}};
+    typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
     failures += expect(index.reserve({rows_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "multiply"));
     auto const left = vectors(nk::range(std::size_t {0}, left_count), nk::slice);
@@ -117,7 +118,7 @@ std::size_t test_dense_vram_attend_refused(make_index_type_ const& make_index) {
     {
         std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
         index_type_& index = *index_ptr;
-        typename index_type_::traversal_context_t context {{}};
+        typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
         failures += expect_eq(index
                                   .attend(typename index_type_::vectors_view_t {}, 1, nullptr, 1.f,
                                           nk::matrix_span<f32_t> {}, std::span<softmax_state_t> {}, context)
@@ -143,12 +144,12 @@ template <typename index_type_, typename make_index_type_>
 std::size_t dense_expect_vram_indexer_search(make_index_type_ const& make_index, allocation_ledger_t& ledger,
                                              u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
-    constexpr std::size_t nodes_count = dense_thread_nodes_k, queries_count = 4, wanted = 16;
+    constexpr std::size_t nodes_count = dense_thread_nodes_k, queries_count = 4, wanted = 200;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
     std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
     index_type_& index = *index_ptr;
-    typename index_type_::traversal_context_t context {{}};
+    typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
     failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
     auto const vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexer"));
     std::vector<node_id_t> assigned_ids(nodes_count);
@@ -158,7 +159,9 @@ std::size_t dense_expect_vram_indexer_search(make_index_type_ const& make_index,
 
     auto const queries = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
     dense_indexer_inputs<scalar_t> const inputs = dense_make_indexer_inputs(vectors.view(), queries_count);
-    typename index_type_::search_config_t const exhaustive {nodes_count, wanted};
+    // Past the widest register pool and past one ranking round, so the arena frontier's
+    // select runs.
+    typename index_type_::search_config_t const exhaustive {4 * nodes_count, wanted};
     auto node_ids = nk::matrix<node_id_t>::zeros({queries_count, wanted}).value;
     auto distances = nk::matrix<distance_t>::zeros({queries_count, wanted}).value;
     failures += expect(
@@ -184,18 +187,83 @@ std::size_t test_dense_vram_indexer_search(make_index_type_ const& make_index, u
 
 #pragma endregion Algebra
 
+/** Builds and refines rows of 2 KB whatever the dtype, too wide for shared memory to seat a
+ *  builder's candidate cache, so every insert, refine and merge keeps its scratch in the warp's
+ *  arena slice; the refine must reach every row and the walks must find them, then the ledger must
+ *  balance. The rows are sign sketches, since independent values this wide leave every pair of
+ *  rows near-equidistant. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+std::size_t test_dense_vram_wide_build(make_index_type_ const& make_index, u64_t seed) {
+    using scalar_t = typename index_type_::scalar_t;
+    allocation_ledger_t ledger;
+    std::size_t failures = 0;
+    {
+        std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
+        index_type_& index = *index_ptr;
+        typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
+        std::size_t const dimensions = 8 * 2048 / scalar_t::bits_per_dimension();
+        auto const vectors = make_sketched_vectors<scalar_t>(dense_growth_nodes_k, dimensions,
+                                                             stream_key(seed, "wide"));
+        failures += expect(index.reserve({dense_growth_nodes_k, connectivity_16_k, dimensions}).status ==
+                           status_t::success_k);
+        // Apple keeps every builder's scratch in the arena, so only shared-memory devices can miss.
+        if constexpr (requires { index.device_specs().shared_memory_per_block_bytes; })
+            failures += expect(!index.build_scratch_fits());
+        failures += expect(index.insert(vectors.view(), {}, context).status == status_t::success_k);
+        failures += expect_eq(index.size(), dense_growth_nodes_k);
+        auto const [refined, refined_status] = index.refine({0, static_cast<node_id_t>(index.size())}, context);
+        failures += expect(refined_status == status_t::success_k && refined.changed_nodes > 0);
+        // A dot graph's hubs can stall the heal short of every row.
+        if constexpr (kernel_ != nk_kernel_dot_k) {
+            failures += expect_eq(refined.reachable_nodes, dense_growth_nodes_k);
+            failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
+        }
+    }
+    return failures + expect_eq(ledger.live_bytes.load(), 0);
+}
+
+/** Builds and refines the growth set at an expansion past the widest register pool of 32 lanes, so
+ *  both walk the arena frontier's rung: no tail entry drops, the walks still find the rows, and the
+ *  ledger must balance. */
+template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
+std::size_t test_dense_vram_broad_build(make_index_type_ const& make_index, u64_t seed) {
+    using scalar_t = typename index_type_::scalar_t;
+    allocation_ledger_t ledger;
+    std::size_t failures = 0;
+    {
+        std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
+        index_type_& index = *index_ptr;
+        typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
+        std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+        auto const vectors = make_vectors<scalar_t>(dense_growth_nodes_k, dimensions, stream_key(seed, "broad"));
+        failures += expect(index.reserve({dense_growth_nodes_k, connectivity_16_k, dimensions}).status ==
+                           status_t::success_k);
+        typename index_type_::insert_config_t broad_insert;
+        broad_insert.expansion_factor = 1024;
+        auto const [inserted, inserted_status] = index.insert(vectors.view(), {}, context, broad_insert);
+        failures += expect(inserted_status == status_t::success_k && inserted.tail_drops == 0);
+        if constexpr (kernel_ != nk_kernel_dot_k)
+            failures += dense_expect_self_recall(index, make_index, vectors.view(), dense_growth_nodes_k, 32);
+        typename index_type_::refine_config_t broad_refine;
+        broad_refine.expansion_factor = 1024;
+        failures += expect(index.refine({0, static_cast<node_id_t>(index.size())}, context, broad_refine).status ==
+                           status_t::success_k);
+    }
+    return failures + expect_eq(ledger.live_bytes.load(), 0);
+}
+
 /** A vendor this build leaves out composes nothing, so its shards instantiate empty. */
-template <gpu_vendor_t vendor_, nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>
-std::size_t test_vram_configuration(char const*, u64_t) {
+template <nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k, typename executor_type_>
+std::size_t test_vram_configuration(char const*, u64_t, executor_type_&) {
     return 0;
 }
 
-/** Composes one (dtype, kernel) cell's suite over @p vendor_ 's ledgered index, reported under
- *  @p name prefixed by the vendor's toolkit. */
-template <gpu_vendor_t vendor_, nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k>
-    requires vram_compiled<vendor_>
-std::size_t test_vram_configuration(char const* name, u64_t seed) {
-    using cell_t = vram_cell<vendor_, dtype_, kernel_>;
+/** Composes one (dtype, kernel) cell's suite over the ledgered index of @p executor 's vendor, on
+ *  its first stream, reported under @p name prefixed by the vendor's toolkit. */
+template <nk_kernel_kind_t kernel_, nk_dtype_t dtype_ = nk_i8_k, typename executor_type_>
+    requires vram_compiled<executor_type_::vendor_k>
+std::size_t test_vram_configuration(char const* name, u64_t seed, executor_type_& executor) {
+    using cell_t = vram_cell<executor_type_::vendor_k, dtype_, kernel_>;
     using index_t = typename cell_t::index_t;
     static_assert(std::is_move_constructible_v<typename index_t::save_plan_t> &&
                       !std::is_copy_constructible_v<typename index_t::save_plan_t> &&
@@ -205,88 +273,91 @@ std::size_t test_vram_configuration(char const* name, u64_t seed) {
                       !std::is_copy_constructible_v<typename index_t::load_plan_t> &&
                       !std::is_move_assignable_v<typename index_t::load_plan_t>,
                   "The device plans are move-only and never assigned over");
-    auto make_index = [](allocation_ledger_t& ledger) { return cell_t::make_index(ledger); };
+    cell_t const cell {executor.stream(0)};
     std::string const vendor_name = fmt::format("{}-{}", cell_t::vendor_prefix_k, name);
     // The suite is composed here, not reflected: every call below is a capability claim
     // this fully-concurrent, serializable category makes about itself.
     std::size_t failures_count = 0;
-    failures_count += test_dense_guards<index_t>(make_index, seed);
+    failures_count += test_dense_guards<index_t>(cell, seed);
     failures_count += test_dense_foreign_metric<index_t>();
-    failures_count += test_dense_three_vectors<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_growth_and_recall<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_save_load_roundtrip<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_load_append<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_concurrent_build<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_concurrent_search<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_refine_settles<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_health_audits<index_t, kernel_>(make_index, seed);
-    failures_count += test_dense_heal_islands<index_t>(make_index, seed);
-    failures_count += test_dense_vram_multiply<index_t, kernel_>(make_index, seed);
-    if constexpr (!requires { cell_t::attends_k; })
-        failures_count += test_dense_vram_attend_refused<index_t>(make_index);
-    failures_count += test_dense_vram_indexer_search<index_t, kernel_>(make_index, seed);
+    failures_count += test_dense_three_vectors<index_t, kernel_>(cell, seed);
+    failures_count += test_dense_growth_and_recall<index_t, kernel_>(cell, seed);
+    failures_count += test_dense_save_load_roundtrip<index_t, kernel_>(cell, seed);
+    failures_count += test_dense_load_append<index_t, kernel_>(cell, seed);
+    failures_count += test_dense_concurrent_build<index_t, kernel_>(cell, seed);
+    failures_count += test_dense_concurrent_search<index_t, kernel_>(cell, seed);
+    failures_count += test_dense_refine_settles<index_t, kernel_>(cell, seed);
+    failures_count += test_dense_health_audits<index_t, kernel_>(cell, seed);
+    failures_count += test_dense_heal_islands<index_t>(cell, seed);
+    failures_count += test_dense_vram_multiply<index_t, kernel_>(cell, seed);
+    if constexpr (!requires { cell_t::attends_k; }) failures_count += test_dense_vram_attend_refused<index_t>(cell);
+    failures_count += test_dense_vram_indexer_search<index_t, kernel_>(cell, seed);
+    failures_count += test_dense_vram_wide_build<index_t, kernel_>(cell, seed);
+    failures_count += test_dense_vram_broad_build<index_t, kernel_>(cell, seed);
     return report(vendor_name.c_str(), failures_count);
 }
 
-/** Per-dtype VRAM suite entries the shard translation units define for every vendor and each
- *  carried vendor's entry composes explicitly; each returns its shard's failure count. */
-template <gpu_vendor_t vendor_>
-std::size_t check_vram_index_bf16(settings_t const& settings);
-template <gpu_vendor_t vendor_>
-std::size_t check_vram_index_f16(settings_t const& settings);
-template <gpu_vendor_t vendor_>
-std::size_t check_vram_index_e5m2(settings_t const& settings);
-template <gpu_vendor_t vendor_>
-std::size_t check_vram_index_e4m3(settings_t const& settings);
-template <gpu_vendor_t vendor_>
-std::size_t check_vram_index_e3m2(settings_t const& settings);
-template <gpu_vendor_t vendor_>
-std::size_t check_vram_index_e2m3(settings_t const& settings);
-template <gpu_vendor_t vendor_>
-std::size_t check_vram_index_i8(settings_t const& settings);
-template <gpu_vendor_t vendor_>
-std::size_t check_vram_index_i4(settings_t const& settings);
-template <gpu_vendor_t vendor_>
-std::size_t check_vram_index_u8(settings_t const& settings);
-template <gpu_vendor_t vendor_>
-std::size_t check_vram_index_u4(settings_t const& settings);
-template <gpu_vendor_t vendor_>
-std::size_t check_vram_index_u1(settings_t const& settings);
+/** Per-dtype VRAM suite entries the shard translation units define for every vendor's executor and
+ *  each carried vendor's entry composes explicitly over the executor it opened; each returns its
+ *  shard's failure count. */
+template <typename executor_type_>
+std::size_t check_vram_index_bf16(settings_t const& settings, executor_type_& executor);
+template <typename executor_type_>
+std::size_t check_vram_index_f16(settings_t const& settings, executor_type_& executor);
+template <typename executor_type_>
+std::size_t check_vram_index_e5m2(settings_t const& settings, executor_type_& executor);
+template <typename executor_type_>
+std::size_t check_vram_index_e4m3(settings_t const& settings, executor_type_& executor);
+template <typename executor_type_>
+std::size_t check_vram_index_e3m2(settings_t const& settings, executor_type_& executor);
+template <typename executor_type_>
+std::size_t check_vram_index_e2m3(settings_t const& settings, executor_type_& executor);
+template <typename executor_type_>
+std::size_t check_vram_index_i8(settings_t const& settings, executor_type_& executor);
+template <typename executor_type_>
+std::size_t check_vram_index_i4(settings_t const& settings, executor_type_& executor);
+template <typename executor_type_>
+std::size_t check_vram_index_u8(settings_t const& settings, executor_type_& executor);
+template <typename executor_type_>
+std::size_t check_vram_index_u4(settings_t const& settings, executor_type_& executor);
+template <typename executor_type_>
+std::size_t check_vram_index_u1(settings_t const& settings, executor_type_& executor);
 
-/** Runs every per-dtype cell the settings select for @p vendor_, in the dtype ladder's order. */
-template <gpu_vendor_t vendor_>
-std::size_t check_vram_index_cells(settings_t const& settings) {
+/** Runs every per-dtype cell the settings select on @p executor 's device, in the dtype ladder's
+ *  order. */
+template <typename executor_type_>
+std::size_t check_vram_index_cells(settings_t const& settings, executor_type_& executor) {
     std::size_t failures_count = 0;
-    if (settings.selects("vram_index_bf16")) failures_count += check_vram_index_bf16<vendor_>(settings);
+    if (settings.selects("vram_index_bf16")) failures_count += check_vram_index_bf16(settings, executor);
 #if USEARCH_DENSE_DTYPES >= 2
-    if (settings.selects("vram_index_u1")) failures_count += check_vram_index_u1<vendor_>(settings);
+    if (settings.selects("vram_index_u1")) failures_count += check_vram_index_u1(settings, executor);
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
-    if (settings.selects("vram_index_i8")) failures_count += check_vram_index_i8<vendor_>(settings);
+    if (settings.selects("vram_index_i8")) failures_count += check_vram_index_i8(settings, executor);
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
-    if (settings.selects("vram_index_e4m3")) failures_count += check_vram_index_e4m3<vendor_>(settings);
+    if (settings.selects("vram_index_e4m3")) failures_count += check_vram_index_e4m3(settings, executor);
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
-    if (settings.selects("vram_index_f16")) failures_count += check_vram_index_f16<vendor_>(settings);
+    if (settings.selects("vram_index_f16")) failures_count += check_vram_index_f16(settings, executor);
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
-    if (settings.selects("vram_index_u8")) failures_count += check_vram_index_u8<vendor_>(settings);
+    if (settings.selects("vram_index_u8")) failures_count += check_vram_index_u8(settings, executor);
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
-    if (settings.selects("vram_index_e5m2")) failures_count += check_vram_index_e5m2<vendor_>(settings);
+    if (settings.selects("vram_index_e5m2")) failures_count += check_vram_index_e5m2(settings, executor);
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
-    if (settings.selects("vram_index_i4")) failures_count += check_vram_index_i4<vendor_>(settings);
+    if (settings.selects("vram_index_i4")) failures_count += check_vram_index_i4(settings, executor);
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
-    if (settings.selects("vram_index_u4")) failures_count += check_vram_index_u4<vendor_>(settings);
+    if (settings.selects("vram_index_u4")) failures_count += check_vram_index_u4(settings, executor);
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
-    if (settings.selects("vram_index_e3m2")) failures_count += check_vram_index_e3m2<vendor_>(settings);
+    if (settings.selects("vram_index_e3m2")) failures_count += check_vram_index_e3m2(settings, executor);
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
-    if (settings.selects("vram_index_e2m3")) failures_count += check_vram_index_e2m3<vendor_>(settings);
+    if (settings.selects("vram_index_e2m3")) failures_count += check_vram_index_e2m3(settings, executor);
 #endif
     return failures_count;
 }

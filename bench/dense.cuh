@@ -365,8 +365,8 @@ struct settings_t {
      *  other value is enforced, so a base-page fallback cannot pass as a huge-page result. */
     count_t huge_pages {.minimum = 0};
 
-    /** Merge the shards into one stitched graph after ingest and answer queries with a single
-     *  walk; absent scatters every query to all shards and k-way merges the hits on the host. */
+    /** Ingest the second half of the rows into a donor index and absorb it into the first, so the
+     *  absorbing refine is measured on its own; absent ingests every row into one index. */
     switch_t merge = switch_t::absent_k;
 
     /** Merge candidate pool; absent inherits `--expansion-add`. */
@@ -649,10 +649,12 @@ inline connectivity_t connectivity_of(std::size_t degree) noexcept {
  *  @param[inout] index A virgin index already reserved to the run's geometry, which every part's
  *      header is vetted against.
  *  @param[out] id_to_row Landing for the restored map; spans at least the checkpoint's rows.
+ *  @param[in] stream The executor's stream a device index restores on; a RAM index takes none.
  *  @return True on a fully restored index; false after printing what failed.
  */
-template <typename index_type_>
-static bool load_checkpoint(settings_t const& settings, index_type_& index, std::span<u32_t> id_to_row) {
+template <typename index_type_, typename... stream_types_>
+static bool load_checkpoint(settings_t const& settings, index_type_& index, std::span<u32_t> id_to_row,
+                            stream_types_ const&... stream) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     typename index_type_::saved_shape_t const shape = index.saved_shape();
@@ -686,7 +688,7 @@ static bool load_checkpoint(settings_t const& settings, index_type_& index, std:
         status_t const restored = index.load(
             {header.data_of(monolith, header.value), header.data_of(monolith, header.neighbors),
              header.norms_of(monolith, checkpoint_norms_dtype(index))},
-            nodes, {0, static_cast<node_id_t>(nodes)});
+            nodes, {0, static_cast<node_id_t>(nodes)}, stream...);
         if (failed(restored)) {
             fmt::println("Failed to restore {}: {}", path, status_to_string(restored));
             return false;
@@ -708,11 +710,12 @@ static bool load_checkpoint(settings_t const& settings, index_type_& index, std:
  *  @param[in] id_to_row The map filled during ingestion; its first @c saved_shape().nodes entries
  *      become the key column.
  *  @param[in] scale The factor the rows were rescaled by, which a view stages its queries under.
+ *  @param[in] stream The executor's stream a device index serializes on; a RAM index takes none.
  *  @return The monolith's bytes, or zero on failure - a real checkpoint never is.
  */
-template <typename index_type_>
+template <typename index_type_, typename... stream_types_>
 static std::size_t save_checkpoint(settings_t const& settings, index_type_& index, std::span<u32_t const> id_to_row,
-                                   float scale) {
+                                   float scale, stream_types_ const&... stream) {
     using scalar_t = typename index_type_::scalar_t;
     using node_id_t = typename index_type_::node_id_t;
     typename index_type_::saved_shape_t const shape = index.saved_shape();
@@ -739,7 +742,7 @@ static std::size_t save_checkpoint(settings_t const& settings, index_type_& inde
     status_t const saved = index.save({header.rows_of(monolith, header.value, 0, shape.nodes),
                                        header.rows_of(monolith, header.neighbors, 0, shape.nodes),
                                        header.rows_of(monolith, header.norms, 0, shape.nodes)},
-                                      synchronization_t::immutable_k, scratch.span());
+                                      synchronization_t::immutable_k, scratch.span(), stream...);
     if (failed(saved)) {
         fmt::println("Failed to serialize the index: {}", status_to_string(saved));
         return 0;

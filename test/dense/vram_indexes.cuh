@@ -24,7 +24,7 @@ concept vram_collection = requires { indexes_type_::vendor_k; };
  *  so the exclusion is the executor's - a search on a claimed executor is refused, and the
  *  reader walks the published rows only once the writer has returned. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_vram_indexes_search_race(u64_t seed) {
+std::size_t test_dense_vram_indexes_search_race(u64_t seed, typename indexes_type_::executor_t& placement) {
     using index_t = typename indexes_type_::index_t;
     using scalar_t = typename index_t::scalar_t;
     using key_t = typename indexes_type_::key_t;
@@ -34,10 +34,10 @@ std::size_t test_dense_vram_indexes_search_race(u64_t seed) {
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
 
     indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
-    failures += expect(succeeded(place_shards(indexes)));
+    failures += expect(succeeded(place_shards(indexes, placement)));
     failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions}).status));
 
-    dense_indexes_executor<indexes_type_> driver;
+    dense_indexes_executor<indexes_type_> driver {placement};
     if (failed(driver.status)) return failures + expect(false);
     auto& executor = driver.executor;
 
@@ -81,17 +81,17 @@ std::size_t test_dense_vram_indexes_search_race(u64_t seed) {
  *  every one, a plan short of rows refuses to finish and stays whole, its gate turns a second batch away, and a plan
  *  dying unfinished publishes nothing and leaves its shard refusing every later batch. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_indexes_planned_insert(u64_t seed) {
+std::size_t test_dense_indexes_planned_insert(u64_t seed, typename indexes_type_::executor_t& placement) {
     using scalar_t = typename indexes_type_::scalar_t;
     using key_t = typename indexes_type_::key_t;
     constexpr std::size_t rows_count = dense_thread_nodes_k, half = rows_count / 2;
     std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
     std::size_t failures = 0;
 
-    dense_indexes_executor<indexes_type_> writer, reader;
+    dense_indexes_executor<indexes_type_> writer {placement}, reader {placement};
     if (failed(writer.status) || failed(reader.status)) return failures + expect(false);
     indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
-    failures += expect(succeeded(writer.place_shards(indexes)));
+    failures += expect(succeeded(place_shards(indexes, placement)));
     failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
     auto const vectors = make_vectors<scalar_t>(2 * rows_count, dimensions, stream_key(seed, "indexes_planned"));
     std::vector<key_t> keys(2 * rows_count);
@@ -143,7 +143,7 @@ std::size_t test_dense_indexes_planned_insert(u64_t seed) {
 /** The VRAM reading of the sharded indexer search, keys equal to their rows: every shard walks the same queries
  *  under the same heads with a pool as wide as the index, so the merged top of every query is the oracle's. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_vram_indexes_indexer_search(u64_t seed) {
+std::size_t test_dense_vram_indexes_indexer_search(u64_t seed, typename indexes_type_::executor_t& placement) {
     using scalar_t = typename indexes_type_::scalar_t;
     if constexpr (kernel_ != nk_kernel_dot_k || nk::is_integral_dtype<scalar_t>()) return 0;
     else {
@@ -152,10 +152,10 @@ std::size_t test_dense_vram_indexes_indexer_search(u64_t seed) {
         std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
         std::size_t failures = 0;
 
-        dense_indexes_executor<indexes_type_> driver;
+        dense_indexes_executor<indexes_type_> driver {placement};
         if (failed(driver.status)) return failures + expect(false);
         indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
-        failures += expect(succeeded(driver.place_shards(indexes)));
+        failures += expect(succeeded(place_shards(indexes, placement)));
         failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
         auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_indexer"));
         std::array<key_t, rows_count> keys;
@@ -184,10 +184,88 @@ std::size_t test_dense_vram_indexes_indexer_search(u64_t seed) {
     }
 }
 
+/** The two merges of the sharded search, over two shards on the device under test: the same queries
+ *  ranked into host spans, merged on the host, and into spans on the first shard's device, merged
+ *  there, agree on every count, on every distance, and on the keys of every run of equal distances,
+ *  which the merges may order differently. An odd row count splits the shards unevenly, and a width
+ *  past either shard's rows leaves both rankings short and the merged ones full. */
+template <typename indexes_type_, nk_kernel_kind_t kernel_>
+std::size_t test_dense_vram_indexes_device_merge(u64_t seed, typename indexes_type_::executor_t& placement) {
+    using scalar_t = typename indexes_type_::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    constexpr std::size_t rows_count = 255, queries_count = 8, wanted = 200;
+    constexpr std::size_t ranks_count = queries_count * wanted;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+
+    dense_indexes_executor<indexes_type_> driver {placement};
+    if (failed(driver.status)) return failures + expect(false);
+    indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(indexes.emplace(driver.executor.stream(0))));
+    failures += expect(succeeded(indexes.emplace(driver.executor.stream(0))));
+    failures += expect(succeeded(indexes.reserve({rows_count, connectivity_16_k, dimensions}).status));
+    auto const vectors = make_vectors<scalar_t>(rows_count, dimensions, stream_key(seed, "indexes_device_merge"));
+    std::array<key_t, rows_count> keys;
+    for (std::size_t row = 0; row != rows_count; ++row) keys[row] = static_cast<key_t>(1 + row);
+    failures += expect(
+        succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
+
+    vram_suite_t const* suite = nullptr;
+    for (vram_suite_t const& registered : vram_suites())
+        if (registered.vendor == indexes_type_::vendor_k) suite = &registered;
+    typename indexes_type_::executor_t::device_arena_t arena {driver.executor.stream(0)};
+    key_t* const device_keys = arena.template allocate<key_t>(ranks_count);
+    distance_t* const device_distances = arena.template allocate<distance_t>(ranks_count);
+    std::size_t* const device_counts = arena.template allocate<std::size_t>(queries_count);
+    if (failures || !suite || !device_keys || !device_distances || !device_counts) return failures + expect(false);
+
+    auto const queries = vectors(nk::range(std::size_t {0}, queries_count), nk::slice);
+    typename indexes_type_::search_config_t const exhaustive {rows_count, wanted};
+    std::vector<key_t> host_keys(ranks_count), merged_keys(ranks_count);
+    std::vector<distance_t> host_distances(ranks_count), merged_distances(ranks_count);
+    std::array<std::size_t, queries_count> host_counts, merged_counts;
+    failures += expect(succeeded(indexes
+                                     .search(queries, driver.executor, exhaustive,
+                                             nk::matrix_span<key_t> {host_keys.data(), queries_count, wanted},
+                                             nk::matrix_span<distance_t> {host_distances.data(), queries_count, wanted},
+                                             std::span {host_counts})
+                                     .status));
+    failures += expect(succeeded(indexes
+                                     .search(queries, driver.executor, exhaustive,
+                                             nk::matrix_span<key_t> {device_keys, queries_count, wanted},
+                                             nk::matrix_span<distance_t> {device_distances, queries_count, wanted},
+                                             std::span {device_counts, queries_count})
+                                     .status));
+    failures += expect(suite->download(merged_keys.data(), device_keys, ranks_count * sizeof(key_t)) &&
+                       suite->download(merged_distances.data(), device_distances, ranks_count * sizeof(distance_t)) &&
+                       suite->download(merged_counts.data(), device_counts, queries_count * sizeof(std::size_t)));
+    if (failures) return failures;
+
+    for (std::size_t query = 0; query != queries_count; ++query) {
+        std::size_t const found = host_counts[query];
+        failures += expect_eq(found, wanted);
+        failures += expect_eq(merged_counts[query], found);
+        if (merged_counts[query] != found) continue;
+        std::size_t const first = query * wanted;
+        for (std::size_t rank = first; rank != first + found; ++rank)
+            failures += expect_near(merged_distances[rank], host_distances[rank]);
+        for (std::size_t begin = first, end = first; begin != first + found; begin = end) {
+            while (end != first + found && host_distances[end] == host_distances[begin]) ++end;
+            // A run the width cuts may keep different ties on either side.
+            if (end == first + wanted) break;
+            std::sort(host_keys.begin() + begin, host_keys.begin() + end);
+            std::sort(merged_keys.begin() + begin, merged_keys.begin() + end);
+            failures += expect(
+                std::equal(host_keys.begin() + begin, host_keys.begin() + end, merged_keys.begin() + begin));
+        }
+    }
+    return failures;
+}
+
 /** A RAM group's monolith loaded into the VRAM collection and saved again comes back byte for byte,
  *  norms included, and the NVMe tier views the VRAM save as it views the RAM one. */
 template <typename indexes_type_, nk_kernel_kind_t kernel_>
-std::size_t test_dense_vram_indexes_nvme_roundtrip(u64_t seed) {
+std::size_t test_dense_vram_indexes_nvme_roundtrip(u64_t seed, typename indexes_type_::executor_t& placement) {
     using key_t = typename indexes_type_::key_t;
     using nvme_t = nvme_indexes<key_t, indexes_type_::vector_dtype_k, nk_cap_serial_k, blocking_files_engine<>>;
     using scalar_t = typename nvme_t::scalar_t;
@@ -200,8 +278,8 @@ std::size_t test_dense_vram_indexes_nvme_roundtrip(u64_t seed) {
         reference.built.save(reference.checkpoint.monolith.data(), save_config_t {}, reference.builder.executor)));
 
     indexes_type_ indexes {kernel_, forkunion_allocator_t {no_memory_domain_k}};
-    failures += expect(succeeded(place_shards(indexes)));
-    dense_indexes_executor<indexes_type_> driver;
+    failures += expect(succeeded(place_shards(indexes, placement)));
+    dense_indexes_executor<indexes_type_> driver {placement};
     if (failed(driver.status) || failures) return failures + expect(false);
     nvme_checkpoint_t const resaved {"vram_nvme_resaved"};
     failures += expect(
@@ -225,51 +303,57 @@ std::size_t test_dense_vram_indexes_nvme_roundtrip(u64_t seed) {
 }
 
 /** A vendor this build leaves out composes nothing, so its shard instantiates empty. */
-template <gpu_vendor_t vendor_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-std::size_t test_vram_indexes_configuration(char const*, u64_t) {
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename executor_type_>
+std::size_t test_vram_indexes_configuration(char const*, u64_t, executor_type_&) {
     return 0;
 }
 
-/** Composes one (dtype, kernel) cell's sharded suite over @p vendor_ 's collection on the device
- *  under test, reported under @p name prefixed by the vendor's toolkit. */
-template <gpu_vendor_t vendor_, nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
-    requires vram_compiled<vendor_>
-std::size_t test_vram_indexes_configuration(char const* name, u64_t seed) {
-    using cell_t = vram_cell<vendor_, dtype_, kernel_>;
+/** Composes one (dtype, kernel) cell's sharded suite over the collection of @p executor 's vendor
+ *  on its device, reported under @p name prefixed by the vendor's toolkit. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename executor_type_>
+    requires vram_compiled<executor_type_::vendor_k>
+std::size_t test_vram_indexes_configuration(char const* name, u64_t seed, executor_type_& executor) {
+    using cell_t = vram_cell<executor_type_::vendor_k, dtype_, kernel_>;
     using indexes_t = typename cell_t::indexes_t;
     std::string const vendor_name = fmt::format("{}-{}", cell_t::vendor_prefix_k, name);
 
     // The suite is composed here, not reflected: every call below is a capability claim
     // this sharded, executor-driven category makes about itself.
     std::size_t failures_count = 0;
-    failures_count += test_dense_indexes_guards<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_duplicate_keys<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_save_load<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_split_load<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_buffer_roundtrip<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_cancelled_load<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_concurrent_add<indexes_t, kernel_>(seed);
-    failures_count += test_dense_vram_indexes_search_race<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_planned_insert<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed);
-    failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed);
-    failures_count += test_dense_vram_indexes_indexer_search<indexes_t, kernel_>(seed);
-    failures_count += test_dense_vram_indexes_nvme_roundtrip<indexes_t, kernel_>(seed);
+    failures_count += test_dense_indexes_guards<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_indexes_duplicate_keys<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_indexes_save_load<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_indexes_split_load<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_indexes_buffer_roundtrip<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_indexes_cancelled_load<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_indexes_concurrent_add<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_vram_indexes_search_race<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_indexes_planned_insert<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_indexes_refine<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_indexes_absorb<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_indexes_products<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_indexes_maxsim<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_vram_indexes_indexer_search<indexes_t, kernel_>(seed, executor);
+    // Apple merges every ranking on the host, so its two merges are one path.
+    if constexpr (executor_type_::vendor_k != gpu_vendor_t::apple_k)
+        failures_count += test_dense_vram_indexes_device_merge<indexes_t, kernel_>(seed, executor);
+    failures_count += test_dense_vram_indexes_nvme_roundtrip<indexes_t, kernel_>(seed, executor);
     return report(vendor_name.c_str(), failures_count);
 }
 
-/** The sharded VRAM suite entry its translation unit defines for every vendor and each carried
- *  vendor's entry composes explicitly; returns the suite's failure count. */
-template <gpu_vendor_t vendor_>
-std::size_t check_vram_indexes(settings_t const& settings);
+/** The sharded VRAM suite entry its translation unit defines for every vendor's executor and each
+ *  carried vendor's entry composes explicitly over the executor it opened; returns the suite's
+ *  failure count. */
+template <typename executor_type_>
+std::size_t check_vram_indexes(settings_t const& settings, executor_type_& executor);
 
 } // namespace unum::usearch::test::dense
 
 /*  The residency forms specialize templates of the enclosing @c test namespace, which only a
  *  scope enclosing it may do, so they follow the namespace at file scope and qualify what they name. */
 
-/** The VRAM form: one stream or queue on the device under test. */
+/** The VRAM form: one stream or queue of its own on the device of @p placement, the executor the
+ *  vendor's entry opened. */
 template <us::test::dense::vram_collection indexes_type_>
 struct us::test::dense_indexes_executor<indexes_type_> {
     using executor_t = typename indexes_type_::executor_t;
@@ -277,8 +361,8 @@ struct us::test::dense_indexes_executor<indexes_type_> {
     executor_t executor;
     us::utilities::status_t status = us::utilities::status_t::uninitialized_k;
 
-    dense_indexes_executor() noexcept {
-        int const device = us::test::dense::selected_device;
+    explicit dense_indexes_executor(executor_t const& placement) noexcept {
+        int const device = placement.device(0);
         auto [executor, spawn_status] = executor_t::spawn(std::span<int const> {&device, 1});
         status = spawn_status;
         this->executor = std::move(executor);
@@ -286,10 +370,10 @@ struct us::test::dense_indexes_executor<indexes_type_> {
     dense_indexes_executor(dense_indexes_executor const&) = delete;
     dense_indexes_executor& operator=(dense_indexes_executor const&) = delete;
 
-    /** Places the shards one sharded scenario drives: one VRAM shard on the device under test,
-     *  since the index refuses two on one device. */
-    static us::utilities::status_t place_shards(indexes_type_& indexes) noexcept {
-        return indexes.emplace(us::test::dense::selected_device);
+    /** Places the shards one sharded scenario drives: one VRAM shard on the device of
+     *  @p placement; each further call places one more beside it. */
+    static us::utilities::status_t place_shards(indexes_type_& indexes, executor_t& placement) noexcept {
+        return indexes.emplace(placement.stream(0));
     }
 };
 
