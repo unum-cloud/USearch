@@ -23,13 +23,13 @@ import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
 
 /**
- * The vocabulary every modality shares - the Java twin of {@code include/usearch/types.h}: entry
- * identities, failure reporting, scalar kinds, the executor every fanned-out verb runs on, deferred
- * calls, and the strided descriptors batches travel in.
+ * The vocabulary every modality shares: entry identities, failure reporting, scalar kinds, the
+ * executor every fanned-out verb runs on, deferred calls, and the strided descriptors batches
+ * travel in.
  *
  * <p>
  * The class itself is the library's introspection: its version, and the hardware it can and does
- * use. Everything else it holds is a nested type, so one file mirrors one header.
+ * use. Everything else it holds is a nested type.
  */
 public final class Types {
 

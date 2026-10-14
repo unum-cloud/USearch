@@ -2,7 +2,7 @@
  *  @file c/test.c
  *  @author Ash Vardanian
  *  @date June 25, 2023
- *  @brief Unit tests for the pure-C ABI of USearch (`usearch/dense_index.h`).
+ *  @brief Unit tests for the pure-C ABI of USearch.
  *
  *  Exercises the dense surface through the ABI every binding consumes: initialization and
  *  reservation, batch `add`, `search`, `multiply` and `attend`, retrieval by key, the arenas every

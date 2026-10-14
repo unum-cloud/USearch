@@ -2,8 +2,7 @@
  *  @file python/dense_index.c
  *  @author Ash Vardanian
  *  @date August 16, 2026
- *  @brief Vector search over equidimensional dense embeddings - the CPython twin of
- *      `include/usearch/dense_index.h`.
+ *  @brief CPython vector search over equidimensional dense embeddings.
  *
  *  Every verb is a batch: a one-dimensional input is one row, so a memory-mapped dataset
  *  reaches the index with no reshape and no copy. The candidate-pool breadth rides the call

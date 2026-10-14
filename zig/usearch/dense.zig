@@ -1,5 +1,4 @@
-//! The dense modality - Vector Search over equidimensional embeddings, the Zig twin of
-//! `include/usearch/dense_index.h`.
+//! The dense modality - Vector Search over equidimensional embeddings.
 //!
 //! `DenseIndex` is the handle; `RowsView` is the batch currency every verb reads, one vector being
 //! a one-row run, and every output whose length scales with the call lands in an `Arena` the verb

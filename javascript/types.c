@@ -2,7 +2,7 @@
  *  @file javascript/types.c
  *  @author Ash Vardanian
  *  @date September 9, 2026
- *  @brief The vocabulary every modality shares, the Node-API twin of @c include/usearch/types.h.
+ *  @brief The Node-API vocabulary every modality shares.
  *
  *  Closed-set naming, argument parsing, identities, row borrowing, the @c Executor whose threads or
  *  streams every fanned-out verb runs on, the @c Arena every scaling output lands in, and the

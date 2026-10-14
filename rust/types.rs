@@ -1,4 +1,4 @@
-//! Shared vocabulary of the USearch bindings - the Rust twin of `include/usearch/types.h`.
+//! Shared vocabulary of every USearch modality.
 //!
 //! Scalar types, matrices, and their traits come from NumKong, so a caller already holding a
 //! `MatrixView` hands it straight to an index without a reshape or a copy.

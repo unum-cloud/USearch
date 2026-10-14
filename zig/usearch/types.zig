@@ -1,4 +1,4 @@
-//! Shared vocabulary of the USearch C interface - the Zig twin of `include/usearch/types.h`.
+//! Shared vocabulary of every USearch modality.
 //!
 //! Holds the `Status`/`Error` pair every call reports through, the 128-bit `Key` and the
 //! `Distance` it is scored by, the `Scalar` encodings rows travel in, the `RowsView` every
@@ -6,9 +6,9 @@
 //! length scales with a call lands in, the `Matches` a ranked run comes back as, and the
 //! `Deferred` a submitted call is held in.
 //!
-//! The C ABI is declared by hand rather than pulled through `@cImport`, so the module needs no
-//! include path from its dependents and no cast at a call site: an `extern struct` already has
-//! the ABI's layout, and an `enum(c_int)` already has its width.
+//! The library's entry points are declared by hand rather than pulled through `@cImport`, so the
+//! module needs no include path from its dependents and no cast at a call site: an `extern struct`
+//! already has the library's layout, and an `enum(c_int)` already has its width.
 
 const std = @import("std");
 

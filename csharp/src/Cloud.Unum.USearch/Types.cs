@@ -1692,9 +1692,9 @@ internal unsafe struct NativeExecutorDrain
 #region Entry Points
 
 /// <summary>
-/// The shared C surface of <c>include/usearch/types.h</c>: the introspection probes, the name
-/// tables, the executor every fanned-out verb of every modality runs on, the arena every output
-/// whose length scales with a call lands in, and the wait every deferred call ends in.
+/// The entry points every modality shares: the introspection probes, the name tables, the
+/// executor every fanned-out verb of every modality runs on, the arena every output whose length
+/// scales with a call lands in, and the wait every deferred call ends in.
 /// </summary>
 /// <remarks>
 /// The declarations are source-generated rather than reflected, so the marshalling stubs are

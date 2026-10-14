@@ -226,7 +226,9 @@ set(USEARCH_CMAKE_PROJECT_CONFIG_FILE "${USEARCH_CMAKE_CONFIG_DIR}/${PROJECT_NAM
 set(USEARCH_CMAKE_PROJECT_TARGETS_FILE "${USEARCH_CMAKE_CONFIG_DIR}/${PROJECT_NAME}Targets.cmake")
 set(USEARCH_PKGCONFIG_INSTALL_DIR "${CMAKE_INSTALL_DATADIR}/pkgconfig")
 
-set(USEARCH_INCLUDE_BUILD_DIR "${PROJECT_SOURCE_DIR}/include/")
+# Include roots that add no path component: the C interface in `c/`, the templates in `include/`, and the C++ wrappers
+# over the C interface in `cpp/`, which only the compiled libraries carry.
+set(USEARCH_INCLUDE_BUILD_DIRS "${PROJECT_SOURCE_DIR}/c/" "${PROJECT_SOURCE_DIR}/include/")
 
 # The core: the basic graph index and the utilities it stands on - six headers on the standard library alone, no sibling
 # library in sight. Concepts are the main reason C++20 is the base language level, with `std::atomic_ref` and the
@@ -240,9 +242,9 @@ target_sources(
     INTERFACE FILE_SET
               HEADERS
               BASE_DIRS
-              ${USEARCH_INCLUDE_BUILD_DIR}
+              ${USEARCH_INCLUDE_BUILD_DIRS}
               FILES
-              include/usearch/types.h
+              c/usearch/types.h
               include/usearch/utilities/types.hpp
               include/usearch/utilities/sanitizers.hpp
               include/usearch/utilities/ram_buffers.hpp
@@ -259,7 +261,7 @@ set_target_properties(${USEARCH_TARGET_NAME} PROPERTIES EXPORT_NAME header)
 target_link_libraries(${USEARCH_TARGET_NAME} INTERFACE usearch_core)
 
 target_include_directories(
-    ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE} INTERFACE $<BUILD_INTERFACE:${USEARCH_INCLUDE_BUILD_DIR}>
+    ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE} INTERFACE "$<BUILD_INTERFACE:${USEARCH_INCLUDE_BUILD_DIRS}>"
                                                                $<INSTALL_INTERFACE:include>
 )
 # Install a pkg-config file, so other tools can find this
@@ -276,7 +278,7 @@ write_basic_package_version_file(
 configure_file(${USEARCH_CMAKE_CONFIG_TEMPLATE} ${USEARCH_CMAKE_PROJECT_CONFIG_FILE} @ONLY)
 
 if (USEARCH_INSTALL)
-    install(DIRECTORY ${USEARCH_INCLUDE_BUILD_DIR} DESTINATION ${USEARCH_INCLUDE_INSTALL_DIR})
+    install(DIRECTORY c/usearch include/usearch cpp/usearch DESTINATION ${USEARCH_INCLUDE_INSTALL_DIR})
     install(FILES ${USEARCH_CMAKE_PROJECT_CONFIG_FILE} ${USEARCH_CMAKE_VERSION_CONFIG_FILE}
             DESTINATION ${USEARCH_CONFIG_INSTALL_DIR}
     )
@@ -610,6 +612,7 @@ endif ()
 
 if (${USEARCH_BUILD_LIB_C})
     add_subdirectory(c)
+    add_subdirectory(cpp)
 endif ()
 
 if (${USEARCH_BUILD_LIB_PYTHON})

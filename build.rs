@@ -194,6 +194,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Only what the chosen implementation actually compiles, so a stand-in build ignores the
     // engine's sources and an engine build ignores the stand-in's.
     println!("cargo:rerun-if-changed={}", manifest.join("CMakeLists.txt").display());
+    watch(&manifest.join("c"));
     watch(&manifest.join("include"));
     for source in chosen.sources {
         watch(&manifest.join(source));

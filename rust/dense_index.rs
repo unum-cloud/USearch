@@ -1,5 +1,4 @@
-//! Vector Search over equidimensional dense embeddings - the Rust twin of
-//! `include/usearch/dense_index.h`.
+//! Vector Search over equidimensional dense embeddings.
 //!
 //! Every batch input is a NumKong matrix, so a memory-mapped dataset feeds the index with no
 //! reshape and no copy: packed slabs go through [`crate::rows`], padded ones through

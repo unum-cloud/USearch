@@ -233,8 +233,7 @@ public sealed class DenseTraversalStats
 #region Index
 
 /// <summary>
-/// A Vector Search Index over equidimensional dense representations - the managed twin of
-/// <c>include/usearch/dense_index.h</c>.
+/// A Vector Search Index over equidimensional dense representations.
 /// </summary>
 /// <remarks>
 /// Every verb is a batch over a <see cref="RowsView"/>, so a single vector is a one-row matrix. The
@@ -2586,9 +2585,8 @@ internal unsafe struct NativeDenseMaxsim
 #region Entry Points
 
 /// <summary>
-/// The dense-modality C surface of <c>include/usearch/dense_index.h</c>. Every verb takes one
-/// argument struct and reports through the outcome it names; this binding exposes no progress
-/// handler, so the handler crosses as null.
+/// The dense modality's entry points. Every verb takes one argument struct and reports through the
+/// outcome it names; this binding exposes no progress handler, so the handler crosses as null.
 /// </summary>
 internal static unsafe partial class NativeMethods
 {

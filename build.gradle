@@ -162,7 +162,7 @@ tasks.register("configureNativeLibrary", Exec) {
 
 tasks.register("compileNativeLibrary", Exec) {
     dependsOn "configureNativeLibrary"
-    inputs.files(fileTree("$rootDir/src"), fileTree("$rootDir/include"))
+    inputs.files(fileTree("$rootDir/src"), fileTree("$rootDir/c"), fileTree("$rootDir/include"))
     outputs.dir(project.ext.usearchLibraryPath)
     commandLine "cmake", "--build", project.ext.usearchLibraryPath,
         "--config", "Release", "--target", "usearch_shared", "--parallel"

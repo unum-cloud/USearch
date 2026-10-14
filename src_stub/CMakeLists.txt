@@ -16,7 +16,9 @@ add_library(usearch_static_stub STATIC ${USEARCH_STUB_SOURCES})
 add_library(${PROJECT_NAME}::shared_stub ALIAS usearch_shared_stub)
 
 foreach (TARGET_NAME usearch_shared_stub usearch_static_stub)
-    target_include_directories(${TARGET_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR})
+    target_include_directories(
+        ${TARGET_NAME} PRIVATE ${PROJECT_SOURCE_DIR}/c ${PROJECT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}
+    )
     target_link_libraries(${TARGET_NAME} PRIVATE Threads::Threads)
     set_target_properties(
         ${TARGET_NAME}

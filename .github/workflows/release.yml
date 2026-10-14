@@ -50,11 +50,11 @@ jobs:
             csharp/nuget/nuget-package.props:>(\d+\.\d+\.\d+)</Version>
             CMakeLists.txt:VERSION (\d+\.\d+\.\d+)
           update-major-version-in: |
-            include/usearch/types.h:^#define USEARCH_VERSION_MAJOR (\d+)
+            c/usearch/types.h:^#define USEARCH_VERSION_MAJOR (\d+)
           update-minor-version-in: |
-            include/usearch/types.h:^#define USEARCH_VERSION_MINOR (\d+)
+            c/usearch/types.h:^#define USEARCH_VERSION_MINOR (\d+)
           update-patch-version-in: |
-            include/usearch/types.h:^#define USEARCH_VERSION_PATCH (\d+)
+            c/usearch/types.h:^#define USEARCH_VERSION_PATCH (\d+)
           dry-run: "false"
           push: "true"
           create-release: "true"
@@ -140,7 +140,9 @@ jobs:
           touch "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/DEBIAN/control"
           mkdir -p "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/lib"
           mkdir "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/include"
-          cp -r include/usearch "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/include/"
+          for root in c include cpp; do
+            cp -r $root/usearch "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/include/"
+          done
           cp build_release/libusearch_shared.so "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/usr/local/lib/"
           echo -e "Package: usearch\nVersion: ${{ steps.set_version.outputs.version }}\nMaintainer: Ash Vardanian\nArchitecture: ${{ matrix.arch }}\nDescription: Faster & Smaller Single-File Search Engine for Vectors & Texts" > "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}/DEBIAN/control"
           dpkg-deb --build "usearch_linux_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}"
@@ -210,7 +212,9 @@ jobs:
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_shared.dll pkg\
+          xcopy /E /I .\c\usearch pkg\usearch
           xcopy /E /I .\include\usearch pkg\usearch
+          xcopy /E /I .\cpp\usearch pkg\usearch
           tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_shared.dll usearch
 
       - name: Build library with MSVC for Arm64
@@ -220,7 +224,9 @@ jobs:
           cmake --build ./build_release --config Release
           mkdir pkg
           copy .\build_release\libusearch_shared.dll pkg\
+          xcopy /E /I .\c\usearch pkg\usearch
           xcopy /E /I .\include\usearch pkg\usearch
+          xcopy /E /I .\cpp\usearch pkg\usearch
           tar -cvf usearch_windows_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.tar -C pkg libusearch_shared.dll usearch
 
       - name: Upload native library for Java
@@ -272,7 +278,7 @@ jobs:
           cmake --build ./build_release
           mkdir pkg
           cp build_release/libusearch_shared.dylib pkg/
-          cp -r include/usearch pkg/
+          for root in c include cpp; do cp -r $root/usearch pkg/; done
           (cd pkg && zip -r ../usearch_macos_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip libusearch_shared.dylib usearch)
 
       - name: Upload native library for Java
@@ -345,7 +351,7 @@ jobs:
         run: |
           mkdir pkg
           cp build_artifacts/libusearch_shared.so pkg/
-          cp -r include/usearch pkg/
+          for root in c include cpp; do cp -r $root/usearch pkg/; done
           (cd pkg && zip -r ../usearch_android_${{ matrix.arch }}_${{ steps.set_version.outputs.version }}.zip libusearch_shared.so usearch)
 
       - name: Upload native library for Java
@@ -630,7 +636,7 @@ jobs:
           cmake --workflow --preset ${{ matrix.archive }}_release
 
           cd build_${{ matrix.archive }}_release
-          cp -r ../include/usearch .
+          for root in c include cpp; do cp -r ../$root/usearch .; done
           tar -czf ../usearch_${{ matrix.archive }}_${{ steps.set_version.outputs.version }}.tar.gz libusearch_static.a usearch
           zip -r ../usearch_${{ matrix.archive }}_${{ steps.set_version.outputs.version }}.zip libusearch_static.a usearch
 

@@ -2,14 +2,13 @@
 //  Types.swift
 //  USearch
 //
-//  Shared vocabulary of the USearch Swift SDK - the twin of include/usearch/types.h.
+//  Shared vocabulary of the USearch Swift SDK.
 //
 //  Statuses, keys, scalar kinds, rows, executors, arenas, and deferred calls are
 //  modality-agnostic, so they live here and the dense modality builds on them in DenseIndex.swift.
 //
 //  Batches travel in a `RowsView` over NumKong's `MatrixView` or `Tensor`, and its low-precision
-//  types are the scalars a caller builds rows out of; this file only tags them with the kind the C
-//  descriptors carry.
+//  types are the scalars a caller builds rows out of, and this file only tags them by `Scalar`.
 //
 
 import Dispatch

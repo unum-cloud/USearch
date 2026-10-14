@@ -2,7 +2,7 @@
  *  @file src/types.cpp
  *  @author Ash Vardanian
  *  @date August 27, 2026
- *  @brief The library-wide probes of the C interface - the twin of `include/usearch/types.h`.
+ *  @brief The library-wide probes of the C interface.
  *
  *  The functions that take no handle and cannot fail: what version this is, which kernel
  *  families it was compiled with, which of those the machine in front of it can run, and the

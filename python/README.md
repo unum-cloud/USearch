@@ -1,14 +1,14 @@
 # USearch for Python
 
-The bindings are pure CPython in C11, sitting directly on the C ABI in `include/usearch/`, with no PyBind11, no NanoBind, and no SWIG.
+The bindings are pure CPython, with no PyBind11, no NanoBind, and no SWIG.
 They need CPython 3.12 or newer on Linux, macOS or Windows, and the extension itself never requires NumPy.
 Every verb is a batch, and one vector is a one-row matrix, so a memory-mapped dataset reaches the index with no reshape and no copy.
-They expose dense indexes; the other modalities are declared and raise `NotImplementedError` until the C library ships their engines.
+They expose dense indexes; the other modalities are declared and raise `NotImplementedError` until the library ships their engines.
 
-- `usearch.DenseIndex` mirrors `usearch/dense_index.h` and is the one instantiated today.
-- `usearch.SequenceIndex` mirrors `usearch/sequence_index.h`.
-- `usearch.MatrixIndex` mirrors `usearch/shapes_index.h`.
-- `usearch.GeospatialIndex` mirrors `usearch/geospatial_index.h`.
+- `usearch.DenseIndex` searches equidimensional dense embeddings, and is the one instantiated today.
+- `usearch.SequenceIndex` searches variable-length sequences.
+- `usearch.MatrixIndex` searches rank-2 tensors.
+- `usearch.GeospatialIndex` searches space and time.
 
 ## Installation
 

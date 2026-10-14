@@ -1,11 +1,10 @@
 """Vector search over equidimensional embeddings: the index, its receivers, its cursor, and its search stream.
 
-Mirrors @c include/usearch/dense_index.h. The type is `DenseIndex` rather than `Index` because the
-engine has sibling modalities that will bind beside it, and a bare name would have to be renamed
-the day one of them lands.
+The type is `DenseIndex` rather than `Index` because the engine has sibling modalities that will
+bind beside it, and a bare name would have to be renamed the day one of them lands.
 
 Every verb takes one argument structure named after it, and every one of them is mirrored below as
-a `...Arguments` struct laid out exactly as the header declares it, materialized in a
+a `...Arguments` struct laid out exactly as the library reads it, materialized in a
 `stack_allocation` slot and crossed by address. The receiver picks the completion: verbs on the
 index and on `index.on(executor)` pass blocking completion and return with their outcome final and
 their outputs readable, while `index.deferred(executor)` passes deferred completion and answers a

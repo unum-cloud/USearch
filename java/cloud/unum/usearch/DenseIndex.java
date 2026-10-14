@@ -30,9 +30,8 @@ import cloud.unum.usearch.Types.USearchException;
 import cloud.unum.usearch.Types.Verb;
 
 /**
- * A Vector Search Index over equidimensional dense representations - the Java twin of
- * {@code include/usearch/dense_index.h}, with the modality's own options, metric, telemetry and
- * per-call settings as nested types.
+ * A Vector Search Index over equidimensional dense representations, with the modality's own
+ * options, metric, telemetry and per-call settings as nested types.
  *
  * <p>
  * Every verb is a batch over strided matrices, so a memory-mapped dataset reaches the index with no

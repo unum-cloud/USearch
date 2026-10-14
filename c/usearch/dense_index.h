@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/dense_index.h
+ *  @file c/usearch/dense_index.h
  *  @author Ash Vardanian
  *  @date August 14, 2026
  *  @brief The dense-modality C interface: Vector Search over equidimensional embeddings with

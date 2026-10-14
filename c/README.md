@@ -1,6 +1,6 @@
 # USearch for C
 
-This is the C 99 interface every other binding wraps: the headers in `include/usearch/`, compiled into `libusearch_shared` and `libusearch_static`.
+This is the C 99 interface every other binding wraps: the headers in `c/usearch/`, compiled into `libusearch_shared` and `libusearch_static`.
 Building the library takes CMake 3.28 and a C++20 compiler, while calling it takes any C99 compiler.
 It exposes all four modalities: the engine implements dense indexes, while sequence, matrix and geospatial indexes are answered today by a brute-force stand-in only.
 
@@ -11,7 +11,7 @@ cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_LIB_C=1 -D U
 ```
 
 That leaves both libraries in `build_release/`, carrying all eleven dense storage types; precompiled ones ship on the [releases page](https://github.com/unum-cloud/USearch/releases).
-Put `include/` on the include path and link either library.
+Put `c/` on the include path, or `include/` once installed, where the C headers sit beside the C++ ones, and link either library.
 One header, `usearch/usearch.h`, pulls in every modality: `dense_index.h`, `sequence_index.h`, `shapes_index.h` and `geospatial_index.h`.
 `ctest --test-dir build_release -R usearch_test_c` runs the smoke test in `c/test.c`.
 
@@ -744,7 +744,7 @@ A metric of your own, over payloads of your own, belongs to the C++ baseline tie
 ## Design
 
 - __This is the C ABI itself.__
-  Every name is the one `include/usearch/` declares: a verb `usearch_dense_<verb>` takes a `usearch_dense_<verb>_t`, and closed sets are C enums with name tables, never strings.
+  Every name is the one `c/usearch/` declares: a verb `usearch_dense_<verb>` takes a `usearch_dense_<verb>_t`, and closed sets are C enums with name tables, never strings.
 - __The completion chooses, the verb stays.__
   A `NULL` executor runs a verb on the calling thread, an executor with the default completion blocks on it, and `usearch_completion_deferred_k` submits it, all with the same argument struct.
 - __Deferred calls report through the same outcome.__

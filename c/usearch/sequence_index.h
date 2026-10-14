@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/sequence_index.h
+ *  @file c/usearch/sequence_index.h
  *  @author Ash Vardanian
  *  @date August 14, 2026
  *  @brief The sequence-modality C interface: similarity search over variable-length sequences -

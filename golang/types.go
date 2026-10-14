@@ -1,9 +1,8 @@
-// Package usearch provides Go bindings for USearch, consumed through its stable C headers.
+// Package usearch provides Go bindings for USearch.
 //
-// The package links the pre-instantiated C library, so no index template is instantiated
-// here and nothing but the vocabulary below crosses the boundary. Shared types mirror
-// include/usearch/types.h; the dense modality mirrors include/usearch/dense_index.h and
-// carries a Dense prefix, leaving room for the modalities that follow.
+// The package links the precompiled engine, so building it compiles no index. Status, Key,
+// Scalar, RowsView, Executor and Arena serve every modality; the dense modality carries a
+// Dense prefix, leaving room for the modalities that follow.
 //
 //	options := usearch.DefaultDenseOptions()
 //	options.Dimensions = 768
@@ -66,8 +65,8 @@ import "C"
 // A Status is an error, so errors.Is(err, usearch.StatusReadOnly) matches any failure carrying it.
 type Status int32
 
-// The statuses of include/usearch/types.h, numbered alike. Only Deferred.Status reports
-// StatusDeferred, the one status that is not final.
+// The statuses a call ends in. Only Deferred.Status reports StatusDeferred, the one status
+// that is not final.
 const (
 	// StatusSuccess means the call completed and carries no message.
 	StatusSuccess Status = C.usearch_status_success_k
@@ -241,8 +240,8 @@ func keyFromRaw(raw C.usearch_key_t) Key { return *(*Key)(unsafe.Pointer(&raw)) 
 // pack several dimensions per byte, as their xN suffixes spell.
 type Scalar int32
 
-// The scalar types of include/usearch/types.h, ordered by shrinking dynamic range. The C
-// enum reserves the numbering gaps for kinds that have not landed yet.
+// The scalar types rows travel in, ordered by shrinking dynamic range. The numbering
+// leaves gaps for kinds that have not landed yet.
 const (
 	// ScalarUnknown tags a type the library could not name.
 	ScalarUnknown Scalar = C.usearch_scalar_unknown_k

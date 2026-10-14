@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/geospatial_index.h
+ *  @file c/usearch/geospatial_index.h
  *  @author Ash Vardanian
  *  @date August 14, 2026
  *  @brief The geospatial-modality C interface.

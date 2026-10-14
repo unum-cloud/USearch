@@ -2,8 +2,7 @@
  *  @file javascript/dense_index.c
  *  @author Ash Vardanian
  *  @date September 9, 2026
- *  @brief Vector search over equidimensional dense embeddings - the Node-API twin of
- *      @c include/usearch/dense_index.h.
+ *  @brief Node-API vector search over equidimensional dense embeddings.
  *
  *  The @c CompiledIndex class and the lifecycle verbs that instantiate it, the cursor and the
  *  search stream it opens, and the checkpoint metadata readers that need no index at all.

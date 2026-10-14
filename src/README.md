@@ -1,6 +1,6 @@
 # The C Interface Implementation
 
-`include/usearch/*.h` declares the C ABI every binding consumes, and this directory implements it over the header-only engine in `include/usearch/`.
+`c/usearch/*.h` declares the C ABI every binding consumes, and this directory implements it over the header-only engine in `include/usearch/`.
 None of it is a public header: the C libraries, the C test and every binding link the objects these files compile into.
 
 ## Files

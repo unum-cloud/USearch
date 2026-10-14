@@ -2,8 +2,7 @@
 //  DenseIndex.swift
 //  USearch
 //
-//  Vector Search over equidimensional dense embeddings - the Swift twin of
-//  include/usearch/dense_index.h.
+//  Vector Search over equidimensional dense embeddings.
 //
 //  Every verb is a batch over strided rows, so a memory-mapped dataset reaches the index
 //  with no reshape and no copy, and a single vector is a one-row matrix. The candidate-pool

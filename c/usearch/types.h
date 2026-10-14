@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/types.h
+ *  @file c/usearch/types.h
  *  @author Ash Vardanian
  *  @date August 14, 2026
  *  @brief Shared vocabulary of the USearch C interface: scalar types, keys, distances, shapes,

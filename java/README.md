@@ -275,7 +275,7 @@ The placement is absent because a checkpoint records where it was written rather
 
 ## Dense Indexes
 
-`DenseIndex` mirrors `include/usearch/dense_index.h`, with the modality's options, metric, telemetry and per-call settings as nested types.
+`DenseIndex` carries the modality's options, metric, telemetry and per-call settings as nested types.
 
 ### Rows & Scalars
 

@@ -2,11 +2,11 @@
  *  @file python/types.c
  *  @author Ash Vardanian
  *  @date August 16, 2026
- *  @brief The vocabulary every modality shares - the CPython twin of `usearch/types.h`.
+ *  @brief The CPython vocabulary every modality shares.
  *
  *  Keys, distances, failures, enums, calls and telemetry live here rather than inside any one
- *  modality, the same split `rust/types.rs` takes: a `Key` produced by a dense search is the very
- *  object a sequence index will accept, because there is one definition and one address.
+ *  modality: a `Key` produced by a dense search is the very object a sequence index will accept,
+ *  because there is one definition and one address.
  *
  *  Tensor ingestion lives here too, being the same kind of shared vocabulary: every batch verb
  *  of every modality takes its input the same way, PEP 3118 first and @c __array_interface__

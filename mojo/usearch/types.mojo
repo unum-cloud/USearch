@@ -1,8 +1,8 @@
 """The vocabulary every modality shares: keys, scalars, rows, residencies, and the one error type.
 
-Mirrors @c include/usearch/types.h. Nothing dense-specific lives here - the metric kinds, the result
-shapes only a dense index answers, and the index itself belong to @c dense.mojo, so a second
-modality adds a module rather than widening this one.
+Nothing dense-specific lives here - the metric kinds, the result shapes only a dense index answers,
+and the index itself belong to @c dense.mojo, so a second modality adds a module rather than
+widening this one.
 
 `Error` is the only error type the binding raises: Mojo 1.1 allows at most one per function, so a
 second would force every caller raising `Error` to catch and convert. A refusal is a failure, not an absence - a key the index does not hold answers zero, but a

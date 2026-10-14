@@ -1745,18 +1745,19 @@ judge_path() {
         check_harness_library_qualified
         check_namespace_reopened
         ;;&
-    # The shipped library: public headers under include/ and the ABI sources under src/.
-    include/*.h)
+    # The shipped library: the C interface under c/usearch/, the headers under include/ and cpp/, and the ABI sources
+    # under src/.
+    c/usearch/*.h)
         check_verb_field_order
         ;;&
-    include/*.h | include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh)
+    c/usearch/*.h | cpp/usearch/*.hpp | include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh)
         check_stl_dynamic_containers
         check_ranges_templates
         check_boolean_parameters
         check_chevron_launches
         ;;&
     # The shipped library and the GenMC clients that spell its protocols line for line.
-    include/*.h | include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh | verification/*.cpp)
+    c/usearch/*.h | cpp/usearch/*.hpp | include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh | verification/*.cpp)
         check_hand_minmax
         check_preferred_aliases
         ;;&
