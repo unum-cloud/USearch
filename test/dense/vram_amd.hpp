@@ -6,7 +6,10 @@
  *      backend and the cell the shared composers build it through.
  *
  *  The shared composers include it for the AMD suite, so the scenarios stay vendor-neutral while
- *  the harness's live-bytes-must-balance ledger audits the AMD flat matrices.
+ *  the harness's live-bytes-must-balance ledger audits the AMD flat matrices. Plain C++ over the
+ *  AMD faces, so the shared shards compile with the host compiler; the cells' kernels instantiate
+ *  in @c vram_amd.hip, which also covers device attention, since its value lookups run on the
+ *  device.
  */
 #pragma once
 
@@ -21,17 +24,37 @@ using counting_hip_allocator_t = counting_device_allocator<hip_virtual_memory_al
 
 static_assert(hip_reservable_allocator<counting_hip_allocator_t>);
 
-/** The AMD class the suite links, whose code object its device must load: CDNA3, the floor. */
-inline constexpr nk_capability_t dense_amd_capabilities_k = amd_capabilities_of(gpu_class_t::amd_cdna3_k);
+/** The ceiling of the suite's own code object, which carries the attends over its value lookups:
+ *  the CDNA3 tier alone, which picks the CDNA3 class that CDNA3 and CDNA4 run, while naming that
+ *  code object apart from the library's CDNA3 one the runner also links. */
+inline constexpr nk_capability_t dense_amd_capabilities_k = nk_cap_cdna3_k;
+
+/** A device lookup over a value table whose rows sit a 16-byte pitch apart: an ID below @c count
+ *  names its row, a node ID on one GPU and a key on shards, and any other has none. */
+struct dense_hip_value_lookup_t {
+
+    /** Names the lookup to the attend kernels the suite's code object carries. */
+    inline static constexpr u32_t device_lookup_k = 1;
+
+    byte_t const* rows;
+    std::size_t pitch;
+    std::size_t count;
+
+#if defined(__HIP__)
+    __device__ void const* operator()(u32_t id) const noexcept { return id < count ? rows + id * pitch : nullptr; }
+#endif
+};
 
 /** The AMD index of one (dtype, kernel) cell over the ledgered flat matrices and its sharded
- *  collection, built over the stream of the executor the ROCm entry opened. */
+ *  collection, built over the stream of the executor the ROCm entry opened; device attention runs
+ *  in @c vram_amd.hip instead of the shared composers. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_>
 struct vram_cell<gpu_vendor_t::amd_k, dtype_, kernel_> {
     using index_t = vram_amd_index<dtype_, dense_amd_capabilities_k, counting_hip_allocator_t, counting_hip_allocator_t,
                                    hip_device_allocator_t>;
     using indexes_t = vram_amd_indexes<u32_t, dtype_, dense_amd_capabilities_k>;
     inline static constexpr char const* vendor_prefix_k = "rocm";
+    inline static constexpr bool attends_k = true;
 
     /** The stream the cell's contexts and checkpoints ride, on the device its indexes sit on. */
     hip_executor_t::stream_t const& stream;

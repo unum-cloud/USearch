@@ -932,9 +932,9 @@ struct vram_apple_indexes {
         return for_each_window<search_result_t>(rows_count, window_rows, maxsim_window);
     }
 
-    /** Grouped-query attention of every token over every shard, vetted as on NVIDIA and refused
-     *  with @c unsupported_k until the shards' Metal attend lands; @c config_mismatch_k unless the
-     *  shards score by dot. */
+    /** Grouped-query attention of every token over every shard, vetted as on NVIDIA and AMD, then
+     *  refused with @c unsupported_k, since a Metal kernel cannot call the caller's value lookup;
+     *  @c config_mismatch_k unless the shards score by dot. */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&&, f32_t,
                                      rows_span_t outputs, std::span<softmax_state_t> carry, executor_t& executor,

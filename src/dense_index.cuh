@@ -3386,9 +3386,8 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                                 "A softmax weighs logits, so the kind must be inner product");
             else if (!arguments->value_lookup)
                 propagate_error(usearch_status_invalid_argument_k, outcome, "The value lookup must be set");
-            else if constexpr (is_vram_index<variant_type_> &&
-                               gpu_vendor_of_index<variant_type_>() != gpu_vendor_t::nvidia_k)
-                propagate_error(usearch_status_unsupported_k, outcome, "Device attention runs on NVIDIA alone");
+            else if constexpr (gpu_vendor_of_index<variant_type_>() == gpu_vendor_t::apple_k)
+                propagate_error(usearch_status_unsupported_k, outcome, "A Metal kernel cannot call the value lookup");
             else {
                 usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
                                                                   arguments->executor, device_of(variant),

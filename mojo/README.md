@@ -333,7 +333,7 @@ var documents = index.on(executor).maxsim(tokens, tokens_per_query, 10, arena)  
 `attend` is Flash Attention folded into the walk: every key it scores folds into each head's running maximum, partition and weighted value sum, with no top-k cut, and the attended rows land in the arena already divided by the partition.
 The index stores no values, so a `ValueLookup` resolves every scored batch of keys to value rows, `columns` values of `scalar` apiece, the index's own width and kind, which it checks before answering any row.
 A key without a row refuses the call with `Status.SHAPE_MISMATCH`, since a missing row is a wrong softmax rather than a smaller one.
-A VRAM index calls its lookup inside the device walk, so there `value_lookup` must be a `__device__` function's address, read with `cudaMemcpyFromSymbol`; a host function there is undefined, never refused.
+A VRAM index calls its lookup inside the device walk, so there `value_lookup` must be a `__device__` function's address, read with `cudaMemcpyFromSymbol` on NVIDIA or `hipMemcpyFromSymbol` on AMD; a host function there is undefined, never refused.
 
 ```mojo
 def value_rows(

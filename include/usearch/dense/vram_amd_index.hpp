@@ -7,22 +7,23 @@
  *  The host face of the AMD family, compiled by any C++ compiler: it fills plain argument records
  *  and launches the kernels of @c vram_amd_index.hip by name through the HIP runtime it opens at
  *  first use, so it never sees a kit, a shared view or HIP beyond its runtime's declarations. Every
- *  kernel is one instantiation of a single template over four integers - the kernel, the class, the
- *  dtype and the register rung - so its mangled name is spelled here from those integers alone, and
- *  one code object per class carries every dtype. Attention refuses with @c unsupported_k, as a
- *  device value lookup is vendor-specific.
+ *  kernel is one instantiation of a single template over five integers - the kernel, the class, the
+ *  dtype, the register rung and the attend value lookup - so its mangled name is spelled here from
+ *  those integers alone, and one code object per class carries every dtype.
  */
 #pragma once
 
 #include <cstddef> // `std::size_t`
 #include <cstdio>  // `std::snprintf` - a kernel's mangled name
-#include <cstring> // `std::memcpy`
+#include <cstring> // `std::memcpy` - an attend's value lookup travels as bytes
 
-#include <bit>     // `std::bit_ceil`, `std::has_single_bit`
-#include <limits>  // `std::numeric_limits` - the unit-RMS import's epsilon
-#include <mutex>   // `std::unique_lock` while one context grows the storage and claims
-#include <span>    // `std::span`
-#include <utility> // `std::exchange`
+#include <bit>         // `std::bit_ceil`, `std::has_single_bit`
+#include <limits>      // `std::numeric_limits` - the unit-RMS import's epsilon
+#include <mutex>       // `std::unique_lock` while one context grows the storage and claims
+#include <numbers>     // `std::numbers::log2e_v` - the base-2 softmax
+#include <span>        // `std::span`
+#include <type_traits> // `std::is_same_v` - which heads a walk stages
+#include <utility>     // `std::exchange`
 
 #include <forkunion/types.hpp> // `fu::spin_mutex_t`, `fu::standard_yield_t`
 
@@ -53,6 +54,43 @@ inline constexpr std::size_t amd_schedule_bytes_k = 1;
 constexpr std::size_t amd_gathered_bytes(u32_t wave_lanes) noexcept {
     return vram_cache_rows_k * sizeof(u32_t) + wave_lanes * (amd_scored_node_bytes_k + 4);
 }
+
+/** Bytes of one walking wavefront's attend scratch over @p heads_count heads of @p columns columns
+ *  and @p wave_lanes lanes: every head's batch dots, its running maximum, partition and latest
+ *  rescale, then its accumulator row, in whole fragments so the next wavefront's query span stays
+ *  aligned. */
+constexpr std::size_t amd_attend_scratch_bytes(std::size_t heads_count, std::size_t columns,
+                                               u32_t wave_lanes) noexcept {
+    return round_up_to_multiple<std::size_t>(heads_count * (wave_lanes + 3 + columns) * sizeof(f32_t),
+                                             amd_fragment_bytes_k);
+}
+
+/** Sets the keyed twin of a value lookup apart from the bare one in an attend kernel's name. */
+inline constexpr u32_t amd_keyed_lookup_k = 1u << 16;
+
+/** A key-level value lookup seen through one shard's device key column, so the shard's walks
+ *  resolve node IDs: the kernels read a node's row as @c value_lookup(keys[node_id]). */
+template <typename key_type_, typename value_lookup_type_>
+struct amd_keyed_lookup {
+
+    /** Names this lookup to the attend kernels, apart from the bare key-level one. */
+    inline static constexpr u32_t device_lookup_k = value_lookup_type_::device_lookup_k | amd_keyed_lookup_k;
+
+    /** The shard's keys on its device, by node ID. */
+    key_type_ const* keys;
+
+    /** Resolves a key to its value row. */
+    value_lookup_type_ value_lookup;
+};
+
+/** The device value lookup an attend kernel resolves rows through, by the @c device_lookup_k a
+ *  lookup type names itself with: whichever unit compiles a code object specializes it with
+ *  @c type for every lookup that code object's attend kernels take. */
+template <u32_t lookup_>
+struct amd_value_lookup_of;
+
+/** Bytes of a value lookup an attend carries to its kernels. */
+inline constexpr std::size_t amd_value_lookup_capacity_k = 64;
 
 /** One bit per row over device-resident words, marked concurrently by a whole grid. */
 struct hip_bitset_t {
@@ -197,6 +235,20 @@ struct amd_graph_t {
     u32_t* reconnected = nullptr;
 };
 
+/** An attend's landing and the value lookup its walks resolve rows through, carried as the lookup's
+ *  own bytes; the sharded gather reads the landing as @p shards blocks of @p rows rows. */
+struct amd_attend_t {
+    f32_t* outputs = nullptr;
+    softmax_state_t* states = nullptr;
+    u32_t* missed = nullptr;
+    f32_t logit_scale = 0;
+    u32_t heads_count = 0;
+    u32_t columns = 0;
+    u32_t rows = 0;
+    u32_t shards = 0;
+    alignas(16) byte_t value_lookup[amd_value_lookup_capacity_k] = {};
+};
+
 /** A ranking of keys on the device, mirroring the shared ranking view. */
 struct amd_ranking_t {
     byte_t* keys = nullptr;
@@ -234,6 +286,7 @@ struct amd_arguments_t {
     amd_multiply_sink_t multiply_sink;
     amd_rescoring_t rescoring;
     amd_graph_t graph;
+    amd_attend_t attend;
     amd_matches_t matches;
     nk_cast_arguments_t cast;
     nk_each_rmsnorm_arguments_t rmscast;
@@ -250,6 +303,7 @@ enum class amd_kernel_t : u32_t {
     search_k,
     search_indexer_k,
     multiply_k,
+    attend_k,
     merge_back_links_k,
     scatter_back_links_k,
     derive_norms_k,
@@ -259,6 +313,7 @@ enum class amd_kernel_t : u32_t {
     reachability_islands_k,
     reached_in_links_k,
     reconnect_island_k,
+    merge_attention_k,
     resolve_matches_k,
     merge_matches_k,
     cast_k,
@@ -273,8 +328,8 @@ struct amd_rung_t {
     u32_t slots;
 };
 
-/** Every instantiation one dtype's code exports, which the device pass instantiates and the host
- *  looks up. */
+/** Every instantiation one dtype's code exports bar the attends, which the device pass instantiates
+ *  and the host looks up as it loads the code object. */
 inline constexpr amd_rung_t amd_rungs[] = {
     {amd_kernel_t::insert_k, 0},
     {amd_kernel_t::insert_k, 2},
@@ -310,11 +365,15 @@ inline constexpr amd_rung_t amd_rungs[] = {
     {amd_kernel_t::reachability_islands_k, 0},
     {amd_kernel_t::reached_in_links_k, 0},
     {amd_kernel_t::reconnect_island_k, 0},
+    {amd_kernel_t::merge_attention_k, 0},
     {amd_kernel_t::resolve_matches_k, 0},
     {amd_kernel_t::merge_matches_k, 0},
     {amd_kernel_t::cast_k, 0},
     {amd_kernel_t::rmscast_k, 0},
 };
+
+/** The rungs every walk family, attends included, is instantiated over. */
+inline constexpr u32_t amd_walk_rungs[] = {0, 2, 4, 8, 16};
 
 /** Rungs per kernel: the arena frontier's zero, then 2, 4, 8 and 16 slots. */
 inline constexpr std::size_t amd_rungs_per_kernel_k = 5;
@@ -340,15 +399,15 @@ constexpr nk_capability_t amd_capabilities_of(gpu_class_t gpu_class) noexcept {
 
 inline constexpr std::size_t amd_kernel_name_capacity_k = 160;
 
-/** Spells the Itanium mangled name of @c amd_kernel<kernel,class,dtype,slots>: four unsigned
- *  template arguments, then the one @ref amd_arguments_t parameter, as the device pass emits
- *  it. */
+/** Spells the Itanium mangled name of @c amd_kernel<kernel,class,dtype,slots,lookup>: five unsigned
+ *  template arguments, then the one @ref amd_arguments_t parameter, as the device pass emits it;
+ *  @p lookup is zero for every kernel but an attend. */
 inline void amd_kernel_name(char (&name)[amd_kernel_name_capacity_k], amd_rung_t rung, gpu_class_t gpu_class,
-                            nk_dtype_t dtype) noexcept {
+                            nk_dtype_t dtype, u32_t lookup = 0) noexcept {
     std::snprintf(name, sizeof(name),
-                  "_ZN4unum7usearch5dense10amd_kernelILj%uELj%uELj%uELj%uEEEvNS1_15amd_arguments_tE",
+                  "_ZN4unum7usearch5dense10amd_kernelILj%uELj%uELj%uELj%uELj%uEEEvNS1_15amd_arguments_tE",
                   static_cast<unsigned>(rung.kernel), static_cast<unsigned>(gpu_class), static_cast<unsigned>(dtype),
-                  static_cast<unsigned>(rung.slots));
+                  static_cast<unsigned>(rung.slots), static_cast<unsigned>(lookup));
 }
 
 /** One class's code object, an offload bundle of its listed processors carrying every compiled
@@ -546,7 +605,7 @@ struct hip_traversal_context {
 };
 
 /**
- *  @brief Vector Search index for a single uniform latency memory space on NVIDIA GPUs.
+ *  @brief Vector Search index for a single uniform latency memory space on AMD GPUs.
  *
  *  Speaks the RAM-resident dense index's verbs, with two divergences: a batch's IDs are one
  *  contiguous range, and its rows publish unordered on the device, turning visible to searches a
@@ -1085,11 +1144,14 @@ struct vram_amd_index {
 
     /** The bytes an attend over @p rows rows needs, one walk per @p head_count of them: the walks'
      *  own, plus every row staged beside its output and carry, and beside those of every further
-     *  one of @p shards, which the first shard gathers. */
+     *  one of @p shards, which the first shard gathers, then the window importing the heads and
+     *  the outputs cast into the widest scalar. */
     std::size_t traversal_memory_usage(std::size_t rows, search_config_t config, std::size_t head_count,
                                        std::size_t shards = 1) const noexcept {
         std::size_t const rows_bytes = rows * (row_bytes() +
-                                               shards * (dimensions() * sizeof(f32_t) + sizeof(softmax_state_t)));
+                                               shards * (dimensions() * sizeof(f32_t) + sizeof(softmax_state_t)) +
+                                               dimensions() * sizeof(f64_t)) +
+                                       import_bytes_(rows, nk_f64_k);
         return traversal_memory_usage(head_count ? rows / head_count : rows, config) +
                divide_round_up<std::size_t>(rows_bytes, default_alignment_k) * default_alignment_k;
     }
@@ -1179,13 +1241,55 @@ struct vram_amd_index {
         return landed;
     }
 
-    /** Refused until the device value-lookup ABI is designed, since a device function pointer is
-     *  vendor-specific. */
+    /**
+     *  @brief Grouped-query attention of every token over the published nodes,
+     *      FlashAttention-style.
+     *
+     *  One walk per token ranks a node by the best of its heads, and every node it scores is folded
+     *  into each head's running softmax, with the value row read once for all of them.
+     *
+     *  @param[in] queries The query heads, in any scalar NumKong casts as in @c search; row t ·
+     *      @p head_count + h is head h of token t.
+     *  @param[in] head_count The query heads sharing this key-value head; it must divide the rows,
+     *      and their per-wavefront softmax states and accumulator rows must seat in the LDS beside
+     *      the query span.
+     *  @param[in] value_lookup Device-callable: `value_lookup(node_id)` points at the node's value
+     *      row on a 16-byte boundary, as wide as the keys and stored like them, in memory this
+     *      device reads; a null row refuses the call with @c shape_mismatch_k. Trivially copyable,
+     *      it names itself with a @c device_lookup_k the code object of @c capability_ instantiates
+     *      its attend kernels over, through @ref amd_value_lookup_of.
+     *  @param[in] score_scale The factor turning a dot into a logit.
+     *  @param[out] outputs The attended rows, one per query row, as wide as the keys, in host or
+     *      device memory; rows in any scalar but f32 cast on the device first, and must fill whole
+     *      bytes.
+     *  @param[out] carry Each row's softmax state, one per row, in host or device memory; an empty
+     *      span skips them.
+     *  @param[inout] context The stream every transfer and the launch ride.
+     *  @param[in] config The per-call breadth; @c count plays no part.
+     *  @param[in] completion As in @c multiply; a deferred call leaves a missing row to
+     *      @c context.missed().
+     *  @return The query rows attended, and the traversal telemetry this call spent;
+     *      @c config_mismatch_k unless the index scores by dot.
+     */
     template <typename value_lookup_type_>
-    expected<search_result_t> attend(rows_view_t, std::size_t, value_lookup_type_&&, f32_t, rows_span_t,
-                                     std::span<softmax_state_t>, traversal_context_t&, search_config_t = {},
-                                     completion_t = completion_t::blocking_k) noexcept {
-        return {{}, status_t::unsupported_k};
+    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
+                                     f32_t score_scale, rows_span_t outputs, std::span<softmax_state_t> carry,
+                                     traversal_context_t& context, search_config_t config = {},
+                                     completion_t completion = completion_t::blocking_k) noexcept {
+        std::size_t const rows_count = queries.rows;
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+        if (status_t const refusal = landing_refusal_(rows_count, outputs, carry); failed(refusal))
+            return {{}, refusal};
+        expected<f32_t*> const landed = submit_attend_(queries, head_count, value_lookup, score_scale, context, config,
+                                                       1, exported_bytes_(outputs), size());
+        if (!landed || !rows_count) return {{}, landed.status};
+        if (status_t const copied = land_attended_(landed.value, 1, outputs, carry, context.stream()); failed(copied))
+            return {{}, copied};
+        expected<search_result_t> const attended = settle_({{rows_count}, status_t::success_k}, rows_count, context,
+                                                           completion);
+        if (attended && completion == completion_t::blocking_k && context.missed())
+            return {{}, status_t::shape_mismatch_k};
+        return attended;
     }
 
 #pragma endregion Search
@@ -2259,6 +2363,47 @@ struct vram_amd_index {
         return status_t::success_k;
     }
 
+    /** Why an attend over @p rows rows cannot land in @p outputs and @p carry: shapes other than
+     *  the rows', a scalar the device casts cannot carry f32 into, or rows closer than one row
+     *  apart. */
+    status_t landing_refusal_(std::size_t rows, rows_span_t outputs,
+                              std::span<softmax_state_t const> carry) const noexcept {
+        if (outputs.rows != rows || outputs.columns != dimensions() || (!carry.empty() && carry.size() != rows))
+            return status_t::config_mismatch_k;
+        if (outputs.dtype != nk_f32_k && !casts_(nk_f32_k, outputs.dtype)) return status_t::unsupported_k;
+        if (outputs.stride < packed_bytes(outputs.dtype, dimensions())) return status_t::unsupported_layout_k;
+        return status_t::success_k;
+    }
+
+    /** Bytes the attended rows take past the f32 blocks once cast into the scalar of @p outputs;
+     *  none when they land as f32. */
+    std::size_t exported_bytes_(rows_span_t outputs) const noexcept {
+        return outputs.dtype == nk_f32_k ? 0 : outputs.rows * packed_bytes(outputs.dtype, dimensions());
+    }
+
+    /** Queues the copy of the attended rows of the first of @p blocks blocks at @p landed into
+     *  @p outputs on @p stream, cast past the blocks first unless they land as f32, then of the
+     *  carries past the rows into @p carry unless it is empty. */
+    status_t land_attended_(f32_t* landed, std::size_t blocks, rows_span_t outputs, std::span<softmax_state_t> carry,
+                            hip_stream_handle_t stream) noexcept {
+        std::size_t const values = outputs.rows * dimensions();
+        std::size_t const exported_row_bytes = packed_bytes(outputs.dtype, dimensions());
+        byte_t* exported = reinterpret_cast<byte_t*>(landed);
+        if (outputs.dtype != nk_f32_k) {
+            exported += blocks * (values * sizeof(f32_t) + outputs.rows * sizeof(softmax_state_t));
+            if (status_t const cast = launch_cast_(landed, nk_f32_k, exported, outputs.dtype, values, stream);
+                failed(cast))
+                return cast;
+        }
+        hip_api_t const& api = hip_api();
+        if (api.copy_2d_async(outputs.data, outputs.stride, exported, exported_row_bytes, exported_row_bytes,
+                              outputs.rows, hip_copy_default_k, stream) != hip_success_k ||
+            (!carry.empty() && api.copy_async(carry.data(), landed + values, carry.size_bytes(), hip_copy_default_k,
+                                              stream) != hip_success_k))
+            return status_t::device_error_k;
+        return status_t::success_k;
+    }
+
     /** Blocking drains the context's stream and adds the telemetry the walks spent; deferred
      *  records the submission for @c context.landed and returns it as queued. */
     expected<search_result_t> settle_(expected<search_result_t> submitted, std::size_t rows,
@@ -2405,7 +2550,38 @@ struct vram_amd_index {
     /** The submission half of @c attend: stages each token's first head to navigate by, then every
      *  head, and launches one walk per token over the @p visible rows, which lands the normalized
      *  rows, then the carries, in the first of @p blocks such blocks of staging, returned
-     *  device-resident; the sharded index gathers its other shards' into the rest. */
+     *  device-resident, with @p exported_bytes more past them for the rows cast on their way out;
+     *  the sharded index gathers its other shards' into the rest. */
+    template <typename value_lookup_type_>
+    expected<f32_t*> submit_attend_(rows_view_t queries, std::size_t head_count, value_lookup_type_ const& value_lookup,
+                                    f32_t score_scale, traversal_context_t& context, search_config_t config,
+                                    std::size_t blocks, std::size_t exported_bytes, std::size_t visible) noexcept {
+        std::size_t const rows_count = queries.rows;
+        if (!head_count || rows_count % head_count) return {nullptr, status_t::shape_mismatch_k};
+        if (!rows_count) return {nullptr, status_t::success_k};
+        std::size_t const scratch_bytes = amd_attend_scratch_bytes(head_count, dimensions(), wave_lanes());
+        if (!walk_scratch_fits(scratch_bytes)) return {nullptr, status_t::config_mismatch_k};
+        std::size_t const outputs_bytes = rows_count * dimensions() * sizeof(f32_t);
+        rows_view_t const first_heads {queries.data, rows_count / head_count, queries.columns,
+                                       queries.stride * head_count, queries.dtype};
+        auto staged = stage_walk_(first_heads, attend_heads_t {queries, head_count}, context,
+                                  static_cast<u32_t>(non_zero_expansion_factor(config)), 2,
+                                  blocks * (outputs_bytes + rows_count * sizeof(softmax_state_t)) + exported_bytes,
+                                  visible);
+        if (!staged) return {nullptr, staged.status};
+        staged.value.view.scratch_bytes_per_warp += static_cast<u32_t>(scratch_bytes);
+        if (hip_api().fill_async(context.missed_.get(), 0, sizeof(u32_t), context.stream()) != hip_success_k)
+            return {nullptr, status_t::device_error_k};
+        f32_t* const device_outputs = reinterpret_cast<f32_t*>(staged.value.outputs);
+        if (status_t const launched = launch_attend_(
+                staged.value, value_lookup, device_outputs,
+                reinterpret_cast<softmax_state_t*>(staged.value.outputs + outputs_bytes),
+                score_scale * std::numbers::log2e_v<f32_t>, context);
+            failed(launched))
+            return {nullptr, launched};
+        return {device_outputs, status_t::success_k};
+    }
+
 #pragma endregion Search
 
 #pragma region Refinement
@@ -2781,8 +2957,8 @@ struct vram_amd_index {
         return shape;
     }
 
-    /** Loads this class's code object onto the device and finds every kernel this dtype exports, by
-     *  the mangled name @ref amd_kernel_name spells. */
+    /** Loads this class's code object onto the device and finds every kernel this dtype exports bar
+     *  the attends, by the mangled name @ref amd_kernel_name spells. */
     status_t load_kernels_() noexcept {
         auto [module, status] = hip_module_t::load(device_.ordinal, amd_code_object<capability_>());
         if (failed(status)) return status;
@@ -2875,6 +3051,19 @@ struct vram_amd_index {
                        device_.multiprocessor_count * search_blocks_per_multiprocessor_k, 0, stream, arguments);
     }
 
+    /** Merges the attended rows and carries of @p shards walks into the first's on @p stream - the
+     *  sharded attend's gather. */
+    status_t launch_merge_attention_(byte_t* blocks, u32_t rows, u32_t columns, u32_t shards,
+                                     hip_stream_handle_t stream) noexcept {
+        amd_arguments_t arguments {};
+        arguments.attend.outputs = reinterpret_cast<f32_t*>(blocks);
+        arguments.attend.rows = rows;
+        arguments.attend.columns = columns;
+        arguments.attend.shards = shards;
+        return launch_(amd_kernel_t::merge_attention_k, 0, divide_round_up<u32_t>(rows, vram_warps_per_block_k), 0,
+                       stream, arguments);
+    }
+
     /** Resolves the @p walked matches per query of @p queries_count at @p ids and @p distances
      *  through the device @p keys column into @p ranking on @p stream - a sharded search's own
      *  ranking, gathered or landed as is. */
@@ -2965,6 +3154,37 @@ struct vram_amd_index {
                        arguments);
     }
 
+    /** Walks every token of @p launch under its staged heads, folding the value rows
+     *  @p value_lookup resolves into the normalized @p outputs and their @p states; the lookup
+     *  travels as bytes to the attend kernel its @c device_lookup_k names, found in the code object
+     *  by name. */
+    template <typename value_lookup_type_>
+    status_t launch_attend_(walk_launch<amd_rescoring_t> const& launch, value_lookup_type_ const& value_lookup,
+                            f32_t* outputs, softmax_state_t* states, f32_t logit_scale,
+                            traversal_context_t& context) noexcept {
+        static_assert(std::is_trivially_copyable_v<value_lookup_type_> &&
+                          sizeof(value_lookup_type_) <= amd_value_lookup_capacity_k &&
+                          alignof(value_lookup_type_) <= 16,
+                      "A device value lookup travels to the kernels as its own bytes");
+        amd_arguments_t arguments {};
+        arguments.search = launch.view;
+        arguments.rescoring = launch.rescoring;
+        amd_attend_t& attend = arguments.attend;
+        attend.outputs = outputs;
+        attend.states = states;
+        attend.missed = context.missed_.get();
+        attend.logit_scale = logit_scale;
+        attend.heads_count = launch.rescoring.heads_count;
+        attend.columns = static_cast<u32_t>(dimensions());
+        std::memcpy(attend.value_lookup, &value_lookup, sizeof(value_lookup));
+        u32_t const slots = launch.frontier == frontier_kind_t::wide_arena_k ? 0 : launch.pool_slots;
+        char name[amd_kernel_name_capacity_k];
+        amd_kernel_name(name, {amd_kernel_t::attend_k, slots}, amd_class_of(capability_), vector_dtype_,
+                        value_lookup_type_::device_lookup_k);
+        return hip_launch(module_.function(name), walk_blocks_(launch.view.queries_count), block_threads(),
+                          vram_warps_per_block_k * launch.view.scratch_bytes_per_warp, context.stream(), arguments);
+    }
+
 #pragma endregion Launches
 
     /** The vectors matrix and norms column backend, rebound to bytes. */
@@ -2973,8 +3193,8 @@ struct vram_amd_index {
     /** The neighbors matrix backend, rebound to bytes. */
     using neighbors_matrix_allocator_t = typename neighbors_allocator_t::template rebind<byte_t>::other;
 
-    /** This class's code object on this device, and its kernels in @ref amd_kernel_t
-     *  order. */
+    /** This class's code object on this device, and its kernels in @ref amd_kernel_t order, the
+     *  attends left to their launches. */
     hip_module_t module_;
     hip_function_handle_t kernels_[static_cast<u32_t>(amd_kernel_t::count_k)][amd_rungs_per_kernel_k] = {};
 

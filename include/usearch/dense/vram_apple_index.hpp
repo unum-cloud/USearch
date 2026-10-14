@@ -648,7 +648,8 @@ struct vram_apple_index {
         return multiply_(left, node_ids, products, counts, context, config, size());
     }
 
-    /** Device attention is NVIDIA's alone until its value lookup has a Metal ABI. */
+    /** Attention is refused with @c unsupported_k: a Metal kernel cannot call the caller's value
+     *  lookup, just as it cannot run a predicate. */
     template <typename value_lookup_type_>
     expected<search_result_t> attend(rows_view_t, std::size_t, value_lookup_type_&&, f32_t, rows_span_t,
                                      std::span<softmax_state_t>, traversal_context_t&, search_config_t = {},

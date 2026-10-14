@@ -238,6 +238,7 @@ Every dense verb is exported for every residency, and the engine answers what a 
 
 - RAM answers every verb but `usearch_dense_view_ram`, `usearch_dense_search_stream_init` and `usearch_dense_sample`.
 - VRAM answers insertion, refinement, absorbing, counting, `get`, search, `multiply`, `maxsim`, attention and the serialization family, `save_buffer` included, while cursors and exact scans answer `usearch_status_unsupported_k`, as [GPUs](#gpus) explains.
+  Apple's Metal answers attention `usearch_status_unsupported_k` too, since its kernels cannot call the caller's value lookup.
 - NVMe answers every read verb as RAM does, refuses every mutating one with `usearch_status_read_only_k`, and refuses saving, since a view already is its checkpoint.
 
 ### GPUs
@@ -594,7 +595,7 @@ usearch_dense_attend(&(usearch_dense_attend_t) {.index = index,
                                                 .arena = arena});
 ```
 
-On RAM `value_lookup` is a host function, and on VRAM a `__device__` one whose address comes from `cudaMemcpyFromSymbol`; passing the wrong kind is undefined, never refused.
+On RAM `value_lookup` is a host function, and on VRAM a `__device__` one whose address comes from `cudaMemcpyFromSymbol` on NVIDIA or `hipMemcpyFromSymbol` on AMD; passing the wrong kind is undefined, never refused.
 `carry` holds each row's running maximum and partition, which merges this branch with the recent window kept out of the index, attention sinks, or a second index of one context:
 $m = \max(m_1, m_2)$, $a_i = l_i e^{m_i - m}$, $l = a_1 + a_2$, $o = (a_1 o_1 + a_2 o_2) / l$.
 Attention never writes the graph, so it overlaps insertions freely, the publication watermark acting as the causal mask.

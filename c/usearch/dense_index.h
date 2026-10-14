@@ -49,7 +49,7 @@
  *  Devices are named by USearch ordinal, a position in @c usearch_gpu_devices, so one binary drives
  *  NVIDIA, AMD and Apple GPUs alike. An index spans one vendor and one generation; Apple's unified
  *  memory counts as device memory, since the GPU manages it, and its single device hosts one shard.
- *  Attention runs on NVIDIA devices alone, and the AMD and Apple handles refuse it with
+ *  Attention runs on NVIDIA and AMD devices, and the Apple handles refuse it with
  *  @c usearch_status_unsupported_k.
  *
  *  Inputs already on the executor's device in the right layout are read in place, pinned and
@@ -100,9 +100,11 @@
  *  alike, an absorb taking donors of the handle's own residency. @c usearch_dense_search answers on
  *  both, a VRAM handle ranking its shards' matches on the arena's device, and so does
  *  @c usearch_dense_attend, which resolves value rows through @c value_lookup, a host function on
- *  RAM and a device one on VRAM. @c usearch_dense_get, @c usearch_dense_save_buffer,
- *  @c usearch_dense_multiply and @c usearch_dense_maxsim stage on the arena's host pages and land
- *  their outputs where it lives, through the stream of the call's own executor.
+ *  RAM and a device one on NVIDIA and AMD; Apple's Metal answers it with
+ *  @c usearch_status_unsupported_k, since its kernels cannot call the caller's function.
+ *  @c usearch_dense_get, @c usearch_dense_save_buffer, @c usearch_dense_multiply and
+ *  @c usearch_dense_maxsim stage on the arena's host pages and land their outputs where it lives,
+ *  through the stream of the call's own executor.
  *
  *  A VRAM handle refuses a search with a @c predicate with @c usearch_status_device_k, since a host
  *  predicate cannot narrow a device walk, and one with @c usearch_traversal_scan_k with
@@ -1460,8 +1462,8 @@ typedef struct usearch_dense_softmax_state_t {
 
 /** Resolves @p count keys to their value rows, one row per key, @p columns values of @p scalar each;
  *  a NULL row refuses the call. A host function for a RAM handle; for a VRAM one, a @c __device__
- *  function whose address comes from @c cudaMemcpyFromSymbol, its @p state and rows 16-byte aligned
- *  in memory that device reads.
+ *  function whose address comes from @c cudaMemcpyFromSymbol on NVIDIA or @c hipMemcpyFromSymbol on
+ *  AMD, its @p state and rows 16-byte aligned in memory that device reads.
  *  No driver query tells the two kinds apart, so passing the wrong one is undefined, never refused. */
 typedef void (*usearch_value_lookup_t)(void* state, usearch_key_t const* keys, size_t count, usearch_scalar_t scalar,
                                        size_t columns, void const** rows);

@@ -11,12 +11,14 @@
  *  @ref merge_search_results, resolving matches into the caller's keys, so shards with colliding ID
  *  spaces land in one shared ranking. Checkpoints ride the SafeGraphs interchange - one
  *  consolidated monolith, or one per shard beside a manifest - written positionally with every
- *  header last, so a failed save reads as absent. One collection spans one vendor, and attention
- *  refuses with @c unsupported_k, as the shards do.
+ *  header last, so a failed save reads as absent. One collection spans one vendor.
  *
  *  Beyond the executor's claim, the insertion gate admits one mutating batch at a time, a shard's
  *  kept failure refuses every later mutation, and the commit sequence word lets a reader spanning
  *  the shards see each batch whole or not at all.
+ *
+ *  Plain host C++ like the shard's own face: the attend gather launches through the shard's
+ *  declarations, which the kernel side defines.
  */
 #pragma once
 
@@ -1042,11 +1044,108 @@ struct vram_amd_indexes {
         return for_each_window<search_result_t>(rows_count, window_rows, maxsim_window);
     }
 
-    /** Refused until the device value-lookup ABI is designed, as the shards refuse it. */
+    /**
+     *  @brief Grouped-query attention of every token over every shard: each shard folds the nodes
+     *      its walks score into per-head partial rows and carries on its own device, and the first
+     *      shard's device merges them by the flash rule, exact over the union.
+     *
+     *  @param[in] queries The query heads, in the shards' stored scalar type as in @c search; row t
+     *      · @p head_count + h is head h of token t, and each token walks every shard once.
+     *  @param[in] head_count The query heads sharing this key-value head; it must divide the rows.
+     *  @param[in] value_lookup Device-callable: `value_lookup(key)` points at the key's value row
+     *      on a 16-byte boundary, as wide as the keys and stored like them, in memory every shard's
+     *      device reads; a null row refuses the call with @c shape_mismatch_k.
+     *  @param[in] score_scale The factor turning a dot into a logit.
+     *  @param[out] outputs The attended rows, one per query row, as wide as the keys, in host or
+     *      device memory; rows in any scalar but f32 cast on the first shard's device first, and
+     *      must fill whole bytes.
+     *  @param[out] carry Each row's softmax state over every shard, one per row, in host or device
+     *      memory; an empty span skips them.
+     *  @param[inout] executor The contexts and streams, paired positionally with the shards.
+     *  @param[in] config The per-shard walk configuration, applied uniformly; @c count plays no
+     *      part.
+     *  @return The query rows attended, and the traversal telemetry every shard spent;
+     *      @c config_mismatch_k unless the shards score by dot.
+     *
+     *  Whole tokens cross @c window_rows_k rows at a time, and a refused window keeps every one
+     *  already landed.
+     */
     template <typename value_lookup_type_>
-    expected<search_result_t> attend(rows_view_t, std::size_t, value_lookup_type_&&, f32_t, rows_span_t,
-                                     std::span<softmax_state_t>, executor_t&, search_config_t = {}) noexcept {
-        return {{}, status_t::unsupported_k};
+    expected<search_result_t> attend(rows_view_t queries, std::size_t head_count, value_lookup_type_&& value_lookup,
+                                     f32_t score_scale, rows_span_t outputs, std::span<softmax_state_t> carry,
+                                     executor_t& executor, search_config_t config = {}) noexcept {
+        using shard_lookup_t = amd_keyed_lookup<key_t, std::remove_cvref_t<value_lookup_type_>>;
+        std::size_t const rows_count = queries.rows, shards = shards_.size();
+        if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
+        if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
+        if (!head_count || rows_count % head_count) return {{}, status_t::shape_mismatch_k};
+        if (status_t const refusal = shards_[0].index->landing_refusal_(rows_count, outputs, carry); failed(refusal))
+            return {{}, refusal};
+        if (!rows_count) return {{}, status_t::success_k};
+        if (queries.columns != dimensions()) return {{}, status_t::config_mismatch_k};
+
+        // A window holds whole tokens, so none splits its heads across two.
+        std::size_t const window_rows = max_of<std::size_t>(window_rows_k / head_count, 1) * head_count;
+        batch_t batch {executor, allocator_};
+        if (status_t const begun = begin_batch_(batch, min_of(rows_count, window_rows), config, head_count, shards);
+            failed(begun))
+            return {{}, begun};
+        auto attend_window = [&](std::size_t first, std::size_t taking) noexcept -> expected<search_result_t> {
+            rows_view_t const window_queries = queries.slice(first, taking);
+            rows_span_t const window_outputs = outputs.slice(first, taking);
+            std::span<softmax_state_t> const window_carry = carry.empty() ? carry : carry.subspan(first, taking);
+            // Shard 0 stages one block of rows and carries per shard, its own first and the others
+            // copied in.
+            std::size_t const outputs_bytes = taking * dimensions() * sizeof(f32_t);
+            std::size_t const block_bytes = outputs_bytes + taking * sizeof(softmax_state_t);
+            byte_t* blocks = nullptr;
+            traversal_context_t* first_traversal = nullptr;
+            auto attend_shard = [&](std::size_t shard, traversal_context_t& traversal, std::size_t visible) noexcept {
+                shard_lookup_t const lookup {shards_[shard].device_keys.base(), value_lookup};
+                expected<f32_t*> const landed = shards_[shard].index->submit_attend_(
+                    window_queries, head_count, lookup, score_scale, traversal, config, shard ? 1 : shards,
+                    shard ? 0 : shards_[0].index->exported_bytes_(window_outputs), visible);
+                if (!landed) return landed.status;
+                if (!shard) {
+                    blocks = reinterpret_cast<byte_t*>(landed.value);
+                    first_traversal = &traversal;
+                    return status_t::success_k;
+                }
+                // On the shard's own stream, so the copy follows its walks; unified addressing
+                // tells the two devices apart. Shard 0's staging may have grown on its stream,
+                // which its context marked when it queued, so following that mark orders the
+                // copy after it.
+                return succeeded(traversal.follow(*first_traversal)) &&
+                               hip_api().copy_async(blocks + shard * block_bytes, landed.value, block_bytes,
+                                                    hip_copy_default_k, traversal.stream()) == hip_success_k
+                           ? status_t::success_k
+                           : status_t::device_error_k;
+            };
+            status_t merged = status_t::success_k;
+            std::size_t landed = 0;
+            auto merge_shard = [&](std::size_t, traversal_context_t const& traversal) noexcept {
+                // A shard whose walk met a node without its value row folded a wrong softmax.
+                if (traversal.missed()) merged = status_t::shape_mismatch_k;
+                if (++landed != shards || failed(merged)) return;
+                // The last shard landed, so every block did; the merge and the landing ride
+                // shard 0's stream, which its context's event drains.
+                hip_stream_handle_t const stream = first_traversal->stream();
+                u32_t const rows = static_cast<u32_t>(taking);
+                if (hip_set_device(first_traversal->device()) != hip_success_k ||
+                    failed(shards_[0].index->launch_merge_attention_(blocks, rows, static_cast<u32_t>(dimensions()),
+                                                                     static_cast<u32_t>(shards), stream)) ||
+                    failed(shards_[0].index->land_attended_(reinterpret_cast<f32_t*>(blocks), shards, window_outputs,
+                                                            window_carry, stream)) ||
+                    failed(first_traversal->drain()))
+                    merged = status_t::device_error_k;
+            };
+            expected<search_result_t> attended = for_each_shard_(batch, attend_shard, merge_shard, {});
+            if (!attended) return attended;
+            if (failed(merged)) return {{}, merged};
+            attended.value.count = taking;
+            return attended;
+        };
+        return for_each_window<search_result_t>(rows_count, window_rows, attend_window);
     }
 
 #pragma endregion Search

@@ -166,7 +166,7 @@ struct value_lookup_t {
 /** The C value lookup called on the device, one scored key at a time inside a GPU walk. */
 struct device_value_lookup_t {
 
-    /** Names the lookup to the NVIDIA attend kernels the class units instantiate over it. */
+    /** Names the lookup to the attend kernels the NVIDIA and AMD units instantiate over it. */
     inline static constexpr u32_t device_lookup_k = 1;
 
     usearch_value_lookup_t callback;
@@ -174,7 +174,7 @@ struct device_value_lookup_t {
     usearch_scalar_t scalar;
     std::size_t dimensions;
 
-#if defined(__CUDACC__)
+#if defined(__CUDACC__) || defined(__HIP__)
     __device__ void const* operator()(us::utilities::uuid_t key) const noexcept {
         usearch_key_t const scored = std::bit_cast<usearch_key_t>(key);
         void const* row = nullptr;
@@ -192,6 +192,17 @@ using nvidia_attend_lookup_t = us::dense::cuda_keyed_lookup<us::utilities::uuid_
 template <>
 struct us::dense::cuda_value_lookup_of<nvidia_attend_lookup_t::device_lookup_k> {
     using type = nvidia_attend_lookup_t;
+};
+#endif
+
+#if USEARCH_ARCH_ROCM_
+
+/** What each shard of an AMD attend resolves rows through: the C lookup behind the shard's keys. */
+using amd_attend_lookup_t = us::dense::amd_keyed_lookup<us::utilities::uuid_t, device_value_lookup_t>;
+
+template <>
+struct us::dense::amd_value_lookup_of<amd_attend_lookup_t::device_lookup_k> {
+    using type = amd_attend_lookup_t;
 };
 #endif
 

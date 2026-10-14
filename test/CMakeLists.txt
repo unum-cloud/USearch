@@ -104,10 +104,23 @@ if (USEARCH_BUILD_CUDA)
     )
 endif ()
 
-# The AMD shards run over the library's CDNA3 floor unit, whose code object CDNA3 and CDNA4 run, and the Apple kernels
-# compile from embedded source at first use.
+# AMD's entry compiles once more with ROCm's Clang device-only, into the suite's own code object of the shards' kernels
+# and the attends over its device value lookups, for the listed processors of the CDNA3 class, which CDNA3 and CDNA4
+# run. The Apple kernels compile from embedded source at first use.
 if (USEARCH_BUILD_ROCM)
-    target_sources(usearch_test_vram_shards PRIVATE dense/vram_amd.cpp)
+    enable_language(ASM)
+    set(usearch_test_vram_amd_entry_ ${CMAKE_CURRENT_SOURCE_DIR}/dense/vram_amd.hip)
+    target_sources(usearch_test_vram_shards PRIVATE ${usearch_test_vram_amd_entry_})
+    target_compile_definitions(usearch_test_vram_shards PRIVATE "NUMKONG_TARGET_CDNA3=1")
+    set(test_rocm_processors_)
+    foreach (processor_ IN ITEMS gfx942 gfx950)
+        if (processor_ IN_LIST USEARCH_ROCM_ARCHITECTURES)
+            list(APPEND test_rocm_processors_ --offload-arch=${processor_})
+        endif ()
+    endforeach ()
+    usearch_gpu_bundle(
+        usearch_test_vram_shards amd test_vram_amd ${usearch_test_vram_amd_entry_} ${test_rocm_processors_}
+    )
 endif ()
 if (USEARCH_BUILD_METAL)
     target_sources(usearch_test_vram_shards PRIVATE dense/vram_apple.cpp)

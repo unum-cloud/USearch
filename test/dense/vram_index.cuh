@@ -128,6 +128,79 @@ std::size_t test_dense_vram_attend_refused(make_index_type_ const& make_index) {
     return failures + expect_eq(ledger.live_bytes.load(), 0);
 }
 
+/** Device attention against exact full attention, value rows looked up by node ID in a device table
+ *  the vendor's @c value_table_type_ uploads: an exhaustive walk scores every node, so each head's
+ *  output and carry match the @c f64 oracle over every key, with one head per token and with four
+ *  sharing its walk, while a narrow walk stays within the oracle's bounds; a node without a value
+ *  row, mismatched outputs, and a head count that does not divide the rows or whose softmax states
+ *  and accumulators no warp seats refuse. */
+template <typename index_type_, typename value_table_type_, typename make_index_type_>
+std::size_t dense_expect_vram_attend(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
+    using scalar_t = typename index_type_::scalar_t;
+    using lookup_t = typename value_table_type_::lookup_t;
+    constexpr std::size_t nodes_count = dense_thread_nodes_k, tokens_count = 4, crowded_heads = 1024;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+    std::unique_ptr<index_type_> const index_ptr = make_index(ledger);
+    index_type_& index = *index_ptr;
+    typename index_type_::traversal_context_t context = dense_make_context<index_type_>(make_index);
+    failures += expect(index.reserve({nodes_count, connectivity_16_k, dimensions}).status == status_t::success_k);
+    auto const vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "attend"));
+    auto const values = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "attend", 1));
+    std::vector<node_id_t> assigned_ids(nodes_count);
+    if (failed(index.insert(vectors.view(), {assigned_ids.data(), nodes_count}, context).status))
+        return failures + expect(false);
+    failures += expect_contiguous_ids(std::span {assigned_ids}, 0);
+    auto const table = value_table_type_::upload(values.view(), make_index.stream);
+    if (!table.rows) return failures + expect(false);
+
+    typename index_type_::search_config_t const exhaustive {nodes_count};
+    auto const queries = make_vectors<scalar_t>(tokens_count * 4, dimensions, stream_key(seed, "attend", 2));
+    auto outputs = nk::matrix<f32_t>::zeros({crowded_heads, dimensions}).value;
+    std::vector<softmax_state_t> carry(crowded_heads);
+    auto attend = [&](nk::matrix_view<scalar_t> heads, std::size_t head_count, lookup_t lookup, f32_t score_scale,
+                      typename index_type_::search_config_t config) noexcept {
+        auto const [attended, status] = index.attend(heads, head_count, lookup, score_scale,
+                                                     outputs(nk::range(std::size_t {0}, heads.extent(0)), nk::slice),
+                                                     std::span {carry}.first(heads.extent(0)), context, config);
+        failures += expect(failed(status) || attended.count == heads.extent(0));
+        return status;
+    };
+    for (std::size_t const head_count : {std::size_t {1}, std::size_t {4}}) {
+        auto const heads = queries(nk::range(std::size_t {0}, tokens_count * head_count), nk::slice);
+        f32_t const score_scale = dense_attend_scale(
+            dense_oracle_dots(dense_widened_rows(heads, index_type_::vector_dtype_k),
+                              dense_widened_rows(vectors.view(), index_type_::vector_dtype_k), dimensions));
+        nk::matrix_view<f32_t> const attended = outputs(nk::range(std::size_t {0}, heads.extent(0)), nk::slice);
+        std::span<softmax_state_t const> const carried {carry.data(), heads.extent(0)};
+        failures += expect(attend(heads, head_count, table.lookup(nodes_count), score_scale, exhaustive) ==
+                           status_t::success_k);
+        failures += dense_expect_full_attention(
+            vectors.view(), heads, head_count,
+            [&](std::size_t row) noexcept { return values.view().row(row).as_vector(); }, score_scale, attended,
+            carried);
+        failures += expect(attend(heads, head_count, table.lookup(nodes_count), score_scale, {}) ==
+                           status_t::success_k);
+        failures += dense_expect_attention_bounds(vectors.view(), values.view(), heads, score_scale, attended, carried);
+    }
+
+    // The walk scores every node, so the one past a shortened table refuses.
+    failures += expect(attend(queries.view(), 4, table.lookup(nodes_count - 1), 1, exhaustive) ==
+                       status_t::shape_mismatch_k);
+    failures += expect(attend(queries.view(), 3, table.lookup(nodes_count), 1, exhaustive) ==
+                       status_t::shape_mismatch_k);
+    failures += expect(index
+                           .attend(queries.view(), 4, table.lookup(nodes_count), 1,
+                                   outputs(nk::range(std::size_t {0}, std::size_t {1}), nk::slice),
+                                   std::span {carry}.first(queries.extent(0)), context, exhaustive)
+                           .status == status_t::config_mismatch_k);
+    // A thousand heads' softmax states and accumulator rows seat in no warp's shared memory.
+    auto const crowded = make_vectors<scalar_t>(crowded_heads, dimensions, stream_key(seed, "attend", 3));
+    failures += expect(attend(crowded.view(), crowded_heads, table.lookup(nodes_count), 1, exhaustive) ==
+                       status_t::config_mismatch_k);
+    return failures;
+}
+
 /** A metric outside the dtype's family reaches no kit, so the first reservation refuses it before
  *  mapping anything. */
 template <typename index_type_>
@@ -297,6 +370,38 @@ std::size_t test_vram_configuration(char const* name, u64_t seed, executor_type_
     return report(vendor_name.c_str(), failures_count);
 }
 
+/** One dtype's device attention over its dot cell on @p executor 's stream, value rows in a
+ *  @c value_table_type_ table, then a kernel that is not a dot refusing it before reading any
+ *  input; every ledger must balance. */
+template <nk_dtype_t dtype_, nk_kernel_kind_t refusing_kernel_, typename value_table_type_, typename executor_type_>
+std::size_t test_vram_attend_cell(char const* name, u64_t seed, executor_type_& executor) {
+    using dot_cell_t = vram_cell<executor_type_::vendor_k, dtype_, nk_kernel_dot_k>;
+    using refusing_cell_t = vram_cell<executor_type_::vendor_k, dtype_, refusing_kernel_>;
+    using index_t = typename dot_cell_t::index_t;
+    std::size_t failures = 0;
+    {
+        allocation_ledger_t ledger;
+        failures += dense_expect_vram_attend<index_t, value_table_type_>(dot_cell_t {executor.stream(0)}, ledger, seed);
+        failures += expect_eq(ledger.live_bytes.load(), 0);
+    }
+    {
+        allocation_ledger_t ledger;
+        {
+            refusing_cell_t const refusing {executor.stream(0)};
+            std::unique_ptr<typename refusing_cell_t::index_t> const index = refusing(ledger);
+            typename refusing_cell_t::index_t::traversal_context_t context = refusing.context();
+            failures += expect_eq(index
+                                      ->attend(typename refusing_cell_t::index_t::vectors_view_t {}, 1,
+                                               typename value_table_type_::lookup_t {}, 1.f, nk::matrix_span<f32_t> {},
+                                               std::span<softmax_state_t> {}, context)
+                                      .status,
+                                  status_t::config_mismatch_k);
+        }
+        failures += expect_eq(ledger.live_bytes.load(), 0);
+    }
+    return report(fmt::format("{}-{}+attend", dot_cell_t::vendor_prefix_k, name).c_str(), failures);
+}
+
 /** Per-dtype VRAM suite entries the shard translation units define for every vendor's executor and
  *  each carried vendor's entry composes explicitly over the executor it opened; each returns its
  *  shard's failure count. */
@@ -358,6 +463,67 @@ std::size_t check_vram_index_cells(settings_t const& settings, executor_type_& e
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
     if (settings.selects("vram_index_e2m3")) failures_count += check_vram_index_e2m3(settings, executor);
+#endif
+    return failures_count;
+}
+
+/** Device attention over every dtype cell the settings select on @p executor 's device, value rows
+ *  in @c value_table_type_ tables, in the dtype ladder's order. */
+template <typename value_table_type_, typename executor_type_>
+std::size_t check_vram_attend_cells(settings_t const& settings, executor_type_& executor) {
+    std::size_t failures_count = 0;
+    if (settings.selects("vram_index_bf16"))
+        failures_count += test_vram_attend_cell<nk_bf16_k, nk_kernel_angular_k, value_table_type_>(
+            "bf16", settings.seed, executor);
+#if USEARCH_DENSE_DTYPES >= 2
+    if (settings.selects("vram_index_u1"))
+        failures_count += test_vram_attend_cell<nk_u1_k, nk_kernel_hamming_k, value_table_type_>("u1", settings.seed,
+                                                                                                 executor);
+#endif
+#if USEARCH_DENSE_DTYPES >= 3
+    if (settings.selects("vram_index_i8"))
+        failures_count += test_vram_attend_cell<nk_i8_k, nk_kernel_angular_k, value_table_type_>("i8", settings.seed,
+                                                                                                 executor);
+#endif
+#if USEARCH_DENSE_DTYPES >= 4
+    if (settings.selects("vram_index_e4m3"))
+        failures_count += test_vram_attend_cell<nk_e4m3_k, nk_kernel_angular_k, value_table_type_>(
+            "e4m3", settings.seed, executor);
+#endif
+#if USEARCH_DENSE_DTYPES >= 5
+    if (settings.selects("vram_index_f16"))
+        failures_count += test_vram_attend_cell<nk_f16_k, nk_kernel_angular_k, value_table_type_>("f16", settings.seed,
+                                                                                                  executor);
+#endif
+#if USEARCH_DENSE_DTYPES >= 6
+    if (settings.selects("vram_index_u8"))
+        failures_count += test_vram_attend_cell<nk_u8_k, nk_kernel_angular_k, value_table_type_>("u8", settings.seed,
+                                                                                                 executor);
+#endif
+#if USEARCH_DENSE_DTYPES >= 7
+    if (settings.selects("vram_index_e5m2"))
+        failures_count += test_vram_attend_cell<nk_e5m2_k, nk_kernel_angular_k, value_table_type_>(
+            "e5m2", settings.seed, executor);
+#endif
+#if USEARCH_DENSE_DTYPES >= 8
+    if (settings.selects("vram_index_i4"))
+        failures_count += test_vram_attend_cell<nk_i4_k, nk_kernel_angular_k, value_table_type_>("i4", settings.seed,
+                                                                                                 executor);
+#endif
+#if USEARCH_DENSE_DTYPES >= 9
+    if (settings.selects("vram_index_u4"))
+        failures_count += test_vram_attend_cell<nk_u4_k, nk_kernel_angular_k, value_table_type_>("u4", settings.seed,
+                                                                                                 executor);
+#endif
+#if USEARCH_DENSE_DTYPES >= 10
+    if (settings.selects("vram_index_e3m2"))
+        failures_count += test_vram_attend_cell<nk_e3m2_k, nk_kernel_angular_k, value_table_type_>(
+            "e3m2", settings.seed, executor);
+#endif
+#if USEARCH_DENSE_DTYPES >= 11
+    if (settings.selects("vram_index_e2m3"))
+        failures_count += test_vram_attend_cell<nk_e2m3_k, nk_kernel_angular_k, value_table_type_>(
+            "e2m3", settings.seed, executor);
 #endif
     return failures_count;
 }

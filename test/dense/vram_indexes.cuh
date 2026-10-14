@@ -302,6 +302,77 @@ std::size_t test_dense_vram_indexes_nvme_roundtrip(u64_t seed, typename indexes_
     return failures;
 }
 
+/** The sharded attention, keys equal to their rows and value rows looked up by key in a device
+ *  table the vendor's @c value_table_type_ uploads: every shard walks every node, so each head's
+ *  merged output and carry match exact full attention, with one head per token and with four
+ *  sharing its walk, while a narrow walk stays within the oracle's bounds; a key without a value
+ *  row, mismatched outputs, and a head count that does not divide the rows refuse. */
+template <typename indexes_type_, typename value_table_type_>
+std::size_t dense_expect_vram_indexes_attend(u64_t seed, typename indexes_type_::executor_t& placement) {
+    using index_t = typename indexes_type_::index_t;
+    using lookup_t = typename value_table_type_::lookup_t;
+    using scalar_t = typename index_t::scalar_t;
+    using key_t = typename indexes_type_::key_t;
+    constexpr std::size_t nodes_count = dense_thread_nodes_k, tokens_count = 4;
+    std::size_t const dimensions = dense_dimensions_for<scalar_t>(dense_values_k);
+    std::size_t failures = 0;
+
+    dense_indexes_executor<indexes_type_> driver {placement};
+    if (failed(driver.status)) return failures + expect(false);
+    indexes_type_ indexes {nk_kernel_dot_k, forkunion_allocator_t {no_memory_domain_k}};
+    failures += expect(succeeded(place_shards(indexes, placement)));
+    failures += expect(succeeded(indexes.reserve({nodes_count, connectivity_16_k, dimensions}).status));
+    auto const vectors = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexes_attend"));
+    auto const values = make_vectors<scalar_t>(nodes_count, dimensions, stream_key(seed, "indexes_attend", 1));
+    std::vector<key_t> keys(nodes_count);
+    for (std::size_t row = 0; row != nodes_count; ++row) keys[row] = static_cast<key_t>(row);
+    failures += expect(
+        succeeded(indexes.insert(std::span<key_t const> {keys}, vectors.view(), driver.executor).status));
+    auto const table = value_table_type_::upload(values.view(), placement.stream(0));
+    if (!table.rows) return failures + expect(false);
+
+    typename indexes_type_::search_config_t const exhaustive {nodes_count};
+    auto const queries = make_vectors<scalar_t>(tokens_count * 4, dimensions, stream_key(seed, "indexes_attend", 2));
+    auto outputs = nk::matrix<f32_t>::zeros({queries.extent(0), dimensions}).value;
+    std::vector<softmax_state_t> carry(queries.extent(0));
+    auto attend = [&](nk::matrix_view<scalar_t> heads, std::size_t head_count, lookup_t lookup, f32_t score_scale,
+                      typename indexes_type_::search_config_t config) noexcept {
+        auto const [attended, status] = indexes.attend(
+            heads, head_count, lookup, score_scale, outputs(nk::range(std::size_t {0}, heads.extent(0)), nk::slice),
+            std::span {carry}.first(heads.extent(0)), driver.executor, config);
+        failures += expect(failed(status) || attended.count == heads.extent(0));
+        return status;
+    };
+    for (std::size_t const head_count : {std::size_t {1}, std::size_t {4}}) {
+        auto const heads = queries(nk::range(std::size_t {0}, tokens_count * head_count), nk::slice);
+        f32_t const score_scale = dense_attend_scale(
+            dense_oracle_dots(dense_widened_rows(heads, index_t::vector_dtype_k),
+                              dense_widened_rows(vectors.view(), index_t::vector_dtype_k), dimensions));
+        nk::matrix_view<f32_t> const attended = outputs(nk::range(std::size_t {0}, heads.extent(0)), nk::slice);
+        std::span<softmax_state_t const> const carried {carry.data(), heads.extent(0)};
+        failures += expect(succeeded(attend(heads, head_count, table.lookup(nodes_count), score_scale, exhaustive)));
+        failures += dense_expect_full_attention(
+            vectors.view(), heads, head_count,
+            [&](std::size_t row) noexcept { return values.view().row(row).as_vector(); }, score_scale, attended,
+            carried);
+        failures += expect(succeeded(attend(heads, head_count, table.lookup(nodes_count), score_scale, {})));
+        failures += dense_expect_attention_bounds(vectors.view(), values.view(), heads, score_scale, attended, carried);
+    }
+
+    // Every shard walks every node, so the key past a shortened table refuses.
+    failures += expect_eq(attend(queries.view(), 4, table.lookup(nodes_count - 1), 1, exhaustive),
+                          status_t::shape_mismatch_k);
+    failures += expect_eq(attend(queries.view(), 3, table.lookup(nodes_count), 1, exhaustive),
+                          status_t::shape_mismatch_k);
+    failures += expect_eq(indexes
+                              .attend(queries.view(), 4, table.lookup(nodes_count), 1,
+                                      outputs(nk::range(std::size_t {0}, std::size_t {1}), nk::slice),
+                                      std::span {carry}, driver.executor, exhaustive)
+                              .status,
+                          status_t::config_mismatch_k);
+    return failures;
+}
+
 /** A vendor this build leaves out composes nothing, so its shard instantiates empty. */
 template <nk_dtype_t dtype_, nk_kernel_kind_t kernel_, typename executor_type_>
 std::size_t test_vram_indexes_configuration(char const*, u64_t, executor_type_&) {
