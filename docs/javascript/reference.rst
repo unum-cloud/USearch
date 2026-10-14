@@ -4,9 +4,7 @@ JavaScript API Reference
 The JavaScript SDK is written in TypeScript, and the reference lives in the sources as
 documentation comments, which the published ``.d.ts`` declarations carry into every editor.
 ``javascript/usearch.ts`` is the package entry point and re-exports two modules: ``types.ts``
-with the shared vocabulary of ``include/usearch/types.h``, and ``dense_index.ts`` with the dense
-modality of ``include/usearch/dense_index.h``; ``docs/c/reference.rst`` documents the surface
-both bind.
+with the shared vocabulary, and ``dense_index.ts`` with the dense modality.
 
 =============
 Dense Indexes
@@ -22,7 +20,7 @@ Dense Indexes
 ``DenseIndexOn``
     The verbs of one index blocking on one executor, as ``index.on(executor)``: ``reserve``,
     ``clear``, ``describe``, ``health``, ``count``, ``contains``, ``insert``, ``refine``,
-    ``search``, ``maxsim``, ``get``, ``multiply``, ``merge``, ``save``, ``saveBuffer``, plus the
+    ``search``, ``maxsim``, ``get``, ``multiply``, ``absorb``, ``save``, ``saveBuffer``, plus the
     ``cursor`` and ``searchStream`` walks.
 
 ``DenseIndexDeferredOn``

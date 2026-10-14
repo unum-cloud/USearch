@@ -1,5 +1,4 @@
-//! The dense modality - Vector Search over equidimensional embeddings, the Zig twin of
-//! `include/usearch/dense_index.h`.
+//! The dense modality - Vector Search over equidimensional embeddings.
 //!
 //! `DenseIndex` is the handle; `RowsView` is the batch currency every verb reads, one vector being
 //! a one-row run, and every output whose length scales with the call lands in an `Arena` the verb
@@ -41,6 +40,7 @@ const usearch_keys_view_t = types.usearch_keys_view_t;
 const usearch_matches_tape_view_t = types.usearch_matches_tape_view_t;
 const usearch_matches_view_t = types.usearch_matches_view_t;
 const usearch_nvme_options_t = types.usearch_nvme_options_t;
+const usearch_progress_t = types.usearch_progress_t;
 const usearch_ram_options_t = types.usearch_ram_options_t;
 const usearch_rows_view_t = types.usearch_rows_view_t;
 const usearch_vram_options_t = types.usearch_vram_options_t;
@@ -62,6 +62,9 @@ pub const ValueLookup = struct {
     /// call is final. The trampoline checks the scalar and columns each batch states, so a null
     /// row, or one of another kind or width, refuses the call with `Error.ShapeMismatch`. It runs
     /// concurrently from the executor's threads.
+    ///
+    /// The trampoline is a host function, so it serves RAM and NVMe handles only: a VRAM walk calls
+    /// `callback` on the device, so a VRAM handle needs a device-callable one set directly.
     pub fn of(
         comptime Element: type,
         context: anytype,
@@ -215,6 +218,8 @@ pub const DenseLoadRamConfig = struct {
     values_per_key: usize = 0,
     /// Called with shards placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
 };
@@ -229,6 +234,8 @@ pub const DenseLoadVramConfig = struct {
     values_per_key: usize = 0,
     /// Called with shards placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
 };
@@ -243,6 +250,8 @@ pub const DenseLoadRamBufferConfig = struct {
     values_per_key: usize = 0,
     /// Called with bytes placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
 };
@@ -257,6 +266,8 @@ pub const DenseLoadVramBufferConfig = struct {
     values_per_key: usize = 0,
     /// Called with bytes placed; a stopped load creates no index.
     progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
     /// Where the call's final outcome, its static message included, is copied; null copies nothing.
     diagnostics: ?*Outcome = null,
 };
@@ -293,6 +304,8 @@ pub const DenseInsertConfig = struct {
     expansion_factor: usize = 0,
     /// Called with rows admitted; it reports and cannot cancel, since every row is claimed first.
     progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
     stats: ?*DenseTraversalStats = null,
 };
 
@@ -302,6 +315,8 @@ pub const DenseRefineConfig = struct {
     expansion_factor: usize = 0,
     /// Called with nodes swept; a stop is a time budget rather than a failure.
     progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
     stats: ?*DenseTraversalStats = null,
 };
 
@@ -315,13 +330,17 @@ pub const DenseSearchConfig = struct {
     predicate: Predicate = .{},
     /// Called with queries resolved; a stopped search answers `Error.Cancelled` and no matches.
     progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
     stats: ?*DenseTraversalStats = null,
 };
 
-/// Optional settings of `DenseIndex.merge`.
-pub const DenseMergeConfig = struct {
-    /// Called with donors absorbed; a stop keeps the donors already absorbed.
+/// Optional settings of `DenseIndex.absorb`.
+pub const DenseAbsorbConfig = struct {
+    /// Called with donors absorbed; a stop between donors keeps those already absorbed.
     progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
 };
 
 /// Optional settings of `DenseIndex.multiply`.
@@ -331,6 +350,8 @@ pub const DenseMultiplyConfig = struct {
     /// The candidate-pool breadth, which widens the emitted pattern; zero derives.
     expansion_factor: usize = 0,
     progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
     stats: ?*DenseTraversalStats = null,
 };
 
@@ -349,6 +370,8 @@ pub const DenseAttendConfig = struct {
     /// derives it from the index's frozen geometry.
     score_scale: f32 = 0,
     progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
     stats: ?*DenseTraversalStats = null,
 };
 
@@ -357,6 +380,8 @@ pub const DenseMaxsimConfig = struct {
     /// The candidate-pool breadth; zero derives.
     expansion_factor: usize = 0,
     progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
     stats: ?*DenseTraversalStats = null,
 };
 
@@ -364,12 +389,16 @@ pub const DenseMaxsimConfig = struct {
 pub const DenseSaveConfig = struct {
     /// Called with shards written; a stopped save leaves leftovers every reader rejects.
     progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
 };
 
 /// Optional settings of `DenseIndex.saveBuffer`.
 pub const DenseSaveBufferConfig = struct {
     /// Called with bytes written; a stopped save leaves no bytes.
     progress: ProgressCallback = .{},
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    progress_steps: usize = 0,
 };
 
 /// Optional settings of `DenseSearchStream.init`.
@@ -410,8 +439,7 @@ const usearch_dense_load_ram_t = extern struct {
     path: BytesView,
     ram: usearch_ram_options_t,
     values_per_key: usize,
-    progress: ?ProgressFunction,
-    progress_state: ?*anyopaque,
+    progress: usearch_progress_t,
 };
 
 const usearch_dense_load_vram_t = extern struct {
@@ -422,8 +450,7 @@ const usearch_dense_load_vram_t = extern struct {
     path: BytesView,
     vram: usearch_vram_options_t,
     values_per_key: usize,
-    progress: ?ProgressFunction,
-    progress_state: ?*anyopaque,
+    progress: usearch_progress_t,
 };
 
 const usearch_dense_load_ram_buffer_t = extern struct {
@@ -434,8 +461,7 @@ const usearch_dense_load_ram_buffer_t = extern struct {
     buffer: BytesView,
     ram: usearch_ram_options_t,
     values_per_key: usize,
-    progress: ?ProgressFunction,
-    progress_state: ?*anyopaque,
+    progress: usearch_progress_t,
 };
 
 const usearch_dense_load_vram_buffer_t = extern struct {
@@ -446,8 +472,7 @@ const usearch_dense_load_vram_buffer_t = extern struct {
     buffer: BytesView,
     vram: usearch_vram_options_t,
     values_per_key: usize,
-    progress: ?ProgressFunction,
-    progress_state: ?*anyopaque,
+    progress: usearch_progress_t,
 };
 
 const usearch_dense_view_ram_t = extern struct {
@@ -489,8 +514,7 @@ const usearch_dense_insert_t = extern struct {
     keys: usearch_keys_view_t,
     vectors: usearch_rows_view_t,
     expansion_factor: usize,
-    progress: ?ProgressFunction,
-    progress_state: ?*anyopaque,
+    progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
 };
 
@@ -501,8 +525,7 @@ const usearch_dense_refine_t = extern struct {
     completion: Completion,
     changed: ?*usize,
     expansion_factor: usize,
-    progress: ?ProgressFunction,
-    progress_state: ?*anyopaque,
+    progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
 };
 
@@ -526,10 +549,8 @@ const usearch_dense_search_t = extern struct {
     wanted: usize,
     expansion_factor: usize,
     traversal: Traversal,
-    predicate: ?PredicateFunction,
-    predicate_state: ?*anyopaque,
-    progress: ?ProgressFunction,
-    progress_state: ?*anyopaque,
+    predicate: Predicate,
+    progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
 };
 
@@ -554,21 +575,21 @@ const usearch_dense_get_t = extern struct {
     outputs_scalar: Scalar,
 };
 
-const usearch_dense_merge_t = extern struct {
+const usearch_dense_absorb_t = extern struct {
     index: ?*anyopaque,
     executor: ?*anyopaque,
     outcome: *Outcome,
     completion: Completion,
     count: usize,
     donors: [*]?*anyopaque,
-    progress: ?ProgressFunction,
-    progress_state: ?*anyopaque,
+    progress: usearch_progress_t,
 };
 
 const usearch_dense_cursor_init_t = extern struct {
     cursor: *?*anyopaque,
     index: ?*anyopaque,
     outcome: *Outcome,
+    start: ?*const Key,
 };
 
 const usearch_dense_cursor_next_t = extern struct {
@@ -610,8 +631,7 @@ const usearch_dense_save_t = extern struct {
     outcome: *Outcome,
     completion: Completion,
     path: BytesView,
-    progress: ?ProgressFunction,
-    progress_state: ?*anyopaque,
+    progress: usearch_progress_t,
 };
 
 const usearch_dense_save_buffer_t = extern struct {
@@ -621,8 +641,7 @@ const usearch_dense_save_buffer_t = extern struct {
     completion: Completion,
     monolith: *BytesView,
     arena: ?*anyopaque,
-    progress: ?ProgressFunction,
-    progress_state: ?*anyopaque,
+    progress: usearch_progress_t,
 };
 
 const usearch_dense_metadata_read_t = extern struct {
@@ -670,8 +689,7 @@ const usearch_dense_multiply_t = extern struct {
     arena: ?*anyopaque,
     wanted: usize,
     expansion_factor: usize,
-    progress: ?ProgressFunction,
-    progress_state: ?*anyopaque,
+    progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
 };
 
@@ -691,8 +709,7 @@ const usearch_dense_attend_t = extern struct {
     outputs_scalar: Scalar,
     expansion_factor: usize,
     score_scale: f32,
-    progress: ?ProgressFunction,
-    progress_state: ?*anyopaque,
+    progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
 };
 
@@ -708,8 +725,7 @@ const usearch_dense_maxsim_t = extern struct {
     arena: ?*anyopaque,
     wanted: usize,
     expansion_factor: usize,
-    progress: ?ProgressFunction,
-    progress_state: ?*anyopaque,
+    progress: usearch_progress_t,
     stats: ?*DenseTraversalStats,
 };
 
@@ -730,7 +746,7 @@ extern fn usearch_dense_health(arguments: *usearch_dense_health_t) void;
 extern fn usearch_dense_search(arguments: *usearch_dense_search_t) void;
 extern fn usearch_dense_count(arguments: *usearch_dense_count_t) void;
 extern fn usearch_dense_get(arguments: *usearch_dense_get_t) void;
-extern fn usearch_dense_merge(arguments: *usearch_dense_merge_t) void;
+extern fn usearch_dense_absorb(arguments: *usearch_dense_absorb_t) void;
 extern fn usearch_dense_cursor_init(arguments: *usearch_dense_cursor_init_t) void;
 extern fn usearch_dense_cursor_next(arguments: *usearch_dense_cursor_next_t) void;
 extern fn usearch_dense_cursor_free(cursor: ?*anyopaque) void;
@@ -856,8 +872,7 @@ pub const DenseIndex = extern struct {
             .path = .of(path),
             .ram = .of(config.memory_domains),
             .values_per_key = config.values_per_key,
-            .progress = config.progress.callback,
-            .progress_state = config.progress.state,
+            .progress = .of(config.progress, config.progress_steps),
         };
         usearch_dense_load_ram(&arguments);
         return adopt(handle, outcome, config.diagnostics);
@@ -876,8 +891,7 @@ pub const DenseIndex = extern struct {
             .path = .of(path),
             .vram = .of(config.devices),
             .values_per_key = config.values_per_key,
-            .progress = config.progress.callback,
-            .progress_state = config.progress.state,
+            .progress = .of(config.progress, config.progress_steps),
         };
         usearch_dense_load_vram(&arguments);
         return adopt(handle, outcome, config.diagnostics);
@@ -896,8 +910,7 @@ pub const DenseIndex = extern struct {
             .buffer = .of(buffer),
             .ram = .of(config.memory_domains),
             .values_per_key = config.values_per_key,
-            .progress = config.progress.callback,
-            .progress_state = config.progress.state,
+            .progress = .of(config.progress, config.progress_steps),
         };
         usearch_dense_load_ram_buffer(&arguments);
         return adopt(handle, outcome, config.diagnostics);
@@ -916,8 +929,7 @@ pub const DenseIndex = extern struct {
             .buffer = .of(buffer),
             .vram = .of(config.devices),
             .values_per_key = config.values_per_key,
-            .progress = config.progress.callback,
-            .progress_state = config.progress.state,
+            .progress = .of(config.progress, config.progress_steps),
         };
         usearch_dense_load_vram_buffer(&arguments);
         return adopt(handle, outcome, config.diagnostics);
@@ -1061,15 +1073,22 @@ pub const DenseIndex = extern struct {
     /// batch operation.
     ///
     /// Never writes to the graph, so any number of these may overlap with concurrent insertions.
+    /// A zero `wanted` walks nothing and lands only the counts, every one zero.
     /// Calls `usearch_dense_search`.
     pub fn search(self: DenseIndex, queries: RowsView, wanted: usize, arena: *Arena, config: DenseSearchConfig) Error!Matches {
         return self.here().search(queries, wanted, arena, config);
     }
 
-    /// Absorbs every donor into the index. Each donor it absorbs is consumed and nulled in place, so
-    /// `deinit` on every donor afterwards frees only those a stop left live. Calls `usearch_dense_merge`.
-    pub fn merge(self: DenseIndex, donors: []DenseIndex, config: DenseMergeConfig) Error!void {
-        return self.here().merge(donors, config);
+    /// Absorbs every donor into the index, one after another, keeping their graphs rather than
+    /// re-inserting their vectors: each donor's rows append shard by shard, then a refinement links
+    /// them across the appended part. Donors must share the index's residency, scalar, metric and
+    /// geometry, or the call answers `Error.ConfigMismatch`.
+    ///
+    /// Each donor it absorbs is consumed and nulled in place, so `deinit` on every donor afterwards
+    /// frees only those a stop between donors or a failure left live. Readers of a RAM index keep
+    /// searching throughout; a VRAM one admits no overlapping search. Calls `usearch_dense_absorb`.
+    pub fn absorb(self: DenseIndex, donors: []DenseIndex, config: DenseAbsorbConfig) Error!void {
+        return self.here().absorb(donors, config);
     }
 
     /// Copies up to `wanted` more entries out of `cursor` into `arena` - their keys, and their rows
@@ -1123,7 +1142,7 @@ pub const DenseIndex = extern struct {
     ///
     /// One walk per token serves its `config.head_count` heads, rows `t · head_count + h`. The
     /// index stores no values: `value_lookup` resolves the keys of every scored batch to their
-    /// rows. The attended rows land in `arena` as wide as the keys and divided by the partition,
+    /// rows, a host function on RAM and a device one on VRAM. The attended rows land in `arena` as wide as the keys and divided by the partition,
     /// and `carry` is worth asking for only to fold this branch into another over the same
     /// queries. Runs on the inner-product kind only. Calls `usearch_dense_attend`.
     pub fn attend(self: DenseIndex, queries: RowsView, value_lookup: ValueLookup, arena: *Arena, config: DenseAttendConfig) Error!DenseVectors {
@@ -1254,9 +1273,9 @@ fn Receiver(comptime completion: Completion, comptime Into: type) type {
             return self.answerIn(DenseSearch{ .queries = queries, .wanted = wanted, .config = config }, arena);
         }
 
-        /// See `DenseIndex.merge`. Calls `usearch_dense_merge`.
-        pub fn merge(self: Self, donors: []DenseIndex, config: DenseMergeConfig) Answer(DenseMerge) {
-            return self.answer(DenseMerge{ .donors = donors, .config = config });
+        /// See `DenseIndex.absorb`. Calls `usearch_dense_absorb`.
+        pub fn absorb(self: Self, donors: []DenseIndex, config: DenseAbsorbConfig) Answer(DenseAbsorb) {
+            return self.answer(DenseAbsorb{ .donors = donors, .config = config });
         }
 
         /// See `DenseIndex.cursorNext`. Calls `usearch_dense_cursor_next`.
@@ -1425,8 +1444,7 @@ pub const DenseInsert = struct {
             .keys = .of(self.keys),
             .vectors = .of(self.vectors),
             .expansion_factor = self.config.expansion_factor,
-            .progress = self.config.progress.callback,
-            .progress_state = self.config.progress.state,
+            .progress = .of(self.config.progress, self.config.progress_steps),
             .stats = self.config.stats,
         };
         usearch_dense_insert(&arguments);
@@ -1452,8 +1470,7 @@ pub const DenseRefine = struct {
             .completion = completion,
             .changed = &self.changed,
             .expansion_factor = self.config.expansion_factor,
-            .progress = self.config.progress.callback,
-            .progress_state = self.config.progress.state,
+            .progress = .of(self.config.progress, self.config.progress_steps),
             .stats = self.config.stats,
         };
         usearch_dense_refine(&arguments);
@@ -1506,10 +1523,8 @@ pub const DenseSearch = struct {
             .wanted = self.wanted,
             .expansion_factor = self.config.expansion_factor,
             .traversal = self.config.traversal,
-            .predicate = self.config.predicate.callback,
-            .predicate_state = self.config.predicate.state,
-            .progress = self.config.progress.callback,
-            .progress_state = self.config.progress.state,
+            .predicate = self.config.predicate,
+            .progress = .of(self.config.progress, self.config.progress_steps),
             .stats = self.config.stats,
         };
         usearch_dense_search(&arguments);
@@ -1521,28 +1536,27 @@ pub const DenseSearch = struct {
     }
 };
 
-/// One `DenseIndex.merge`, as a `Deferred` holds it.
-pub const DenseMerge = struct {
+/// One `DenseIndex.absorb`, as a `Deferred` holds it.
+pub const DenseAbsorb = struct {
     pub const Result = void;
     donors: []DenseIndex,
-    config: DenseMergeConfig,
+    config: DenseAbsorbConfig,
     outcome: Outcome = .{},
 
-    pub fn launch(self: *DenseMerge, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
-        var arguments: usearch_dense_merge_t = .{
+    pub fn launch(self: *DenseAbsorb, index: ?*anyopaque, executor: ?*anyopaque, completion: Completion) void {
+        var arguments: usearch_dense_absorb_t = .{
             .index = index,
             .executor = executor,
             .outcome = &self.outcome,
             .completion = completion,
             .count = self.donors.len,
             .donors = @ptrCast(self.donors.ptr),
-            .progress = self.config.progress.callback,
-            .progress_state = self.config.progress.state,
+            .progress = .of(self.config.progress, self.config.progress_steps),
         };
-        usearch_dense_merge(&arguments);
+        usearch_dense_absorb(&arguments);
     }
 
-    pub fn finish(self: *DenseMerge) Error!void {
+    pub fn finish(self: *DenseAbsorb) Error!void {
         return self.outcome.check();
     }
 };
@@ -1632,8 +1646,7 @@ pub const DenseSave = struct {
             .outcome = &self.outcome,
             .completion = completion,
             .path = .of(self.path),
-            .progress = self.config.progress.callback,
-            .progress_state = self.config.progress.state,
+            .progress = .of(self.config.progress, self.config.progress_steps),
         };
         usearch_dense_save(&arguments);
     }
@@ -1660,8 +1673,7 @@ pub const DenseSaveBuffer = struct {
             .completion = completion,
             .monolith = &self.monolith,
             .arena = self.stamp.arena.handle,
-            .progress = self.config.progress.callback,
-            .progress_state = self.config.progress.state,
+            .progress = .of(self.config.progress, self.config.progress_steps),
         };
         usearch_dense_save_buffer(&arguments);
     }
@@ -1698,8 +1710,7 @@ pub const DenseMultiply = struct {
             .arena = self.stamp.arena.handle,
             .wanted = self.config.wanted,
             .expansion_factor = self.config.expansion_factor,
-            .progress = self.config.progress.callback,
-            .progress_state = self.config.progress.state,
+            .progress = .of(self.config.progress, self.config.progress_steps),
             .stats = self.config.stats,
         };
         usearch_dense_multiply(&arguments);
@@ -1745,8 +1756,7 @@ pub const DenseAttend = struct {
             .outputs_scalar = self.config.outputs_scalar,
             .expansion_factor = self.config.expansion_factor,
             .score_scale = self.config.score_scale,
-            .progress = self.config.progress.callback,
-            .progress_state = self.config.progress.state,
+            .progress = .of(self.config.progress, self.config.progress_steps),
             .stats = self.config.stats,
         };
         usearch_dense_attend(&arguments);
@@ -1783,8 +1793,7 @@ pub const DenseMaxsim = struct {
             .arena = self.stamp.arena.handle,
             .wanted = self.wanted,
             .expansion_factor = self.config.expansion_factor,
-            .progress = self.config.progress.callback,
-            .progress_state = self.config.progress.state,
+            .progress = .of(self.config.progress, self.config.progress_steps),
             .stats = self.config.stats,
         };
         usearch_dense_maxsim(&arguments);
@@ -1938,7 +1947,7 @@ pub const DenseCursor = struct {
     pub fn init(index: DenseIndex) Error!DenseCursor {
         var handle: ?*anyopaque = null;
         var outcome: Outcome = .{};
-        var arguments: usearch_dense_cursor_init_t = .{ .cursor = &handle, .index = index.handle, .outcome = &outcome };
+        var arguments: usearch_dense_cursor_init_t = .{ .cursor = &handle, .index = index.handle, .outcome = &outcome, .start = null };
         usearch_dense_cursor_init(&arguments);
         errdefer usearch_dense_cursor_free(handle);
         try outcome.check();
@@ -2039,8 +2048,10 @@ test "callbacks wrap with and without a context" {
     };
     const tenant: Tenant = .{ .allowed = 7 };
     const filter = Predicate.of(&tenant, Tenant.admits);
-    try std.testing.expectEqual(types.Admission.admit, filter.callback.?(.{ .bytes = .{7} ++ .{0} ** 15 }, filter.state));
-    try std.testing.expectEqual(types.Admission.reject, filter.callback.?(.nil, filter.state));
+    const judged = [_]Key{ .{ .bytes = .{7} ++ .{0} ** 15 }, .nil };
+    var verdicts: [judged.len]types.Admission = undefined;
+    filter.callback.?(&judged, &verdicts, judged.len, filter.state);
+    try std.testing.expectEqual([judged.len]types.Admission{ .admit, .reject }, verdicts);
 
     var tally: usize = 0;
     const counting = ProgressCallback.of(&tally, struct {
@@ -2089,7 +2100,7 @@ test { // analyze every declaration, the methods on each handle included
     std.testing.refAllDecls(DenseIndex.On);
     inline for (.{
         DenseReserve,  DenseClear,  DenseDescribe, DenseCount,      DenseGet,              DenseInsert,
-        DenseRefine,   DenseHealth, DenseSearch,   DenseMerge,      DenseSave,             DenseSaveBuffer,
+        DenseRefine,   DenseHealth, DenseSearch,   DenseAbsorb,     DenseSave,             DenseSaveBuffer,
         DenseMultiply, DenseAttend, DenseMaxsim,   DenseCursorNext, DenseSearchStreamNext,
     }) |Call| std.testing.refAllDecls(Deferred(Call));
     std.testing.refAllDecls(DenseCursor);
@@ -2142,6 +2153,10 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     try std.testing.expectError(Error.Uninitialized, matches.row(0));
     try std.testing.expectEqual(keys[0], (try again.row(0)).keys[0]);
 
+    // A zero `wanted` lands the counts alone, so a row reads empty rather than through absent keys.
+    const none = try index.search(try .ofRow(f32, slab[0..dimensions]), 0, &arena, .{});
+    try std.testing.expectEqual(@as(usize, 0), (try none.row(0)).keys.len);
+
     // A predicate narrows the matches, and still finds the admitted row behind rejected ones.
     const Only = struct {
         key: Key,
@@ -2169,15 +2184,9 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     try std.testing.expectEqual(@as(usize, 0), absent.rows);
     try std.testing.expectEqual(@as(usize, 0), (try absent.bytes()).len);
 
-    // Sub-byte rows report their own stride, so no width arithmetic happens here.
-    const bits = try index.on(executor).get(keys[2], .u1x8, &arena);
-    try std.testing.expectEqual(@as(usize, 1), bits.stride);
-    try std.testing.expectEqual(@as(usize, dimensions), bits.columns);
-    try std.testing.expectEqual(@as(usize, 1), (try bits.row(Scalar.U1x8, 0)).len);
-
     // A failed call rewinds the arena too, and leaves it the caller's, ready for the next one.
     try std.testing.expectError(Error.ConfigMismatch, index.multiply(try .ofRow(f32, slab[0..dimensions]), &arena, .{}));
-    try std.testing.expectError(Error.Uninitialized, bits.row(Scalar.U1x8, 0));
+    try std.testing.expectError(Error.Uninitialized, absent.bytes());
     try std.testing.expectEqualSlices(f32, &.{ 0, 0, 1 }, try (try index.get(keys[2], .f32, &arena)).row(f32, 0));
 
     // A freed arena leaves its views refusing, and device memory is never read as the host's.
@@ -2239,17 +2248,21 @@ test "a batch crosses the ABI and comes back as views over the arena it lands in
     defer copy.deinit();
     try std.testing.expectEqual(@as(usize, 3), (try copy.describe()).size);
 
-    // A donor is consumed and nulled in place, and one a residency cannot absorb yet stays live,
-    // so freeing every donor afterwards is safe either way.
-    var donors = [_]DenseIndex{try DenseIndex.loadRamBuffer(monolith, .{})};
+    // An absorbed donor is consumed and nulled in place, and a stop between donors leaves the rest
+    // live, so freeing every donor afterwards is safe either way.
+    var donors = [_]DenseIndex{ try DenseIndex.loadRamBuffer(monolith, .{}), try DenseIndex.loadRamBuffer(monolith, .{}) };
     defer for (&donors) |*donor| donor.deinit();
-    if (copy.on(executor).merge(&donors, .{})) {
-        try std.testing.expectEqual(DenseIndex{ .handle = null }, donors[0]);
-        try std.testing.expectEqual(@as(usize, 2), try copy.count(keys[0]));
-    } else |failure| {
-        try std.testing.expectEqual(Error.Unsupported, failure);
-        try std.testing.expectEqual(@as(usize, 1), try copy.count(keys[0]));
-    }
+    const Stop = struct {
+        fn afterFirst(_: void, completed: usize, _: usize) types.Continuation {
+            return if (completed == 0) .@"continue" else .cancel;
+        }
+    };
+    try std.testing.expectError(Error.Cancelled, copy.on(executor).absorb(&donors, .{ .progress = .of({}, Stop.afterFirst) }));
+    try std.testing.expectEqual(DenseIndex{ .handle = null }, donors[0]);
+    try std.testing.expect(donors[1].handle != null);
+    try copy.on(executor).absorb(donors[1..], .{});
+    try std.testing.expectEqual(DenseIndex{ .handle = null }, donors[1]);
+    try std.testing.expectEqual(@as(usize, 3), try copy.count(keys[0]));
 
     const reachability = try index.on(executor).health();
     try std.testing.expectEqual([2]usize{ 3, 3 }, [2]usize{ reachability.audited, reachability.reachable });
@@ -2268,6 +2281,12 @@ test "a scan scores every row, so every query finds itself first" {
     defer arena.deinit();
     const matches = try index.search(try .of(f32, &slab, dimensions), 1, &arena, .{ .traversal = .scan });
     for (keys, 0..) |key, query| try std.testing.expectEqual(key, (try matches.row(query)).keys[0]);
+
+    // Sub-byte rows report their own stride, so no width arithmetic happens here.
+    const nibbles = try index.get(keys[3], .u4x2, &arena);
+    try std.testing.expectEqual(@as(usize, 2), nibbles.stride);
+    try std.testing.expectEqual(@as(usize, dimensions), nibbles.columns);
+    try std.testing.expectEqual(@as(usize, 2), (try nibbles.row(Scalar.U4x2, 0)).len);
 }
 
 test "a deferred call is the same verb, final only once waited on" {

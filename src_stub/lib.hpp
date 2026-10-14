@@ -184,10 +184,15 @@ inline bool reject_tape(usearch_tape_view_t tape, std::size_t count, usearch_out
     return false;
 }
 
-/** Ticks the caller's handler and answers whether to carry on; a null handler always does. */
-inline bool keep_going(usearch_progress_callback_t progress, void* progress_state, std::size_t completed,
-                       std::size_t total) {
-    return !progress || progress(completed, total, progress_state) == usearch_continue_k;
+/** Ticks the caller's handler when @p completed closes one of its steps, and answers whether to
+ *  carry on; a null handler always does. Every loop here advances a unit at a time, so the unit
+ *  that crosses into a new step is the one that reports. */
+inline bool keep_going(usearch_progress_t progress, std::size_t completed, std::size_t total) {
+    if (!progress.callback || !completed) return true;
+    // The library's default when the caller leaves the steps zero, a tenth of the call apart.
+    std::size_t const steps = progress.steps ? progress.steps : 10;
+    bool const closes = completed >= total || completed * steps / total != (completed - 1) * steps / total;
+    return !closes || progress.callback(completed, total, progress.state) == usearch_continue_k;
 }
 
 /** Reports a handler's cancellation once a loop stopped short, and answers whether it did. */
@@ -208,18 +213,19 @@ using call_arguments_t = std::variant<
     usearch_dense_search_stream_next_t, usearch_dense_save_t, usearch_dense_save_buffer_t,
     usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t, usearch_dense_describe_t,
     usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t, usearch_sequence_load_ram_t,
-    usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t, usearch_sequence_refine_t,
-    usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t, usearch_sequence_merge_t,
-    usearch_sequence_cursor_next_t, usearch_sequence_save_t, usearch_sequence_metadata_read_t,
-    usearch_sequence_describe_t, usearch_matrix_load_ram_t, usearch_matrix_load_vram_t, usearch_matrix_reserve_t,
-    usearch_matrix_clear_t, usearch_matrix_insert_t, usearch_matrix_refine_t, usearch_matrix_search_t,
-    usearch_matrix_count_t, usearch_matrix_get_t, usearch_matrix_merge_t, usearch_matrix_cursor_next_t,
-    usearch_matrix_save_t, usearch_matrix_metadata_read_t, usearch_matrix_describe_t, usearch_geospatial_load_ram_t,
+    usearch_sequence_view_nvme_t, usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t,
+    usearch_sequence_refine_t, usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t,
+    usearch_sequence_absorb_t, usearch_sequence_cursor_next_t, usearch_sequence_save_t,
+    usearch_sequence_metadata_read_t, usearch_sequence_describe_t, usearch_shapes_load_ram_t,
+    usearch_shapes_load_vram_t, usearch_shapes_view_nvme_t, usearch_shapes_reserve_t, usearch_shapes_clear_t,
+    usearch_shapes_insert_t, usearch_shapes_refine_t, usearch_shapes_search_t, usearch_shapes_count_t,
+    usearch_shapes_get_t, usearch_shapes_absorb_t, usearch_shapes_cursor_next_t, usearch_shapes_save_t,
+    usearch_shapes_metadata_read_t, usearch_shapes_describe_t, usearch_geospatial_load_ram_t,
     usearch_geospatial_load_vram_t, usearch_geospatial_reserve_t, usearch_geospatial_clear_t,
-    usearch_geospatial_insert_t, usearch_geospatial_refine_t, usearch_geospatial_emplace_t, usearch_geospatial_search_t,
-    usearch_geospatial_within_t, usearch_geospatial_count_t, usearch_geospatial_get_t, usearch_geospatial_merge_t,
-    usearch_geospatial_cursor_next_t, usearch_geospatial_save_t, usearch_geospatial_metadata_read_t,
-    usearch_geospatial_describe_t>;
+    usearch_geospatial_insert_t, usearch_geospatial_refine_t, usearch_geospatial_search_t, usearch_geospatial_within_t,
+    usearch_geospatial_count_t, usearch_geospatial_get_t, usearch_geospatial_absorb_t, usearch_geospatial_cursor_next_t,
+    usearch_geospatial_save_t, usearch_geospatial_metadata_read_t, usearch_geospatial_describe_t,
+    usearch_dense_sample_t, usearch_sequence_sample_t, usearch_shapes_sample_t, usearch_geospatial_sample_t>;
 
 /** A stand-in's executor: no threads, so every call it is given runs on the thread of a caller -
  *  the one that submits it blocking, drains the executor, waits on the call, or frees a handle it uses. */
@@ -689,10 +695,13 @@ struct handle {
     std::unordered_multimap<uuid_t, std::size_t> by_key;
 
     /** Held shared by every reader, exclusively by every mutation. */
-    mutable std::shared_mutex mutex;
+    std::shared_mutex mutex;
 
     /** The checkpoint a @c view_ram verb serves from, whose presence refuses every mutating verb. */
     mapped_file_t served;
+
+    /** The residency the handle answers as, so an NVMe view refuses a save as the engine's does. */
+    usearch_residency_t residency = usearch_residency_ram_k;
 
     /** Drops every row, which @c clear promises without touching the frozen options. */
     void reset() noexcept { entries.clear(), by_key.clear(); }
@@ -789,17 +798,6 @@ value_ read_pod(bytes_view_t source) {
 
 #pragma region Ranking
 
-/** Whether a filtered search admits one key. Named states, never a bare @c bool. */
-enum class admission_t : bool { rejected_k, admitted_k };
-
-/** Wraps the ABI's predicate pair once, at the boundary; a null predicate admits every key. */
-inline std::function<admission_t(usearch_key_t)> admitting(usearch_predicate_t predicate, void* state) {
-    if (!predicate) return [](usearch_key_t) { return admission_t::admitted_k; };
-    return [predicate, state](usearch_key_t key) {
-        return predicate(key, state) == usearch_admit_k ? admission_t::admitted_k : admission_t::rejected_k;
-    };
-}
-
 /** One scored pair, in the order a search reports them. */
 struct match_t {
 
@@ -838,22 +836,136 @@ inline bool carve_ranked(usearch_arena_handle_t& arena, std::size_t count, std::
            (landing.counts = carve<std::size_t>(arena, count, outcome));
 }
 
-/** Scores @p entries into @p ranked, nearest first. The sort is stable because every
- *  modality's docblock promises ties fall in insertion order. */
+/** Scores the @p entries that @p predicate admits, judged in one call, into @p ranked, nearest
+ *  first. The sort is stable because every modality's docblock promises ties fall in insertion
+ *  order. */
 template <typename payload_>
-void rank(std::span<entry<payload_> const> entries, std::function<admission_t(usearch_key_t)> const& admits,
+void rank(std::span<entry<payload_> const> entries, usearch_predicate_t predicate,
           std::function<double(payload_ const&)> const& score, std::vector<match_t>& ranked) {
+    std::vector<usearch_admission_t> admissions(entries.size(), usearch_admit_k);
+    if (predicate.callback && !entries.empty()) {
+        std::vector<usearch_key_t> keys(entries.size());
+        for (std::size_t row = 0; row != entries.size(); ++row) keys[row] = entries[row].key;
+        predicate.callback(keys.data(), admissions.data(), keys.size(), predicate.state);
+    }
     ranked.clear();
     ranked.reserve(entries.size());
-    for (entry<payload_> const& row : entries) {
-        if (admits(row.key) == admission_t::rejected_k) continue;
-        ranked.push_back({score(row.payload), row.key});
-    }
+    for (std::size_t row = 0; row != entries.size(); ++row)
+        if (admissions[row] == usearch_admit_k) ranked.push_back({score(entries[row].payload), entries[row].key});
     std::stable_sort(ranked.begin(), ranked.end(),
                      [](match_t const& left, match_t const& right) { return left.distance < right.distance; });
 }
 
 #pragma endregion Ranking
+
+#pragma region Sampling
+
+/** Where @p slot falls in the sequence @p seed names: SplitMix64's output at that slot of the
+ *  seed's stream, so equal seeds draw a region in one order and distinct seeds in others. */
+inline u64_t draw_rank(u64_t seed, std::size_t slot) noexcept {
+    u64_t mixed = seed + (static_cast<u64_t>(slot) + 1) * 0x9E3779B97F4A7C15ull;
+    mixed = (mixed ^ (mixed >> 30)) * 0xBF58476D1CE4E5B9ull;
+    mixed = (mixed ^ (mixed >> 27)) * 0x94D049BB133111EBull;
+    return mixed ^ (mixed >> 31);
+}
+
+/** The rows below @p rows that @p within admits - a sample's region - in the order @p seed draws
+ *  them. */
+template <typename within_>
+std::vector<std::size_t> drawing_order(std::size_t rows, u64_t seed, within_ const& within) {
+    std::vector<std::size_t> order;
+    for (std::size_t row = 0; row != rows; ++row)
+        if (within(row)) order.push_back(row);
+    // The slot breaks a tie between equal ranks, so the order is total and repeats exactly.
+    std::sort(order.begin(), order.end(), [seed](std::size_t first, std::size_t second) {
+        u64_t const first_rank = draw_rank(seed, first), second_rank = draw_rank(seed, second);
+        return first_rank != second_rank ? first_rank < second_rank : first < second;
+    });
+    return order;
+}
+
+/**
+ *  @brief The body of every modality's @c sample: lands the draws ranked @c offset onward in
+ *      @p order, at most @c wanted, each linked to its @c links_per_draw nearest earlier draws.
+ *
+ *  Earlier means every draw ranked before it, those an earlier call wrote included, so successive
+ *  calls extend one sample. Equidistant draws link in the order they were drawn. The outputs of
+ *  @p arguments are written only once every draw landed, so a cancelled call leaves them reset.
+ */
+template <typename arguments_, typename payload_, typename score_>
+void land_sample(arguments_ const& arguments, std::span<entry<payload_> const> entries,
+                 std::span<std::size_t const> order, score_ const& score, usearch_arena_handle_t& arena,
+                 usearch_outcome_t* outcome) {
+    std::size_t const first = std::min(arguments.offset, order.size());
+    std::size_t const drawn = std::min(arguments.wanted, order.size() - first);
+    std::size_t links_count = 0;
+    for (std::size_t rank = first; rank != first + drawn; ++rank)
+        links_count += std::min(arguments.links_per_draw, rank);
+    usearch_key_t* const keys = carve<usearch_key_t>(arena, drawn, outcome);
+    std::size_t* const offsets = keys ? carve<std::size_t>(arena, drawn + 1, outcome) : nullptr;
+    usearch_key_t* const linked = offsets ? carve<usearch_key_t>(arena, links_count, outcome) : nullptr;
+    usearch_distance_t* const distances = linked ? carve<usearch_distance_t>(arena, links_count, outcome) : nullptr;
+    if (!distances) return;
+
+    // Each earlier draw as its distance and rank, so sorting pairs breaks ties by draw order.
+    std::vector<std::pair<double, std::size_t>> earlier;
+    offsets[0] = 0;
+    std::size_t landed = 0;
+    while (landed != drawn) {
+        std::size_t const rank = first + landed;
+        payload_ const& payload = entries[order[rank]].payload;
+        earlier.clear();
+        for (std::size_t previous = 0; previous != rank; ++previous)
+            earlier.push_back({score(payload, entries[order[previous]].payload), previous});
+        std::size_t const kept = std::min(arguments.links_per_draw, rank);
+        std::partial_sort(earlier.begin(), earlier.begin() + kept, earlier.end());
+        for (std::size_t link = 0; link != kept; ++link) {
+            linked[offsets[landed] + link] = entries[order[earlier[link].second]].key;
+            distances[offsets[landed] + link] = earlier[link].first;
+        }
+        offsets[landed + 1] = offsets[landed] + kept;
+        keys[landed] = entries[order[rank]].key;
+        if (arguments.stats) arguments.stats->visited_members += rank, arguments.stats->computed_distances += rank;
+        ++landed;
+        if (!keep_going(arguments.progress, landed, arguments.wanted)) break;
+    }
+    if (reject_cancelled(landed, drawn, outcome)) return;
+    *arguments.keys = {keys, sizeof(usearch_key_t)};
+    *arguments.links = {linked, distances, offsets};
+    *arguments.written = drawn;
+}
+
+/**
+ *  @brief The rows a cursor opened at @p key yields: those the key's entries link to, once each
+ *      and in link order, never an entry under @p key itself. An absent key links to none.
+ *
+ *  A stand-in keeps no graph, so an entry's links are its @c connectivity nearest other entries by
+ *  @p score, nearest first - the lists a perfectly refined graph would hold.
+ */
+template <typename handle_, typename score_>
+std::vector<std::size_t> linked_rows(handle_ const& index, usearch_key_t key, score_ const& score) {
+    std::size_t const rows = index.entries.size();
+    std::vector<double> distances(rows);
+    std::vector<std::size_t> nearest, linked;
+    for (std::size_t from : rows_under(index, key)) {
+        nearest.clear();
+        for (std::size_t row = 0; row != rows; ++row) {
+            if (row == from) continue;
+            distances[row] = score(index.entries[from].payload, index.entries[row].payload);
+            nearest.push_back(row);
+        }
+        std::stable_sort(nearest.begin(), nearest.end(),
+                         [&](std::size_t first, std::size_t second) { return distances[first] < distances[second]; });
+        nearest.resize(std::min(nearest.size(), index.options.connectivity));
+        for (std::size_t row : nearest)
+            if (keyed(index.entries[row].key) != keyed(key) &&
+                std::find(linked.begin(), linked.end(), row) == linked.end())
+                linked.push_back(row);
+    }
+    return linked;
+}
+
+#pragma endregion Sampling
 
 #pragma region Files
 

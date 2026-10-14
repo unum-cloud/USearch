@@ -118,6 +118,7 @@ To keep a result past the next call, or to read one while making the next, pass 
 An arena serves one call at a time, so each deferred call needs its own, and a call naming an arena that serves another call finishes with `Status.Contended` and rewinds nothing, so the holder's views stay readable.
 A stale view throws `USearchException` with `Status.Uninitialized`; a `ReadOnlySpan` an accessor already returned cannot outlive its stack frame, so read it before the next call.
 An arena's `Residency` says where it lives, and one from a VRAM executor holds device memory, which host accessors refuse with `Status.Device`.
+It grows, fills and frees on that executor's first stream, so it serves only calls on that executor and holds it open until disposed; a host arena may outlive its executor.
 
 ```csharp
 using Arena arena = new(pool);                                     // new Arena() is host pages for the calling thread
@@ -258,6 +259,7 @@ Matches admitted = index.On(pool).Search(
 Rejected entries still route the traversal, so recall does not collapse at low selectivity.
 The predicate runs on the executor's worker threads, so it must be safe for concurrent use, and it is called once per scored candidate rather than once per reported match.
 An exception it throws is captured, every later candidate is rejected, and the exception is rethrown with its own type once the call is final, never unwound through the native frames.
+A host predicate cannot narrow a device walk, so a VRAM handle refuses one with `Status.Device`.
 
 ### Retrieval: Get, Cursors & Streams
 
@@ -289,14 +291,14 @@ It is a build step rather than a repair: a cheap insertion pass followed by one 
 The return is the number of nodes whose edges changed, and zero means the graph has settled, so a caller under a time budget loops until the return falls below whatever rate it considers settled.
 Searches may run throughout.
 
-### Merging
+### Absorbing
 
 ```csharp
-index.On(pool).Merge(donor);
+index.On(pool).Absorb(donor);
 ```
 
-Bigger indexes come from merging, never mutating: `Merge` consumes every donor it absorbs, which then refuses every verb with `Status.Uninitialized`, while a donor a refused merge never reached stays the caller's.
-No residency absorbs donors yet, so today the call answers `Status.Unsupported`.
+Bigger indexes come from absorbing, never mutating: `Absorb` appends each donor in turn, keeping its graph and linking it in across the appended part.
+Every donor it absorbs is consumed and then refuses every verb with `Status.Uninitialized`, while one it did not absorb, like a donor of another scalar refused with `Status.ConfigMismatch`, stays a live index you still own, though its rows may already have landed.
 
 ### Sparse Multiplication
 
@@ -344,6 +346,7 @@ With `headCount: 8`, row `t * 8 + h` of the queries is head `h` of token `t`, an
 A key resolving outside the values, or values of another kind or width than the library reads, refuses the call with `Status.ShapeMismatch`, since a missing row is a wrong softmax rather than a smaller one.
 The `carry` holds one `DenseSoftmaxState` per query row, which folds this branch into another over the same queries, such as a recent window kept out of the index; it is state the caller carries between calls, so it stays lent rather than landing in the arena.
 An `outputsScalar` argument lands the attended rows as another kind than the queries' own.
+`rowOf` is a host function, so it serves RAM handles alone: a VRAM walk resolves rows through a device function, which this binding does not build, and an `Attend` into a VRAM arena refuses with `Status.Device`.
 
 ### Introspection
 
@@ -365,7 +368,7 @@ Every verb takes one argument struct, as the C interface does, and holds a refer
 ## What This Binding Does Not Expose
 
 - __Progress handlers.__
-  Every verb passes the C `progress` callback as null, so a long `Insert`, `Refine`, `Merge` or `Save` runs to its end, and `Status.Cancelled` never arises.
+  Every verb passes the C `progress` callback as null, so a long `Insert`, `Refine`, `Absorb` or `Save` runs to its end, and `Status.Cancelled` never arises.
 - __Deferred cursors and streams.__
   `Cursor` and `SearchStream` pull blocking, so a `DenseIndexDeferredOn` lacks them.
 - __Constructors on receivers.__

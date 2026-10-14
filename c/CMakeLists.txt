@@ -1,6 +1,6 @@
-# The C interface lives in `include/usearch/*.h` and its implementation in `src/`, so this directory holds only the
-# smoke test that proves the two agree. Both library flavors take the punned objects rather than compiling a boundary of
-# their own.
+# The C interface lives in `c/usearch/*.h` and its implementation in `src/`, so this directory holds only the headers
+# and the smoke test that proves the two agree. Both library flavors take the punned objects rather than compiling a
+# boundary of their own.
 
 if (USEARCH_BUILD_TEST)
     add_executable(usearch_test_c test.c)

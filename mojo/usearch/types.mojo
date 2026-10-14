@@ -1,8 +1,8 @@
 """The vocabulary every modality shares: keys, scalars, rows, residencies, and the one error type.
 
-Mirrors @c include/usearch/types.h. Nothing dense-specific lives here - the metric kinds, the result
-shapes only a dense index answers, and the index itself belong to @c dense.mojo, so a second
-modality adds a module rather than widening this one.
+Nothing dense-specific lives here - the metric kinds, the result shapes only a dense index answers,
+and the index itself belong to @c dense.mojo, so a second modality adds a module rather than
+widening this one.
 
 `Error` is the only error type the binding raises: Mojo 1.1 allows at most one per function, so a
 second would force every caller raising `Error` to catch and convert. A refusal is a failure, not an absence - a key the index does not hold answers zero, but a
@@ -37,7 +37,7 @@ deferred call's slots outlive the verb that submitted them, so they live on the 
 
 from std.bit import byte_swap
 from std.ffi import c_int, c_size_t
-from std.memory import OwnedPointer, stack_allocation
+from std.memory import ArcPointer, OwnedPointer, stack_allocation
 from std.sys.info import size_of
 
 from usearch.library import Library
@@ -477,6 +477,36 @@ struct Completion(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """Return with the final status stored and every output readable."""
     comptime DEFERRED = Self(1)
     """Return once submitted; the status reads `DEFERRED` until final."""
+
+
+@fieldwise_init
+struct ProgressArguments(Defaultable, ImplicitlyCopyable):
+    """`usearch_progress_t`: how a long call reports its advance - a handler, its state, and how
+    many reports it hears."""
+
+    var callback: Address
+    """The optional handler; `NULL_ADDRESS` skips every report."""
+    var state: Address
+    """Forwarded into every `callback` call."""
+    var steps: c_size_t
+    """Reports a call makes at most, the last at completion; zero derives to ten."""
+
+    def __init__(out self):
+        """No handler, which is all this binding installs."""
+        self.callback = NULL_ADDRESS
+        self.state = NULL_ADDRESS
+        self.steps = c_size_t(0)
+
+
+@fieldwise_init
+struct PredicateArguments(ImplicitlyCopyable):
+    """`usearch_predicate_t`: which candidate keys a filtered search may report - a handler and the
+    state it is called with."""
+
+    var callback: Address
+    """A `usearch_predicate_callback_t` compiled in C; `NULL_ADDRESS` admits every key."""
+    var state: Address
+    """Forwarded into every `callback` call."""
 
 
 # endregion Residency & Execution
@@ -1066,8 +1096,32 @@ struct ExecutorDrainArguments(ImplicitlyCopyable):
     var mood: Mood
 
 
+struct _ExecutorHandle:
+    """The `usearch_executor_t` an `Executor` owns, shared with every VRAM arena it made and freed with
+    the last of them, since such an arena grows, fills and frees on the executor's first stream."""
+
+    var library: Library
+    var address: Address
+
+    def __init__(out self, library: Library, address: Address):
+        """Takes over a spawned handle, or the null one the caller-thread executor names."""
+        self.library = library
+        self.address = address
+
+    def __deinit__(deinit self):
+        """Drains every thread or stream, releases the scratch, and frees the executor.
+        Calls `usearch_executor_free`.
+
+        The loader reference is surrendered only after the call: reading the entry point is the
+        last use of `library`, so without the trailing move Mojo drops the last reference - and
+        `dlclose`s the engine - between the load and the branch to it.
+        """
+        self.library.symbols().executor_free(self.address)
+        _ = self.library^
+
+
 struct Executor:
-    """The threads or streams a verb runs on, freed when it goes out of scope.
+    """The threads or streams a verb runs on, freed once it and every VRAM arena it made go out of scope.
 
     `Executor(library)` owns nothing: every verb handed it runs on the calling thread -
     single-threaded on RAM, on the handle's device and default stream on VRAM. The spawning
@@ -1081,6 +1135,8 @@ struct Executor:
     """The opaque `usearch_executor_t` every verb hands back to the engine; `NULL_ADDRESS` runs inline."""
     var residency: Residency
     """Where the arenas it makes live; the caller-thread executor makes host pages."""
+    var _handle: ArcPointer[_ExecutorHandle]
+    """The handle's owner, which a VRAM arena shares so the executor outlives it."""
 
     def __init__(out self, library: Library):
         """The caller-thread executor, which every verb accepts whatever the handle's residency.
@@ -1088,9 +1144,7 @@ struct Executor:
         Args:
             library: The loaded engine, kept so the shared object stays mapped.
         """
-        self.library = library
-        self.address = NULL_ADDRESS
-        self.residency = Residency.RAM
+        self = Self(library=library, address=NULL_ADDRESS, residency=Residency.RAM)
 
     def __init__(out self, *, library: Library, address: Address, residency: Residency):
         """Adopts a handle that is already spawned, which is how the factories hand one back.
@@ -1103,6 +1157,7 @@ struct Executor:
         self.library = library
         self.address = address
         self.residency = residency
+        self._handle = ArcPointer(_ExecutorHandle(library, address))
 
     @staticmethod
     def for_ram[
@@ -1291,17 +1346,6 @@ struct Executor:
             residency=Residency.VRAM,
         )
 
-    def __deinit__(deinit self):
-        """Drains every thread or stream, releases the scratch, and frees the executor.
-        Calls `usearch_executor_free`.
-
-        The loader reference is surrendered only after the call: reading the entry point is the
-        last use of `library`, so without the trailing move Mojo drops the last reference - and
-        `dlclose`s the engine - between the load and the branch to it.
-        """
-        self.library.symbols().executor_free(self.address)
-        _ = self.library^
-
     def drain(self, mood: Mood = Mood.PARKED) raises Error:
         """Waits for every call submitted before the drain, then adopts `mood` whenever it next idles.
         Calls `usearch_executor_drain`.
@@ -1352,7 +1396,8 @@ struct Arena:
     in turn, so the arena outlives both; a failed call leaves it valid.
 
     A result refuses every read with `UNINITIALIZED` once a later call rewinds its arena, and a
-    result over a VRAM arena refuses every host read with `DEVICE`.
+    result over a VRAM arena refuses every host read with `DEVICE`. A VRAM arena serves only calls on
+    the executor that made it, and keeps that executor alive until it is freed.
     """
 
     var _library: Library
@@ -1361,6 +1406,8 @@ struct Arena:
     """The `usearch_arena_t`, never null."""
     var _residency: Residency
     """Where its memory lives, so a host read of device memory is refused rather than made."""
+    var _executor: Optional[ArcPointer[_ExecutorHandle]]
+    """The VRAM executor that made it, held so the arena is freed first, on that executor's first stream."""
     var _generation: Int
     """Calls the engine took on it so far, which every result records to know when a later one rewound it."""
 
@@ -1380,7 +1427,8 @@ struct Arena:
         of its residency. Calls `usearch_arena_init`.
 
         Args:
-            executor: The executor whose calls it serves, which may be freed before it.
+            executor: The executor whose calls it serves; host pages may outlive it, and a VRAM arena
+                keeps it alive.
 
         Raises:
             `Error` if the engine cannot allocate the handle.
@@ -1396,14 +1444,18 @@ struct Arena:
         self._library = executor.library
         self._address = created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0]
         self._residency = executor.residency
+        self._executor = Optional(executor._handle) if executor.residency == Residency.VRAM else None
         self._generation = 0
 
     def __deinit__(deinit self):
-        """Frees the arena and every output in it. Calls `usearch_arena_free`.
+        """Frees the arena and every output in it, then lets a VRAM arena's executor go.
+        Calls `usearch_arena_free`.
 
-        The loader reference is surrendered only after the call, for the reason `Executor` records.
+        The executor and the loader reference are surrendered only after the call, for the reason
+        `_ExecutorHandle` records.
         """
         self._library.symbols().arena_free(self._address)
+        _ = self._executor^
         _ = self._library^
 
     def residency(self) -> Residency:

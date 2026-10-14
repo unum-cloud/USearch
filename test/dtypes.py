@@ -51,7 +51,7 @@ def test_extension_names_itself():
     assert usearch.DenseIndex.__module__ == "usearch"
 
 
-@pytest.mark.parametrize("modality", ["SequenceIndex", "MatrixIndex", "GeospatialIndex"])
+@pytest.mark.parametrize("modality", ["SequenceIndex", "ShapesIndex", "GeospatialIndex"])
 def test_placeholder_modalities_announce_themselves(modality: str):
     """A modality the library has not instantiated says so rather than failing obscurely."""
     with pytest.raises(NotImplementedError):

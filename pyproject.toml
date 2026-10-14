@@ -202,6 +202,7 @@ ignore = [
   "F401",
   "E402",
 ] # re-exports and conditional imports
+".cmake-format.py" = ["F821"] # cmake-format defines `section` when it runs the profile
 
 [tool.ruff.lint.flake8-tidy-imports]
 ban-relative-imports = "all"

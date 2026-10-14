@@ -1,5 +1,4 @@
-//! Vector Search over equidimensional dense embeddings - the Rust twin of
-//! `include/usearch/dense_index.h`.
+//! Vector Search over equidimensional dense embeddings.
 //!
 //! Every batch input is a NumKong matrix, so a memory-mapped dataset feeds the index with no
 //! reshape and no copy: packed slabs go through [`crate::rows`], padded ones through
@@ -31,11 +30,11 @@ use crate::types::{
     arena_slice, check, fail, lower_predicate, lower_progress, nvme_options, path_view, path_views, ram_options,
     read_spelling, spelling, static_string, usearch_arena_t, usearch_bytes_view_t, usearch_completion_blocking_k,
     usearch_completion_t, usearch_executor_t, usearch_key_t, usearch_keys_view_t, usearch_matches_tape_view_t,
-    usearch_matches_view_t, usearch_nvme_options_t, usearch_outcome_t, usearch_predicate_t,
-    usearch_progress_callback_t, usearch_ram_options_t, usearch_rows_view_t, usearch_scalar_t, usearch_traversal_t,
-    usearch_vram_options_t, values_of, vram_options, Accepts, Arena, Blocking, Callbacks, Calling, Completion,
-    Deferring, Element, Error, Executor, Exported, Handles, Key, Matches, MatchesRow, On, Predicate, ProgressCallback,
-    Result, RowsView, Scalar, Status, Traversal,
+    usearch_matches_view_t, usearch_nvme_options_t, usearch_outcome_t, usearch_predicate_t, usearch_progress_t,
+    usearch_ram_options_t, usearch_rows_view_t, usearch_scalar_t, usearch_traversal_t, usearch_vram_options_t,
+    values_of, vram_options, Accepts, Arena, Blocking, Callbacks, Calling, Completion, Deferring, Element, Error,
+    Executor, Exported, Handles, Key, Matches, MatchesRow, On, Predicate, ProgressCallback, Residency, Result,
+    RowsView, Scalar, Status, Traversal,
 };
 
 // region: Raw Declarations
@@ -78,8 +77,7 @@ pub struct usearch_dense_load_ram_t {
     pub path: usearch_bytes_view_t,
     pub ram: usearch_ram_options_t,
     pub values_per_key: usize,
-    pub progress: usearch_progress_callback_t,
-    pub progress_state: *mut c_void,
+    pub progress: usearch_progress_t,
 }
 
 #[repr(C)]
@@ -91,8 +89,7 @@ pub struct usearch_dense_load_vram_t {
     pub path: usearch_bytes_view_t,
     pub vram: usearch_vram_options_t,
     pub values_per_key: usize,
-    pub progress: usearch_progress_callback_t,
-    pub progress_state: *mut c_void,
+    pub progress: usearch_progress_t,
 }
 
 #[repr(C)]
@@ -104,8 +101,7 @@ pub struct usearch_dense_load_ram_buffer_t {
     pub buffer: usearch_bytes_view_t,
     pub ram: usearch_ram_options_t,
     pub values_per_key: usize,
-    pub progress: usearch_progress_callback_t,
-    pub progress_state: *mut c_void,
+    pub progress: usearch_progress_t,
 }
 
 #[repr(C)]
@@ -117,8 +113,7 @@ pub struct usearch_dense_load_vram_buffer_t {
     pub buffer: usearch_bytes_view_t,
     pub vram: usearch_vram_options_t,
     pub values_per_key: usize,
-    pub progress: usearch_progress_callback_t,
-    pub progress_state: *mut c_void,
+    pub progress: usearch_progress_t,
 }
 
 #[repr(C)]
@@ -167,8 +162,7 @@ pub struct usearch_dense_insert_t {
     pub keys: usearch_keys_view_t,
     pub vectors: usearch_rows_view_t,
     pub expansion_factor: usize,
-    pub progress: usearch_progress_callback_t,
-    pub progress_state: *mut c_void,
+    pub progress: usearch_progress_t,
     pub stats: *mut usearch_dense_traversal_stats_t,
 }
 
@@ -180,8 +174,7 @@ pub struct usearch_dense_refine_t {
     pub completion: usearch_completion_t,
     pub changed: *mut usize,
     pub expansion_factor: usize,
-    pub progress: usearch_progress_callback_t,
-    pub progress_state: *mut c_void,
+    pub progress: usearch_progress_t,
     pub stats: *mut usearch_dense_traversal_stats_t,
 }
 
@@ -210,9 +203,7 @@ pub struct usearch_dense_search_t {
     pub expansion_factor: usize,
     pub traversal: usearch_traversal_t,
     pub predicate: usearch_predicate_t,
-    pub predicate_state: *mut c_void,
-    pub progress: usearch_progress_callback_t,
-    pub progress_state: *mut c_void,
+    pub progress: usearch_progress_t,
     pub stats: *mut usearch_dense_traversal_stats_t,
 }
 
@@ -240,15 +231,14 @@ pub struct usearch_dense_get_t {
 }
 
 #[repr(C)]
-pub struct usearch_dense_merge_t {
+pub struct usearch_dense_absorb_t {
     pub index: usearch_dense_index_t,
     pub executor: usearch_executor_t,
     pub outcome: *mut usearch_outcome_t,
     pub completion: usearch_completion_t,
     pub count: usize,
     pub donors: *mut usearch_dense_index_t,
-    pub progress: usearch_progress_callback_t,
-    pub progress_state: *mut c_void,
+    pub progress: usearch_progress_t,
 }
 
 #[repr(C)]
@@ -256,6 +246,7 @@ pub struct usearch_dense_cursor_init_t {
     pub cursor: *mut usearch_dense_cursor_t,
     pub index: usearch_dense_index_t,
     pub outcome: *mut usearch_outcome_t,
+    pub start: *const usearch_key_t,
 }
 
 #[repr(C)]
@@ -301,8 +292,7 @@ pub struct usearch_dense_save_t {
     pub outcome: *mut usearch_outcome_t,
     pub completion: usearch_completion_t,
     pub path: usearch_bytes_view_t,
-    pub progress: usearch_progress_callback_t,
-    pub progress_state: *mut c_void,
+    pub progress: usearch_progress_t,
 }
 
 #[repr(C)]
@@ -313,8 +303,7 @@ pub struct usearch_dense_save_buffer_t {
     pub completion: usearch_completion_t,
     pub monolith: *mut usearch_bytes_view_t,
     pub arena: usearch_arena_t,
-    pub progress: usearch_progress_callback_t,
-    pub progress_state: *mut c_void,
+    pub progress: usearch_progress_t,
 }
 
 #[repr(C)]
@@ -389,8 +378,7 @@ pub struct usearch_dense_multiply_t {
     pub arena: usearch_arena_t,
     pub wanted: usize,
     pub expansion_factor: usize,
-    pub progress: usearch_progress_callback_t,
-    pub progress_state: *mut c_void,
+    pub progress: usearch_progress_t,
     pub stats: *mut usearch_dense_traversal_stats_t,
 }
 
@@ -416,8 +404,7 @@ pub struct usearch_dense_attend_t {
     pub outputs_scalar: usearch_scalar_t,
     pub expansion_factor: usize,
     pub score_scale: f32,
-    pub progress: usearch_progress_callback_t,
-    pub progress_state: *mut c_void,
+    pub progress: usearch_progress_t,
     pub stats: *mut usearch_dense_traversal_stats_t,
 }
 
@@ -434,8 +421,7 @@ pub struct usearch_dense_maxsim_t {
     pub arena: usearch_arena_t,
     pub wanted: usize,
     pub expansion_factor: usize,
-    pub progress: usearch_progress_callback_t,
-    pub progress_state: *mut c_void,
+    pub progress: usearch_progress_t,
     pub stats: *mut usearch_dense_traversal_stats_t,
 }
 
@@ -461,7 +447,7 @@ extern "C" {
     pub fn usearch_dense_search(arguments: *mut usearch_dense_search_t);
     pub fn usearch_dense_count(arguments: *mut usearch_dense_count_t);
     pub fn usearch_dense_get(arguments: *mut usearch_dense_get_t);
-    pub fn usearch_dense_merge(arguments: *mut usearch_dense_merge_t);
+    pub fn usearch_dense_absorb(arguments: *mut usearch_dense_absorb_t);
 
     pub fn usearch_dense_cursor_init(arguments: *mut usearch_dense_cursor_init_t);
     pub fn usearch_dense_cursor_next(arguments: *mut usearch_dense_cursor_next_t);
@@ -694,6 +680,8 @@ pub struct DenseLoadRamConfig<'config> {
     pub values_per_key: usize,
     /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
 }
 
 impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseLoadRamConfig<'config> {
@@ -704,6 +692,7 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseL
             memory_domains: &[],
             values_per_key: 0,
             progress: None,
+            progress_steps: 0,
         }
     }
 }
@@ -724,6 +713,8 @@ pub struct DenseLoadVramConfig<'config> {
     pub values_per_key: usize,
     /// Reports the shards placed and stops wherever it says to; a stopped load creates no index.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
 }
 
 impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseLoadVramConfig<'config> {
@@ -734,6 +725,7 @@ impl<'config, Location: AsRef<Path> + ?Sized> From<&'config Location> for DenseL
             devices: &[],
             values_per_key: 0,
             progress: None,
+            progress_steps: 0,
         }
     }
 }
@@ -754,6 +746,8 @@ pub struct DenseLoadRamBufferConfig<'config> {
     pub values_per_key: usize,
     /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
 }
 
 impl<'config> From<&'config [u8]> for DenseLoadRamBufferConfig<'config> {
@@ -764,6 +758,7 @@ impl<'config> From<&'config [u8]> for DenseLoadRamBufferConfig<'config> {
             memory_domains: &[],
             values_per_key: 0,
             progress: None,
+            progress_steps: 0,
         }
     }
 }
@@ -788,6 +783,8 @@ pub struct DenseLoadVramBufferConfig<'config> {
     pub values_per_key: usize,
     /// Reports the bytes placed and stops wherever it says to; a stopped load creates no index.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
 }
 
 impl<'config> From<&'config [u8]> for DenseLoadVramBufferConfig<'config> {
@@ -798,6 +795,7 @@ impl<'config> From<&'config [u8]> for DenseLoadVramBufferConfig<'config> {
             devices: &[],
             values_per_key: 0,
             progress: None,
+            progress_steps: 0,
         }
     }
 }
@@ -840,6 +838,8 @@ pub struct DenseInsertConfig<'config, Rows> {
     /// Reports the rows inserted; every row is claimed before the first report, so a `Break` is
     /// ignored.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
     pub stats: Option<&'config mut DenseTraversalStats>,
 }
@@ -850,6 +850,7 @@ impl<Rows: RowsView> From<Rows> for DenseInsertConfig<'_, Rows> {
             vectors,
             expansion_factor: 0,
             progress: None,
+            progress_steps: 0,
             stats: None,
         }
     }
@@ -864,6 +865,8 @@ pub struct DenseRefineConfig<'config> {
     pub expansion_factor: usize,
     /// Reports the nodes swept and stops wherever it says to.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
     pub stats: Option<&'config mut DenseTraversalStats>,
 }
@@ -885,6 +888,8 @@ pub struct DenseSearchConfig<'config> {
     /// Reports the queries resolved and stops wherever it says to; a stopped search reports
     /// [`Status::Cancelled`] and leaves no matches.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
     pub stats: Option<&'config mut DenseTraversalStats>,
 }
@@ -897,6 +902,7 @@ impl From<usize> for DenseSearchConfig<'_> {
             traversal: Traversal::Walk,
             predicate: None,
             progress: None,
+            progress_steps: 0,
             stats: None,
         }
     }
@@ -913,6 +919,8 @@ pub struct DenseMaxsimConfig<'config> {
     pub expansion_factor: usize,
     /// Reports the queries resolved and stops wherever it says to.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
     pub stats: Option<&'config mut DenseTraversalStats>,
 }
@@ -923,6 +931,7 @@ impl From<usize> for DenseMaxsimConfig<'_> {
             wanted,
             expansion_factor: 0,
             progress: None,
+            progress_steps: 0,
             stats: None,
         }
     }
@@ -938,6 +947,8 @@ pub struct DenseMultiplyConfig<'config> {
     pub expansion_factor: usize,
     /// Reports the rows resolved and stops wherever it says to.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
     pub stats: Option<&'config mut DenseTraversalStats>,
 }
@@ -948,6 +959,7 @@ impl From<usize> for DenseMultiplyConfig<'_> {
             wanted,
             expansion_factor: 0,
             progress: None,
+            progress_steps: 0,
             stats: None,
         }
     }
@@ -971,6 +983,8 @@ pub struct DenseAttendConfig<'config> {
     pub score_scale: f32,
     /// Reports the queries resolved and stops wherever it says to.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
     /// Where the traversal telemetry lands, overwritten by the call.
     pub stats: Option<&'config mut DenseTraversalStats>,
 }
@@ -983,23 +997,32 @@ impl From<usize> for DenseAttendConfig<'_> {
             expansion_factor: 0,
             score_scale: 0.0,
             progress: None,
+            progress_steps: 0,
             stats: None,
         }
     }
 }
 
-/// The donors a merge absorbs and the handler counting them; see [`DenseVerbs::merge`].
+/// The donors an absorb consumes and the handler counting them; see [`DenseVerbs::absorb`].
 ///
-/// Mirrors `usearch_dense_merge_t`.
-pub struct DenseMergeConfig<'config, Donors> {
-    /// The indexes absorbed, consumed whether or not the merge succeeds.
+/// Mirrors `usearch_dense_absorb_t`.
+pub struct DenseAbsorbConfig<'config, Donors> {
+    /// The indexes absorbed, consumed whether or not the absorb succeeds.
     pub donors: Donors,
     /// Reports the donors absorbed and stops wherever it says to.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
 }
 
-impl<Donors: IntoIterator<Item = DenseIndex>> From<Donors> for DenseMergeConfig<'_, Donors> {
-    fn from(donors: Donors) -> Self { DenseMergeConfig { donors, progress: None } }
+impl<Donors: IntoIterator<Item = DenseIndex>> From<Donors> for DenseAbsorbConfig<'_, Donors> {
+    fn from(donors: Donors) -> Self {
+        DenseAbsorbConfig {
+            donors,
+            progress: None,
+            progress_steps: 0,
+        }
+    }
 }
 
 /// The path a checkpoint is written to and the handler counting its shards; see [`DenseVerbs::save`].
@@ -1010,10 +1033,18 @@ pub struct DenseSaveConfig<'config, Location> {
     pub path: Location,
     /// Reports the shards written and stops wherever it says to.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
 }
 
 impl<Location: AsRef<Path>> From<Location> for DenseSaveConfig<'_, Location> {
-    fn from(path: Location) -> Self { DenseSaveConfig { path, progress: None } }
+    fn from(path: Location) -> Self {
+        DenseSaveConfig {
+            path,
+            progress: None,
+            progress_steps: 0,
+        }
+    }
 }
 
 /// The arena a monolith is written into and the handler counting its bytes; see
@@ -1025,10 +1056,18 @@ pub struct DenseSaveBufferConfig<'config, 'arena> {
     pub arena: &'arena mut Arena,
     /// Reports the bytes written and stops wherever it says to; a stopped save leaves no monolith.
     pub progress: Option<&'config mut ProgressCallback<'config>>,
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    pub progress_steps: usize,
 }
 
 impl<'arena> From<&'arena mut Arena> for DenseSaveBufferConfig<'_, 'arena> {
-    fn from(arena: &'arena mut Arena) -> Self { DenseSaveBufferConfig { arena, progress: None } }
+    fn from(arena: &'arena mut Arena) -> Self {
+        DenseSaveBufferConfig {
+            arena,
+            progress: None,
+            progress_steps: 0,
+        }
+    }
 }
 
 /// The query a stream walks and the breadth of its walk; see [`DenseVerbs::search_stream`].
@@ -1057,7 +1096,7 @@ impl Accepts<DenseMaxsimConfig<'static>> for Deferring {}
 impl Accepts<DenseMultiplyConfig<'static>> for Deferring {}
 impl Accepts<DenseAttendConfig<'static>> for Deferring {}
 impl<Value> Accepts<&'static ValueLookup<'static, Value>> for Deferring {}
-impl<Donors> Accepts<DenseMergeConfig<'static, Donors>> for Deferring {}
+impl<Donors> Accepts<DenseAbsorbConfig<'static, Donors>> for Deferring {}
 impl<Location> Accepts<DenseSaveConfig<'static, Location>> for Deferring where Deferring: Accepts<Location> {}
 impl Accepts<DenseSaveBufferConfig<'static, '_>> for Deferring {}
 
@@ -1354,7 +1393,7 @@ impl DenseIndex {
     pub fn load_ram<'config>(config: impl Into<DenseLoadRamConfig<'config>>) -> Result<Self> {
         let mut config = config.into();
         let callbacks = Callbacks::default();
-        let (progress, progress_state) = lower_progress(&mut config.progress, &callbacks);
+        let progress = lower_progress(&mut config.progress, config.progress_steps, &callbacks);
         let mut index = DenseIndex::null();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1367,7 +1406,6 @@ impl DenseIndex {
                 ram: ram_options(config.memory_domains),
                 values_per_key: config.values_per_key,
                 progress,
-                progress_state,
             })
         };
         callbacks.raise();
@@ -1381,7 +1419,7 @@ impl DenseIndex {
     pub fn load_vram<'config>(config: impl Into<DenseLoadVramConfig<'config>>) -> Result<Self> {
         let mut config = config.into();
         let callbacks = Callbacks::default();
-        let (progress, progress_state) = lower_progress(&mut config.progress, &callbacks);
+        let progress = lower_progress(&mut config.progress, config.progress_steps, &callbacks);
         let mut index = DenseIndex::null();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1394,7 +1432,6 @@ impl DenseIndex {
                 vram: vram_options(config.devices),
                 values_per_key: config.values_per_key,
                 progress,
-                progress_state,
             })
         };
         callbacks.raise();
@@ -1407,7 +1444,7 @@ impl DenseIndex {
     pub fn load_ram_buffer<'config>(config: impl Into<DenseLoadRamBufferConfig<'config>>) -> Result<Self> {
         let mut config = config.into();
         let callbacks = Callbacks::default();
-        let (progress, progress_state) = lower_progress(&mut config.progress, &callbacks);
+        let progress = lower_progress(&mut config.progress, config.progress_steps, &callbacks);
         let mut index = DenseIndex::null();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1420,7 +1457,6 @@ impl DenseIndex {
                 ram: ram_options(config.memory_domains),
                 values_per_key: config.values_per_key,
                 progress,
-                progress_state,
             })
         };
         callbacks.raise();
@@ -1433,7 +1469,7 @@ impl DenseIndex {
     pub fn load_vram_buffer<'config>(config: impl Into<DenseLoadVramBufferConfig<'config>>) -> Result<Self> {
         let mut config = config.into();
         let callbacks = Callbacks::default();
-        let (progress, progress_state) = lower_progress(&mut config.progress, &callbacks);
+        let progress = lower_progress(&mut config.progress, config.progress_steps, &callbacks);
         let mut index = DenseIndex::null();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1446,7 +1482,6 @@ impl DenseIndex {
                 vram: vram_options(config.devices),
                 values_per_key: config.values_per_key,
                 progress,
-                progress_state,
             })
         };
         callbacks.raise();
@@ -1768,9 +1803,10 @@ pub trait DenseVerbs<'index>: Copy {
     /// resolves every scored key to its value row, as wide as the keys and stored in the index's
     /// own quantization. A key left without a row, or given one of another type or width, refuses the
     /// call with [`Status::ShapeMismatch`], since a missing row is a wrong softmax rather than a
-    /// smaller one, and a VRAM handle refuses the host lookup with
-    /// [`Status::InvalidArgument`]. The outputs come back already divided by the partition. Runs on
-    /// an inner-product index alone, since a softmax needs logits.
+    /// smaller one. A VRAM walk resolves values on the device, where no Rust closure runs, so an
+    /// arena from a VRAM executor is refused with [`Status::Device`]. The outputs come back
+    /// already divided by the partition. Runs on an inner-product index alone, since a softmax
+    /// needs logits.
     ///
     /// See <https://arxiv.org/abs/2205.14135> - Flash Attention, whose recurrence this reuses.
     ///
@@ -1797,28 +1833,29 @@ pub trait DenseVerbs<'index>: Copy {
         })
     }
 
-    /// Absorbs every donor into this index, wiring cross-links via landmark stitching.
+    /// Absorbs every donor into this index, one after another, keeping their graphs rather than
+    /// re-inserting their vectors and linking each in by walks across the appended part.
     ///
-    /// Cheaper than re-inserting the donors' vectors one by one, and readers may keep searching
-    /// throughout. The donors are consumed whether or not the merge succeeds; a stopped merge keeps
-    /// the donors already absorbed, and the count the handler last saw names the boundary.
+    /// Readers of a RAM index may keep searching throughout, while a VRAM one admits no
+    /// overlapping search. The donors are consumed whether or not the absorb succeeds: a stopped
+    /// absorb keeps the donors already absorbed, the count the handler last saw names the
+    /// boundary, and the donors past it are freed with the call, while a failed one may leave the
+    /// failing donor's rows behind.
     ///
-    /// No residency absorbs donors yet, so the engine answers [`Status::Unsupported`] and frees the
-    /// donors.
-    ///
-    /// Calls `usearch_dense_merge`.
-    fn merge<'config, Donors: IntoIterator<Item = DenseIndex>>(
+    /// Calls `usearch_dense_absorb`.
+    fn absorb<'config, Donors: IntoIterator<Item = DenseIndex>>(
         self,
-        config: impl Into<DenseMergeConfig<'config, Donors>>,
-    ) -> Answer<'index, Self, DenseMerge<'config>>
+        config: impl Into<DenseAbsorbConfig<'config, Donors>>,
+    ) -> Answer<'index, Self, DenseAbsorb<'config>>
     where
-        Self::Completion: Accepts<DenseMergeConfig<'config, Donors>>,
+        Self::Completion: Accepts<DenseAbsorbConfig<'config, Donors>>,
     {
         let config = config.into();
-        <Self::Completion as Completion>::answer(DenseMerge {
+        <Self::Completion as Completion>::answer(DenseAbsorb {
             handles: self.handles(),
             donors: DonorHandles::of(config.donors),
             progress: config.progress,
+            progress_steps: config.progress_steps,
         })
     }
 
@@ -1879,6 +1916,7 @@ pub trait DenseVerbs<'index>: Copy {
                 cursor: &mut cursor.handle,
                 index: cursor.handles.index,
                 outcome: &mut outcome,
+                start: ptr::null(),
             })
         };
         check(outcome).map(|()| cursor)
@@ -2134,7 +2172,7 @@ impl<Keys: AsRef<[Key]>, Rows: RowsView> Calling for DenseInsert<'_, Keys, Rows>
                 "the key count does not match the vector row count",
             ));
         }
-        let (progress, progress_state) = lower_progress(&mut self.config.progress, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         Ok(usearch_dense_insert_t {
             index: self.handles.index,
             executor: self.handles.executor,
@@ -2145,7 +2183,6 @@ impl<Keys: AsRef<[Key]>, Rows: RowsView> Calling for DenseInsert<'_, Keys, Rows>
             vectors: batch.rows,
             expansion_factor: self.config.expansion_factor,
             progress,
-            progress_state,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
         })
     }
@@ -2174,7 +2211,7 @@ impl Calling for DenseRefine<'_> {
         completion: usearch_completion_t,
         callbacks: &Callbacks,
     ) -> Result<Self::Arguments> {
-        let (progress, progress_state) = lower_progress(&mut self.config.progress, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         Ok(usearch_dense_refine_t {
             index: self.handles.index,
             executor: self.handles.executor,
@@ -2183,7 +2220,6 @@ impl Calling for DenseRefine<'_> {
             changed: &mut self.changed,
             expansion_factor: self.config.expansion_factor,
             progress,
-            progress_state,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
         })
     }
@@ -2249,8 +2285,8 @@ impl<'arena, Queries: RowsView> Calling for DenseSearch<'_, 'arena, Queries> {
     ) -> Result<Self::Arguments> {
         let batch = self.queries.batch()?;
         self.count = batch.count;
-        let (predicate, predicate_state) = lower_predicate(&self.config.predicate, callbacks);
-        let (progress, progress_state) = lower_progress(&mut self.config.progress, callbacks);
+        let predicate = lower_predicate(&self.config.predicate, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         Ok(usearch_dense_search_t {
             index: self.handles.index,
             executor: self.handles.executor,
@@ -2264,9 +2300,7 @@ impl<'arena, Queries: RowsView> Calling for DenseSearch<'_, 'arena, Queries> {
             expansion_factor: self.config.expansion_factor,
             traversal: self.config.traversal as usearch_traversal_t,
             predicate,
-            predicate_state,
             progress,
-            progress_state,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
         })
     }
@@ -2314,7 +2348,7 @@ impl<'arena, Queries: RowsView> Calling for DenseMaxsim<'_, 'arena, Queries> {
             ));
         }
         self.count = batch.count / self.rows_per_query;
-        let (progress, progress_state) = lower_progress(&mut self.config.progress, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         Ok(usearch_dense_maxsim_t {
             index: self.handles.index,
             executor: self.handles.executor,
@@ -2328,7 +2362,6 @@ impl<'arena, Queries: RowsView> Calling for DenseMaxsim<'_, 'arena, Queries> {
             wanted: self.config.wanted,
             expansion_factor: self.config.expansion_factor,
             progress,
-            progress_state,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
         })
     }
@@ -2369,7 +2402,7 @@ impl<'arena, Left: RowsView> Calling for DenseMultiply<'_, 'arena, Left> {
     ) -> Result<Self::Arguments> {
         let batch = self.left.batch()?;
         self.count = batch.count;
-        let (progress, progress_state) = lower_progress(&mut self.config.progress, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         Ok(usearch_dense_multiply_t {
             index: self.handles.index,
             executor: self.handles.executor,
@@ -2384,7 +2417,6 @@ impl<'arena, Left: RowsView> Calling for DenseMultiply<'_, 'arena, Left> {
             wanted: self.config.wanted,
             expansion_factor: self.config.expansion_factor,
             progress,
-            progress_state,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
         })
     }
@@ -2452,6 +2484,10 @@ impl<'arena, Queries: RowsView, Value: Element> Calling for DenseAttend<'_, '_, 
         completion: usearch_completion_t,
         callbacks: &Callbacks,
     ) -> Result<Self::Arguments> {
+        // A VRAM walk calls its value lookup on the device, which a host trampoline cannot serve.
+        if self.arena.residency() == Residency::Vram {
+            return Err(fail(Status::Device, "a VRAM walk needs a device-callable value lookup"));
+        }
         let batch = self.queries.batch()?;
         self.count = batch.count;
         let carry = match self.config.carry.as_deref_mut() {
@@ -2465,7 +2501,7 @@ impl<'arena, Queries: RowsView, Value: Element> Calling for DenseAttend<'_, '_, 
             }
             Some(carry) => carry.as_mut_ptr(),
         };
-        let (progress, progress_state) = lower_progress(&mut self.config.progress, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         callbacks.lookup.set(ptr::from_ref(&self.lookup).cast());
         Ok(usearch_dense_attend_t {
             index: self.handles.index,
@@ -2484,7 +2520,6 @@ impl<'arena, Queries: RowsView, Value: Element> Calling for DenseAttend<'_, '_, 
             expansion_factor: self.config.expansion_factor,
             score_scale: self.config.score_scale,
             progress,
-            progress_state,
             stats: self.config.stats.as_deref_mut().map_or(ptr::null_mut(), ptr::from_mut),
         })
     }
@@ -2527,17 +2562,18 @@ impl Drop for DonorHandles {
     }
 }
 
-/// A merge of donor indexes; see [`DenseVerbs::merge`].
+/// An absorb of donor indexes; see [`DenseVerbs::absorb`].
 ///
-/// Calls `usearch_dense_merge`.
-pub struct DenseMerge<'config> {
+/// Calls `usearch_dense_absorb`.
+pub struct DenseAbsorb<'config> {
     handles: Handles,
     donors: DonorHandles,
     progress: Option<&'config mut ProgressCallback<'config>>,
+    progress_steps: usize,
 }
 
-impl Calling for DenseMerge<'_> {
-    type Arguments = usearch_dense_merge_t;
+impl Calling for DenseAbsorb<'_> {
+    type Arguments = usearch_dense_absorb_t;
     type Output = ();
 
     fn arguments(
@@ -2546,8 +2582,8 @@ impl Calling for DenseMerge<'_> {
         completion: usearch_completion_t,
         callbacks: &Callbacks,
     ) -> Result<Self::Arguments> {
-        let (progress, progress_state) = lower_progress(&mut self.progress, callbacks);
-        Ok(usearch_dense_merge_t {
+        let progress = lower_progress(&mut self.progress, self.progress_steps, callbacks);
+        Ok(usearch_dense_absorb_t {
             index: self.handles.index,
             executor: self.handles.executor,
             outcome,
@@ -2555,11 +2591,10 @@ impl Calling for DenseMerge<'_> {
             count: self.donors.0.len(),
             donors: self.donors.0.as_mut_ptr(),
             progress,
-            progress_state,
         })
     }
 
-    unsafe fn call(arguments: *mut Self::Arguments) { usearch_dense_merge(arguments) }
+    unsafe fn call(arguments: *mut Self::Arguments) { usearch_dense_absorb(arguments) }
 
     fn finish(self) -> Result<()> { Ok(()) }
 }
@@ -2583,7 +2618,7 @@ impl<Location: AsRef<Path>> Calling for DenseSave<'_, Location> {
         callbacks: &Callbacks,
     ) -> Result<Self::Arguments> {
         let path = path_view(self.config.path.as_ref())?;
-        let (progress, progress_state) = lower_progress(&mut self.config.progress, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         Ok(usearch_dense_save_t {
             index: self.handles.index,
             executor: self.handles.executor,
@@ -2591,7 +2626,6 @@ impl<Location: AsRef<Path>> Calling for DenseSave<'_, Location> {
             completion,
             path,
             progress,
-            progress_state,
         })
     }
 
@@ -2619,7 +2653,7 @@ impl<'arena> Calling for DenseSaveBuffer<'_, 'arena> {
         completion: usearch_completion_t,
         callbacks: &Callbacks,
     ) -> Result<Self::Arguments> {
-        let (progress, progress_state) = lower_progress(&mut self.config.progress, callbacks);
+        let progress = lower_progress(&mut self.config.progress, self.config.progress_steps, callbacks);
         Ok(usearch_dense_save_buffer_t {
             index: self.handles.index,
             executor: self.handles.executor,
@@ -2628,7 +2662,6 @@ impl<'arena> Calling for DenseSaveBuffer<'_, 'arena> {
             monolith: &mut self.monolith.0,
             arena: self.config.arena.handle,
             progress,
-            progress_state,
         })
     }
 
@@ -3387,6 +3420,18 @@ mod tests {
         Ok(())
     }
 
+    /// A zero `wanted` walks nothing and lands only zeroed counts, with no keys to read.
+    #[test]
+    fn a_zero_wanted_lands_only_counts() -> Result<()> {
+        const DIMENSIONS: usize = 8;
+        let (index, _, slab) = populated_index(16, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
+        let mut arena = Arena::new()?;
+        let matches = index.search(&rows(&slab[..4 * DIMENSIONS], DIMENSIONS)?, 0, &mut arena)?;
+        assert_eq!(matches.queries(), 4);
+        assert!(matches.rows()?.all(|row| row.keys.is_empty()), "no row holds a match");
+        Ok(())
+    }
+
     /// Every query's matches land in their own packed row of the arena, and its count in its own
     /// slot; a row past the call's count is refused rather than read.
     #[test]
@@ -3893,10 +3938,10 @@ mod tests {
 
     // endregion: Serialization
 
-    // region: Merging and Iteration
+    // region: Absorbing and Iteration
 
     #[test]
-    fn merges_a_donor_index() -> Result<()> {
+    fn absorbs_a_donor_index() -> Result<()> {
         const DIMENSIONS: usize = 16;
         let (index, keys, _) = populated_index(32, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
 
@@ -3905,14 +3950,10 @@ mod tests {
         let donor_slab = seeded_rows(32, DIMENSIONS, SEED + 1);
         donor.insert(&donor_keys, &rows(&donor_slab, DIMENSIONS)?)?;
 
-        // The donors are consumed by value, so a merged handle cannot be used again.
-        match index.on(&executor()).merge([donor]) {
-            Ok(()) => {
-                assert_eq!(index.describe()?.size, 64);
-                assert!(index.contains(keys[0])? && index.contains(donor_keys[0])?);
-            }
-            Err(error) => assert_eq!(error.status, Status::Unsupported, "no residency absorbs donors yet"),
-        }
+        // The donors are consumed by value, so an absorbed handle cannot be used again.
+        index.on(&executor()).absorb([donor])?;
+        assert_eq!(index.describe()?.size, 64);
+        assert!(index.contains(keys[0])? && index.contains(donor_keys[0])?);
         Ok(())
     }
 
@@ -4015,7 +4056,7 @@ mod tests {
         Ok(())
     }
 
-    // endregion: Merging and Iteration
+    // endregion: Absorbing and Iteration
 
     // region: Progress and Cancellation
 
@@ -4138,7 +4179,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reported_merge_counts_its_donors() -> Result<()> {
+    fn a_reported_absorb_counts_its_donors() -> Result<()> {
         const DIMENSIONS: usize = 16;
         const COUNT: usize = 16;
         let (index, _, _) = populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?;
@@ -4148,14 +4189,10 @@ mod tests {
             populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?.0,
         ];
         let mut watch = Watch::new(Patience::Complete);
-        let merged = index.on(&executor()).merge(DenseMergeConfig {
+        index.on(&executor()).absorb(DenseAbsorbConfig {
             progress: Some(&mut |finished, total| watch.saw(finished, total)),
-            ..DenseMergeConfig::from(donors)
-        });
-        if let Err(error) = merged {
-            assert_eq!(error.status, Status::Unsupported, "no residency absorbs donors yet");
-            return Ok(());
-        }
+            ..DenseAbsorbConfig::from(donors)
+        })?;
 
         assert!(watch.ordered, "a report never counts down");
         assert_eq!(watch.last, (2, 2), "one report per donor absorbed");
@@ -4163,10 +4200,10 @@ mod tests {
         Ok(())
     }
 
-    /// A stopped merge keeps what it absorbed, and the donors past the boundary are freed with the
+    /// A stopped absorb keeps what it absorbed, and the donors past the boundary are freed with the
     /// call - they were handed over by value, so a leak or a double free would surface here.
     #[test]
-    fn a_stopped_merge_keeps_the_donors_it_absorbed() -> Result<()> {
+    fn a_stopped_absorb_keeps_the_donors_it_absorbed() -> Result<()> {
         const DIMENSIONS: usize = 16;
         const COUNT: usize = 16;
         const DONORS: usize = 2;
@@ -4177,14 +4214,14 @@ mod tests {
             populated_index(COUNT, DIMENSIONS, DenseMetric::Angular, Scalar::BF16)?.0,
         ];
         let mut watch = Watch::new(Patience::StopAtFirstReport);
-        let merged = index.merge(DenseMergeConfig {
+        let absorbed = index.absorb(DenseAbsorbConfig {
             progress: Some(&mut |finished, total| watch.saw(finished, total)),
-            ..DenseMergeConfig::from(donors)
+            ..DenseAbsorbConfig::from(donors)
         });
 
-        match merged {
-            Ok(()) => assert_eq!(watch.last.0, DONORS, "an unstopped merge absorbed them all"),
-            Err(failure) => assert!(matches!(failure.status, Status::Cancelled | Status::Unsupported)),
+        match absorbed {
+            Ok(()) => assert_eq!(watch.last.0, DONORS, "an unstopped absorb took them all"),
+            Err(failure) => assert_eq!(failure.status, Status::Cancelled),
         }
         assert_eq!(index.describe()?.size, COUNT * (1 + watch.last.0));
         Ok(())

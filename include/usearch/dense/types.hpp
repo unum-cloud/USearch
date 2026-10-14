@@ -306,6 +306,27 @@ status_t rankings_refusal(std::size_t rows, nk::matrix_span<key_type_> keys,
     return status_t::success_k;
 }
 
+/** Runs @p window over every @p window_rows rows of a batch of @p rows in order, as
+ *  `window(first, taking)`, summing what each reports; each window writes its own rows' counts,
+ *  wherever they live, and the first refusal stops the batch, keeping every window already landed
+ *  and leaving the rows past it unwritten. */
+template <typename search_result_type_, typename window_type_>
+expected<search_result_type_> for_each_window(std::size_t rows, std::size_t window_rows,
+                                              window_type_&& window) noexcept {
+    search_result_type_ total;
+    for (std::size_t first = 0; first < rows; first += window_rows) {
+        expected<search_result_type_> const landed = window(first, min_of(window_rows, rows - first));
+        total.count += landed.value.count;
+        total.visited_members += landed.value.visited_members;
+        total.computed_distances += landed.value.computed_distances;
+        total.restarts += landed.value.restarts;
+        total.tail_drops += landed.value.tail_drops;
+        total.visited_saturations += landed.value.visited_saturations;
+        if (!landed) return {total, landed.status};
+    }
+    return {total, status_t::success_k};
+}
+
 /** Why @p span cannot take @p rows copied rows of @p columns values each, packed within a row, or
  *  success; rows may stride past @p columns, and wider rows keep their tails. */
 template <typename value_type_>

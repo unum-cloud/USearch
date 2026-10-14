@@ -1,18 +1,28 @@
 /**
- *  @file include/usearch/sequence_index.h
+ *  @file c/usearch/sequence_index.h
  *  @author Ash Vardanian
  *  @date August 14, 2026
  *  @brief The sequence-modality C interface: similarity search over variable-length sequences -
- *      textual documents, DNA, RNA, and protein strings - under Levenshtein, Needleman-Wunsch,
- *      Smith-Waterman, and Gotoh-affine scoring.
+ *      textual documents, DNA, RNA, and protein strings - under Levenshtein, window overlap,
+ *      Needleman-Wunsch, Smith-Waterman, and Gotoh-affine scoring.
  *
  *  Variable-length payloads cannot ride a run of equal rows, so every batch input is a @b tape:
  *  the bytes of every sequence end to end, and @c count + 1 Apache Arrow offsets around them - the
- *  sequence-modality twin of the dense header's rows. One constructor serves both metric
- *  families: uniform edit distances need no parameters, weighted alignments take a substitution
- *  matrix and gap costs. Handles live in RAM, created empty by @c usearch_sequence_init_ram,
- *  copied from a checkpoint by @c usearch_sequence_load_ram, or served from one in place by
- *  @c usearch_sequence_view_ram, which is read-only.
+ *  sequence-modality twin of the dense header's rows. One constructor serves every metric family:
+ *  uniform edit distances need no parameters, window overlap takes its window widths, weighted
+ *  alignments take a substitution matrix and gap costs. Handles are created by a lifecycle verb
+ *  naming both an action and a residency:
+ *
+ *      Action                           RAM                          NVMe
+ *      init: start empty, mutable       usearch_sequence_init_ram    none
+ *      load: copy a checkpoint in       usearch_sequence_load_ram    none
+ *      view: serve one in place         usearch_sequence_view_ram    usearch_sequence_view_nvme
+ *      save: write a checkpoint         usearch_sequence_save        none
+ *
+ *  A viewed handle is read-only, refusing every mutating verb with @c usearch_status_read_only_k.
+ *  An NVMe handle answers every read verb as a RAM handle does, its rows read through the
+ *  executor's engines, and saving answers @c usearch_status_unsupported_k, since a view already is
+ *  its checkpoint.
  *
  *  @section sequence_index_concurrency Concurrency & Thread Safety
  *
@@ -190,6 +200,27 @@ typedef enum usearch_sequence_metric_t {
      *  @endcode
      */
     usearch_sequence_metric_smith_waterman_k = 6,
+
+    /**
+     *  @brief Window overlap: the share of the larger window set the other side misses.
+     *
+     *  Every window of every configured width is taken from both sequences, and a window of the
+     *  stored @c b is a hit when the query @c a holds the same bytes at the same width. The
+     *  distance is the misses over whichever side has more windows: zero where the windows
+     *  coincide at every width, one where they share none. Exact at every radius; the window
+     *  widths are in bytes, fixed at creation and recorded in the checkpoint.
+     *
+     *  d(a, b) = (max(|W(a)|, |W(b)|) − |{ v ∈ W(b) : v ∈ W(a) }|) / max(|W(a)|, |W(b)|)
+     *
+     *  @code{.py}
+     *  windows = lambda s: [(w, s[i:i + w]) for w in widths for i in range(len(s) - w + 1)]
+     *  query, stored = windows(a), windows(b)       # repeats kept, every width at once
+     *  hits = sum(window in set(query) for window in stored)
+     *  longer = max(len(query), len(stored))
+     *  overlap = (longer - hits) / longer if longer else 1
+     *  @endcode
+     */
+    usearch_sequence_metric_overlap_k = 7,
 } usearch_sequence_metric_t;
 
 /** The substitution matrix and gap costs an alignment kind scores with; the Levenshtein kinds
@@ -220,6 +251,13 @@ typedef struct usearch_sequence_init_ram_t {
 
     /** The weights an alignment kind needs; @c NULL for the Levenshtein kinds, which refuse any. */
     usearch_sequence_weights_t const* weights;
+
+    /** Window widths in bytes for the overlap kind, which needs at least one; every other kind
+     *  refuses any. */
+    size_t const* window_widths;
+
+    /** Number of entries in @c window_widths. */
+    size_t window_widths_count;
 
     /** The @b optional connections-per-node bound; zero derives. */
     size_t connectivity;
@@ -263,10 +301,7 @@ typedef struct usearch_sequence_load_ram_t {
     usearch_sequence_weights_t const* weights;
 
     /** The @b optional handler, called with parts placed and their count. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    usearch_progress_t progress;
 } usearch_sequence_load_ram_t;
 
 /**
@@ -297,6 +332,40 @@ typedef struct usearch_sequence_view_ram_t {
 /** Serves a checkpoint in place through a memory mapping, as a read-only index whose mutating
  *  verbs report @c usearch_status_read_only_k. */
 USEARCH_EXPORT void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments);
+
+/** The arguments of @c usearch_sequence_view_nvme. */
+typedef struct usearch_sequence_view_nvme_t {
+
+    /** Output for the new, read-only index, written by the time the call is final. */
+    usearch_sequence_index_t* index;
+
+    /** The NVMe executor the call is ordered on; the headers come through blocking reads. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** Checkpoint path - a monolith, or a manifest naming many. */
+    usearch_bytes_view_t path;
+
+    /** The devices the parts are served from; naming none serves each where its manifest points. */
+    usearch_nvme_options_t nvme;
+
+    /** The weights an alignment checkpoint was built with; @c NULL for the Levenshtein kinds. */
+    usearch_sequence_weights_t const* weights;
+} usearch_sequence_view_nvme_t;
+
+/**
+ *  @brief Serves a checkpoint in place from NVMe drives as a read-only index, every later call
+ *      reading it through its executor's engines.
+ *
+ *  Opening reads the headers alone. Every mutating verb on the handle reports
+ *  @c usearch_status_read_only_k, and the parts must stay unmodified until the handle is freed.
+ */
+USEARCH_EXPORT void usearch_sequence_view_nvme(usearch_sequence_view_nvme_t* arguments);
 
 /** Frees the resources associated with the index; @c NULL is safe, and it cannot fail, so takes
  *  no outcome.
@@ -391,10 +460,7 @@ typedef struct usearch_sequence_insert_t {
     size_t expansion_factor;
 
     /** The @b optional handler, called with entries admitted and the batch length. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_sequence_traversal_stats_t* stats;
@@ -437,11 +503,8 @@ typedef struct usearch_sequence_refine_t {
     /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional handler, called with entries swept; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with entries swept. */
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_sequence_traversal_stats_t* stats;
@@ -500,17 +563,11 @@ typedef struct usearch_sequence_search_t {
      *  literature; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional per-key admission callback; @c NULL admits everything. */
+    /** The @b optional admission filter, asked about a batch of candidates at a time. */
     usearch_predicate_t predicate;
 
-    /** Opaque pointer forwarded into every @c predicate call. */
-    void* predicate_state;
-
     /** The @b optional handler, called with queries resolved and their count. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_sequence_traversal_stats_t* stats;
@@ -524,8 +581,8 @@ typedef struct usearch_sequence_search_t {
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
  *  the traversal rather than terminating it, so recall does not collapse at low selectivity - the
  *  walk crosses rejected regions to reach admitted ones behind them. The cost is that the
- *  predicate is called far more often than @c wanted, once per scored candidate, so it
- *  belongs on the caller's fast path.
+ *  predicate judges far more keys than @c wanted, every scored candidate, asked about a batch of
+ *  them at a time, so it belongs on the caller's fast path.
  *
  *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL.
  */
@@ -606,13 +663,13 @@ typedef struct usearch_sequence_get_t {
  */
 USEARCH_EXPORT void usearch_sequence_get(usearch_sequence_get_t* arguments);
 
-/** The arguments of @c usearch_sequence_merge. */
-typedef struct usearch_sequence_merge_t {
+/** The arguments of @c usearch_sequence_absorb. */
+typedef struct usearch_sequence_absorb_t {
 
     /** The handle absorbing the donors. */
     usearch_sequence_index_t index;
 
-    /** The executor the merge fans out over, one donor per thread. */
+    /** The executor the absorb fans out over, one donor per thread. */
     usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
@@ -628,11 +685,8 @@ typedef struct usearch_sequence_merge_t {
     usearch_sequence_index_t* donors;
 
     /** The @b optional handler, called with donors absorbed and their count. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
-} usearch_sequence_merge_t;
+    usearch_progress_t progress;
+} usearch_sequence_absorb_t;
 
 /**
  *  @brief Absorbs every handle in @c donors into @c index - cheaper than re-inserting their
@@ -648,7 +702,7 @@ typedef struct usearch_sequence_merge_t {
  *  caller still owns and must free. Every consumed slot is nulled as it goes, so the array itself
  *  says which handles survived.
  */
-USEARCH_EXPORT void usearch_sequence_merge(usearch_sequence_merge_t* arguments);
+USEARCH_EXPORT void usearch_sequence_absorb(usearch_sequence_absorb_t* arguments);
 
 /** The arguments of @c usearch_sequence_cursor_init. */
 typedef struct usearch_sequence_cursor_init_t {
@@ -661,6 +715,10 @@ typedef struct usearch_sequence_cursor_init_t {
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
+
+    /** The @b optional key to step from: the cursor then yields the entries that the key's entries
+     *  link to in the graph, once each and in link order; @c NULL scans every entry as stored. */
+    usearch_key_t const* start;
 } usearch_sequence_cursor_init_t;
 
 /** Opens a snapshot cursor over the current contents; see @c usearch_sequence_cursor_t. */
@@ -714,6 +772,75 @@ USEARCH_EXPORT void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t*
  *  Waits until every deferred call naming the handle is final. */
 USEARCH_EXPORT void usearch_sequence_cursor_free(usearch_sequence_cursor_t cursor);
 
+/** The arguments of @c usearch_sequence_sample. */
+typedef struct usearch_sequence_sample_t {
+
+    /** The handle to be sampled. */
+    usearch_sequence_index_t index;
+
+    /** The executor the draws run on; its kind must match the handle's residency. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** The @b optional count of @c anchors; zero draws from the whole index. */
+    size_t anchors_count;
+
+    /** The sequences that bound the region around them, one anchor apiece, as bytes end to end
+     *  around @c anchors_count + 1 offsets. */
+    usearch_tape_view_t anchors;
+
+    /** Output for the identities drawn, inside @c arena. */
+    usearch_keys_view_t* keys;
+
+    /** Output for each draw's nearest earlier draws - their keys and distances, row @c i spanning
+     *  @c offsets[i] up to @c offsets[i+1] - inside @c arena. */
+    usearch_matches_tape_view_t* links;
+
+    /** Output for the draws written; fewer than @c wanted only once the region is exhausted. */
+    size_t* written;
+
+    /** Memory for @c keys and @c links, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** The upper bound on draws this call writes. */
+    size_t wanted;
+
+    /** Draws already taken in this sequence, skipped so successive calls extend one sample. */
+    size_t offset;
+
+    /** Up to how many earlier draws each draw links to; one already keeps the sample connected. */
+    size_t links_per_draw;
+
+    /** The sequence: equal seeds, anchors and radius over an unchanged index draw equally. */
+    uint64_t seed;
+
+    /** The @b optional radius around the anchors; zero bounds nothing. */
+    usearch_distance_t radius;
+
+    /** The @b optional candidate-pool breadth of the walks behind the draws; zero derives. */
+    size_t expansion_factor;
+
+    /** The @b optional handler, called with draws written and @c wanted. */
+    usearch_progress_t progress;
+
+    /** The @b optional traversal telemetry; @c NULL skips reporting. */
+    usearch_sequence_traversal_stats_t* stats;
+} usearch_sequence_sample_t;
+
+/**
+ *  @brief Draws entries uniformly, across the index or around anchors, each linked to its nearest
+ *      earlier draws - so the sample is one connected component, ready to be laid out.
+ *
+ *  Links name earlier draws of the same sequence, a later call's reaching an earlier call's. They
+ *  are exact in a scan and approximate as any walk otherwise.
+ */
+USEARCH_EXPORT void usearch_sequence_sample(usearch_sequence_sample_t* arguments);
+
 /** The arguments of @c usearch_sequence_save. */
 typedef struct usearch_sequence_save_t {
 
@@ -733,10 +860,7 @@ typedef struct usearch_sequence_save_t {
     usearch_bytes_view_t path;
 
     /** The @b optional handler, called with parts written and their count. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    usearch_progress_t progress;
 } usearch_sequence_save_t;
 
 /**

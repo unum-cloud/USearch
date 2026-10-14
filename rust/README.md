@@ -1,6 +1,6 @@
 # USearch for Rust
 
-The crate links the pre-instantiated C library and calls the stable C ABI in `include/usearch/` through `extern "C"` declarations, so no index template is instantiated in your build.
+The crate links the pre-instantiated C library and calls the stable C ABI in `c/usearch/` through `extern "C"` declarations, so no index template is instantiated in your build.
 It needs Rust 1.100 or newer, CMake 3.28 and a C++20 compiler.
 It exposes dense indexes; sequence, matrix and geospatial indexes follow as the C library ships them.
 Detailed symbol documentation lives on [docs.rs](https://docs.rs/usearch).
@@ -116,7 +116,7 @@ threads.drain(Mood::Spinning)?;                                   // waits for e
 Each constructor ends with a `deferred_limit` sizing its table of deferred calls, where zero takes the default.
 `Executor::default()` owns nothing and runs every call handed to it on the calling thread.
 Calls on one executor start in submission order, so two threads that genuinely overlap take one apiece; an executor is `Send` but not `Sync`, while index handles stay freely shared.
-`drain` waits for every submitted call and sets the `Mood` idle workers adopt, and dropping an executor drains it.
+`drain` waits for every submitted call and sets the `Mood` idle workers adopt, and dropping an executor drains it, unless a GPU arena it made still holds it, which then does so on its own drop.
 
 ## Arenas
 
@@ -127,6 +127,7 @@ To keep a result past the next call, or to read one while making the next, pass 
 An arena serves one call at a time, so each deferred call needs its own.
 Every call, blocking or deferred, borrows the arena as `&mut Arena` and its result borrows it in turn, so the borrow checker refuses a stale view at compile time and keeps a call's inputs out of the arena it rewinds.
 An arena from a VRAM executor holds device memory, which host accessors refuse with `Status::Device`.
+It grows, fills and frees on that executor's first stream, so it serves only calls on that executor, any other refused with `Status::Device`, and holds the executor until it drops.
 
 ```rust
 let mut arena = Arena::new_in(&executor)?;                           // Arena::new() is host pages for the calling thread
@@ -350,7 +351,7 @@ index.on(&executor).refine(DenseRefineConfig {
 
 The handler is `FnMut` and `Send` where a predicate is `Fn` and `Sync`: it arrives on whichever thread advanced the work and never on two at once, which is what lets it carry a counter or a deadline without a lock of its own.
 A panic inside it is read as a stop.
-Reports are denominated in whatever the verb consumes: rows for an insertion, queries for a search, donors for a merge, shards for a checkpoint, and bytes for a buffer.
+Reports are denominated in whatever the verb consumes: rows for an insertion, queries for a search, donors for an absorb, shards for a checkpoint, and bytes for a buffer.
 How often they arrive is the increment's size rather than a guarantee, so read the counts and never the number of calls.
 
 What a stop leaves behind is each verb's own contract.
@@ -412,17 +413,16 @@ let receiver = index.on(&executor);
 while receiver.refine(DenseRefineConfig { expansion_factor: 128, ..DenseRefineConfig::default() })? != 0 {}
 ```
 
-### Merging & Splitting
+### Absorbing & Splitting
 
-`merge` absorbs donor indexes, handed over by value, and wires cross-links via landmark stitching.
-That is cheaper than re-inserting their rows, and readers may keep searching throughout.
+`absorb` takes donor indexes, handed over by value, one after another, keeping their graphs rather than re-inserting their rows and linking each in by walks across the appended part.
+Readers of a RAM index may keep searching throughout, while a VRAM one admits no overlapping search.
 
 ```rust
-index.on(&executor).merge([first_shard, second_shard])?;
+index.on(&executor).absorb([first_shard, second_shard])?;
 ```
 
-A stopped `merge` keeps the donors it already absorbed, and the count its progress handler last saw is the only way to learn where the boundary fell; the donors past it are freed for you.
-No residency absorbs donors yet, so a `merge` answers `Status::Unsupported` and frees the donors.
+A stopped `absorb` keeps the donors it already absorbed, and the count its progress handler last saw is the only way to learn where the boundary fell; the donors past it are freed for you.
 Splitting is not in the C library yet.
 
 ### Sparse Multiplication
@@ -455,8 +455,9 @@ let documents = index.on(&executor).maxsim(&rows(&tokens, 768)?, tokens_per_quer
 
 `attend` is Flash Attention folded into the walk: every key it scores folds into each head's running maximum, partition and weighted value sum, with no top-k cut, and the outputs land in an arena already divided by the partition, as rows of the queries' own scalar type.
 The index stores no values, so a `ValueLookup` closure resolves every scored key to its value row, as wide as the keys, stored in the index's own quantization, and borrowed from storage outliving the call.
-A `None` row, or rows of another scalar type or width than the library reads, refuses the call with `Status::ShapeMismatch`, and a VRAM handle refuses the host lookup with `Status::InvalidArgument`.
+A `None` row, or rows of another scalar type or width than the library reads, refuses the call with `Status::ShapeMismatch`.
 It runs on the executor's threads together, hence `Sync`, and a panic inside it refuses the call.
+A VRAM walk resolves values on the device, where no Rust closure runs, so an arena from a VRAM executor is refused with `Status::Device`.
 With a `head_count` of 8, row `t * 8 + h` of the queries is head `h` of token `t`, and the heads of one token share its walk.
 A `carry` of one `DenseSoftmaxState` per query row, lent by you, folds this branch into another over the same queries, such as a recent window kept out of the index.
 `score_scale` is conventionally the inverse square root of the head width, and zero derives it from the frozen geometry.
@@ -503,7 +504,7 @@ These C entry points also take a deferred completion, but the crate calls them b
 ## Design
 
 - __A thin layer over the C ABI.__
-  Every name follows `include/usearch/`: a C verb `usearch_dense_<verb>` is a `<verb>` here, each module mirrors one header, a verb's argument struct becomes its `Dense*Config`, and every wrapper's documentation names the C symbol it calls.
+  Every name follows `c/usearch/`: a C verb `usearch_dense_<verb>` is a `<verb>` here, each module mirrors one header, a verb's argument struct becomes its `Dense*Config`, and every wrapper's documentation names the C symbol it calls.
   Enums mirror C enums, never strings.
 - __The receiver chooses, the verb stays.__
   `&DenseIndex` runs a verb on the calling thread, `on(&executor)` blocks on an executor, and `deferred(&executor)` submits it, all with the same arguments.

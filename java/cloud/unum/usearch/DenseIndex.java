@@ -30,9 +30,8 @@ import cloud.unum.usearch.Types.USearchException;
 import cloud.unum.usearch.Types.Verb;
 
 /**
- * A Vector Search Index over equidimensional dense representations - the Java twin of
- * {@code include/usearch/dense_index.h}, with the modality's own options, metric, telemetry and
- * per-call settings as nested types.
+ * A Vector Search Index over equidimensional dense representations, with the modality's own
+ * options, metric, telemetry and per-call settings as nested types.
  *
  * <p>
  * Every verb is a batch over strided matrices, so a memory-mapped dataset reaches the index with no
@@ -398,6 +397,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
      *
      * <p>
      * Mirrors {@code usearch_value_lookup_t}, whose scalar and columns are checked against the matrix.
+     * It is a host function, so it serves RAM handles alone: a VRAM walk resolves rows through a
+     * device function, which this binding does not build, so an attention into a VRAM arena refuses
+     * it with DEVICE.
      */
     public static final class ValueLookup {
 
@@ -1218,9 +1220,9 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             return submit(DenseVerbs.attending(queries, valueLookup, config, arena));
         }
 
-        /** Submits {@link DenseVerbs#merge}, consuming the donors at once. Calls {@code usearch_dense_merge}. */
-        public Deferred<Void> merge(DenseIndex... donors) {
-            return submit(DenseVerbs.merging(donors));
+        /** Submits {@link DenseVerbs#absorb}, surrendering the donors at once. Calls {@code usearch_dense_absorb}. */
+        public Deferred<Void> absorb(DenseIndex... donors) {
+            return submit(DenseVerbs.absorbing(donors));
         }
 
         /** Submits {@link DenseVerbs#save}. Calls {@code usearch_dense_save}. */
@@ -1234,7 +1236,8 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         }
     }
 
-    final Handle handle;
+    /** Replaced once final by an absorb that surrendered this index as a donor and left it live. */
+    volatile Handle handle;
 
     private DenseIndex(MemorySegment created) {
         handle = new Handle(created, FREE);
@@ -1528,8 +1531,14 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         return value;
     }
 
-    private static final MemoryLayout PROGRESS = Library.POINTER.withName("progress");
-    private static final MemoryLayout PROGRESS_STATE = Library.POINTER.withName("progress_state");
+    private static final MemoryLayout PREDICATE = MemoryLayout.structLayout(
+                    Library.POINTER.withName("callback"), Library.POINTER.withName("state"))
+            .withName("predicate");
+    private static final MemoryLayout PROGRESS = MemoryLayout.structLayout(
+                    Library.POINTER.withName("callback"),
+                    Library.POINTER.withName("state"),
+                    Library.SIZE.withName("steps"))
+            .withName("progress");
     private static final MemoryLayout STATS = Library.POINTER.withName("stats");
 
     /** {@code usearch_dense_metadata_t}. */
@@ -1575,8 +1584,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                 Library.BYTES_VIEW.withName(source),
                 Library.PLACEMENT.withName(placement),
                 Library.SIZE.withName("values_per_key"),
-                PROGRESS,
-                PROGRESS_STATE);
+                PROGRESS);
     }
 
     /** {@code usearch_dense_metadata_read_t} or its buffer twin, reading {@code source}. */
@@ -1626,7 +1634,6 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.ROWS_VIEW.withName("vectors"),
                     Library.SIZE.withName("expansion_factor"),
                     PROGRESS,
-                    PROGRESS_STATE,
                     STATS));
 
     static final Verb REFINE = new Verb(
@@ -1636,7 +1643,6 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.POINTER.withName("changed"),
                     Library.SIZE.withName("expansion_factor"),
                     PROGRESS,
-                    PROGRESS_STATE,
                     STATS));
 
     static final Verb HEALTH = new Verb(
@@ -1654,10 +1660,8 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("expansion_factor"),
                     Library.ENUM.withName("traversal"),
                     Library.padding(),
-                    Library.POINTER.withName("predicate"),
-                    Library.POINTER.withName("predicate_state"),
+                    PREDICATE,
                     PROGRESS,
-                    PROGRESS_STATE,
                     STATS));
 
     // The key follows the completion unpadded, since sixteen bytes align to one.
@@ -1676,21 +1680,18 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.ENUM.withName("outputs_scalar"),
                     Library.padding()));
 
-    static final Verb MERGE = new Verb(
-            "usearch_dense_merge",
+    static final Verb ABSORB = new Verb(
+            "usearch_dense_absorb",
             Library.opening(
-                    Library.padding(),
-                    Library.SIZE.withName("count"),
-                    Library.POINTER.withName("donors"),
-                    PROGRESS,
-                    PROGRESS_STATE));
+                    Library.padding(), Library.SIZE.withName("count"), Library.POINTER.withName("donors"), PROGRESS));
 
     static final Verb CURSOR_INIT = new Verb(
             "usearch_dense_cursor_init",
             MemoryLayout.structLayout(
                     Library.POINTER.withName("cursor"),
                     Library.POINTER.withName("index"),
-                    Library.POINTER.withName("outcome")));
+                    Library.POINTER.withName("outcome"),
+                    Library.POINTER.withName("start")));
 
     static final Verb CURSOR_NEXT = new Verb(
             "usearch_dense_cursor_next",
@@ -1724,8 +1725,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("wanted")));
 
     static final Verb SAVE = new Verb(
-            "usearch_dense_save",
-            Library.opening(Library.padding(), Library.BYTES_VIEW.withName("path"), PROGRESS, PROGRESS_STATE));
+            "usearch_dense_save", Library.opening(Library.padding(), Library.BYTES_VIEW.withName("path"), PROGRESS));
 
     static final Verb SAVE_BUFFER = new Verb(
             "usearch_dense_save_buffer",
@@ -1733,8 +1733,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.padding(),
                     Library.POINTER.withName("monolith"),
                     Library.POINTER.withName("arena"),
-                    PROGRESS,
-                    PROGRESS_STATE));
+                    PROGRESS));
 
     static final Verb METADATA_READ = new Verb("usearch_dense_metadata_read", reading("path"));
 
@@ -1753,7 +1752,6 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("wanted"),
                     Library.SIZE.withName("expansion_factor"),
                     PROGRESS,
-                    PROGRESS_STATE,
                     STATS));
 
     static final Verb ATTEND = new Verb(
@@ -1774,7 +1772,6 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     ValueLayout.JAVA_FLOAT.withName("score_scale"),
                     Library.padding(),
                     PROGRESS,
-                    PROGRESS_STATE,
                     STATS));
 
     static final Verb MAXSIM = new Verb(
@@ -1789,7 +1786,6 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("wanted"),
                     Library.SIZE.withName("expansion_factor"),
                     PROGRESS,
-                    PROGRESS_STATE,
                     STATS));
 
     /** {@code usearch_value_lookup_t}. */

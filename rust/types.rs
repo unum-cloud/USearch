@@ -1,4 +1,4 @@
-//! Shared vocabulary of the USearch bindings - the Rust twin of `include/usearch/types.h`.
+//! Shared vocabulary of every USearch modality.
 //!
 //! Scalar types, matrices, and their traits come from NumKong, so a caller already holding a
 //! `MatrixView` hands it straight to an index without a reshape or a copy.
@@ -24,7 +24,7 @@ use core::str::FromStr;
 use core::task::{Context, Poll};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use numkong::{bf16, e2m3, e3m2, e4m3, e5m2, f16, i4x2, u1x8, u4x2};
 use numkong::{Allocator, Matrix, MatrixView, StorageElement, TensorRef};
@@ -234,10 +234,29 @@ pub struct usearch_nvme_options_t {
     pub paths_count: usize,
 }
 
-pub type usearch_predicate_t = Option<unsafe extern "C" fn(usearch_key_t, *mut c_void) -> c_int>;
+/// Admits or rejects a batch of candidate keys, one admission per key.
+pub type usearch_predicate_callback_t =
+    Option<unsafe extern "C" fn(*const usearch_key_t, *mut c_int, usize, *mut c_void)>;
+
+/// Mirrors `usearch_predicate_t`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct usearch_predicate_t {
+    pub callback: usearch_predicate_callback_t,
+    pub state: *mut c_void,
+}
 
 /// Periodic advance report and the caller's chance to stop the call.
 pub type usearch_progress_callback_t = Option<unsafe extern "C" fn(usize, usize, *mut c_void) -> c_int>;
+
+/// Mirrors `usearch_progress_t`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct usearch_progress_t {
+    pub callback: usearch_progress_callback_t,
+    pub state: *mut c_void,
+    pub steps: usize,
+}
 
 pub type usearch_completion_t = c_int;
 
@@ -1083,18 +1102,27 @@ unsafe extern "C" fn progress_trampoline(finished: usize, total: usize, state: *
     callbacks.guard(1, || c_int::from(handler(finished, total).is_break()))
 }
 
-/// Lends an optional handler as the callback and state pair every reporting verb takes, so the
+/// Lends an optional handler and its step count as the progress every reporting verb takes, so the
 /// trampoline is never paired with the wrong state; `None` lends nulls.
 pub(crate) fn lower_progress(
     handler: &mut Option<&mut ProgressCallback>,
+    steps: usize,
     callbacks: &Callbacks,
-) -> (usearch_progress_callback_t, *mut c_void) {
+) -> usearch_progress_t {
     match handler {
         Some(handler) => {
             callbacks.progress.set(ptr::from_mut(handler).cast());
-            (Some(progress_trampoline), callbacks.state())
+            usearch_progress_t {
+                callback: Some(progress_trampoline),
+                state: callbacks.state(),
+                steps,
+            }
         }
-        None => (None, ptr::null_mut()),
+        None => usearch_progress_t {
+            callback: None,
+            state: ptr::null_mut(),
+            steps,
+        },
     }
 }
 
@@ -1105,25 +1133,33 @@ pub(crate) fn lower_progress(
 pub type Predicate<'a> = dyn Fn(Key) -> bool + Sync + 'a;
 
 /// # Safety
-/// `state` must address the live [`Callbacks`] of the call the callback was passed to, lending a `&Predicate`.
-unsafe extern "C" fn admission_trampoline(key: Key, state: *mut c_void) -> c_int {
+/// `state` must address the live [`Callbacks`] of the call the callback was passed to, lending a `&Predicate`,
+/// and `keys` and `admissions` must each address `count` elements.
+unsafe extern "C" fn admission_trampoline(keys: *const Key, admissions: *mut c_int, count: usize, state: *mut c_void) {
     let callbacks = &*state.cast::<Callbacks>();
     let predicate = *callbacks.predicate.get().cast::<&Predicate>();
-    callbacks.guard(0, || c_int::from(predicate(key)))
+    let keys = std::slice::from_raw_parts(keys, count);
+    let admissions = std::slice::from_raw_parts_mut(admissions, count);
+    for (key, admission) in keys.iter().zip(admissions) {
+        *admission = callbacks.guard(0, || c_int::from(predicate(*key)));
+    }
 }
 
-/// Lends an optional predicate as the callback and state pair every filtering verb takes, so the
-/// trampoline is never paired with the wrong state; `None` lends nulls.
-pub(crate) fn lower_predicate(
-    predicate: &Option<&Predicate>,
-    callbacks: &Callbacks,
-) -> (usearch_predicate_t, *mut c_void) {
+/// Lends an optional predicate as the struct every filtering verb takes, so the trampoline is never
+/// paired with the wrong state; `None` lends nulls.
+pub(crate) fn lower_predicate(predicate: &Option<&Predicate>, callbacks: &Callbacks) -> usearch_predicate_t {
     match predicate {
         Some(predicate) => {
             callbacks.predicate.set(ptr::from_ref(predicate).cast());
-            (Some(admission_trampoline), callbacks.state())
+            usearch_predicate_t {
+                callback: Some(admission_trampoline),
+                state: callbacks.state(),
+            }
         }
-        None => (None, ptr::null_mut()),
+        None => usearch_predicate_t {
+            callback: None,
+            state: ptr::null_mut(),
+        },
     }
 }
 
@@ -1276,15 +1312,18 @@ impl FromStr for Traversal {
 /// it is `Send` but not `Sync`.
 /// Every constructor takes a `deferred_limit` sizing its table of deferred calls, where zero takes
 /// the default; a deferred submission finding the table full fails with [`Status::Contended`].
-/// [`Arena::new_in`] places an arena where it computes, and the arena may outlive it.
-/// Dropping an executor drains it.
+/// [`Arena::new_in`] places an arena where it computes: a host arena may outlive it, while a GPU
+/// arena holds it until the arena drops.
+/// Dropping an executor drains it, unless a GPU arena it made still holds it, which then does so.
 ///
-/// Mirrors `usearch_executor_t`; dropping it calls `usearch_executor_free`.
+/// Mirrors `usearch_executor_t`; dropping its last holder calls `usearch_executor_free`.
 #[derive(Debug)]
 pub struct Executor {
     pub(crate) handle: usearch_executor_t,
     /// The residency of the constructor that produced it, which places the arenas it makes.
     residency: Residency,
+    /// Frees `handle` once neither this nor a GPU arena it made holds it.
+    share: Arc<ExecutorShare>,
 }
 
 // Safety: nothing in an executor is tied to the thread that created it, so it may move to another;
@@ -1292,15 +1331,16 @@ pub struct Executor {
 unsafe impl Send for Executor {}
 
 impl Default for Executor {
-    fn default() -> Self { Executor::null(Residency::Ram) }
+    fn default() -> Self { Executor::adopt(ptr::null_mut(), Residency::Ram) }
 }
 
 impl Executor {
-    /// An executor whose handle a constructor is about to fill.
-    fn null(residency: Residency) -> Self {
+    /// Owns the handle a constructor filled, which is null for the executor that owns nothing.
+    fn adopt(handle: usearch_executor_t, residency: Residency) -> Self {
         Executor {
-            handle: ptr::null_mut(),
+            handle,
             residency,
+            share: Arc::new(ExecutorShare(handle)),
         }
     }
 
@@ -1312,17 +1352,18 @@ impl Executor {
     ///
     /// Calls `usearch_executor_for_ram`.
     pub fn for_ram(memory_domains: &[i32], threads: usize, deferred_limit: usize) -> Result<Self> {
-        let mut executor = Executor::null(Residency::Ram);
+        let mut handle = ptr::null_mut();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_executor_for_ram(&mut usearch_executor_for_ram_t {
-                executor: &mut executor.handle,
+                executor: &mut handle,
                 outcome: &mut outcome,
                 ram: ram_options(memory_domains),
                 threads,
                 deferred_limit,
             })
         };
+        let executor = Executor::adopt(handle, Residency::Ram);
         check(outcome).map(|()| executor)
     }
 
@@ -1334,15 +1375,16 @@ impl Executor {
     /// # Safety
     /// `pool` must address a live ForkUnion `fu_pool_t` that outlives the executor.
     pub unsafe fn on_pool(memory_domains: &[i32], pool: *mut c_void, deferred_limit: usize) -> Result<Self> {
-        let mut executor = Executor::null(Residency::Ram);
+        let mut handle = ptr::null_mut();
         let mut outcome = usearch_outcome_t::default();
         usearch_executor_on_pool(&mut usearch_executor_on_pool_t {
-            executor: &mut executor.handle,
+            executor: &mut handle,
             outcome: &mut outcome,
             ram: ram_options(memory_domains),
             pool,
             deferred_limit,
         });
+        let executor = Executor::adopt(handle, Residency::Ram);
         check(outcome).map(|()| executor)
     }
 
@@ -1354,17 +1396,18 @@ impl Executor {
     /// Calls `usearch_executor_for_nvme`.
     pub fn for_nvme(paths: &[impl AsRef<Path>], threads: usize, deferred_limit: usize) -> Result<Self> {
         let views = path_views(paths)?;
-        let mut executor = Executor::null(Residency::Nvme);
+        let mut handle = ptr::null_mut();
         let mut outcome = usearch_outcome_t::default();
         unsafe {
             usearch_executor_for_nvme(&mut usearch_executor_for_nvme_t {
-                executor: &mut executor.handle,
+                executor: &mut handle,
                 outcome: &mut outcome,
                 nvme: nvme_options(&views),
                 threads,
                 deferred_limit,
             })
         };
+        let executor = Executor::adopt(handle, Residency::Nvme);
         check(outcome).map(|()| executor)
     }
 
@@ -1387,10 +1430,10 @@ impl Executor {
         if !streams.is_empty() && streams.len() != devices.len() {
             return Err(fail(Status::ShapeMismatch, "pass no streams or one per device"));
         }
-        let mut executor = Executor::null(Residency::Vram);
+        let mut handle = ptr::null_mut();
         let mut outcome = usearch_outcome_t::default();
         usearch_executor_for_vram(&mut usearch_executor_for_vram_t {
-            executor: &mut executor.handle,
+            executor: &mut handle,
             outcome: &mut outcome,
             vram: vram_options(devices),
             // The C side reads one stream per device from any non-null pointer.
@@ -1401,6 +1444,7 @@ impl Executor {
             scratch_limit,
             deferred_limit,
         });
+        let executor = Executor::adopt(handle, Residency::Vram);
         check(outcome).map(|()| executor)
     }
 
@@ -1421,8 +1465,16 @@ impl Executor {
     }
 }
 
-impl Drop for Executor {
-    fn drop(&mut self) { unsafe { usearch_executor_free(self.handle) } }
+/// The executor every holder shares, freed by the last of them to drop.
+#[derive(Debug)]
+struct ExecutorShare(usearch_executor_t);
+
+// Safety: an executor may be freed from any thread, and a share is only ever dropped, never read.
+unsafe impl Send for ExecutorShare {}
+unsafe impl Sync for ExecutorShare {}
+
+impl Drop for ExecutorShare {
+    fn drop(&mut self) { unsafe { usearch_executor_free(self.0) } }
 }
 
 // endregion: Executors
@@ -1436,7 +1488,9 @@ impl Drop for Executor {
 /// invalidating the previous call's outputs, so a steady loop allocates once.
 /// Every verb, blocking or deferred, borrows it as `&mut Arena` and answers outputs that borrow it in turn.
 /// A [`Residency::Vram`] arena holds device memory, so the host accessors of its outputs refuse
-/// with [`Status::Device`].
+/// with [`Status::Device`]. It grows, fills and frees on the first stream of the executor that made
+/// it, so it serves only calls on that executor, any other refused with [`Status::Device`], and
+/// holds the executor until it drops.
 ///
 /// Mirrors `usearch_arena_t`; dropping it calls `usearch_arena_free`, which waits for the calls
 /// still writing into it.
@@ -1445,6 +1499,8 @@ pub struct Arena {
     pub(crate) handle: usearch_arena_t,
     /// The residency of the executor that made it.
     residency: Residency,
+    /// The executor a GPU arena frees on, dropped after the arena; `None` for host pages.
+    _executor: Option<Arc<ExecutorShare>>,
 }
 
 // Safety: an arena serves one call at a time, which the `&mut` every verb takes already enforces,
@@ -1458,13 +1514,18 @@ impl Arena {
     /// Calls `usearch_arena_init`.
     pub fn new() -> Result<Self> { Arena::new_in(&Executor::default()) }
 
-    /// Makes an arena where `executor` computes, serving the calls of its residency.
+    /// Makes an arena where `executor` computes, serving the calls of its residency, or only those
+    /// on `executor` itself for a GPU arena.
     ///
     /// Calls `usearch_arena_init`.
     pub fn new_in(executor: &Executor) -> Result<Self> {
         let mut arena = Arena {
             handle: ptr::null_mut(),
             residency: executor.residency,
+            _executor: match executor.residency {
+                Residency::Vram => Some(Arc::clone(&executor.share)),
+                _ => None,
+            },
         };
         let mut outcome = usearch_outcome_t::default();
         unsafe {
@@ -1868,11 +1929,15 @@ mod tests {
         drop(executor);
         assert_eq!(placed.residency(), Residency::Ram, "an arena outlives its executor");
 
-        let device = Arena {
-            handle: ptr::null_mut(),
-            residency: Residency::Vram,
-        };
+        // A GPU arena frees on its executor's first stream, so it keeps the executor past its drop.
+        let gpu = Executor::adopt(ptr::null_mut(), Residency::Vram);
+        let device = Arena::new_in(&gpu)?;
+        let share = Arc::downgrade(&gpu.share);
+        drop(gpu);
+        assert!(share.upgrade().is_some(), "a GPU arena holds its executor");
         assert_eq!(device.host().unwrap_err().status, Status::Device);
+        drop(device);
+        assert!(share.upgrade().is_none(), "the last GPU arena frees its executor");
         Ok(())
     }
 

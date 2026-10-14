@@ -17,3 +17,15 @@ with section("format"):
     # If a statement is wrapped to more than one line, than dangle the closing
     # parenthesis on its own line.
     dangle_parens = True
+
+# The project's own functions, so a dtype keyword stays on the line of the shards it brings.
+with section("parse"):
+    additional_commands = {
+        name: {
+            "pargs": positional,
+            "kwargs": {
+                dtype: "*" for dtype in ("BF16", "U1", "I8", "E4M3", "F16", "U8", "E5M2", "I4", "U4", "E3M2", "E2M3")
+            },
+        }
+        for name, positional in (("usearch_dense_dtype_sources", 1), ("usearch_dense_vram_bench", 2))
+    }

@@ -750,30 +750,35 @@ public class DenseIndexTest {
     }
 
     @Test
-    public void mergeConsumesItsDonors() {
+    public void absorbConsumesOnlyTheDonorsItAbsorbed() {
         try (DenseIndex index = populated()) {
             DenseIndex donor = populated();
             // A donor named twice is refused before anything is surrendered, so it stays usable.
             assertEquals(
                     Status.INVALID_ARGUMENT,
-                    assertThrows(USearchException.class, () -> index.merge(donor, donor))
+                    assertThrows(USearchException.class, () -> index.absorb(donor, donor))
                             .status());
             assertEquals(2, donor.describe().size());
-            try {
-                index.on(POOL).merge(donor);
-            } catch (USearchException refused) {
-                // No residency absorbs donors yet.
-                assertEquals(Status.UNSUPPORTED, refused.status());
-                donor.close();
-                return;
-            }
+            index.on(POOL).absorb(donor);
             assertEquals(4, index.describe().size());
             assertThrows(IllegalStateException.class, donor::describe);
             donor.close();
             assertEquals(
                     Status.INVALID_ARGUMENT,
-                    assertThrows(USearchException.class, () -> index.merge(index))
+                    assertThrows(USearchException.class, () -> index.absorb(index))
                             .status());
+
+            try (DenseIndex other = empty(twoDimensional().quantization(Scalar.I8))) {
+                other.reserve(1);
+                other.insert(new Key[] {Key.of(30)}, RowsView.of(new float[] {1, 1}, 2));
+                try {
+                    index.on(POOL).absorb(other);
+                } catch (USearchException refused) {
+                    // The engine refuses another scalar, which the stand-in absorbs, and hands the donor back live.
+                    assertEquals(Status.CONFIG_MISMATCH, refused.status());
+                    assertEquals(1, other.describe().size());
+                }
+            }
         }
     }
 

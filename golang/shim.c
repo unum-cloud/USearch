@@ -6,7 +6,11 @@
  */
 #include "shim.h"
 
-usearch_predicate_t usearch_go_admits(void) { return &usearchAdmits; }
+static void usearch_go_admit(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count, void* state) {
+    usearchAdmits((usearch_key_t*)keys, admissions, count, state);
+}
+
+usearch_predicate_callback_t usearch_go_admits(void) { return &usearch_go_admit; }
 
 usearch_progress_callback_t usearch_go_continues(void) { return &usearchContinues; }
 

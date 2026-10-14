@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/dense_index.h
+ *  @file c/usearch/dense_index.h
  *  @author Ash Vardanian
  *  @date August 14, 2026
  *  @brief The dense-modality C interface: Vector Search over equidimensional embeddings with
@@ -107,8 +107,9 @@
  *  A VRAM handle refuses a search with a @c predicate with @c usearch_status_device_k, since a host
  *  predicate cannot narrow a device walk, and one with @c usearch_traversal_scan_k with
  *  @c usearch_status_unsupported_k until devices scan; RAM and NVMe answer both.
- *  @c usearch_dense_cursor_init answers on RAM, while VRAM rows are read back by key or by search,
- *  and @c usearch_dense_search_stream_init is unsupported on both.
+ *  @c usearch_dense_cursor_init answers on RAM, while VRAM rows are read back by key or by search.
+ *  @c usearch_dense_search_stream_init and @c usearch_dense_sample are unsupported on both, and so
+ *  is a cursor opened at a @c start key.
  *
  *  An NVMe handle is a view that answers every read verb as a RAM handle does, the cursor and
  *  @c usearch_dense_health included, its rows read through the executor's engines. Every mutating
@@ -319,11 +320,8 @@ typedef struct usearch_dense_load_ram_t {
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
     size_t values_per_key;
 
-    /** The @b optional handler, called with shards placed; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with shards placed. */
+    usearch_progress_t progress;
 } usearch_dense_load_ram_t;
 
 /**
@@ -369,11 +367,8 @@ typedef struct usearch_dense_load_vram_t {
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
     size_t values_per_key;
 
-    /** The @b optional handler, called with shards placed; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with shards placed. */
+    usearch_progress_t progress;
 } usearch_dense_load_vram_t;
 
 /** Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
@@ -404,11 +399,8 @@ typedef struct usearch_dense_load_ram_buffer_t {
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
     size_t values_per_key;
 
-    /** The @b optional handler, called with bytes placed; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with bytes placed. */
+    usearch_progress_t progress;
 } usearch_dense_load_ram_buffer_t;
 
 /**
@@ -445,11 +437,8 @@ typedef struct usearch_dense_load_vram_buffer_t {
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
     size_t values_per_key;
 
-    /** The @b optional handler, called with bytes placed; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with bytes placed. */
+    usearch_progress_t progress;
 } usearch_dense_load_vram_buffer_t;
 
 /** Copies a monolith from a memory buffer into a new, mutable index in device memory, reporting
@@ -603,11 +592,8 @@ typedef struct usearch_dense_insert_t {
     /** The @b optional candidate-pool breadth the build walk explores; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional handler, called with rows admitted, which reports and cannot cancel; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with rows admitted, which reports and cannot cancel. */
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_dense_traversal_stats_t* stats;
@@ -662,11 +648,8 @@ typedef struct usearch_dense_refine_t {
     /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional handler, called with nodes swept; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with nodes swept. */
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_dense_traversal_stats_t* stats;
@@ -776,17 +759,11 @@ typedef struct usearch_dense_search_t {
     /** How rows are reached: a walk, the default, or an exact scan of every row on RAM and NVMe. */
     usearch_traversal_t traversal;
 
-    /** The @b optional per-key admission callback; @c NULL admits everything. */
+    /** The @b optional admission filter, asked about a scored quad of candidates at a time. */
     usearch_predicate_t predicate;
 
-    /** Opaque pointer forwarded into every @c predicate call. */
-    void* predicate_state;
-
-    /** The @b optional handler, called with queries resolved; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with queries resolved. */
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_dense_traversal_stats_t* stats;
@@ -813,17 +790,18 @@ typedef struct usearch_dense_search_t {
  *  A @c predicate narrows the matches to the entries it admits. Non-matching entries still route
  *  the traversal rather than terminating it, so recall does not collapse at low selectivity - the
  *  walk crosses rejected regions to reach admitted ones behind them. The cost is that the
- *  predicate is called far more often than @c wanted, once per scored candidate, so it
- *  belongs on the caller's fast path - and it is invoked concurrently from the executor's threads,
- *  so it must tolerate that.
+ *  predicate judges far more keys than @c wanted, every scored candidate, asked about a quad of
+ *  them at a time, so it belongs on the caller's fast path - and it is invoked concurrently from
+ *  the executor's threads, so it must tolerate that.
  *
  *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL, since a
  *  query resolved before the stop is indistinguishable from one that never ran. A zero @c wanted
  *  succeeds without walking and lands only the counts, every one zero.
  *
  *  @code{.c}
- *  static usearch_admission_t admits_tenant(usearch_key_t key, void* state) {
- *      return key.bytes[0] == *(uint8_t const*)state ? usearch_admit_k : usearch_reject_k;
+ *  static void admits_tenant(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count, void* state) {
+ *      for (size_t i = 0; i != count; ++i)
+ *          admissions[i] = keys[i].bytes[0] == *(uint8_t const*)state ? usearch_admit_k : usearch_reject_k;
  *  }
  *
  *  uint8_t tenant = 7;
@@ -833,7 +811,7 @@ typedef struct usearch_dense_search_t {
  *      .index = index, .executor = executor, .outcome = &outcome,
  *      .count = 32, .queries = {rows_base, 256 * sizeof(float), 256, usearch_scalar_f32_k},
  *      .matches = &matches, .arena = arena, .wanted = 10,
- *      .predicate = admits_tenant, .predicate_state = &tenant});
+ *      .predicate = {admits_tenant, &tenant}});
  *  // Row 3's nearest key, valid until the next call given `arena`.
  *  usearch_key_t nearest = matches.keys[3 * matches.columns];
  *  @endcode
@@ -931,11 +909,8 @@ typedef struct usearch_dense_absorb_t {
     /** Array of @c count handles, every one of them consumed and nulled as it goes. */
     usearch_dense_index_t* donors;
 
-    /** The @b optional handler, called with donors absorbed; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with donors absorbed. */
+    usearch_progress_t progress;
 } usearch_dense_absorb_t;
 
 /**
@@ -966,7 +941,7 @@ typedef struct usearch_dense_absorb_t {
  *  usearch_outcome_t outcome = {0};
  *  usearch_dense_absorb(&(usearch_dense_absorb_t){
  *      .index = index, .executor = executor, .outcome = &outcome, .count = 4, .donors = shards,
- *      .progress = report_to_terminal, .progress_state = &ui});
+ *      .progress = {report_to_terminal, &ui, 4}});
  *  // Every entry of `shards` is consumed here; none of them may be freed afterwards.
  *  @endcode
  */
@@ -983,6 +958,10 @@ typedef struct usearch_dense_cursor_init_t {
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
+
+    /** The @b optional key to step from: the cursor then yields the entries that the key's entries
+     *  link to in the graph, once each and in link order; @c NULL scans every row as stored. */
+    usearch_key_t const* start;
 } usearch_dense_cursor_init_t;
 
 /** Opens a row scan over the current contents; see @c usearch_dense_cursor_t. */
@@ -1037,6 +1016,74 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
 /** Releases the cursor; @c NULL is safe.
  *  Waits until every deferred call naming the handle is final. */
 USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor);
+
+/** The arguments of @c usearch_dense_sample. */
+typedef struct usearch_dense_sample_t {
+
+    /** The handle to be sampled. */
+    usearch_dense_index_t index;
+
+    /** The executor the draws run on; its kind must match the handle's residency. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** The @b optional count of @c anchors; zero draws from the whole index. */
+    size_t anchors_count;
+
+    /** The rows that bound the region around them, one anchor apiece. */
+    usearch_rows_view_t anchors;
+
+    /** Output for the identities drawn, inside @c arena. */
+    usearch_keys_view_t* keys;
+
+    /** Output for each draw's nearest earlier draws - their keys and distances, row @c i spanning
+     *  @c offsets[i] up to @c offsets[i+1] - inside @c arena. */
+    usearch_matches_tape_view_t* links;
+
+    /** Output for the draws written; fewer than @c wanted only once the region is exhausted. */
+    size_t* written;
+
+    /** Memory for @c keys and @c links, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** The upper bound on draws this call writes. */
+    size_t wanted;
+
+    /** Draws already taken in this sequence, skipped so successive calls extend one sample. */
+    size_t offset;
+
+    /** Up to how many earlier draws each draw links to; one already keeps the sample connected. */
+    size_t links_per_draw;
+
+    /** The sequence: equal seeds, anchors and radius over an unchanged index draw equally. */
+    uint64_t seed;
+
+    /** The @b optional radius around the anchors; zero bounds nothing. */
+    usearch_distance_t radius;
+
+    /** The @b optional candidate-pool breadth of the walks behind the draws; zero derives. */
+    size_t expansion_factor;
+
+    /** The @b optional handler, called with draws written and @c wanted. */
+    usearch_progress_t progress;
+
+    /** The @b optional traversal telemetry; @c NULL skips reporting. */
+    usearch_dense_traversal_stats_t* stats;
+} usearch_dense_sample_t;
+
+/**
+ *  @brief Draws entries uniformly, across the index or around anchors, each linked to its nearest
+ *      earlier draws - so the sample is one connected component, ready to be laid out.
+ *
+ *  Links name earlier draws of the same sequence, a later call's reaching an earlier call's. They
+ *  are exact in a scan and approximate as any walk otherwise.
+ */
+USEARCH_EXPORT void usearch_dense_sample(usearch_dense_sample_t* arguments);
 
 /** The arguments of @c usearch_dense_search_stream_init. */
 typedef struct usearch_dense_search_stream_init_t {
@@ -1125,11 +1172,8 @@ typedef struct usearch_dense_save_t {
     /** Destination path, whose extension picks the layout. */
     usearch_bytes_view_t path;
 
-    /** The @b optional handler, called with shards written; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with shards written. */
+    usearch_progress_t progress;
 } usearch_dense_save_t;
 
 /**
@@ -1164,11 +1208,8 @@ typedef struct usearch_dense_save_buffer_t {
     /** Memory for @c monolith, rewound by the call. */
     usearch_arena_t arena;
 
-    /** The @b optional handler, called with bytes written; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with bytes written. */
+    usearch_progress_t progress;
 } usearch_dense_save_buffer_t;
 
 /**
@@ -1341,11 +1382,8 @@ typedef struct usearch_dense_multiply_t {
     /** The @b optional candidate-pool breadth, which widens the emitted pattern; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional handler, called with rows resolved; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with rows resolved. */
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_dense_traversal_stats_t* stats;
@@ -1479,11 +1517,8 @@ typedef struct usearch_dense_attend_t {
      *  dimensionality; zero derives it from the index's frozen geometry. */
     float score_scale;
 
-    /** The @b optional handler, called with queries resolved; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with queries resolved. */
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_dense_traversal_stats_t* stats;
@@ -1585,11 +1620,8 @@ typedef struct usearch_dense_maxsim_t {
     /** The @b optional candidate-pool breadth; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional handler, called with queries resolved; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with queries resolved. */
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_dense_traversal_stats_t* stats;

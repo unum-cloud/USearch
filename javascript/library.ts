@@ -169,7 +169,7 @@ export interface CompiledIndex {
       stats: CompiledStats | undefined,
     ]
   ): CompiledProducts | CompiledDeferred;
-  merge(...arguments_: [...On, donors: CompiledIndex[]]): undefined | CompiledDeferred;
+  absorb(...arguments_: [...On, donors: CompiledIndex[]]): undefined | CompiledDeferred;
   save(...arguments_: [...On, path: string]): undefined | CompiledDeferred;
   saveBuffer(...arguments_: [...On, arena: CompiledArena]): Uint8Array | null | CompiledDeferred;
   attend(

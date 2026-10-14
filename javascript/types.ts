@@ -388,7 +388,7 @@ export interface Executor extends Disposable {
    */
   drain(mood?: Mood): void;
 
-  /** Runs every deferred call and joins the workers now; a freed executor refuses every later call, and a second `free` does nothing. Calls `usearch_executor_free`. */
+  /** Runs every deferred call and joins the workers now; a freed executor refuses every later call, and a second `free` does nothing. Refuses with {@link Status.Contended} while a GPU arena made on it is live. Calls `usearch_executor_free`. */
   free(): void;
 }
 
@@ -444,6 +444,9 @@ export const Executor = compiled.Executor as ExecutorConstructor;
  * as a blocking one does: another call naming it before the first is final finishes
  * {@link Status.Contended} and leaves the first call's outputs alone, and `free` waits for it. The
  * collector frees the arena once nothing views it; `free` releases it now.
+ *
+ * A `Vram` arena grows, fills and frees on its executor's first stream, so it serves only calls on
+ * that executor and keeps it alive until freed; host pages may outlive their executor.
  */
 export interface Arena extends Disposable {
   /** The residency of the executor that made it; a `Vram` arena's views refuse host reads with {@link Status.Device}. */

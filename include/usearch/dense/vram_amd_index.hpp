@@ -589,7 +589,7 @@ struct vram_amd_index {
 
     /** Rows one checkpoint batch carries between a matrix and the caller: one slab, the row
      *  granularity the RAM residency grows by. */
-    inline static constexpr std::size_t bounce_rows_log2_k = 20;
+    inline static constexpr std::size_t batch_rows_log2_k = 20;
     using traversal_context_t = hip_traversal_context<traversals_allocator_t>;
 
     /** The strongest @c synchronization_t contract this design honors; nothing routes on it.
@@ -1373,7 +1373,7 @@ struct vram_amd_index {
                     hip_executor_t::stream_t const& stream, node_id_t visible) noexcept
             : columns(columns), id_shift(id_shift), stream(stream.handle), bounce(hip_pinned_allocator_t {stream}),
               visible(visible),
-              batch_rows(min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(bounce_rows_log2_k))),
+              batch_rows(min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(batch_rows_log2_k))),
               index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
             : columns(other.columns), id_shift(other.id_shift), stream(other.stream), bounce(std::move(other.bounce)),
@@ -1593,7 +1593,7 @@ struct vram_amd_index {
                     node_id_t base, std::size_t rows) noexcept
             : columns(columns), source_range(source_range), stream(stream.handle),
               bounce(hip_pinned_allocator_t {stream}), base(base), rows(rows),
-              batch_rows(min_of(rows, power_of_two<std::size_t>(bounce_rows_log2_k))), index_(&index),
+              batch_rows(min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k))), index_(&index),
               claiming_(std::move(claiming)) {}
         load_plan_t(load_plan_t&& other) noexcept
             : columns(other.columns), source_range(other.source_range), stream(other.stream),
@@ -2837,13 +2837,13 @@ struct vram_amd_index {
                        static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k,
                        vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
     }
-    status_t launch_merge_back_links_(amd_refine_t const& view, nk::matrix_view<u32_t> buckets,
-                                      std::span<u32_t const> bucket_counts, hip_bitset_t touched,
+    status_t launch_merge_back_links_(amd_refine_t const& view, nk::matrix_span<u32_t> buckets,
+                                      std::span<u32_t> bucket_counts, hip_bitset_t touched,
                                       hip_stream_handle_t stream) noexcept {
         amd_arguments_t arguments {};
         arguments.refine = view;
-        arguments.graph.bucket_ids = const_cast<u32_t*>(buckets.data());
-        arguments.graph.bucket_counts = const_cast<u32_t*>(bucket_counts.data());
+        arguments.graph.bucket_ids = buckets.data();
+        arguments.graph.bucket_counts = bucket_counts.data();
         arguments.graph.bucket_width = static_cast<u32_t>(buckets.extent(1));
         arguments.graph.touched = touched;
         return launch_(amd_kernel_t::merge_back_links_k, 0,

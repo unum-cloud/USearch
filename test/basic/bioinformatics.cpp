@@ -146,11 +146,11 @@ struct bioinformatics_fixture {
     }
     static bool value_equals(dna_t const& first, dna_t const& second) noexcept { return first == second; }
 
-    static bioinformatics_handmade_t make_handmade() {
+    static bioinformatics_handmade_t make_handmade(typename index_t::allocator_t const&) {
         return {{"AAAA", "AAAG", "AAAC"}, {{{0, 1, 2}, {1, 0, 2}, {2, 2, 0}}}};
     }
 
-    static std::vector<dna_t> make_values(std::size_t count, u64_t seed) {
+    static std::vector<dna_t> make_values(std::size_t count, u64_t seed, typename index_t::allocator_t const&) {
         constexpr std::size_t references_k = 6;
         constexpr std::size_t reference_bases_k = 48;
         splitmix64_t random_generator {seed};
@@ -230,14 +230,16 @@ static u64_t exhaustive_alignment_distance(std::string_view first, std::string_v
 static std::size_t check_bioinformatics_independent_oracle(u64_t seed) {
     std::size_t failures = 0;
     std::vector<u64_t> previous_row, current_row;
-    auto values = bioinformatics_fixture_t::make_values(16, stream_key(seed, "independent_oracle"));
+    allocation_ledger_t ledger;
+    auto values = bioinformatics_fixture_t::make_values(16, stream_key(seed, "independent_oracle"),
+                                                        counting_allocator_t {ledger});
     for (std::size_t pair = 0; pair + 1 < values.size(); pair += 2) {
         std::string_view const first = std::string_view {values[pair]}.substr(0, 6);
         std::string_view const second = std::string_view {values[pair + 1]}.substr(0, 6);
         failures += expect_eq(alignment_distance(first, second, previous_row, current_row),
                               exhaustive_alignment_distance(first, second));
     }
-    auto const handmade = bioinformatics_fixture_t::make_handmade();
+    auto const handmade = bioinformatics_fixture_t::make_handmade(counting_allocator_t {ledger});
     for (std::size_t row = 0; row != 3; ++row)
         for (std::size_t column = 0; column != 3; ++column)
             failures += expect_eq(exhaustive_alignment_distance(handmade.values[row], handmade.values[column]),

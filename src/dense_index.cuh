@@ -2088,14 +2088,6 @@ extern template struct specialized_index<ram_indexes<nk_e3m2_k, cpu_class_t::ser
 extern template struct specialized_index<ram_indexes<nk_e2m3_k, cpu_class_t::serial_k>>;
 #endif
 
-/** Whether @p alternative_type_ is listed in @p variant_type_ - the membership fact the ladder
- *  asserts against the explicit list. */
-template <typename alternative_type_, typename variant_type_>
-inline constexpr bool variant_carries = false;
-template <typename alternative_type_, typename... alternative_types_>
-inline constexpr bool variant_carries<alternative_type_, std::variant<alternative_types_...>> =
-    (std::is_same_v<alternative_type_, alternative_types_> || ...);
-
 #pragma endregion Multi Index
 
 #pragma region Construction
@@ -2522,121 +2514,6 @@ static usearch_dense_index_t with_cell(usearch_dense_metadata_t const& geometry,
 
 #pragma region Multi Verbs
 
-/** Every argument structure that names an executor, so a deferred submission keeps its call by
- *  value; whatever the copy points to stays the caller's until final. */
-using deferred_arguments_t =
-    std::variant<usearch_dense_load_ram_t, usearch_dense_load_vram_t, usearch_dense_load_ram_buffer_t,
-                 usearch_dense_load_vram_buffer_t, usearch_dense_view_nvme_t, usearch_dense_reserve_t,
-                 usearch_dense_clear_t, usearch_dense_insert_t, usearch_dense_refine_t, usearch_dense_health_t,
-                 usearch_dense_search_t, usearch_dense_count_t, usearch_dense_get_t, usearch_dense_absorb_t,
-                 usearch_dense_cursor_next_t, usearch_dense_search_stream_next_t, usearch_dense_save_t,
-                 usearch_dense_save_buffer_t, usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t,
-                 usearch_dense_describe_t, usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t>;
-
-/** Where one slot of a deferred table stands. */
-enum class deferred_stage_t : unsigned char {
-
-    /** Nothing in it; a submission may take it. */
-    free_k,
-
-    /** A submitted call waits in it for its wait, a drain, a blocking call or a free. */
-    held_k,
-
-    /** Some thread took the call and runs it. */
-    running_k,
-};
-
-/** One slot of an executor's deferred table: the copied call, the verb that runs it, and its place
- *  in line. */
-struct deferred_call_t {
-    deferred_arguments_t arguments;
-    void (*verb)(void*) = nullptr;
-
-    /** Submission order, counted from one across every executor. */
-    std::size_t ticket = 0;
-    deferred_stage_t stage = deferred_stage_t::free_k;
-};
-
-/** Slots a deferred table holds when its constructor names no limit. */
-inline constexpr std::size_t deferred_limit_default_k = 64;
-
-/** Reads every NVMe engine keeps in flight: deep enough to cover a device's latency, which the C
- *  interface leaves to the library. */
-inline constexpr std::size_t nvme_queue_depth_k = 64;
-
-/** The state behind @c usearch_executor_t: the discovered topology a RAM or NVMe executor was
- *  spawned over, its deferred table, and one residency's executor; the variant is the kind tag, so
- *  no second word can disagree. The executor is declared last, so its pool dies before the
- *  topology. */
-struct usearch_executor_handle_t {
-    std::unique_ptr<void, decltype(&fu_topology_delete)> topology {nullptr, &fu_topology_delete};
-
-    /** One slot per call it tracks at once, sized at creation, so a submission never allocates. */
-    growing_buffer<deferred_call_t> deferred {global_allocator};
-
-    /** The next listed executor, so a wait or a free finds the calls naming its handle. */
-    usearch_executor_handle_t* next_listed = nullptr;
-
-    std::variant<forkunion_executor_t, nvme_executor_t, gpu_executor_t> executor;
-};
-
-/** Requests AMX tile state alone, granted process-wide on Linux; more bits would rewrite FPCR. */
-static void request_tile_state() noexcept {
-    nk_capability_t available = 0;
-    if (nk_cpu_capabilities_enabled(&available) != nk_success_k || !(available & nk_cap_sapphireamx_k)) return;
-    [[maybe_unused]] nk_status_t const requested = nk_cpu_configure_thread(nk_cap_sapphireamx_k);
-}
-
-/** Discovers the topology and spawns @p threads over it into @p handle, answering @p handle, or null
- *  once the outcome records why not; one thread is the caller. */
-static usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, std::size_t threads,
-                                             usearch_outcome_t* outcome) noexcept {
-    fu_topology_t topology = nullptr;
-    if (fu_topology_new(&topology) != fu_success_k)
-        return propagate_error(usearch_status_device_k, outcome, "Topology discovery failed"), nullptr;
-    handle.topology.reset(topology);
-    auto [spawned, status] = forkunion_executor_t::spawn(topology, threads);
-    if (failed(status)) return propagate_error(status, outcome), nullptr;
-    request_tile_state();
-    handle.executor = std::move(spawned);
-    return &handle;
-}
-
-/** Discovers the topology and spawns @p threads into @p handle, each opening the engine @p config
- *  names, answering @p handle, or null once the outcome records why not. */
-static usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle, std::size_t threads,
-                                              io_engine_config_t const& config, usearch_outcome_t* outcome) noexcept {
-    fu_topology_t topology = nullptr;
-    if (fu_topology_new(&topology) != fu_success_k)
-        return propagate_error(usearch_status_device_k, outcome, "Topology discovery failed"), nullptr;
-    handle.topology.reset(topology);
-    auto [spawned, status] = nvme_executor_t::spawn(topology, threads, config);
-    if (failed(status))
-        return propagate_error(status, outcome, "No I/O engine opened on the executor's threads"), nullptr;
-    request_tile_state();
-    handle.executor = std::move(spawned);
-    return &handle;
-}
-
-/** The executor a null handle runs RAM work on: the calling thread, built into @p call_executor. */
-template <typename multi_type_>
-    requires is_ram_index<multi_type_>
-static usearch_executor_t call_executor_for(multi_type_&, usearch_executor_handle_t& call_executor,
-                                            usearch_outcome_t* outcome) noexcept {
-    return spawn_ram_executor(call_executor, 1, outcome);
-}
-
-/** The executor a null handle runs NVMe work on: one thread of synchronous reads. */
-template <typename multi_type_>
-    requires is_nvme_index<multi_type_>
-static usearch_executor_t call_executor_for(multi_type_&, usearch_executor_handle_t& call_executor,
-                                            usearch_outcome_t* outcome) noexcept {
-    io_engine_config_t config;
-    config.queue_depth = nvme_queue_depth_k;
-    config.transport = io_transport_t::blocking_k;
-    return spawn_nvme_executor(call_executor, 1, config, outcome);
-}
-
 /** The executor a null handle runs VRAM work on: streams or queues of its own on its devices, never
  *  a legacy default stream, which would wait on every blocking stream of the process. */
 template <typename multi_type_>
@@ -2659,349 +2536,12 @@ static usearch_executor_t call_executor_for(multi_type_& variant, usearch_execut
     return &call_executor;
 }
 
-/** Applies @p visitor to whichever executor @p executor holds, a GPU one included; an empty GPU
- *  alternative answers @c device_error_k. */
-template <typename visitor_type_>
-static status_t visit_executor(usearch_executor_handle_t& executor, visitor_type_&& visitor) noexcept {
-    return std::visit(
-        [&]<typename executor_type_>(executor_type_& typed) noexcept {
-            if constexpr (!std::is_same_v<executor_type_, gpu_executor_t>) return visitor(typed);
-            else
-                return std::visit(
-                    [&]<typename gpu_type_>(gpu_type_& gpu) noexcept {
-                        if constexpr (std::is_same_v<gpu_type_, std::monostate>) return status_t::device_error_k;
-                        else return visitor(gpu);
-                    },
-                    typed);
-        },
-        executor.executor);
-}
-
-/** The residency's executor inside @p executor 's variant: GPU executors nest one level deeper. */
-template <typename executor_type_>
-static executor_type_* residency_executor(usearch_executor_handle_t& executor) noexcept {
-    if constexpr (std::is_same_v<executor_type_, forkunion_executor_t> ||
-                  std::is_same_v<executor_type_, nvme_executor_t>)
-        return std::get_if<executor_type_>(&executor.executor);
-    else {
-        gpu_executor_t* const gpu = std::get_if<gpu_executor_t>(&executor.executor);
-        return gpu ? std::get_if<executor_type_>(gpu) : nullptr;
-    }
-}
-
-/** The typed executor behind the C handle, or null with @c usearch_status_device_k on a kind
- *  mismatch. A null handle builds @p call_executor for this call alone. */
-template <typename multi_type_>
-static typename multi_type_::executor_t* executor_of(multi_type_& variant, usearch_executor_t executor,
-                                                     usearch_executor_handle_t& call_executor,
-                                                     usearch_outcome_t* outcome) noexcept {
-    if (!executor) executor = call_executor_for(variant, call_executor, outcome);
-    if (!executor) return nullptr;
-    typename multi_type_::executor_t* const typed = residency_executor<typename multi_type_::executor_t>(*executor);
-    if (!typed)
-        propagate_error(usearch_status_device_k, outcome, "The executor's kind must match the handle's residency");
-    return typed;
-}
-
-/** The device an arena of host pages names, which no GPU ordinal does. */
-inline constexpr int host_device_k = -1;
-
-/** What @c usearch_arena_t owns: memory that one call at a time rewinds and refills, as host pages
- *  or on one device, and the call holding it. */
-struct usearch_arena_handle_t {
-    growing_arena<forkunion_allocator_t> memory {forkunion_allocator_t {no_memory_domain_k}};
-
-    /** Device memory on the first stream of the executor the arena was made for, or none. */
-    gpu_arena_t device_memory;
-
-    /** The executor whose first stream the device memory rides, the only one whose calls it serves;
-     *  null for host pages, which serve any. */
-    usearch_executor_t executor = nullptr;
-
-    /** The GPU ordinal the memory lives on, or @c host_device_k. */
-    int device = host_device_k;
-
-    /** The outcome of the call holding the arena, from its claim or deferred submission until just
-     *  before its final store; atomic, since a held call finishes on whichever thread runs it. */
-    std::atomic<usearch_outcome_t const*> holder {nullptr};
-};
-
-/** Holds @p arena for the call whose outcome is @p call, answering whether it was free or already
- *  that call's; a null arena holds nothing, left for the verb to refuse. */
-static bool hold_arena(usearch_arena_t arena, usearch_outcome_t const* call) noexcept {
-    if (!arena) return true;
-    usearch_outcome_t const* holder = nullptr;
-    return arena->holder.compare_exchange_strong(holder, call, std::memory_order_acquire) || holder == call;
-}
-
-/** Lets go of @p arena when the call whose outcome is @p call holds it. */
-static void release_arena(usearch_arena_t arena, usearch_outcome_t const* call) noexcept {
-    if (arena) arena->holder.compare_exchange_strong(call, nullptr, std::memory_order_release);
-}
-
-/** Whether @p address lies in memory @p arena handed out, which its next rewind reuses or frees. */
-static bool arena_contains(usearch_arena_handle_t const& arena, void const* address) noexcept {
-    return arena.device_memory ? arena.device_memory.contains(address) : arena.memory.contains(address);
-}
-
 /** The GPU ordinal @p variant computes on, or @c host_device_k. */
 template <typename variant_type_>
 static int device_of(variant_type_& variant) noexcept {
     if constexpr (is_vram_index<variant_type_>) return specialized_index {variant}.device(0);
     else return host_device_k;
 }
-
-/** Holds @p arena for the call whose outcome is @p call and rewinds it, freeing the previous call's
- *  outputs, so an input of @p inputs still inside it is refused, as is an arena on another device
- *  than @p device or device memory another @p executor made. The call's @c call_outcome_t lets go
- *  of it before the final store. */
-static usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcome_t const* call,
-                                           usearch_executor_t executor, int device,
-                                           std::initializer_list<void const*> inputs,
-                                           usearch_outcome_t* outcome) noexcept {
-    if (!arena)
-        return propagate_error(usearch_status_invalid_argument_k, outcome, "The arena must not be null"), nullptr;
-    if (arena->device != device)
-        return propagate_error(usearch_status_device_k, outcome, "The arena lives where the call does not compute"),
-               nullptr;
-    if (arena->device_memory && arena->executor != executor)
-        return propagate_error(usearch_status_device_k, outcome,
-                               "A device arena serves calls on the executor that made it"),
-               nullptr;
-    if (!hold_arena(arena, call))
-        return propagate_error(usearch_status_contended_k, outcome, "The arena serves another call"), nullptr;
-    for (void const* input : inputs)
-        if (input && arena_contains(*arena, input))
-            return propagate_error(usearch_status_invalid_argument_k, outcome,
-                                   "An input lies inside the arena it rewinds"),
-                   nullptr;
-    arena->device_memory.clear();
-    arena->memory.clear();
-    return arena;
-}
-
-/** Carves @p count values of @p value_type_ out of a claimed arena's host pages, @p staging, where
- *  every verb computes, even one whose outputs @ref publish moves to a device; null when they
- *  cannot grow. */
-template <typename value_type_>
-static value_type_* carve(growing_arena<forkunion_allocator_t>& staging, std::size_t count) noexcept {
-    return reinterpret_cast<value_type_*>(staging.allocate(count * sizeof(value_type_), default_alignment_k));
-}
-
-/** Carves @p count values of @p value_type_ out of a claimed arena's @p device_memory, for outputs
- *  the device writes in place. */
-template <typename value_type_>
-static value_type_* carve(gpu_arena_t& device_memory, std::size_t count) noexcept {
-    return device_memory.template allocate<value_type_>(count);
-}
-
-/** Hands out the @p count values @ref carve put at @p output in @p arena: in place on host pages,
- *  or re-pointed at one upload to its device queued on its executor's first stream, which the call
- *  awaits once through @c gpu_arena_t::drain, the host pages it reads living until then. */
-template <typename value_type_>
-static status_t publish(usearch_arena_handle_t& arena, value_type_*& output, std::size_t count) noexcept {
-    if (!arena.device_memory || !output || !count) return status_t::success_k;
-    value_type_* const landed = carve<value_type_>(arena.device_memory, count);
-    if (!landed) return status_t::bad_alloc_k;
-    if (status_t const uploaded = arena.device_memory.upload(landed, output, count * sizeof(value_type_));
-        failed(uploaded))
-        return uploaded;
-    output = landed;
-    return status_t::success_k;
-}
-
-/**
- *  @brief A verb's outcome while it runs: the caller's reads deferred from the start, every step
- *      records into a private one, and the end lets go of the arena before the one final store.
- *
- *  Declared first in a verb, it unwinds last, so a waiter that sees the final status may reuse the
- *  arena at once. A path that forgot to report finishes @c usearch_status_internal_k rather than
- *  hanging its waiters.
- */
-class call_outcome_t {
-  public:
-    explicit call_outcome_t(usearch_outcome_t* published, usearch_arena_t arena = nullptr) noexcept
-        : published_(published), arena_(arena) {
-        propagate_pending(published_);
-    }
-    ~call_outcome_t() noexcept {
-        release_arena(arena_, published_);
-        propagate_error(recorded_.status, published_, recorded_.message);
-    }
-    call_outcome_t(call_outcome_t const&) = delete;
-    call_outcome_t& operator=(call_outcome_t const&) = delete;
-
-    /** The private record every step reports into. */
-    operator usearch_outcome_t*() noexcept { return &recorded_; }
-
-  private:
-    usearch_outcome_t* published_;
-    usearch_arena_t arena_;
-    usearch_outcome_t recorded_ {usearch_status_internal_k, "The call finished without reporting a status"};
-};
-
-#pragma region Deferred Calls
-
-/** Every listed executor and the lock every deferred table is read under, so a wait or a free finds
- *  the calls naming its handle without asking each executor. */
-struct deferred_registry_t {
-    std::mutex guard;
-
-    /** Signalled whenever a taken call becomes final. */
-    std::condition_variable finished;
-
-    /** The last ticket handed out. */
-    std::size_t tickets = 0;
-
-    /** The newest listed executor. */
-    usearch_executor_handle_t* executors = nullptr;
-};
-
-static deferred_registry_t deferred_registry;
-
-/** The held call whose arguments this thread passes back into their verb, which then runs them in
- *  place rather than holding them again. */
-static thread_local void const* resuming_call = nullptr;
-
-/** Sizes @p executor 's deferred table at @p limit slots, zero taking the default, and lists it. */
-static status_t list_executor(usearch_executor_handle_t& executor, std::size_t limit) noexcept {
-    if (failed(executor.deferred.resize(limit ? limit : deferred_limit_default_k))) return status_t::bad_alloc_k;
-    std::lock_guard<std::mutex> lock(deferred_registry.guard);
-    executor.next_listed = deferred_registry.executors;
-    deferred_registry.executors = &executor;
-    return status_t::success_k;
-}
-
-/** Takes @p executor off the list; the caller already finished every call it held. */
-static void delist_executor(usearch_executor_handle_t& executor) noexcept {
-    std::lock_guard<std::mutex> lock(deferred_registry.guard);
-    for (usearch_executor_handle_t** link = &deferred_registry.executors; *link; link = &(*link)->next_listed)
-        if (*link == &executor) {
-            *link = executor.next_listed;
-            return;
-        }
-}
-
-/** Whether the call in @p slot reads or writes @p handle: its outcome, its executor, or an index,
- *  cursor, stream or arena it names. An output slot for a handle the call creates holds nothing
- *  yet. */
-static bool deferred_uses(deferred_call_t const& slot, void const* handle) noexcept {
-    return std::visit(
-        [&](auto const& arguments) noexcept {
-            auto const names = [&](auto named) noexcept {
-                if constexpr (std::is_pointer_v<std::remove_pointer_t<decltype(named)>>) return false;
-                else return static_cast<void const*>(named) == handle;
-            };
-            bool used = static_cast<void const*>(arguments.outcome) == handle ||
-                        static_cast<void const*>(arguments.executor) == handle;
-            if constexpr (requires { arguments.index; }) used = used || names(arguments.index);
-            if constexpr (requires { arguments.cursor; }) used = used || names(arguments.cursor);
-            if constexpr (requires { arguments.stream; }) used = used || names(arguments.stream);
-            if constexpr (requires { arguments.arena; }) used = used || names(arguments.arena);
-            return used;
-        },
-        slot.arguments);
-}
-
-/** Runs every call @p executor holds with a ticket up to @p last on this thread, oldest first. */
-static void run_held(usearch_executor_handle_t& executor, std::size_t last) noexcept {
-    for (;;) {
-        deferred_call_t* oldest = nullptr;
-        {
-            std::lock_guard<std::mutex> lock(deferred_registry.guard);
-            for (deferred_call_t& slot : executor.deferred)
-                if (slot.stage == deferred_stage_t::held_k && slot.ticket <= last &&
-                    (!oldest || slot.ticket < oldest->ticket))
-                    oldest = &slot;
-            if (!oldest) return;
-            oldest->stage = deferred_stage_t::running_k;
-        }
-        std::visit(
-            [&](auto& arguments) noexcept {
-                resuming_call = &arguments;
-                oldest->verb(&arguments);
-            },
-            oldest->arguments);
-        std::lock_guard<std::mutex> lock(deferred_registry.guard);
-        oldest->stage = deferred_stage_t::free_k;
-        deferred_registry.finished.notify_all();
-    }
-}
-
-/** Waits until no call @p executor took with a ticket up to @p last still runs on another
- *  thread. */
-static void wait_running(usearch_executor_handle_t& executor, std::size_t last) noexcept {
-    std::unique_lock<std::mutex> lock(deferred_registry.guard);
-    deferred_registry.finished.wait(lock, [&]() noexcept {
-        for (deferred_call_t const& slot : executor.deferred)
-            if (slot.stage == deferred_stage_t::running_k && slot.ticket <= last) return false;
-        return true;
-    });
-}
-
-/** Returns once no deferred call reads or writes @p handle, running the held ones on this thread
- *  together with every call held before them on the same executor - what every wait and every free
- *  does first. */
-static void finish_calls_using(void const* handle) noexcept {
-    if (!handle) return;
-    std::unique_lock<std::mutex> lock(deferred_registry.guard);
-    for (;;) {
-        usearch_executor_handle_t* holding = nullptr;
-        std::size_t last = 0, running = 0;
-        for (usearch_executor_handle_t* executor = deferred_registry.executors; executor && !holding;
-             executor = executor->next_listed)
-            for (deferred_call_t const& slot : executor->deferred)
-                if (slot.stage == deferred_stage_t::held_k && deferred_uses(slot, handle))
-                    holding = executor, last = max_of(last, slot.ticket);
-                else if (slot.stage == deferred_stage_t::running_k && deferred_uses(slot, handle)) ++running;
-        if (holding) {
-            // Running a held call takes this lock itself, so it runs outside it.
-            lock.unlock();
-            run_held(*holding, last);
-            lock.lock();
-        }
-        else if (running) deferred_registry.finished.wait(lock);
-        else return;
-    }
-}
-
-/**
- *  @brief Every verb's entry. A deferred call on an executor is copied into the executor's table,
- *      holding its arena, and answers true; a blocking one first runs the calls the executor holds
- *      and answers false.
- *
- *  A call the runner of a held call passes back answers false at once, so the verb runs it in
- *  place, and so does a call with no executor, which is final when it returns whatever its
- *  completion says.
- */
-template <auto verb_, typename arguments_type_>
-static bool submitted(arguments_type_* arguments) noexcept {
-    if (resuming_call == arguments) return resuming_call = nullptr, false;
-    usearch_executor_t const executor = arguments->executor;
-    if (!executor) return false;
-    if (arguments->completion != usearch_completion_deferred_k) return run_held(*executor, ~std::size_t {0}), false;
-    usearch_outcome_t* const outcome = arguments->outcome;
-    propagate_pending(outcome);
-    usearch_arena_t arena = nullptr;
-    if constexpr (requires { arguments->arena; }) arena = arguments->arena;
-    if (!hold_arena(arena, outcome))
-        return propagate_error(usearch_status_contended_k, outcome, "The arena serves another call"), true;
-    std::lock_guard<std::mutex> lock(deferred_registry.guard);
-    for (deferred_call_t& slot : executor->deferred)
-        if (slot.stage == deferred_stage_t::free_k) {
-            slot.arguments.template emplace<arguments_type_>(*arguments);
-            slot.verb = [](void* erased) { verb_(static_cast<arguments_type_*>(erased)); };
-            slot.ticket = ++deferred_registry.tickets;
-            slot.stage = deferred_stage_t::held_k;
-            return true;
-        }
-    // A refused submission never runs, so nothing else would let go of the arena it took.
-    release_arena(arena, outcome);
-    propagate_error(usearch_status_contended_k, outcome, "The deferred table is full");
-    return true;
-}
-
-#pragma endregion Deferred Calls
 
 /** @p count rows of the C view @p rows as the engines take them, their scalar riding along. */
 static us::dense::rows_view_t rows_of(usearch_rows_view_t const& rows, std::size_t count) noexcept {
@@ -3024,15 +2564,15 @@ static nk_dtype_t rows_dtype_of(usearch_scalar_t scalar, std::size_t columns, us
  *  @brief The one loop every row verb drives on an arm that serves it: hands @p rows to @p sink
  *      chunk by chunk, each arm importing its rows into its own scalar.
  *
- *  Chunks hold whole queries of @p rows_per_query rows, so a device batch stages a bounded run, and
- *  progress counts queries. Finishes @p outcome only on failure, leaving the success to the verb
- *  once its last output is written.
+ *  Chunks hold whole queries of @p rows_per_query rows, one per step of @p progress, or the whole
+ *  call without a handler, as each engine bounds its own scratch; progress counts queries. Finishes
+ *  @p outcome only on failure, leaving the success to the verb once its last output is written.
  */
 template <typename variant_type_, typename sink_type_>
 static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t executor_handle,         //
                                  std::size_t rows_count, usearch_rows_view_t const& rows,            //
                                  std::size_t rows_per_query, std::size_t expansion_factor,           //
-                                 usearch_progress_callback_t progress, void* progress_state,         //
+                                 usearch_progress_t progress,                                        //
                                  usearch_dense_traversal_stats_t* stats, usearch_outcome_t* outcome, //
                                  sink_type_&& sink) noexcept {
     if (stats) *stats = {};
@@ -3048,8 +2588,9 @@ static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t exec
     if (rows.stride && rows.stride < us::dense::packed_bytes(source_dtype, rows.columns))
         return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row");
 
-    std::size_t const chunk = rows_per_query *
-                              max_of<std::size_t>(1, min_of(rows_count, increment_rows_k) / rows_per_query);
+    std::size_t const queries = rows_count / rows_per_query;
+    progress_ticks_t ticks {progress, queries};
+    std::size_t const chunk = rows_per_query * ticks.slice();
     us::dense::rows_view_t const all = rows_of(rows, rows_count);
     for (std::size_t resolved = 0; resolved != rows_count;) {
         std::size_t const taking = min_of(chunk, rows_count - resolved);
@@ -3057,50 +2598,10 @@ static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t exec
             specialized_index {variant}, all.slice(resolved, taking), *executor, search_config, resolved, taking);
         if (!crossed(found, stats, outcome)) return false;
         resolved += taking;
-        if (progress &&
-            progress(resolved / rows_per_query, rows_count / rows_per_query, progress_state) == usearch_cancel_k)
+        if (ticks(resolved / rows_per_query, queries) == continuation_t::cancel_k)
             return propagate_error(usearch_status_cancelled_k, outcome, "The handler stopped the call");
     }
     return true;
-}
-
-/** Where a ranked run lands inside a claimed arena: @c wanted keys and scores per row, and a count
- *  per row. */
-struct matches_landing_t {
-    usearch_key_t* keys = nullptr;
-    usearch_distance_t* scores = nullptr;
-    std::size_t* counts = nullptr;
-    std::size_t wanted = 0;
-
-    /** The view the call publishes once every row landed. */
-    usearch_matches_view_t view() const noexcept { return {keys, scores, counts, wanted}; }
-};
-
-/** Carves @p count rows of @p wanted matches out of a claimed arena's host pages or device memory,
- *  @p memory; a zero @p wanted carves only the counts. False once @p outcome records why not. */
-template <typename memory_type_>
-static bool carve_matches(memory_type_& memory, std::size_t count, std::size_t wanted, matches_landing_t& landing,
-                          usearch_outcome_t* outcome) noexcept {
-    landing.wanted = wanted;
-    landing.counts = carve<std::size_t>(memory, count);
-    if (wanted) {
-        landing.keys = carve<usearch_key_t>(memory, count * wanted);
-        landing.scores = carve<usearch_distance_t>(memory, count * wanted);
-    }
-    if (landing.counts && (!wanted || (landing.keys && landing.scores))) return true;
-    return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
-}
-
-/** Hands out the @p count rows @ref carve_matches put in @p landing where @p arena hands outputs
- *  out, awaiting the uploads once. False once @p outcome records why not. */
-static bool publish_matches(usearch_arena_handle_t& arena, std::size_t count, matches_landing_t& landing,
-                            usearch_outcome_t* outcome) noexcept {
-    std::size_t const entries = count * landing.wanted;
-    status_t status = publish(arena, landing.counts, count);
-    if (succeeded(status)) status = publish(arena, landing.keys, entries);
-    if (succeeded(status)) status = publish(arena, landing.scores, entries);
-    if (status_t const drained = arena.device_memory.drain(); succeeded(status)) status = drained;
-    return succeeded(status) || propagate_error(status, outcome, "Failed to land the matches on the device");
 }
 
 /** The matching verbs' sink on one serving arm: keys and scores land in @p landing as the walk
@@ -3110,8 +2611,7 @@ template <typename variant_type_, typename verb_type_>
 static bool match_dense_rows(variant_type_& variant, usearch_executor_t executor,                //
                              std::size_t count, usearch_rows_view_t const& rows,                 //
                              std::size_t rows_per_query, matches_landing_t const& landing,       //
-                             std::size_t expansion_factor,                                       //
-                             usearch_progress_callback_t progress, void* progress_state,         //
+                             std::size_t expansion_factor, usearch_progress_t progress,          //
                              usearch_dense_traversal_stats_t* stats, usearch_outcome_t* outcome, //
                              verb_type_&& verb) noexcept {
     using key_t = typename variant_type_::key_t;
@@ -3128,7 +2628,7 @@ static bool match_dense_rows(variant_type_& variant, usearch_executor_t executor
                     std::span<std::size_t> {landing.counts + first, matched});
     };
     return for_each_dense_chunk(variant, executor, count * rows_per_query, rows, rows_per_query, expansion_factor,
-                                progress, progress_state, stats, outcome, sink);
+                                progress, stats, outcome, sink);
 }
 
 #pragma endregion Multi Verbs
@@ -3163,17 +2663,6 @@ struct usearch_dense_cursor_handle_t {
     std::atomic_flag busy;
 };
 
-/** The run read as text - a path, which is bytes that happen to decode. The ABI spells a byte
- *  @c uint8_t and the language spells it @c char, so the two never meet implicitly. */
-static std::string_view as_text(usearch_bytes_view_t bytes) noexcept {
-    return {reinterpret_cast<char const*>(bytes.data), bytes.length};
-}
-
-/** The run read as the engine's bytes - a buffer the ABI spells in @c uint8_t. */
-static bytes_view_t as_bytes(usearch_bytes_view_t bytes) noexcept {
-    return {reinterpret_cast<byte_t const*>(bytes.data), bytes.length};
-}
-
 /** Fills every field a checkpoint froze; the type carries nothing a checkpoint cannot say. */
 static void adopt_metadata(safegraphs_metadata_t const& source, usearch_dense_metadata_t* metadata) noexcept {
     metadata->dimensions = regular_width(source.value_shape).value_or(0);
@@ -3187,7 +2676,7 @@ static void adopt_metadata(safegraphs_metadata_t const& source, usearch_dense_me
  *  @p source into it; a failed or cancelled load frees the handle and leaves @c *index null. */
 template <typename source_type_, typename placement_type_>
 static void load_dense_index(source_type_ source, placement_type_ const& placement, usearch_executor_t executor,
-                             usearch_progress_callback_t progress, void* progress_state, usearch_dense_index_t* index,
+                             usearch_progress_t progress, usearch_dense_index_t* index,
                              usearch_outcome_t* outcome) noexcept {
     *index = nullptr;
     if (source.empty())
@@ -3220,7 +2709,7 @@ static void load_dense_index(source_type_ source, placement_type_ const& placeme
                 typename variant_type_::executor_t* const typed = executor_of(variant, executor, call_executor,
                                                                               outcome);
                 if (!typed) return false;
-                shard_ticks_t ticks {progress, progress_state, specialized_index {variant}.shards_count()};
+                progress_ticks_t ticks {progress, specialized_index {variant}.shards_count()};
                 status_t const status = specialized_index {variant}.load(source, *typed, ticks);
                 return succeeded(status) || propagate_error(status, outcome);
             }
@@ -3231,31 +2720,10 @@ static void load_dense_index(source_type_ source, placement_type_ const& placeme
     propagate_error(usearch_status_success_k, outcome, nullptr);
 }
 
-/** Visits the arm of @p index with @p mutate when it is writable; an NVMe view serves its
- *  checkpoint in place, so it refuses every mutation with @c usearch_status_read_only_k. */
-template <typename mutate_type_>
-static void visit_writable(usearch_dense_index_handle_t& index, usearch_outcome_t* outcome,
-                           mutate_type_&& mutate) noexcept {
-    std::visit(
-        [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if constexpr (is_nvme_index<variant_type_>)
-                propagate_error(usearch_status_read_only_k, outcome, "An NVMe view never mutates");
-            else mutate(variant);
-        },
-        index.variants);
-}
-
-/** Lists a spawned @p executor with a deferred table of @p deferred_limit slots and hands it out
- *  through @p output, or frees it once @p outcome records why not. */
-static void hand_out_executor(usearch_executor_t executor, std::size_t deferred_limit, usearch_executor_t* output,
-                              usearch_outcome_t* outcome) noexcept {
-    if (failed(list_executor(*executor, deferred_limit)))
-        return delete executor,
-               propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the deferred table"),
-               void();
-    *output = executor;
-    propagate_error(usearch_status_success_k, outcome, nullptr);
-}
+/** The one registry and resuming slot @c lib.hpp declares for every modality's calls, defined
+ *  beside the executor, arena and outcome verbs that drain them. */
+deferred_registry_t deferred_registry;
+thread_local void const* resuming_call = nullptr;
 
 extern "C" {
 
@@ -3454,8 +2922,9 @@ USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
             return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row"),
                    void();
         nk::vector_view<key_t> const uuids {reinterpret_cast<char const*>(keys.data), count, keys.stride};
+        progress_ticks_t ticks {arguments->progress, count};
         expected<typename variant_type_::insert_result_t> const inserted = specialized_index {variant}.add(
-            uuids, rows_of(vectors, count), {arguments->progress, arguments->progress_state}, *executor, insert_config);
+            uuids, rows_of(vectors, count), ticks, *executor, insert_config);
         if (crossed(inserted, stats, outcome)) propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
@@ -3472,7 +2941,7 @@ USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments) {
         if (!executor) return;
         typename variant_type_::refine_config_t config {};
         config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
-        shard_ticks_t ticks {arguments->progress, arguments->progress_state, specialized_index {variant}.size()};
+        progress_ticks_t ticks {arguments->progress, specialized_index {variant}.size()};
         auto const [refined, refined_status] = specialized_index {variant}.refine(*executor, config, ticks);
         accumulate_stats(stats, refined);
         // A stopped pass is not a failure: it still healed, the graph stands, and the next call
@@ -3511,12 +2980,12 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
     if (rejects_columns(*arguments->index, count, arguments->queries.columns, outcome)) return;
     if (arguments->traversal != usearch_traversal_walk_k && arguments->traversal != usearch_traversal_scan_k)
         return propagate_error(usearch_status_unknown_kind_k, outcome, "Unknown traversal"), void();
-    key_predicate_t keyed {arguments->predicate, arguments->predicate_state};
+    key_predicate_t keyed {arguments->predicate};
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
             if (is_vram_index<variant_type_> && arguments->traversal != usearch_traversal_walk_k)
                 propagate_error(usearch_status_unsupported_k, outcome, "Scans run on RAM and NVMe handles");
-            else if (is_vram_index<variant_type_> && keyed.callback)
+            else if (is_vram_index<variant_type_> && keyed.predicate.callback)
                 propagate_error(usearch_status_device_k, outcome, "A host predicate cannot narrow a device walk");
             else {
                 usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
@@ -3546,8 +3015,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                 auto search_with = [&](auto&& predicate) noexcept {
                     return match_dense_rows(
                         variant, arguments->executor, count, arguments->queries, 1, landing,
-                        arguments->expansion_factor, arguments->progress, arguments->progress_state, arguments->stats,
-                        outcome,
+                        arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
                         [&](auto view, auto rows, auto& executor, auto config, auto keys, auto distances, auto counts) {
                             if constexpr (!is_vram_index<variant_type_>)
                                 config.traversal = static_cast<traversal_t>(arguments->traversal);
@@ -3556,7 +3024,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                 };
                 bool const walked = [&] {
                     if constexpr (is_vram_index<variant_type_>) return search_with(dummy_predicate_t {});
-                    else return keyed.callback ? search_with(keyed) : search_with(dummy_predicate_t {});
+                    else return keyed.predicate.callback ? search_with(keyed) : search_with(dummy_predicate_t {});
                 }();
                 if (!walked) return;
                 *arguments->matches = landing.view();
@@ -3650,6 +3118,9 @@ USEARCH_EXPORT void usearch_dense_search_stream_free(usearch_dense_search_stream
 USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->cursor = nullptr;
+    if (arguments->start)
+        return propagate_error(usearch_status_unsupported_k, outcome, "No residency steps through graph links yet"),
+               void();
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
             if constexpr (is_vram_index<variant_type_>)
@@ -3757,6 +3228,7 @@ USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
         typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
                                                                          outcome);
         if (!executor) return;
+        progress_ticks_t ticks {arguments->progress, arguments->count};
         for (std::size_t position = 0; position != arguments->count; ++position) {
             usearch_dense_index_t& donor = arguments->donors[position];
             if (!donor)
@@ -3776,12 +3248,21 @@ USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
             status_t const absorbed = specialized_index {variant}.absorb(*typed, *executor).status;
             if (failed(absorbed)) return propagate_error(absorbed, outcome), void();
             delete std::exchange(donor, nullptr);
-            if (arguments->progress &&
-                arguments->progress(position + 1, arguments->count, arguments->progress_state) == usearch_cancel_k)
+            if (ticks(position + 1, arguments->count) == continuation_t::cancel_k)
                 return propagate_error(usearch_status_cancelled_k, outcome, "The handler stopped the call"), void();
         }
         propagate_error(usearch_status_success_k, outcome, nullptr);
     });
+}
+
+USEARCH_EXPORT void usearch_dense_sample(usearch_dense_sample_t* arguments) {
+    if (submitted<usearch_dense_sample>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    *arguments->keys = {};
+    *arguments->links = {};
+    *arguments->written = 0;
+    if (arguments->stats) *arguments->stats = {};
+    propagate_error(usearch_status_unsupported_k, outcome, "No residency samples yet");
 }
 
 #pragma endregion Cursors and Absorbing
@@ -3819,7 +3300,7 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                 usearch_distance_t* scores = nullptr;
                 // Every row keeps the pairs its walks scored until `width` of them fill its row,
                 // compacted once the counts are known.
-                auto walk = [&](std::size_t width, usearch_progress_callback_t progress) noexcept {
+                auto walk = [&](std::size_t width, usearch_progress_t progress) noexcept {
                     keys = width ? carve<usearch_key_t>(arena->memory, count * width) : nullptr;
                     scores = width ? carve<usearch_distance_t>(arena->memory, count * width) : nullptr;
                     if (width && (!keys || !scores))
@@ -3835,13 +3316,12 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                                              kept_scores(chunk, nk::slice), scored.subspan(resolved, taking));
                     };
                     return for_each_dense_chunk(variant, arguments->executor, count, arguments->left, 1,
-                                                arguments->expansion_factor, progress, arguments->progress_state,
-                                                arguments->stats, outcome, sink);
+                                                arguments->expansion_factor, progress, arguments->stats, outcome, sink);
                 };
                 // Keeping every pair needs the widest row first, which only a counting walk can tell.
                 std::size_t width = arguments->wanted;
                 if (!width) {
-                    if (!walk(0, nullptr)) return;
+                    if (!walk(0, usearch_progress_t {})) return;
                     for (std::size_t const row_scored : scored) width = max_of(width, row_scored);
                 }
                 if (!walk(width, arguments->progress)) return;
@@ -3937,8 +3417,8 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                                        carried.empty() ? carried : carried.subspan(resolved, taking), executor, config);
                 };
                 if (!for_each_dense_chunk(variant, arguments->executor, count, arguments->queries, head_count,
-                                          arguments->expansion_factor, arguments->progress, arguments->progress_state,
-                                          arguments->stats, outcome, sink))
+                                          arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
+                                          sink))
                     return;
                 if constexpr (is_vram_index<variant_type_>) {
                     status_t landed = publish(*arena, landing, count * row_bytes);
@@ -3978,8 +3458,7 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                 if (!carve_matches(arena->memory, count, wanted, landing, outcome)) return;
                 if (!match_dense_rows(
                         variant, arguments->executor, count, arguments->queries, rows_per_query, landing,
-                        arguments->expansion_factor, arguments->progress, arguments->progress_state, arguments->stats,
-                        outcome,
+                        arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
                         [&](auto view, auto rows, auto& executor, auto config, auto keys, auto scores, auto counts) {
                             return view.maxsim(rows, rows_per_query, executor, config, keys, scores, counts);
                         }))
@@ -4001,21 +3480,21 @@ USEARCH_EXPORT void usearch_dense_load_ram(usearch_dense_load_ram_t* arguments) 
     if (submitted<usearch_dense_load_ram>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     load_dense_index(as_text(arguments->path), arguments->ram, arguments->executor, arguments->progress,
-                     arguments->progress_state, arguments->index, outcome);
+                     arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments) {
     if (submitted<usearch_dense_load_vram>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     load_dense_index(as_text(arguments->path), arguments->vram, arguments->executor, arguments->progress,
-                     arguments->progress_state, arguments->index, outcome);
+                     arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments) {
     if (submitted<usearch_dense_load_ram_buffer>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     load_dense_index(as_bytes(arguments->buffer), arguments->ram, arguments->executor, arguments->progress,
-                     arguments->progress_state, arguments->index, outcome);
+                     arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments) {
@@ -4040,8 +3519,7 @@ USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffe
                    void();
         source = to_span(staged);
     }
-    load_dense_index(source, arguments->vram, arguments->executor, arguments->progress, arguments->progress_state,
-                     arguments->index, outcome);
+    load_dense_index(source, arguments->vram, arguments->executor, arguments->progress, arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {
@@ -4058,8 +3536,7 @@ USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {
                 typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
                                                                                  call_executor, outcome);
                 if (!executor) return;
-                shard_ticks_t ticks {arguments->progress, arguments->progress_state,
-                                     specialized_index {variant}.shards_count()};
+                progress_ticks_t ticks {arguments->progress, specialized_index {variant}.shards_count()};
                 propagate_error(specialized_index {variant}.save(as_text(arguments->path), *executor, ticks), outcome);
             }
         },
@@ -4087,8 +3564,7 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
                 std::byte* monolith = carve<std::byte>(arena->memory, length);
                 if (!monolith)
                     return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-                shard_ticks_t ticks {arguments->progress, arguments->progress_state,
-                                     specialized_index {variant}.shards_count()};
+                progress_ticks_t ticks {arguments->progress, specialized_index {variant}.shards_count()};
                 status_t const saved = specialized_index {variant}.save(
                     bytes_span_t {reinterpret_cast<byte_t*>(monolith), length}, *executor, ticks);
                 if (failed(saved)) return propagate_error(saved, outcome), void();

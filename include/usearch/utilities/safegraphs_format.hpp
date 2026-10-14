@@ -1132,7 +1132,7 @@ std::span<element_type_> safegraphs_typed_span_(std::span<byte_type_> segment, s
 /** Bytes a save of @p index under @p config writes; @c contended_k while a plan is open. */
 template <typename index_type_, typename codec_type_, typename allocator_type_ = std::allocator<byte_t>>
     requires interchange_value_codec<codec_type_>
-expected<std::size_t> safegraphs_storage_requirements(index_type_ const& index, codec_type_ const& codec,
+expected<std::size_t> safegraphs_storage_requirements(index_type_& index, codec_type_ const& codec,
                                                       save_config_t const& config, std::string_view metric,
                                                       allocator_type_ allocator = {}) noexcept {
     auto const [extents, measure_status] = index.columns_extents(codec);
@@ -1166,7 +1166,7 @@ expected<std::size_t> safegraphs_storage_requirements(index_type_ const& index, 
 template <typename index_type_, typename codec_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<byte_t>>
     requires interchange_value_codec<codec_type_>
-status_t safegraphs_write_index(bytes_span_t monolith, index_type_ const& index, codec_type_ const& codec,
+status_t safegraphs_write_index(bytes_span_t monolith, index_type_& index, codec_type_ const& codec,
                                 executor_type_& executor, save_config_t const& config, std::string_view metric,
                                 progress_type_&& progress = {}, allocator_type_ allocator = {}) noexcept {
     using key_t = typename index_type_::key_t;
@@ -1252,6 +1252,25 @@ status_t safegraphs_write_index(bytes_span_t monolith, index_type_ const& index,
     return safegraphs_write_header(monolith, header, to_span(fields), allocator);
 }
 
+/** Writes the monolith at @p path: sized from the index, created fresh, mapped, and flushed once
+ *  every region landed. */
+template <typename index_type_, typename codec_type_, typename executor_type_,
+          typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<byte_t>>
+    requires interchange_value_codec<codec_type_>
+status_t safegraphs_write_index(std::string_view path, index_type_& index, codec_type_ const& codec,
+                                executor_type_& executor, save_config_t const& config, std::string_view metric,
+                                progress_type_&& progress = {}, allocator_type_ allocator = {}) noexcept {
+    auto const [bytes, measure_status] = safegraphs_storage_requirements(index, codec, config, metric, allocator);
+    if (failed(measure_status)) return measure_status;
+    auto [mapping, map_status] = mapped_file_t::write(path, bytes);
+    if (failed(map_status)) return map_status;
+    if (status_t const saved = safegraphs_write_index(mapping.span(), index, codec, executor, config, metric,
+                                                      std::forward<progress_type_>(progress), allocator);
+        failed(saved))
+        return saved;
+    return mapping.sync();
+}
+
 /** What a columned index's monolith says about itself without touching the payload. */
 struct safegraphs_index_metadata_t {
 
@@ -1283,15 +1302,21 @@ struct safegraphs_index_metadata_t {
     safegraphs_name_t metric;
 };
 
-/** Reads a columned index's header from @p source into its metadata. */
-template <typename allocator_type_ = std::allocator<byte_t>>
+/**
+ *  @brief Reads a columned index's header from @p monolith into its metadata.
+ *  @param[in] per_custom_field Fires once per string-valued `__metadata__` entry, the metric
+ *      included, for the parameters a modality records beside it; its views die with this call.
+ */
+template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
 expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(bytes_view_t monolith,
-                                                                     allocator_type_ allocator = {}) noexcept {
+                                                                     allocator_type_ allocator = {},
+                                                                     callback_type_&& per_custom_field = {}) noexcept {
     safegraphs_index_metadata_t metadata;
-    auto per_custom_field = [&](safegraphs_custom_field_t field) noexcept {
+    auto per_field = [&](safegraphs_custom_field_t field) noexcept {
         if (field.key == "metric") metadata.metric = safegraphs_name_t {field.value};
+        per_custom_field(field);
     };
-    auto const [header, parse_status] = safegraphs_read_header(monolith, allocator, per_custom_field);
+    auto const [header, parse_status] = safegraphs_read_header(monolith, allocator, per_field);
     if (failed(parse_status)) return {metadata, parse_status};
     safegraphs_column_t const& value = header.value;
     std::size_t const id_bytes = dtype_bytes(header.neighbors.dtype);
@@ -1306,6 +1331,16 @@ expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(bytes_view_
     return {metadata, status_t::success_k};
 }
 
+/** The metadata of the monolith at @p path, mapped read-only. */
+template <typename allocator_type_ = std::allocator<byte_t>, typename callback_type_ = dummy_callback_t>
+expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(std::string_view path,
+                                                                     allocator_type_ allocator = {},
+                                                                     callback_type_&& per_custom_field = {}) noexcept {
+    auto [mapping, map_status] = mapped_file_t::read(path);
+    if (failed(map_status)) return {safegraphs_index_metadata_t {}, map_status};
+    return safegraphs_read_index_metadata(mapping.view(), allocator, std::forward<callback_type_>(per_custom_field));
+}
+
 /**
  *  @brief Restores a columned index from one monolith: the header is vetted against the codec's
  *      dtype and shape before any payload byte, the index is reserved when it has no capacity,
@@ -1314,7 +1349,8 @@ expected<safegraphs_index_metadata_t> safegraphs_read_index_metadata(bytes_view_
  *  A source lending its bytes in place hands the plan its data segment directly; any other
  *  source stages the segment in one read. The interchange counts elements and the index bytes,
  *  so the value prefix sums are re-expressed on the way in - synthesized for a fixed shape,
- *  scaled from the header's sums otherwise.
+ *  scaled from the header's sums otherwise. Neighbors load from ragged rows or from fixed-degree
+ *  ones, whose sentinels, any ID at or past the node count, are skipped.
  *
  *  @param[in] monolith The checkpoint's bytes - a buffer, or a file's mapping.
  *  @param[inout] index Anything with @c capacity, @c reserve, @c plan_load and their column types.
@@ -1338,7 +1374,8 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
     auto const [header, parse_status] = safegraphs_read_header(monolith, allocator);
     if (failed(parse_status)) return parse_status;
 
-    // Every column's dtype, layout and extent is vetted before a payload byte lands.
+    // Every column's dtype, layout and extent is vetted before a payload byte lands. Neighbors
+    // without prefix sums are fixed-degree rows.
     constexpr bool fixed_width = safegraphs_value_is_fixed<codec_type_>();
     safegraphs_column_t const& value = header.value;
     safegraphs_column_t const& adjacency = header.neighbors;
@@ -1350,8 +1387,11 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
     std::size_t const sums_bytes = (nodes + 1) * sizeof(u64_t);
     if (value.dtype != codec_type_::value_dtype_k || value.offsets.has_value() == fixed_width || value.shape != shape)
         return status_t::config_mismatch_k;
-    if (!adjacency.offsets || adjacency.dtype != safegraphs_node_id_dtype<node_id_t>() ||
-        adjacency.shape != column_shape_t {scalar_shape_t {}})
+    std::size_t const degree = std::holds_alternative<vector_shape_t>(adjacency.shape) && !adjacency.offsets
+                                   ? std::get<vector_shape_t>(adjacency.shape).columns
+                                   : 0;
+    if (adjacency.dtype != safegraphs_node_id_dtype<node_id_t>() ||
+        (adjacency.offsets ? adjacency.shape != column_shape_t {scalar_shape_t {}} : !degree))
         return status_t::config_mismatch_k;
     if constexpr (fixed_width) {
         if (value.data.size() != nodes * *regular_width(shape) * element_bytes) return status_t::malformed_k;
@@ -1361,12 +1401,17 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
         if (value.offsets->bytes.size() != sums_bytes || value.data.size() % element_bytes)
             return status_t::malformed_k;
     }
-    if (adjacency.offsets->dtype != dtype_t::u64_k) return status_t::config_mismatch_k;
-    if (adjacency.offsets->bytes.size() != sums_bytes || adjacency.data.size() % sizeof(node_id_t))
-        return status_t::malformed_k;
-    std::size_t const neighbors = adjacency.data.size() / sizeof(node_id_t);
+    if (degree) {
+        if (adjacency.data.size() != nodes * degree * sizeof(node_id_t)) return status_t::malformed_k;
+    }
+    else {
+        if (adjacency.offsets->dtype != dtype_t::u64_k) return status_t::config_mismatch_k;
+        if (adjacency.offsets->bytes.size() != sums_bytes || adjacency.data.size() % sizeof(node_id_t))
+            return status_t::malformed_k;
+    }
     if (header.key.data.first % alignof(u64_t) || value.data.first % alignof(u64_t) ||
-        adjacency.offsets->bytes.first % alignof(u64_t) || adjacency.data.first % alignof(u64_t) ||
+        adjacency.data.first % alignof(u64_t) ||
+        (adjacency.offsets && adjacency.offsets->bytes.first % alignof(u64_t)) ||
         (value.offsets && value.offsets->bytes.first % alignof(u64_t)))
         return status_t::config_mismatch_k;
     if (header.monolith_bytes() > monolith.size()) return status_t::malformed_k;
@@ -1380,11 +1425,35 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
     bytes_view_t const segment = monolith.subspan(header.data_offset, segment_bytes);
     if (reinterpret_cast<std::uintptr_t>(segment.data()) % alignof(u64_t)) return status_t::config_mismatch_k;
 
-    // Neighbor sums are the file's own buffer; @c plan_load proves they start at zero, never
-    // fall and end at the ID count. Value sums count bytes here, so a fixed shape synthesizes
-    // them and a ragged one of wider elements scales them up.
-    std::span<u64_t const> const neighbor_sums = safegraphs_typed_span_<u64_t const>(
-        segment, adjacency.offsets->bytes.first, nodes + 1);
+    // Ragged neighbor sums are the file's own buffer; `plan_load` proves they start at zero, never
+    // fall and end at the ID count. Fixed rows stage their IDs below the node count packed, every
+    // sentinel skipped. Value sums count bytes here, so a fixed shape synthesizes them and a ragged
+    // one of wider elements scales them up.
+    growing_buffer<u64_t, allocator_type_> staged_neighbor_sums {allocator};
+    growing_buffer<node_id_t, allocator_type_> staged_neighbor_ids {allocator};
+    std::span<u64_t const> neighbor_sums;
+    std::span<node_id_t const> neighbor_ids;
+    if (degree) {
+        std::span<node_id_t const> const rows = safegraphs_typed_span_<node_id_t const>(segment, adjacency.data.first,
+                                                                                        nodes * degree);
+        std::size_t kept = 0;
+        for (node_id_t const neighbor : rows) kept += static_cast<std::size_t>(neighbor) < nodes;
+        if (failed(staged_neighbor_sums.resize(nodes + 1)) || failed(staged_neighbor_ids.resize_uninitialized(kept)))
+            return status_t::bad_alloc_k;
+        kept = 0;
+        for (std::size_t node = 0; node != nodes; ++node) {
+            for (node_id_t const neighbor : rows.subspan(node * degree, degree))
+                if (static_cast<std::size_t>(neighbor) < nodes) staged_neighbor_ids[kept++] = neighbor;
+            staged_neighbor_sums[node + 1] = kept;
+        }
+        neighbor_sums = std::span<u64_t const> {staged_neighbor_sums};
+        neighbor_ids = std::span<node_id_t const> {staged_neighbor_ids};
+    }
+    else {
+        neighbor_sums = safegraphs_typed_span_<u64_t const>(segment, adjacency.offsets->bytes.first, nodes + 1);
+        neighbor_ids = safegraphs_typed_span_<node_id_t const>(segment, adjacency.data.first,
+                                                               adjacency.data.size() / sizeof(node_id_t));
+    }
     growing_buffer<u64_t, allocator_type_> staged_value_sums {allocator};
     std::span<u64_t const> value_sums;
     if constexpr (fixed_width) {
@@ -1410,7 +1479,7 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
     columns_view_t const columns {
         safegraphs_typed_span_<key_t const>(segment, header.key.data.first, nodes),
         neighbor_sums,
-        safegraphs_typed_span_<node_id_t const>(segment, adjacency.data.first, neighbors),
+        neighbor_ids,
         value_sums,
         segment.subspan(value.data.first, value.data.size()),
     };
@@ -1437,6 +1506,20 @@ status_t safegraphs_read_index(bytes_view_t monolith, index_type_& index, codec_
         failed(settled))
         return settled;
     return planned.value.finish();
+}
+
+/** Restores a columned index from the monolith at @p path, mapped read-only; every value is
+ *  decoded into its record, so nothing borrows the mapping once this returns. */
+template <typename index_type_, typename codec_type_, typename executor_type_,
+          typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<byte_t>>
+    requires interchange_value_codec<codec_type_>
+status_t safegraphs_read_index(std::string_view path, index_type_& index, codec_type_ const& codec,
+                               executor_type_& executor, load_config_t const& config, progress_type_&& progress = {},
+                               allocator_type_ allocator = {}) noexcept {
+    auto [mapping, map_status] = mapped_file_t::read(path);
+    if (failed(map_status)) return map_status;
+    return safegraphs_read_index(mapping.view(), index, codec, executor, config, std::forward<progress_type_>(progress),
+                                 allocator);
 }
 
 #pragma endregion Columned Indexes

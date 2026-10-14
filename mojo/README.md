@@ -1,6 +1,6 @@
 # USearch for Mojo
 
-The Mojo package binds the C ABI in `include/usearch/`, opening the engine's shared library with `dlopen` rather than linking it, so a consumer builds with no linker flags of its own.
+The Mojo package binds the C ABI in `c/usearch/`, opening the engine's shared library with `dlopen` rather than linking it, so a consumer builds with no linker flags of its own.
 It needs Mojo 1.1 or a later 1.x release through pixi, on Linux x86-64, Linux AArch64 or macOS on Apple silicon.
 It exposes dense indexes, Vector Search over equidimensional embeddings; sequence, matrix and geospatial indexes follow as the C library ships them.
 
@@ -97,7 +97,7 @@ Each call rewinds its arena, so the previous call's views die and a steady loop 
 To keep a result past the next call, or to read one while making the next, pass that call another arena.
 An arena serves one call at a time, so each deferred call needs its own.
 A view's origin keeps its arena alive, and reading a stale one raises `Status.UNINITIALIZED`.
-An arena from a VRAM executor holds device memory, which host accessors refuse with `Status.DEVICE`.
+An arena from a VRAM executor holds device memory, which host accessors refuse with `Status.DEVICE`, and serves only that executor's calls, keeping the executor alive until the arena goes.
 
 ```mojo
 var arena = Arena(executor)  # Arena(library) makes host pages for the calling thread
@@ -245,7 +245,7 @@ The candidate-pool breadth rides each call as `expansion_factor` rather than the
 ### Filtering & Progress
 
 A `predicate` in the `DenseSearchConfig` admits only the keys it approves, while non-matching entries still route the traversal, so recall does not collapse at low selectivity.
-It is the address of a `usearch_predicate_t` compiled in C, and its state crosses beside it as an address.
+It is the address of a `usearch_predicate_callback_t` compiled in C, judging a batch of keys per call, and its state crosses beside it as an address.
 
 ```mojo
 var admitted = index.search(queries, 10, arena, DenseSearchConfig(predicate=admits_even, predicate_state=tenant))
@@ -297,15 +297,15 @@ while index.on(executor).refine(DenseRefineConfig(expansion_factor=128)) != 0:
     pass
 ```
 
-### Merging & Splitting
+### Absorbing & Splitting
 
-Bigger indexes come from merging, never mutating: `merge` takes its donors by value, and the engine frees each one it absorbs.
-No residency of the engine absorbs donors yet, so it answers `Status.UNSUPPORTED`, and splitting is not in the C library yet.
+Bigger indexes come from absorbing, never mutating: `absorb` takes its donors by value, appends each one's rows with its graph, then refines across the appended part, and the engine frees each donor it absorbs.
+Splitting is not in the C library yet.
 
 ```mojo
 var donors = List[DenseIndex]()
 donors.append(shard^)
-index.on(executor).merge(donors^)
+index.on(executor).absorb(donors^)
 ```
 
 ### Sparse Multiplication
@@ -333,6 +333,7 @@ var documents = index.on(executor).maxsim(tokens, tokens_per_query, 10, arena)  
 `attend` is Flash Attention folded into the walk: every key it scores folds into each head's running maximum, partition and weighted value sum, with no top-k cut, and the attended rows land in the arena already divided by the partition.
 The index stores no values, so a `ValueLookup` resolves every scored batch of keys to value rows, `columns` values of `scalar` apiece, the index's own width and kind, which it checks before answering any row.
 A key without a row refuses the call with `Status.SHAPE_MISMATCH`, since a missing row is a wrong softmax rather than a smaller one.
+A VRAM index calls its lookup inside the device walk, so there `value_lookup` must be a `__device__` function's address, read with `cudaMemcpyFromSymbol`; a host function there is undefined, never refused.
 
 ```mojo
 def value_rows(
@@ -369,14 +370,14 @@ print(library.version_name(), library.capabilities_available())
 - __Progress handlers and cancellation.__
   A handler returns a verdict, and a Mojo 1.1 `def ... abi("C")` that returns a value does not lower to the C calling convention, so every `progress` slot crosses as `NULL_ADDRESS`.
 - __Predicates written in Mojo.__
-  A predicate returns a verdict too, for the same reason, so `predicate` takes the address of one compiled in C.
+  `predicate` takes the address of a `usearch_predicate_callback_t` compiled in C.
 - __Deferred cursors and streams.__
   `DenseIndexDeferredOn` offers neither, since their pulls block.
 
 ## Design
 
 - __A thin layer over the C ABI.__
-  Every name follows `include/usearch/`: a C verb `usearch_dense_<verb>` is a `<verb>` here, and enums mirror C enums, never strings.
+  Every name follows `c/usearch/`: a C verb `usearch_dense_<verb>` is a `<verb>` here, and enums mirror C enums, never strings.
 - __The receiver chooses, the verb stays.__
   The index runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__

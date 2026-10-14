@@ -13,18 +13,20 @@
  *  @section sequence_ram_metric_kits Kits
  *
  *  A kit binds one ISA's state and vertical types, its @c init / @c step / @c any_active / @c score
- *  verbs, its transpose and class loaders, how many candidates one step advances, and how many registers
- *  it advances per position. @c levenshtein_kit picks the widest kit this build compiled in under the
- *  requested capability mask, at compile time, so the loops below unroll around the kit's constants
- *  and never test a capability at run time.
+ *  verbs, its symbol count, query preparation, transpose and class loaders, how many candidates one
+ *  step advances, and how many registers it advances per position. @c levenshtein_kit picks the
+ *  widest kit this build compiled in under the requested capability mask and symbol, at compile
+ *  time, so the loops below unroll around the kit's constants and never test a capability at run
+ *  time.
  *
  *  @section sequence_ram_metric_levenshtein Levenshtein
  *
  *  Unit-cost Myers: the query's match masks are prepared once, and every candidate streams through
- *  them one byte per step, several candidates per step. The round is scored in ascending length
+ *  them one symbol per step, several candidates per step. The round is scored in ascending length
  *  order, since the candidates advanced together run as long as the longest of them, each candidate's
  *  score is read at the position where its text ends, and a freeze test every few positions stops a
- *  flight whose every candidate is already past the radius. Distances are byte-level edit counts.
+ *  flight whose every candidate is already past the radius. Distances count edits over bytes, or
+ *  over UTF-8 runes under @c sz_levenshtein_runes_k.
  *
  *  @section sequence_ram_metric_overlap Overlap
  *
@@ -44,8 +46,9 @@
 #include <type_traits> // `std::conditional_t`, `std::integral_constant` - the kit choice and the resident word count
 #include <utility>     // `std::swap`
 
-#include <stringzilla/levenshtein.h> // `sz_levenshtein_query_*`, the transposes, and the per-backend step primitives
-#include <stringzilla/overlap.h>     // `sz_overlap_*` & the per-backend step primitives
+#include <stringzilla/levenshtein.h>   // `sz_levenshtein_query_*`, the transposes, and the per-backend step primitives
+#include <stringzilla/overlap.h>       // `sz_overlap_*` & the per-backend step primitives
+#include <stringzilla/stringzilla.hpp> // `sz::string_view_t` - every operand a metric takes
 
 #include "usearch/utilities/types.hpp"
 #include "usearch/utilities/ram_buffers.hpp"
@@ -59,6 +62,17 @@ using namespace unum::usearch::utilities;
 struct levenshtein_serial_kit_t;
 struct levenshtein_haswell_kit_t;
 struct levenshtein_skylake_kit_t;
+struct levenshtein_neon_kit_t;
+struct levenshtein_utf8_serial_kit_t;
+struct levenshtein_utf8_haswell_kit_t;
+struct levenshtein_utf8_skylake_kit_t;
+struct levenshtein_utf8_neon_kit_t;
+
+/** Symbols in a byte string: its length, as every byte is one. */
+constexpr std::size_t levenshtein_byte_symbols_(sz_cptr_t, sz_size_t length) noexcept { return length; }
+
+/** Bytes a byte query's class table takes: one class per byte value, whatever the query. */
+constexpr std::size_t levenshtein_byte_class_table_bytes_(sz_size_t) noexcept { return sz_levenshtein_byte_classes_k; }
 
 /** Scalar Myers: one candidate per step, eight independent candidates per position to fill the pipeline. */
 struct levenshtein_serial_kit_t {
@@ -73,9 +87,22 @@ struct levenshtein_serial_kit_t {
     static constexpr auto step = sz_levenshtein_u64x1_step_serial;
     static constexpr auto any_active = sz_levenshtein_u64x1_any_active_serial;
     static constexpr auto score = sz_levenshtein_u64x1_score_serial;
+    static constexpr auto symbols = levenshtein_byte_symbols_;
+    static constexpr auto mask_entries = sz_levenshtein_query_mask_entries;
+    static constexpr auto class_table_bytes = levenshtein_byte_class_table_bytes_;
+    static constexpr auto prepare = sz_levenshtein_query_prepare;
     static constexpr auto transpose = sz_levenshtein_transpose;
     static classes_t classes(class_t const* transpose_classes) noexcept { return *transpose_classes; }
     static counts_t counts(sz_u64_t const* lengths) noexcept { return *lengths; }
+};
+
+/** Scalar Myers over UTF-8 runes: the serial steps, fed the rune classes a page table hands out. */
+struct levenshtein_utf8_serial_kit_t : levenshtein_serial_kit_t {
+    static constexpr auto symbols = sz_levenshtein_utf8_runes;
+    static constexpr auto mask_entries = sz_levenshtein_query_mask_entries_utf8;
+    static constexpr auto class_table_bytes = sz_levenshtein_utf8_pages_bytes;
+    static constexpr auto prepare = sz_levenshtein_query_prepare_utf8;
+    static constexpr auto transpose = sz_levenshtein_transpose_utf8;
 };
 
 #if STRINGZILLA_TARGET_HASWELL
@@ -93,6 +120,10 @@ struct levenshtein_haswell_kit_t {
     static constexpr auto step = sz_levenshtein_u64x4_step_haswell;
     static constexpr auto any_active = sz_levenshtein_u64x4_any_active_haswell;
     static constexpr auto score = sz_levenshtein_u64x4_score_haswell;
+    static constexpr auto symbols = levenshtein_byte_symbols_;
+    static constexpr auto mask_entries = sz_levenshtein_query_mask_entries;
+    static constexpr auto class_table_bytes = levenshtein_byte_class_table_bytes_;
+    static constexpr auto prepare = sz_levenshtein_query_prepare;
     static constexpr auto transpose = sz_levenshtein_u8x4_transpose_haswell;
     static classes_t classes(class_t const* transpose_classes) noexcept {
         return sz_levenshtein_u64x4_classes_u8_haswell(transpose_classes);
@@ -101,6 +132,19 @@ struct levenshtein_haswell_kit_t {
         counts_t counts_vec;
         counts_vec.ymm = _mm256_loadu_si256(reinterpret_cast<__m256i const*>(lengths));
         return counts_vec;
+    }
+};
+
+/** Intel Haswell AVX2 over UTF-8 runes: four candidates per step, fed 32-bit rune classes. */
+struct levenshtein_utf8_haswell_kit_t : levenshtein_haswell_kit_t {
+    using class_t = sz_u32_t;
+    static constexpr auto symbols = sz_levenshtein_utf8_runes;
+    static constexpr auto mask_entries = sz_levenshtein_query_mask_entries_utf8;
+    static constexpr auto class_table_bytes = sz_levenshtein_utf8_pages_bytes;
+    static constexpr auto prepare = sz_levenshtein_query_prepare_utf8;
+    static constexpr auto transpose = sz_levenshtein_transpose_utf8;
+    static classes_t classes(class_t const* transpose_classes) noexcept {
+        return sz_levenshtein_u64x4_classes_u32_haswell(transpose_classes);
     }
 };
 #endif // STRINGZILLA_TARGET_HASWELL
@@ -120,6 +164,10 @@ struct levenshtein_skylake_kit_t {
     static constexpr auto step = sz_levenshtein_u64x8_step_skylake;
     static constexpr auto any_active = sz_levenshtein_u64x8_any_active_skylake;
     static constexpr auto score = sz_levenshtein_u64x8_score_skylake;
+    static constexpr auto symbols = levenshtein_byte_symbols_;
+    static constexpr auto mask_entries = sz_levenshtein_query_mask_entries;
+    static constexpr auto class_table_bytes = levenshtein_byte_class_table_bytes_;
+    static constexpr auto prepare = sz_levenshtein_query_prepare;
     static constexpr auto transpose = sz_levenshtein_u8x8_transpose_skylake;
     static classes_t classes(class_t const* transpose_classes) noexcept {
         return sz_levenshtein_u64x8_classes_u8_skylake(transpose_classes);
@@ -130,15 +178,83 @@ struct levenshtein_skylake_kit_t {
         return counts_vec;
     }
 };
+
+/** Intel Skylake-X AVX-512 over UTF-8 runes: eight candidates per step, fed 32-bit rune classes. */
+struct levenshtein_utf8_skylake_kit_t : levenshtein_skylake_kit_t {
+    using class_t = sz_u32_t;
+    static constexpr auto symbols = sz_levenshtein_utf8_runes;
+    static constexpr auto mask_entries = sz_levenshtein_query_mask_entries_utf8;
+    static constexpr auto class_table_bytes = sz_levenshtein_utf8_pages_bytes;
+    static constexpr auto prepare = sz_levenshtein_query_prepare_utf8;
+    static constexpr auto transpose = sz_levenshtein_transpose_utf8;
+    static classes_t classes(class_t const* transpose_classes) noexcept {
+        return sz_levenshtein_u64x8_classes_u32_skylake(transpose_classes);
+    }
+};
 #endif // STRINGZILLA_TARGET_SKYLAKE
 
-/** The widest Levenshtein kit this build compiled in among the backends @p capability_ admits; each row's
- *  flag is the backend's @c STRINGZILLA_TARGET_* and the mask's bit, so an unselected kit's body never has to exist. */
-template <sz_capability_t capability_>
-using levenshtein_kit =
-    std::conditional_t<STRINGZILLA_TARGET_SKYLAKE && (capability_ & sz_cap_skylake_k) != 0, levenshtein_skylake_kit_t,
-                       std::conditional_t<STRINGZILLA_TARGET_HASWELL && (capability_ & sz_cap_haswell_k) != 0,
-                                          levenshtein_haswell_kit_t, levenshtein_serial_kit_t>>;
+#if STRINGZILLA_TARGET_NEON
+
+/** Arm NEON: two candidates per step, four registers per position, a SIMD byte transpose. */
+struct levenshtein_neon_kit_t {
+    using state_t = sz_levenshtein_u64x2_state_neon_t;
+    using vertical_t = sz_levenshtein_u64x2_vertical_neon_t;
+    using class_t = sz_u8_t;
+    using classes_t = sz_u128_vec_t;
+    using counts_t = sz_u128_vec_t;
+    static constexpr std::size_t candidates_per_step_k = sz_levenshtein_u64x2_candidates_per_step_neon_k;
+    static constexpr std::size_t registers_per_position_k = sz_levenshtein_u64x2_registers_per_position_neon_k;
+    static constexpr auto init = sz_levenshtein_u64x2_init_neon;
+    static constexpr auto step = sz_levenshtein_u64x2_step_neon;
+    static constexpr auto any_active = sz_levenshtein_u64x2_any_active_neon;
+    static constexpr auto score = sz_levenshtein_u64x2_score_neon;
+    static constexpr auto symbols = levenshtein_byte_symbols_;
+    static constexpr auto mask_entries = sz_levenshtein_query_mask_entries;
+    static constexpr auto class_table_bytes = levenshtein_byte_class_table_bytes_;
+    static constexpr auto prepare = sz_levenshtein_query_prepare;
+    static constexpr auto transpose = sz_levenshtein_u8x8_transpose_neon;
+    static classes_t classes(class_t const* transpose_classes) noexcept {
+        return sz_levenshtein_u64x2_classes_u8_neon(transpose_classes);
+    }
+    static counts_t counts(sz_u64_t const* lengths) noexcept {
+        counts_t counts_vec;
+        counts_vec.u64x2 = vld1q_u64(lengths);
+        return counts_vec;
+    }
+};
+
+/** Arm NEON over UTF-8 runes: two candidates per step, four registers per position. */
+struct levenshtein_utf8_neon_kit_t : levenshtein_neon_kit_t {
+    using class_t = sz_u32_t;
+    static constexpr auto symbols = sz_levenshtein_utf8_runes;
+    static constexpr auto mask_entries = sz_levenshtein_query_mask_entries_utf8;
+    static constexpr auto class_table_bytes = sz_levenshtein_utf8_pages_bytes;
+    static constexpr auto prepare = sz_levenshtein_query_prepare_utf8;
+    static constexpr auto transpose = sz_levenshtein_transpose_utf8;
+    static classes_t classes(class_t const* transpose_classes) noexcept {
+        return sz_levenshtein_u64x2_classes_u32_neon(transpose_classes);
+    }
+};
+#endif // STRINGZILLA_TARGET_NEON
+
+/** The widest Levenshtein kit this build compiled in among the backends @p capability_ admits, over
+ *  the symbols @p symbol_ names; each row's flag is the backend's @c STRINGZILLA_TARGET_* and the
+ *  mask's bit, so an unselected kit's body never has to exist. */
+template <sz_capability_t capability_, sz_levenshtein_symbol_t symbol_ = sz_levenshtein_bytes_k>
+using levenshtein_kit = std::conditional_t<
+    symbol_ == sz_levenshtein_bytes_k,
+    std::conditional_t<
+        STRINGZILLA_TARGET_SKYLAKE && (capability_ & sz_cap_skylake_k) != 0, levenshtein_skylake_kit_t,
+        std::conditional_t<STRINGZILLA_TARGET_HASWELL && (capability_ & sz_cap_haswell_k) != 0,
+                           levenshtein_haswell_kit_t,
+                           std::conditional_t<STRINGZILLA_TARGET_NEON && (capability_ & sz_cap_neon_k) != 0,
+                                              levenshtein_neon_kit_t, levenshtein_serial_kit_t>>>,
+    std::conditional_t<
+        STRINGZILLA_TARGET_SKYLAKE && (capability_ & sz_cap_skylake_k) != 0, levenshtein_utf8_skylake_kit_t,
+        std::conditional_t<STRINGZILLA_TARGET_HASWELL && (capability_ & sz_cap_haswell_k) != 0,
+                           levenshtein_utf8_haswell_kit_t,
+                           std::conditional_t<STRINGZILLA_TARGET_NEON && (capability_ & sz_cap_neon_k) != 0,
+                                              levenshtein_utf8_neon_kit_t, levenshtein_utf8_serial_kit_t>>>>;
 
 /** Query words whose verticals stay register-resident: one and two measured faster than the scratch walk,
  *  wider ones spill on sixteen-register machines. */
@@ -158,11 +274,13 @@ constexpr std::size_t levenshtein_freeze_cadence_k = 16;
  *  candidate is past the radius. The verticals live in a local array on the resident path - the vector unions may
  *  alias, and only a local lets the step's stores be proven disjoint - and in @p verticals_scratch above it.
  *
+ *  @param[in] symbol_counts Every staged candidate's length in the kit's symbols, by push slot.
  *  @param[in] words The unroll bound: an @c std::integral_constant on the resident path, the query's count otherwise.
  */
 template <typename kit_, typename words_type_>
-void levenshtein_distances_(sz_levenshtein_query_t const& shared_query, sz_string_view_t const* candidates,
-                            u32_t const* order, std::size_t count, i64_t radius, i64_t* distances, words_type_ words,
+void levenshtein_distances_(sz_levenshtein_query_t const& shared_query, sz::string_view_t const* candidates,
+                            std::size_t const* symbol_counts, u32_t const* order, std::size_t count, i64_t radius,
+                            i64_t* distances, words_type_ words,
                             typename kit_::vertical_t* verticals_scratch) noexcept {
     // A local copy: nothing stored through the verticals can alias it, so the step keeps its fields in registers.
     sz_levenshtein_query_t const query = shared_query;
@@ -182,12 +300,14 @@ void levenshtein_distances_(sz_levenshtein_query_t const& shared_query, sz_strin
     for (std::size_t flight_start = 0; flight_start < count; flight_start += candidates_per_position_k) {
         std::size_t const flight_count = min_of(candidates_per_position_k, count - flight_start);
         sz_cptr_t starts[candidates_per_position_k] = {};
+        sz_u64_t byte_counts[candidates_per_position_k] = {};
         sz_u64_t lengths[candidates_per_position_k] = {};
         std::size_t cursors[candidates_per_position_k] = {};
         std::size_t next_read[registers_per_position_k] = {};
         for (std::size_t candidate = 0; candidate != flight_count; ++candidate) {
-            sz_string_view_t const& view = candidates[order[flight_start + candidate]];
-            starts[candidate] = view.start, lengths[candidate] = view.length;
+            u32_t const slot = order[flight_start + candidate];
+            starts[candidate] = candidates[slot].data(), byte_counts[candidate] = candidates[slot].size();
+            lengths[candidate] = symbol_counts[slot];
         }
         // Padding candidates of a partial flight have no slot to read into.
         for (std::size_t candidate = flight_count; candidate != candidates_per_position_k; ++candidate)
@@ -206,7 +326,8 @@ void levenshtein_distances_(sz_levenshtein_query_t const& shared_query, sz_strin
         bool alive = true;
         for (std::size_t transpose_start = 0, filled = positions_per_transpose_k;
              alive && filled == positions_per_transpose_k; transpose_start += filled) {
-            filled = kit_::transpose(&query, starts, lengths, candidates_per_position_k, cursors, lengths,
+            // A rune transpose rewrites a dry candidate's symbol count to the value it holds.
+            filled = kit_::transpose(&query, starts, byte_counts, candidates_per_position_k, cursors, lengths,
                                      transpose_start, positions_per_transpose_k, &transpose_classes[0][0]);
             for (std::size_t position = 0; position != filled; ++position) {
                 std::size_t const global = transpose_start + position;
@@ -250,17 +371,18 @@ constexpr std::size_t levenshtein_scratch_verticals(std::size_t words) noexcept 
 
 /** The scoring entry: register-resident verticals for one- and two-word queries, scratch above. */
 template <typename kit_>
-void levenshtein_distances(sz_levenshtein_query_t const& query, sz_string_view_t const* candidates, u32_t const* order,
-                           std::size_t count, i64_t radius, i64_t* distances,
-                           typename kit_::vertical_t* verticals_scratch) noexcept {
+void levenshtein_distances(sz_levenshtein_query_t const& query, sz::string_view_t const* candidates,
+                           std::size_t const* symbol_counts, u32_t const* order, std::size_t count, i64_t radius,
+                           i64_t* distances, typename kit_::vertical_t* verticals_scratch) noexcept {
     std::size_t const words = sz_levenshtein_query_words(query.length);
     if (words == 1)
-        return levenshtein_distances_<kit_>(query, candidates, order, count, radius, distances,
+        return levenshtein_distances_<kit_>(query, candidates, symbol_counts, order, count, radius, distances,
                                             std::integral_constant<std::size_t, 1> {}, verticals_scratch);
     if (words == 2)
-        return levenshtein_distances_<kit_>(query, candidates, order, count, radius, distances,
+        return levenshtein_distances_<kit_>(query, candidates, symbol_counts, order, count, radius, distances,
                                             std::integral_constant<std::size_t, 2> {}, verticals_scratch);
-    levenshtein_distances_<kit_>(query, candidates, order, count, radius, distances, words, verticals_scratch);
+    levenshtein_distances_<kit_>(query, candidates, symbol_counts, order, count, radius, distances, words,
+                                 verticals_scratch);
 }
 
 #pragma endregion Levenshtein Kernels
@@ -270,6 +392,7 @@ void levenshtein_distances(sz_levenshtein_query_t const& query, sz_string_view_t
 struct overlap_serial_kit_t;
 struct overlap_haswell_kit_t;
 struct overlap_skylake_kit_t;
+struct overlap_neon_kit_t;
 
 /** Scalar binding: one position per step, one key per sort and probe step. */
 struct overlap_serial_kit_t {
@@ -310,13 +433,28 @@ struct overlap_skylake_kit_t {
 };
 #endif // STRINGZILLA_TARGET_SKYLAKE
 
+#if STRINGZILLA_TARGET_NEON
+
+/** Arm NEON: two positions per step, four keys per sort and probe step. */
+struct overlap_neon_kit_t {
+    static constexpr std::size_t positions_per_step_k = sz_overlap_f64x2_positions_per_step_neon_k;
+    static constexpr auto prefix_hash_step = sz_overlap_f64x2_prefix_hash_step_neon;
+    static constexpr auto prefix_hash_step_tail = sz_overlap_f64x2_prefix_hash_step_tail_neon;
+    static constexpr auto window_hash_step = sz_overlap_f64x2_window_hash_step_neon;
+    static constexpr auto window_hash_step_tail = sz_overlap_f64x2_window_hash_step_tail_neon;
+    static constexpr auto btree_sort = sz_overlap_u32x4_btree_sort_neon;
+    static constexpr auto btree_probe = sz_overlap_u32x4_btree_probe_neon;
+};
+#endif // STRINGZILLA_TARGET_NEON
+
 /** The widest overlap kit this build compiled in among the backends @p capability_ admits; each row's flag is
  *  the backend's @c STRINGZILLA_TARGET_* and the mask's bit, so an unselected kit's body never has to exist. */
 template <sz_capability_t capability_>
-using overlap_kit =
-    std::conditional_t<STRINGZILLA_TARGET_SKYLAKE && (capability_ & sz_cap_skylake_k) != 0, overlap_skylake_kit_t,
-                       std::conditional_t<STRINGZILLA_TARGET_HASWELL && (capability_ & sz_cap_haswell_k) != 0,
-                                          overlap_haswell_kit_t, overlap_serial_kit_t>>;
+using overlap_kit = std::conditional_t<
+    STRINGZILLA_TARGET_SKYLAKE && (capability_ & sz_cap_skylake_k) != 0, overlap_skylake_kit_t,
+    std::conditional_t<STRINGZILLA_TARGET_HASWELL && (capability_ & sz_cap_haswell_k) != 0, overlap_haswell_kit_t,
+                       std::conditional_t<STRINGZILLA_TARGET_NEON && (capability_ & sz_cap_neon_k) != 0,
+                                          overlap_neon_kit_t, overlap_serial_kit_t>>>;
 
 /** Candidates whose prefix-hash chains advance together: one chain's recurrence is latency-bound at about fifty
  *  cycles per step, and four independent chains hide it - measured 39 → 26 µs per round of 64 candidates. */
@@ -338,7 +476,7 @@ void overlap_prefix_hashes(char const* text, std::size_t length, f64_t* prefix_h
 /** One flight's chains advanced in one loop, each candidate carrying its own prior into its own @p stride -wide
  *  slice of @p prefix_hashes; a chain past its text idles until the longest ends, then every tail finishes alone. */
 template <typename kit_>
-void overlap_prefix_hashes_flight(sz_string_view_t const* candidates, std::size_t stride,
+void overlap_prefix_hashes_flight(sz::string_view_t const* candidates, std::size_t stride,
                                   f64_t* prefix_hashes) noexcept {
     constexpr std::size_t step_k = kit_::positions_per_step_k;
     constexpr std::size_t flight_k = overlap_candidates_per_flight_k;
@@ -346,18 +484,18 @@ void overlap_prefix_hashes_flight(sz_string_view_t const* candidates, std::size_
     std::size_t longest = 0;
     for (std::size_t chain = 0; chain != flight_k; ++chain) {
         prefix_hashes[chain * stride] = 0.0;
-        longest = max_of(longest, candidates[chain].length);
+        longest = max_of(longest, candidates[chain].size());
     }
     for (std::size_t position = 0; position + step_k <= longest; position += step_k)
         for (std::size_t chain = 0; chain != flight_k; ++chain)
-            if (position + step_k <= candidates[chain].length)
-                priors[chain] = kit_::prefix_hash_step(priors[chain], candidates[chain].start + position,
+            if (position + step_k <= candidates[chain].size())
+                priors[chain] = kit_::prefix_hash_step(priors[chain], candidates[chain].data() + position,
                                                        prefix_hashes + chain * stride + position + 1);
     for (std::size_t chain = 0; chain != flight_k; ++chain) {
-        std::size_t const length = candidates[chain].length;
+        std::size_t const length = candidates[chain].size();
         std::size_t const tail = length % step_k;
         if (tail == 0) continue;
-        kit_::prefix_hash_step_tail(priors[chain], candidates[chain].start + length - tail, tail,
+        kit_::prefix_hash_step_tail(priors[chain], candidates[chain].data() + length - tail, tail,
                                     prefix_hashes + chain * stride + length - tail + 1);
     }
 }
@@ -390,28 +528,37 @@ void overlap_window_hashes(f64_t const* prefix_hashes, std::size_t windows, std:
  *
  *  @tparam capability_ The admitted ISA backends as a capability mask; the widest kit this build compiled in
  *      among them is picked.
+ *  @tparam symbol_ What one edit replaces: a byte, or a UTF-8 rune.
  *  @tparam allocator_type_ places every buffer, one set per metric.
  */
-template <sz_capability_t capability_ = sz_cap_any_k, typename allocator_type_ = std::allocator<byte_t>>
+template <sz_capability_t capability_ = sz_cap_any_k, sz_levenshtein_symbol_t symbol_ = sz_levenshtein_bytes_k,
+          typename allocator_type_ = std::allocator<byte_t>>
 class levenshtein_metric {
   public:
-    using kit_t = levenshtein_kit<capability_>;
+    using kit_t = levenshtein_kit<capability_, symbol_>;
     using allocator_t = allocator_type_;
+    using is_transparent = void;
 
   private:
 
-    /** The prepared query; @c masks and @c byte_to_class point into @c masks_, and @c length is zero for an
-     *  empty query. */
+    /** The prepared query; its masks point into @c masks_ and its class table into @c class_table_,
+     *  and @c length is zero for an empty query. */
     sz_levenshtein_query_t query_ {};
 
-    /** The query's match masks, then its byte-to-class table, grown to the widest query seen. */
+    /** The query's match masks, grown to the widest query seen. */
     growing_buffer<u64_t, allocator_t> masks_;
+
+    /** The query's byte-to-class map or rune page table, grown to the widest query seen. */
+    growing_buffer<sz_u8_t, allocator_t> class_table_;
 
     /** Verticals for queries wider than the resident count, grown to the widest query seen. */
     growing_buffer<typename kit_t::vertical_t, allocator_t> verticals_;
 
     /** The round's candidates in push order. */
-    growing_buffer<sz_string_view_t, allocator_t> staged_;
+    growing_buffer<sz::string_view_t, allocator_t> staged_;
+
+    /** Every staged candidate's length in the kit's symbols, by push slot, measured per round. */
+    growing_buffer<std::size_t, allocator_t> symbol_counts_;
 
     /** Two halves of the staging capacity: @c order_[rank] = slot, ascending by length, the radix passes
      *  bouncing between them. */
@@ -420,14 +567,15 @@ class levenshtein_metric {
 
   public:
     levenshtein_metric(allocator_t const& allocator = {}) noexcept
-        : masks_(allocator), verticals_(allocator), staged_(allocator), order_(allocator) {}
+        : masks_(allocator), class_table_(allocator), verticals_(allocator), staged_(allocator),
+          symbol_counts_(allocator), order_(allocator) {}
     levenshtein_metric(levenshtein_metric const&) = delete;
     levenshtein_metric& operator=(levenshtein_metric const&) = delete;
     levenshtein_metric(levenshtein_metric&&) noexcept = default;
     levenshtein_metric& operator=(levenshtein_metric&&) noexcept = default;
 
     /**
-     *  @brief Sizes the staging and the ordering.
+     *  @brief Sizes the staging, the symbol counts and the ordering.
      *  @param[in] staging_limit How many candidates one round may hold before @c push refuses; at least the
      *      index's round capacity, @c max(fan_out × connectivity, connectivity + 1), or rounds saturate rather
      *      than fail. A round is bounded to @c u32_t slots by design.
@@ -435,6 +583,8 @@ class levenshtein_metric {
     status_t init(std::size_t staging_limit) noexcept {
         if (!staging_limit || staging_limit > (std::numeric_limits<u32_t>::max)()) return status_t::config_mismatch_k;
         if (status_t const staged = staged_.reserve_exactly(staging_limit); failed(staged)) return staged;
+        if (status_t const counted = symbol_counts_.resize_uninitialized(staged_.capacity()); failed(counted))
+            return counted;
         last_status_ = order_.resize_uninitialized(2 * staged_.capacity());
         return last_status_;
     }
@@ -444,30 +594,31 @@ class levenshtein_metric {
     status_t status() const noexcept { return last_status_; }
 
     /** @brief Opens a round for @p query, preparing its masks and discarding whatever the previous round staged. */
-    void reset(sz_string_view_t const& query) noexcept {
+    void reset(sz::string_view_t query) noexcept {
         staged_.clear();
         query_ = sz_levenshtein_query_t {};
         last_status_ = status_t::success_k;
-        if (query.length == 0) return;
+        if (query.empty()) return;
         // Grow only past the widest query seen: `reserve` keeps the allocation, the size then follows within it.
-        std::size_t const words = sz_levenshtein_query_words(query.length);
-        std::size_t const scratch_verticals = levenshtein_scratch_verticals<kit_t>(words);
-        std::size_t const mask_entries = sz_levenshtein_query_mask_entries(query.length);
-        std::size_t const entries = mask_entries + sz_levenshtein_byte_classes_k / sizeof(u64_t);
-        last_status_ = masks_.reserve(entries);
+        std::size_t const symbols = kit_t::symbols(query.data(), query.size());
+        std::size_t const scratch_verticals = levenshtein_scratch_verticals<kit_t>(sz_levenshtein_query_words(symbols));
+        std::size_t const mask_entries = kit_t::mask_entries(symbols);
+        std::size_t const class_table_bytes = kit_t::class_table_bytes(symbols);
+        last_status_ = masks_.reserve(mask_entries);
+        if (failed(last_status_)) return;
+        last_status_ = class_table_.reserve(class_table_bytes);
         if (failed(last_status_)) return;
         last_status_ = verticals_.reserve(scratch_verticals);
         if (failed(last_status_)) return;
-        masks_.resize_reserved(entries);
+        masks_.resize_reserved(mask_entries);
+        class_table_.resize_reserved(class_table_bytes);
         verticals_.resize_reserved(scratch_verticals);
-        auto* const byte_to_class = reinterpret_cast<sz_u8_t*>(masks_.data() + mask_entries);
-        if (sz_levenshtein_query_prepare(query.start, query.length, masks_.data(), byte_to_class, &query_) !=
-            sz_success_k)
+        if (kit_t::prepare(query.data(), query.size(), masks_.data(), class_table_.data(), &query_) != sz_success_k)
             last_status_ = status_t::shape_mismatch_k;
     }
 
     /** @brief Stages one candidate, or refuses once the round is full. */
-    basic::metric_staging_t push(sz_string_view_t const& value) noexcept {
+    basic::metric_staging_t push(sz::string_view_t value) noexcept {
         if (staged_.size() == staged_.capacity()) return basic::metric_staging_t::refused_k;
         staged_.push_back_reserved(value);
         return basic::metric_staging_t::staged_k;
@@ -481,7 +632,8 @@ class levenshtein_metric {
      *
      *  In length order the candidates whose length gap alone exceeds the radius form a prefix and a suffix
      *  that never enter the kernel and report that gap - the suffix cut is what keeps a long candidate out
-     *  of a register - and the rest stream through it.
+     *  of a register - and the rest stream through it. Lengths count the kit's symbols, each
+     *  candidate's measured once per round.
      *
      *  @param[out] distances One slot per staged candidate, in push order.
      *  @param[in] radius The furthest distance the caller still tells apart.
@@ -493,34 +645,37 @@ class levenshtein_metric {
             staged_.clear();
             return;
         }
+        for (std::size_t slot = 0; slot != count; ++slot)
+            symbol_counts_[slot] = kit_t::symbols(staged_[slot].data(), staged_[slot].size());
         i64_t const query_length = static_cast<i64_t>(query_.length);
         if (query_length == 0) {
             for (std::size_t slot = 0; slot != count; ++slot)
-                distances[slot] = static_cast<i64_t>(staged_[slot].length);
+                distances[slot] = static_cast<i64_t>(symbol_counts_[slot]);
             staged_.clear();
             return;
         }
         u32_t const* const order = order_by_length_(count);
         std::size_t first_within = 0, end_within = count;
-        while (first_within != count && query_length - static_cast<i64_t>(staged_[order[first_within]].length) > radius)
+        while (first_within != count && query_length - static_cast<i64_t>(symbol_counts_[order[first_within]]) > radius)
             ++first_within;
         while (end_within != first_within &&
-               static_cast<i64_t>(staged_[order[end_within - 1]].length) - query_length > radius)
+               static_cast<i64_t>(symbol_counts_[order[end_within - 1]]) - query_length > radius)
             --end_within;
         for (std::size_t rank = 0; rank != first_within; ++rank)
-            distances[order[rank]] = query_length - static_cast<i64_t>(staged_[order[rank]].length);
+            distances[order[rank]] = query_length - static_cast<i64_t>(symbol_counts_[order[rank]]);
         for (std::size_t rank = end_within; rank != count; ++rank)
-            distances[order[rank]] = static_cast<i64_t>(staged_[order[rank]].length) - query_length;
-        levenshtein_distances<kit_t>(query_, staged_.data(), order + first_within, end_within - first_within, radius,
-                                     distances.data(), verticals_.data());
+            distances[order[rank]] = static_cast<i64_t>(symbol_counts_[order[rank]]) - query_length;
+        levenshtein_distances<kit_t>(query_, staged_.data(), symbol_counts_.data(), order + first_within,
+                                     end_within - first_within, radius, distances.data(), verticals_.data());
         staged_.clear();
     }
 
   private:
     /**
      *  @brief The ascending-length permutation of the first @p count staged views: a stable LSD radix over the
-     *      length bytes, low byte first, visiting only the bytes that differ across the round - so lengths under
-     *      256 cost one counting pass and one scatter, and nothing allocates or throws.
+     *      bytes of their symbol counts, low byte first, visiting only the bytes that differ across
+     *      the round - so lengths under 256 cost one counting pass and one scatter, and nothing
+     *      allocates or throws.
      *  @return Whichever half of @c order_ holds the finished permutation.
      */
     u32_t const* order_by_length_(std::size_t count) noexcept {
@@ -529,20 +684,20 @@ class levenshtein_metric {
         std::size_t all_ones = ~std::size_t(0), any_ones = 0;
         for (std::size_t slot = 0; slot != count; ++slot) {
             source[slot] = static_cast<u32_t>(slot);
-            all_ones &= staged_[slot].length, any_ones |= staged_[slot].length;
+            all_ones &= symbol_counts_[slot], any_ones |= symbol_counts_[slot];
         }
         std::size_t const varying = all_ones ^ any_ones;
         for (std::size_t shift = 0; shift != std::numeric_limits<std::size_t>::digits; shift += 8) {
             if (((varying >> shift) & 0xFF) == 0) continue;
             std::size_t offsets[256] = {};
-            for (std::size_t rank = 0; rank != count; ++rank) ++offsets[(staged_[source[rank]].length >> shift) & 0xFF];
+            for (std::size_t rank = 0; rank != count; ++rank) ++offsets[(symbol_counts_[source[rank]] >> shift) & 0xFF];
             std::size_t running = 0;
             for (std::size_t digit = 0; digit != 256; ++digit) {
                 std::size_t const bucket = offsets[digit];
                 offsets[digit] = running, running += bucket;
             }
             for (std::size_t rank = 0; rank != count; ++rank)
-                target[offsets[(staged_[source[rank]].length >> shift) & 0xFF]++] = source[rank];
+                target[offsets[(symbol_counts_[source[rank]] >> shift) & 0xFF]++] = source[rank];
             std::swap(source, target);
         }
         return source;
@@ -576,12 +731,13 @@ class overlap_metric {
   public:
     using kit_t = overlap_kit<capability_>;
     using allocator_t = allocator_type_;
+    using is_transparent = void;
     /** The full scale of a distance: the widest that still fits @c i64 times a @c u32 window count. */
     static constexpr i64_t resolution_k = i64_t(1) << 31;
 
   private:
     /** The round's candidates in push order. */
-    growing_buffer<sz_string_view_t, allocator_t> staged_;
+    growing_buffer<sz::string_view_t, allocator_t> staged_;
     /** The widths windows are taken at, all sharing one B-tree. */
     growing_buffer<std::size_t, allocator_t> window_widths_;
     /** Each width's @c sz_overlap_window_power, alongside @ref window_widths_. */
@@ -639,31 +795,31 @@ class overlap_metric {
     status_t status() const noexcept { return last_status_; }
 
     /** Opens a round for @p query, building its B-tree once and discarding whatever the previous round staged. */
-    void reset(sz_string_view_t const& query) noexcept {
+    void reset(sz::string_view_t query) noexcept {
         last_status_ = status_t::success_k;
         staged_.clear(), query_windows_ = 0, btree_ = sz_overlap_btree_t {};
-        if (query.length == 0) return;
+        if (query.empty()) return;
         for (std::size_t const width : window_widths_)
-            if (width <= query.length) query_windows_ += query.length - width + 1;
+            if (width <= query.size()) query_windows_ += query.size() - width + 1;
         if (query_windows_ == 0) return;
 
         // Grow only past the longest query seen: `reserve` keeps the allocation, the size then follows within it.
         std::size_t const entries = sz_overlap_btree_entries(query_windows_);
-        last_status_ = prefix_hashes_.reserve(query.length + 1);
+        last_status_ = prefix_hashes_.reserve(query.size() + 1);
         if (failed(last_status_)) return;
         last_status_ = nodes_.reserve(entries);
         if (failed(last_status_)) return;
-        prefix_hashes_.resize_reserved(query.length + 1);
+        prefix_hashes_.resize_reserved(query.size() + 1);
         nodes_.resize_reserved(entries);
-        overlap_prefix_hashes<kit_t>(query.start, query.length, prefix_hashes_.data());
+        overlap_prefix_hashes<kit_t>(query.data(), query.size(), prefix_hashes_.data());
 
         // Every width's window hashes land in one array; a hash carries its width by construction, so a hit is
         // attributed to that width and a coincidence with another width's hash runs at 2^-32.
         std::size_t written = 0;
         for (std::size_t index = 0; index != window_widths_.size(); ++index) {
             std::size_t const width = window_widths_[index];
-            if (width > query.length) continue;
-            std::size_t const windows = query.length - width + 1;
+            if (width > query.size()) continue;
+            std::size_t const windows = query.size() - width + 1;
             overlap_window_hashes<kit_t>(prefix_hashes_.data(), windows, width, window_powers_[index],
                                          nodes_.data() + written);
             written += windows;
@@ -674,7 +830,7 @@ class overlap_metric {
     }
 
     /** Stages one candidate, or refuses once the round is full. */
-    basic::metric_staging_t push(sz_string_view_t const& value) noexcept {
+    basic::metric_staging_t push(sz::string_view_t value) noexcept {
         if (staged_.size() == staged_.capacity()) return basic::metric_staging_t::refused_k;
         staged_.push_back_reserved(value);
         return basic::metric_staging_t::staged_k;
@@ -693,7 +849,7 @@ class overlap_metric {
     void drain(std::span<i64_t> distances, i64_t) noexcept {
         std::size_t const count = staged_.size();
         std::size_t longest = 0;
-        for (std::size_t slot = 0; slot != count; ++slot) longest = max_of(longest, staged_[slot].length);
+        for (std::size_t slot = 0; slot != count; ++slot) longest = max_of(longest, staged_[slot].size());
         std::size_t const stride = longest + 1;
         if (succeeded(last_status_) && query_windows_ != 0) {
             last_status_ = prefix_hashes_.reserve(stride * overlap_candidates_per_flight_k);
@@ -712,12 +868,12 @@ class overlap_metric {
         for (; slot + overlap_candidates_per_flight_k <= count; slot += overlap_candidates_per_flight_k) {
             overlap_prefix_hashes_flight<kit_t>(staged_.data() + slot, stride, prefix_hashes_.data());
             for (std::size_t chain = 0; chain != overlap_candidates_per_flight_k; ++chain)
-                distances[slot + chain] = distance_(staged_[slot + chain].length,
+                distances[slot + chain] = distance_(staged_[slot + chain].size(),
                                                     prefix_hashes_.data() + chain * stride);
         }
         for (; slot != count; ++slot) {
-            overlap_prefix_hashes<kit_t>(staged_[slot].start, staged_[slot].length, prefix_hashes_.data());
-            distances[slot] = distance_(staged_[slot].length, prefix_hashes_.data());
+            overlap_prefix_hashes<kit_t>(staged_[slot].data(), staged_[slot].size(), prefix_hashes_.data());
+            distances[slot] = distance_(staged_[slot].size(), prefix_hashes_.data());
         }
         staged_.clear();
     }

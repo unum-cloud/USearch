@@ -1,9 +1,9 @@
 # Baseline Indexes
 
 The readable reference tier: a graph index over arbitrary payloads, scored by any batched metric you write, under keys you choose.
-It needs the standard library and the OS headers only, so together with `utilities/` it ships as a standalone header-only library.
-The sequence and geospatial modalities are instantiations of it, `sequence::ram_index` over string views and `geospatial::ram_index` over Earth-fixed positions.
-Specialized optimizations, like packed state words, growth schedules, lock-free readers and SIMD kernel kits, belong to the dense family instead.
+Its RAM tier needs the standard library and the OS headers only, so together with `utilities/` it ships as a standalone header-only library.
+The sequence, shapes and geospatial modalities are instantiations of it: `sequence::ram_index` over StringZilla strings, `shapes::ram_index` over NumKong shape packs, and `geospatial::ram_index` over Earth-fixed positions.
+Specialized optimizations, like lock-free readers and SIMD kernel kits, belong to the dense family instead.
 
 ## Metrics
 
@@ -48,8 +48,10 @@ struct manhattan_metric_t {
 
 ## Construction & Search
 
-An index is a template over the payload, the key, the node ID width and the distance type, and it allocates nothing until `reserve` freezes its capacity.
-Each thread brings its own metric instance and its own traversal context, which holds the walk's scratch and receives the matches:
+An index is a template over the payload, the key, the node ID width and the distance type.
+It allocates nothing until its first `reserve` or insert, then grows on demand in chunks of node records that never move, so `reserve` is only a hint that covers ahead.
+Every record builds its value from the index's allocator by uses-allocator construction, so the values a caller inserts are best built from `index.get_allocator()` too.
+Each thread brings its own metric instance and its own traversal context, which holds the walk's scratch, sits on any allocator such as a per-thread arena, and receives the matches:
 
 ```cpp
 using index_t = us::basic::ram_index<std::vector<float>, us::utilities::u64_t>;
@@ -73,6 +75,8 @@ for (std::size_t i = 0; i != found.count; ++i) {
 ```
 
 - `insert` moves a batch of payloads in under their keys and is all-or-nothing: capacity and scratch for the whole batch are secured before the first value moves.
+- `plan_insert` spreads one batch over threads: it claims, covers and dispenses the whole ID range, each thread lands a disjoint slice through the plan's own `insert` with a context `reserve_traversal` sized, and `finish` publishes the batch at once.
+  Nothing can fail past the dispense, so every position of a plan must land, and a refused fan-out lands on the calling thread.
 - The selector decides which candidates become neighbors, and carries the neighbors-per-node budget: `basic::keep_diverse_t` prunes by diversity, `basic::keep_closest_t` keeps the nearest.
   Both are per-call values, so heuristics and budgets can change between batches.
 - `search` leaves its matches in `context.results`, nearest first, and `key_of`, `value_of`, `find` and `count` translate between node IDs and keys.
@@ -87,7 +91,7 @@ The leading template parameter of `insert` and `search` is the caller's synchron
 - `exclusive_k` certifies sole ownership, compiling every lock out for single-threaded builds.
 
 A violated certification answers `contended_k` instead of returning a silently wrong result.
-`reserve`, `save`, `load` and `health` never run concurrently with inserts.
+`save`, `load`, `clear` and `health` never run concurrently with inserts, while `reserve` runs at any time.
 
 ## Serialization
 
@@ -97,4 +101,14 @@ Payloads are arbitrary objects, so `save` and `load` take a codec that encodes e
 - `save(value, output)` encodes it.
 - `load(input, value)` decodes it into a pre-constructed record.
 
-`save` fills five caller-placed columns sized from `columns_extents`, while searches keep running, and `load` reads them back into a reserved, empty index, publishing everything at once.
+`save` fills five caller-placed columns sized from `columns_extents`, while searches keep running, and `load` reads them back into an empty index, publishing everything at once.
+
+## Storage
+
+`basic::nvme_index` serves the SafeGraphs checkpoints a RAM index saved from block storage, read-only, through the same storage walk as the dense tier.
+A view keeps each part's column offsets and, for every ragged column, an Elias-Fano directory of its row starts at a few bits per row, so every row costs one covering read.
+It reaches ForkUnion through `utilities/nvme_device.hpp` and SmashTable for the directories.
+
+- `view(path, paths, metric, executor)` opens a monolith or a manifest, building the directories on the executor's threads.
+- `search(count, make_metric, query_of, executor, config, keys, distances, counts)` keeps one metric per row slot, built by the caller's factory on the slot's arena, and hands it every landed value as the codec's borrowed `view`.
+- `count`, `contains` and `get` scan the key columns, and `get` reads the value rows of the keys it found.

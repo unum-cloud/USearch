@@ -2,14 +2,13 @@
 //  Types.swift
 //  USearch
 //
-//  Shared vocabulary of the USearch Swift SDK - the twin of include/usearch/types.h.
+//  Shared vocabulary of the USearch Swift SDK.
 //
 //  Statuses, keys, scalar kinds, rows, executors, arenas, and deferred calls are
 //  modality-agnostic, so they live here and the dense modality builds on them in DenseIndex.swift.
 //
 //  Batches travel in a `RowsView` over NumKong's `MatrixView` or `Tensor`, and its low-precision
-//  types are the scalars a caller builds rows out of; this file only tags them with the kind the C
-//  descriptors carry.
+//  types are the scalars a caller builds rows out of, and this file only tags them by `Scalar`.
 //
 
 import Dispatch
@@ -554,7 +553,7 @@ final class Landing {
     private var slots: [UnsafeMutableRawPointer] = []
     /// The callback states the call reads, and the objects whose memory a deferred call reads.
     private var anchors: [AnyObject] = []
-    /// What the call hands back once final, like the donors a merge did not consume, taken by the
+    /// What the call hands back once final, like the donors an absorb did not consume, taken by the
     /// first wait to settle, since several threads may wait at once.
     private let finals = Mutex<[@Sendable () -> Void]>([])
     /// The arena lent to the call, until `rewind` learns whether the call took it.
@@ -633,11 +632,12 @@ final class Landing {
         }
     }
 
-    /// Lends an optional handler as the callback and state pair every reporting verb takes, so the
-    /// trampoline can never be paired with the wrong state; nil lends nulls.
-    func lend(_ progress: Progress?) -> (usearch_progress_callback_t?, UnsafeMutableRawPointer?) {
-        guard let progress else { return (nil, nil) }
-        return (progressTrampoline, place(ProgressState(progress: progress, landing: self)))
+    /// Lends an optional handler and its report count as the progress every reporting verb takes, so
+    /// the trampoline can never be paired with the wrong state; nil lends a null callback.
+    func lend(_ progress: Progress?, steps: Int) -> usearch_progress_t {
+        guard let progress else { return usearch_progress_t(callback: nil, state: nil, steps: steps) }
+        let state = place(ProgressState(progress: progress, landing: self))
+        return usearch_progress_t(callback: progressTrampoline, state: state, steps: steps)
     }
 
     /// Lends `arena` to the call, answering the stamp its views carry once `rewind` advances the
@@ -1017,11 +1017,14 @@ func withPaths<Value>(_ paths: [String], _ body: (usearch_nvme_options_t) -> Val
 /// out-of-bounds index does. To keep a result past the next call, give that call another arena.
 /// Every call borrows the arena, deferred ones included, and one naming it while another call
 /// writes it is refused with `contended`. An arena serves one call at a time and is not `Sendable`.
+/// One in GPU memory serves only calls on the executor that made it, and keeps that executor alive.
 public final class Arena {
     /// The native handle, released by `deinit`.
     let raw: usearch_arena_t
     /// Where its memory lives, which the executor that made it decided.
     public let residency: Residency
+    /// The VRAM executor that made it, held so the arena is freed first, on that executor's first stream.
+    private let executor: Executor?
     /// Advanced by every call given the arena, so a view remembers which call wrote it.
     var generation: UInt64 = 0
 
@@ -1034,6 +1037,7 @@ public final class Arena {
         usearch_arena_init(&arguments)
         raw = try landing.read { () throws(USearchError) in try created(arena) }
         residency = executor?.residency ?? .ram
+        self.executor = executor?.residency == .vram ? executor : nil
     }
 
     /// Calls `usearch_arena_free`.

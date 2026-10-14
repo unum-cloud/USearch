@@ -854,6 +854,15 @@ func TestBatchSearchFillsEveryOutputRow(t *testing.T) {
 		t.Errorf("a query past the end reported %v", err)
 	}
 
+	// A zero wanted lands the counts alone, so a row reads empty rather than through absent keys.
+	none, err := index.Search(RowsOf(slab[:queries*dimensions], dimensions), 0, newArena(t, nil), nil)
+	if err != nil {
+		t.Fatalf("a search wanting nothing reported %v", err)
+	}
+	if found, distances, err := none.Row(queries - 1); err != nil || len(found) != 0 || len(distances) != 0 {
+		t.Errorf("a search wanting nothing found %d matches: %v", len(found), err)
+	}
+
 	// Three positional size_t fields, so a swap in the C struct would go unseen otherwise.
 	if stats.VisitedMembers == 0 || stats.ComputedDistances == 0 {
 		t.Errorf("the traversal reported %+v", stats)
@@ -1129,6 +1138,13 @@ func TestAttendFoldsTheRowsTheLookupNames(t *testing.T) {
 	if _, err := index.Attend(single, ValueLookup{Values: lookup.Values}, arena, nil); !errors.Is(err, StatusInvalidArgument) {
 		t.Errorf("a lookup without a row function reported %v", err)
 	}
+
+	// A device walk would call the Go trampoline from a kernel, so a VRAM handle never crosses.
+	device := newDenseIndex(ResidencyVram)
+	device.handle = index.handle
+	if _, err := device.Attend(single, lookup, arena, nil); !errors.Is(err, StatusDevice) {
+		t.Errorf("a VRAM handle attended with %v", err)
+	}
 }
 
 // A sweep reports the nodes whose edges changed rather than a status, so a caller loops on the
@@ -1161,34 +1177,51 @@ func TestRefineAndHealthReportTheirSweeps(t *testing.T) {
 	}
 }
 
-// Every donor is consumed whatever the outcome, so no donor can be closed twice.
-func TestMergeConsumesItsDonors(t *testing.T) {
+// An absorbed donor is consumed, so it cannot be closed twice, and a stop between donors hands the
+// rest back live to the caller who still owns them.
+func TestAbsorbConsumesOnlyItsAbsorbedDonors(t *testing.T) {
 	t.Parallel()
 	const dimensions = 4
 	index, _, _ := populated(t, angularBF16(dimensions), 2)
-	donor, err := DenseInitRam(angularBF16(dimensions), nil)
-	if err != nil {
-		t.Fatalf("the donor must initialize: %v", err)
-	}
-	if err := donor.Reserve(1); err != nil {
-		t.Fatalf("the donor must reserve: %v", err)
-	}
-	if err := donor.Insert([]Key{KeyFromUint64(7)}, RowsOf(seededRows(1, dimensions), dimensions), nil); err != nil {
-		t.Fatalf("the donor must insert: %v", err)
+	donors := make([]*DenseIndex, 3)
+	for position := range donors {
+		donor, err := DenseInitRam(angularBF16(dimensions), nil)
+		if err != nil {
+			t.Fatalf("the donor must initialize: %v", err)
+		}
+		t.Cleanup(func() { donor.Close() })
+		if err := donor.Reserve(1); err != nil {
+			t.Fatalf("the donor must reserve: %v", err)
+		}
+		key := []Key{KeyFromUint64(uint64(position) + 7)}
+		if err := donor.Insert(key, RowsOf(seededRows(1, dimensions), dimensions), nil); err != nil {
+			t.Fatalf("the donor must insert: %v", err)
+		}
+		donors[position] = donor
 	}
 
-	err = index.Merge([]*DenseIndex{donor}, nil)
-	if err != nil && !errors.Is(err, StatusUnsupported) {
-		t.Fatalf("the merge reported %v", err)
+	if err := index.Absorb(donors[:1], nil); err != nil {
+		t.Fatalf("the absorb reported %v", err)
 	}
-	if _, err := donor.Describe(); !errors.Is(err, StatusUninitialized) {
+	if counted, err := index.Count(KeyFromUint64(7)); err != nil || counted != 1 {
+		t.Errorf("the absorbed row counted %d with %v", counted, err)
+	}
+	if _, err := donors[0].Describe(); !errors.Is(err, StatusUninitialized) {
 		t.Errorf("a consumed donor described with %v", err)
 	}
-	if err := donor.Close(); err != nil {
-		t.Errorf("a consumed donor closed with %v", err)
+	if err := index.Absorb(donors[:1], nil); !errors.Is(err, StatusUninitialized) {
+		t.Errorf("a consumed donor was absorbed again with %v", err)
 	}
-	if err := index.Merge([]*DenseIndex{donor}, nil); !errors.Is(err, StatusUninitialized) {
-		t.Errorf("a consumed donor merged again with %v", err)
+
+	var seen uint
+	stops := func(completed, _ uint) bool { seen = completed; return completed == 0 }
+	if err := index.Absorb(donors[1:], &DenseAbsorbConfig{Progress: stops}); err != nil && !errors.Is(err, StatusCancelled) {
+		t.Fatalf("the stopped absorb reported %v", err)
+	}
+	for position, donor := range donors[1:] {
+		if _, err := donor.Describe(); (err == nil) != (uint(position) >= seen) {
+			t.Errorf("donor %d of the %d absorbed described with %v", position, seen, err)
+		}
 	}
 }
 

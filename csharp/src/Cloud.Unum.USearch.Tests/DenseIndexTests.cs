@@ -488,6 +488,12 @@ public sealed class DenseIndexTests : IDisposable
         Assert.Equal(1, found[0].Count);
         Assert.Single(found[0].Keys.ToArray());
         Assert.Single(found[0].Distances.ToArray());
+
+        // A zero wanted lands only zeroed counts, with no keys or distances behind them.
+        Matches none = index.On(this._pool).Search(Rows(RowOf(1f)), wanted: 0, this._arena);
+        Assert.Equal(0, none.Columns);
+        Assert.Equal(0, none[0].Count);
+        Assert.True(none[0].Keys.IsEmpty);
     }
 
     [Fact]
@@ -808,25 +814,30 @@ public sealed class DenseIndexTests : IDisposable
     }
 
     [Fact]
-    public void MergesConsumeTheDonorsTheyAbsorb()
+    public void AbsorbConsumesOnlyTheDonorsItAbsorbed()
     {
         using DenseIndex index = SmallIndex();
         DenseIndex donor = SmallIndex();
         donor.Insert(KeysOf(7), Rows(RowOf(7f)));
 
-        try
-        {
-            index.On(this._pool).Merge(donor);
-        }
-        catch (USearchException refused) when (refused.Status == Status.Unsupported)
-        {
-            donor.Dispose();
-            return; // No residency absorbs donors yet.
-        }
-
+        index.On(this._pool).Absorb(donor);
         Assert.True(index.Contains(7UL));
         Assert.Equal(Status.Uninitialized, Assert.Throws<USearchException>(() => donor.Count(7UL)).Status);
         donor.Dispose();
+
+        using DenseIndex other = DenseIndex.InitRam(SmallOptions() with { Quantization = Scalar.I8 });
+        other.Reserve(1);
+        other.Insert(KeysOf(8), Rows(RowOf(8f)));
+        try
+        {
+            index.On(this._pool).Absorb(other);
+        }
+        catch (USearchException refused)
+        {
+            // The engine refuses another scalar, which the stand-in absorbs, and hands the donor back live.
+            Assert.Equal(Status.ConfigMismatch, refused.Status);
+            Assert.Equal(1UL, other.Count(8UL));
+        }
     }
 
     #endregion Handles

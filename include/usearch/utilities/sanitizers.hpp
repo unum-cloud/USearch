@@ -63,68 +63,60 @@ inline constexpr bool address_sanitizer_k = false;
 
 /** Opens the bracket of a blocking @c lock; the verb's own atomics are ignored
  *  until the matching @c annotate_lock_acquired. */
-inline void annotate_lock_started(void const volatile* mutex_address) noexcept {
-    __tsan_mutex_pre_lock(const_cast<void*>(mutex_address), 0u);
-}
+inline void annotate_lock_started(void* mutex_address) noexcept { __tsan_mutex_pre_lock(mutex_address, 0u); }
 
 /** Closes the @c lock bracket: the calling thread now holds the mutex. */
-inline void annotate_lock_acquired(void const volatile* mutex_address) noexcept {
-    __tsan_mutex_post_lock(const_cast<void*>(mutex_address), 0u, 0);
-}
+inline void annotate_lock_acquired(void* mutex_address) noexcept { __tsan_mutex_post_lock(mutex_address, 0u, 0); }
 
 /** Opens the bracket of a @c try_lock; closes through @c annotate_try_lock_acquired
  *  or @c annotate_try_lock_refused - the flags must match this opening. */
-inline void annotate_try_lock_started(void const volatile* mutex_address) noexcept {
-    __tsan_mutex_pre_lock(const_cast<void*>(mutex_address), __tsan_mutex_try_lock);
+inline void annotate_try_lock_started(void* mutex_address) noexcept {
+    __tsan_mutex_pre_lock(mutex_address, __tsan_mutex_try_lock);
 }
 
 /** Closes a @c try_lock bracket as a successful acquisition. */
-inline void annotate_try_lock_acquired(void const volatile* mutex_address) noexcept {
-    __tsan_mutex_post_lock(const_cast<void*>(mutex_address), __tsan_mutex_try_lock, 0);
+inline void annotate_try_lock_acquired(void* mutex_address) noexcept {
+    __tsan_mutex_post_lock(mutex_address, __tsan_mutex_try_lock, 0);
 }
 
 /** Closes a @c try_lock bracket as a refusal - nothing is held. */
-inline void annotate_try_lock_refused(void const volatile* mutex_address) noexcept {
-    __tsan_mutex_post_lock(const_cast<void*>(mutex_address), __tsan_mutex_try_lock | __tsan_mutex_try_lock_failed, 0);
+inline void annotate_try_lock_refused(void* mutex_address) noexcept {
+    __tsan_mutex_post_lock(mutex_address, __tsan_mutex_try_lock | __tsan_mutex_try_lock_failed, 0);
 }
 
 /** Opens an @c unlock bracket; the release into the mutex happens at the opening. */
-inline void annotate_unlock_started(void const volatile* mutex_address) noexcept {
-    __tsan_mutex_pre_unlock(const_cast<void*>(mutex_address), 0u);
-}
+inline void annotate_unlock_started(void* mutex_address) noexcept { __tsan_mutex_pre_unlock(mutex_address, 0u); }
 
 /** Closes an @c unlock bracket. */
-inline void annotate_unlock_finished(void const volatile* mutex_address) noexcept {
-    __tsan_mutex_post_unlock(const_cast<void*>(mutex_address), 0u);
-}
+inline void annotate_unlock_finished(void* mutex_address) noexcept { __tsan_mutex_post_unlock(mutex_address, 0u); }
 
 /** The shared-side twin of @c annotate_lock_started, carrying the read-lock flag. */
-inline void annotate_lock_shared_started(void const volatile* mutex_address) noexcept {
-    __tsan_mutex_pre_lock(const_cast<void*>(mutex_address), __tsan_mutex_read_lock);
+inline void annotate_lock_shared_started(void* mutex_address) noexcept {
+    __tsan_mutex_pre_lock(mutex_address, __tsan_mutex_read_lock);
 }
 
 /** The shared-side twin of @c annotate_lock_acquired. */
-inline void annotate_lock_shared_acquired(void const volatile* mutex_address) noexcept {
-    __tsan_mutex_post_lock(const_cast<void*>(mutex_address), __tsan_mutex_read_lock, 0);
+inline void annotate_lock_shared_acquired(void* mutex_address) noexcept {
+    __tsan_mutex_post_lock(mutex_address, __tsan_mutex_read_lock, 0);
 }
 
 /** The shared-side twin of @c annotate_unlock_started. */
-inline void annotate_unlock_shared_started(void const volatile* mutex_address) noexcept {
-    __tsan_mutex_pre_unlock(const_cast<void*>(mutex_address), __tsan_mutex_read_lock);
+inline void annotate_unlock_shared_started(void* mutex_address) noexcept {
+    __tsan_mutex_pre_unlock(mutex_address, __tsan_mutex_read_lock);
 }
 
 /** The shared-side twin of @c annotate_unlock_finished. */
-inline void annotate_unlock_shared_finished(void const volatile* mutex_address) noexcept {
-    __tsan_mutex_post_unlock(const_cast<void*>(mutex_address), __tsan_mutex_read_lock);
+inline void annotate_unlock_shared_finished(void* mutex_address) noexcept {
+    __tsan_mutex_post_unlock(mutex_address, __tsan_mutex_read_lock);
 }
 
 /** One half of a raw happens-before edge on @p address - what keeps a wait-free
  *  probe's pairing with the unlock releases visible once brackets hide the atomics.
  *  Call @c annotate_release before an unlock bracket opens, never inside one. */
-inline void annotate_acquire(void const volatile* address) noexcept { __tsan_acquire(const_cast<void*>(address)); }
+inline void annotate_acquire(void* address) noexcept { __tsan_acquire(address); }
 
 /** The releasing half of @ref annotate_acquire. */
-inline void annotate_release(void const volatile* address) noexcept { __tsan_release(const_cast<void*>(address)); }
+inline void annotate_release(void* address) noexcept { __tsan_release(address); }
 
 /** Reports a bug if the calling thread still holds any annotated mutex - the
  *  scenario-tail check of the concurrent suites. */
@@ -138,19 +130,19 @@ inline void annotate_container(void const*, void const*, void const*, void const
 inline constexpr bool thread_sanitizer_k = false;
 inline constexpr bool address_sanitizer_k = true;
 
-inline void annotate_lock_started(void const volatile*) noexcept {}
-inline void annotate_lock_acquired(void const volatile*) noexcept {}
-inline void annotate_try_lock_started(void const volatile*) noexcept {}
-inline void annotate_try_lock_acquired(void const volatile*) noexcept {}
-inline void annotate_try_lock_refused(void const volatile*) noexcept {}
-inline void annotate_unlock_started(void const volatile*) noexcept {}
-inline void annotate_unlock_finished(void const volatile*) noexcept {}
-inline void annotate_lock_shared_started(void const volatile*) noexcept {}
-inline void annotate_lock_shared_acquired(void const volatile*) noexcept {}
-inline void annotate_unlock_shared_started(void const volatile*) noexcept {}
-inline void annotate_unlock_shared_finished(void const volatile*) noexcept {}
-inline void annotate_acquire(void const volatile*) noexcept {}
-inline void annotate_release(void const volatile*) noexcept {}
+inline void annotate_lock_started(void*) noexcept {}
+inline void annotate_lock_acquired(void*) noexcept {}
+inline void annotate_try_lock_started(void*) noexcept {}
+inline void annotate_try_lock_acquired(void*) noexcept {}
+inline void annotate_try_lock_refused(void*) noexcept {}
+inline void annotate_unlock_started(void*) noexcept {}
+inline void annotate_unlock_finished(void*) noexcept {}
+inline void annotate_lock_shared_started(void*) noexcept {}
+inline void annotate_lock_shared_acquired(void*) noexcept {}
+inline void annotate_unlock_shared_started(void*) noexcept {}
+inline void annotate_unlock_shared_finished(void*) noexcept {}
+inline void annotate_acquire(void*) noexcept {}
+inline void annotate_release(void*) noexcept {}
 inline void assert_no_locks_held() noexcept {}
 
 /** Re-poisons a flat container's capacity slack: @p storage_begin & @p storage_end
@@ -168,19 +160,19 @@ inline void annotate_container(void const* storage_begin, void const* storage_en
 inline constexpr bool thread_sanitizer_k = false;
 inline constexpr bool address_sanitizer_k = false;
 
-inline void annotate_lock_started(void const volatile*) noexcept {}
-inline void annotate_lock_acquired(void const volatile*) noexcept {}
-inline void annotate_try_lock_started(void const volatile*) noexcept {}
-inline void annotate_try_lock_acquired(void const volatile*) noexcept {}
-inline void annotate_try_lock_refused(void const volatile*) noexcept {}
-inline void annotate_unlock_started(void const volatile*) noexcept {}
-inline void annotate_unlock_finished(void const volatile*) noexcept {}
-inline void annotate_lock_shared_started(void const volatile*) noexcept {}
-inline void annotate_lock_shared_acquired(void const volatile*) noexcept {}
-inline void annotate_unlock_shared_started(void const volatile*) noexcept {}
-inline void annotate_unlock_shared_finished(void const volatile*) noexcept {}
-inline void annotate_acquire(void const volatile*) noexcept {}
-inline void annotate_release(void const volatile*) noexcept {}
+inline void annotate_lock_started(void*) noexcept {}
+inline void annotate_lock_acquired(void*) noexcept {}
+inline void annotate_try_lock_started(void*) noexcept {}
+inline void annotate_try_lock_acquired(void*) noexcept {}
+inline void annotate_try_lock_refused(void*) noexcept {}
+inline void annotate_unlock_started(void*) noexcept {}
+inline void annotate_unlock_finished(void*) noexcept {}
+inline void annotate_lock_shared_started(void*) noexcept {}
+inline void annotate_lock_shared_acquired(void*) noexcept {}
+inline void annotate_unlock_shared_started(void*) noexcept {}
+inline void annotate_unlock_shared_finished(void*) noexcept {}
+inline void annotate_acquire(void*) noexcept {}
+inline void annotate_release(void*) noexcept {}
 inline void assert_no_locks_held() noexcept {}
 inline void annotate_container(void const*, void const*, void const*, void const*) noexcept {}
 

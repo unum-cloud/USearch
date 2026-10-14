@@ -22,10 +22,12 @@
  *  index runs it on the calling thread, an @c On blocks on its executor, and a @c DeferredOn
  *  submits it there and answers a @c Deferred. A verb fills one call structure, kept on the stack
  *  while it blocks and inside its @c Deferred once submitted, so one body serves every receiver and
- *  nothing the library borrows ever moves. The binding starts no threads and keeps one count, an
+ *  nothing the library borrows ever moves. The binding starts no threads and keeps two counts: an
  *  arena's @c exports, since a buffer it exported cannot be revoked before C rewinds the memory
- *  under it; a call adds one until it is waited on or dropped. Dropping a @c Deferred waits on its
- *  outcome, and every other wait belongs to the C library.
+ *  under it, to which a call adds one until it is waited on or dropped, and an executor's GPU
+ *  @c arenas, since each frees on the executor's stream, so a close leaves its handle to the last
+ *  of them. Dropping a @c Deferred waits on its outcome, and every other wait belongs to the C
+ *  library.
  *
  *  @section python_buffers Buffer Protocol and NumPy Compatibility
  *
@@ -205,7 +207,7 @@ extern PyTypeObject DenseBatchType;
 extern PyTypeObject DenseSearchStreamType;
 
 extern PyTypeObject SequenceIndexType;
-extern PyTypeObject MatrixIndexType;
+extern PyTypeObject ShapesIndexType;
 extern PyTypeObject GeospatialIndexType;
 
 /** The layouts of the struct sequences, which `lib.c` readies through their own initializer. */
@@ -226,6 +228,13 @@ typedef struct Executor {
 
     /** Where the calls it runs compute, as its constructor named it. */
     usearch_residency_t residency;
+
+    /** The GPU arenas it made that are still alive, each holding it, since they free on its first
+     *  stream. */
+    Py_ssize_t arenas;
+
+    /** The handle a close left to those arenas, freed with the last of them. */
+    usearch_executor_t retained;
 } Executor;
 
 /**
@@ -247,6 +256,10 @@ typedef struct Arena {
 
     /** Where its executor computes, which decides how its results export their outputs. */
     usearch_residency_t residency;
+
+    /** The @c Executor a GPU arena serves alone, held until the arena is freed; NULL for host
+     *  pages. */
+    PyObject* executor;
 } Arena;
 
 /** A C enum mirrored as an `enum.IntEnum`, its members spelled by the C name table. */
@@ -420,11 +433,13 @@ void usearch_py_callback_latch(usearch_py_call_t* call);
 /** Whether a callback of @p call already raised, so a later one returns at once. */
 int usearch_py_callback_raised(usearch_py_call_t* call);
 
-/** The progress trampoline to register for @p callback, or NULL when the caller passed no handler. */
-usearch_progress_callback_t usearch_py_progress_registered(usearch_py_callback_t const* callback);
+/** The progress to register for @p callback and @p steps; its trampoline is NULL when the caller
+ *  passed no handler. */
+usearch_progress_t usearch_py_progress_registered(usearch_py_callback_t* callback, size_t steps);
 
-/** The predicate trampoline to register for @p callback, or NULL when the caller passed no predicate. */
-usearch_predicate_t usearch_py_predicate_registered(usearch_py_callback_t const* callback);
+/** The predicate to register for @p callback; its trampoline is NULL when the caller passed no
+ *  predicate. */
+usearch_predicate_t usearch_py_predicate_registered(usearch_py_callback_t* callback);
 
 #pragma endregion Calls
 

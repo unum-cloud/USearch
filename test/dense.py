@@ -866,8 +866,8 @@ def test_walks_close_before_they_are_collected(executor):
 # region Composition
 
 
-def test_merge_absorbs_and_consumes_every_donor(executor):
-    """Every donor's entries arrive and its handle stops answering, all at once, where the build merges."""
+def test_absorb_absorbs_and_consumes_every_donor(executor):
+    """Every donor's entries arrive and its handle stops answering, all at once, where the build absorbs."""
     first = DenseIndex.init_ram(dimensions=16, quantization=Scalar.BF16)
     first.reserve(96)
     first.on(executor).insert(np.arange(0, 32), random_vectors(32, 16))
@@ -879,7 +879,7 @@ def test_merge_absorbs_and_consumes_every_donor(executor):
         donors.append(donor)
 
     try:
-        first.on(executor).merge(*donors)
+        first.on(executor).absorb(*donors)
     except UnsupportedError:
         return
     assert len(first) == 96
@@ -889,13 +889,13 @@ def test_merge_absorbs_and_consumes_every_donor(executor):
             len(donor)
 
 
-def test_merge_stopped_between_donors_leaves_the_rest_live(executor):
-    """A donor the merge never reached is handed back to its wrapper, still usable."""
+def test_absorb_stopped_between_donors_leaves_the_rest_live(executor):
+    """A donor the absorb never reached is handed back to its wrapper, still usable."""
     first, _ = build_index(8, 8, executor)
     second, _ = build_index(8, 8, executor, seed=1)
     third, _ = build_index(8, 8, executor, seed=2)
     with pytest.raises((CancelledError, UnsupportedError)) as raised:
-        first.on(executor).merge(second, third, progress=lambda completed, total: completed < 1)
+        first.on(executor).absorb(second, third, progress=lambda completed, total: completed < 1)
     if raised.type is UnsupportedError:
         return
     assert len(first) == 16
@@ -904,14 +904,14 @@ def test_merge_stopped_between_donors_leaves_the_rest_live(executor):
         len(second)
 
 
-def test_merge_consumes_a_donor_still_walked(executor):
-    """A cursor keeps no hold on its index, so a merge consumes the donor and the cursor's next
+def test_absorb_consumes_a_donor_still_walked(executor):
+    """A cursor keeps no hold on its index, so an absorb consumes the donor and the cursor's next
     pull, naming a handle that is gone, is refused."""
     first, _ = build_index(16, 8, executor)
     second, _ = build_index(16, 8, executor, seed=1)
     cursor = second.cursor()
     try:
-        first.on(executor).merge(second)
+        first.on(executor).absorb(second)
     except UnsupportedError:
         return
     assert len(first) == 32
@@ -919,11 +919,11 @@ def test_merge_consumes_a_donor_still_walked(executor):
         cursor.next(4, Arena())
 
 
-def test_merge_refuses_itself(executor):
+def test_absorb_refuses_itself(executor):
     """An index cannot absorb the handle it already is."""
     index, _ = build_index(8, 8, executor)
-    with pytest.raises(InvalidArgumentError):
-        index.on(executor).merge(index)
+    with pytest.raises(ConfigMismatchError):
+        index.on(executor).absorb(index)
 
 
 def test_clear_keeps_the_geometry(executor):
@@ -1058,11 +1058,11 @@ def test_refine_rejects_unknown_keywords(executor):
 
 
 def test_refine_refuses_a_consumed_handle(executor):
-    """A donor absorbed by `merge` has no graph left to sweep."""
+    """A donor absorbed by `absorb` has no graph left to sweep."""
     first, _ = build_index(8, 8, executor)
     second, _ = build_index(8, 8, executor, seed=1)
     try:
-        first.on(executor).merge(second)
+        first.on(executor).absorb(second)
     except UnsupportedError:
         return
     with pytest.raises(UninitializedError):

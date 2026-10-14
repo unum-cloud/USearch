@@ -49,7 +49,7 @@ static struct {
     {"DenseSearchStream", &DenseSearchStreamType, NULL},
 
     {"SequenceIndex", &SequenceIndexType, NULL},
-    {"MatrixIndex", &MatrixIndexType, NULL},
+    {"ShapesIndex", &ShapesIndexType, NULL},
     {"GeospatialIndex", &GeospatialIndexType, NULL},
 };
 

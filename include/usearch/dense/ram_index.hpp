@@ -107,6 +107,30 @@ inline void invoke_admission(predicate_type_& predicate, std::span<scored_node_t
             }
 }
 
+/** A predicate over keys lifted onto node IDs through a @p keys_type_ column: a walk's quad is
+ *  judged in one call, a scan's row as a span of one. */
+template <typename predicate_type_, typename keys_type_>
+struct keyed_admission {
+    using key_t = typename keys_type_::value_t;
+
+    predicate_type_& predicate;
+    keys_type_ const& keys;
+
+    void operator()(std::span<scored_node_t const> scored, admissions_t& admissions) noexcept {
+        std::array<key_t, 4> quad;
+        std::array<admission_t, 4> verdicts;
+        for (std::size_t lane = 0; lane != scored.size(); ++lane) quad[lane] = keys[scored[lane].node_id];
+        judge_keys(predicate, std::span(quad).first(scored.size()), std::span(verdicts).first(scored.size()));
+        for (std::size_t lane = 0; lane != scored.size(); ++lane)
+            if (verdicts[lane] == admission_t::admit_k) {
+                // One quad in, four slots of capacity - the buffer cannot refuse.
+                [[maybe_unused]] fu::status_t const admitted = admissions.push_back(scored[lane]);
+            }
+    }
+
+    admission_t operator()(node_id_t node) noexcept { return judge_key(predicate, keys[node]); }
+};
+
 /** Filtered search as a fold: each quad's matches merge into the admitted pool, while the walk
  *  keeps routing through whatever the predicate rejects. */
 template <typename predicate_type_, typename pool_type_>
@@ -142,16 +166,23 @@ struct filtering_fold {
         return walk_demand_t::continue_k;
     }
 
-    /** The keyed form: @p keys hold each lane's key, so a per-key predicate filters a walk that has
-     *  no key column to resolve node IDs through. */
+    /** The keyed form: @p keys hold each lane's key, so a predicate over keys filters a walk that
+     *  has no key column to resolve node IDs through, judging the quad's contenders in one call. */
     template <typename dot_result_type_, typename key_type_>
     walk_demand_t absorb(std::span<scored_node_t const> scored_nodes, std::span<dot_result_type_ const>,
                          std::span<key_type_ const> keys) noexcept {
-        admissions_t admissions;
+        std::array<key_type_, 4> contenders;
+        std::array<std::size_t, 4> lanes;
+        std::array<admission_t, 4> verdicts;
+        std::size_t count = 0;
         for (std::size_t lane = 0; lane != scored_nodes.size(); ++lane)
-            if (contends(scored_nodes[lane]) && predicate(keys[lane]) == admission_t::admit_k) {
+            if (contends(scored_nodes[lane])) contenders[count] = keys[lane], lanes[count++] = lane;
+        judge_keys(predicate, std::span(contenders).first(count), std::span(verdicts).first(count));
+        admissions_t admissions;
+        for (std::size_t index = 0; index != count; ++index)
+            if (verdicts[index] == admission_t::admit_k) {
                 // One quad in, four slots of capacity, so the buffer cannot refuse.
-                [[maybe_unused]] fu::status_t const pushed = admissions.push_back(scored_nodes[lane]);
+                [[maybe_unused]] fu::status_t const pushed = admissions.push_back(scored_nodes[lanes[index]]);
             }
         network_sort(std::span(admissions), closer_scored_node_t {});
         admitted.insert(std::span(admissions), expansion_factor);

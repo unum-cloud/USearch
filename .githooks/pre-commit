@@ -301,11 +301,16 @@ check_region_lengths() {
 # `include/usearch/<dir>/` opens exactly `unum::usearch::<dir>`; only `utilities/types.hpp` also opens the
 # parent and the sibling roots, to declare the `nk`, `fu`, `sz` & `st` aliases every directory shares.
 check_namespace_directories() {
-    local directory=${file%/*} allowed name misplaced="" modality=""
+    local directory=${file%/*} depth allowed name misplaced="" modality=""
     [ "$directory" = "$file" ] && directory=.
     allowed=" unum usearch ashvardanian numkong stringzilla forkunion smashtable "
     for name in $(printf '%s\n' "$directory" | tr '/' '\n'); do allowed="$allowed$name ${name##*_} "; done
-    for name in $(git ls-tree -d --name-only HEAD "$directory/" 2> /dev/null); do allowed="$allowed${name##*/} "; done
+    # Directories beside the file as the index holds them, so a commit may add one along with its first file.
+    depth=$(printf '%s\n' "$directory" | awk -F/ '{ print ($0 == "." ? 0 : NF) }')
+    for name in $(git ls-files -- "$directory/" | awk -F/ -v depth="$depth" 'NF > depth + 1 { print $(depth + 1) }' |
+        sort -u); do
+        allowed="$allowed$name "
+    done
     case "$file" in
     include/usearch/*/*)
         modality=${file#include/usearch/}
@@ -362,8 +367,9 @@ check_rust_modules() {
 
 # A verb's argument struct reads in the order the call works: what it reads, what it writes, the arena
 # those outputs land in, then the knobs that shape the work and the handlers that observe it. So the
-# output views and `written`/`required` form one block right before `arena`, a plain `scalar` describes an
-# input and never follows it, and an `outputs_*` knob never precedes it.
+# output views, the arrays handed back through a double pointer, and `written`/`required` form one block
+# right before `arena`, a plain `scalar` describes an input and never follows it, and an `outputs_*` knob
+# never precedes it.
 check_verb_field_order() {
     local misordered
     misordered=$(< "$staged_blob" awk '
@@ -394,7 +400,8 @@ check_verb_field_order() {
             field_type = line; sub(/[A-Za-z0-9_]+$/, "", field_type); sub(/[[:space:]*]+$/, "", field_type)
             pointer = line ~ /\*[[:space:]]*[A-Za-z0-9_]+$/
             ++count; names[count] = field_name; types[count] = field_type
-            output[count] = pointer && (field_type ~ /_view_t$/ || field_type == "size_t")
+            output[count] = pointer && (field_type ~ /_view_t$/ || field_type == "size_t" ||
+                                        line ~ /\*\*[[:space:]]*[A-Za-z0-9_]+$/)
         }')
     [ -z "$misordered" ] || fail "$misordered" \
         "$file orders a verb's fields out of reads, writes, arena, knobs and observers:"
@@ -1369,6 +1376,20 @@ check_requires_clauses() {
 
 # region Concurrency and Atomics
 
+# A const member that locks or writes hides a mutation behind its signature: such members are non-const, and a
+# const reader only loads, through `standard_atomic_ref<T const>`, the one `const_cast` this allows. The whole
+# file is judged, so touching one finishes its cleanup.
+check_mutable_and_const_cast() {
+    local hits
+    hits=$(sed -E 's/"([^"\\]|\\.)*"//g' "$staged_blob" | grep -nE '\bmutable\b|\bconst_cast\b' |
+        grep -vE '^[0-9]+:[[:space:]]*(//|/\*|\*)' |
+        grep -vF 'standard_atomic_ref(value_type_ const& word) noexcept : word_(const_cast<value_type_&>(word))' ||
+        true)
+    [ -z "$hits" ] || fail "$hits" \
+        "$file writes through const - make the member that locks or writes non-const; a const reader loads" \
+        "            through standard_atomic_ref<T const>, the only const_cast allowed:"
+}
+
 # Host threads managing GPUs in CUDA sources - fleets of NVLink-resident devices are
 # orchestrated with per-device non-blocking streams and events from one host thread: kernel
 # launches are already asynchronous, cross-device ordering is `cudaStreamWaitEvent`, and
@@ -1419,15 +1440,16 @@ check_annotate_release_before_unlock() {
 
 # region Build CI and Packaging
 
-# The dependency-free core: include/usearch/basic/ and its transitive utilities/ suppliers ship
-# as a standalone header-only library - standard-library & OS headers only, no submodules. The
-# supplier set is computed from the includes themselves, so a new supplier joins the checked set
-# the moment basic/ names it, and hardware wrappers like utilities/vram_nvidia_device.hpp or
-# utilities/ram_device.hpp - which legitimately include CUDA or ForkUnion - never enter it.
+# The dependency-free core: include/usearch/basic/ram_index.hpp and its transitive utilities/
+# suppliers ship as a standalone header-only library - standard-library & OS headers only, no
+# submodules. The supplier set is computed from the includes themselves, so a new supplier joins
+# the checked set the moment the RAM tier names it, and hardware wrappers like
+# utilities/ram_device.hpp or the NVMe tier's utilities/nvme_device.hpp - which legitimately
+# include CUDA or ForkUnion - never enter it.
 dependency_free_core_files() {
     local closure frontier next supplier fresh
     # Space-separated throughout: the membership probes below match " $file " against this list.
-    closure=$(ls include/usearch/basic/*.hpp 2>/dev/null | tr '\n' ' ')
+    closure="include/usearch/basic/ram_index.hpp"
     frontier=$closure
     while [ -n "$frontier" ]; do
         next=$(grep -h '#[[:space:]]*include[[:space:]]*"usearch/utilities/' $frontier 2>/dev/null |
@@ -1498,6 +1520,20 @@ check_workflow_names() {
     [ -z "$nameless" ] || fail "$nameless" \
         "$file has a CI job or step without a name - write \`- name: Build the wheels\`;" \
         "            the Actions UI and branch protection both reference it by name:"
+}
+
+# CMake spells every target, source and flag it means at the call that means it. Deriving one by replacing, slicing or
+# matching out part of another string, or by editing a list in place, hides what the build compiles: pass each name as
+# an argument instead, under a keyword where several kinds travel together. Building a list with `list(APPEND)` and
+# testing a value with `if (... MATCHES ...)` stay free.
+check_cmake_string_surgery() {
+    local surgery
+    surgery=$(printf '%s\n' "$added" | grep -vE '^[[:space:]]*#' |
+        grep -iE '(^|[^A-Za-z0-9_])(string[[:space:]]*\([[:space:]]*(REPLACE|REGEX|SUBSTRING|STRIP|TOLOWER|TOUPPER)[[:space:]]|list[[:space:]]*\([[:space:]]*(TRANSFORM|FILTER|REMOVE_ITEM|REMOVE_AT|REMOVE_DUPLICATES|SUBLIST|POP_BACK|POP_FRONT|INSERT|JOIN|SORT|REVERSE)[[:space:]]|(get_filename_component|cmake_path)[[:space:]]*\()' ||
+        true)
+    [ -z "$surgery" ] || fail "$surgery" \
+        "$file derives a name or flag by editing a string or a list - spell each one out at its call and pass it as" \
+        "            an argument, as \`usearch_dense_dtype_sources(target BF16 a_bf16.cpp F16 a_f16.cpp)\` does:"
 }
 
 # The CPython bindings parse arguments and build results by hand: `PyArg_Parse*` and `Py_BuildValue` interpret a
@@ -1726,6 +1762,7 @@ judge_path() {
         check_call_chained_call
         check_gcc_atomics
         check_annotate_release_before_unlock
+        check_mutable_and_const_cast
         ;;&
     # CUDA translation units and the headers they compile into.
     *.cu | *.cuh)
@@ -1745,18 +1782,19 @@ judge_path() {
         check_harness_library_qualified
         check_namespace_reopened
         ;;&
-    # The shipped library: public headers under include/ and the ABI sources under src/.
-    include/*.h)
+    # The shipped library: the C interface under c/usearch/, the headers under include/ and cpp/, and the ABI sources
+    # under src/.
+    c/usearch/*.h)
         check_verb_field_order
         ;;&
-    include/*.h | include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh)
+    c/usearch/*.h | cpp/usearch/*.hpp | include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh)
         check_stl_dynamic_containers
         check_ranges_templates
         check_boolean_parameters
         check_chevron_launches
         ;;&
     # The shipped library and the GenMC clients that spell its protocols line for line.
-    include/*.h | include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh | verification/*.cpp)
+    c/usearch/*.h | cpp/usearch/*.hpp | include/*.hpp | include/*.cuh | src/*.cpp | src/*.cuh | verification/*.cpp)
         check_hand_minmax
         check_preferred_aliases
         ;;&
@@ -1778,6 +1816,7 @@ judge_path() {
         ;;
     python/*.c | python/*.h) check_cpython_format_shortcuts ;;
     .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
+    CMakeLists.txt | */CMakeLists.txt | *.cmake) check_cmake_string_surgery ;;
     esac
     case "$file" in
     test/harness.hpp | test/main.cpp | test/dense_vram.cpp | test/dense/vram_nvidia.cu | test/dense/vram_amd.cpp | \

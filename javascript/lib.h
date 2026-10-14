@@ -98,6 +98,9 @@ typedef struct usearch_js_executor_t {
 
     /** The residency its factory named, which every arena it makes inherits. */
     usearch_residency_t residency;
+
+    /** Live GPU arenas it made, each of which must be freed before it is. */
+    size_t arenas;
 } usearch_js_executor_t;
 
 /** Memory every output whose length scales with a call lands in, and the views handed over it. */
@@ -108,6 +111,13 @@ typedef struct usearch_js_arena_t {
 
     /** The residency of the executor that made it; the host never views a VRAM arena's memory. */
     usearch_residency_t residency;
+
+    /** The executor a GPU arena grows, fills and frees on, held until the arena is freed; @c NULL
+     *  for host pages, which may outlive theirs. */
+    usearch_js_executor_t* executor;
+
+    /** The strong reference keeping @c executor's wrapper alive alongside it. */
+    napi_ref executor_reference;
 
     /** The last call the library took naming it, compared and never read; @c NULL once freed. */
     struct usearch_js_call_t const* holder;
@@ -125,7 +135,7 @@ typedef struct usearch_js_arena_t {
 /** An owned index handle, one per @c CompiledIndex instance. */
 typedef struct usearch_js_index_t {
 
-    /** The engine handle, freed by @c free or the collector, or consumed by a merge. */
+    /** The engine handle, freed by @c free or the collector, or consumed by an absorb. */
     usearch_dense_index_t handle;
 } usearch_js_index_t;
 
@@ -172,7 +182,7 @@ typedef enum usearch_js_slot_t {
 /** Builds a verb's answer from a successful call's outputs; @c NULL with an exception pending. */
 typedef napi_value (*usearch_js_finish_t)(napi_env env, struct usearch_js_call_t* call, napi_value const* slots);
 
-/** Settles what a final call left behind whatever its status, like the donors a merge consumed. */
+/** Settles what a final call left behind whatever its status, like donors an absorb consumed. */
 typedef void (*usearch_js_conclude_t)(struct usearch_js_call_t* call);
 
 /**

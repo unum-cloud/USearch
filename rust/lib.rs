@@ -1,8 +1,6 @@
 //! USearch - Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices.
 //!
-//! The crate links the pre-instantiated C library and consumes it through its stable C headers,
-//! so no index template is instantiated here and nothing but the vocabulary below crosses the
-//! boundary. Each module mirrors one header and is named after it.
+//! The crate links the precompiled engine, so building it compiles no index.
 //!
 //! ```no_run
 //! use usearch::*;
@@ -24,18 +22,18 @@
 //! # Ok::<(), usearch::Error>(())
 //! ```
 
-mod dense_index; // mirrors include/usearch/dense_index.h
-mod types; // mirrors include/usearch/types.h
+mod dense_index;
+mod types;
 
 // The C mirror items are public within their modules, so only these names leave the crate.
 pub use dense_index::{
-    DenseAttend, DenseAttendConfig, DenseBatch, DenseCount, DenseCursor, DenseDescribe, DenseGet, DenseHealth,
-    DenseIndex, DenseIndexDescription, DenseInsert, DenseInsertConfig, DenseLoadRamBufferConfig, DenseLoadRamConfig,
-    DenseLoadVramBufferConfig, DenseLoadVramConfig, DenseMaxsim, DenseMaxsimConfig, DenseMerge, DenseMergeConfig,
-    DenseMetadata, DenseMetric, DenseMultiply, DenseMultiplyConfig, DenseOptions, DenseProducts, DenseReachability,
-    DenseRefine, DenseRefineConfig, DenseReserve, DenseSave, DenseSaveBuffer, DenseSaveBufferConfig, DenseSaveConfig,
-    DenseSearch, DenseSearchConfig, DenseSearchStream, DenseSearchStreamInitConfig, DenseSoftmaxState,
-    DenseTraversalStats, DenseVectors, DenseVerbs, DenseViewNvmeConfig, Monolith, ValueLookup,
+    DenseAbsorb, DenseAbsorbConfig, DenseAttend, DenseAttendConfig, DenseBatch, DenseCount, DenseCursor, DenseDescribe,
+    DenseGet, DenseHealth, DenseIndex, DenseIndexDescription, DenseInsert, DenseInsertConfig, DenseLoadRamBufferConfig,
+    DenseLoadRamConfig, DenseLoadVramBufferConfig, DenseLoadVramConfig, DenseMaxsim, DenseMaxsimConfig, DenseMetadata,
+    DenseMetric, DenseMultiply, DenseMultiplyConfig, DenseOptions, DenseProducts, DenseReachability, DenseRefine,
+    DenseRefineConfig, DenseReserve, DenseSave, DenseSaveBuffer, DenseSaveBufferConfig, DenseSaveConfig, DenseSearch,
+    DenseSearchConfig, DenseSearchStream, DenseSearchStreamInitConfig, DenseSoftmaxState, DenseTraversalStats,
+    DenseVectors, DenseVerbs, DenseViewNvmeConfig, Monolith, ValueLookup,
 };
 pub use types::{
     capabilities_available, capabilities_compiled, rows, version, Arena, Blocking, Deferred, Deferring, Distance,

@@ -12,7 +12,7 @@ endif ()
 find_package(Python 3.12 REQUIRED COMPONENTS Interpreter Development.Module)
 
 # Module glue first, then the shared ingestion, then one file per modality named after the header it mirrors - the same
-# stems `rust/` and `include/usearch/` list.
+# stems `rust/` and `c/usearch/` list.
 python_add_library(
     usearch_python
     MODULE
@@ -33,7 +33,7 @@ set_target_properties(
                C_STANDARD_REQUIRED ON
 )
 
-target_include_directories(usearch_python PRIVATE ${PROJECT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(usearch_python PRIVATE ${PROJECT_SOURCE_DIR}/c ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_python PRIVATE ${USEARCH_PYTHON_LIBRARY})
 
 # CPython's own symbols come from the interpreter, so they are absent at link time and the linker must not insist.

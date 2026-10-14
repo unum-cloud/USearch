@@ -25,9 +25,9 @@
 #include <concepts>    // `std::same_as` - the buffer-allocator concept
 #include <span>        // `std::span` - the sorted-batch insert argument
 #include <functional>  // `std::less`
-#include <memory>      // `std::allocator`, `std::unique_ptr` - the arena's chunk chain
+#include <memory>      // `std::allocator`, `std::unique_ptr` - the arena's chunk chain, `std::destroy_n` - built rows
 #include <new>         // `new (ptr) element_t(value)` for "placement-new"
-#include <type_traits> // `std::is_trivially_destructible`, `std::is_trivially_copyable`, `std::is_integral`
+#include <type_traits> // `std::is_trivially_destructible`, `std::is_trivially_copyable`, `std::is_nothrow_*`
 #include <utility>     // `std::swap`, `std::move`, `std::forward`
 
 #include "usearch/utilities/types.hpp"      // `status_t`, `succeeded`, `failed`
@@ -987,7 +987,7 @@ class growing_buffer {
  */
 template <std::size_t first_rows_log2_, std::size_t slab_rows_log2_>
 struct chunk_schedule {
-    static_assert(first_rows_log2_ <= slab_rows_log2_ && slab_rows_log2_ < 48);
+    static_assert(first_rows_log2_ <= slab_rows_log2_ && slab_rows_log2_ < address_bits_k);
 
     /** Rows in every mature slab-sized chunk, as a power-of-two exponent. */
     inline static constexpr std::size_t slab_rows_log2_k = slab_rows_log2_;
@@ -1033,6 +1033,11 @@ struct chunk_schedule {
     static constexpr std::size_t chunks_for(std::size_t rows) noexcept { return rows ? locate(rows - 1).chunk + 1 : 0; }
 };
 
+/** The schedule spanning @p max_rows_ rows in about 2^12 chunks: 2^10-row chunks doubling up to
+ *  slabs as wide as that takes - at 2^32 rows, the dense index's @c chunk_schedule<10, 20>. */
+template <std::size_t max_rows_>
+using chunk_schedule_spanning = chunk_schedule<10, max_of<std::size_t>(std::bit_width(max_rows_), 10 + 12) - 12>;
+
 /**
  *  @brief Rows addressed by ID that never move: chunks on @p schedule_type_, a missing one allocated, zeroed and
  *      published by whichever thread asks for it first, so readers index while writers grow the column.
@@ -1041,11 +1046,17 @@ struct chunk_schedule {
  *  published ones are always a prefix. A reader indexes only rows some cover already reached, and learns of them
  *  through the owner's own publication, which orders the chunk before the read. The directory entries are plain
  *  pointers owned through @p atomic_ref_template_.
+ *
+ *  A row type that is not trivially copyable is built instead of zeroed: every row of a fresh
+ *  chunk is constructed from @p allocator_type_ before the chunk publishes, and destroyed before
+ *  the chunk is returned.
  */
 template <typename value_type_, typename schedule_type_, std::size_t max_rows_, typename allocator_type_,
           template <typename> class atomic_ref_template_ = standard_atomic_ref>
 class chunked_column {
-    static_assert(std::is_trivially_copyable_v<value_type_>, "Rows are written in place, never constructed");
+    static_assert(std::is_trivially_copyable_v<value_type_> ||
+                      std::is_nothrow_constructible_v<value_type_, allocator_type_ const&>,
+                  "Rows are zeroed, or built from the column's allocator");
 
   public:
     using value_t = value_type_;
@@ -1071,7 +1082,8 @@ class chunked_column {
     chunked_column& operator=(chunked_column const&) = delete;
     ~chunked_column() noexcept { reset(); }
 
-    /** Allocates, zeroes and publishes every chunk the first @p rows rows need and is missing - safe on any thread. */
+    /** Allocates, zeroes or builds, and publishes every chunk the first @p rows rows need and is
+     *  missing - safe on any thread. */
     status_t cover(std::size_t rows) noexcept {
         if (rows > max_rows_) return status_t::overflow_k;
         for (std::size_t chunk = 0, chunks = schedule_t::chunks_for(rows); chunk != chunks; ++chunk) {
@@ -1079,12 +1091,18 @@ class chunked_column {
             if (slot.load(std::memory_order_acquire)) continue;
             value_t* const fresh = allocator_.allocate(schedule_t::rows_in(chunk));
             if (!fresh) return status_t::bad_alloc_k;
-            std::memset(static_cast<void*>(fresh), 0, schedule_t::rows_in(chunk) * sizeof(value_t));
+            if constexpr (std::is_trivially_copyable_v<value_t>)
+                std::memset(static_cast<void*>(fresh), 0, schedule_t::rows_in(chunk) * sizeof(value_t));
+            else {
+                allocator_type_ const rows_allocator(allocator_);
+                for (std::size_t row = 0; row != schedule_t::rows_in(chunk); ++row)
+                    new (fresh + row) value_t(rows_allocator);
+            }
             value_t* expected_empty = nullptr;
             // A peer covering the same chunk first keeps its own; this one goes back.
             if (!slot.compare_exchange_strong(expected_empty, fresh, std::memory_order_release,
                                               std::memory_order_acquire))
-                allocator_.deallocate(fresh, schedule_t::rows_in(chunk));
+                release_(fresh, schedule_t::rows_in(chunk));
         }
         return status_t::success_k;
     }
@@ -1149,10 +1167,16 @@ class chunked_column {
     void reset() noexcept {
         for (std::size_t index = 0; index != max_chunks_k; ++index)
             if (value_t* const rows = std::exchange(chunks_[index], nullptr))
-                allocator_.deallocate(rows, schedule_t::rows_in(index));
+                release_(rows, schedule_t::rows_in(index));
     }
 
   private:
+
+    /** Destroys the @p count rows a cover built, if it built any, and returns their chunk. */
+    void release_(value_t* rows, std::size_t count) noexcept {
+        if constexpr (!std::is_trivially_copyable_v<value_t>) std::destroy_n(rows, count);
+        allocator_.deallocate(rows, count);
+    }
 
     /** One pointer per chunk, sized once and never reallocated; a null entry is a chunk no cover reached yet. */
     std::array<value_t*, max_chunks_k> chunks_ {};

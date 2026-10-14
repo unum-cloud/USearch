@@ -233,8 +233,7 @@ public sealed class DenseTraversalStats
 #region Index
 
 /// <summary>
-/// A Vector Search Index over equidimensional dense representations - the managed twin of
-/// <c>include/usearch/dense_index.h</c>.
+/// A Vector Search Index over equidimensional dense representations.
 /// </summary>
 /// <remarks>
 /// Every verb is a batch over a <see cref="RowsView"/>, so a single vector is a one-row matrix. The
@@ -695,7 +694,9 @@ public sealed unsafe class DenseIndex : IDisposable
     /// <param name="arena">Where the run lands, rewound by the call.</param>
     /// <param name="expansionFactor">The candidate-pool breadth the walk explores; zero derives it
     /// from the geometry.</param>
-    /// <param name="predicate">The per-key admission predicate; null admits every key.</param>
+    /// <param name="predicate">The per-key admission predicate; null admits every key. A host
+    /// predicate cannot narrow a device walk, so a VRAM handle refuses one as
+    /// <see cref="Status.Device"/>.</param>
     /// <param name="stats">The traversal telemetry to fill, when the caller wants any.</param>
     /// <param name="traversal">A walk, the default, or an exact scan of every row on RAM and NVMe
     /// handles; a VRAM handle refuses a scan as <see cref="Status.Unsupported"/>.</param>
@@ -765,7 +766,10 @@ public sealed unsafe class DenseIndex : IDisposable
     /// outside it, or a values matrix of another scalar kind or width than the index's own, refuses
     /// the call with <see cref="Status.ShapeMismatch"/>, since a missing row is a wrong softmax rather
     /// than a smaller one. Runs on the inner-product kinds alone; a graph frozen under a distance kind
-    /// refuses with <see cref="Status.ConfigMismatch"/>.
+    /// refuses with <see cref="Status.ConfigMismatch"/>. <paramref name="rowOf"/> is a host function,
+    /// so it serves RAM handles alone: a VRAM walk resolves rows through a device function, which this
+    /// binding does not build, so an attention into a <see cref="Residency.Vram"/> arena refuses with
+    /// <see cref="Status.Device"/>.
     /// </remarks>
     /// <param name="queries">The query rows; row <c>t * headCount + h</c> is head <c>h</c> of token <c>t</c>.</param>
     /// <param name="values">The value rows the scored keys resolve into, pinned for the call.</param>
@@ -792,16 +796,18 @@ public sealed unsafe class DenseIndex : IDisposable
             scoreScale, stats)).Result;
 
     /// <summary>
-    /// Absorbs every donor into this index - cheaper than re-inserting their vectors one by one,
-    /// linking across donors via landmark stitching. Calls <c>usearch_dense_merge</c>.
+    /// Absorbs every donor into this index, one after another, keeping their graphs rather than
+    /// re-inserting their vectors and linking each in across the appended part. Calls
+    /// <c>usearch_dense_absorb</c>.
     /// </summary>
     /// <remarks>
     /// An absorbed donor is consumed and refuses every later verb with <see cref="Status.Uninitialized"/>;
-    /// one a stopped or refused merge never reached stays the caller's. No residency absorbs donors
-    /// yet, so the engine answers <see cref="Status.Unsupported"/>.
+    /// one the call did not absorb, such as a donor of another residency, scalar, metric or geometry,
+    /// which refuses with <see cref="Status.ConfigMismatch"/>, stays a live index the caller still
+    /// owns, though its rows may already have landed here.
     /// </remarks>
     /// <param name="donors">The indexes to absorb.</param>
-    public void Merge(params DenseIndex[] donors) => Calls.Block(new DenseMergeCall(new(this._handle, null), donors));
+    public void Absorb(params DenseIndex[] donors) => Calls.Block(new DenseAbsorbCall(new(this._handle, null), donors));
 
     /// <summary>
     /// Writes the index under a path, in the layout its extension picks - one <c>.safegraphs</c>
@@ -1014,13 +1020,13 @@ public static class DenseVerbs
             Of(on), queries, values, rowOf, arena, headCount, carry, outputsScalar, expansionFactor, scoreScale,
             stats));
 
-    /// <inheritdoc cref="DenseIndex.Merge"/>
-    public static void Merge(this DenseIndexOn on, params DenseIndex[] donors) =>
-        Calls.Block(new DenseMergeCall(Of(on), donors));
+    /// <inheritdoc cref="DenseIndex.Absorb"/>
+    public static void Absorb(this DenseIndexOn on, params DenseIndex[] donors) =>
+        Calls.Block(new DenseAbsorbCall(Of(on), donors));
 
-    /// <inheritdoc cref="DenseIndex.Merge"/>
-    public static Deferred Merge(this DenseIndexDeferredOn on, params DenseIndex[] donors) =>
-        Calls.Defer(new DenseMergeCall(Of(on), donors));
+    /// <inheritdoc cref="DenseIndex.Absorb"/>
+    public static Deferred Absorb(this DenseIndexDeferredOn on, params DenseIndex[] donors) =>
+        Calls.Defer(new DenseAbsorbCall(Of(on), donors));
 
     /// <inheritdoc cref="DenseIndex.Save"/>
     public static void Save(this DenseIndexOn on, string path) => Calls.Block(new DenseSaveCall(Of(on), path));
@@ -1348,8 +1354,9 @@ internal unsafe struct DenseSearchCall(
                 Count = (nuint)queries.Rows, Queries = queries.AsView(rows),
                 Matches = (NativeMatchesView*)landing->View, Arena = lent.Pointer, Wanted = bound,
                 ExpansionFactor = (nuint)expansionFactor, Traversal = traversal,
-                Predicate = this._admitting is null ? null : &Admitting.Admits,
-                PredicateState = this._admitting is null ? IntPtr.Zero : GCHandle.ToIntPtr(this._registration),
+                Predicate = this._admitting is null
+                    ? default
+                    : new NativePredicate { Callback = &Admitting.Admits, State = GCHandle.ToIntPtr(this._registration) },
                 Stats = (NativeDenseTraversalStats*)landing->Report,
             };
             usearch_dense_search(&arguments);
@@ -1501,6 +1508,12 @@ internal unsafe struct DenseAttendCall(
                 Status.ShapeMismatch, "the softmax carry holds fewer entries than there are queries");
         }
 
+        // A VRAM arena serves only a VRAM call, whose walk would run this host lookup on the device.
+        if (arena is { Residency: Residency.Vram })
+        {
+            throw new USearchException(Status.Device, "a VRAM walk needs a device-callable value lookup");
+        }
+
         fixed (byte* queryRows = queries.Bytes)
         fixed (byte* valueRows = this._values.Bytes)
         fixed (DenseSoftmaxState* carried = carry.Span)
@@ -1552,8 +1565,8 @@ internal unsafe struct DenseAttendCall(
     }
 }
 
-/// <summary>A merge; see <see cref="DenseIndex.Merge"/>.</summary>
-internal unsafe struct DenseMergeCall(CallHandles handles, DenseIndex[] donors) : ICall
+/// <summary>An absorb; see <see cref="DenseIndex.Absorb"/>.</summary>
+internal unsafe struct DenseAbsorbCall(CallHandles handles, DenseIndex[] donors) : ICall
 {
     private readonly DenseIndex[] _donors = donors;
     private readonly IntPtr[] _slots = new IntPtr[donors.Length];
@@ -1577,12 +1590,12 @@ internal unsafe struct DenseMergeCall(CallHandles handles, DenseIndex[] donors) 
 
             using Lease index = handles.LendIndex();
             using Lease executor = handles.LendExecutor();
-            NativeDenseMerge arguments = new()
+            NativeDenseAbsorb arguments = new()
             {
                 Index = index.Pointer, Executor = executor.Pointer, Outcome = &landing->Outcome,
                 Completion = completion, Count = (nuint)this._donors.Length, Donors = slots,
             };
-            usearch_dense_merge(&arguments);
+            usearch_dense_absorb(&arguments);
         }
     }
 
@@ -1677,17 +1690,25 @@ internal sealed class Admitting(Func<Key, bool> admits)
     private ExceptionDispatchInfo? _escaped;
 
     /// <summary>
-    /// The per-key admission callback the engine calls from its own worker threads, reaching the
-    /// managed predicate through the state pointer the search registered alongside it.
+    /// The admission callback the engine calls from its own worker threads with a batch of
+    /// candidates, reaching the managed predicate through the state pointer the search registered
+    /// alongside it.
     /// </summary>
-    /// <param name="key">The candidate entry's identity.</param>
+    /// <param name="keys">The candidate entries' identities.</param>
+    /// <param name="admissions">Receives whether each key joins the matches.</param>
+    /// <param name="count">How many keys the batch holds.</param>
     /// <param name="state">The registered trampoline, forwarded verbatim.</param>
-    /// <returns>Whether the key joins the matches.</returns>
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    internal static Admission Admits(Key key, IntPtr state) =>
-        GCHandle.FromIntPtr(state).Target is Admitting trampoline && trampoline.Admit(key)
-            ? Admission.Admit
-            : Admission.Reject;
+    internal static unsafe void Admits(Key* keys, Admission* admissions, nuint count, IntPtr state)
+    {
+        Admitting? trampoline = GCHandle.FromIntPtr(state).Target as Admitting;
+        for (nuint index = 0; index != count; ++index)
+        {
+            admissions[index] = trampoline is not null && trampoline.Admit(keys[index])
+                ? Admission.Admit
+                : Admission.Reject;
+        }
+    }
 
     /// <summary>Rethrows the first exception the predicate threw, with its own type and stack.</summary>
     internal void Rethrow() => this._escaped?.Throw();
@@ -2208,8 +2229,7 @@ internal unsafe struct NativeDenseLoadRam
     public NativeBytesView Path;
     public NativeRamOptions Ram;
     public nuint ValuesPerKey;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
 }
 
 /// <summary>The arguments of <c>usearch_dense_load_vram</c>.</summary>
@@ -2223,8 +2243,7 @@ internal unsafe struct NativeDenseLoadVram
     public NativeBytesView Path;
     public NativeVramOptions Vram;
     public nuint ValuesPerKey;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
 }
 
 /// <summary>The arguments of <c>usearch_dense_load_ram_buffer</c>.</summary>
@@ -2238,8 +2257,7 @@ internal unsafe struct NativeDenseLoadRamBuffer
     public NativeBytesView Buffer;
     public NativeRamOptions Ram;
     public nuint ValuesPerKey;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
 }
 
 /// <summary>The arguments of <c>usearch_dense_load_vram_buffer</c>.</summary>
@@ -2253,8 +2271,7 @@ internal unsafe struct NativeDenseLoadVramBuffer
     public NativeBytesView Buffer;
     public NativeVramOptions Vram;
     public nuint ValuesPerKey;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
 }
 
 /// <summary>The arguments of <c>usearch_dense_view_ram</c>.</summary>
@@ -2311,8 +2328,7 @@ internal unsafe struct NativeDenseInsert
     public NativeKeysView Keys;
     public NativeRowsView Vectors;
     public nuint ExpansionFactor;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
 
@@ -2326,8 +2342,7 @@ internal unsafe struct NativeDenseRefine
     public Completion Completion;
     public nuint* Changed;
     public nuint ExpansionFactor;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
 
@@ -2357,10 +2372,8 @@ internal unsafe struct NativeDenseSearch
     public nuint Wanted;
     public nuint ExpansionFactor;
     public Traversal Traversal;
-    public delegate* unmanaged[Cdecl]<Key, IntPtr, Admission> Predicate;
-    public IntPtr PredicateState;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativePredicate Predicate;
+    public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
 
@@ -2391,9 +2404,9 @@ internal unsafe struct NativeDenseGet
     public Scalar OutputsScalar;
 }
 
-/// <summary>The arguments of <c>usearch_dense_merge</c>.</summary>
+/// <summary>The arguments of <c>usearch_dense_absorb</c>.</summary>
 [StructLayout(LayoutKind.Sequential)]
-internal unsafe struct NativeDenseMerge
+internal unsafe struct NativeDenseAbsorb
 {
     public IntPtr Index;
     public IntPtr Executor;
@@ -2401,8 +2414,7 @@ internal unsafe struct NativeDenseMerge
     public Completion Completion;
     public nuint Count;
     public IntPtr* Donors;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
 }
 
 /// <summary>The arguments of <c>usearch_dense_cursor_init</c>.</summary>
@@ -2412,6 +2424,7 @@ internal unsafe struct NativeDenseCursorInit
     public IntPtr* Cursor;
     public IntPtr Index;
     public NativeOutcome* Outcome;
+    public Key* Start;
 }
 
 /// <summary>The arguments of <c>usearch_dense_cursor_next</c>.</summary>
@@ -2465,8 +2478,7 @@ internal unsafe struct NativeDenseSave
     public NativeOutcome* Outcome;
     public Completion Completion;
     public NativeBytesView Path;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
 }
 
 /// <summary>The arguments of <c>usearch_dense_save_buffer</c>.</summary>
@@ -2479,8 +2491,7 @@ internal unsafe struct NativeDenseSaveBuffer
     public Completion Completion;
     public NativeBytesView* Monolith;
     public IntPtr Arena;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
 }
 
 /// <summary>The arguments of <c>usearch_dense_metadata_read</c>.</summary>
@@ -2532,8 +2543,7 @@ internal unsafe struct NativeDenseMultiply
     public IntPtr Arena;
     public nuint Wanted;
     public nuint ExpansionFactor;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
 
@@ -2556,8 +2566,7 @@ internal unsafe struct NativeDenseAttend
     public Scalar OutputsScalar;
     public nuint ExpansionFactor;
     public float ScoreScale;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
 
@@ -2576,8 +2585,7 @@ internal unsafe struct NativeDenseMaxsim
     public IntPtr Arena;
     public nuint Wanted;
     public nuint ExpansionFactor;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
 
@@ -2586,9 +2594,8 @@ internal unsafe struct NativeDenseMaxsim
 #region Entry Points
 
 /// <summary>
-/// The dense-modality C surface of <c>include/usearch/dense_index.h</c>. Every verb takes one
-/// argument struct and reports through the outcome it names; this binding exposes no progress
-/// handler, so the handler crosses as null.
+/// The dense modality's entry points. Every verb takes one argument struct and reports through the
+/// outcome it names; this binding exposes no progress handler, so the handler crosses as null.
 /// </summary>
 internal static unsafe partial class NativeMethods
 {
@@ -2678,7 +2685,7 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]
-    internal static partial void usearch_dense_merge(NativeDenseMerge* arguments);
+    internal static partial void usearch_dense_absorb(NativeDenseAbsorb* arguments);
 
     [LibraryImport(LibraryName)]
     [UnmanagedCallConv(CallConvs = [typeof(CallConvCdecl)])]

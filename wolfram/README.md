@@ -287,7 +287,7 @@ Outputs & carry are copied before the Arena is reused.
 
 - Deferred calls, since every call blocks.
 - Search predicates and progress callbacks, since the kernel evaluates on one thread and the executor's workers would have nowhere to call back into.
-- Traversal telemetry, cursors, search streams & `merge`, which the C interface has and this package does not bind yet.
+- Traversal telemetry, cursors, search streams & `absorb`, which the C interface has and this package does not bind yet.
 
 ## Design
 

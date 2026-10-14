@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/types.h
+ *  @file c/usearch/types.h
  *  @author Ash Vardanian
  *  @date August 14, 2026
  *  @brief Shared vocabulary of the USearch C interface: scalar types, keys, distances, shapes,
@@ -18,7 +18,7 @@
  *  skipped by name and their order never matters. Name lookups and the @c _free family stay
  *  positional. Every structure opens in the same order: the handle, @c executor, @c outcome, then
  *  @c completion. Inputs follow, then outputs and the @c arena they land in, then knobs, and last
- *  @c progress, @c progress_state and @c stats.
+ *  @c progress and @c stats.
  *
  *  Structures carry no size or version field, so they grow source-compatibly only: initialize
  *  them by designator, which zeroes every field left out, and expect the major version to change
@@ -377,8 +377,8 @@ typedef struct usearch_matrix_view_t {
  *      than entries around them, borrowed as an input or written into an arena as an output.
  *
  *  Entry @c i spans elements @c offsets[i] up to @c offsets[i+1], so the last offset closes the
- *  final entry. What an element is belongs to the modality: a byte of a sequence, a row of a
- *  matrix, a point of a set.
+ *  final entry. What an element is belongs to the modality: a byte of a sequence, a point of a
+ *  shape or of a geospatial set.
  */
 typedef struct usearch_tape_view_t {
 
@@ -390,8 +390,8 @@ typedef struct usearch_tape_view_t {
     size_t const* offsets;
 
     /** The scalar type the elements hold: @c u8 for sequences, @c f64 degrees for geospatial inputs
-     *  and @c i32 Earth-fixed centimetres for their cursor, and any kind for matrix rows, converted on
-     *  the way in where it differs from storage. */
+     *  and @c i32 Earth-fixed centimetres for their cursor, and any kind for shape points,
+     *  converted on the way in where it differs from storage. */
     usearch_scalar_t scalar;
 } usearch_tape_view_t;
 
@@ -703,10 +703,21 @@ typedef enum usearch_admission_t {
     usearch_admit_k = 1,
 } usearch_admission_t;
 
-/** Type-punned per-key admission predicate for filtered searches. The batched
- *  span-admission form exists only in the C++ layer - a C callback per candidate quad
- *  would cost more than it amortizes. */
-typedef usearch_admission_t (*usearch_predicate_t)(usearch_key_t, void*);
+/** Admits or rejects @p count candidate keys at once, never zero, writing one admission per key
+ *  into @p admissions, a buffer the library owns for the call, so a handler backed by an external
+ *  store answers them in one round trip. Called concurrently from the executor's threads. */
+typedef void (*usearch_predicate_callback_t)(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count,
+                                             void* state);
+
+/** Which candidate keys a filtered search may report: a handler and the state it is called with. */
+typedef struct usearch_predicate_t {
+
+    /** The @b optional handler; @c NULL admits every key. */
+    usearch_predicate_callback_t callback;
+
+    /** Opaque pointer forwarded into every @c callback call. */
+    void* state;
+} usearch_predicate_t;
 
 /** Whether the operation a handler is watching carries on or unwinds. */
 typedef enum usearch_continuation_t {
@@ -734,6 +745,26 @@ typedef enum usearch_continuation_t {
  */
 typedef usearch_continuation_t (*usearch_progress_callback_t)( //
     size_t completed, size_t total, void* state);
+
+/**
+ *  @brief How a long call reports its advance: a handler, its state, and how many reports it hears.
+ *
+ *  A batch verb splits its units into @c steps nearly equal slices, hands each to its engine whole
+ *  and reports after each; a verb whose engine counts its own units, a checkpoint's shards or a
+ *  refinement's nodes, forwards only the ticks that cross into the next slice. Without a handler
+ *  the call runs as one slice and reports nothing.
+ */
+typedef struct usearch_progress_t {
+
+    /** The @b optional handler; @c NULL skips every report. */
+    usearch_progress_callback_t callback;
+
+    /** Opaque pointer forwarded into every @c callback call. */
+    void* state;
+
+    /** Reports a call makes at most, the last at completion; zero derives to ten. */
+    size_t steps;
+} usearch_progress_t;
 
 /**
  *  @brief Blocks on an atomic wait until @p outcome is final, with acquire ordering.

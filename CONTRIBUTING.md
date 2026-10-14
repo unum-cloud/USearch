@@ -29,7 +29,7 @@ git config core.hooksPath .githooks
 ## C++ 20 & C 99
 
 Our primary C++ implementation uses CMake for builds.
-The headers need C++20, the C interface in `include/usearch/*.h` stays C99, and the Python and JavaScript glue around it compiles as C11.
+The headers need C++20, the C interface in `c/usearch/*.h` stays C99, and the Python and JavaScript glue around it compiles as C11.
 If this is your first experience with CMake, use the following commands to get started:
 
 ```sh
@@ -484,7 +484,7 @@ cmake -B build_release -D USEARCH_BUILD_LIB_C=1 -D USEARCH_DENSE_DTYPES=11
 cmake --build build_release --config Release -j
 
 cp build_release/libusearch_static.a golang/  # the archive `golang/types.go` links, NumKong and ForkUnion included
-cp -r include/usearch golang/                        # to make the headers available to Go
+cp -r c/usearch golang/                              # to make the headers available to Go
 
 cd golang && go test -race -v ./... ; cd ..
 ```
@@ -494,7 +494,7 @@ The race detector matters here: the tests drive one shared handle from many goro
 Compilation and the static checks need only the headers, not the library, so they run before it links:
 
 ```sh
-cp -r include/usearch golang/
+cp -r c/usearch golang/
 
 cd golang
 go build ./...      # compiles the cgo preamble and shim.c against the real headers

@@ -1,5 +1,5 @@
 /**
- *  @file include/usearch/usearch.h
+ *  @file c/usearch/usearch.h
  *  @author Ash Vardanian
  *  @date October 1, 2026
  *  @brief The umbrella of the USearch C interface: every modality header and the vocabulary they

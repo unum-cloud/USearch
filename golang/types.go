@@ -1,9 +1,8 @@
-// Package usearch provides Go bindings for USearch, consumed through its stable C headers.
+// Package usearch provides Go bindings for USearch.
 //
-// The package links the pre-instantiated C library, so no index template is instantiated
-// here and nothing but the vocabulary below crosses the boundary. Shared types mirror
-// include/usearch/types.h; the dense modality mirrors include/usearch/dense_index.h and
-// carries a Dense prefix, leaving room for the modalities that follow.
+// The package links the precompiled engine, so building it compiles no index. Status, Key,
+// Scalar, RowsView, Executor and Arena serve every modality; the dense modality carries a
+// Dense prefix, leaving room for the modalities that follow.
 //
 //	options := usearch.DefaultDenseOptions()
 //	options.Dimensions = 768
@@ -66,8 +65,8 @@ import "C"
 // A Status is an error, so errors.Is(err, usearch.StatusReadOnly) matches any failure carrying it.
 type Status int32
 
-// The statuses of include/usearch/types.h, numbered alike. Only Deferred.Status reports
-// StatusDeferred, the one status that is not final.
+// The statuses a call ends in. Only Deferred.Status reports StatusDeferred, the one status
+// that is not final.
 const (
 	// StatusSuccess means the call completed and carries no message.
 	StatusSuccess Status = C.usearch_status_success_k
@@ -241,8 +240,8 @@ func keyFromRaw(raw C.usearch_key_t) Key { return *(*Key)(unsafe.Pointer(&raw)) 
 // pack several dimensions per byte, as their xN suffixes spell.
 type Scalar int32
 
-// The scalar types of include/usearch/types.h, ordered by shrinking dynamic range. The C
-// enum reserves the numbering gaps for kinds that have not landed yet.
+// The scalar types rows travel in, ordered by shrinking dynamic range. The numbering
+// leaves gaps for kinds that have not landed yet.
 const (
 	// ScalarUnknown tags a type the library could not name.
 	ScalarUnknown Scalar = C.usearch_scalar_unknown_k
@@ -523,14 +522,19 @@ type upcall struct {
 }
 
 //export usearchAdmits
-func usearchAdmits(key C.usearch_key_t, state unsafe.Pointer) (admission C.usearch_admission_t) {
+func usearchAdmits(keys *C.usearch_key_t, admissions *C.usearch_admission_t, count C.size_t, state unsafe.Pointer) {
 	upcall := (*cgo.Handle)(state).Value().(upcall)
-	admission = C.usearch_reject_k
-	defer func() { upcall.call.latch(recover()) }() // a panic unwinding through C frames would skip their unlocks
-	if upcall.value.(Predicate)(keyFromRaw(key)) {
-		admission = C.usearch_admit_k
+	verdicts := unsafe.Slice(admissions, count)
+	for index := range verdicts {
+		verdicts[index] = C.usearch_reject_k
 	}
-	return admission
+	defer func() { upcall.call.latch(recover()) }() // a panic unwinding through C frames would skip their unlocks
+	predicate := upcall.value.(Predicate)
+	for index, key := range unsafe.Slice(keys, count) {
+		if predicate(keyFromRaw(key)) {
+			verdicts[index] = C.usearch_admit_k
+		}
+	}
 }
 
 //export usearchContinues
@@ -544,20 +548,20 @@ func usearchContinues(completed, total C.size_t, state unsafe.Pointer) (continua
 	return continuation
 }
 
-// predicate lends an optional predicate as the callback and state pair a filtering verb takes.
-func (call *call) predicate(predicate Predicate) (C.usearch_predicate_t, unsafe.Pointer) {
+// predicate lends an optional predicate as the struct a filtering verb takes.
+func (call *call) predicate(predicate Predicate) C.usearch_predicate_t {
 	if predicate == nil {
-		return nil, nil
+		return C.usearch_predicate_t{}
 	}
-	return C.usearch_go_admits(), call.callback(predicate)
+	return C.usearch_predicate_t{callback: C.usearch_go_admits(), state: call.callback(predicate)}
 }
 
-// progress lends an optional handler as the callback and state pair a reporting verb takes.
-func (call *call) progress(progress ProgressCallback) (C.usearch_progress_callback_t, unsafe.Pointer) {
+// progress lends an optional handler and its report count as the struct a reporting verb takes.
+func (call *call) progress(progress ProgressCallback, steps uint) C.usearch_progress_t {
 	if progress == nil {
-		return nil, nil
+		return C.usearch_progress_t{}
 	}
-	return C.usearch_go_continues(), call.callback(progress)
+	return C.usearch_progress_t{callback: C.usearch_go_continues(), state: call.callback(progress), steps: C.size_t(steps)}
 }
 
 // callback lends a Go value to a C callback as an opaque handle rather than a Go pointer, since the
@@ -744,8 +748,8 @@ func (executor *Executor) Drain(mood Mood) error {
 }
 
 // Close drains every thread or stream and releases them, waiting for every deferred call naming
-// the executor. It is idempotent, and a closed executor must not be used again. Calls
-// usearch_executor_free.
+// the executor. It is idempotent, and a closed executor must not be used again. The host arenas
+// it made stay valid, while its GPU arenas must be closed first. Calls usearch_executor_free.
 func (executor *Executor) Close() error {
 	if executor == nil || executor.handle == nil {
 		return nil
@@ -791,7 +795,9 @@ type Arena struct {
 
 // NewArena makes an empty arena where executor computes, host pages or the memory of its GPU,
 // decided once; a nil executor makes host pages for calls on the calling goroutine. Nothing is
-// allocated until a call writes into it, and it may outlive its executor. Calls usearch_arena_init.
+// allocated until a call writes into it, and host pages may outlive their executor. A GPU arena
+// grows and frees on its executor's stream, so it serves only calls on that executor, any other or
+// nil finishing StatusDevice, and must be closed before it. Calls usearch_arena_init.
 func NewArena(executor *Executor) (*Arena, error) {
 	handle, refusal := executor.lower()
 	if refusal != nil {

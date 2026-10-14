@@ -295,6 +295,10 @@ test("Batch operations", async (t) => {
     assert.deepEqual(matches.counts, new BigUint64Array([2n, 2n]), "both queries found both keys");
     assert.deepEqual(matches.keys, keysFromIntegers(15n, 16n, 15n, 16n));
     assertAlmostEqual(matches.get(1).scores[0], 0, 1e-3);
+
+    const none = index.search(rows(3, 13, 14, 15, 10, 20, 30), 0, new Arena());
+    assert.deepEqual(none.counts, new BigUint64Array([0n, 0n]), "a zero wanted lands only zeroed counts");
+    assert.equal(none.get(1).count, 0, "and no keys behind them");
   });
 });
 
@@ -558,7 +562,7 @@ test("Refinement leaves the graph searchable", () => {
   assert.equal(usearch.integerFromKey(index.search(new Float32Array([7, 8, 9, 10]), 1, new Arena()).get(0).keys), 7n);
 });
 
-test("Merging consumes the donors", () => {
+test("Absorbing consumes only the donors it absorbed", () => {
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
   const donor = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
   index.reserve(2);
@@ -566,32 +570,43 @@ test("Merging consumes the donors", () => {
   index.insert(1n, new Float32Array([1, 1]));
   donor.insert(2n, new Float32Array([2, 2]));
 
-  if (!served(() => index.merge([donor]))) return;
+  index.absorb([donor]);
 
   assert.equal(index.count(2n), 1, "the donor's entries joined the index");
   assert.throws(() => donor.describe(), {
     code: Status.Uninitialized,
-    message: "The index was freed or merged into another",
+    message: "The index was freed or absorbed into another",
   });
   donor.free(); // a consumed donor holds nothing left to free
-  assert.throws(() => index.merge([donor]), {
+  assert.throws(() => index.absorb([donor]), {
     code: Status.Uninitialized,
-    message: "A donor was freed or merged already",
+    message: "A donor was freed or absorbed already",
   });
-  assert.throws(() => index.merge([EXECUTOR]), {
+  assert.throws(() => index.absorb([EXECUTOR]), {
     code: Status.InvalidArgument,
     message: "The 'donors' argument must hold indexes",
   });
 
   const twice = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
-  assert.throws(() => index.merge([twice, twice]), {
+  assert.throws(() => index.absorb([twice, twice]), {
     code: Status.Uninitialized,
-    message: "A donor was freed or merged already",
+    message: "A donor was freed or absorbed already",
   });
-  assert.equal(twice.describe().size, 0, "a refused merge hands its donors back");
+  assert.equal(twice.describe().size, 0, "a refused absorb hands its donors back");
+
+  const other = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2, quantization: Scalar.I8 });
+  other.reserve(1);
+  other.insert(3n, new Float32Array([3, 3]));
+  try {
+    index.absorb([other]);
+  } catch (error) {
+    // The engine refuses another scalar, which the stand-in absorbs, and hands the donor back live.
+    assert.equal(error.code, Status.ConfigMismatch);
+    assert.equal(other.count(3n), 1, "a donor the call did not absorb stays live");
+  }
 });
 
-test("A deferred merge holds its donors until it is final", () => {
+test("A deferred absorb holds its donors until it is final", () => {
   const executor = Executor.forRam();
   const index = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
   const donor = DenseIndex.initRam({ metric: DenseMetric.Euclidean, dimensions: 2 });
@@ -599,17 +614,17 @@ test("A deferred merge holds its donors until it is final", () => {
   donor.reserve(1);
   donor.insert(2n, new Float32Array([2, 2]));
 
-  const call = index.deferred(executor).merge([donor]);
+  const call = index.deferred(executor).absorb([donor]);
   assert.throws(() => donor.count(2n), {
     code: Status.Uninitialized,
-    message: "The index was freed or merged into another",
+    message: "The index was freed or absorbed into another",
   });
-  assert.throws(() => index.deferred(executor).merge([donor]), {
+  assert.throws(() => index.deferred(executor).absorb([donor]), {
     code: Status.Uninitialized,
-    message: "A donor was freed or merged already",
+    message: "A donor was freed or absorbed already",
   });
-  if (served(() => assert.equal(call.wait(), undefined)))
-    assert.equal(index.count(2n), 1, "the donor's entries joined the index");
+  assert.equal(call.wait(), undefined);
+  assert.equal(index.count(2n), 1, "the donor's entries joined the index");
   executor.free();
 });
 

@@ -9,9 +9,10 @@ target_include_directories(usearch_test_header_only PRIVATE ${CMAKE_CURRENT_SOUR
 target_link_libraries(usearch_test_header_only PRIVATE fmt::fmt yyjson forkunion::header numkong::header)
 add_test(NAME usearch_test_header_only COMMAND usearch_test_header_only)
 
-# The dense suite lists the per-family test units, sharded per dtype so the instantiation grids build in parallel, and
-# keeps the shards of the dtypes `USEARCH_DENSE_DTYPES` compiles. Optimization level comes from the configuration:
-# measured on these shards, -O1 costs as much as -O3 and only slows the suite down.
+# The engine suite lists the dense per-family test units, sharded per dtype so the instantiation grids build in
+# parallel, and keeps the shards of the dtypes `USEARCH_DENSE_DTYPES` compiles; the sequence and shapes engines add one
+# unit each. Optimization level comes from the configuration: measured on these shards, -O1 costs as much as -O3 and
+# only slows the suite down.
 add_executable(
     usearch_test
     main.cpp
@@ -19,34 +20,32 @@ add_executable(
     utilities/safegraphs_format.cpp
     dense/ram_metric_f64.cpp
     dense/ram_metric_f32.cpp
-    dense/ram_metric_bf16.cpp
-    dense/ram_metric_f16.cpp
-    dense/ram_metric_e5m2.cpp
-    dense/ram_metric_e4m3.cpp
-    dense/ram_metric_e3m2.cpp
-    dense/ram_metric_e2m3.cpp
-    dense/ram_metric_i8.cpp
-    dense/ram_metric_i4.cpp
-    dense/ram_metric_u8.cpp
-    dense/ram_metric_u4.cpp
-    dense/ram_metric_u1.cpp
     dense/ram_indexes.cpp
     dense/ram_index_f32.cpp
-    dense/ram_index_bf16.cpp
-    dense/ram_index_f16.cpp
-    dense/ram_index_e5m2.cpp
-    dense/ram_index_i8.cpp
-    dense/ram_index_i4.cpp
-    dense/ram_index_u8.cpp
-    dense/ram_index_u1.cpp
     dense/nvme_indexes.cpp
+    sequence/ram_index.cpp
+    shapes/ram_index.cpp
+    geospatial/ram_index.cpp
 )
-usearch_keep_dense_dtypes(usearch_test)
+usearch_dense_dtype_sources(
+    usearch_test
+    BF16 dense/ram_metric_bf16.cpp dense/ram_index_bf16.cpp
+    F16 dense/ram_metric_f16.cpp dense/ram_index_f16.cpp
+    E5M2 dense/ram_metric_e5m2.cpp dense/ram_index_e5m2.cpp
+    E4M3 dense/ram_metric_e4m3.cpp
+    E3M2 dense/ram_metric_e3m2.cpp
+    E2M3 dense/ram_metric_e2m3.cpp
+    I8 dense/ram_metric_i8.cpp dense/ram_index_i8.cpp
+    I4 dense/ram_metric_i4.cpp dense/ram_index_i4.cpp
+    U8 dense/ram_metric_u8.cpp dense/ram_index_u8.cpp
+    U4 dense/ram_metric_u4.cpp
+    U1 dense/ram_metric_u1.cpp dense/ram_index_u1.cpp
+)
 usearch_setup_target(usearch_test HOST)
 # The capability names come from the C interface's own probes, compiled in rather than linking the whole library.
 target_sources(usearch_test PRIVATE ${PROJECT_SOURCE_DIR}/src/types.cpp)
 target_include_directories(usearch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(usearch_test PRIVATE fmt::fmt yyjson forkunion::static)
+target_link_libraries(usearch_test PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header)
 add_test(NAME usearch_test COMMAND usearch_test)
 
 # The header-only tier's witness: everything under `utilities/`, `basic/` & `geospatial/` compiles & runs from headers
@@ -59,22 +58,21 @@ add_test(NAME usearch_test_header_only_witness COMMAND usearch_test_header_only_
 # The one VRAM runner: one object library compiles the per-dtype test shards once, each instantiating every vendor its
 # `USEARCH_ARCH_<VENDOR>_` carries, and each carried vendor's entry registers with the runner, which names none of them.
 # The library links in too, so the runner reaches every class arm it compiled through the C interface.
-add_library(
-    usearch_test_vram_shards OBJECT
-    dense/vram_index_bf16.cpp
-    dense/vram_index_f16.cpp
-    dense/vram_index_e5m2.cpp
-    dense/vram_index_e4m3.cpp
-    dense/vram_index_e3m2.cpp
-    dense/vram_index_e2m3.cpp
-    dense/vram_index_i8.cpp
-    dense/vram_index_i4.cpp
-    dense/vram_index_u8.cpp
-    dense/vram_index_u4.cpp
-    dense/vram_index_u1.cpp
-    dense/vram_indexes.cpp
+add_library(usearch_test_vram_shards OBJECT dense/vram_indexes.cpp)
+usearch_dense_dtype_sources(
+    usearch_test_vram_shards
+    BF16 dense/vram_index_bf16.cpp
+    F16 dense/vram_index_f16.cpp
+    E5M2 dense/vram_index_e5m2.cpp
+    E4M3 dense/vram_index_e4m3.cpp
+    E3M2 dense/vram_index_e3m2.cpp
+    E2M3 dense/vram_index_e2m3.cpp
+    I8 dense/vram_index_i8.cpp
+    I4 dense/vram_index_i4.cpp
+    U8 dense/vram_index_u8.cpp
+    U4 dense/vram_index_u4.cpp
+    U1 dense/vram_index_u1.cpp
 )
-usearch_keep_dense_dtypes(usearch_test_vram_shards)
 usearch_setup_target(usearch_test_vram_shards HOST)
 target_include_directories(usearch_test_vram_shards PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(

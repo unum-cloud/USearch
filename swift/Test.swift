@@ -328,6 +328,10 @@ struct ResultTests {
         #expect(matches[0].map(\.key) == [7, 7, 7])
         let distances = matches[0].map(\.distance)
         #expect(distances.count == 3 && zip(distances, [0, 1, 2]).allSatisfy { nearly($0, $1) })
+
+        // Wanting nothing lands only the counts, with no keys or scores behind them.
+        let none = try index.search(try rows([Float](arrayLiteral: 1, 0), columns: 2), wanted: 0, arena: arena)
+        #expect(none.count == 1 && none[0].isEmpty)
     }
 
     /// The arena's next call rewinds it, so a view an earlier call answered traps on its next read
@@ -557,9 +561,9 @@ struct LifetimeTests {
         #expect(failureStatus(of: try viewed.insert(keys: [4], vectors: vector)) == .readOnly)
     }
 
-    /// A merge consumes every donor it absorbs, which then refuses every verb rather than reaching a
-    /// freed handle, and one stopped early hands the rest back.
-    @Test func mergeConsumesItsDonors() throws {
+    /// An absorb consumes every donor it takes in, which then refuses every verb rather than reaching
+    /// a freed handle, and one stopped early hands the rest back.
+    @Test func absorbConsumesItsDonors() throws {
         let index = try triangle()
         func donor(_ key: Key) throws -> DenseIndex {
             let donor = try DenseIndex.initRam(DenseOptions(dimensions: 2, metric: .euclidean))
@@ -568,22 +572,19 @@ struct LifetimeTests {
             return donor
         }
         let (first, second) = (try donor(4), try donor(5))
-        #expect(failureStatus(of: try index.merge([first, first])) == .invalidArgument)
-        #expect(failureStatus(of: try index.merge([index])) == .invalidArgument)
+        #expect(failureStatus(of: try index.absorb([first, first])) == .invalidArgument)
+        #expect(failureStatus(of: try index.absorb([index])) == .configMismatch)
 
-        // The engine declares merges before it serves them, so only the refusal is checked there.
-        let stopped = DenseMergeConfig(progress: { _, _ in .cancel })
-        let refusal = failureStatus(of: try index.merge([first, second], config: stopped))
-        if refusal == .unsupported { return }
-        #expect(refusal == .cancelled)
+        let stopped = DenseAbsorbConfig(progress: { _, _ in .cancel })
+        #expect(failureStatus(of: try index.absorb([first, second], config: stopped)) == .cancelled)
         #expect(try index.count(key: 4) == 1)
         #expect(failureStatus(of: try first.describe()) == .uninitialized)
         #expect(try second.count(key: 5) == 1)
 
-        try index.merge([second])
+        try index.absorb([second])
         #expect(try index.describe().size == 5)
         #expect(failureStatus(of: try second.describe()) == .uninitialized)
-        #expect(failureStatus(of: try index.merge([second])) == .uninitialized)
+        #expect(failureStatus(of: try index.absorb([second])) == .uninitialized)
     }
 }
 

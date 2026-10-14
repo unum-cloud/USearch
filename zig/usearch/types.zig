@@ -1,4 +1,4 @@
-//! Shared vocabulary of the USearch C interface - the Zig twin of `include/usearch/types.h`.
+//! Shared vocabulary of every USearch modality.
 //!
 //! Holds the `Status`/`Error` pair every call reports through, the 128-bit `Key` and the
 //! `Distance` it is scored by, the `Scalar` encodings rows travel in, the `RowsView` every
@@ -6,9 +6,9 @@
 //! length scales with a call lands in, the `Matches` a ranked run comes back as, and the
 //! `Deferred` a submitted call is held in.
 //!
-//! The C ABI is declared by hand rather than pulled through `@cImport`, so the module needs no
-//! include path from its dependents and no cast at a call site: an `extern struct` already has
-//! the ABI's layout, and an `enum(c_int)` already has its width.
+//! The library's entry points are declared by hand rather than pulled through `@cImport`, so the
+//! module needs no include path from its dependents and no cast at a call site: an `extern struct`
+//! already has the library's layout, and an `enum(c_int)` already has its width.
 
 const std = @import("std");
 
@@ -589,8 +589,8 @@ pub const Continuation = enum(c_int) {
 
 /// Mirrors `usearch_progress_callback_t`.
 pub const ProgressFunction = *const fn (usize, usize, ?*anyopaque) callconv(.c) Continuation;
-/// Mirrors `usearch_predicate_t`.
-pub const PredicateFunction = *const fn (Key, ?*anyopaque) callconv(.c) Admission;
+/// Mirrors `usearch_predicate_callback_t`.
+pub const PredicateFunction = *const fn ([*]const Key, [*]Admission, usize, ?*anyopaque) callconv(.c) void;
 
 /// A progress handler as the C interface carries it: a `usearch_progress_callback_t` and the state
 /// forwarded into it. Build one with `ProgressCallback.of`; the default reports nowhere.
@@ -619,25 +619,42 @@ pub const ProgressCallback = struct {
     }
 };
 
-/// A per-key admission filter as the C interface carries it: a `usearch_predicate_t` and the
-/// state forwarded into it. Build one with `Predicate.of`; the default admits everything.
-pub const Predicate = struct {
+/// How a long call reports its advance: a handler, its state, and how many reports it hears.
+/// Mirrors `usearch_progress_t`.
+pub const usearch_progress_t = extern struct {
+    /// The optional handler; null skips every report.
+    callback: ?ProgressFunction = null,
+    /// Opaque pointer forwarded into every `callback` call.
+    state: ?*anyopaque = null,
+    /// Reports a call makes at most, the last at completion; zero derives to ten.
+    steps: usize = 0,
+
+    pub fn of(progress: ProgressCallback, steps: usize) usearch_progress_t {
+        return .{ .callback = progress.callback, .state = progress.state, .steps = steps };
+    }
+};
+
+/// Which candidate keys a filtered search may report: a handler and the state forwarded into it.
+/// Build one with `Predicate.of`; the default admits everything. Mirrors `usearch_predicate_t`.
+pub const Predicate = extern struct {
+    /// The optional handler; null admits every key.
     callback: ?PredicateFunction = null,
+    /// Opaque pointer forwarded into every `callback` call.
     state: ?*anyopaque = null,
 
-    /// Wraps `admits` in a trampoline generated per call site. Pass `{}` for a predicate needing
-    /// no context, and a single-item pointer otherwise.
+    /// Wraps `admits` in a trampoline generated per call site, asking it about each key of a batch.
+    /// Pass `{}` for a predicate needing no context, and a single-item pointer otherwise.
     ///
-    /// It runs once per scored candidate, far more often than `wanted`, and concurrently from the
+    /// It judges every scored candidate, far more than `wanted`, and runs concurrently from the
     /// executor's threads - so it belongs on the caller's fast path and must tolerate that.
     pub fn of(context: anytype, comptime admits: fn (@TypeOf(context), Key) Admission) Predicate {
         const Context = @TypeOf(context);
         checkContext(Context);
         return .{
             .callback = struct {
-                fn admit(key: Key, state: ?*anyopaque) callconv(.c) Admission {
-                    if (Context == void) return admits({}, key);
-                    return admits(@ptrCast(@alignCast(state.?)), key);
+                fn admit(keys: [*]const Key, admissions: [*]Admission, count: usize, state: ?*anyopaque) callconv(.c) void {
+                    for (keys[0..count], admissions[0..count]) |key, *admission| admission.* =
+                        if (Context == void) admits({}, key) else admits(@ptrCast(@alignCast(state.?)), key);
                 }
             }.admit,
             .state = contextPointer(Context, context),
@@ -886,7 +903,8 @@ pub const Executor = struct {
     }
 
     /// Drains every call, releases the scratch and the streams it owns, and frees the executor,
-    /// which is invalid afterwards; the arenas it made keep their memory. Calls `usearch_executor_free`.
+    /// which is invalid afterwards; the host arenas it made keep their memory, while its GPU arenas
+    /// must be freed first. Calls `usearch_executor_free`.
     pub fn deinit(self: *Executor) void {
         usearch_executor_free(self.handle);
         self.* = undefined;
@@ -902,6 +920,10 @@ pub const Executor = struct {
 /// at a time: a second use while a call holds it fails with `Error.Contended` and leaves that call's
 /// views alone. A view finds its arena where the call left it, so an arena stays put, never copied,
 /// while views over it live.
+///
+/// A GPU arena grows, fills and frees on the first stream of the executor that made it, so it
+/// serves only calls on that executor, any other or none answering `Error.Device`, and must be
+/// freed before that executor is.
 pub const Arena = struct {
     /// The opaque `usearch_arena_t` the ABI hands back; null once freed.
     handle: ?*anyopaque,
@@ -911,7 +933,8 @@ pub const Arena = struct {
     generation: usize = 0,
 
     /// Makes an arena where `executor` computes, decided once, or host pages for calls on the
-    /// calling thread when null; it may outlive the executor. Calls `usearch_arena_init`.
+    /// calling thread when null; host pages may outlive the executor, a GPU arena may not.
+    /// Calls `usearch_arena_init`.
     pub fn init(executor: ?Executor) Error!Arena {
         var arena: Arena = .{ .handle = null, .residency = if (executor) |chosen| chosen.residency else .ram };
         var outcome: Outcome = .{};

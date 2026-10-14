@@ -51,11 +51,11 @@ jobs:
             csharp/nuget/nuget-package.props:>(\d+\.\d+\.\d+(?:-rc\.\d+)?)</Version>
             CMakeLists.txt:VERSION (\d+\.\d+\.\d+(?:-rc\.\d+)?)
           update-major-version-in: |
-            include/usearch/types.h:^#define USEARCH_VERSION_MAJOR (\d+)
+            c/usearch/types.h:^#define USEARCH_VERSION_MAJOR (\d+)
           update-minor-version-in: |
-            include/usearch/types.h:^#define USEARCH_VERSION_MINOR (\d+)
+            c/usearch/types.h:^#define USEARCH_VERSION_MINOR (\d+)
           update-patch-version-in: |
-            include/usearch/types.h:^#define USEARCH_VERSION_PATCH (\d+)
+            c/usearch/types.h:^#define USEARCH_VERSION_PATCH (\d+)
           dry-run: "true"
 
   test_ubuntu_gcc:
@@ -155,7 +155,7 @@ jobs:
       - name: Test GoLang
         run: |
           sudo cp ${{ github.workspace }}/build_host_relwithdebinfo/libusearch_shared.so /usr/lib/libusearch_shared.so
-          sudo cp -r ${{ github.workspace }}/include/usearch /usr/include/
+          for root in c include cpp; do sudo cp -r ${{ github.workspace }}/$root/usearch /usr/include/; done
           test -z "$(gofmt -l .)"
           go vet ./...
           LD_DEBUG=all go test -race -v ./...
@@ -753,7 +753,8 @@ jobs:
       - name: Package Android libraries for release
         run: |
           version=$(cat VERSION)
-          zip -r usearch_android_${{ matrix.arch }}_${version}.zip build_${{ matrix.preset }}/libusearch_shared.so include/usearch
+          zip -r usearch_android_${{ matrix.arch }}_${version}.zip build_${{ matrix.preset }}/libusearch_shared.so c/usearch \
+            include/usearch cpp/usearch
 
       - name: Upload Android libraries
         uses: actions/upload-artifact@v7

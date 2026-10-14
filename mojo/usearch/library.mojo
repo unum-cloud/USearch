@@ -15,6 +15,7 @@ from std.memory import ArcPointer, stack_allocation
 from std.sys.info import CompilationTarget
 
 from usearch.dense import (
+    DenseAbsorb,
     DenseAttend,
     DenseClear,
     DenseCount,
@@ -31,7 +32,6 @@ from usearch.dense import (
     DenseLoadVram,
     DenseLoadVramBuffer,
     DenseMaxsim,
-    DenseMerge,
     DenseMetadataRead,
     DenseMetadataReadBuffer,
     DenseMetric,
@@ -202,8 +202,8 @@ struct Symbols:
     """`usearch_dense_refine`."""
     var dense_health: DenseHealth
     """`usearch_dense_health`."""
-    var dense_merge: DenseMerge
-    """`usearch_dense_merge`."""
+    var dense_absorb: DenseAbsorb
+    """`usearch_dense_absorb`."""
     var dense_search: DenseSearch
     """`usearch_dense_search`."""
     var dense_count: DenseCount
@@ -293,7 +293,7 @@ struct Symbols:
         self.dense_insert = _resolve[DenseInsert](handle, "usearch_dense_insert")
         self.dense_refine = _resolve[DenseRefine](handle, "usearch_dense_refine")
         self.dense_health = _resolve[DenseHealth](handle, "usearch_dense_health")
-        self.dense_merge = _resolve[DenseMerge](handle, "usearch_dense_merge")
+        self.dense_absorb = _resolve[DenseAbsorb](handle, "usearch_dense_absorb")
         self.dense_search = _resolve[DenseSearch](handle, "usearch_dense_search")
         self.dense_count = _resolve[DenseCount](handle, "usearch_dense_count")
         self.dense_get = _resolve[DenseGet](handle, "usearch_dense_get")

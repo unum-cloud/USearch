@@ -24,9 +24,11 @@ import cloud.unum.usearch.DenseIndex.ValueLookup;
 import cloud.unum.usearch.Types.Arena;
 import cloud.unum.usearch.Types.Call;
 import cloud.unum.usearch.Types.Executor;
+import cloud.unum.usearch.Types.Handle;
 import cloud.unum.usearch.Types.Key;
 import cloud.unum.usearch.Types.Matches;
 import cloud.unum.usearch.Types.Monolith;
+import cloud.unum.usearch.Types.Residency;
 import cloud.unum.usearch.Types.RowsView;
 import cloud.unum.usearch.Types.Scalar;
 import cloud.unum.usearch.Types.Status;
@@ -279,23 +281,26 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
      *
      * @throws USearchException SHAPE_MISMATCH when a scored key resolves to no row or the head count
      *     does not divide the rows; CONFIG_MISMATCH on a graph frozen under a distance kind; CONTENDED
-     *     when the arena serves another call; and whatever the lookup raised, which outranks the
-     *     status it turned into.
+     *     when the arena serves another call; DEVICE on a VRAM arena, whose walk needs a device
+     *     lookup; and whatever the lookup raised, which outranks the status it turned into.
      */
     public DenseVectors attend(RowsView queries, ValueLookup valueLookup, DenseAttendConfig config, Arena arena) {
         return block(attending(queries, valueLookup, config, arena));
     }
 
     /**
-     * Absorbs every donor into this index - cheaper than re-inserting their vectors one by one,
-     * linking across donors via landmark stitching. The donors are consumed whether or not the merge
-     * succeeds, and closed from the call on. Calls {@code usearch_dense_merge}.
+     * Absorbs every donor into this index, one after another, keeping their graphs rather than
+     * re-inserting their vectors and linking each in across the appended part. Every donor refuses
+     * every verb until the call is final; then each one absorbed stays closed, and one it did not
+     * absorb is a live index again, which the caller still owns, though its rows may already have
+     * landed here. Calls {@code usearch_dense_absorb}.
      *
-     * @throws USearchException UNSUPPORTED where no residency absorbs donors yet, and INVALID_ARGUMENT
-     *     when the index is among its own donors or a donor is named twice, which consumes none.
+     * @throws USearchException READ_ONLY on a view, CONFIG_MISMATCH on a donor of another residency,
+     *     scalar, metric or geometry, and INVALID_ARGUMENT when the index is among its own donors or a
+     *     donor is named twice, which consumes none.
      */
-    public void merge(DenseIndex... donors) {
-        block(merging(donors));
+    public void absorb(DenseIndex... donors) {
+        block(absorbing(donors));
     }
 
     /**
@@ -504,6 +509,10 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
             call.enumeration("outputs_scalar", config.outputsScalar.code());
             MemorySegment outputs = call.output("outputs", Library.ROWS_VIEW);
             call.arena("arena", arena);
+            // A VRAM arena serves only a VRAM call, whose walk would run this host upcall on the device.
+            if (arena.residency() == Residency.VRAM) {
+                throw new USearchException(Status.DEVICE, "a VRAM walk needs a device-callable value lookup");
+            }
             call.size("expansion_factor", config.expansionFactor);
             call.real("score_scale", config.scoreScale);
             call.stats("stats", config.stats);
@@ -522,12 +531,12 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
         });
     }
 
-    static Request<Void> merging(DenseIndex[] donors) {
-        return new Request<>(DenseIndex.MERGE, call -> {
+    static Request<Void> absorbing(DenseIndex[] donors) {
+        return new Request<>(DenseIndex.ABSORB, call -> {
             long index = call.arguments
-                    .get(Library.POINTER, DenseIndex.MERGE.at("index"))
+                    .get(Library.POINTER, DenseIndex.ABSORB.at("index"))
                     .address();
-            // Every donor is checked before any is surrendered, so a refused merge consumes none of them.
+            // Every donor is checked before any is surrendered, so a refused absorb consumes none of them.
             for (int order = 0; order != donors.length; ++order) {
                 if (donors[order].handle.address().address() == index) {
                     throw new USearchException(Status.INVALID_ARGUMENT, "an index cannot absorb itself");
@@ -539,10 +548,13 @@ public abstract sealed class DenseVerbs permits DenseIndex, DenseIndex.On {
                 }
             }
             MemorySegment slots = call.memory.allocate(Library.POINTER, donors.length);
-            // Every surrendered donor is the call's to free once final, unless the library absorbed it.
+            // A slot the library left unnulled is a live handle once final, so it goes back to its donor.
             call.settle(() -> {
                 for (int order = 0; order != donors.length; ++order) {
-                    Library.invoke(DenseIndex.FREE, slots.getAtIndex(Library.POINTER, order));
+                    MemorySegment survivor = slots.getAtIndex(Library.POINTER, order);
+                    if (!survivor.equals(MemorySegment.NULL)) {
+                        donors[order].handle = new Handle(survivor, DenseIndex.FREE);
+                    }
                 }
             });
             for (int order = 0; order != donors.length; ++order) {

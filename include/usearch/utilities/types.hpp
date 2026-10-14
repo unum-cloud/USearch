@@ -184,6 +184,24 @@ bytes_span_t bytes_of(value_type_* data, std::size_t count) noexcept {
     return std::as_writable_bytes(std::span {data, count});
 }
 
+/** The typed elements behind @p bytes, the inverse of @ref bytes_of and the one place a payload's
+ *  bytes are read back as its elements; a trailing partial element is left out. */
+template <typename element_type_>
+std::span<element_type_ const> elements_of(bytes_view_t bytes) noexcept {
+    return {reinterpret_cast<element_type_ const*>(bytes.data()), bytes.size() / sizeof(element_type_)};
+}
+
+/** The writable typed elements behind @p bytes, for a codec decoding straight into its slice. */
+template <typename element_type_>
+std::span<element_type_> elements_of(bytes_span_t bytes) noexcept {
+    return {reinterpret_cast<element_type_*>(bytes.data()), bytes.size() / sizeof(element_type_)};
+}
+
+/** The characters behind @p bytes, as the view every string type converts from. */
+inline std::string_view chars_of(bytes_view_t bytes) noexcept {
+    return {reinterpret_cast<char const*>(bytes.data()), bytes.size()};
+}
+
 /** The process-wide allocator, named rather than defaulted: a container takes this when
  *  no arena, memory domain or device owns its bytes, so every such placement is one grep
  *  away instead of hiding in an omitted argument. */
@@ -194,6 +212,10 @@ inline constexpr global_allocator_t global_allocator {};
 inline constexpr std::size_t default_alignment_k = USEARCH_DEFAULT_ALIGNMENT;
 static_assert(default_alignment_k >= 8 && (default_alignment_k & (default_alignment_k - 1)) == 0,
               "USEARCH_DEFAULT_ALIGNMENT must be a power of two, no narrower than a pointer pair");
+
+/** The user-space virtual address width of x86-64 and Arm64 under four-level paging, which bounds
+ *  how many records any one collection can ever place. */
+inline constexpr std::size_t address_bits_k = 48;
 
 /** How one step of a walk - a batch of landmarks or one expansion round - left it, in every tier. */
 enum class walk_step_t : u32_t {
@@ -390,6 +412,8 @@ constexpr char const* status_to_string(status_t status) noexcept {
  *  on @c success_k. */
 template <typename value_type_>
 struct [[nodiscard]] expected {
+    using value_t = value_type_;
+
     value_type_ value;
     status_t status;
 
@@ -980,6 +1004,24 @@ struct dummy_predicate_t {
         return admission_t::admit_k;
     }
 };
+
+/** Judges @p keys through @p predicate into @p verdicts, in one call when it takes a span of keys,
+ *  so a C handler behind an external store answers a whole quad at once, else key by key. */
+template <typename predicate_type_, typename key_type_, std::size_t extent_>
+inline void judge_keys(predicate_type_& predicate, std::span<key_type_, extent_> keys,
+                       std::span<admission_t, extent_> verdicts) noexcept {
+    if constexpr (requires { predicate(keys, verdicts); }) predicate(keys, verdicts);
+    else
+        for (std::size_t index = 0; index != keys.size(); ++index) verdicts[index] = predicate(keys[index]);
+}
+
+/** The verdict @p predicate gives one @p key, asking a batched predicate about a span of one. */
+template <typename predicate_type_, typename key_type_>
+inline admission_t judge_key(predicate_type_& predicate, key_type_ const& key) noexcept {
+    admission_t verdict = admission_t::reject_k;
+    judge_keys(predicate, std::span<key_type_ const, 1>(&key, 1), std::span<admission_t, 1>(&verdict, 1));
+    return verdict;
+}
 
 /** The compiled-out default progress watcher: always carries on, so an unwatched long
  *  verb runs to completion with no cancellation checks surviving inlining. */

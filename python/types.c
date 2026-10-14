@@ -2,11 +2,11 @@
  *  @file python/types.c
  *  @author Ash Vardanian
  *  @date August 16, 2026
- *  @brief The vocabulary every modality shares - the CPython twin of `usearch/types.h`.
+ *  @brief The CPython vocabulary every modality shares.
  *
  *  Keys, distances, failures, enums, calls and telemetry live here rather than inside any one
- *  modality, the same split `rust/types.rs` takes: a `Key` produced by a dense search is the very
- *  object a sequence index will accept, because there is one definition and one address.
+ *  modality: a `Key` produced by a dense search is the very object a sequence index will accept,
+ *  because there is one definition and one address.
  *
  *  Tensor ingestion lives here too, being the same kind of shared vocabulary: every batch verb
  *  of every modality takes its input the same way, PEP 3118 first and @c __array_interface__
@@ -54,7 +54,7 @@ static struct {
     {usearch_status_overflow_k, "usearch.CapacityOverflowError", &PyExc_OverflowError,
      "A hard design ceiling was reached; a smaller request cannot help."},
     {usearch_status_uninitialized_k, "usearch.UninitializedError", NULL,
-     "The handle is not ready for the verb - unfrozen, consumed by a merge, or closed."},
+     "The handle is not ready for the verb - unfrozen, absorbed as a donor, or closed."},
     {usearch_status_config_mismatch_k, "usearch.ConfigMismatchError", &PyExc_ValueError,
      "The request contradicts an already-frozen configuration."},
     {usearch_status_contended_k, "usearch.ContendedError", NULL,
@@ -1314,36 +1314,41 @@ static usearch_continuation_t progress_trampoline(size_t completed, size_t total
     return continuation;
 }
 
-usearch_progress_callback_t usearch_py_progress_registered(usearch_py_callback_t const* callback) {
-    return callback->callable ? progress_trampoline : NULL;
+usearch_progress_t usearch_py_progress_registered(usearch_py_callback_t* callback, size_t steps) {
+    return (usearch_progress_t) {.callback = callback->callable ? progress_trampoline : NULL,
+                                 .state = callback,
+                                 .steps = steps};
 }
 
 /**
- *  @brief Re-enters Python for one admission decision, from whichever library thread traverses.
+ *  @brief Re-enters Python for one batch of admission decisions, from whichever library thread
+ *      traverses, taking the GIL once per batch.
  *
  *  A worker's thread state dies with the callback and the caller's would surface the exception
  *  at an unrelated return, so a raising predicate latches its failure into the call for the answer
  *  to raise, and every later decision rejects without re-entering Python.
  */
-static usearch_admission_t predicate_trampoline(usearch_key_t key, void* state) {
+static void predicate_trampoline(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count,
+                                 void* state) {
     usearch_py_callback_t const* const callback = (usearch_py_callback_t const*)state;
-    if (usearch_py_callback_raised(callback->call)) return usearch_reject_k;
+    for (size_t index = 0; index != count; ++index) admissions[index] = usearch_reject_k;
+    if (usearch_py_callback_raised(callback->call)) return;
     PyGILState_STATE const gil_state = PyGILState_Ensure();
-    usearch_admission_t admitted = usearch_reject_k;
-    PyObject* const key_object = usearch_py_key_to_object(key);
-    PyObject* const verdict = key_object ? PyObject_CallOneArg(callback->callable, key_object) : NULL;
-    Py_XDECREF(key_object);
-    if (verdict) {
-        admitted = PyObject_IsTrue(verdict) > 0 ? usearch_admit_k : usearch_reject_k;
-        Py_DECREF(verdict);
+    for (size_t index = 0; index != count && !PyErr_Occurred(); ++index) {
+        PyObject* const key_object = usearch_py_key_to_object(keys[index]);
+        PyObject* const verdict = key_object ? PyObject_CallOneArg(callback->callable, key_object) : NULL;
+        Py_XDECREF(key_object);
+        if (verdict) {
+            admissions[index] = PyObject_IsTrue(verdict) > 0 ? usearch_admit_k : usearch_reject_k;
+            Py_DECREF(verdict);
+        }
     }
     if (PyErr_Occurred()) usearch_py_callback_latch(callback->call);
     PyGILState_Release(gil_state);
-    return admitted;
 }
 
-usearch_predicate_t usearch_py_predicate_registered(usearch_py_callback_t const* callback) {
-    return callback->callable ? predicate_trampoline : NULL;
+usearch_predicate_t usearch_py_predicate_registered(usearch_py_callback_t* callback) {
+    return (usearch_predicate_t) {.callback = callback->callable ? predicate_trampoline : NULL, .state = callback};
 }
 
 #pragma endregion Calls
@@ -1666,7 +1671,8 @@ static char const doc_Executor[] =                                              
     "`index.on(executor)` blocks on it, `index.deferred(executor)` submits to it. Calls\n"  //
     "start in submission order, a blocking one after every earlier submission finishes,\n"  //
     "and a deferred one finding its `deferred_limit` table full raises `ContendedError`\n"  //
-    "once waited for. Used in a `with` block, it waits for its calls and closes on exit.\n" //
+    "once waited for. Used in a `with` block, it waits for its calls and closes on exit,\n" //
+    "or leaves both to the last GPU arena it made that is still alive.\n"                   //
     "\n"                                                                                    //
     "Example:\n"                                                                            //
     "  >>> from array import array\n"                                                       //
@@ -1697,18 +1703,48 @@ static PyObject* Executor_tp_new(PyTypeObject* type, PyObject* args, PyObject* k
     return NULL;
 }
 
-/** Frees the handle of @p executor once, waiting in C for every deferred call naming it, fenced
- *  against a concurrent close. */
+/** Frees @p handle, waiting in C for every deferred call naming it; NULL is safe. */
+static void executor_free(usearch_executor_t handle) {
+    if (!handle) return;
+    Py_BEGIN_ALLOW_THREADS;
+    usearch_executor_free(handle);
+    Py_END_ALLOW_THREADS;
+}
+
+/** Closes @p executor once, fenced against a concurrent close; while a GPU arena it made is alive,
+ *  the handle is left for the last of them to free. */
 static void executor_close(Executor* executor) {
     usearch_executor_t handle = NULL;
     usearch_py_critical_section_begin_((PyObject*)executor);
     handle = executor->handle;
     executor->handle = NULL;
+    if (handle && executor->arenas) {
+        executor->retained = handle;
+        handle = NULL;
+    }
     usearch_py_critical_section_end_();
-    if (!handle) return;
-    Py_BEGIN_ALLOW_THREADS;
-    usearch_executor_free(handle);
-    Py_END_ALLOW_THREADS;
+    executor_free(handle);
+}
+
+/** Takes a GPU arena's hold on @p executor, whose handle must outlive the arena. */
+static PyObject* executor_hold(PyObject* executor) {
+    usearch_py_critical_section_begin_(executor);
+    ++((Executor*)executor)->arenas;
+    usearch_py_critical_section_end_();
+    return Py_NewRef(executor);
+}
+
+/** Drops a GPU arena's hold on @p executor, freeing the handle a close left to the last of them. */
+static void executor_release(PyObject* executor) {
+    usearch_executor_t retained = NULL;
+    usearch_py_critical_section_begin_(executor);
+    if (!--((Executor*)executor)->arenas) {
+        retained = ((Executor*)executor)->retained;
+        ((Executor*)executor)->retained = NULL;
+    }
+    usearch_py_critical_section_end_();
+    executor_free(retained);
+    Py_DECREF(executor);
 }
 
 static void Executor_dealloc(Executor* executor) {
@@ -2038,7 +2074,9 @@ static char const doc_Arena[] =                                                 
     "and a result read after a later call rewound it raises `UninitializedError`. A\n"         //
     "deferred call holds it as a blocking one does, until it is waited on or dropped.\n"       //
     "Results over device memory export `__cuda_array_interface__`, and host reads of them\n"   //
-    "raise `DeviceError`.\n"                                                                   //
+    "raise `DeviceError`. A GPU arena serves only calls on the executor that made it, any\n"   //
+    "other or none raising `DeviceError`, and holds that executor until it is freed, so an\n"  //
+    "executor closed first keeps its streams until then.\n"                                    //
     "Calls `usearch_arena_init`.\n"                                                            //
     "\n"                                                                                       //
     "Args:\n"                                                                                  //
@@ -2083,6 +2121,8 @@ static PyObject* Arena_tp_new(PyTypeObject* type, PyObject* args, PyObject* keyw
     }
     arena->handle = handle;
     arena->residency = residency;
+    // A GPU arena grows, fills and frees on its executor's first stream, so it holds the executor.
+    if (residency == usearch_residency_vram_k) arena->executor = executor_hold(executor_object);
     return (PyObject*)arena;
 }
 
@@ -2090,6 +2130,7 @@ static void Arena_dealloc(Arena* self) {
     Py_BEGIN_ALLOW_THREADS;
     usearch_arena_free(self->handle);
     Py_END_ALLOW_THREADS;
+    if (self->executor) executor_release(self->executor);
     Py_TYPE(self)->tp_free((PyObject*)self);
 }
 

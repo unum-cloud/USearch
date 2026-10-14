@@ -1,11 +1,10 @@
 """Vector search over equidimensional embeddings: the index, its receivers, its cursor, and its search stream.
 
-Mirrors @c include/usearch/dense_index.h. The type is `DenseIndex` rather than `Index` because the
-engine has sibling modalities that will bind beside it, and a bare name would have to be renamed
-the day one of them lands.
+The type is `DenseIndex` rather than `Index` because the engine has sibling modalities that will
+bind beside it, and a bare name would have to be renamed the day one of them lands.
 
 Every verb takes one argument structure named after it, and every one of them is mirrored below as
-a `...Arguments` struct laid out exactly as the header declares it, materialized in a
+a `...Arguments` struct laid out exactly as the library reads it, materialized in a
 `stack_allocation` slot and crossed by address. The receiver picks the completion: verbs on the
 index and on `index.on(executor)` pass blocking completion and return with their outcome final and
 their outputs readable, while `index.deferred(executor)` passes deferred completion and answers a
@@ -26,9 +25,9 @@ Two Mojo 1.1 facts shape the callback slots. A closure capturing anything cannot
 all, so a callback's state crosses beside it as an `Address`; and a `def ... abi("C")` that returns
 a value does not in fact lower to the C calling convention, so the engine calling one jumps into a
 corrupted frame. The value lookup of `attend` returns nothing, so it is a Mojo function - a
-`ValueLookup`. The admission predicate of `search` returns a verdict, so it crosses as a raw
-`Address` that a kernel built in C can fill; progress handlers return one too, so every `progress`
-and `progress_state` slot crosses as `NULL_ADDRESS`.
+`ValueLookup`. The admission predicate of `search` crosses as a raw `Address` that a kernel built in
+C fills; progress handlers return a verdict, so every `progress` slot crosses with a `NULL_ADDRESS`
+callback.
 
 Telemetry is a lent output. Every config of a verb that reports traversal statistics takes an
 optional `stats` pointer, which the engine overwrites whole on every call it is passed to.
@@ -59,6 +58,8 @@ from usearch.types import (
     NULL_ADDRESS,
     NvmeOptions,
     Outcome,
+    PredicateArguments,
+    ProgressArguments,
     RamOptions,
     RowsView,
     RowsViewArguments,
@@ -136,7 +137,11 @@ refuses the call.
 
 Called with the `value_lookup_state` the verb was handed, once per scored batch and concurrently from
 the executor's threads. A lookup whose rows hold another kind or width answers `NULL_ADDRESS` for
-every key rather than handing the engine rows it would misread."""
+every key rather than handing the engine rows it would misread.
+
+A VRAM index calls it inside the device walk instead, so there it must be the address of a
+`__device__` function, as `cudaMemcpyFromSymbol` reads it, with its state and rows in memory that
+device reads. Nothing tells the two kinds apart, so a host function there is undefined, never refused."""
 
 
 @fieldwise_init
@@ -545,10 +550,9 @@ struct DenseRefineConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
 struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](ImplicitlyCopyable):
     """The knobs of `usearch_dense_search_t`; zeroed or absent ones derive what the C interface derives.
 
-    A `predicate` narrows the matches to the entries it admits, and is an address rather than a Mojo
-    function, because a `def ... abi("C")` that returns a value does not lower to the C calling
-    convention in Mojo 1.1. Any `usearch_predicate_t` compiled in C installs unchanged. Non-matching
-    entries still route the traversal, so the predicate is called once per scored candidate,
+    A `predicate` narrows the matches to the entries it admits: the address of a
+    `usearch_predicate_callback_t` compiled in C, which installs unchanged. Non-matching entries still
+    route the traversal, so the predicate judges every scored candidate, a quad of them per call,
     concurrently from the executor's threads.
 
     Parameters:
@@ -560,7 +564,7 @@ struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
     var traversal: Traversal
     """A walk, or an exact scan of every row on RAM and NVMe handles; VRAM answers `UNSUPPORTED`."""
     var predicate: Address
-    """A `usearch_predicate_t` that must outlive the call; `NULL_ADDRESS` admits all."""
+    """A `usearch_predicate_callback_t` that must outlive the call; `NULL_ADDRESS` admits all."""
     var predicate_state: Address
     """The opaque state forwarded into every predicate call."""
     var stats: Optional[Pointer[DenseTraversalStats, Self.stats_origin]]
@@ -582,7 +586,7 @@ struct DenseSearchConfig[stats_origin: MutOrigin = MutUntrackedOrigin](Implicitl
         Args:
             expansion_factor: The candidate-pool breadth the walk explores; zero derives.
             traversal: A walk, or an exact scan of every row on RAM and NVMe handles.
-            predicate: A `usearch_predicate_t` that must outlive the call; `NULL_ADDRESS` admits all.
+            predicate: A `usearch_predicate_callback_t` that must outlive the call; `NULL_ADDRESS` admits all.
             predicate_state: The opaque state forwarded into every predicate call.
             stats: Receives this call's traversal telemetry; absent skips reporting.
         """
@@ -765,8 +769,7 @@ struct DenseLoadRamArguments(ImplicitlyCopyable):
     var source: BytesView[ImmUntrackedOrigin]
     var ram: RamOptions[ImmUntrackedOrigin]
     var values_per_key: c_size_t
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
 
 
 @fieldwise_init
@@ -780,8 +783,7 @@ struct DenseLoadVramArguments(ImplicitlyCopyable):
     var source: BytesView[ImmUntrackedOrigin]
     var vram: VramOptions[ImmUntrackedOrigin]
     var values_per_key: c_size_t
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
 
 
 @fieldwise_init
@@ -849,8 +851,7 @@ struct DenseInsertArguments(ImplicitlyCopyable):
     var keys: KeysView[ImmUntrackedOrigin]
     var vectors: RowsViewArguments
     var expansion_factor: c_size_t
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
     var stats: Address
 
 
@@ -864,8 +865,7 @@ struct DenseRefineArguments(ImplicitlyCopyable):
     var completion: Completion
     var changed: Address
     var expansion_factor: c_size_t
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
     var stats: Address
 
 
@@ -881,8 +881,8 @@ struct DenseHealthArguments(ImplicitlyCopyable):
 
 
 @fieldwise_init
-struct DenseMergeArguments(ImplicitlyCopyable):
-    """`usearch_dense_merge_t`."""
+struct DenseAbsorbArguments(ImplicitlyCopyable):
+    """`usearch_dense_absorb_t`."""
 
     var index: Address
     var executor: Address
@@ -890,8 +890,7 @@ struct DenseMergeArguments(ImplicitlyCopyable):
     var completion: Completion
     var count: c_size_t
     var donors: Address
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
 
 
 @fieldwise_init
@@ -909,10 +908,8 @@ struct DenseSearchArguments(ImplicitlyCopyable):
     var wanted: c_size_t
     var expansion_factor: c_size_t
     var traversal: Traversal
-    var predicate: Address
-    var predicate_state: Address
-    var progress: Address
-    var progress_state: Address
+    var predicate: PredicateArguments
+    var progress: ProgressArguments
     var stats: Address
 
 
@@ -950,6 +947,7 @@ struct DenseCursorInitArguments(ImplicitlyCopyable):
     var cursor: Address
     var index: Address
     var outcome: Address
+    var start: Address
 
 
 @fieldwise_init
@@ -1003,8 +1001,7 @@ struct DenseSaveArguments(ImplicitlyCopyable):
     var outcome: Address
     var completion: Completion
     var path: BytesView[ImmUntrackedOrigin]
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
 
 
 @fieldwise_init
@@ -1017,8 +1014,7 @@ struct DenseSaveBufferArguments(ImplicitlyCopyable):
     var completion: Completion
     var monolith: Address
     var arena: Address
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
 
 
 @fieldwise_init
@@ -1049,8 +1045,7 @@ struct DenseMultiplyArguments(ImplicitlyCopyable):
     var arena: Address
     var wanted: c_size_t
     var expansion_factor: c_size_t
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
     var stats: Address
 
 
@@ -1073,8 +1068,7 @@ struct DenseAttendArguments(ImplicitlyCopyable):
     var outputs_scalar: ScalarKind
     var expansion_factor: c_size_t
     var score_scale: Float32
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
     var stats: Address
 
 
@@ -1093,8 +1087,7 @@ struct DenseMaxsimArguments(ImplicitlyCopyable):
     var arena: Address
     var wanted: c_size_t
     var expansion_factor: c_size_t
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
     var stats: Address
 
 
@@ -1112,7 +1105,7 @@ comptime DenseDescribe = Verb[DenseDescribeArguments]
 comptime DenseInsert = Verb[DenseInsertArguments]
 comptime DenseRefine = Verb[DenseRefineArguments]
 comptime DenseHealth = Verb[DenseHealthArguments]
-comptime DenseMerge = Verb[DenseMergeArguments]
+comptime DenseAbsorb = Verb[DenseAbsorbArguments]
 comptime DenseSearch = Verb[DenseSearchArguments]
 comptime DenseCount = Verb[DenseCountArguments]
 comptime DenseGet = Verb[DenseGetArguments]
@@ -1408,8 +1401,7 @@ struct _DenseInsertCall(Call):
                 self.keys,
                 self.vectors,
                 c_size_t(self.expansion_factor),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
                 self.stats,
             ),
             library.symbols().dense_insert,
@@ -1446,8 +1438,7 @@ struct _DenseRefineCall(Call):
                 completion,
                 outputs,
                 c_size_t(self.expansion_factor),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
                 self.stats,
             ),
             library.symbols().dense_refine,
@@ -1480,12 +1471,12 @@ struct _DenseHealthCall(Call):
         return outputs
 
 
-struct _DenseMergeCall(Call):
-    """The crossing of `usearch_dense_merge`, which owns the donors until the call is final."""
+struct _DenseAbsorbCall(Call):
+    """The crossing of `usearch_dense_absorb`, which owns the donors until the call is final."""
 
     comptime Outputs = Unwritten
     comptime Result = NoneType
-    comptime symbol: StaticString = "usearch_dense_merge"
+    comptime symbol: StaticString = "usearch_dense_absorb"
     var donors: List[DenseIndex]
     var addresses: List[Address]
 
@@ -1505,17 +1496,16 @@ struct _DenseMergeCall(Call):
         outputs: Address,
     ):
         _cross(
-            DenseMergeArguments(
+            DenseAbsorbArguments(
                 index,
                 executor,
                 outcome,
                 completion,
                 c_size_t(len(self.addresses)),
                 Int(self.addresses.unsafe_ptr()),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
             ),
-            library.symbols().dense_merge,
+            library.symbols().dense_absorb,
         )
 
     def conclude(deinit self, outputs: Unwritten, generation: Int) -> NoneType:
@@ -1565,10 +1555,8 @@ struct _DenseSearchCall[origin: MutOrigin](Call):
                 c_size_t(self.wanted),
                 c_size_t(self.expansion_factor),
                 self.traversal,
-                self.predicate,
-                self.predicate_state,
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                PredicateArguments(self.predicate, self.predicate_state),
+                ProgressArguments(),
                 self.stats,
             ),
             library.symbols().dense_search,
@@ -1620,8 +1608,7 @@ struct _DenseMaxsimCall[origin: MutOrigin](Call):
                 self.arena[]._address,
                 c_size_t(self.wanted),
                 c_size_t(self.expansion_factor),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
                 self.stats,
             ),
             library.symbols().dense_maxsim,
@@ -1673,8 +1660,7 @@ struct _DenseMultiplyCall[origin: MutOrigin](Call):
                 self.arena[]._address,
                 c_size_t(self.wanted),
                 c_size_t(self.expansion_factor),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
                 self.stats,
             ),
             library.symbols().dense_multiply,
@@ -1740,8 +1726,7 @@ struct _DenseAttendCall[dtype: DType, origin: MutOrigin](Call):
                 ScalarKind.of[Self.dtype](),
                 c_size_t(self.expansion_factor),
                 self.score_scale,
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
                 self.stats,
             ),
             library.symbols().dense_attend,
@@ -1773,7 +1758,7 @@ struct _DenseSaveCall(Call):
         outputs: Address,
     ):
         _cross(
-            DenseSaveArguments(index, executor, outcome, completion, self.path, NULL_ADDRESS, NULL_ADDRESS),
+            DenseSaveArguments(index, executor, outcome, completion, self.path, ProgressArguments()),
             library.symbols().dense_save,
         )
 
@@ -1801,7 +1786,7 @@ struct _DenseSaveBufferCall[origin: MutOrigin](Call):
     ):
         _cross(
             DenseSaveBufferArguments(
-                index, executor, outcome, completion, outputs, self.arena[]._address, NULL_ADDRESS, NULL_ADDRESS
+                index, executor, outcome, completion, outputs, self.arena[]._address, ProgressArguments()
             ),
             library.symbols().dense_save_buffer,
         )
@@ -1914,7 +1899,7 @@ struct DenseIndex(DenseVerbs, Movable):
     var library: Library
     """The loaded engine, held so its symbol table outlives every call made through the handle."""
     var address: Address
-    """The opaque `usearch_dense_index_t`, or zero once a merge has consumed it."""
+    """The opaque `usearch_dense_index_t`, or zero once an absorb has consumed it."""
 
     # region Lifetime
 
@@ -2110,8 +2095,7 @@ struct DenseIndex(DenseVerbs, Movable):
                 source,
                 ram,
                 c_size_t(values_per_key),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
             ),
             verb,
         )
@@ -2215,8 +2199,7 @@ struct DenseIndex(DenseVerbs, Movable):
                 source,
                 vram,
                 c_size_t(values_per_key),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
             ),
             verb,
         )
@@ -2300,7 +2283,7 @@ struct DenseIndex(DenseVerbs, Movable):
         return Self(library=executor.library, address=created.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0])
 
     def __deinit__(deinit self):
-        """Releases the index and everything it owns, unless a merge already took the handle.
+        """Releases the index and everything it owns, unless an absorb already took the handle.
         Calls `usearch_dense_free`.
 
         The loader reference is surrendered only after the call: reading the entry point is the
@@ -2497,20 +2480,21 @@ trait DenseVerbs:
         """
         return self._route(_DenseHealthCall())
 
-    def merge(self, var donors: List[DenseIndex]) raises Error:
-        """Absorbs every donor into this index - cheaper than re-inserting their vectors one by one.
-        Calls `usearch_dense_merge`.
+    def absorb(self, var donors: List[DenseIndex]) raises Error:
+        """Absorbs every donor into this index, keeping their graphs rather than re-inserting their
+        vectors. Calls `usearch_dense_absorb`.
 
         Each donor the engine consumes is emptied here, so dropping the list releases only the
-        donors a stopped merge left standing.
+        donors a stopped absorb left standing.
 
         Args:
             donors: The handles to absorb, consumed by the call.
 
         Raises:
-            `Error` with `UNSUPPORTED` while no residency absorbs donor handles.
+            `Error` with `CONFIG_MISMATCH` for a donor of another residency, scalar, metric or
+            geometry, or with `READ_ONLY` if the handle serves its checkpoint in place.
         """
-        _ = self._route(_DenseMergeCall(donors^))
+        _ = self._route(_DenseAbsorbCall(donors^))
 
     def search[
         queries_origin: ImmOrigin, stats_origin: MutOrigin, //
@@ -2614,7 +2598,7 @@ trait DenseVerbs:
             The monolith, read in place from the arena.
 
         Raises:
-            `Error` if the engine refuses, as it does for a VRAM handle.
+            `Error` if the engine refuses the write.
         """
         return self._route(_DenseSaveBufferCall(Pointer(to=arena)))
 
@@ -2687,7 +2671,8 @@ trait DenseVerbs:
 
         Args:
             queries: The query rows, `head_count` per token.
-            value_lookup: Resolves every scored batch of keys to their value rows.
+            value_lookup: Resolves every scored batch of keys to their value rows - a host function on
+                RAM, and a device one on VRAM.
             value_lookup_state: The opaque state forwarded into every `value_lookup` call.
             arena: The arena to rewind and refill, which the result borrows; a failed call leaves it valid.
             config: The heads per token, the carry, the candidate-pool breadth, the logit scale,
@@ -2979,9 +2964,9 @@ struct DenseIndexDeferredOn[origin: ImmOrigin](ImplicitlyCopyable):
         """Submits `DenseVerbs.health`. Calls `usearch_dense_health`."""
         return {self.index[].library, _DenseHealthCall(), self.index[].address, self.executor}
 
-    def merge(self, var donors: List[DenseIndex]) -> Deferred[_DenseMergeCall, Self.origin]:
-        """Submits `DenseVerbs.merge`; the donors are owned by the call. Calls `usearch_dense_merge`."""
-        return {self.index[].library, _DenseMergeCall(donors^), self.index[].address, self.executor}
+    def absorb(self, var donors: List[DenseIndex]) -> Deferred[_DenseAbsorbCall, Self.origin]:
+        """Submits `DenseVerbs.absorb`; the donors are owned by the call. Calls `usearch_dense_absorb`."""
+        return {self.index[].library, _DenseAbsorbCall(donors^), self.index[].address, self.executor}
 
     def search[
         queries_origin: ImmOrigin, stats_origin: MutOrigin, //
@@ -3146,7 +3131,10 @@ struct DenseCursor[origin: ImmOrigin]:
         created[unsafe_offset=0] = NULL_ADDRESS
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
-        _cross(DenseCursorInitArguments(Int(created), index, Int(outcome)), library.symbols().dense_cursor_init)
+        _cross(
+            DenseCursorInitArguments(Int(created), index, Int(outcome), NULL_ADDRESS),
+            library.symbols().dense_cursor_init,
+        )
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_dense_cursor_init")
         self.library = library
         self.index = index

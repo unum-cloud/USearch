@@ -872,7 +872,9 @@ WARN_LOGFILE           =
 # - Testing
 # - Benchmarks
 
-INPUT                  = ../include/usearch/ \
+INPUT                  = ../c/usearch/ \
+                         ../cpp/usearch/ \
+                         ../include/usearch/ \
                          ../java/cloud/unum/usearch/
 
 # This tag can be used to specify the character encoding of the source files

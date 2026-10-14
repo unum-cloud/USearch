@@ -1117,6 +1117,9 @@ public sealed unsafe class Executor : IDisposable
 /// until it returns, a deferred one until final, and a second call naming it meanwhile finishes
 /// with <see cref="Status.Contended"/>. A <see cref="Residency.Vram"/> arena holds device
 /// memory, which no view lends to the host, so their accessors refuse with <see cref="Status.Device"/>.
+/// It grows, fills and frees on its executor's first stream, so it serves only calls on that executor
+/// and holds it open until disposed, which defers freeing an executor disposed first; a host arena
+/// may outlive its executor.
 /// </remarks>
 public sealed unsafe class Arena : IDisposable
 {
@@ -1136,6 +1139,10 @@ public sealed unsafe class Arena : IDisposable
         usearch_arena_init(&arguments);
         this._handle = EngineHandle.Created<NativeArenaHandle>(created, outcome);
         this.Residency = executor?.Residency ?? Residency.Ram;
+        if (this.Residency == Residency.Vram)
+        {
+            this._handle.Executor = Lease.Of(executor!.Handle, "executor");
+        }
     }
 
     /// <summary>Where the arena keeps its memory, decided by the executor it was made for.</summary>
@@ -1624,6 +1631,28 @@ internal struct NativeNvmeOptions
     public nuint PathsCount;
 }
 
+/// <summary>How a long call reports its advance, laid out as <c>usearch_progress_t</c>.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeProgress
+{
+    /// <summary>The optional handler; null skips every report.</summary>
+    public IntPtr Callback;
+    /// <summary>Opaque pointer forwarded into every handler call.</summary>
+    public IntPtr State;
+    /// <summary>Reports a call makes at most, the last at completion; zero derives to ten.</summary>
+    public nuint Steps;
+}
+
+/// <summary>Which candidate keys a filtered search may report, laid out as <c>usearch_predicate_t</c>.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal unsafe struct NativePredicate
+{
+    /// <summary>The optional handler; null admits every key.</summary>
+    public delegate* unmanaged[Cdecl]<Key*, Admission*, nuint, IntPtr, void> Callback;
+    /// <summary>Opaque pointer forwarded into every handler call.</summary>
+    public IntPtr State;
+}
+
 /// <summary>The arguments of <c>usearch_executor_for_ram</c>.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeExecutorForRam
@@ -1692,9 +1721,9 @@ internal unsafe struct NativeExecutorDrain
 #region Entry Points
 
 /// <summary>
-/// The shared C surface of <c>include/usearch/types.h</c>: the introspection probes, the name
-/// tables, the executor every fanned-out verb of every modality runs on, the arena every output
-/// whose length scales with a call lands in, and the wait every deferred call ends in.
+/// The entry points every modality shares: the introspection probes, the name tables, the
+/// executor every fanned-out verb of every modality runs on, the arena every output whose length
+/// scales with a call lands in, and the wait every deferred call ends in.
 /// </summary>
 /// <remarks>
 /// The declarations are source-generated rather than reflected, so the marshalling stubs are
@@ -1888,10 +1917,14 @@ internal sealed class NativeExecutorHandle : EngineHandle
 /// collected.</summary>
 internal sealed class NativeArenaHandle : EngineHandle
 {
+    /// <summary>The executor a GPU arena frees on, held open until the arena is freed.</summary>
+    internal Lease Executor;
+
     /// <inheritdoc/>
     protected override bool ReleaseHandle()
     {
         NativeMethods.usearch_arena_free(this.handle);
+        this.Executor.Dispose();
         return true;
     }
 }

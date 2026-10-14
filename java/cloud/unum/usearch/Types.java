@@ -23,13 +23,13 @@ import java.util.function.Supplier;
 import org.jspecify.annotations.Nullable;
 
 /**
- * The vocabulary every modality shares - the Java twin of {@code include/usearch/types.h}: entry
- * identities, failure reporting, scalar kinds, the executor every fanned-out verb runs on, deferred
- * calls, and the strided descriptors batches travel in.
+ * The vocabulary every modality shares: entry identities, failure reporting, scalar kinds, the
+ * executor every fanned-out verb runs on, deferred calls, and the strided descriptors batches
+ * travel in.
  *
  * <p>
  * The class itself is the library's introspection: its version, and the hardware it can and does
- * use. Everything else it holds is a nested type, so one file mirrors one header.
+ * use. Everything else it holds is a nested type.
  */
 public final class Types {
 
@@ -734,8 +734,10 @@ public final class Types {
      * An arena serves one call at a time and takes no lock: a second call naming it while the first
      * holds it fails with CONTENDED and leaves the first call's views readable. A blocking call holds
      * it until it returns, and a deferred one until it is joined, closed or collected. A VRAM arena
-     * holds device memory, so the views over it refuse host reads with DEVICE. One the program drops
-     * without closing is freed once neither it nor any view over it is reachable.
+     * holds device memory, so the views over it refuse host reads with DEVICE, and it serves only
+     * calls on the executor that made it, which it keeps reachable and which must be closed after it.
+     * One the program drops without closing is freed once neither it nor any view over it is
+     * reachable.
      *
      * <pre>{@code
      * try (Arena arena = new Arena(pool)) {
@@ -759,8 +761,9 @@ public final class Types {
         }
 
         /**
-         * Memory where {@code executor} computes, serving the calls of its residency. Calls
-         * {@code usearch_arena_init}.
+         * Memory where {@code executor} computes, serving the calls of its residency. A VRAM arena
+         * grows, fills and frees on that executor's first stream, so it serves only calls on that
+         * executor and must be closed before it. Calls {@code usearch_arena_init}.
          */
         public Arena(Executor executor) {
             this(executor, executor.residency);
@@ -768,9 +771,11 @@ public final class Types {
 
         private Arena(@Nullable Executor executor, Residency residency) {
             this.residency = residency;
+            // A GPU arena frees on its executor's stream, so its release keeps that executor alive.
+            Object owner = residency == Residency.VRAM ? executor : null;
             this.handle = Call.block(ARENA_INIT, null, executor, call -> {
                 MemorySegment made = call.output("arena", Library.POINTER);
-                return () -> new Handle(made.get(Library.POINTER, 0), ARENA_FREE);
+                return () -> new Handle(made.get(Library.POINTER, 0), ARENA_FREE, owner);
             });
         }
 
@@ -1357,13 +1362,21 @@ public final class Types {
         private final Cleaner.Cleanable release;
 
         Handle(MemorySegment address, MethodHandle free) {
+            this(address, free, null);
+        }
+
+        /** A handle whose release keeps {@code owner} reachable until it has freed the address. */
+        Handle(MemorySegment address, MethodHandle free, @Nullable Object owner) {
             cell.set(Library.POINTER, 0, address);
-            release = CLEANER.register(this, new Release(lifetime, cell, free));
+            release = CLEANER.register(this, new Release(lifetime, cell, free, owner));
         }
 
         /** Frees a handle no call leases, and leaves one a call still leases to a later collection. */
-        private record Release(java.lang.foreign.Arena lifetime, MemorySegment cell, MethodHandle free)
-                implements Runnable {
+        private record Release(
+                java.lang.foreign.Arena lifetime,
+                MemorySegment cell,
+                MethodHandle free,
+                @Nullable Object owner) implements Runnable {
 
             @Override
             public void run() {
@@ -1376,6 +1389,7 @@ public final class Types {
                     return;
                 }
                 Library.invoke(free, cell.get(Library.POINTER, 0));
+                Reference.reachabilityFence(owner);
             }
         }
 
@@ -1443,7 +1457,7 @@ public final class Types {
         /** Copies of fixed-size reports into the caller's objects, run once the call succeeded. */
         private final List<Runnable> landings = new ArrayList<>();
 
-        /** Runs once the call is final, joined or not, like freeing the donors a merge left. */
+        /** Runs once the call is final, joined or not, like handing back the donors an absorb left. */
         private final List<Runnable> settles = new ArrayList<>();
 
         /** The handle the downcall leases, so closing it from another thread raises instead of freeing it. */

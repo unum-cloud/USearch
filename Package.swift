@@ -5,7 +5,7 @@ import PackageDescription
 // The C surface is consumed as headers, not as sources: `src/dense_index.cpp` pulls the whole
 // NumKong, ForkUnion, and StringZilla stack, has a CUDA sibling SwiftPM cannot drive, and is
 // built by CMake into `libusearch_static` for every other binding already. So `USearchC` is the
-// module map over `include/`, and the Swift target links the library CMake produced. Point the
+// module map over `c/`, and the Swift target links the library CMake produced. Point the
 // linker at it with `swift build -Xlinker -L<build directory>`, or install it system-wide.
 //
 // NumKong is a source dependency rather than a header one: its matrix views are the batch
@@ -37,8 +37,8 @@ let package = Package(
             // as resources.
             exclude: ["numkong", "stringzilla"],
             sources: ["swift/shim.c"],
-            publicHeadersPath: "include",
-            cSettings: [.headerSearchPath("include")]
+            publicHeadersPath: "c",
+            cSettings: [.headerSearchPath("c")]
         ),
         .target(
             name: "USearch",

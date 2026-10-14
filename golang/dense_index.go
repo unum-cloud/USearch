@@ -1,5 +1,4 @@
-// Vector Search over equidimensional dense embeddings - the Go twin of
-// include/usearch/dense_index.h.
+// Vector Search over equidimensional dense embeddings.
 //
 // Every verb is a batch over strided matrices, so a memory-mapped dataset reaches the index
 // with no reshape and no copy, and a single vector is a one-row matrix. The candidate-pool
@@ -55,7 +54,7 @@ import (
 #cgo noescape usearch_dense_maxsim
 #cgo noescape usearch_dense_multiply
 #cgo noescape usearch_dense_attend
-#cgo noescape usearch_dense_merge
+#cgo noescape usearch_dense_absorb
 #cgo noescape usearch_dense_save
 #cgo noescape usearch_dense_save_buffer
 #cgo noescape usearch_dense_cursor_next
@@ -234,6 +233,9 @@ func (call *call) stats(stats *DenseTraversalStats) *C.usearch_dense_traversal_s
 // the call with StatusShapeMismatch. Row runs on the executor's threads together, so it must be
 // safe for concurrent use, and a panic inside it answers no row and becomes the call's error.
 //
+// Row is a host function, while a VRAM walk resolves its rows through a device one, so Attend
+// refuses a VRAM handle with StatusDevice.
+//
 // Mirrors usearch_value_lookup_t.
 type ValueLookup struct {
 	Values RowsView
@@ -255,6 +257,8 @@ type DenseLoadRamConfig struct {
 	// Progress reports the shards placed and stops wherever it says to; a stopped load creates no
 	// index.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 }
 
 // DenseLoadVramConfig carries the optional settings of DenseLoadVram.
@@ -270,6 +274,8 @@ type DenseLoadVramConfig struct {
 	ValuesPerKey uint
 	// Progress reports the shards placed and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 }
 
 // DenseLoadRamBufferConfig carries the optional settings of DenseLoadRamBuffer.
@@ -285,6 +291,8 @@ type DenseLoadRamBufferConfig struct {
 	ValuesPerKey uint
 	// Progress reports the bytes placed and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 }
 
 // DenseLoadVramBufferConfig carries the optional settings of DenseLoadVramBuffer.
@@ -300,6 +308,8 @@ type DenseLoadVramBufferConfig struct {
 	ValuesPerKey uint
 	// Progress reports the bytes placed and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 }
 
 // DenseViewNvmeConfig carries the optional settings of DenseViewNvme.
@@ -340,6 +350,8 @@ type DenseInsertConfig struct {
 	// Progress reports the rows inserted; every row is claimed before the first report, so a
 	// stop is ignored.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 	// Stats is where the traversal telemetry lands, overwritten by the call.
 	Stats *DenseTraversalStats
 }
@@ -353,6 +365,8 @@ type DenseRefineConfig struct {
 	ExpansionFactor uint
 	// Progress reports the nodes swept and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 	// Stats is where the traversal telemetry lands, overwritten by the call.
 	Stats *DenseTraversalStats
 }
@@ -374,6 +388,8 @@ type DenseSearchConfig struct {
 	// Progress reports the queries resolved and stops wherever it says to; a stopped search
 	// reports StatusCancelled and returns no matches.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 	// Stats is where the traversal telemetry lands, overwritten by the call.
 	Stats *DenseTraversalStats
 }
@@ -387,6 +403,8 @@ type DenseMaxsimConfig struct {
 	ExpansionFactor uint
 	// Progress reports the queries resolved and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 	// Stats is where the traversal telemetry lands, overwritten by the call.
 	Stats *DenseTraversalStats
 }
@@ -404,6 +422,8 @@ type DenseMultiplyConfig struct {
 	ExpansionFactor uint
 	// Progress reports the rows resolved and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 	// Stats is where the traversal telemetry lands, overwritten by the call.
 	Stats *DenseTraversalStats
 }
@@ -428,16 +448,20 @@ type DenseAttendConfig struct {
 	ScoreScale float32
 	// Progress reports the queries resolved and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 	// Stats is where the traversal telemetry lands, overwritten by the call.
 	Stats *DenseTraversalStats
 }
 
-// DenseMergeConfig carries the optional settings of Merge.
+// DenseAbsorbConfig carries the optional settings of Absorb.
 //
-// Mirrors usearch_dense_merge_t.
-type DenseMergeConfig struct {
-	// Progress reports the donors absorbed and stops wherever it says to.
+// Mirrors usearch_dense_absorb_t.
+type DenseAbsorbConfig struct {
+	// Progress reports the donors absorbed and stops between them wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 }
 
 // DenseSaveConfig carries the optional settings of Save.
@@ -446,6 +470,8 @@ type DenseMergeConfig struct {
 type DenseSaveConfig struct {
 	// Progress reports the shards written and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 }
 
 // DenseSaveBufferConfig carries the optional settings of SaveBuffer.
@@ -455,6 +481,8 @@ type DenseSaveBufferConfig struct {
 	// Progress reports the bytes written and stops wherever it says to; a stopped save leaves no
 	// monolith.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 }
 
 // DenseSearchStreamInitConfig carries the optional settings of SearchStream.
@@ -596,11 +624,13 @@ func (batch DenseBatch) Vectors() DenseVectors { return batch.vectors }
 type DenseIndex struct {
 	DenseIndexOn
 	handle C.usearch_dense_index_t
+	// residency is the constructor's, which decides whether a Go value lookup can serve Attend.
+	residency Residency
 }
 
-// newDenseIndex is an index whose handle a lifecycle verb is about to fill.
-func newDenseIndex() *DenseIndex {
-	index := new(DenseIndex)
+// newDenseIndex is an index whose handle a lifecycle verb of residency is about to fill.
+func newDenseIndex(residency Residency) *DenseIndex {
+	index := &DenseIndex{residency: residency}
 	index.DenseIndexOn = DenseIndexOn{denseReceiver{index: index}}
 	return index
 }
@@ -632,7 +662,7 @@ func (index *DenseIndex) Close() error {
 // memoryDomains names; empty derives every node the process may use. Calls usearch_dense_init_ram.
 func DenseInitRam(options DenseOptions, memoryDomains []int32) (*DenseIndex, error) {
 	lent := open[*DenseIndex]()
-	index := newDenseIndex()
+	index := newDenseIndex(ResidencyRam)
 	C.usearch_dense_init_ram(&C.usearch_dense_init_ram_t{
 		index:          pin(&lent.call, &index.handle),
 		outcome:        lent.outcome,
@@ -652,7 +682,7 @@ func DenseInitRam(options DenseOptions, memoryDomains []int32) (*DenseIndex, err
 // usearch_dense_init_vram.
 func DenseInitVram(options DenseOptions, devices []int32) (*DenseIndex, error) {
 	lent := open[*DenseIndex]()
-	index := newDenseIndex()
+	index := newDenseIndex(ResidencyVram)
 	C.usearch_dense_init_vram(&C.usearch_dense_init_vram_t{
 		index:          pin(&lent.call, &index.handle),
 		outcome:        lent.outcome,
@@ -678,8 +708,7 @@ func DenseLoadRam(path string, config *DenseLoadRamConfig) (*DenseIndex, error) 
 		return nil, refusal
 	}
 	lent := open[*DenseIndex]()
-	index := newDenseIndex()
-	progress, progressState := lent.progress(config.Progress)
+	index := newDenseIndex(ResidencyRam)
 	C.usearch_dense_load_ram(&C.usearch_dense_load_ram_t{
 		index:          pin(&lent.call, &index.handle),
 		executor:       executor,
@@ -687,8 +716,7 @@ func DenseLoadRam(path string, config *DenseLoadRamConfig) (*DenseIndex, error) 
 		path:           lent.text(path),
 		ram:            lent.ram(config.MemoryDomains),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       progress,
-		progress_state: progressState,
+		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
 	lent.result = func() *DenseIndex { return index }
 	return block(lent)
@@ -705,8 +733,7 @@ func DenseLoadVram(path string, config *DenseLoadVramConfig) (*DenseIndex, error
 		return nil, refusal
 	}
 	lent := open[*DenseIndex]()
-	index := newDenseIndex()
-	progress, progressState := lent.progress(config.Progress)
+	index := newDenseIndex(ResidencyVram)
 	C.usearch_dense_load_vram(&C.usearch_dense_load_vram_t{
 		index:          pin(&lent.call, &index.handle),
 		executor:       executor,
@@ -714,8 +741,7 @@ func DenseLoadVram(path string, config *DenseLoadVramConfig) (*DenseIndex, error
 		path:           lent.text(path),
 		vram:           lent.vram(config.Devices),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       progress,
-		progress_state: progressState,
+		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
 	lent.result = func() *DenseIndex { return index }
 	return block(lent)
@@ -732,8 +758,7 @@ func DenseLoadRamBuffer(buffer []byte, config *DenseLoadRamBufferConfig) (*Dense
 		return nil, refusal
 	}
 	lent := open[*DenseIndex]()
-	index := newDenseIndex()
-	progress, progressState := lent.progress(config.Progress)
+	index := newDenseIndex(ResidencyRam)
 	C.usearch_dense_load_ram_buffer(&C.usearch_dense_load_ram_buffer_t{
 		index:          pin(&lent.call, &index.handle),
 		executor:       executor,
@@ -741,8 +766,7 @@ func DenseLoadRamBuffer(buffer []byte, config *DenseLoadRamBufferConfig) (*Dense
 		buffer:         lent.bytes(buffer),
 		ram:            lent.ram(config.MemoryDomains),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       progress,
-		progress_state: progressState,
+		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
 	lent.result = func() *DenseIndex { return index }
 	return block(lent)
@@ -759,8 +783,7 @@ func DenseLoadVramBuffer(buffer []byte, config *DenseLoadVramBufferConfig) (*Den
 		return nil, refusal
 	}
 	lent := open[*DenseIndex]()
-	index := newDenseIndex()
-	progress, progressState := lent.progress(config.Progress)
+	index := newDenseIndex(ResidencyVram)
 	C.usearch_dense_load_vram_buffer(&C.usearch_dense_load_vram_buffer_t{
 		index:          pin(&lent.call, &index.handle),
 		executor:       executor,
@@ -768,8 +791,7 @@ func DenseLoadVramBuffer(buffer []byte, config *DenseLoadVramBufferConfig) (*Den
 		buffer:         lent.bytes(buffer),
 		vram:           lent.vram(config.Devices),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       progress,
-		progress_state: progressState,
+		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
 	lent.result = func() *DenseIndex { return index }
 	return block(lent)
@@ -780,7 +802,7 @@ func DenseLoadVramBuffer(buffer []byte, config *DenseLoadVramBufferConfig) (*Den
 // Calls usearch_dense_view_ram.
 func DenseViewRam(path string) (*DenseIndex, error) {
 	lent := open[*DenseIndex]()
-	index := newDenseIndex()
+	index := newDenseIndex(ResidencyRam)
 	C.usearch_dense_view_ram(&C.usearch_dense_view_ram_t{
 		index:   pin(&lent.call, &index.handle),
 		outcome: lent.outcome,
@@ -802,7 +824,7 @@ func DenseViewNvme(path string, config *DenseViewNvmeConfig) (*DenseIndex, error
 		return nil, refusal
 	}
 	lent := open[*DenseIndex]()
-	index := newDenseIndex()
+	index := newDenseIndex(ResidencyNvme)
 	C.usearch_dense_view_nvme(&C.usearch_dense_view_nvme_t{
 		index:    pin(&lent.call, &index.handle),
 		executor: executor,
@@ -1016,8 +1038,8 @@ func (on DenseIndexDeferredOn) Health() *Deferred[DenseReachability] {
 // Search resolves a matrix of queries into up to wanted nearest matches apiece, written into arena
 // - the native batch path, parallelized internally, and filtered when the config carries a predicate.
 //
-// Never writes to the graph, so any number of these may overlap with concurrent insertions.
-// Calls usearch_dense_search.
+// Never writes to the graph, so any number of these may overlap with concurrent insertions. A
+// zero wanted walks nothing and lands only the counts, every one zero. Calls usearch_dense_search.
 func (on DenseIndexOn) Search(queries RowsView, wanted uint, arena *Arena, config *DenseSearchConfig) (MatchesView, error) {
 	return block(on.search(C.usearch_completion_blocking_k, queries, wanted, arena, config))
 }
@@ -1069,7 +1091,8 @@ func (on DenseIndexDeferredOn) Multiply(left RowsView, arena *Arena, config *Den
 // already divided by the partition.
 //
 // The index holds one layer's keys for one key-value head and no values, so lookup resolves every
-// scored key to its value row. Runs on an inner-product index alone, since a softmax needs logits.
+// scored key to its value row. Runs on an inner-product index alone, since a softmax needs logits,
+// and on RAM and NVMe handles, since a VRAM walk needs a device lookup no Go function can be.
 //
 // See https://arxiv.org/abs/2205.14135 - Flash Attention, whose recurrence this reuses. Calls
 // usearch_dense_attend.
@@ -1084,20 +1107,24 @@ func (on DenseIndexDeferredOn) Attend(queries RowsView, lookup ValueLookup, aren
 	return submitted(on.attend(C.usearch_completion_deferred_k, queries, lookup, arena, config))
 }
 
-// Merge absorbs every donor into this index, wiring cross-links via landmark stitching - cheaper
-// than re-inserting their vectors one by one, while readers keep searching throughout.
+// Absorb moves every donor into this index, one after another, keeping their graphs rather than
+// re-inserting their vectors: each donor's rows append shard by shard, then a refinement links
+// them across the appended part. Donors must share the index's residency, scalar, metric and
+// geometry. Readers of a RAM index keep searching throughout; a VRAM one admits no overlapping
+// search.
 //
-// The donors are consumed whether or not the merge succeeds, and every later verb on them reports
-// StatusUninitialized; a stopped merge keeps the donors already absorbed and frees the rest. No
-// residency absorbs donors yet, so the engine answers StatusUnsupported. Calls usearch_dense_merge.
-func (on DenseIndexOn) Merge(donors []*DenseIndex, config *DenseMergeConfig) error {
-	_, err := block(on.merge(C.usearch_completion_blocking_k, donors, config))
+// Each absorbed donor is consumed, and every later verb on it reports StatusUninitialized. A stop
+// between donors, or a failure, leaves every donor not yet absorbed a live handle the caller still
+// owns and closes; until the call is final every donor reports StatusUninitialized. Calls
+// usearch_dense_absorb.
+func (on DenseIndexOn) Absorb(donors []*DenseIndex, config *DenseAbsorbConfig) error {
+	_, err := block(on.absorb(C.usearch_completion_blocking_k, donors, config))
 	return err
 }
 
-// Merge submits DenseIndexOn.Merge. Calls usearch_dense_merge.
-func (on DenseIndexDeferredOn) Merge(donors []*DenseIndex, config *DenseMergeConfig) *Deferred[struct{}] {
-	return submitted(on.merge(C.usearch_completion_deferred_k, donors, config))
+// Absorb submits DenseIndexOn.Absorb. Calls usearch_dense_absorb.
+func (on DenseIndexDeferredOn) Absorb(donors []*DenseIndex, config *DenseAbsorbConfig) *Deferred[struct{}] {
+	return submitted(on.absorb(C.usearch_completion_deferred_k, donors, config))
 }
 
 // Save writes the index under a path, in the layout its extension picks - one .safegraphs
@@ -1247,7 +1274,6 @@ func (receiver denseReceiver) insert(completion C.usearch_completion_t, keys []K
 	if uint(len(keys)) != vectors.rows {
 		return lent.refuse(fail(StatusShapeMismatch, "the key count does not match the vector row count"))
 	}
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_insert(&C.usearch_dense_insert_t{
 		index:            index,
 		executor:         executor,
@@ -1257,8 +1283,7 @@ func (receiver denseReceiver) insert(completion C.usearch_completion_t, keys []K
 		keys:             lent.keys(keys),
 		vectors:          vectors.lower(&lent.call),
 		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         progress,
-		progress_state:   progressState,
+		progress:         lent.progress(config.Progress, config.ProgressSteps),
 		stats:            lent.stats(config.Stats),
 	})
 	return lent
@@ -1274,7 +1299,6 @@ func (receiver denseReceiver) refine(completion C.usearch_completion_t, config *
 		return lent.refuse(refusal)
 	}
 	changed := pin(&lent.call, new(C.size_t))
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_refine(&C.usearch_dense_refine_t{
 		index:            index,
 		executor:         executor,
@@ -1282,8 +1306,7 @@ func (receiver denseReceiver) refine(completion C.usearch_completion_t, config *
 		completion:       completion,
 		changed:          changed,
 		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         progress,
-		progress_state:   progressState,
+		progress:         lent.progress(config.Progress, config.ProgressSteps),
 		stats:            lent.stats(config.Stats),
 	})
 	lent.result = func() uint { return uint(*changed) }
@@ -1323,8 +1346,6 @@ func (receiver denseReceiver) search(completion C.usearch_completion_t, queries 
 		return lent.refuse(refusal)
 	}
 	matches := pin(&lent.call, new(C.usearch_matches_view_t))
-	predicate, predicateState := lent.predicate(config.Predicate)
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_search(&C.usearch_dense_search_t{
 		index:            index,
 		executor:         executor,
@@ -1337,10 +1358,8 @@ func (receiver denseReceiver) search(completion C.usearch_completion_t, queries 
 		wanted:           C.size_t(wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
 		traversal:        C.usearch_traversal_t(config.Traversal),
-		predicate:        predicate,
-		predicate_state:  predicateState,
-		progress:         progress,
-		progress_state:   progressState,
+		predicate:        lent.predicate(config.Predicate),
+		progress:         lent.progress(config.Progress, config.ProgressSteps),
 		stats:            lent.stats(config.Stats),
 	})
 	view := lent.rewound(arena)
@@ -1368,7 +1387,6 @@ func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries 
 	}
 	count := queries.rows / rowsPerQuery
 	matches := pin(&lent.call, new(C.usearch_matches_view_t))
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_maxsim(&C.usearch_dense_maxsim_t{
 		index:            index,
 		executor:         executor,
@@ -1381,8 +1399,7 @@ func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries 
 		arena:            memory,
 		wanted:           C.size_t(wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         progress,
-		progress_state:   progressState,
+		progress:         lent.progress(config.Progress, config.ProgressSteps),
 		stats:            lent.stats(config.Stats),
 	})
 	view := lent.rewound(arena)
@@ -1406,7 +1423,6 @@ func (receiver denseReceiver) multiply(completion C.usearch_completion_t, left R
 	}
 	products := pin(&lent.call, new(C.usearch_matches_tape_view_t))
 	required := pin(&lent.call, new(C.size_t))
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_multiply(&C.usearch_dense_multiply_t{
 		index:            index,
 		executor:         executor,
@@ -1419,8 +1435,7 @@ func (receiver denseReceiver) multiply(completion C.usearch_completion_t, left R
 		arena:            memory,
 		wanted:           C.size_t(config.Wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         progress,
-		progress_state:   progressState,
+		progress:         lent.progress(config.Progress, config.ProgressSteps),
 		stats:            lent.stats(config.Stats),
 	})
 	view := lent.rewound(arena)
@@ -1443,6 +1458,10 @@ func (receiver denseReceiver) attend(completion C.usearch_completion_t, queries 
 	if lookup.Row == nil {
 		return lent.refuse(fail(StatusInvalidArgument, "the value lookup names no row function"))
 	}
+	// A device walk would call the host trampoline from a kernel.
+	if receiver.index.residency == ResidencyVram {
+		return lent.refuse(fail(StatusDevice, "a VRAM walk resolves values through a device function, which Go cannot supply"))
+	}
 	// The carry pointer has no length, so only this side can see it fall short.
 	if config.Carry != nil && uint(len(config.Carry)) < queries.rows {
 		return lent.refuse(fail(StatusShapeMismatch, "the softmax carry holds fewer entries than there are queries"))
@@ -1453,7 +1472,6 @@ func (receiver denseReceiver) attend(completion C.usearch_completion_t, queries 
 	}
 	lent.pinner.Pin(lookup.Values.pointer)
 	outputs := pin(&lent.call, new(C.usearch_rows_view_t))
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_attend(&C.usearch_dense_attend_t{
 		index:              index,
 		executor:           executor,
@@ -1470,8 +1488,7 @@ func (receiver denseReceiver) attend(completion C.usearch_completion_t, queries 
 		outputs_scalar:     C.usearch_scalar_t(config.OutputsScalar),
 		expansion_factor:   C.size_t(config.ExpansionFactor),
 		score_scale:        C.float(config.ScoreScale),
-		progress:           progress,
-		progress_state:     progressState,
+		progress:           lent.progress(config.Progress, config.ProgressSteps),
 		stats:              lent.stats(config.Stats),
 	})
 	view := lent.rewound(arena)
@@ -1505,10 +1522,10 @@ func usearchLooksUpValues(state unsafe.Pointer, keys *C.usearch_key_t, count C.s
 	}
 }
 
-func (receiver denseReceiver) merge(completion C.usearch_completion_t, donors []*DenseIndex,
-	config *DenseMergeConfig) *lent[struct{}] {
+func (receiver denseReceiver) absorb(completion C.usearch_completion_t, donors []*DenseIndex,
+	config *DenseAbsorbConfig) *lent[struct{}] {
 	if config == nil {
-		config = new(DenseMergeConfig)
+		config = new(DenseAbsorbConfig)
 	}
 	lent := open[struct{}]()
 	index, executor, refusal := receiver.lower()
@@ -1520,27 +1537,27 @@ func (receiver denseReceiver) merge(completion C.usearch_completion_t, donors []
 			return lent.refuse(fail(StatusUninitialized, "a donor is closed or was never initialized"))
 		}
 	}
-	// The library nulls each slot it absorbs, so freeing the rest once the call is final consumes
-	// every donor whatever the outcome.
+	// The library nulls each slot it absorbs, so once a failed call is final the slots still set
+	// are the donors it left live, handed back to their owners.
 	handles := make([]C.usearch_dense_index_t, len(donors))
 	for position, donor := range donors {
 		handles[position], donor.handle = donor.handle, nil
 	}
 	lent.discard = func() {
-		for _, handle := range handles {
-			C.usearch_dense_free(handle)
+		for position, handle := range handles {
+			if handle != nil {
+				donors[position].handle = handle
+			}
 		}
 	}
-	progress, progressState := lent.progress(config.Progress)
-	C.usearch_dense_merge(&C.usearch_dense_merge_t{
-		index:          index,
-		executor:       executor,
-		outcome:        lent.outcome,
-		completion:     completion,
-		count:          C.size_t(len(handles)),
-		donors:         lend(&lent.call, handles),
-		progress:       progress,
-		progress_state: progressState,
+	C.usearch_dense_absorb(&C.usearch_dense_absorb_t{
+		index:      index,
+		executor:   executor,
+		outcome:    lent.outcome,
+		completion: completion,
+		count:      C.size_t(len(handles)),
+		donors:     lend(&lent.call, handles),
+		progress:   lent.progress(config.Progress, config.ProgressSteps),
 	})
 	return lent
 }
@@ -1555,15 +1572,13 @@ func (receiver denseReceiver) save(completion C.usearch_completion_t, path strin
 	if refusal != nil {
 		return lent.refuse(refusal)
 	}
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_save(&C.usearch_dense_save_t{
-		index:          index,
-		executor:       executor,
-		outcome:        lent.outcome,
-		completion:     completion,
-		path:           lent.text(path),
-		progress:       progress,
-		progress_state: progressState,
+		index:      index,
+		executor:   executor,
+		outcome:    lent.outcome,
+		completion: completion,
+		path:       lent.text(path),
+		progress:   lent.progress(config.Progress, config.ProgressSteps),
 	})
 	return lent
 }
@@ -1583,16 +1598,14 @@ func (receiver denseReceiver) saveBuffer(completion C.usearch_completion_t, aren
 		return lent.refuse(refusal)
 	}
 	monolith := pin(&lent.call, new(C.usearch_bytes_view_t))
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_save_buffer(&C.usearch_dense_save_buffer_t{
-		index:          index,
-		executor:       executor,
-		outcome:        lent.outcome,
-		completion:     completion,
-		monolith:       monolith,
-		arena:          memory,
-		progress:       progress,
-		progress_state: progressState,
+		index:      index,
+		executor:   executor,
+		outcome:    lent.outcome,
+		completion: completion,
+		monolith:   monolith,
+		arena:      memory,
+		progress:   lent.progress(config.Progress, config.ProgressSteps),
 	})
 	view := lent.rewound(arena)
 	lent.result = func() Monolith { return Monolith{exported: view, raw: *monolith} }

@@ -1,6 +1,6 @@
 # USearch for Go
 
-The Go package binds the C ABI in `include/usearch/` through cgo, linking the pre-instantiated C library, so nothing but the vocabulary below crosses the boundary.
+The Go package binds the C ABI in `c/usearch/` through cgo, linking the pre-instantiated C library, so nothing but the vocabulary below crosses the boundary.
 It needs Go 1.24 or newer with cgo enabled and a C toolchain, on Linux, macOS or Windows.
 It exposes dense indexes; sequence, matrix and geospatial indexes follow as the C library ships them.
 
@@ -193,6 +193,7 @@ To keep a result past the next call, or to read one while making the next, pass 
 An arena serves one call at a time, so each deferred call needs its own.
 A stale view answers `StatusUninitialized`; slices an accessor already returned are not checked again.
 An arena from a VRAM executor holds device memory, which host accessors refuse with `StatusDevice`.
+It grows and frees on that executor's stream, so it serves only calls on that executor, any other finishing `StatusDevice`, and is closed before it; host pages may outlive theirs.
 
 ```go
 arena, err := usearch.NewArena(executor) // NewArena(nil) makes host pages for the calling goroutine
@@ -434,7 +435,7 @@ values, _ := usearch.DenseValues[float32](vectors)
 
 A cursor walks the contents as a sequential row scan, each pull writing up to `wanted` keys, and their rows in the scalar kind you name, into an arena.
 `NextKeys` pulls the keys alone, and a batch of none means the walk is exhausted.
-Cursors answer on RAM and NVMe handles, while VRAM rows are read back through a search.
+Cursors answer on RAM and NVMe handles, while VRAM rows are read back by key or by search.
 
 ```go
 cursor, _ := index.On(executor).Cursor()
@@ -495,13 +496,14 @@ for {
 }
 ```
 
-### Merging & Splitting
+### Absorbing
 
-Bigger indexes come from merging, never mutating: `Merge` consumes every donor whatever the outcome, and every later verb on one reports `StatusUninitialized`.
-No residency absorbs donors yet, so the engine answers `StatusUnsupported`.
+`Absorb` moves donor indexes into one, one after another, keeping their graphs rather than re-inserting their rows, then refines every shard that took one across the appended part.
+A donor must share the index's residency, scalar, metric and geometry, or the call answers `StatusConfigMismatch`.
+Each absorbed donor is consumed, and every later verb on it reports `StatusUninitialized`; a stop between donors, or a failure, leaves the rest live, still yours to close.
 
 ```go
-err := index.On(executor).Merge([]*usearch.DenseIndex{shard}, nil)
+err := index.On(executor).Absorb([]*usearch.DenseIndex{first, second}, nil)
 ```
 
 ### Sparse Multiplication
@@ -535,6 +537,7 @@ documents, err := index.On(executor).Maxsim(usearch.RowsOf(tokens, dimensions), 
 `Attend` is Flash Attention folded into the walk: every key it scores folds into each head's running maximum, partition and weighted value sum, with no top-k cut, and the outputs land in an arena already divided by the partition.
 The index stores no values, so a `ValueLookup` names, for every scored key, its row of a `Values` matrix as wide as the keys and stored in the index's own quantization.
 A key without a row, or values of another width or scalar type, refuses the call with `StatusShapeMismatch`, since a missing row is a wrong softmax rather than a smaller one.
+A VRAM walk resolves its rows through a device function, which no Go function can be, so `Attend` refuses a VRAM index with `StatusDevice`.
 With `HeadCount: 8`, row `t * 8 + h` of the queries is head `h` of token `t`, and the heads of one token share its walk.
 
 ```go
@@ -577,7 +580,7 @@ fmt.Println(usearch.Version(), usearch.CapabilitiesCompiled(), usearch.Capabilit
 
 ## Design
 
-- __A thin layer over the C ABI.__ Every name follows `include/usearch/`: a C verb `usearch_dense_<verb>` is a `<Verb>` method here, and enums mirror C enums, never strings.
+- __A thin layer over the C ABI.__ Every name follows `c/usearch/`: a C verb `usearch_dense_<verb>` is a `<Verb>` method here, and enums mirror C enums, never strings.
 - __The receiver chooses, the verb stays.__ The index runs a verb on the calling goroutine, `On(executor)` blocks on an executor, and `Deferred(executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__ `Status` polls through `usearch_outcome_status` and `Wait` blocks through `usearch_outcome_wait`; a goroutine calling `Wait` overlaps the wait, and a `select` reaches it through a channel that goroutine closes.
 - __No life of its own.__ The binding starts no goroutines and keeps no queues; releasing a `Deferred` rides `Close`, which waits for the call first, or the collector's cleanup, which frees it only once final.

@@ -18,6 +18,9 @@ int main() {
 
     if (settings.selects("safegraphs_format")) failures_count += test::utilities::check_safegraphs_format(settings);
     failures_count += check_dense(settings);
+    if (settings.selects("sequence")) failures_count += test::sequence::check_sequence(settings);
+    if (settings.selects("shapes")) failures_count += test::shapes::check_shapes(settings);
+    if (settings.selects("geospatial")) failures_count += test::geospatial::check_geospatial(settings);
 
     return report("total", failures_count) ? 1 : 0;
 }

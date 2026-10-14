@@ -27,9 +27,7 @@ set_target_properties(
                C_STANDARD_REQUIRED ON
 )
 
-target_include_directories(
-    usearch_node PRIVATE ${CMAKE_JS_INC} ${PROJECT_SOURCE_DIR}/include ${CMAKE_CURRENT_SOURCE_DIR}
-)
+target_include_directories(usearch_node PRIVATE ${CMAKE_JS_INC} ${PROJECT_SOURCE_DIR}/c ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(usearch_node PRIVATE NAPI_VERSION=8)
 target_link_libraries(usearch_node PRIVATE ${CMAKE_JS_LIB} ${USEARCH_NODE_LIBRARY})
 

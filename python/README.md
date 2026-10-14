@@ -1,14 +1,14 @@
 # USearch for Python
 
-The bindings are pure CPython in C11, sitting directly on the C ABI in `include/usearch/`, with no PyBind11, no NanoBind, and no SWIG.
+The bindings are pure CPython, with no PyBind11, no NanoBind, and no SWIG.
 They need CPython 3.12 or newer on Linux, macOS or Windows, and the extension itself never requires NumPy.
 Every verb is a batch, and one vector is a one-row matrix, so a memory-mapped dataset reaches the index with no reshape and no copy.
-They expose dense indexes; the other modalities are declared and raise `NotImplementedError` until the C library ships their engines.
+They expose dense indexes; the other modalities are declared and raise `NotImplementedError` until the library ships their engines.
 
-- `usearch.DenseIndex` mirrors `usearch/dense_index.h` and is the one instantiated today.
-- `usearch.SequenceIndex` mirrors `usearch/sequence_index.h`.
-- `usearch.MatrixIndex` mirrors `usearch/shapes_index.h`.
-- `usearch.GeospatialIndex` mirrors `usearch/geospatial_index.h`.
+- `usearch.DenseIndex` searches equidimensional dense embeddings, and is the one instantiated today.
+- `usearch.SequenceIndex` searches variable-length sequences.
+- `usearch.ShapesIndex` searches 3D point clouds of any size.
+- `usearch.GeospatialIndex` searches space and time.
 
 ## Installation
 
@@ -112,7 +112,7 @@ Calling `usearch.Executor()` raises a `TypeError` naming the factories, since wh
 The index and every receiver derived from it never change after they are made, so threads share them freely.
 Searches never write to the graph, so any number may overlap with insertions, and saving needs a mutation-free window.
 The extension declares `Py_MOD_GIL_NOT_USED`, so free-threaded builds run without the interpreter lock.
-Critical sections or atomics fence the few fields the binding mutates: an arena's exports and generation, the handle a cursor or stream lends its running pull, a closed executor's handle, a latched callback exception, a `DenseTraversalStats` total and a merged donor's handle.
+Critical sections or atomics fence the few fields the binding mutates: an arena's exports and generation, the handle a cursor or stream lends its running pull, a closed executor's handle, a latched callback exception, a `DenseTraversalStats` total and an absorbed donor's handle.
 
 ## Arenas
 
@@ -124,6 +124,7 @@ An arena serves one call at a time, so each deferred call needs its own.
 A NumPy array or `memoryview` over an output pins its arena as a `memoryview` pins a `bytearray`, so the next call naming that arena raises `ContendedError` until the export is released.
 A stale output raises `UninitializedError` from `memoryview`, from indexing a `Matches` and from `DenseProducts.row`, but `np.asarray` swallows that error into a 0-d object array, so read through those or copy with `np.array(...)` while the output is fresh.
 An arena from a VRAM executor holds device memory, which host accessors refuse with `DeviceError`.
+It serves only calls on that executor, any other or none raising `DeviceError`, and holds the executor until it is freed, so an executor closed first keeps its streams until then.
 Its views export `__cuda_array_interface__` instead, for CuPy, PyTorch or Numba, and `arena.residency` tells the two apart.
 
 ```python
@@ -213,7 +214,7 @@ Handing a constructor another residency's arm, such as `devices` to `init_ram`, 
 
 Shards are never replicated, so eight devices host eight slices of one graph rather than eight copies, and an index outgrowing them fails rather than paging to the host, so the answer is to name more devices.
 An NVMe path is whatever identifies a device to an engine that can reach it: a filesystem path names a kernel device, a transport identifier selects a userspace engine, and a FUSE mount is how object storage stages in without an HTTP stack.
-External-memory graphs are never modified in place, so an NVMe handle is a view and every mutating verb fails on it; bigger ones come from [merging](#merging--splitting).
+External-memory graphs are never modified in place, so an NVMe handle is a view and every mutating verb fails on it; bigger ones come from [absorbing](#absorbing--splitting).
 
 ## Serialization
 
@@ -314,7 +315,7 @@ with index.on(pool).search_stream(query) as stream:  # resumable best-first stre
 `get` for an absent key answers an empty, falsy `DenseVectors`.
 Every pull names its arena and rewinds it like any other call, so one arena serves a scan and any other verb in turn.
 A drained cursor answers an empty, falsy `DenseBatch`, and a drained stream a row with no matches.
-A cursor or a stream releases its walk on `close()` or at the end of a `with` block, so a `merge` waiting on it need not wait for the collector, and a later pull raises `UninitializedError`.
+A cursor or a stream releases its walk on `close()` or at the end of a `with` block, so an `absorb` waiting on it need not wait for the collector, and a later pull raises `UninitializedError`.
 
 ### Refinement
 
@@ -329,13 +330,14 @@ while index.on(pool).refine(expansion_factor=128) > len(index) // 100:
 The return is how many nodes changed edges, so a caller loops until it falls below whatever change rate they consider settled.
 Searches may run throughout on a RAM handle but not on a VRAM one, and a stopped sweep leaves the graph correct for the next call to sweep again, which is what makes a whole-graph pass affordable under a time budget.
 
-### Merging & Splitting
+### Absorbing & Splitting
 
 ```python
-first.on(pool).merge(second, third)  # both donors are consumed and must not be used afterwards
+first.on(pool).absorb(second, third)  # both donors are consumed and must not be used afterwards
 ```
 
-A later verb on a consumed donor raises `UninitializedError`.
+Donors are absorbed one after another, each keeping its graph and linked in by walks across the appended part.
+A later verb on a consumed donor raises `UninitializedError`, and a stopped `absorb` hands every donor it never reached back to its wrapper.
 
 ### Sparse Multiplication
 
@@ -380,6 +382,7 @@ outputs = index.on(pool).attend(queries, values, row_of, arena, head_count=8, ou
 
 A `row_of` answering `None`, or a row outside `values`, refuses the call with `ShapeMismatchError`, since a missing row is a wrong softmax rather than a smaller one; so do values of another width or scalar type, which `values_dtype=` names when the buffer cannot.
 It re-enters Python from the library's threads, so it runs under the GIL.
+A VRAM walk resolves values on the device, where no Python callable runs, so `attend` with a VRAM arena raises `DeviceError`.
 The attended rows come back already divided by the partition, as a `DenseVectors` over the arena.
 
 Ask for the `carry` to recombine this branch by partial-softmax rescaling with another over the same queries, such as attention sinks, a dense recent window, or a second index of one context.
@@ -422,7 +425,7 @@ print(stats.mean_recall, stats.mean_efficiency)
 ## Design
 
 - __A thin layer over the C ABI.__
-  Every name follows `include/usearch/`: a C verb `usearch_dense_<verb>` is a `<verb>` here, a type drops `usearch_` and `_t`, and enums mirror C enums as `enum.IntEnum` classes, never strings.
+  Every name follows `c/usearch/`: a C verb `usearch_dense_<verb>` is a `<verb>` here, a type drops `usearch_` and `_t`, and enums mirror C enums as `enum.IntEnum` classes, never strings.
 - __The receiver chooses, the verb stays.__
   The index runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__

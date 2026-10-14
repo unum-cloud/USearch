@@ -680,7 +680,7 @@ struct vram_nvidia_index {
 
     /** Rows one checkpoint batch carries between a matrix and the caller: one slab, the row
      *  granularity the RAM residency grows by. */
-    inline static constexpr std::size_t bounce_rows_log2_k = 20;
+    inline static constexpr std::size_t batch_rows_log2_k = 20;
     using traversal_context_t = cuda_traversal_context<traversals_allocator_t>;
 
     /** The strongest @c synchronization_t contract this design honors; nothing routes on it.
@@ -1485,7 +1485,7 @@ struct vram_nvidia_index {
                     cuda_executor_t::stream_t const& stream, node_id_t visible) noexcept
             : columns(columns), id_shift(id_shift), stream(stream.handle), bounce(cuda_pinned_allocator_t {stream}),
               visible(visible),
-              batch_rows(min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(bounce_rows_log2_k))),
+              batch_rows(min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(batch_rows_log2_k))),
               index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
             : columns(other.columns), id_shift(other.id_shift), stream(other.stream), bounce(std::move(other.bounce)),
@@ -1701,7 +1701,7 @@ struct vram_nvidia_index {
                     node_id_t base, std::size_t rows) noexcept
             : columns(columns), source_range(source_range), stream(stream.handle),
               bounce(cuda_pinned_allocator_t {stream}), base(base), rows(rows),
-              batch_rows(min_of(rows, power_of_two<std::size_t>(bounce_rows_log2_k))), index_(&index),
+              batch_rows(min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k))), index_(&index),
               claiming_(std::move(claiming)) {}
         load_plan_t(load_plan_t&& other) noexcept
             : columns(other.columns), source_range(other.source_range), stream(other.stream),

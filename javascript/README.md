@@ -111,6 +111,7 @@ An arena serves one call at a time, so each deferred call needs its own.
 A deferred call borrows its arena as a blocking one does: another call naming it before the first is final finishes with `Status.Contended`, and `free()` waits for it.
 A rewind or a `free()` detaches every buffer over the previous outputs, so a stale view throws `Status.Uninitialized` and typed arrays taken from it read as empty.
 An arena from a VRAM executor holds device memory, which host accessors refuse with `Status.Device`.
+It grows, fills and frees on that executor's first stream, so it serves only calls on that executor and keeps it alive until freed, and the executor's `free()` refuses with `Status.Contended` while such an arena lives; a host arena may outlive its executor.
 
 ```js
 const { Arena, keyAt } = usearch;
@@ -369,14 +370,14 @@ while (pool.refine({ expansionFactor: 128 }) > vectors.rows / 100) {}
 Refinement is a build step rather than a repair.
 It adds and removes nothing, and searches may run throughout.
 
-### Merging & Splitting
+### Absorbing & Splitting
 
-Bigger indexes come from merging, never mutating: `merge` absorbs every donor, and a donor the library consumed refuses every later verb with `Status.Uninitialized`.
-No residency absorbs donors yet, so the engine answers `Status.Unsupported` and leaves every donor live.
-A deferred merge holds its donors until it is final, so meanwhile they refuse every verb and no other merge can name them.
+Bigger indexes come from absorbing, never mutating: `absorb` appends every donor in turn, keeping its graph and linking it in across the appended part, and a donor the library consumed refuses every later verb with `Status.Uninitialized`.
+A donor it did not absorb, like one of another scalar refused with `Status.ConfigMismatch`, stays a live index you still own, though its rows may already have landed.
+A deferred absorb holds its donors until it is final, so meanwhile they refuse every verb and no other absorb can name them.
 
 ```js
-index.on(executor).merge([shard]);
+index.on(executor).absorb([shard]);
 ```
 
 ### Sparse Multiplication
@@ -431,6 +432,7 @@ outputs.data;
 
 One index holds one layer's one key-value head, so the `headCount` query heads of grouped-query attention share its keys and one walk per token.
 The first exception `rowOf` throws stops every later lookup and surfaces as itself.
+`rowOf` runs on the host, so `attend` serves RAM handles alone: a VRAM walk resolves rows through a device function, which this binding does not build, and a VRAM arena refuses with `Status.Device`.
 The carry is what folds one branch into another over the same queries, by the usual partial-softmax rescaling: attention sinks, a dense recent window, or a second index of one context.
 Its two floats travel in one row because a maximum without its partition is a number nothing can rescale, and omitting it altogether starts the softmax fresh.
 `scoreScale` multiplies every logit and derives from the geometry when left out, and a wider `expansionFactor` walks further, folding more of the tail.

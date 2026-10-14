@@ -2,7 +2,7 @@
  *  @file javascript/types.c
  *  @author Ash Vardanian
  *  @date September 9, 2026
- *  @brief The vocabulary every modality shares, the Node-API twin of @c include/usearch/types.h.
+ *  @brief The Node-API vocabulary every modality shares.
  *
  *  Closed-set naming, argument parsing, identities, row borrowing, the @c Executor whose threads or
  *  streams every fanned-out verb runs on, the @c Arena every scaling output lands in, and the
@@ -754,6 +754,10 @@ static napi_value usearch_js_executor_drain(napi_env env, napi_callback_info inf
 static napi_value usearch_js_executor_release(napi_env env, napi_callback_info info) {
     usearch_js_executor_t* const executor = (usearch_js_executor_t*)usearch_js_self(env, info, NULL, NULL, NULL);
     if (!executor) return NULL;
+    if (executor->arenas) {
+        usearch_js_throw(env, usearch_status_contended_k, "Free the GPU arenas made on the Executor before it");
+        return NULL;
+    }
     usearch_executor_free(executor->handle);
     executor->handle = NULL;
     return usearch_js_undefined(env);
@@ -818,6 +822,14 @@ static void usearch_js_arena_forget(napi_env env, usearch_js_arena_t* arena,
     arena->views_count = 0;
 }
 
+/** Lets go of the executor a GPU arena held, once the arena's memory is freed. */
+static void usearch_js_arena_unbind(napi_env env, usearch_js_arena_t* arena) {
+    if (!arena->executor) return;
+    --arena->executor->arenas;
+    napi_delete_reference(env, arena->executor_reference);
+    arena->executor = NULL;
+}
+
 static void usearch_js_arena_finalize(napi_env env, void* data, void* hint) {
     usearch_js_arena_t* const arena = (usearch_js_arena_t*)data;
     (void)hint;
@@ -825,6 +837,7 @@ static void usearch_js_arena_finalize(napi_env env, void* data, void* hint) {
     usearch_js_arena_forget(env, arena, NULL);
     free(arena->views);
     usearch_arena_free(arena->handle);
+    usearch_js_arena_unbind(env, arena);
     free(arena);
 }
 
@@ -837,7 +850,7 @@ static napi_value usearch_js_arena_construct(napi_env env, napi_callback_info in
         usearch_js_throw(env, usearch_status_internal_k, "Could not read the Arena arguments");
         return NULL;
     }
-    usearch_js_executor_t const* executor = NULL;
+    usearch_js_executor_t* executor = NULL;
     if (arguments_count && !usearch_js_value_absent(env, argument) &&
         !(executor = usearch_js_executor_live(env, argument)))
         return NULL;
@@ -856,8 +869,20 @@ static napi_value usearch_js_arena_construct(napi_env env, napi_callback_info in
         free(arena);
         return NULL;
     }
+    // A GPU arena frees on its executor's first stream, so it holds that executor until freed.
+    if (arena->residency == usearch_residency_vram_k) {
+        if (napi_create_reference(env, argument, 1, &arena->executor_reference) != napi_ok) {
+            usearch_arena_free(arena->handle);
+            free(arena);
+            usearch_js_throw(env, usearch_status_internal_k, "Could not hold the Executor");
+            return NULL;
+        }
+        arena->executor = executor;
+        ++executor->arenas;
+    }
     if (napi_wrap(env, self, arena, usearch_js_arena_finalize, NULL, NULL) != napi_ok) {
         usearch_arena_free(arena->handle);
+        usearch_js_arena_unbind(env, arena);
         free(arena);
         usearch_js_throw(env, usearch_status_internal_k, "Could not attach the Arena");
         return NULL;
@@ -879,6 +904,7 @@ static napi_value usearch_js_arena_release(napi_env env, napi_callback_info info
     if (!arena->handle) return usearch_js_undefined(env);
     usearch_js_arena_forget(env, arena, napi_detach_arraybuffer);
     usearch_arena_free(arena->handle);
+    usearch_js_arena_unbind(env, arena);
     arena->handle = NULL;
     arena->holder = NULL;
     return usearch_js_undefined(env);

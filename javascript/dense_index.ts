@@ -738,18 +738,20 @@ export abstract class DenseVerbs<Receiving extends "blocking" | "deferred"> {
   }
 
   /**
-   * Absorbs every donor into this index, cheaper than re-inserting their vectors. Calls `usearch_dense_merge`.
+   * Absorbs every donor into this index, one after another, keeping their graphs rather than
+   * re-inserting their vectors and linking each in across the appended part. Calls `usearch_dense_absorb`.
    *
-   * A donor the library consumed refuses every later verb with {@link Status.Uninitialized}; one a
-   * stopped merge left behind stays a live index the caller still owns. Until a deferred merge is
-   * final, every donor it names refuses every verb, and no other merge can name it.
+   * A donor the library consumed refuses every later verb with {@link Status.Uninitialized}; one it
+   * did not absorb, like a donor of another scalar refused with {@link Status.ConfigMismatch}, stays
+   * a live index the caller still owns, though its rows may already have landed here. Until a
+   * deferred absorb is final, every donor it names refuses every verb, and no other absorb can name it.
    *
    * @param {DenseIndex[]} donors - The indexes to absorb.
    */
-  merge(donors: DenseIndex[]): Answer<Receiving, void> {
+  absorb(donors: DenseIndex[]): Answer<Receiving, void> {
     const handles = donors.map((donor) => donor.compiled);
     return this.submit(
-      (completion) => this.compiled.merge(this.executor, completion, handles),
+      (completion) => this.compiled.absorb(this.executor, completion, handles),
       () => undefined,
     );
   }
@@ -899,7 +901,9 @@ export class DenseIndex extends DenseIndexOn implements Disposable {
    *
    * `rowOf` runs on the calling thread, which no executor's thread is, so only the index itself
    * offers `attend`. The first exception it throws stops every later lookup and is rethrown once
-   * the call returns.
+   * the call returns. Being a host function, it serves RAM handles alone: a VRAM walk resolves rows
+   * through a device function, which this binding does not build, so a `Vram` arena refuses with
+   * {@link Status.Device}.
    *
    * @param {RowsView|Vector} queries - One query row, or a run of them, at the index's own width.
    * @param {RowsView|Vector} values - The value rows the scored keys resolve into, never copied.

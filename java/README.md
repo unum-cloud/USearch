@@ -167,6 +167,7 @@ To keep a result past the next call, or to read one while making the next, pass 
 An arena serves one call at a time, so each deferred call needs its own.
 A stale view's segments are closed, so reading one throws `IllegalStateException`.
 An arena from a VRAM executor holds device memory, which host accessors refuse with `Status.DEVICE`.
+It grows, fills and frees on that executor's first stream, so it serves only calls on that executor, keeps it reachable, and must be closed before it; a host arena may outlive its executor.
 
 ```java
 try (Arena arena = new Arena(pool)) {
@@ -275,7 +276,7 @@ The placement is absent because a checkpoint records where it was written rather
 
 ## Dense Indexes
 
-`DenseIndex` mirrors `include/usearch/dense_index.h`, with the modality's options, metric, telemetry and per-call settings as nested types.
+`DenseIndex` carries the modality's options, metric, telemetry and per-call settings as nested types.
 
 ### Rows & Scalars
 
@@ -357,13 +358,14 @@ DenseRefineConfig wide = new DenseRefineConfig().expansionFactor(256);
 while (index.on(pool).refine(wide) > index.describe().size() / 100) {}
 ```
 
-### Merging & Splitting
+### Absorbing & Splitting
 
-`merge` absorbs donor indexes, consuming them whether or not it succeeds, and no engine residency absorbs donors yet.
+`absorb` appends donor indexes one after another, keeping their graphs and linking each in across the appended part, rather than re-inserting their vectors.
+Every donor refuses every verb until the call is final; each one absorbed then stays closed, while one it did not absorb, like a donor of another scalar, is a live index again that you still own, though its rows may already have landed.
 Splitting is not in the C library yet.
 
 ```java
-index.on(pool).merge(shard0, shard1);   // both donors are closed from here on
+index.on(pool).absorb(shard0, shard1);  // both donors are closed from here on
 ```
 
 ### Sparse Multiplication
@@ -403,6 +405,7 @@ The index stores no values, so a `ValueLookup` names the row of a values matrix 
 It borrows that matrix and builds its upcall once, so every call reuses both: a native matrix is read in place, a heap one is copied at construction.
 The library states the scalar and width it reads each row as, and a values matrix of another kind, a row outside it, or a lookup that throws leaves the key without a row, which refuses the call with `Status.SHAPE_MISMATCH`; the first exception the lookup raised outranks that status, and is raised once the call is final.
 The lookup runs on the executor's threads together, so it must tolerate concurrent calls.
+It is a host function, so it serves RAM handles alone: a VRAM walk resolves rows through a device function, which this binding does not build, and an `attend` into a VRAM arena refuses with `Status.DEVICE`.
 
 ```java
 ValueLookup cache = new ValueLookup(RowsView.of(valueRows, 128, Scalar.BF16), rowOf::get);
@@ -458,7 +461,7 @@ index.on(pool).insert(keys, RowsView.of(Array(1.0f, 0.0f, 0.0f, 1.0f), 2))
 ## What This Binding Does Not Expose
 
 The filtered search of the C interface stays unbound.
-Its predicate runs on the engine's own worker threads, which are not attached to the JVM, so every candidate would pay an attach, an upcall, and an exception check.
+Its predicate runs on the engine's own worker threads, which are not attached to the JVM, so every batch of candidates would pay an attach, an upcall, and an exception check.
 A predicate that threw would also unwind through native frames that cannot handle it.
 Filter the results of `search` instead, or narrow the index.
 Progress handlers stay unbound for the same reason, which is what makes an insertion batch all-or-nothing here.

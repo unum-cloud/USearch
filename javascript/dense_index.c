@@ -2,8 +2,7 @@
  *  @file javascript/dense_index.c
  *  @author Ash Vardanian
  *  @date September 9, 2026
- *  @brief Vector search over equidimensional dense embeddings - the Node-API twin of
- *      @c include/usearch/dense_index.h.
+ *  @brief Node-API vector search over equidimensional dense embeddings.
  *
  *  The @c CompiledIndex class and the lifecycle verbs that instantiate it, the cursor and the
  *  search stream it opens, and the checkpoint metadata readers that need no index at all.
@@ -33,7 +32,7 @@ typedef struct usearch_js_dense_call_t {
     /** The report @c describe fills. */
     usearch_dense_index_description_t description;
 
-    /** Donors a merge names, which its settlement walks, or the rows on a verb's batch axis. */
+    /** Donors an absorb names, which its settlement walks, or the rows on a verb's batch axis. */
     size_t count;
 
     /** Entries under a key, nodes a refinement changed, or the rows or pairs a call landed. */
@@ -214,7 +213,7 @@ static usearch_js_index_t* usearch_js_index_self(napi_env env, napi_callback_inf
     for (size_t position = arguments_count; position < wanted; ++position)
         arguments[position] = usearch_js_undefined(env);
     if (!index->handle) {
-        usearch_js_throw(env, usearch_status_uninitialized_k, "The index was freed or merged into another");
+        usearch_js_throw(env, usearch_status_uninitialized_k, "The index was freed or absorbed into another");
         return NULL;
     }
     return index;
@@ -876,7 +875,7 @@ static napi_value usearch_js_index_multiply(napi_env env, napi_callback_info inf
 }
 
 /** Hands every donor the library left in its slot back to its wrapper; a nulled one is consumed. */
-static void usearch_js_conclude_merge(usearch_js_call_t* call) {
+static void usearch_js_conclude_absorb(usearch_js_call_t* call) {
     usearch_dense_index_t const* const handles = (usearch_dense_index_t const*)call->owned[0];
     usearch_js_index_t** const donors = (usearch_js_index_t**)call->owned[1];
     usearch_js_dense_call_t const* const dense = (usearch_js_dense_call_t const*)call;
@@ -885,18 +884,18 @@ static void usearch_js_conclude_merge(usearch_js_call_t* call) {
 }
 
 /**
- *  @brief @c merge(executor, completion, donors) - absorbs every donor, consumed as its slot nulls.
+ *  @brief @c absorb(executor, completion, donors) - absorbs every donor, each consumed as it nulls.
  *
  *  Every donor's handle moves into the call at submission, so until it is final a donor refuses
- *  every verb and no second merge can name it; @c usearch_js_conclude_merge hands back the rest.
+ *  every verb and no second absorb can name it; @c usearch_js_conclude_absorb hands back the rest.
  */
-static napi_value usearch_js_index_merge(napi_env env, napi_callback_info info) {
+static napi_value usearch_js_index_absorb(napi_env env, napi_callback_info info) {
     napi_value arguments[3], self = NULL, deferred = NULL;
     usearch_js_index_t* const index = usearch_js_index_self(env, info, 3, arguments, &self);
     usearch_js_dense_call_t local;
-    usearch_dense_merge_t merge = {.index = index ? index->handle : NULL};
+    usearch_dense_absorb_t absorb = {.index = index ? index->handle : NULL};
     usearch_js_dense_call_t* const call =
-        index ? usearch_js_dense_open(env, arguments, &local, &merge.executor, &merge.completion) : NULL;
+        index ? usearch_js_dense_open(env, arguments, &local, &absorb.executor, &absorb.completion) : NULL;
     if (!call) return NULL;
     bool is_array = false;
     uint32_t length = 0;
@@ -925,9 +924,9 @@ static napi_value usearch_js_index_merge(napi_env env, napi_callback_info info) 
                                               : NULL;
         if (!donor || !donor->handle) {
             call->count = position;
-            usearch_js_conclude_merge(&call->call);
+            usearch_js_conclude_absorb(&call->call);
             usearch_js_call_abandon(&call->call, &local.call);
-            if (donor) usearch_js_throw(env, usearch_status_uninitialized_k, "A donor was freed or merged already");
+            if (donor) usearch_js_throw(env, usearch_status_uninitialized_k, "A donor was freed or absorbed already");
             return NULL;
         }
         donors[position] = donor;
@@ -936,13 +935,13 @@ static napi_value usearch_js_index_merge(napi_env env, napi_callback_info info) 
     }
     napi_value const slots[usearch_js_slots_k] = {self, arguments[0], NULL, arguments[2]};
     call->call.finish = usearch_js_finish_nothing;
-    call->call.conclude = usearch_js_conclude_merge;
+    call->call.conclude = usearch_js_conclude_absorb;
     call->count = length;
-    merge.outcome = &call->call.outcome;
-    merge.count = length;
-    merge.donors = handles;
+    absorb.outcome = &call->call.outcome;
+    absorb.count = length;
+    absorb.donors = handles;
     if (!usearch_js_call_hold(env, &call->call, &local.call, slots, &deferred)) return NULL;
-    usearch_dense_merge(&merge);
+    usearch_dense_absorb(&absorb);
     return usearch_js_call_answer(env, &call->call, &local.call, slots, deferred);
 }
 
@@ -1037,6 +1036,10 @@ static void usearch_js_value_rows_latch(usearch_js_value_rows_t* lookup) {
 /**
  *  @brief The @c usearch_value_lookup_t of every attention, re-entering JavaScript once per scored
  *      key and pointing it at the value row @c row_of answers.
+ *
+ *  A host function, so it serves RAM handles alone: a VRAM walk resolves rows through a device
+ *  function, and @c attend refuses a VRAM arena with @c usearch_status_device_k rather than hand
+ *  this one to it.
  *
  *  A key answered by anything but a row the values hold, or asked for in another kind or width than
  *  the values are stored in, resolves to @c NULL, which refuses the call. Once @c row_of throws,
@@ -1139,6 +1142,11 @@ static napi_value usearch_js_index_attend(napi_env env, napi_callback_info info)
         !usearch_js_carry_from_value(env, arguments[13], attend.count, &attend.carry) ||
         !usearch_js_arena_from_value(env, arguments[11], &call.call, &attend.arena))
         return NULL;
+    // A VRAM arena means a device walk, which would call this host lookup on the device.
+    if (call.call.arena->residency == usearch_residency_vram_k) {
+        usearch_js_throw(env, usearch_status_device_k, "A VRAM walk needs a device-callable value lookup");
+        return NULL;
+    }
     napi_value const slots[usearch_js_slots_k] = {self, NULL, arguments[11], arguments[0], NULL, arguments[17]};
     call.call.finish = usearch_js_finish_attend;
     call.count = attend.count;
@@ -1428,7 +1436,7 @@ napi_value usearch_js_index_define(napi_env env) {
         {"maxsim", NULL, usearch_js_index_maxsim, NULL, NULL, NULL, napi_default_method, NULL},
         {"get", NULL, usearch_js_index_get, NULL, NULL, NULL, napi_default_method, NULL},
         {"multiply", NULL, usearch_js_index_multiply, NULL, NULL, NULL, napi_default_method, NULL},
-        {"merge", NULL, usearch_js_index_merge, NULL, NULL, NULL, napi_default_method, NULL},
+        {"absorb", NULL, usearch_js_index_absorb, NULL, NULL, NULL, napi_default_method, NULL},
         {"save", NULL, usearch_js_index_save, NULL, NULL, NULL, napi_default_method, NULL},
         {"saveBuffer", NULL, usearch_js_index_save_buffer, NULL, NULL, NULL, napi_default_method, NULL},
         {"attend", NULL, usearch_js_index_attend, NULL, NULL, NULL, napi_default_method, NULL},

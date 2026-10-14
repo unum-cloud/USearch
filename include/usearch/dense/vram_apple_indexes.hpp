@@ -121,6 +121,10 @@ struct vram_apple_indexes {
     /** The vendor whose devices the shards sit on, beside the vendors' twins of this index. */
     inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::apple_k;
 
+    /** Rows one window of a batch verb stages on a shard at most: one slab, the granularity
+     *  checkpoints move by, so a batch of any size crosses in bounded staging. */
+    inline static constexpr std::size_t window_rows_k = power_of_two<std::size_t>(index_t::batch_rows_log2_k);
+
 #pragma region Placement
 
     /** Every index names the @p kernel its shards score by and the host allocator its shard table,
@@ -300,9 +304,15 @@ struct vram_apple_indexes {
                 return status_t::config_mismatch_k;
             if (!count) return status_t::success_k;
             std::size_t const shards = shares_.size();
-            std::size_t const rotation = (rotation_ + first_row) % shards;
-            for (std::size_t shard = 0; shard != shards && succeeded(status_); ++shard)
-                status_ = launch_(shard, first_row_of_shard_(shard, shards, rotation), keys, rows);
+            // Each shard takes one slab per window at most, so no run stages more.
+            std::size_t const window_rows = window_rows_k * shards;
+            for (std::size_t first = 0; first < count && succeeded(status_); first += window_rows) {
+                std::size_t const taking = min_of(window_rows, count - first);
+                std::size_t const rotation = (rotation_ + first_row + first) % shards;
+                for (std::size_t shard = 0; shard != shards && succeeded(status_); ++shard)
+                    status_ = launch_(shard, first_row_of_shard_(shard, shards, rotation),
+                                      keys[nk::range(first, first + taking)], rows.slice(first, taking));
+            }
             return status_;
         }
 
@@ -719,9 +729,12 @@ struct vram_apple_indexes {
         std::size_t const width = min_of(min_of(keys.size(), distances.size()), expansion);
         if (!width) return {{}, pairs_with_(executor)};
         config.expansion_factor = static_cast<typename index_t::small_size_t>(expansion);
+        config.count = static_cast<typename index_t::small_size_t>(width);
+        batch_t batch {executor, allocator_};
+        if (status_t const begun = begin_batch_(batch); failed(begun)) return {{}, begun};
         std::size_t count = 0;
-        expected<search_result_t> found = search_(vectors_view_t {query_vector.data(), 1u, query_vector.size()},
-                                                  executor, config, nk::matrix_span<key_t> {keys.data(), 1u, width},
+        expected<search_result_t> found = search_(batch, vectors_view_t {query_vector.data(), 1u, query_vector.size()},
+                                                  config, nk::matrix_span<key_t> {keys.data(), 1u, width},
                                                   nk::matrix_span<distance_t> {distances.data(), 1u, width},
                                                   std::span<std::size_t> {&count, 1u});
         found.value.count = count;
@@ -740,12 +753,26 @@ struct vram_apple_indexes {
      *  @param[out] distances The same rankings' distances in any score type, parallel to @p keys.
      *  @param[out] counts Per-query merged hit counts, one per query row.
      *  @return The merged hits summed over queries, and the telemetry summed over shards.
+     *
+     *  The queries cross @c window_rows_k at a time, and a refused window keeps every one already
+     *  landed, so the rankings and the counts always agree.
      */
     template <typename score_type_>
     expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
                                      nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
                                      std::span<std::size_t> counts) noexcept {
-        return search_(queries, executor, config, keys, distances, counts);
+        if (status_t const refusal = batch_refusal_(executor, queries.rows, keys, distances, counts);
+            failed(refusal) || !queries.rows)
+            return {{}, refusal};
+        config.count = static_cast<typename index_t::small_size_t>(keys.extent(1));
+        batch_t batch {executor, allocator_};
+        if (status_t const begun = begin_batch_(batch); failed(begun)) return {{}, begun};
+        auto search_window = [&](std::size_t first, std::size_t taking) noexcept {
+            nk::range_t const rows = nk::range(first, first + taking);
+            return search_(batch, queries.slice(first, taking), config, keys(rows, nk::slice),
+                           distances(rows, nk::slice), counts.subspan(first, taking));
+        };
+        return for_each_window<search_result_t>(queries.rows, window_rows_k, search_window);
     }
 
     /** The batched @c search ranked by a lightning indexer: every shard walks the queries under
@@ -758,17 +785,34 @@ struct vram_apple_indexes {
         requires floating_scalar<scalar_t>
     {
         if (kernel_ != nk_kernel_dot_k) return {{}, status_t::config_mismatch_k};
-        return search_(queries, executor, config, keys, distances, counts, heads);
+        if (status_t const refusal = batch_refusal_(executor, queries.rows, keys, distances, counts);
+            failed(refusal) || !queries.rows)
+            return {{}, refusal};
+        std::size_t const heads_count = heads.weights.extent(1);
+        if (heads.weights.extent(0) != queries.rows || heads.heads.extent(0) != queries.rows * heads_count)
+            return {{}, status_t::config_mismatch_k};
+        config.count = static_cast<typename index_t::small_size_t>(keys.extent(1));
+        batch_t batch {executor, allocator_};
+        if (status_t const begun = begin_batch_(batch); failed(begun)) return {{}, begun};
+        auto search_window = [&](std::size_t first, std::size_t taking) noexcept {
+            nk::range_t const rows = nk::range(first, first + taking);
+            indexer_heads<scalar_t> const window_heads {
+                heads.heads(nk::range(first * heads_count, (first + taking) * heads_count), nk::slice),
+                heads.weights(rows, nk::slice)};
+            return search_(batch, queries.slice(first, taking), config, keys(rows, nk::slice),
+                           distances(rows, nk::slice), counts.subspan(first, taking), window_heads);
+        };
+        return for_each_window<search_result_t>(queries.rows, window_rows_k, search_window);
     }
 
     /**
      *  @brief Graph products of a whole matrix of left-hand rows against every shard: each row
      *      keeps the pairs its walks scored, keys resolved and dots at their native width.
      *
-     *  A full row keeps whichever pairs landed first, its dots in any product type. A refused
-     *  shard keeps every shard already landed, so the pairs and the counts always agree; the first
-     *  refusal is what the merged result reports. A metric other than dot refuses with
-     *  @c config_mismatch_k.
+     *  A full row keeps whichever pairs landed first, its dots in any product type. The rows cross
+     *  @c window_rows_k at a time, and a refused shard keeps every shard and window already
+     *  landed, so the pairs and the counts always agree; the first refusal is what the merged
+     *  result reports. A metric other than dot refuses with @c config_mismatch_k.
      */
     template <typename product_type_>
     expected<search_result_t> multiply(rows_view_t left, executor_t& executor, search_config_t config,
@@ -784,45 +828,53 @@ struct vram_apple_indexes {
         if (!rows_count) return {{}, status_t::success_k};
         if (left.columns != dimensions()) return {{}, status_t::config_mismatch_k};
 
-        // Every shard lands its own columns of one host landing.
-        std::size_t const landing_entries = rows_count * shards * wanted;
+        // Every shard lands its own columns of one host landing, as tall as a window and reused by
+        // every one.
+        std::size_t const landing_rows = min_of(rows_count, window_rows_k);
+        std::size_t const landing_entries = landing_rows * shards * wanted;
         growing_buffer<node_id_t, forkunion_allocator_t> ids_landing {allocator_};
         growing_buffer<dot_result_t, forkunion_allocator_t> products_landing {allocator_};
         growing_buffer<u32_t, forkunion_allocator_t> counts_landing {allocator_};
         if (failed(ids_landing.resize_uninitialized(landing_entries)) ||
             failed(products_landing.resize_uninitialized(landing_entries)) ||
-            failed(counts_landing.resize_uninitialized(shards * rows_count)))
+            failed(counts_landing.resize_uninitialized(shards * landing_rows)))
             return {{}, status_t::bad_alloc_k};
-        nk::matrix_span<node_id_t> const ids_wide {ids_landing.data(), rows_count, shards * wanted};
-        nk::matrix_span<dot_result_t> const products_wide {products_landing.data(), rows_count, shards * wanted};
+        batch_t batch {executor, allocator_};
+        if (status_t const begun = begin_batch_(batch); failed(begun)) return {{}, begun};
 
         auto shard_columns = [&](std::size_t shard) noexcept {
             return nk::range(shard * wanted, (shard + 1) * wanted);
         };
-        auto multiply_shard = [&](std::size_t shard, traversal_context_t& traversal, std::size_t visible) noexcept {
-            return shards_[shard].index->submit_multiply_(left, wanted, traversal, config, visible).status;
-        };
-        // Shards append as they land until a row fills, so a full row keeps whichever pairs came
-        // first.
-        auto merge_shard = [&](std::size_t shard, traversal_context_t const& traversal) noexcept {
-            nk::matrix_span<node_id_t> const shard_ids = ids_wide(nk::all, shard_columns(shard), nk::slice);
-            nk::matrix_span<dot_result_t> const shard_products = products_wide(nk::all, shard_columns(shard),
-                                                                               nk::slice);
-            std::span<u32_t> const shard_counts =
-                to_writable_span(counts_landing).subspan(shard * rows_count, rows_count);
-            shards_[shard].index->land_multiply_(traversal, shard_ids, shard_products, shard_counts);
-            for (std::size_t row = 0; row != rows_count; ++row) {
-                std::size_t const kept = min_of(counts[row], wanted);
-                std::size_t const scored = shard_counts[row];
-                for (std::size_t pair = 0; pair != min_of(scored, wanted - kept); ++pair) {
-                    keys(row, kept + pair) = shards_[shard].keys[shard_ids(row, pair)];
-                    products(row, kept + pair) = shard_products(row, pair);
+        auto multiply_window = [&](std::size_t first, std::size_t taking) noexcept {
+            // Shards add to these as they land, on the host.
+            for (std::size_t& count : counts.subspan(first, taking)) count = 0;
+            rows_view_t const window_left = left.slice(first, taking);
+            nk::matrix_span<node_id_t> const ids_wide {ids_landing.data(), taking, shards * wanted};
+            nk::matrix_span<dot_result_t> const products_wide {products_landing.data(), taking, shards * wanted};
+            auto multiply_shard = [&](std::size_t shard, traversal_context_t& traversal, std::size_t visible) noexcept {
+                return shards_[shard].index->submit_multiply_(window_left, wanted, traversal, config, visible).status;
+            };
+            // Shards append as they land until a row fills, so a full row keeps whichever pairs
+            // came first.
+            auto merge_shard = [&](std::size_t shard, traversal_context_t const& traversal) noexcept {
+                nk::matrix_span<node_id_t> const shard_ids = ids_wide(nk::all, shard_columns(shard), nk::slice);
+                nk::matrix_span<dot_result_t> const shard_products = products_wide(nk::all, shard_columns(shard),
+                                                                                   nk::slice);
+                std::span<u32_t> const shard_counts = to_writable_span(counts_landing).subspan(shard * taking, taking);
+                shards_[shard].index->land_multiply_(traversal, shard_ids, shard_products, shard_counts);
+                for (std::size_t row = 0; row != taking; ++row) {
+                    std::size_t const kept = min_of(counts[first + row], wanted);
+                    std::size_t const scored = shard_counts[row];
+                    for (std::size_t pair = 0; pair != min_of(scored, wanted - kept); ++pair) {
+                        keys(first + row, kept + pair) = shards_[shard].keys[shard_ids(row, pair)];
+                        products(first + row, kept + pair) = shard_products(row, pair);
+                    }
+                    counts[first + row] += scored;
                 }
-                counts[row] += scored;
-            }
+            };
+            return for_each_shard_(batch, multiply_shard, merge_shard, counts.subspan(first, taking));
         };
-        for (std::size_t& count : counts) count = 0;
-        return for_each_shard_(executor, multiply_shard, merge_shard, counts);
+        return for_each_window<search_result_t>(rows_count, window_rows_k, multiply_window);
     }
 
     /**
@@ -831,8 +883,9 @@ struct vram_apple_indexes {
      *      score.
      *
      *  A key some row never ranked misses that row's maximum, so with non-negative per-row maxima a
-     *  score lands below its exact value, never above. A metric other than dot refuses with
-     *  @c config_mismatch_k.
+     *  score lands below its exact value, never above. Whole queries cross @c window_rows_k rows at
+     *  a time, or one query when it outgrows that, and a refused window keeps every one already
+     *  landed. A metric other than dot refuses with @c config_mismatch_k.
      */
     expected<search_result_t> maxsim(rows_view_t queries, std::size_t rows_per_query, executor_t& executor,
                                      search_config_t config, nk::matrix_span<key_t> keys, nk::matrix_span<f64_t> scores,
@@ -848,23 +901,35 @@ struct vram_apple_indexes {
         if (!groups_count) return {{}, status_t::success_k};
 
         // Every token row keeps its whole ranked pool, its keys resolved and merged across the
-        // shards.
+        // shards; a window holds whole queries, so none splits across two.
         std::size_t const width = shards_[0].index->non_zero_expansion_factor(config);
+        std::size_t const window_rows = max_of<std::size_t>(window_rows_k / rows_per_query, 1) * rows_per_query;
+        std::size_t const landing_rows = min_of(rows_count, window_rows);
         growing_buffer<key_t, forkunion_allocator_t> row_keys {allocator_};
         growing_buffer<distance_t, forkunion_allocator_t> row_distances {allocator_};
         growing_buffer<std::size_t, forkunion_allocator_t> row_counts {allocator_};
         maxsim_reducer<key_t, distance_t, forkunion_allocator_t> reduce {allocator_};
-        if (failed(row_keys.resize_uninitialized(rows_count * width)) ||
-            failed(row_distances.resize_uninitialized(rows_count * width)) ||
-            failed(row_counts.resize_uninitialized(rows_count)) || failed(reduce.reserve(rows_per_query, width)))
+        if (failed(row_keys.resize_uninitialized(landing_rows * width)) ||
+            failed(row_distances.resize_uninitialized(landing_rows * width)) ||
+            failed(row_counts.resize_uninitialized(landing_rows)) || failed(reduce.reserve(rows_per_query, width)))
             return {{}, status_t::bad_alloc_k};
-        nk::matrix_span<key_t> const ranked_keys {row_keys.data(), rows_count, width};
-        nk::matrix_span<distance_t> const ranked_distances {row_distances.data(), rows_count, width};
-        expected<search_result_t> ranked = search(queries, executor, config, ranked_keys, ranked_distances,
-                                                  to_writable_span(row_counts));
-        if (!ranked) return ranked;
-        ranked.value.count = reduce(ranked_keys, ranked_distances, to_span(row_counts), keys, scores, counts);
-        return ranked;
+        config.count = static_cast<typename index_t::small_size_t>(width);
+        batch_t batch {executor, allocator_};
+        if (status_t const begun = begin_batch_(batch); failed(begun)) return {{}, begun};
+        auto maxsim_window = [&](std::size_t first, std::size_t taking) noexcept {
+            nk::matrix_span<key_t> const ranked_keys {row_keys.data(), taking, width};
+            nk::matrix_span<distance_t> const ranked_distances {row_distances.data(), taking, width};
+            std::span<std::size_t> const ranked_counts = to_writable_span(row_counts).first(taking);
+            expected<search_result_t> ranked = search_(batch, queries.slice(first, taking), config, ranked_keys,
+                                                       ranked_distances, ranked_counts);
+            if (!ranked) return ranked;
+            std::size_t const first_group = first / rows_per_query, groups = taking / rows_per_query;
+            nk::range_t const window_groups = nk::range(first_group, first_group + groups);
+            ranked.value.count = reduce(ranked_keys, ranked_distances, ranked_counts, keys(window_groups, nk::slice),
+                                        scores(window_groups, nk::slice), counts.subspan(first_group, groups));
+            return ranked;
+        };
+        return for_each_window<search_result_t>(rows_count, window_rows, maxsim_window);
     }
 
     /** Grouped-query attention of every token over every shard, vetted as on NVIDIA and refused
@@ -1615,22 +1680,46 @@ struct vram_apple_indexes {
         return live;
     }
 
-    /** The body of the batched @c search, passing any indexer @p heads to every shard as is. */
+    /** What every window of one batched read shares, taken once by @ref begin_batch_: the executor
+     *  and its claim, one context per shard, and one snapshot of the shards' visible rows, so every
+     *  window reads the same rows. */
+    struct batch_t {
+        executor_t& executor;
+        typename executor_t::claim_t claim;
+        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals;
+        growing_buffer<std::size_t, forkunion_allocator_t> visible;
+        growing_buffer<std::size_t, forkunion_allocator_t> pending;
+
+        batch_t(executor_t& executor, forkunion_allocator_t allocator) noexcept
+            : executor(executor), traversals(allocator), visible(allocator), pending(allocator) {}
+    };
+
+    /** Why a batch of @p rows cannot rank into @p keys, @p scores and @p counts on @p executor: the
+     *  checks @c search_ opens with, run once over the whole batch before any window slices it. */
+    template <typename score_type_>
+    status_t batch_refusal_(executor_t const& executor, std::size_t rows, nk::matrix_span<key_t> keys,
+                            nk::matrix_span<score_type_> scores, std::span<std::size_t const> counts) const noexcept {
+        if (status_t const paired = pairs_with_(executor); failed(paired)) return paired;
+        if (counts.size() != rows) return status_t::config_mismatch_k;
+        return rankings_refusal(rows, keys, scores);
+    }
+
+    /** The body of the batched @c search over one window of @p batch, passing any indexer @p heads
+     *  to every shard as is; @p config counts as many matches as @p keys is wide. */
     template <typename score_type_, typename... heads_types_>
-    expected<search_result_t> search_(rows_view_t queries, executor_t& executor, search_config_t config,
+    expected<search_result_t> search_(batch_t& batch, rows_view_t queries, search_config_t config,
                                       nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
                                       std::span<std::size_t> counts, heads_types_ const&... heads) noexcept {
         std::size_t const queries_count = queries.rows;
         std::size_t const shards = shards_.size();
-        if (status_t const paired = pairs_with_(executor); paired != status_t::success_k) return {{}, paired};
+        if (status_t const paired = pairs_with_(batch.executor); paired != status_t::success_k) return {{}, paired};
         if (counts.size() != queries_count) return {{}, status_t::config_mismatch_k};
         if (status_t const refusal = rankings_refusal(queries_count, keys, distances); failed(refusal))
             return {{}, refusal};
         if (!queries_count) return {{}, status_t::success_k};
-        // Vetted before anything is claimed or carved; the shards would refuse only after the
-        // landing had been sized for a doomed call.
+        // Vetted before anything is carved; the shards would refuse only after the landing had been
+        // sized for a doomed call.
         if (queries.columns != dimensions()) return {{}, status_t::config_mismatch_k};
-        config.count = static_cast<typename index_t::small_size_t>(keys.extent(1));
 
         // The host landing: every shard's matches, one wide matrix each, shard columns side by
         // side; never zeroed, since only columns a landed shard wrote are ever read. One row of
@@ -1667,29 +1756,35 @@ struct vram_apple_indexes {
             }
         };
         for (std::size_t& count : counts) count = 0;
-        return for_each_shard_(executor, search_shard, merge_shard, counts);
+        return for_each_shard_(batch, search_shard, merge_shard, counts);
     }
 
-    /** Claims @p executor, opens one context per shard, snapshots the shards' visible rows, submits
-     *  @p submit under its snapshot on every shard before awaiting any, hands each shard and its
-     *  context to @p merge as its stream lands - whichever lands first, so one merge overlaps the
-     *  other walks - and sums the telemetry & the rows' @p counts; the first refusal is the one
-     *  kept. */
-    template <typename submit_type_, typename merge_type_>
-    expected<search_result_t> for_each_shard_(executor_t& executor, submit_type_&& submit, merge_type_&& merge,
-                                              std::span<std::size_t const> counts) noexcept {
+    /** Claims the executor of @p batch, opens one context per shard, and snapshots the shards'
+     *  visible rows. */
+    status_t begin_batch_(batch_t& batch) noexcept {
         // The executor serializes, never the index: a second caller with its own executor searches
         // concurrently.
-        auto [claim, claim_status] = executor.claim();
-        if (failed(claim_status)) return {{}, claim_status};
-        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
-        if (status_t const readied = open_traversals_(traversals, executor); failed(readied)) return {{}, readied};
+        auto [claim, claim_status] = batch.executor.claim();
+        if (failed(claim_status)) return claim_status;
+        batch.claim = std::move(claim);
+        if (status_t const readied = open_traversals_(batch.traversals, batch.executor); failed(readied))
+            return readied;
+        if (failed(batch.visible.resize(shards_.size())) || failed(batch.pending.reserve_exactly(shards_.size())))
+            return status_t::bad_alloc_k;
+        snapshot_(to_writable_span(batch.visible));
+        return status_t::success_k;
+    }
+
+    /** Submits @p submit under the snapshot of @p batch on every shard before awaiting any, hands
+     *  each shard and its context to @p merge as its stream lands - whichever lands first, so one
+     *  merge overlaps the other walks - and sums the telemetry & the rows' @p counts; the first
+     *  refusal is the one kept. */
+    template <typename submit_type_, typename merge_type_>
+    expected<search_result_t> for_each_shard_(batch_t& batch, submit_type_&& submit, merge_type_&& merge,
+                                              std::span<std::size_t const> counts) noexcept {
         std::size_t const shards = shards_.size();
-        growing_buffer<std::size_t, forkunion_allocator_t> visible {allocator_};
-        growing_buffer<std::size_t, forkunion_allocator_t> pending {allocator_};
-        if (failed(visible.resize(shards)) || failed(pending.reserve_exactly(shards)))
-            return {{}, status_t::bad_alloc_k};
-        snapshot_(to_writable_span(visible));
+        growing_buffer<traversal_context_t, forkunion_allocator_t>& traversals = batch.traversals;
+        growing_buffer<std::size_t, forkunion_allocator_t>& pending = batch.pending;
 
         // Submit to every shard before awaiting any, so the batch costs the slowest device rather
         // than the sum. From here to the last landing there must be no return: the contexts own
@@ -1698,7 +1793,8 @@ struct vram_apple_indexes {
         std::size_t queued = 0;
         for (; queued != shards; ++queued) {
             pending.push_back_reserved(queued);
-            if (status_t const submitted = submit(queued, traversals[queued], visible[queued]); failed(submitted)) {
+            if (status_t const submitted = submit(queued, traversals[queued], batch.visible[queued]);
+                failed(submitted)) {
                 first_refusal = submitted;
                 break;
             }

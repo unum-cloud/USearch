@@ -321,6 +321,10 @@ struct vram_apple_index {
     /** Rows of the per-simdgroup candidate cache, as on CUDA. */
     inline static constexpr std::size_t cache_rows_k = 64;
 
+    /** Rows one checkpoint batch carries between a matrix and the caller: one slab, the row
+     *  granularity the RAM residency grows by. */
+    inline static constexpr std::size_t batch_rows_log2_k = 20;
+
     /** The host capability rows import into the shared staging at: the arm's own names only the
      *  GPU, and every Apple silicon host has NEON. */
     inline static constexpr nk_capability_t import_capability_k = nk_cap_serial_k | nk_cap_neon_k;
@@ -431,7 +435,7 @@ struct vram_apple_index {
     }
 
     /** Copies the stored row of @p node into @p destination with the fragment padding stripped. */
-    status_t vector(node_id_t node, nk::vector_span<scalar_t> destination) const noexcept {
+    status_t vector(node_id_t node, nk::vector_span<scalar_t> destination) noexcept {
         if (node >= size()) return status_t::config_mismatch_k;
         if (destination.size() != dimensions()) return status_t::config_mismatch_k;
         if (!destination.is_contiguous()) return status_t::unsupported_layout_k;
@@ -628,6 +632,12 @@ struct vram_apple_index {
         return search_one_(query_vector, context, config, size());
     }
 
+    /** Filtered search is banned on the device index: a host predicate cannot run inside the walk,
+     *  and a device-resident admission bitmap is a design of its own. */
+    template <typename predicate_type_>
+    expected<search_result_t> search_if(vector_view_t, predicate_type_&&, traversal_context_t&,
+                                        search_config_t = {}) noexcept = delete;
+
     /** Graph products of every left-hand row: each keeps the pairs its walk scored, until its
      *  output row fills. */
     expected<search_result_t> multiply(rows_view_t left, nk::matrix_span<node_id_t> node_ids,
@@ -749,9 +759,10 @@ struct vram_apple_index {
         std::size_t covered_neighbors = 0;
 
         save_plan_t() noexcept = default;
-        save_plan_t(vram_apple_index const& index, columns_t columns, node_id_t id_shift, node_id_t visible) noexcept
+        save_plan_t(vram_apple_index& index, columns_t columns, node_id_t id_shift, node_id_t visible) noexcept
             : columns(columns), id_shift(id_shift), visible(visible),
-              batch_rows(min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(20))), index_(&index) {}
+              batch_rows(min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(batch_rows_log2_k))),
+              index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
             : columns(other.columns), id_shift(other.id_shift), visible(other.visible), batch_rows(other.batch_rows),
               covered_vectors(other.covered_vectors), covered_neighbors(other.covered_neighbors),
@@ -825,13 +836,13 @@ struct vram_apple_index {
         }
 
       private:
-        vram_apple_index const* index_ = nullptr;
+        vram_apple_index* index_ = nullptr;
     };
 
     /** Opens a save into @p columns; @c concurrent_k refuses, since the storage cannot be probed
      *  for settlement. */
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
-                                    node_id_t id_shift = 0) const noexcept {
+                                    node_id_t id_shift = 0) noexcept {
         if (synchronization == synchronization_t::concurrent_k) return {{}, status_t::config_mismatch_k};
         if (!dimensions_) return {{}, status_t::uninitialized_k};
         std::size_t const rows = size();
@@ -844,7 +855,7 @@ struct vram_apple_index {
 
     /** Serializes every row under the watermark into @p columns on the calling thread. */
     status_t save(columns_t columns, synchronization_t synchronization,
-                  nk::matrix_span<node_id_t> scratch = {}) const noexcept {
+                  nk::matrix_span<node_id_t> scratch = {}) noexcept {
         auto [plan, status] = plan_save(columns, synchronization);
         if (failed(status)) return status;
         for (typename save_plan_t::step_t const step : plan.steps())
@@ -867,8 +878,8 @@ struct vram_apple_index {
         load_plan_t() noexcept = default;
         load_plan_t(vram_apple_index& index, std::unique_lock<std::mutex>&& batch, node_id_t base,
                     std::size_t rows) noexcept
-            : base(base), rows(rows), batch_rows(min_of(rows, power_of_two<std::size_t>(20))), index_(&index),
-              batch_(std::move(batch)) {}
+            : base(base), rows(rows), batch_rows(min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k))),
+              index_(&index), batch_(std::move(batch)) {}
         load_plan_t(load_plan_t&& other) noexcept
             : columns(other.columns), source_range(other.source_range), base(other.base),
               rows(std::exchange(other.rows, 0)), batch_rows(other.batch_rows), covered_vectors(other.covered_vectors),
@@ -953,7 +964,7 @@ struct vram_apple_index {
          *  drives it: both keep padded rows of one geometry in shared buffers, so every column
          *  moves whole on the host, and the neighbors rebase from @p source_range onto the appended
          *  range and compact. The source takes no rows until the copy returns. */
-        status_t load(step_t const& step, vram_apple_index const& source, iota_view<node_id_t> source_range) noexcept {
+        status_t load(step_t const& step, vram_apple_index& source, iota_view<node_id_t> source_range) noexcept {
             if (!index_) return status_t::uninitialized_k;
             iota_view<node_id_t> const range = step.index_rows;
             if (range.empty() || range.size() != step.source_rows.size() || step.source_rows.bound > source.size() ||
@@ -1892,7 +1903,7 @@ struct vram_apple_index {
     void* derive_norms_pipeline_ = nullptr;
 
     /** Shared by every walk while its command buffer runs, taken alone by growth. */
-    mutable std::shared_mutex storage_;
+    std::shared_mutex storage_;
 
     /** Held by the one batch, load or refinement at a time. */
     std::mutex batch_;

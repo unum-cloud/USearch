@@ -80,7 +80,7 @@
                     "package.json",
                     "Cargo.toml",
                     "Cargo.lock",
-                    "./include/usearch/types.h",
+                    "./c/usearch/types.h",
                     "./csharp/nuget/nuget-package.props",
                     "CITATION.cff"
                 ],

@@ -112,44 +112,50 @@ if (NOT USEARCH_DENSE_DTYPES MATCHES "^([1-9]|1[01])$")
     message(FATAL_ERROR "USEARCH_DENSE_DTYPES must be an integer from 1 to 11, found \"${USEARCH_DENSE_DTYPES}\"")
 endif ()
 set(usearch_dense_dtypes_ladder_
-    bf16
-    u1
-    i8
-    e4m3
-    f16
-    u8
-    e5m2
-    i4
-    u4
-    e3m2
-    e2m3
+    BF16
+    U1
+    I8
+    E4M3
+    F16
+    U8
+    E5M2
+    I4
+    U4
+    E3M2
+    E2M3
 )
 
-# Drops from @p target the per-dtype units, named by their `_<dtype>` suffix, of the dtypes the ladder leaves out; the
-# f32 and f64 units are the suites' own references and always stay.
-function (usearch_keep_dense_dtypes target)
-    list(SUBLIST usearch_dense_dtypes_ladder_ 0 ${USEARCH_DENSE_DTYPES} compiled_)
-    get_target_property(sources_ ${target} SOURCES)
-    set(kept_)
-    foreach (source_ IN LISTS sources_)
-        get_filename_component(stem_ ${source_} NAME_WE)
-        string(REGEX MATCH "[^_]+$" dtype_ ${stem_})
-        if (dtype_ IN_LIST compiled_ OR NOT dtype_ IN_LIST usearch_dense_dtypes_ladder_)
-            list(APPEND kept_ ${source_})
+# Adds to @p target the per-dtype units listed after each dtype's keyword, for the dtypes the ladder compiles:
+# `usearch_dense_dtype_sources(target BF16 a_bf16.cpp F16 a_f16.cpp ...)`. The f32 and f64 units are the suites' own
+# references, outside the ladder, so their targets list them directly.
+function (usearch_dense_dtype_sources target)
+    cmake_parse_arguments(PARSE_ARGV 1 shards "" "" "${usearch_dense_dtypes_ladder_}")
+    if (shards_UNPARSED_ARGUMENTS)
+        message(FATAL_ERROR "${target} lists \"${shards_UNPARSED_ARGUMENTS}\" under no dense dtype of the ladder")
+    endif ()
+    set(position_ 0)
+    foreach (dtype_ IN LISTS usearch_dense_dtypes_ladder_)
+        if (position_ LESS USEARCH_DENSE_DTYPES)
+            target_sources(${target} PRIVATE ${shards_${dtype_}})
         endif ()
+        math(EXPR position_ "${position_} + 1")
     endforeach ()
-    set_target_properties(${target} PROPERTIES SOURCES "${kept_}")
 endfunction ()
 
-# Sets @p output to `capability_macro=1` where every one of the architectures, without CMake's "-real" or "-virtual", is
-# one of NumKong's cached `nk_target_<capability>_architectures`, and to `capability_macro=0` otherwise. NumKong's
-# one-code units need any of them; a unit here compiles every listed code, and a kit compiled into one pass is compiled
-# into all.
+# Sets @p output to `capability_macro=1` where every one of the architectures is one of NumKong's cached
+# `nk_target_<capability>_architectures`, with or without CMake's "-real" or "-virtual", and to `capability_macro=0`
+# otherwise. NumKong's one-code units need any of them; a unit here compiles every listed code, and a kit compiled into
+# one pass is compiled into all.
 function (usearch_cuda_capability capability_name capability_macro architectures output)
     set(enabled_ 1)
     foreach (architecture_ IN LISTS architectures)
-        string(REGEX REPLACE "-(real|virtual)$" "" architecture_ "${architecture_}")
-        if (NOT architecture_ IN_LIST nk_target_${capability_name}_architectures)
+        set(supported_ 0)
+        foreach (supported_architecture_ IN LISTS nk_target_${capability_name}_architectures)
+            if (architecture_ MATCHES "^${supported_architecture_}(-real|-virtual)?$")
+                set(supported_ 1)
+            endif ()
+        endforeach ()
+        if (NOT supported_)
             set(enabled_ 0)
         endif ()
     endforeach ()
@@ -175,14 +181,14 @@ endfunction ()
 # Three-digit "a" & "f" entries are only understood from CMake 3.31 onward, while the CPU-only build stays on the 3.28
 # floor that stock Ubuntu 24.04 ships. The floor follows the architectures actually asked for, so a single-architecture
 # build on a distribution CMake is never refused for a capability it does not use.
-if (USEARCH_BUILD_CUDA AND CMAKE_VERSION VERSION_LESS 3.31)
-    string(REGEX MATCH "1[0-9][0-9][af]" architectures_needing_cmake_331 "${USEARCH_CUDA_ARCHITECTURES}")
-    if (architectures_needing_cmake_331)
-        message(
-            FATAL_ERROR
-                "USEARCH_CUDA_ARCHITECTURES names \"${architectures_needing_cmake_331}\", which needs CMake 3.31 or newer, found ${CMAKE_VERSION} - override with a single architecture or \"native\""
-        )
-    endif ()
+if (USEARCH_BUILD_CUDA
+    AND CMAKE_VERSION VERSION_LESS 3.31
+    AND USEARCH_CUDA_ARCHITECTURES MATCHES "1[0-9][0-9][af]"
+)
+    message(
+        FATAL_ERROR
+            "USEARCH_CUDA_ARCHITECTURES \"${USEARCH_CUDA_ARCHITECTURES}\" names a three-digit \"a\" or \"f\" architecture, which needs CMake 3.31 or newer, found ${CMAKE_VERSION} - override with a single architecture or \"native\""
+    )
 endif ()
 
 # One diagnostic is what an iteration wants; surveying a tree that has drifted wants the whole list at once.
@@ -226,7 +232,9 @@ set(USEARCH_CMAKE_PROJECT_CONFIG_FILE "${USEARCH_CMAKE_CONFIG_DIR}/${PROJECT_NAM
 set(USEARCH_CMAKE_PROJECT_TARGETS_FILE "${USEARCH_CMAKE_CONFIG_DIR}/${PROJECT_NAME}Targets.cmake")
 set(USEARCH_PKGCONFIG_INSTALL_DIR "${CMAKE_INSTALL_DATADIR}/pkgconfig")
 
-set(USEARCH_INCLUDE_BUILD_DIR "${PROJECT_SOURCE_DIR}/include/")
+# Include roots that add no path component: the C interface in `c/`, the templates in `include/`, and the C++ wrappers
+# over the C interface in `cpp/`, which only the compiled libraries carry.
+set(USEARCH_INCLUDE_BUILD_DIRS "${PROJECT_SOURCE_DIR}/c/" "${PROJECT_SOURCE_DIR}/include/")
 
 # The core: the basic graph index and the utilities it stands on - six headers on the standard library alone, no sibling
 # library in sight. Concepts are the main reason C++20 is the base language level, with `std::atomic_ref` and the
@@ -240,9 +248,9 @@ target_sources(
     INTERFACE FILE_SET
               HEADERS
               BASE_DIRS
-              ${USEARCH_INCLUDE_BUILD_DIR}
+              ${USEARCH_INCLUDE_BUILD_DIRS}
               FILES
-              include/usearch/types.h
+              c/usearch/types.h
               include/usearch/utilities/types.hpp
               include/usearch/utilities/sanitizers.hpp
               include/usearch/utilities/ram_buffers.hpp
@@ -259,7 +267,7 @@ set_target_properties(${USEARCH_TARGET_NAME} PROPERTIES EXPORT_NAME header)
 target_link_libraries(${USEARCH_TARGET_NAME} INTERFACE usearch_core)
 
 target_include_directories(
-    ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE} INTERFACE $<BUILD_INTERFACE:${USEARCH_INCLUDE_BUILD_DIR}>
+    ${USEARCH_TARGET_NAME} ${USEARCH_SYSTEM_INCLUDE} INTERFACE "$<BUILD_INTERFACE:${USEARCH_INCLUDE_BUILD_DIRS}>"
                                                                $<INSTALL_INTERFACE:include>
 )
 # Install a pkg-config file, so other tools can find this
@@ -276,7 +284,7 @@ write_basic_package_version_file(
 configure_file(${USEARCH_CMAKE_CONFIG_TEMPLATE} ${USEARCH_CMAKE_PROJECT_CONFIG_FILE} @ONLY)
 
 if (USEARCH_INSTALL)
-    install(DIRECTORY ${USEARCH_INCLUDE_BUILD_DIR} DESTINATION ${USEARCH_INCLUDE_INSTALL_DIR})
+    install(DIRECTORY c/usearch include/usearch cpp/usearch DESTINATION ${USEARCH_INCLUDE_INSTALL_DIR})
     install(FILES ${USEARCH_CMAKE_PROJECT_CONFIG_FILE} ${USEARCH_CMAKE_VERSION_CONFIG_FILE}
             DESTINATION ${USEARCH_CONFIG_INSTALL_DIR}
     )
@@ -359,6 +367,7 @@ function (usearch_setup_target TARGET_NAME)
             ${TARGET_NAME}
             PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${USEARCH_SANITIZERS}>
                     -ffast-math
+                    -fno-finite-math-only
                     -fPIC
                     -Wall
                     -Wextra
@@ -374,8 +383,14 @@ function (usearch_setup_target TARGET_NAME)
 
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         target_compile_options(
-            ${TARGET_NAME} PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${USEARCH_SANITIZERS}> -ffast-math
-                                   -fPIC -pedantic -Wfatal-errors -fcolor-diagnostics>
+            ${TARGET_NAME}
+            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${USEARCH_SANITIZERS}>
+                    -ffast-math
+                    -fno-finite-math-only
+                    -fPIC
+                    -pedantic
+                    -Wfatal-errors
+                    -fcolor-diagnostics>
         )
         target_link_options(${TARGET_NAME} PRIVATE $<$<CONFIG:DEBUG>:-g ${USEARCH_SANITIZERS}> -fPIC)
 
@@ -508,7 +523,7 @@ endforeach ()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 usearch_sibling(
-    numkong numkong::header https://github.com/ashvardanian/NumKong 614ba065b306d65040f2b7cb46c7aa72176faed3
+    numkong numkong::header https://github.com/ashvardanian/NumKong 0604027604d3adc6c6cc955e28372735fb5f8220
 )
 usearch_sibling(
     forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 075d14137420f204ff175acd2d29c22e163e241c
@@ -518,7 +533,7 @@ usearch_sibling(
     7826f358a51df3871fba5cc825ebab3e1163174a
 )
 usearch_sibling(
-    smashtable smashtable::header https://github.com/ashvardanian/SmashTable a7df2585228a444755ce85ac4b1a86dc425a3cee
+    smashtable smashtable::header https://github.com/ashvardanian/SmashTable e5404d996b2800fe92df8e966038f1953b0875a0
 )
 
 # Recorded without headers - each sibling owns its own - so `usearch::header` names nothing a consumer cannot resolve.
@@ -610,6 +625,7 @@ endif ()
 
 if (${USEARCH_BUILD_LIB_C})
     add_subdirectory(c)
+    add_subdirectory(cpp)
 endif ()
 
 if (${USEARCH_BUILD_LIB_PYTHON})

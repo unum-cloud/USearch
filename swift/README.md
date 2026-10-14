@@ -1,6 +1,6 @@
 # USearch for Swift
 
-The Swift package binds the C ABI in `include/usearch/` through `USearchC`, a Clang module map over its headers, and links the `libusearch_static` engine CMake builds.
+The Swift package binds the C ABI in `c/usearch/` through `USearchC`, a Clang module map over its headers, and links the `libusearch_static` engine CMake builds.
 It requires Swift 6.4 or newer, on macOS 15, iOS 18, tvOS 18, watchOS 11, visionOS 2, or Linux, and takes its matrix views and low-precision scalars from NumKong.
 It exposes dense indexes; sequence, matrix and geospatial indexes follow as the C library ships them.
 
@@ -107,7 +107,7 @@ To keep a result past the next call, or to read one while making the next, pass 
 An arena serves one call at a time, so each deferred call needs its own.
 Views stay on the arena's thread, which the compiler checks, and reading a stale one traps as an out-of-bounds index does.
 A view cannot be `~Escapable` while its lifetime annotation is still behind an experimental feature flag as of Swift 6.4, so it checks its arena at runtime instead.
-An arena from a VRAM executor holds device memory, which host accessors refuse with a trap.
+An arena from a VRAM executor holds device memory, which host accessors refuse with a trap, and serves only that executor's calls, keeping the executor alive until the arena goes.
 
 ```swift
 let arena = try Arena(on: executor)                                              // Arena() is host pages for the calling thread
@@ -319,13 +319,13 @@ Zero means the graph has settled, and searches may run throughout.
 while try index.on(executor).refine(config: DenseRefineConfig(expansionFactor: 128)) != 0 {}
 ```
 
-### Merging & Splitting
+### Absorbing & Splitting
 
-Bigger indexes come from merging, never mutating: `merge` consumes every donor it absorbs, and every later verb on one reports `uninitialized`; a merge stopped early hands the rest back to their indexes.
-No residency absorbs donors yet, so the engine answers `unsupported`.
+Bigger indexes come from absorbing, never mutating: `absorb` appends every donor's rows with its graph, then refines across the appended part.
+It consumes every donor it absorbs, so every later verb on one reports `uninitialized`, and an absorb stopped early hands the rest back to their indexes.
 
 ```swift
-try index.on(executor).merge([shard])
+try index.on(executor).absorb([shard])
 ```
 
 ### Sparse Multiplication
@@ -357,6 +357,7 @@ let documents = try index.on(executor).maxsim(tokens, rowsPerQuery: tokensPerQue
 Row `t · headCount + h` of the queries, outputs and carry is head `h` of token `t`, so the query heads of grouped-query attention share the index's one key-value head and one walk per token.
 The index stores no values: a `ValueLookup` names, for every scored key, its row of a values `RowsView` as wide as the keys and stored in the index's own quantization.
 A key without a row, or values of another width or scalar kind than the library reads, refuses the call with `shapeMismatch`, since a missing row is a wrong softmax rather than a smaller one.
+A VRAM index walks on the device and resolves values through a device function, which a Swift closure cannot be, so `attend` refuses it with `device`.
 The lookup runs on the executor's threads together, so it must be `@Sendable` and safe for concurrent use.
 The outputs land in the arena as rows of the scalar kind `as:` names, and a `carry` of one `DenseSoftmaxState` per query row folds this branch into another over the same queries.
 
@@ -393,7 +394,7 @@ print(version(), capabilitiesCompiled(), capabilitiesAvailable())
 ## Design
 
 - __A thin layer over the C ABI.__
-  Every name follows `include/usearch/`: a C verb `usearch_dense_<verb>` is a camel-cased `<verb>` here, such as `saveBuffer`, a type is its C name without `usearch_` and `_t`, and enums mirror C enums, never strings.
+  Every name follows `c/usearch/`: a C verb `usearch_dense_<verb>` is a camel-cased `<verb>` here, such as `saveBuffer`, a type is its C name without `usearch_` and `_t`, and enums mirror C enums, never strings.
 - __The receiver chooses, the verb stays.__
   The index runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor)` submits it, all with the same arguments.
 - __Deferred calls use the language's own idioms.__

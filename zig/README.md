@@ -1,6 +1,6 @@
 # USearch for Zig
 
-The Zig SDK binds the stable C ABI in `include/usearch/` with hand-written `extern fn` declarations rather than `@cImport`, so a dependent needs no include path of its own, only the library.
+The Zig SDK binds the stable C ABI in `c/usearch/` with hand-written `extern fn` declarations rather than `@cImport`, so a dependent needs no include path of its own, only the library.
 It requires Zig 0.16 or later and links the engine's shared library, built by CMake.
 It exposes dense indexes; sequence, matrix and geospatial indexes follow as the C library ships them.
 
@@ -113,6 +113,7 @@ To keep a result past the next call, or to read one while making the next, pass 
 An arena serves one call at a time, so each deferred call needs its own.
 Views find their arena by address, so it must not move while they live, and a stale view answers `Error.Uninitialized`; slices an accessor already returned are not checked again.
 An arena from a VRAM executor holds device memory, which host accessors refuse with `Error.Device`.
+It grows and frees on that executor's stream, so it serves only calls on that executor, any other answering `Error.Device`, and is freed before it; host pages may outlive theirs.
 
 ```zig
 var arena = try usearch.Arena.init(executor); // `Arena.init(null)` is host pages for the calling thread
@@ -289,7 +290,7 @@ const even = try index.on(executor).search(try .of(f32, queries, 768), 10, &aren
 It runs once per scored candidate, far more often than the "k" asked for, and concurrently from the executor's threads, so it belongs on your fast path and must tolerate that.
 A VRAM index refuses a predicate with `Error.Device`, since a host callback cannot narrow a device walk.
 
-Every long verb, namely `insert`, `refine`, `search`, `merge`, `multiply`, `attend`, `maxsim`, `save`, `saveBuffer` and every load, takes a `ProgressCallback` in its config, called with the units finished so far and the units the call finishes if it runs to the end.
+Every long verb, namely `insert`, `refine`, `search`, `absorb`, `multiply`, `attend`, `maxsim`, `save`, `saveBuffer` and every load, takes a `ProgressCallback` in its config, called with the units finished so far and the units the call finishes if it runs to the end.
 Answering `.cancel` stops the call at the next increment boundary, except an `insert`, which ignores it.
 
 ```zig
@@ -311,7 +312,7 @@ _ = try index.on(executor).refine(.{
 
 Like a predicate, the handler is a `comptime` function whose trampoline is generated per call site, and its context travels as one pointer, `{}` where none is needed.
 It arrives on whichever thread advanced the work and never on two at once, so a counter or a deadline needs no synchronization of its own.
-Reports are denominated in whatever the verb consumes, such as rows for an insertion, queries for a search, donors for a merge and shards for a checkpoint, and how often they arrive is the increment's size rather than a guarantee, so read the counts and never the number of calls.
+Reports are denominated in whatever the verb consumes, such as rows for an insertion, queries for a search, donors for an absorb and shards for a checkpoint, and how often they arrive is the increment's size rather than a guarantee, so read the counts and never the number of calls.
 
 An `insert` cannot be stopped: it claims every row before its first report and publishes the whole batch at once, so a batch is all-or-nothing with or without a handler.
 A stopped `refine` is not a failure but the time budget a whole-graph sweep is meant to run under: re-selection claims no identity, so the graph stays correct and merely less improved, and the next call sweeps again, so calling under a time budget still converges.
@@ -367,16 +368,16 @@ Zero means the graph has settled, and on a RAM index searches may run throughout
 while (try index.on(executor).refine(.{ .expansion_factor = 128 }) != 0) {}
 ```
 
-### Merging
+### Absorbing
 
-Bigger indexes come from merging, never mutating: shards build in RAM, serialize, and join a manifest, and `merge` absorbs donor handles, nulling each one it consumed so that freeing every donor afterwards is safe.
-A stopped merge keeps the donors it already absorbed, and the rest stay live for their `deinit` to free.
-No residency absorbs donor handles yet, so today `merge` answers `Error.Unsupported` and every donor stays live.
+`absorb` moves donor handles into one index, one after another, keeping their graphs rather than re-inserting their rows, then refines every shard that took one across the appended part.
+A donor must share the index's residency, scalar, metric and geometry, or the call answers `Error.ConfigMismatch`.
+Each donor it absorbs is consumed and nulled in place, so freeing every donor afterwards is safe, and a stop between donors, or a failure, leaves the rest live for their `deinit` to free.
 
 ```zig
 var donors = [_]usearch.DenseIndex{ first, second };
-try index.on(executor).merge(&donors, .{});
-for (&donors) |*donor| donor.deinit(); // frees only the donors a stop left live
+try index.on(executor).absorb(&donors, .{});
+for (&donors) |*donor| donor.deinit(); // frees only the donors a stop or a failure left live
 ```
 
 ### Sparse Multiplication
@@ -411,6 +412,7 @@ const documents = try index.on(executor).maxsim(try .of(f32, tokens, 768), token
 The index stores no values, so a `ValueLookup` resolves each scored key to its row, as wide as the keys and stored in the index's quantization.
 Its trampoline checks the kind and width every batch states, so a missing row, or one of another kind or width, refuses the call with `Error.ShapeMismatch`.
 It runs on the executor's threads, so it must tolerate concurrent calls.
+That trampoline is a host function, which serves RAM and NVMe indexes; a VRAM walk calls the lookup on the device, so a VRAM index takes a `ValueLookup` whose `callback` is device-callable, set directly.
 The `head_count` query heads of grouped-query attention share one walk per token, row `t · head_count + h` being head `h` of token `t`, and a carry of one `DenseSoftmaxState` per query row, lent rather than landed, folds this branch into another over the same queries.
 The attended rows land in the arena as the queries' own scalar type, or as the config's `outputs_scalar`.
 
@@ -453,7 +455,7 @@ std.debug.print("{d} of {d} entries reachable\n", .{ reachability.reachable, rea
 ## Design
 
 - __A thin layer over the C ABI.__
-  Every name follows `include/usearch/`: a C verb `usearch_dense_<verb>` is a `<verb>` here, in camelCase, and enums mirror C enums, never strings.
+  Every name follows `c/usearch/`: a C verb `usearch_dense_<verb>` is a `<verb>` here, in camelCase, and enums mirror C enums, never strings.
   Every type is its C name without `usearch_` and `_t`, a verb's argument structure becomes its `Dense*Config`, and every wrapper's documentation names the C symbol it calls or says it is binding-only.
 - __The receiver chooses, the verb stays.__
   The index runs a verb on the calling thread, `on(executor)` blocks on an executor, and `deferred(executor, &call)` submits it, all with the same arguments.

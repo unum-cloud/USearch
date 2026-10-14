@@ -456,8 +456,8 @@ def test_health_audits_every_entry() raises:
     assert_equal(Int(reachability.reachable), 2, "and both reached")
 
 
-def test_merge_consumes_its_donors() raises:
-    """A merge absorbs every donor's rows, and the donors it consumed are freed exactly once."""
+def test_absorb_consumes_its_donors() raises:
+    """An absorb takes in every donor's rows, and the donors it consumed are freed exactly once."""
     if not _engine_is_present():
         print("skipped: libusearch_shared is not on the loader path")
         return
@@ -470,11 +470,7 @@ def test_merge_consumes_its_donors() raises:
     donor.insert(keys, RowsView.of(rows, 2))
     var donors = List[DenseIndex]()
     donors.append(donor^)
-    try:
-        index.merge(donors^)
-    except error:
-        assert_true(error.status == Status.UNSUPPORTED, "no residency absorbs donors yet")
-        return
+    index.absorb(donors^)
     assert_equal(Int(index.describe().size), 3, "the donor's row joined")
     assert_equal(index.count(Key(integer=3)), 1, "under its own key")
 
@@ -775,7 +771,7 @@ def main() raises:
     suite.test[test_search_stream_pulls_in_distance_order]()
     suite.test[test_cursor_walks_every_row_once]()
     suite.test[test_health_audits_every_entry]()
-    suite.test[test_merge_consumes_its_donors]()
+    suite.test[test_absorb_consumes_its_donors]()
     suite.test[test_mutating_a_view_is_refused_as_read_only]()
     suite.test[test_scans_find_every_query_itself]()
     suite.test[test_deferred_calls_wait_until_final]()

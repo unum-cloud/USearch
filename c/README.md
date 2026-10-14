@@ -1,8 +1,8 @@
 # USearch for C
 
-This is the C 99 interface every other binding wraps: the headers in `include/usearch/`, compiled into `libusearch_shared` and `libusearch_static`.
+This is the C 99 interface every other binding wraps: the headers in `c/usearch/`, compiled into `libusearch_shared` and `libusearch_static`.
 Building the library takes CMake 3.28 and a C++20 compiler, while calling it takes any C99 compiler.
-It exposes all four modalities: the engine implements dense indexes, while sequence, matrix and geospatial indexes are answered today by a brute-force stand-in only.
+It exposes all four modalities: the engine implements dense, sequence and shape indexes, while geospatial indexes are answered today by a brute-force stand-in only.
 
 ## Installation
 
@@ -11,7 +11,7 @@ cmake -B build_release -D CMAKE_BUILD_TYPE=Release -D USEARCH_BUILD_LIB_C=1 -D U
 ```
 
 That leaves both libraries in `build_release/`, carrying all eleven dense storage types; precompiled ones ship on the [releases page](https://github.com/unum-cloud/USearch/releases).
-Put `include/` on the include path and link either library.
+Put `c/` on the include path, or `include/` once installed, where the C headers sit beside the C++ ones, and link either library.
 One header, `usearch/usearch.h`, pulls in every modality: `dense_index.h`, `sequence_index.h`, `shapes_index.h` and `geospatial_index.h`.
 `ctest --test-dir build_release -R usearch_test_c` runs the smoke test in `c/test.c`.
 
@@ -22,7 +22,7 @@ Its search is exact, its traversal statistics are invented, and its checkpoints 
 ## Quickstart
 
 Every verb takes one argument struct, initialized by designator, so every field left out keeps its default.
-Every struct opens in the same order: the handle, `executor`, `outcome`, then `completion`; inputs follow, then outputs and the `arena` they land in, then knobs, and last `progress`, `progress_state` and `stats`.
+Every struct opens in the same order: the handle, `executor`, `outcome`, then `completion`; inputs follow, then outputs and the `arena` they land in, then knobs, and last `progress` and `stats`.
 Structs carry no size or version field, so they grow source-compatibly only, and the major version changes whenever one does.
 
 ```c
@@ -236,7 +236,7 @@ Callers lend memory, never a way to allocate it: no allocator callback crosses t
 
 Every dense verb is exported for every residency, and the engine answers what a residency lacks with `usearch_status_unsupported_k`:
 
-- RAM answers every verb but `usearch_dense_view_ram` and `usearch_dense_search_stream_init`.
+- RAM answers every verb but `usearch_dense_view_ram`, `usearch_dense_search_stream_init` and `usearch_dense_sample`.
 - VRAM answers insertion, refinement, absorbing, counting, `get`, search, `multiply`, `maxsim`, attention and the serialization family, `save_buffer` included, while cursors and exact scans answer `usearch_status_unsupported_k`, as [GPUs](#gpus) explains.
 - NVMe answers every read verb as RAM does, refuses every mutating one with `usearch_status_read_only_k`, and refuses saving, since a view already is its checkpoint.
 
@@ -404,8 +404,9 @@ In most engines, you'd have to manually perform paging requests, successively fi
 In USearch you can pass a predicate to the search, which is applied during graph traversal.
 
 ```c
-usearch_admission_t admits_tenant(usearch_key_t key, void* state) {
-    return key.bytes[0] == *(uint8_t const*)state ? usearch_admit_k : usearch_reject_k;
+void admits_tenant(usearch_key_t const* keys, usearch_admission_t* admissions, size_t count, void* state) {
+    for (size_t i = 0; i != count; ++i)
+        admissions[i] = keys[i].bytes[0] == *(uint8_t const*)state ? usearch_admit_k : usearch_reject_k;
 }
 
 uint8_t tenant = 7;
@@ -417,23 +418,31 @@ usearch_dense_search(&(usearch_dense_search_t) {.index = index,
                                                 .matches = &matches,
                                                 .arena = arena,
                                                 .wanted = 10,
-                                                .predicate = admits_tenant,
-                                                .predicate_state = &tenant});
+                                                .predicate = {admits_tenant, &tenant}});
 ```
 
-Rejected entries still route the walk, so recall holds at low selectivity, and the predicate runs once per scored candidate, concurrently on the executor's threads, so it must be fast and tolerate that.
+The predicate judges a batch of candidates per call, a quad of them at a time during a walk, so a handler backed by an external store answers each batch in one round trip.
+
+Rejected entries still route the walk, so recall holds at low selectivity, and the predicate judges every scored candidate, concurrently on the executor's threads, so it must be fast and tolerate that.
 An exact scan asks it only about rows closer than the worst match a query already holds, which makes the scan the fallback for filters too selective for a walk to cross.
 A host predicate cannot narrow a device walk, so a VRAM search with one reports `usearch_status_device_k`.
 
-Long calls take a progress handler, which is also the only way to stop one:
+Long calls take a `usearch_progress_t`: a handler, which is also the only way to stop one, its state, and how many reports it hears:
 
 ```c
 usearch_continuation_t stop_when_asked(size_t completed, size_t total, void* state) {
     return *(int const*)state ? usearch_cancel_k : usearch_continue_k;
 }
+
+int stop = 0;
+usearch_dense_search(&(usearch_dense_search_t) {
+    .index = index, .executor = executor, .outcome = &outcome, .count = 1000000, .queries = queries,
+    .wanted = 10, .arena = arena, .matches = &matches, .progress = {stop_when_asked, &stop, 20}});
 ```
 
 Counts are in whatever units the verb consumes, rows for an insertion, queries for a search, shards for a checkpoint, and the handler is never called concurrently or after the call is final.
+A call reports at most `steps` times, the last at completion, and zero steps derive to ten.
+A batch verb hands its engine one slice per step, and a call without a handler runs as one slice, since every engine bounds its own scratch.
 A stopped call reports `usearch_status_cancelled_k` and leaves its outputs `NULL`.
 An insertion claims every row before its first report, so its handler only reports, and all its rows publish at once.
 
@@ -646,40 +655,44 @@ usearch_sequence_search(&(usearch_sequence_search_t) {.index = sequences,
                                                       .wanted = 3});
 ```
 
-The kinds are Levenshtein over bytes or UTF-8 code points, Needleman-Wunsch and Smith-Waterman with linear gaps, and their Gotoh forms with affine gaps.
-The alignment kinds take `usearch_sequence_weights_t`, a 256×256 substitution matrix with gap costs, which the Levenshtein kinds refuse.
+The kinds are Levenshtein over bytes or UTF-8 code points, Needleman-Wunsch and Smith-Waterman with linear gaps, their Gotoh forms with affine gaps, and overlap, the share of fixed-width windows one side misses of the other.
+The alignment kinds take `usearch_sequence_weights_t`, a 256×256 substitution matrix with gap costs, and the overlap kind takes `window_widths` in bytes, each refused by every other kind with `usearch_status_config_mismatch_k`.
 The local Smith-Waterman kinds only rank: each is served from an index built under its global counterpart, which the library picks.
-The verbs mirror the dense ones: `init_ram`, `load_ram`, `view_ram`, `reserve`, `clear`, `insert`, `refine`, `search` with a predicate, `get` and `cursor_next` writing tapes into an arena, `merge`, `save`, `metadata_read` and `describe`, while `count` also reports a key's total and largest byte lengths.
+The verbs mirror the dense ones: `init_ram`, `load_ram`, `view_ram`, `reserve`, `clear`, `insert`, `refine`, `search` with a predicate, `get` and `cursor_next` writing tapes into an arena, `absorb`, `save`, `metadata_read` and `describe`, while `count` also reports a key's total and largest byte lengths.
 A key already holding `values_per_key` entries rejects the whole insertion with `usearch_status_overflow_k`.
-The engine does not export these verbs yet, so a program calling them links against the stand-in, which scores every kind by textbook dynamic programming, quadratic and unbanded, and reports alignment similarities negated.
+The engine serves the Levenshtein and overlap kinds, and answers the alignment kinds, `view_ram`, `refine`, `absorb`, `sample` and a cursor opened at a key with `usearch_status_unsupported_k`.
+The stand-in serves every kind by textbook dynamic programming, quadratic and unbanded, and reports alignment similarities negated.
 
-## Matrix Indexes
+## Shape Indexes
 
-A matrix index searches sets of equidimensional rows whose count varies per entry, like molecular conformers or point clouds, in RAM or VRAM.
-Its tape is rows end to end with row offsets, `columns` is frozen index-wide, and a non-zero `rows` freezes the height too, rejecting insertions of any other:
+A shape index searches 3D point clouds of any size, like molecules, conformers and protein backbones, in RAM or VRAM.
+Its tape is points end to end, `x`, `y` and `z` interleaved, with offsets that count points rather than scalars:
 
 ```c
-usearch_matrix_index_t conformers = NULL;
-usearch_matrix_init_ram(&(usearch_matrix_init_ram_t) {.index = &conformers,
+usearch_shapes_index_t conformers = NULL;
+usearch_shapes_init_ram(&(usearch_shapes_init_ram_t) {.index = &conformers,
                                                       .outcome = &outcome,
-                                                      .metric = usearch_matrix_metric_hausdorff_k,
-                                                      .quantization = usearch_scalar_f16_k,
-                                                      .columns = 3});
+                                                      .metric = usearch_shapes_metric_wasserstein_procrustes_k,
+                                                      .quantization = usearch_scalar_f16_k});
 
 float const atoms[5][3] = {{0, 0, 0}, {1.1f, 0, 0}, {0, 0, 0}, {1.5f, 0, 0}, {0, 1.5f, 0}};
-size_t const row_offsets[3] = {0, 2, 5}; // a 2-atom and a 3-atom entry
-usearch_matrix_insert(&(usearch_matrix_insert_t) {.index = conformers,
+size_t const point_offsets[3] = {0, 2, 5}; // a 2-atom and a 3-atom entry
+usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = conformers,
                                                   .executor = executor,
                                                   .outcome = &outcome,
                                                   .count = 2,
                                                   .keys = {molecules, sizeof(usearch_key_t)},
-                                                  .matrices = {atoms, row_offsets, usearch_scalar_f32_k}});
+                                                  .shapes = {atoms, point_offsets, usearch_scalar_f32_k}});
 ```
 
-Chamfer and Hausdorff pair every row with its best partner on the other side; Gromov-Wasserstein compares each side's internal geometry, invariant to rotation, translation and row order.
-Kabsch and Umeyama report the residual after superposing one set onto the other, so they need a fixed `rows`, and Umeyama only ranks, served from a symmetric counterpart.
-The verbs are the sequence ones plus `init_vram` and `load_vram`, with `get` and `cursor_next` converting rows to an `outputs_scalar` and `count` reporting a key's total and tallest row counts.
-The engine does not export these verbs yet, so a program calling them links against the stand-in, which scores Chamfer and Hausdorff, refuses the other three kinds with `usearch_status_unknown_kind_k`, ignores `quantization`, and refuses every VRAM verb with `usearch_status_device_k`.
+Chamfer and Hausdorff pair every point with its nearest partner after aligning the principal axes under all eight sign flips, keeping the best.
+Wasserstein-Procrustes pairs points by an exact transport plan, alternated with the best rotation or reflection.
+Gromov-Wasserstein compares each side's internal distances.
+All four are invariant to rotation, reflection, translation and point order.
+A non-zero `points` freezes the count, rejecting insertions of any other with `usearch_status_shape_mismatch_k`.
+The verbs are the sequence ones plus `init_vram` and `load_vram`, where `get` and `cursor_next` convert to an `outputs_scalar` and return each shape in its inserted pose, and `count` reports a key's total and largest point counts.
+The engine serves all four kinds in RAM over `f16` or `f32` points, refusing other quantizations, `view_ram`, `refine` and `absorb` with `usearch_status_unsupported_k`, and both VRAM verbs with `usearch_status_device_k`.
+The stand-in scores Chamfer and Hausdorff in the frame the points arrive in, refuses the two transport kinds with `usearch_status_unknown_kind_k`, refuses quantizations other than `f16` and `f32` with `usearch_status_unsupported_k`, and refuses every VRAM verb with `usearch_status_device_k`.
 
 ## Geospatial Indexes
 
@@ -736,7 +749,7 @@ An emplaced query is not internally synchronized, so build one per thread, and t
 `axes` narrows the comparison to the ground track, three dimensions, or every axis with time, and `tolerance` carries the radius in metres and the time window in seconds.
 Scores are metres, except overlap, which counts query points and ranks largest first.
 `insert` takes optional per-point `deviations` in metres, `get` returns the degrees, metres and seconds inserted, and `cursor_next` exports the internal Earth-fixed integer centimetres, three per point, as `usearch_scalar_i32_k`.
-The remaining verbs are the matrix ones, with `count` reporting a key's total and longest point counts.
+The remaining verbs are the shapes ones, with `count` reporting a key's total and longest point counts.
 The engine does not export these verbs yet, so a program calling them links against the stand-in, which converts onto a sphere rather than the ellipsoid, refuses `overlap_k` with `usearch_status_unknown_kind_k`, ignores deviations, and refuses every VRAM verb with `usearch_status_device_k`.
 
 ## What This Binding Does Not Expose
@@ -749,7 +762,7 @@ A metric of your own, over payloads of your own, belongs to the C++ baseline tie
 ## Design
 
 - __This is the C ABI itself.__
-  Every name is the one `include/usearch/` declares: a verb `usearch_dense_<verb>` takes a `usearch_dense_<verb>_t`, and closed sets are C enums with name tables, never strings.
+  Every name is the one `c/usearch/` declares: a verb `usearch_dense_<verb>` takes a `usearch_dense_<verb>_t`, and closed sets are C enums with name tables, never strings.
 - __The completion chooses, the verb stays.__
   A `NULL` executor runs a verb on the calling thread, an executor with the default completion blocks on it, and `usearch_completion_deferred_k` submits it, all with the same argument struct.
 - __Deferred calls report through the same outcome.__
