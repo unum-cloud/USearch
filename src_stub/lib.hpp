@@ -190,6 +190,17 @@ inline bool keep_going(usearch_progress_callback_t progress, void* progress_stat
     return !progress || progress(completed, total, progress_state) == usearch_continue_k;
 }
 
+/** Ticks the caller's handler when @p completed closes one of its steps, and answers whether to
+ *  carry on; a null handler always does. Every loop here advances a unit at a time, so the unit
+ *  that crosses into a new step is the one that reports. */
+inline bool keep_going(usearch_progress_t progress, std::size_t completed, std::size_t total) {
+    if (!progress.callback || !completed) return true;
+    // The library's default when the caller leaves the steps zero, a tenth of the call apart.
+    std::size_t const steps = progress.steps ? progress.steps : 10;
+    bool const closes = completed >= total || completed * steps / total != (completed - 1) * steps / total;
+    return !closes || progress.callback(completed, total, progress.state) == usearch_continue_k;
+}
+
 /** Reports a handler's cancellation once a loop stopped short, and answers whether it did. */
 inline bool reject_cancelled(std::size_t completed, std::size_t total, usearch_outcome_t* outcome) {
     return reject_if(completed < total, usearch_status_cancelled_k, "The caller's handler stopped the work", outcome);

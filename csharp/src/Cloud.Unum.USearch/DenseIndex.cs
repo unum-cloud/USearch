@@ -2207,8 +2207,7 @@ internal unsafe struct NativeDenseLoadRam
     public NativeBytesView Path;
     public NativeRamOptions Ram;
     public nuint ValuesPerKey;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
 }
 
 /// <summary>The arguments of <c>usearch_dense_load_vram</c>.</summary>
@@ -2222,8 +2221,7 @@ internal unsafe struct NativeDenseLoadVram
     public NativeBytesView Path;
     public NativeVramOptions Vram;
     public nuint ValuesPerKey;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
 }
 
 /// <summary>The arguments of <c>usearch_dense_load_ram_buffer</c>.</summary>
@@ -2237,8 +2235,7 @@ internal unsafe struct NativeDenseLoadRamBuffer
     public NativeBytesView Buffer;
     public NativeRamOptions Ram;
     public nuint ValuesPerKey;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
 }
 
 /// <summary>The arguments of <c>usearch_dense_load_vram_buffer</c>.</summary>
@@ -2252,8 +2249,7 @@ internal unsafe struct NativeDenseLoadVramBuffer
     public NativeBytesView Buffer;
     public NativeVramOptions Vram;
     public nuint ValuesPerKey;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
 }
 
 /// <summary>The arguments of <c>usearch_dense_view_ram</c>.</summary>
@@ -2310,8 +2306,7 @@ internal unsafe struct NativeDenseInsert
     public NativeKeysView Keys;
     public NativeRowsView Vectors;
     public nuint ExpansionFactor;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
 
@@ -2325,8 +2320,7 @@ internal unsafe struct NativeDenseRefine
     public Completion Completion;
     public nuint* Changed;
     public nuint ExpansionFactor;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
 
@@ -2358,8 +2352,7 @@ internal unsafe struct NativeDenseSearch
     public Traversal Traversal;
     public delegate* unmanaged[Cdecl]<Key, IntPtr, Admission> Predicate;
     public IntPtr PredicateState;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
 
@@ -2400,8 +2393,7 @@ internal unsafe struct NativeDenseMerge
     public Completion Completion;
     public nuint Count;
     public IntPtr* Donors;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
 }
 
 /// <summary>The arguments of <c>usearch_dense_cursor_init</c>.</summary>
@@ -2464,8 +2456,7 @@ internal unsafe struct NativeDenseSave
     public NativeOutcome* Outcome;
     public Completion Completion;
     public NativeBytesView Path;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
 }
 
 /// <summary>The arguments of <c>usearch_dense_save_buffer</c>.</summary>
@@ -2478,8 +2469,7 @@ internal unsafe struct NativeDenseSaveBuffer
     public Completion Completion;
     public NativeBytesView* Monolith;
     public IntPtr Arena;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
 }
 
 /// <summary>The arguments of <c>usearch_dense_metadata_read</c>.</summary>
@@ -2531,8 +2521,7 @@ internal unsafe struct NativeDenseMultiply
     public IntPtr Arena;
     public nuint Wanted;
     public nuint ExpansionFactor;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
 
@@ -2555,8 +2544,7 @@ internal unsafe struct NativeDenseAttend
     public Scalar OutputsScalar;
     public nuint ExpansionFactor;
     public float ScoreScale;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
 
@@ -2575,8 +2563,7 @@ internal unsafe struct NativeDenseMaxsim
     public IntPtr Arena;
     public nuint Wanted;
     public nuint ExpansionFactor;
-    public IntPtr Progress;
-    public IntPtr ProgressState;
+    public NativeProgress Progress;
     public NativeDenseTraversalStats* Stats;
 }
 

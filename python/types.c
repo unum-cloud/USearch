@@ -1314,8 +1314,10 @@ static usearch_continuation_t progress_trampoline(size_t completed, size_t total
     return continuation;
 }
 
-usearch_progress_callback_t usearch_py_progress_registered(usearch_py_callback_t const* callback) {
-    return callback->callable ? progress_trampoline : NULL;
+usearch_progress_t usearch_py_progress_registered(usearch_py_callback_t* callback, size_t steps) {
+    return (usearch_progress_t) {.callback = callback->callable ? progress_trampoline : NULL,
+                                 .state = callback,
+                                 .steps = steps};
 }
 
 /**

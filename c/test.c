@@ -358,8 +358,8 @@ static usearch_continuation_t record_progress(size_t completed, size_t total, vo
 void test_add_progress(void) {
     printf("Test: Add Progress\n");
 
-    // Wider than two of the engine's 4096-row steps, so its handler hears more than one report.
-    enum { rows_count = 2 * 4096 + 1, dimensions = 16 };
+    // A handler asking for four reports hears four, the batch split into nearly equal slices.
+    enum { rows_count = 101, dimensions = 16, steps = 4 };
     usearch_outcome_t outcome = {0};
     usearch_dense_index_t const index = create_index(dimensions);
     usearch_executor_t const executor = create_executor(0);
@@ -380,10 +380,9 @@ void test_add_progress(void) {
                                    .count = rows_count,
                                    .keys = {keys, sizeof(usearch_key_t)},
                                    .vectors = {data, dimensions * sizeof(float), dimensions, usearch_scalar_f32_k},
-                                   .progress = record_progress,
-                                   .progress_state = &reports});
+                                   .progress = {record_progress, &reports, steps}});
     expect(!outcome.message, outcome.message);
-    expect(reports.ascending && reports.calls > 1, "Every step must be reported, in order");
+    expect(reports.ascending && reports.calls == steps, "Every step must be reported once, in order");
     expect(reports.completed == rows_count && reports.total == rows_count, "The last report must cover the batch");
 
     usearch_dense_index_description_t description = {0};

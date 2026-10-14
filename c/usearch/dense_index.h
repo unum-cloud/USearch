@@ -318,11 +318,8 @@ typedef struct usearch_dense_load_ram_t {
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
     size_t values_per_key;
 
-    /** The @b optional handler, called with shards placed; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with shards placed. */
+    usearch_progress_t progress;
 } usearch_dense_load_ram_t;
 
 /**
@@ -368,11 +365,8 @@ typedef struct usearch_dense_load_vram_t {
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
     size_t values_per_key;
 
-    /** The @b optional handler, called with shards placed; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with shards placed. */
+    usearch_progress_t progress;
 } usearch_dense_load_vram_t;
 
 /** Copies a checkpoint into a new, mutable index in device memory, with the placement rules of
@@ -403,11 +397,8 @@ typedef struct usearch_dense_load_ram_buffer_t {
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
     size_t values_per_key;
 
-    /** The @b optional handler, called with bytes placed; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with bytes placed. */
+    usearch_progress_t progress;
 } usearch_dense_load_ram_buffer_t;
 
 /**
@@ -443,11 +434,8 @@ typedef struct usearch_dense_load_vram_buffer_t {
     /** Upper bound on entries sharing one key, which no checkpoint records; zero derives to one. */
     size_t values_per_key;
 
-    /** The @b optional handler, called with bytes placed; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with bytes placed. */
+    usearch_progress_t progress;
 } usearch_dense_load_vram_buffer_t;
 
 /** Copies a monolith from a memory buffer into a new, mutable index in device memory, reporting
@@ -601,11 +589,8 @@ typedef struct usearch_dense_insert_t {
     /** The @b optional candidate-pool breadth the build walk explores; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional handler, called with rows admitted, which reports and cannot cancel; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with rows admitted, which reports and cannot cancel. */
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_dense_traversal_stats_t* stats;
@@ -660,11 +645,8 @@ typedef struct usearch_dense_refine_t {
     /** The @b optional candidate-pool breadth the re-selection walk explores; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional handler, called with nodes swept; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with nodes swept. */
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_dense_traversal_stats_t* stats;
@@ -780,11 +762,8 @@ typedef struct usearch_dense_search_t {
     /** Opaque pointer forwarded into every @c predicate call. */
     void* predicate_state;
 
-    /** The @b optional handler, called with queries resolved; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with queries resolved. */
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_dense_traversal_stats_t* stats;
@@ -928,11 +907,8 @@ typedef struct usearch_dense_merge_t {
     /** Array of @c count handles, every one of them consumed and nulled as it goes. */
     usearch_dense_index_t* donors;
 
-    /** The @b optional handler, called with donors absorbed; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with donors absorbed. */
+    usearch_progress_t progress;
 } usearch_dense_merge_t;
 
 /**
@@ -955,7 +931,7 @@ typedef struct usearch_dense_merge_t {
  *  usearch_outcome_t outcome = {0};
  *  usearch_dense_merge(&(usearch_dense_merge_t){
  *      .index = index, .executor = executor, .outcome = &outcome, .count = 4, .donors = shards,
- *      .progress = report_to_terminal, .progress_state = &ui});
+ *      .progress = {report_to_terminal, &ui, 4}});
  *  // Every entry of `shards` is consumed here; none of them may be freed afterwards.
  *  @endcode
  */
@@ -1114,11 +1090,8 @@ typedef struct usearch_dense_save_t {
     /** Destination path, whose extension picks the layout. */
     usearch_bytes_view_t path;
 
-    /** The @b optional handler, called with shards written; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with shards written. */
+    usearch_progress_t progress;
 } usearch_dense_save_t;
 
 /**
@@ -1153,11 +1126,8 @@ typedef struct usearch_dense_save_buffer_t {
     /** Memory for @c monolith, rewound by the call. */
     usearch_arena_t arena;
 
-    /** The @b optional handler, called with bytes written; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with bytes written. */
+    usearch_progress_t progress;
 } usearch_dense_save_buffer_t;
 
 /**
@@ -1329,11 +1299,8 @@ typedef struct usearch_dense_multiply_t {
     /** The @b optional candidate-pool breadth, which widens the emitted pattern; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional handler, called with rows resolved; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with rows resolved. */
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_dense_traversal_stats_t* stats;
@@ -1467,11 +1434,8 @@ typedef struct usearch_dense_attend_t {
      *  dimensionality; zero derives it from the index's frozen geometry. */
     float score_scale;
 
-    /** The @b optional handler, called with queries resolved; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with queries resolved. */
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_dense_traversal_stats_t* stats;
@@ -1573,11 +1537,8 @@ typedef struct usearch_dense_maxsim_t {
     /** The @b optional candidate-pool breadth; zero derives. */
     size_t expansion_factor;
 
-    /** The @b optional handler, called with queries resolved; @c NULL skips it. */
-    usearch_progress_callback_t progress;
-
-    /** Opaque pointer forwarded into every @c progress call. */
-    void* progress_state;
+    /** The @b optional handler, called with queries resolved. */
+    usearch_progress_t progress;
 
     /** The @b optional traversal telemetry; @c NULL skips reporting. */
     usearch_dense_traversal_stats_t* stats;

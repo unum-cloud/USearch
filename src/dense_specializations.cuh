@@ -94,9 +94,9 @@ inline usearch_dense_metric_t usearch_metric_of(nk_kernel_kind_t kernel) noexcep
     }
 }
 
-/** Rows one progress tick or one staged conversion spans - a few megabytes at any width in use,
- *  and wide enough to bury a fan-out's per-thread setup. */
-inline constexpr std::size_t increment_rows_k = 4096;
+/** Reports a handler hears when the caller leaves @c usearch_progress_t::steps zero, a tenth of the
+ *  call apart. */
+inline constexpr std::size_t default_progress_steps_k = 10;
 
 /** Codenames of the dispatchable CPU tiers, composed into the capability string once. */
 struct numkong_capability_name_t {
@@ -646,20 +646,26 @@ struct us::dense::cuda_value_lookup_of<nvidia_attend_lookup_t::device_lookup_k> 
 };
 #endif
 
-/** Serializes shard ticks from the executor's threads onto the C handler, which the contract
- *  promises is never concurrent. */
-struct shard_ticks_t {
-    usearch_progress_callback_t progress;
-    void* state;
+/** One call's reports: the C handler, serialized for the executor's threads, which the contract
+ *  promises it never sees concurrently, thinned to the caller's steps, and the slice a batch verb
+ *  hands its engine whole. */
+struct progress_ticks_t {
+    usearch_progress_t progress;
     std::size_t total;
-    std::size_t done = 0; // Counted under the mutex that already serializes the handler.
+    std::size_t done = 0;   // Counted under the mutex that already serializes the handler.
+    std::size_t closed = 0; // The last step a forwarded tick closed.
     fu::spin_mutex_t mutex;
 
-    shard_ticks_t(usearch_progress_callback_t progress, void* state, std::size_t total) noexcept
-        : progress(progress), state(state), total(total) {}
+    progress_ticks_t(usearch_progress_t progress, std::size_t total) noexcept : progress(progress), total(total) {}
+
+    /** Units each slice of a batch spans: a step's share with a handler, the whole batch
+     *  without. */
+    std::size_t slice() const noexcept {
+        return progress.callback ? divide_round_up<std::size_t>(total, steps_()) : total;
+    }
 
     continuation_t operator()(std::size_t) noexcept {
-        if (!progress) return continuation_t::continue_k;
+        if (!progress.callback) return continuation_t::continue_k;
         std::lock_guard guard {mutex};
         return forward_(++done, total);
     }
@@ -667,29 +673,22 @@ struct shard_ticks_t {
     /** The sibling for verbs that count their own units and know their own population - a
      *  refinement ticks the nodes visited so far, which no counter here could derive. */
     continuation_t operator()(std::size_t finished, std::size_t population) noexcept {
-        if (!progress) return continuation_t::continue_k;
+        if (!progress.callback) return continuation_t::continue_k;
         std::lock_guard guard {mutex};
         return forward_(finished, population);
     }
 
   private:
+    std::size_t steps_() const noexcept { return progress.steps ? progress.steps : default_progress_steps_k; }
 
-    /** Hands one tick to the C handler; the caller holds the mutex. */
+    /** Hands the C handler a tick that closes a new step, or the last one; the caller holds the
+     *  mutex. */
     continuation_t forward_(std::size_t finished, std::size_t population) noexcept {
-        return progress(finished, population, state) == usearch_cancel_k ? continuation_t::cancel_k
-                                                                         : continuation_t::continue_k;
-    }
-};
-
-/** One insertion's handler, told of each chunk once it lands. Every row is claimed before the first
- *  report and a dispensed row cannot be withdrawn, so the handler's answer is ignored. */
-struct insertion_progress_t {
-    usearch_progress_callback_t progress;
-    void* progress_state;
-
-    /** Tells the handler, if any, that @p landed of @p total rows landed. */
-    void report(std::size_t landed, std::size_t total) const noexcept {
-        if (progress) progress(landed, total, progress_state);
+        std::size_t const step = finished >= population ? steps_() : finished / divide_round_up(population, steps_());
+        if (step <= closed) return continuation_t::continue_k;
+        closed = step;
+        return progress.callback(finished, population, progress.state) == usearch_cancel_k ? continuation_t::cancel_k
+                                                                                           : continuation_t::continue_k;
     }
 };
 
@@ -744,9 +743,9 @@ struct specialized_index {
     status_t clear() noexcept;
 
     /** Lands @p rows under @p keys through one plan, a step per chunk, and publishes them all at once. */
-    expected<insert_result_t> add(keys_view_t keys, rows_view_t rows, insertion_progress_t const& progress,
-                                  executor_t& executor, insert_config_t config) noexcept;
-    expected<refine_result_t> refine(executor_t& executor, refine_config_t config, shard_ticks_t& ticks) noexcept;
+    expected<insert_result_t> add(keys_view_t keys, rows_view_t rows, progress_ticks_t& ticks, executor_t& executor,
+                                  insert_config_t config) noexcept;
+    expected<refine_result_t> refine(executor_t& executor, refine_config_t config, progress_ticks_t& ticks) noexcept;
     expected<health_result_t> health(executor_t& executor) noexcept;
     expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
                                      keys_span_t keys, scores_span_t distances, counts_span_t counts,
@@ -764,10 +763,10 @@ struct specialized_index {
                                      f32_t score_scale, rows_span_t outputs,
                                      std::span<us::dense::softmax_state_t> carry, executor_t& executor,
                                      search_config_t config) noexcept;
-    status_t save(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
-    status_t save(bytes_span_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept;
-    status_t load(std::string_view path, executor_t& executor, shard_ticks_t& ticks) noexcept;
-    status_t load(bytes_view_t buffer, executor_t& executor, shard_ticks_t& ticks) noexcept;
+    status_t save(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    status_t save(bytes_span_t buffer, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    status_t load(std::string_view path, executor_t& executor, progress_ticks_t& ticks) noexcept;
+    status_t load(bytes_view_t buffer, executor_t& executor, progress_ticks_t& ticks) noexcept;
 
     /** The C layer's save config: the path's suffix picks the layout, the residency the contract -
      *  device storage cannot be settlement-probed, so a GPU handle certifies. */
@@ -840,11 +839,11 @@ status_t specialized_index<index_type_>::clear() noexcept {
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::insert_result_t> specialized_index<index_type_>::add(
-    keys_view_t keys, rows_view_t rows, insertion_progress_t const& progress, executor_t& executor,
+    keys_view_t keys, rows_view_t rows, progress_ticks_t& ticks, executor_t& executor,
     insert_config_t config) noexcept {
     std::size_t const count = keys.size();
-    // Only a handler splits the call, and one plan still publishes every chunk at once.
-    std::size_t const chunk = progress.progress ? min_of(count, increment_rows_k) : count;
+    // Only a handler splits the call, and one plan still publishes every slice at once.
+    std::size_t const chunk = ticks.slice();
     auto [plan, status] = index.plan_insert(count, executor, config);
     if (failed(status)) return {{}, status};
     for (std::size_t landed = 0; landed != count;) {
@@ -854,14 +853,16 @@ expected<typename specialized_index<index_type_>::insert_result_t> specialized_i
         else if (failed(plan.insert(landed, keys[nk::range(landed, landed + taking)], rows.slice(landed, taking))))
             break;
         landed += taking;
-        progress.report(landed, count);
+        // Every row is claimed before the first report and none can be withdrawn, so a cancel
+        // goes unheard.
+        ticks(landed, count);
     }
     // After a failed device step, `finish` publishes nothing and reports the failure the plan kept.
     return plan.finish();
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::refine_result_t> specialized_index<index_type_>::refine(
-    executor_t& executor, refine_config_t config, shard_ticks_t& ticks) noexcept {
+    executor_t& executor, refine_config_t config, progress_ticks_t& ticks) noexcept {
     return index.refine(executor, config,
                         [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
 }
@@ -904,22 +905,22 @@ expected<typename specialized_index<index_type_>::search_result_t> specialized_i
 }
 template <typename index_type_>
 status_t specialized_index<index_type_>::save(std::string_view path, executor_t& executor,
-                                              shard_ticks_t& ticks) noexcept {
+                                              progress_ticks_t& ticks) noexcept {
     return index.save(path, save_config_of(path), executor, ticks);
 }
 template <typename index_type_>
 status_t specialized_index<index_type_>::save(bytes_span_t buffer, executor_t& executor,
-                                              shard_ticks_t& ticks) noexcept {
+                                              progress_ticks_t& ticks) noexcept {
     return index.save(buffer, save_config_of({}), executor, ticks);
 }
 template <typename index_type_>
 status_t specialized_index<index_type_>::load(std::string_view path, executor_t& executor,
-                                              shard_ticks_t& ticks) noexcept {
+                                              progress_ticks_t& ticks) noexcept {
     return index.load(path, load_config_t {}, executor, ticks);
 }
 template <typename index_type_>
 status_t specialized_index<index_type_>::load(bytes_view_t buffer, executor_t& executor,
-                                              shard_ticks_t& ticks) noexcept {
+                                              progress_ticks_t& ticks) noexcept {
     return index.load(buffer, load_config_t {}, executor, ticks);
 }
 template <typename index_type_>

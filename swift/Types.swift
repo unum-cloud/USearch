@@ -632,11 +632,12 @@ final class Landing {
         }
     }
 
-    /// Lends an optional handler as the callback and state pair every reporting verb takes, so the
-    /// trampoline can never be paired with the wrong state; nil lends nulls.
-    func lend(_ progress: Progress?) -> (usearch_progress_callback_t?, UnsafeMutableRawPointer?) {
-        guard let progress else { return (nil, nil) }
-        return (progressTrampoline, place(ProgressState(progress: progress, landing: self)))
+    /// Lends an optional handler and its report count as the progress every reporting verb takes, so
+    /// the trampoline can never be paired with the wrong state; nil lends a null callback.
+    func lend(_ progress: Progress?, steps: Int) -> usearch_progress_t {
+        guard let progress else { return usearch_progress_t(callback: nil, state: nil, steps: steps) }
+        let state = place(ProgressState(progress: progress, landing: self))
+        return usearch_progress_t(callback: progressTrampoline, state: state, steps: steps)
     }
 
     /// Lends `arena` to the call, answering the stamp its views carry once `rewind` advances the

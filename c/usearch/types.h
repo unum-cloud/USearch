@@ -18,7 +18,7 @@
  *  skipped by name and their order never matters. Name lookups and the @c _free family stay
  *  positional. Every structure opens in the same order: the handle, @c executor, @c outcome, then
  *  @c completion. Inputs follow, then outputs and the @c arena they land in, then knobs, and last
- *  @c progress, @c progress_state and @c stats.
+ *  @c progress and @c stats.
  *
  *  Structures carry no size or version field, so they grow source-compatibly only: initialize
  *  them by designator, which zeroes every field left out, and expect the major version to change
@@ -734,6 +734,26 @@ typedef enum usearch_continuation_t {
  */
 typedef usearch_continuation_t (*usearch_progress_callback_t)( //
     size_t completed, size_t total, void* state);
+
+/**
+ *  @brief How a long call reports its advance: a handler, its state, and how many reports it hears.
+ *
+ *  A batch verb splits its units into @c steps nearly equal slices, hands each to its engine whole
+ *  and reports after each; a verb whose engine counts its own units, a checkpoint's shards or a
+ *  refinement's nodes, forwards only the ticks that cross into the next slice. Without a handler
+ *  the call runs as one slice and reports nothing.
+ */
+typedef struct usearch_progress_t {
+
+    /** The @b optional handler; @c NULL skips every report. */
+    usearch_progress_callback_t callback;
+
+    /** Opaque pointer forwarded into every @c callback call. */
+    void* state;
+
+    /** Reports a call makes at most, the last at completion; zero derives to ten. */
+    size_t steps;
+} usearch_progress_t;
 
 /**
  *  @brief Blocks on an atomic wait until @p outcome is final, with acquire ordering.

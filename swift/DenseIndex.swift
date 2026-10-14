@@ -221,12 +221,20 @@ public struct DenseInsertConfig {
     public var expansionFactor: Int
     /// Called with rows admitted; it reports and cannot cancel.
     public var progress: Progress?
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    public var progressSteps: Int
     /// The traversal telemetry to write.
     public var stats: DenseTraversalStats?
 
-    public init(expansionFactor: Int = 0, progress: Progress? = nil, stats: DenseTraversalStats? = nil) {
+    public init(
+        expansionFactor: Int = 0,
+        progress: Progress? = nil,
+        progressSteps: Int = 0,
+        stats: DenseTraversalStats? = nil
+    ) {
         self.expansionFactor = expansionFactor
         self.progress = progress
+        self.progressSteps = progressSteps
         self.stats = stats
     }
 }
@@ -237,12 +245,20 @@ public struct DenseRefineConfig {
     public var expansionFactor: Int
     /// Called with nodes swept; a stop leaves the graph correct and merely less improved.
     public var progress: Progress?
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    public var progressSteps: Int
     /// The traversal telemetry to write.
     public var stats: DenseTraversalStats?
 
-    public init(expansionFactor: Int = 0, progress: Progress? = nil, stats: DenseTraversalStats? = nil) {
+    public init(
+        expansionFactor: Int = 0,
+        progress: Progress? = nil,
+        progressSteps: Int = 0,
+        stats: DenseTraversalStats? = nil
+    ) {
         self.expansionFactor = expansionFactor
         self.progress = progress
+        self.progressSteps = progressSteps
         self.stats = stats
     }
 }
@@ -262,6 +278,8 @@ public struct DenseSearchConfig {
     public var predicate: (@Sendable (Key) throws -> Bool)?
     /// Called with queries resolved.
     public var progress: Progress?
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    public var progressSteps: Int
     /// The traversal telemetry to write.
     public var stats: DenseTraversalStats?
 
@@ -270,12 +288,14 @@ public struct DenseSearchConfig {
         traversal: Traversal = .walk,
         predicate: (@Sendable (Key) throws -> Bool)? = nil,
         progress: Progress? = nil,
+        progressSteps: Int = 0,
         stats: DenseTraversalStats? = nil
     ) {
         self.expansionFactor = expansionFactor
         self.traversal = traversal
         self.predicate = predicate
         self.progress = progress
+        self.progressSteps = progressSteps
         self.stats = stats
     }
 }
@@ -286,12 +306,20 @@ public struct DenseMaxsimConfig {
     public var expansionFactor: Int
     /// Called with queries resolved.
     public var progress: Progress?
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    public var progressSteps: Int
     /// The traversal telemetry to write.
     public var stats: DenseTraversalStats?
 
-    public init(expansionFactor: Int = 0, progress: Progress? = nil, stats: DenseTraversalStats? = nil) {
+    public init(
+        expansionFactor: Int = 0,
+        progress: Progress? = nil,
+        progressSteps: Int = 0,
+        stats: DenseTraversalStats? = nil
+    ) {
         self.expansionFactor = expansionFactor
         self.progress = progress
+        self.progressSteps = progressSteps
         self.stats = stats
     }
 }
@@ -304,6 +332,8 @@ public struct DenseMultiplyConfig {
     public var expansionFactor: Int
     /// Called with rows resolved.
     public var progress: Progress?
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    public var progressSteps: Int
     /// The traversal telemetry to write.
     public var stats: DenseTraversalStats?
 
@@ -311,11 +341,13 @@ public struct DenseMultiplyConfig {
         wanted: Int = 0,
         expansionFactor: Int = 0,
         progress: Progress? = nil,
+        progressSteps: Int = 0,
         stats: DenseTraversalStats? = nil
     ) {
         self.wanted = wanted
         self.expansionFactor = expansionFactor
         self.progress = progress
+        self.progressSteps = progressSteps
         self.stats = stats
     }
 }
@@ -335,6 +367,8 @@ public struct DenseAttendConfig {
     public var scoreScale: Float
     /// Called with queries resolved.
     public var progress: Progress?
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    public var progressSteps: Int
     /// The traversal telemetry to write.
     public var stats: DenseTraversalStats?
 
@@ -344,6 +378,7 @@ public struct DenseAttendConfig {
         expansionFactor: Int = 0,
         scoreScale: Float = 0,
         progress: Progress? = nil,
+        progressSteps: Int = 0,
         stats: DenseTraversalStats? = nil
     ) {
         self.headCount = headCount
@@ -351,6 +386,7 @@ public struct DenseAttendConfig {
         self.expansionFactor = expansionFactor
         self.scoreScale = scoreScale
         self.progress = progress
+        self.progressSteps = progressSteps
         self.stats = stats
     }
 }
@@ -359,24 +395,39 @@ public struct DenseAttendConfig {
 public struct DenseMergeConfig {
     /// Called with donors absorbed.
     public var progress: Progress?
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    public var progressSteps: Int
 
-    public init(progress: Progress? = nil) { self.progress = progress }
+    public init(progress: Progress? = nil, progressSteps: Int = 0) {
+        self.progress = progress
+        self.progressSteps = progressSteps
+    }
 }
 
 /// The knobs of `save`.
 public struct DenseSaveConfig {
     /// Called with shards written.
     public var progress: Progress?
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    public var progressSteps: Int
 
-    public init(progress: Progress? = nil) { self.progress = progress }
+    public init(progress: Progress? = nil, progressSteps: Int = 0) {
+        self.progress = progress
+        self.progressSteps = progressSteps
+    }
 }
 
 /// The knobs of `saveBuffer`.
 public struct DenseSaveBufferConfig {
     /// Called with bytes written.
     public var progress: Progress?
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    public var progressSteps: Int
 
-    public init(progress: Progress? = nil) { self.progress = progress }
+    public init(progress: Progress? = nil, progressSteps: Int = 0) {
+        self.progress = progress
+        self.progressSteps = progressSteps
+    }
 }
 
 /// The knobs of `searchStream`.
@@ -398,17 +449,21 @@ public struct DenseLoadRamConfig {
     public var valuesPerKey: Int
     /// Called with shards placed.
     public var progress: Progress?
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    public var progressSteps: Int
 
     public init(
         executor: Executor? = nil,
         memoryDomains: [Int32] = [],
         valuesPerKey: Int = 0,
-        progress: Progress? = nil
+        progress: Progress? = nil,
+        progressSteps: Int = 0
     ) {
         self.executor = executor
         self.memoryDomains = memoryDomains
         self.valuesPerKey = valuesPerKey
         self.progress = progress
+        self.progressSteps = progressSteps
     }
 }
 
@@ -423,12 +478,21 @@ public struct DenseLoadVramConfig {
     public var valuesPerKey: Int
     /// Called with shards placed.
     public var progress: Progress?
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    public var progressSteps: Int
 
-    public init(executor: Executor? = nil, devices: [Int32] = [], valuesPerKey: Int = 0, progress: Progress? = nil) {
+    public init(
+        executor: Executor? = nil,
+        devices: [Int32] = [],
+        valuesPerKey: Int = 0,
+        progress: Progress? = nil,
+        progressSteps: Int = 0
+    ) {
         self.executor = executor
         self.devices = devices
         self.valuesPerKey = valuesPerKey
         self.progress = progress
+        self.progressSteps = progressSteps
     }
 }
 
@@ -442,17 +506,21 @@ public struct DenseLoadRamBufferConfig {
     public var valuesPerKey: Int
     /// Called with bytes placed.
     public var progress: Progress?
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    public var progressSteps: Int
 
     public init(
         executor: Executor? = nil,
         memoryDomains: [Int32] = [],
         valuesPerKey: Int = 0,
-        progress: Progress? = nil
+        progress: Progress? = nil,
+        progressSteps: Int = 0
     ) {
         self.executor = executor
         self.memoryDomains = memoryDomains
         self.valuesPerKey = valuesPerKey
         self.progress = progress
+        self.progressSteps = progressSteps
     }
 }
 
@@ -466,12 +534,21 @@ public struct DenseLoadVramBufferConfig {
     public var valuesPerKey: Int
     /// Called with bytes placed.
     public var progress: Progress?
+    /// Reports the call makes at most, the last at completion; zero derives to ten.
+    public var progressSteps: Int
 
-    public init(executor: Executor? = nil, devices: [Int32] = [], valuesPerKey: Int = 0, progress: Progress? = nil) {
+    public init(
+        executor: Executor? = nil,
+        devices: [Int32] = [],
+        valuesPerKey: Int = 0,
+        progress: Progress? = nil,
+        progressSteps: Int = 0
+    ) {
         self.executor = executor
         self.devices = devices
         self.valuesPerKey = valuesPerKey
         self.progress = progress
+        self.progressSteps = progressSteps
     }
 }
 
@@ -686,7 +763,7 @@ public final class DenseIndex: @unchecked Sendable {
     ) throws(USearchError) -> DenseIndex {
         let landing = Landing()
         let index = landing.slots(usearch_dense_index_t?.none)
-        let (progress, progressState) = landing.lend(config.progress)
+        let progress = landing.lend(config.progress, steps: config.progressSteps)
         try landing.lend(path) { (path) throws(USearchError) in
             try landing.lend(config.memoryDomains) { (domains) throws(USearchError) in
                 var arguments = usearch_dense_load_ram_t(
@@ -700,8 +777,7 @@ public final class DenseIndex: @unchecked Sendable {
                         memory_domains_count: config.memoryDomains.count
                     ),
                     values_per_key: config.valuesPerKey,
-                    progress: progress,
-                    progress_state: progressState
+                    progress: progress
                 )
                 usearch_dense_load_ram(&arguments)
             }
@@ -717,7 +793,7 @@ public final class DenseIndex: @unchecked Sendable {
     ) throws(USearchError) -> DenseIndex {
         let landing = Landing()
         let index = landing.slots(usearch_dense_index_t?.none)
-        let (progress, progressState) = landing.lend(config.progress)
+        let progress = landing.lend(config.progress, steps: config.progressSteps)
         try landing.lend(path) { (path) throws(USearchError) in
             try landing.lend(config.devices) { (devices) throws(USearchError) in
                 var arguments = usearch_dense_load_vram_t(
@@ -728,8 +804,7 @@ public final class DenseIndex: @unchecked Sendable {
                     path: path,
                     vram: usearch_vram_options_t(devices: devices, devices_count: config.devices.count),
                     values_per_key: config.valuesPerKey,
-                    progress: progress,
-                    progress_state: progressState
+                    progress: progress
                 )
                 usearch_dense_load_vram(&arguments)
             }
@@ -745,7 +820,7 @@ public final class DenseIndex: @unchecked Sendable {
     ) throws(USearchError) -> DenseIndex {
         let landing = Landing()
         let index = landing.slots(usearch_dense_index_t?.none)
-        let (progress, progressState) = landing.lend(config.progress)
+        let progress = landing.lend(config.progress, steps: config.progressSteps)
         try buffer.withUnsafeBytes { (bytes) throws(USearchError) in
             try landing.lend(config.memoryDomains) { (domains) throws(USearchError) in
                 var arguments = usearch_dense_load_ram_buffer_t(
@@ -759,8 +834,7 @@ public final class DenseIndex: @unchecked Sendable {
                         memory_domains_count: config.memoryDomains.count
                     ),
                     values_per_key: config.valuesPerKey,
-                    progress: progress,
-                    progress_state: progressState
+                    progress: progress
                 )
                 usearch_dense_load_ram_buffer(&arguments)
             }
@@ -776,7 +850,7 @@ public final class DenseIndex: @unchecked Sendable {
     ) throws(USearchError) -> DenseIndex {
         let landing = Landing()
         let index = landing.slots(usearch_dense_index_t?.none)
-        let (progress, progressState) = landing.lend(config.progress)
+        let progress = landing.lend(config.progress, steps: config.progressSteps)
         try buffer.withUnsafeBytes { (bytes) throws(USearchError) in
             try landing.lend(config.devices) { (devices) throws(USearchError) in
                 var arguments = usearch_dense_load_vram_buffer_t(
@@ -787,8 +861,7 @@ public final class DenseIndex: @unchecked Sendable {
                     buffer: usearch_bytes_view_t(bytes),
                     vram: usearch_vram_options_t(devices: devices, devices_count: config.devices.count),
                     values_per_key: config.valuesPerKey,
-                    progress: progress,
-                    progress_state: progressState
+                    progress: progress
                 )
                 usearch_dense_load_vram_buffer(&arguments)
             }
@@ -1490,7 +1563,7 @@ struct DenseCall {
         let handle = try open()
         landing.anchor(vectors.owner)
         landing.anchor(config.stats)
-        let (progress, progressState) = landing.lend(config.progress)
+        let progress = landing.lend(config.progress, steps: config.progressSteps)
         try landing.lend(keys) { (keys) throws(USearchError) in
             var arguments = usearch_dense_insert_t(
                 index: handle,
@@ -1505,7 +1578,6 @@ struct DenseCall {
                 vectors: vectors.raw,
                 expansion_factor: config.expansionFactor,
                 progress: progress,
-                progress_state: progressState,
                 stats: config.stats?.raw
             )
             usearch_dense_insert(&arguments)
@@ -1517,7 +1589,7 @@ struct DenseCall {
         let handle = try open()
         landing.anchor(config.stats)
         let changed = landing.slots(0)
-        let (progress, progressState) = landing.lend(config.progress)
+        let progress = landing.lend(config.progress, steps: config.progressSteps)
         var arguments = usearch_dense_refine_t(
             index: handle,
             executor: executor?.raw,
@@ -1526,7 +1598,6 @@ struct DenseCall {
             changed: changed,
             expansion_factor: config.expansionFactor,
             progress: progress,
-            progress_state: progressState,
             stats: config.stats?.raw
         )
         usearch_dense_refine(&arguments)
@@ -1561,7 +1632,7 @@ struct DenseCall {
         let matches = landing.slots(usearch_matches_view_t())
         let write = landing.lend(arena)
         let (predicate, predicateState) = landing.lend(config.predicate)
-        let (progress, progressState) = landing.lend(config.progress)
+        let progress = landing.lend(config.progress, steps: config.progressSteps)
         var arguments = usearch_dense_search_t(
             index: handle,
             executor: executor?.raw,
@@ -1577,7 +1648,6 @@ struct DenseCall {
             predicate: predicate,
             predicate_state: predicateState,
             progress: progress,
-            progress_state: progressState,
             stats: config.stats?.raw
         )
         usearch_dense_search(&arguments)
@@ -1598,7 +1668,7 @@ struct DenseCall {
         landing.anchor(config.stats)
         let matches = landing.slots(usearch_matches_view_t())
         let write = landing.lend(arena)
-        let (progress, progressState) = landing.lend(config.progress)
+        let progress = landing.lend(config.progress, steps: config.progressSteps)
         var arguments = usearch_dense_maxsim_t(
             index: handle,
             executor: executor?.raw,
@@ -1612,7 +1682,6 @@ struct DenseCall {
             wanted: wanted,
             expansion_factor: config.expansionFactor,
             progress: progress,
-            progress_state: progressState,
             stats: config.stats?.raw
         )
         usearch_dense_maxsim(&arguments)
@@ -1631,7 +1700,7 @@ struct DenseCall {
         let products = landing.slots(usearch_matches_tape_view_t())
         let required = landing.slots(0)
         let write = landing.lend(arena)
-        let (progress, progressState) = landing.lend(config.progress)
+        let progress = landing.lend(config.progress, steps: config.progressSteps)
         var arguments = usearch_dense_multiply_t(
             index: handle,
             executor: executor?.raw,
@@ -1646,7 +1715,6 @@ struct DenseCall {
             wanted: config.wanted,
             expansion_factor: config.expansionFactor,
             progress: progress,
-            progress_state: progressState,
             stats: config.stats?.raw
         )
         usearch_dense_multiply(&arguments)
@@ -1673,7 +1741,7 @@ struct DenseCall {
         landing.anchor(config.stats)
         let outputs = landing.slots(usearch_rows_view_t())
         let write = landing.lend(arena)
-        let (progress, progressState) = landing.lend(config.progress)
+        let progress = landing.lend(config.progress, steps: config.progressSteps)
         var arguments = usearch_dense_attend_t(
             index: handle,
             executor: executor?.raw,
@@ -1692,7 +1760,6 @@ struct DenseCall {
             expansion_factor: config.expansionFactor,
             score_scale: config.scoreScale,
             progress: progress,
-            progress_state: progressState,
             stats: config.stats?.raw
         )
         usearch_dense_attend(&arguments)
@@ -1719,7 +1786,7 @@ struct DenseCall {
             slots[position] = raw
         }
         for donor in donors { donor.raw = nil }
-        let (progress, progressState) = landing.lend(config.progress)
+        let progress = landing.lend(config.progress, steps: config.progressSteps)
         var arguments = usearch_dense_merge_t(
             index: handle,
             executor: executor?.raw,
@@ -1727,8 +1794,7 @@ struct DenseCall {
             completion: completion,
             count: donors.count,
             donors: slots,
-            progress: progress,
-            progress_state: progressState
+            progress: progress
         )
         usearch_dense_merge(&arguments)
         // The handles belong to the call until final, then whichever it left go back to their donors.
@@ -1742,7 +1808,7 @@ struct DenseCall {
 
     func save(_ path: String, config: DenseSaveConfig) throws(USearchError) -> Submission<Void> {
         let handle = try open()
-        let (progress, progressState) = landing.lend(config.progress)
+        let progress = landing.lend(config.progress, steps: config.progressSteps)
         try landing.lend(path) { (path) throws(USearchError) in
             var arguments = usearch_dense_save_t(
                 index: handle,
@@ -1750,8 +1816,7 @@ struct DenseCall {
                 outcome: landing.outcome,
                 completion: completion,
                 path: path,
-                progress: progress,
-                progress_state: progressState
+                progress: progress
             )
             usearch_dense_save(&arguments)
         }
@@ -1762,7 +1827,7 @@ struct DenseCall {
         let handle = try open()
         let monolith = landing.slots(usearch_bytes_view_t())
         let write = landing.lend(arena)
-        let (progress, progressState) = landing.lend(config.progress)
+        let progress = landing.lend(config.progress, steps: config.progressSteps)
         var arguments = usearch_dense_save_buffer_t(
             index: handle,
             executor: executor?.raw,
@@ -1770,8 +1835,7 @@ struct DenseCall {
             completion: completion,
             monolith: monolith,
             arena: arena.raw,
-            progress: progress,
-            progress_state: progressState
+            progress: progress
         )
         usearch_dense_save_buffer(&arguments)
         func read() -> Monolith { Monolith(write: write, monolith: monolith.pointee) }

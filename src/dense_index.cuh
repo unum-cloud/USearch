@@ -2995,15 +2995,15 @@ static nk_dtype_t rows_dtype_of(usearch_scalar_t scalar, std::size_t columns, us
  *  @brief The one loop every row verb drives on an arm that serves it: hands @p rows to @p sink
  *      chunk by chunk, each arm importing its rows into its own scalar.
  *
- *  Chunks hold whole queries of @p rows_per_query rows, so a device batch stages a bounded run, and
- *  progress counts queries. Finishes @p outcome only on failure, leaving the success to the verb
- *  once its last output is written.
+ *  Chunks hold whole queries of @p rows_per_query rows, one per step of @p progress, or the whole
+ *  call without a handler, as each engine bounds its own scratch; progress counts queries. Finishes
+ *  @p outcome only on failure, leaving the success to the verb once its last output is written.
  */
 template <typename variant_type_, typename sink_type_>
 static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t executor_handle,         //
                                  std::size_t rows_count, usearch_rows_view_t const& rows,            //
                                  std::size_t rows_per_query, std::size_t expansion_factor,           //
-                                 usearch_progress_callback_t progress, void* progress_state,         //
+                                 usearch_progress_t progress,                                        //
                                  usearch_dense_traversal_stats_t* stats, usearch_outcome_t* outcome, //
                                  sink_type_&& sink) noexcept {
     if (stats) *stats = {};
@@ -3019,8 +3019,9 @@ static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t exec
     if (rows.stride && rows.stride < us::dense::packed_bytes(source_dtype, rows.columns))
         return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row");
 
-    std::size_t const chunk = rows_per_query *
-                              max_of<std::size_t>(1, min_of(rows_count, increment_rows_k) / rows_per_query);
+    std::size_t const queries = rows_count / rows_per_query;
+    progress_ticks_t ticks {progress, queries};
+    std::size_t const chunk = rows_per_query * ticks.slice();
     us::dense::rows_view_t const all = rows_of(rows, rows_count);
     for (std::size_t resolved = 0; resolved != rows_count;) {
         std::size_t const taking = min_of(chunk, rows_count - resolved);
@@ -3028,8 +3029,7 @@ static bool for_each_dense_chunk(variant_type_& variant, usearch_executor_t exec
             specialized_index {variant}, all.slice(resolved, taking), *executor, search_config, resolved, taking);
         if (!crossed(found, stats, outcome)) return false;
         resolved += taking;
-        if (progress &&
-            progress(resolved / rows_per_query, rows_count / rows_per_query, progress_state) == usearch_cancel_k)
+        if (ticks(resolved / rows_per_query, queries) == continuation_t::cancel_k)
             return propagate_error(usearch_status_cancelled_k, outcome, "The handler stopped the call");
     }
     return true;
@@ -3079,8 +3079,7 @@ template <typename variant_type_, typename verb_type_>
 static bool match_dense_rows(variant_type_& variant, usearch_executor_t executor,                //
                              std::size_t count, usearch_rows_view_t const& rows,                 //
                              std::size_t rows_per_query, matches_landing_t const& landing,       //
-                             std::size_t expansion_factor,                                       //
-                             usearch_progress_callback_t progress, void* progress_state,         //
+                             std::size_t expansion_factor, usearch_progress_t progress,          //
                              usearch_dense_traversal_stats_t* stats, usearch_outcome_t* outcome, //
                              verb_type_&& verb) noexcept {
     using key_t = typename variant_type_::key_t;
@@ -3097,7 +3096,7 @@ static bool match_dense_rows(variant_type_& variant, usearch_executor_t executor
                     std::span<std::size_t> {landing.counts + first, matched});
     };
     return for_each_dense_chunk(variant, executor, count * rows_per_query, rows, rows_per_query, expansion_factor,
-                                progress, progress_state, stats, outcome, sink);
+                                progress, stats, outcome, sink);
 }
 
 #pragma endregion Multi Verbs
@@ -3156,7 +3155,7 @@ static void adopt_metadata(safegraphs_metadata_t const& source, usearch_dense_me
  *  @p source into it; a failed or cancelled load frees the handle and leaves @c *index null. */
 template <typename source_type_, typename placement_type_>
 static void load_dense_index(source_type_ source, placement_type_ const& placement, usearch_executor_t executor,
-                             usearch_progress_callback_t progress, void* progress_state, usearch_dense_index_t* index,
+                             usearch_progress_t progress, usearch_dense_index_t* index,
                              usearch_outcome_t* outcome) noexcept {
     *index = nullptr;
     if (source.empty())
@@ -3189,7 +3188,7 @@ static void load_dense_index(source_type_ source, placement_type_ const& placeme
                 typename variant_type_::executor_t* const typed = executor_of(variant, executor, call_executor,
                                                                               outcome);
                 if (!typed) return false;
-                shard_ticks_t ticks {progress, progress_state, specialized_index {variant}.shards_count()};
+                progress_ticks_t ticks {progress, specialized_index {variant}.shards_count()};
                 status_t const status = specialized_index {variant}.load(source, *typed, ticks);
                 return succeeded(status) || propagate_error(status, outcome);
             }
@@ -3423,8 +3422,9 @@ USEARCH_EXPORT void usearch_dense_insert(usearch_dense_insert_t* arguments) {
             return propagate_error(usearch_status_unsupported_layout_k, outcome, "The stride is shorter than one row"),
                    void();
         nk::vector_view<key_t> const uuids {reinterpret_cast<char const*>(keys.data), count, keys.stride};
+        progress_ticks_t ticks {arguments->progress, count};
         expected<typename variant_type_::insert_result_t> const inserted = specialized_index {variant}.add(
-            uuids, rows_of(vectors, count), {arguments->progress, arguments->progress_state}, *executor, insert_config);
+            uuids, rows_of(vectors, count), ticks, *executor, insert_config);
         if (crossed(inserted, stats, outcome)) propagate_error(usearch_status_success_k, outcome, nullptr);
     });
 }
@@ -3441,7 +3441,7 @@ USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments) {
         if (!executor) return;
         typename variant_type_::refine_config_t config {};
         config.expansion_factor = static_cast<u32_t>(arguments->expansion_factor);
-        shard_ticks_t ticks {arguments->progress, arguments->progress_state, specialized_index {variant}.size()};
+        progress_ticks_t ticks {arguments->progress, specialized_index {variant}.size()};
         auto const [refined, refined_status] = specialized_index {variant}.refine(*executor, config, ticks);
         accumulate_stats(stats, refined);
         // A stopped pass is not a failure: it still healed, the graph stands, and the next call
@@ -3501,8 +3501,7 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                 auto search_with = [&](auto&& predicate) noexcept {
                     return match_dense_rows(
                         variant, arguments->executor, count, arguments->queries, 1, landing,
-                        arguments->expansion_factor, arguments->progress, arguments->progress_state, arguments->stats,
-                        outcome,
+                        arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
                         [&](auto view, auto rows, auto& executor, auto config, auto keys, auto distances, auto counts) {
                             config.traversal = static_cast<traversal_t>(arguments->traversal);
                             return view.search(rows, executor, config, keys, distances, counts, predicate);
@@ -3723,7 +3722,7 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                 usearch_distance_t* scores = nullptr;
                 // Every row keeps the pairs its walks scored until `width` of them fill its row,
                 // compacted once the counts are known.
-                auto walk = [&](std::size_t width, usearch_progress_callback_t progress) noexcept {
+                auto walk = [&](std::size_t width, usearch_progress_t progress) noexcept {
                     keys = width ? carve<usearch_key_t>(arena->memory, count * width) : nullptr;
                     scores = width ? carve<usearch_distance_t>(arena->memory, count * width) : nullptr;
                     if (width && (!keys || !scores))
@@ -3739,13 +3738,12 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                                              kept_scores(chunk, nk::slice), scored.subspan(resolved, taking));
                     };
                     return for_each_dense_chunk(variant, arguments->executor, count, arguments->left, 1,
-                                                arguments->expansion_factor, progress, arguments->progress_state,
-                                                arguments->stats, outcome, sink);
+                                                arguments->expansion_factor, progress, arguments->stats, outcome, sink);
                 };
                 // Keeping every pair needs the widest row first, which only a counting walk can tell.
                 std::size_t width = arguments->wanted;
                 if (!width) {
-                    if (!walk(0, nullptr)) return;
+                    if (!walk(0, usearch_progress_t {})) return;
                     for (std::size_t const row_scored : scored) width = max_of(width, row_scored);
                 }
                 if (!walk(width, arguments->progress)) return;
@@ -3838,8 +3836,8 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                                        carried.empty() ? carried : carried.subspan(resolved, taking), executor, config);
                 };
                 if (!for_each_dense_chunk(variant, arguments->executor, count, arguments->queries, head_count,
-                                          arguments->expansion_factor, arguments->progress, arguments->progress_state,
-                                          arguments->stats, outcome, sink))
+                                          arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
+                                          sink))
                     return;
                 if (status_t const landed = publish(*arena, landing, count * row_bytes); failed(landed))
                     return propagate_error(landed, outcome, "Failed to land the outputs on the device"), void();
@@ -3874,8 +3872,7 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                 if (!carve_matches(arena->memory, count, wanted, landing, outcome)) return;
                 if (!match_dense_rows(
                         variant, arguments->executor, count, arguments->queries, rows_per_query, landing,
-                        arguments->expansion_factor, arguments->progress, arguments->progress_state, arguments->stats,
-                        outcome,
+                        arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
                         [&](auto view, auto rows, auto& executor, auto config, auto keys, auto scores, auto counts) {
                             return view.maxsim(rows, rows_per_query, executor, config, keys, scores, counts);
                         }) ||
@@ -3896,28 +3893,28 @@ USEARCH_EXPORT void usearch_dense_load_ram(usearch_dense_load_ram_t* arguments) 
     if (submitted<usearch_dense_load_ram>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     load_dense_index(as_text(arguments->path), arguments->ram, arguments->executor, arguments->progress,
-                     arguments->progress_state, arguments->index, outcome);
+                     arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_vram(usearch_dense_load_vram_t* arguments) {
     if (submitted<usearch_dense_load_vram>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     load_dense_index(as_text(arguments->path), arguments->vram, arguments->executor, arguments->progress,
-                     arguments->progress_state, arguments->index, outcome);
+                     arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_t* arguments) {
     if (submitted<usearch_dense_load_ram_buffer>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     load_dense_index(as_bytes(arguments->buffer), arguments->ram, arguments->executor, arguments->progress,
-                     arguments->progress_state, arguments->index, outcome);
+                     arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments) {
     if (submitted<usearch_dense_load_vram_buffer>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     load_dense_index(as_bytes(arguments->buffer), arguments->vram, arguments->executor, arguments->progress,
-                     arguments->progress_state, arguments->index, outcome);
+                     arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {
@@ -3934,8 +3931,7 @@ USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {
                 typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
                                                                                  call_executor, outcome);
                 if (!executor) return;
-                shard_ticks_t ticks {arguments->progress, arguments->progress_state,
-                                     specialized_index {variant}.shards_count()};
+                progress_ticks_t ticks {arguments->progress, specialized_index {variant}.shards_count()};
                 propagate_error(specialized_index {variant}.save(as_text(arguments->path), *executor, ticks), outcome);
             }
         },
@@ -3965,8 +3961,7 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
                 std::byte* const monolith = carve<std::byte>(arena->memory, length);
                 if (!monolith)
                     return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-                shard_ticks_t ticks {arguments->progress, arguments->progress_state,
-                                     specialized_index {variant}.shards_count()};
+                progress_ticks_t ticks {arguments->progress, specialized_index {variant}.shards_count()};
                 status_t const saved = specialized_index {variant}.save(
                     bytes_span_t {reinterpret_cast<byte_t*>(monolith), length}, *executor, ticks);
                 if (failed(saved)) return propagate_error(saved, outcome), void();

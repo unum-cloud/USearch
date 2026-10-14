@@ -27,7 +27,7 @@ a value does not in fact lower to the C calling convention, so the engine callin
 corrupted frame. The value lookup of `attend` returns nothing, so it is a Mojo function - a
 `ValueLookup`. The admission predicate of `search` returns a verdict, so it crosses as a raw
 `Address` that a kernel built in C can fill; progress handlers return one too, so every `progress`
-and `progress_state` slot crosses as `NULL_ADDRESS`.
+slot crosses with a `NULL_ADDRESS` callback.
 
 Telemetry is a lent output. Every config of a verb that reports traversal statistics takes an
 optional `stats` pointer, which the engine overwrites whole on every call it is passed to.
@@ -58,6 +58,7 @@ from usearch.types import (
     NULL_ADDRESS,
     NvmeOptions,
     Outcome,
+    ProgressArguments,
     RamOptions,
     RowsView,
     RowsViewArguments,
@@ -764,8 +765,7 @@ struct DenseLoadRamArguments(ImplicitlyCopyable):
     var source: BytesView[ImmUntrackedOrigin]
     var ram: RamOptions[ImmUntrackedOrigin]
     var values_per_key: c_size_t
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
 
 
 @fieldwise_init
@@ -779,8 +779,7 @@ struct DenseLoadVramArguments(ImplicitlyCopyable):
     var source: BytesView[ImmUntrackedOrigin]
     var vram: VramOptions[ImmUntrackedOrigin]
     var values_per_key: c_size_t
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
 
 
 @fieldwise_init
@@ -848,8 +847,7 @@ struct DenseInsertArguments(ImplicitlyCopyable):
     var keys: KeysView[ImmUntrackedOrigin]
     var vectors: RowsViewArguments
     var expansion_factor: c_size_t
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
     var stats: Address
 
 
@@ -863,8 +861,7 @@ struct DenseRefineArguments(ImplicitlyCopyable):
     var completion: Completion
     var changed: Address
     var expansion_factor: c_size_t
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
     var stats: Address
 
 
@@ -889,8 +886,7 @@ struct DenseMergeArguments(ImplicitlyCopyable):
     var completion: Completion
     var count: c_size_t
     var donors: Address
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
 
 
 @fieldwise_init
@@ -910,8 +906,7 @@ struct DenseSearchArguments(ImplicitlyCopyable):
     var traversal: Traversal
     var predicate: Address
     var predicate_state: Address
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
     var stats: Address
 
 
@@ -1002,8 +997,7 @@ struct DenseSaveArguments(ImplicitlyCopyable):
     var outcome: Address
     var completion: Completion
     var path: BytesView[ImmUntrackedOrigin]
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
 
 
 @fieldwise_init
@@ -1016,8 +1010,7 @@ struct DenseSaveBufferArguments(ImplicitlyCopyable):
     var completion: Completion
     var monolith: Address
     var arena: Address
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
 
 
 @fieldwise_init
@@ -1048,8 +1041,7 @@ struct DenseMultiplyArguments(ImplicitlyCopyable):
     var arena: Address
     var wanted: c_size_t
     var expansion_factor: c_size_t
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
     var stats: Address
 
 
@@ -1072,8 +1064,7 @@ struct DenseAttendArguments(ImplicitlyCopyable):
     var outputs_scalar: ScalarKind
     var expansion_factor: c_size_t
     var score_scale: Float32
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
     var stats: Address
 
 
@@ -1092,8 +1083,7 @@ struct DenseMaxsimArguments(ImplicitlyCopyable):
     var arena: Address
     var wanted: c_size_t
     var expansion_factor: c_size_t
-    var progress: Address
-    var progress_state: Address
+    var progress: ProgressArguments
     var stats: Address
 
 
@@ -1407,8 +1397,7 @@ struct _DenseInsertCall(Call):
                 self.keys,
                 self.vectors,
                 c_size_t(self.expansion_factor),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
                 self.stats,
             ),
             library.symbols().dense_insert,
@@ -1445,8 +1434,7 @@ struct _DenseRefineCall(Call):
                 completion,
                 outputs,
                 c_size_t(self.expansion_factor),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
                 self.stats,
             ),
             library.symbols().dense_refine,
@@ -1511,8 +1499,7 @@ struct _DenseMergeCall(Call):
                 completion,
                 c_size_t(len(self.addresses)),
                 Int(self.addresses.unsafe_ptr()),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
             ),
             library.symbols().dense_merge,
         )
@@ -1566,8 +1553,7 @@ struct _DenseSearchCall[origin: MutOrigin](Call):
                 self.traversal,
                 self.predicate,
                 self.predicate_state,
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
                 self.stats,
             ),
             library.symbols().dense_search,
@@ -1619,8 +1605,7 @@ struct _DenseMaxsimCall[origin: MutOrigin](Call):
                 self.arena[]._address,
                 c_size_t(self.wanted),
                 c_size_t(self.expansion_factor),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
                 self.stats,
             ),
             library.symbols().dense_maxsim,
@@ -1672,8 +1657,7 @@ struct _DenseMultiplyCall[origin: MutOrigin](Call):
                 self.arena[]._address,
                 c_size_t(self.wanted),
                 c_size_t(self.expansion_factor),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
                 self.stats,
             ),
             library.symbols().dense_multiply,
@@ -1739,8 +1723,7 @@ struct _DenseAttendCall[dtype: DType, origin: MutOrigin](Call):
                 ScalarKind.of[Self.dtype](),
                 c_size_t(self.expansion_factor),
                 self.score_scale,
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
                 self.stats,
             ),
             library.symbols().dense_attend,
@@ -1772,7 +1755,7 @@ struct _DenseSaveCall(Call):
         outputs: Address,
     ):
         _cross(
-            DenseSaveArguments(index, executor, outcome, completion, self.path, NULL_ADDRESS, NULL_ADDRESS),
+            DenseSaveArguments(index, executor, outcome, completion, self.path, ProgressArguments()),
             library.symbols().dense_save,
         )
 
@@ -1800,7 +1783,7 @@ struct _DenseSaveBufferCall[origin: MutOrigin](Call):
     ):
         _cross(
             DenseSaveBufferArguments(
-                index, executor, outcome, completion, outputs, self.arena[]._address, NULL_ADDRESS, NULL_ADDRESS
+                index, executor, outcome, completion, outputs, self.arena[]._address, ProgressArguments()
             ),
             library.symbols().dense_save_buffer,
         )
@@ -2109,8 +2092,7 @@ struct DenseIndex(DenseVerbs, Movable):
                 source,
                 ram,
                 c_size_t(values_per_key),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
             ),
             verb,
         )
@@ -2214,8 +2196,7 @@ struct DenseIndex(DenseVerbs, Movable):
                 source,
                 vram,
                 c_size_t(values_per_key),
-                NULL_ADDRESS,
-                NULL_ADDRESS,
+                ProgressArguments(),
             ),
             verb,
         )

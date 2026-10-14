@@ -479,6 +479,25 @@ struct Completion(Equatable, ImplicitlyCopyable, TrivialRegisterPassable):
     """Return once submitted; the status reads `DEFERRED` until final."""
 
 
+@fieldwise_init
+struct ProgressArguments(Defaultable, ImplicitlyCopyable):
+    """`usearch_progress_t`: how a long call reports its advance - a handler, its state, and how
+    many reports it hears."""
+
+    var callback: Address
+    """The optional handler; `NULL_ADDRESS` skips every report."""
+    var state: Address
+    """Forwarded into every `callback` call."""
+    var steps: c_size_t
+    """Reports a call makes at most, the last at completion; zero derives to ten."""
+
+    def __init__(out self):
+        """No handler, which is all this binding installs."""
+        self.callback = NULL_ADDRESS
+        self.state = NULL_ADDRESS
+        self.steps = c_size_t(0)
+
+
 # endregion Residency & Execution
 
 # region Byte Runs

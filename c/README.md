@@ -22,7 +22,7 @@ Its search is exact, its traversal statistics are invented, and its checkpoints 
 ## Quickstart
 
 Every verb takes one argument struct, initialized by designator, so every field left out keeps its default.
-Every struct opens in the same order: the handle, `executor`, `outcome`, then `completion`; inputs follow, then outputs and the `arena` they land in, then knobs, and last `progress`, `progress_state` and `stats`.
+Every struct opens in the same order: the handle, `executor`, `outcome`, then `completion`; inputs follow, then outputs and the `arena` they land in, then knobs, and last `progress` and `stats`.
 Structs carry no size or version field, so they grow source-compatibly only, and the major version changes whenever one does.
 
 ```c
@@ -422,15 +422,22 @@ Rejected entries still route the walk, so recall holds at low selectivity, and t
 An exact scan asks it only about rows closer than the worst match a query already holds, which makes the scan the fallback for filters too selective for a walk to cross.
 A host predicate cannot narrow a device walk, so a VRAM search with one reports `usearch_status_device_k`.
 
-Long calls take a progress handler, which is also the only way to stop one:
+Long calls take a `usearch_progress_t`: a handler, which is also the only way to stop one, its state, and how many reports it hears:
 
 ```c
 usearch_continuation_t stop_when_asked(size_t completed, size_t total, void* state) {
     return *(int const*)state ? usearch_cancel_k : usearch_continue_k;
 }
+
+int stop = 0;
+usearch_dense_search(&(usearch_dense_search_t) {
+    .index = index, .executor = executor, .outcome = &outcome, .count = 1000000, .queries = queries,
+    .wanted = 10, .arena = arena, .matches = &matches, .progress = {stop_when_asked, &stop, 20}});
 ```
 
 Counts are in whatever units the verb consumes, rows for an insertion, queries for a search, shards for a checkpoint, and the handler is never called concurrently or after the call is final.
+A call reports at most `steps` times, the last at completion, and zero steps derive to ten.
+A batch verb hands its engine one slice per step, and a call without a handler runs as one slice, since every engine bounds its own scratch.
 A stopped call reports `usearch_status_cancelled_k` and leaves its outputs `NULL`.
 An insertion claims every row before its first report, so its handler only reports, and all its rows publish at once.
 

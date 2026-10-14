@@ -254,6 +254,8 @@ type DenseLoadRamConfig struct {
 	// Progress reports the shards placed and stops wherever it says to; a stopped load creates no
 	// index.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 }
 
 // DenseLoadVramConfig carries the optional settings of DenseLoadVram.
@@ -269,6 +271,8 @@ type DenseLoadVramConfig struct {
 	ValuesPerKey uint
 	// Progress reports the shards placed and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 }
 
 // DenseLoadRamBufferConfig carries the optional settings of DenseLoadRamBuffer.
@@ -284,6 +288,8 @@ type DenseLoadRamBufferConfig struct {
 	ValuesPerKey uint
 	// Progress reports the bytes placed and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 }
 
 // DenseLoadVramBufferConfig carries the optional settings of DenseLoadVramBuffer.
@@ -299,6 +305,8 @@ type DenseLoadVramBufferConfig struct {
 	ValuesPerKey uint
 	// Progress reports the bytes placed and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 }
 
 // DenseViewNvmeConfig carries the optional settings of DenseViewNvme.
@@ -339,6 +347,8 @@ type DenseInsertConfig struct {
 	// Progress reports the rows inserted; every row is claimed before the first report, so a
 	// stop is ignored.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 	// Stats is where the traversal telemetry lands, overwritten by the call.
 	Stats *DenseTraversalStats
 }
@@ -352,6 +362,8 @@ type DenseRefineConfig struct {
 	ExpansionFactor uint
 	// Progress reports the nodes swept and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 	// Stats is where the traversal telemetry lands, overwritten by the call.
 	Stats *DenseTraversalStats
 }
@@ -373,6 +385,8 @@ type DenseSearchConfig struct {
 	// Progress reports the queries resolved and stops wherever it says to; a stopped search
 	// reports StatusCancelled and returns no matches.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 	// Stats is where the traversal telemetry lands, overwritten by the call.
 	Stats *DenseTraversalStats
 }
@@ -386,6 +400,8 @@ type DenseMaxsimConfig struct {
 	ExpansionFactor uint
 	// Progress reports the queries resolved and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 	// Stats is where the traversal telemetry lands, overwritten by the call.
 	Stats *DenseTraversalStats
 }
@@ -403,6 +419,8 @@ type DenseMultiplyConfig struct {
 	ExpansionFactor uint
 	// Progress reports the rows resolved and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 	// Stats is where the traversal telemetry lands, overwritten by the call.
 	Stats *DenseTraversalStats
 }
@@ -427,6 +445,8 @@ type DenseAttendConfig struct {
 	ScoreScale float32
 	// Progress reports the queries resolved and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 	// Stats is where the traversal telemetry lands, overwritten by the call.
 	Stats *DenseTraversalStats
 }
@@ -437,6 +457,8 @@ type DenseAttendConfig struct {
 type DenseMergeConfig struct {
 	// Progress reports the donors absorbed and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 }
 
 // DenseSaveConfig carries the optional settings of Save.
@@ -445,6 +467,8 @@ type DenseMergeConfig struct {
 type DenseSaveConfig struct {
 	// Progress reports the shards written and stops wherever it says to.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 }
 
 // DenseSaveBufferConfig carries the optional settings of SaveBuffer.
@@ -454,6 +478,8 @@ type DenseSaveBufferConfig struct {
 	// Progress reports the bytes written and stops wherever it says to; a stopped save leaves no
 	// monolith.
 	Progress ProgressCallback
+	// ProgressSteps bounds the reports Progress hears, the last at completion; zero derives to ten.
+	ProgressSteps uint
 }
 
 // DenseSearchStreamInitConfig carries the optional settings of SearchStream.
@@ -678,7 +704,6 @@ func DenseLoadRam(path string, config *DenseLoadRamConfig) (*DenseIndex, error) 
 	}
 	lent := open[*DenseIndex]()
 	index := newDenseIndex()
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_load_ram(&C.usearch_dense_load_ram_t{
 		index:          pin(&lent.call, &index.handle),
 		executor:       executor,
@@ -686,8 +711,7 @@ func DenseLoadRam(path string, config *DenseLoadRamConfig) (*DenseIndex, error) 
 		path:           lent.text(path),
 		ram:            lent.ram(config.MemoryDomains),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       progress,
-		progress_state: progressState,
+		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
 	lent.result = func() *DenseIndex { return index }
 	return block(lent)
@@ -705,7 +729,6 @@ func DenseLoadVram(path string, config *DenseLoadVramConfig) (*DenseIndex, error
 	}
 	lent := open[*DenseIndex]()
 	index := newDenseIndex()
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_load_vram(&C.usearch_dense_load_vram_t{
 		index:          pin(&lent.call, &index.handle),
 		executor:       executor,
@@ -713,8 +736,7 @@ func DenseLoadVram(path string, config *DenseLoadVramConfig) (*DenseIndex, error
 		path:           lent.text(path),
 		vram:           lent.vram(config.Devices),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       progress,
-		progress_state: progressState,
+		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
 	lent.result = func() *DenseIndex { return index }
 	return block(lent)
@@ -732,7 +754,6 @@ func DenseLoadRamBuffer(buffer []byte, config *DenseLoadRamBufferConfig) (*Dense
 	}
 	lent := open[*DenseIndex]()
 	index := newDenseIndex()
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_load_ram_buffer(&C.usearch_dense_load_ram_buffer_t{
 		index:          pin(&lent.call, &index.handle),
 		executor:       executor,
@@ -740,8 +761,7 @@ func DenseLoadRamBuffer(buffer []byte, config *DenseLoadRamBufferConfig) (*Dense
 		buffer:         lent.bytes(buffer),
 		ram:            lent.ram(config.MemoryDomains),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       progress,
-		progress_state: progressState,
+		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
 	lent.result = func() *DenseIndex { return index }
 	return block(lent)
@@ -759,7 +779,6 @@ func DenseLoadVramBuffer(buffer []byte, config *DenseLoadVramBufferConfig) (*Den
 	}
 	lent := open[*DenseIndex]()
 	index := newDenseIndex()
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_load_vram_buffer(&C.usearch_dense_load_vram_buffer_t{
 		index:          pin(&lent.call, &index.handle),
 		executor:       executor,
@@ -767,8 +786,7 @@ func DenseLoadVramBuffer(buffer []byte, config *DenseLoadVramBufferConfig) (*Den
 		buffer:         lent.bytes(buffer),
 		vram:           lent.vram(config.Devices),
 		values_per_key: C.size_t(config.ValuesPerKey),
-		progress:       progress,
-		progress_state: progressState,
+		progress:       lent.progress(config.Progress, config.ProgressSteps),
 	})
 	lent.result = func() *DenseIndex { return index }
 	return block(lent)
@@ -1246,7 +1264,6 @@ func (receiver denseReceiver) insert(completion C.usearch_completion_t, keys []K
 	if uint(len(keys)) != vectors.rows {
 		return lent.refuse(fail(StatusShapeMismatch, "the key count does not match the vector row count"))
 	}
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_insert(&C.usearch_dense_insert_t{
 		index:            index,
 		executor:         executor,
@@ -1256,8 +1273,7 @@ func (receiver denseReceiver) insert(completion C.usearch_completion_t, keys []K
 		keys:             lent.keys(keys),
 		vectors:          vectors.lower(&lent.call),
 		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         progress,
-		progress_state:   progressState,
+		progress:         lent.progress(config.Progress, config.ProgressSteps),
 		stats:            lent.stats(config.Stats),
 	})
 	return lent
@@ -1273,7 +1289,6 @@ func (receiver denseReceiver) refine(completion C.usearch_completion_t, config *
 		return lent.refuse(refusal)
 	}
 	changed := pin(&lent.call, new(C.size_t))
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_refine(&C.usearch_dense_refine_t{
 		index:            index,
 		executor:         executor,
@@ -1281,8 +1296,7 @@ func (receiver denseReceiver) refine(completion C.usearch_completion_t, config *
 		completion:       completion,
 		changed:          changed,
 		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         progress,
-		progress_state:   progressState,
+		progress:         lent.progress(config.Progress, config.ProgressSteps),
 		stats:            lent.stats(config.Stats),
 	})
 	lent.result = func() uint { return uint(*changed) }
@@ -1323,7 +1337,6 @@ func (receiver denseReceiver) search(completion C.usearch_completion_t, queries 
 	}
 	matches := pin(&lent.call, new(C.usearch_matches_view_t))
 	predicate, predicateState := lent.predicate(config.Predicate)
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_search(&C.usearch_dense_search_t{
 		index:            index,
 		executor:         executor,
@@ -1338,8 +1351,7 @@ func (receiver denseReceiver) search(completion C.usearch_completion_t, queries 
 		traversal:        C.usearch_traversal_t(config.Traversal),
 		predicate:        predicate,
 		predicate_state:  predicateState,
-		progress:         progress,
-		progress_state:   progressState,
+		progress:         lent.progress(config.Progress, config.ProgressSteps),
 		stats:            lent.stats(config.Stats),
 	})
 	view := lent.rewound(arena)
@@ -1367,7 +1379,6 @@ func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries 
 	}
 	count := queries.rows / rowsPerQuery
 	matches := pin(&lent.call, new(C.usearch_matches_view_t))
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_maxsim(&C.usearch_dense_maxsim_t{
 		index:            index,
 		executor:         executor,
@@ -1380,8 +1391,7 @@ func (receiver denseReceiver) maxsim(completion C.usearch_completion_t, queries 
 		arena:            memory,
 		wanted:           C.size_t(wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         progress,
-		progress_state:   progressState,
+		progress:         lent.progress(config.Progress, config.ProgressSteps),
 		stats:            lent.stats(config.Stats),
 	})
 	view := lent.rewound(arena)
@@ -1405,7 +1415,6 @@ func (receiver denseReceiver) multiply(completion C.usearch_completion_t, left R
 	}
 	products := pin(&lent.call, new(C.usearch_matches_tape_view_t))
 	required := pin(&lent.call, new(C.size_t))
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_multiply(&C.usearch_dense_multiply_t{
 		index:            index,
 		executor:         executor,
@@ -1418,8 +1427,7 @@ func (receiver denseReceiver) multiply(completion C.usearch_completion_t, left R
 		arena:            memory,
 		wanted:           C.size_t(config.Wanted),
 		expansion_factor: C.size_t(config.ExpansionFactor),
-		progress:         progress,
-		progress_state:   progressState,
+		progress:         lent.progress(config.Progress, config.ProgressSteps),
 		stats:            lent.stats(config.Stats),
 	})
 	view := lent.rewound(arena)
@@ -1452,7 +1460,6 @@ func (receiver denseReceiver) attend(completion C.usearch_completion_t, queries 
 	}
 	lent.pinner.Pin(lookup.Values.pointer)
 	outputs := pin(&lent.call, new(C.usearch_rows_view_t))
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_attend(&C.usearch_dense_attend_t{
 		index:              index,
 		executor:           executor,
@@ -1469,8 +1476,7 @@ func (receiver denseReceiver) attend(completion C.usearch_completion_t, queries 
 		outputs_scalar:     C.usearch_scalar_t(config.OutputsScalar),
 		expansion_factor:   C.size_t(config.ExpansionFactor),
 		score_scale:        C.float(config.ScoreScale),
-		progress:           progress,
-		progress_state:     progressState,
+		progress:           lent.progress(config.Progress, config.ProgressSteps),
 		stats:              lent.stats(config.Stats),
 	})
 	view := lent.rewound(arena)
@@ -1530,16 +1536,14 @@ func (receiver denseReceiver) merge(completion C.usearch_completion_t, donors []
 			C.usearch_dense_free(handle)
 		}
 	}
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_merge(&C.usearch_dense_merge_t{
-		index:          index,
-		executor:       executor,
-		outcome:        lent.outcome,
-		completion:     completion,
-		count:          C.size_t(len(handles)),
-		donors:         lend(&lent.call, handles),
-		progress:       progress,
-		progress_state: progressState,
+		index:      index,
+		executor:   executor,
+		outcome:    lent.outcome,
+		completion: completion,
+		count:      C.size_t(len(handles)),
+		donors:     lend(&lent.call, handles),
+		progress:   lent.progress(config.Progress, config.ProgressSteps),
 	})
 	return lent
 }
@@ -1554,15 +1558,13 @@ func (receiver denseReceiver) save(completion C.usearch_completion_t, path strin
 	if refusal != nil {
 		return lent.refuse(refusal)
 	}
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_save(&C.usearch_dense_save_t{
-		index:          index,
-		executor:       executor,
-		outcome:        lent.outcome,
-		completion:     completion,
-		path:           lent.text(path),
-		progress:       progress,
-		progress_state: progressState,
+		index:      index,
+		executor:   executor,
+		outcome:    lent.outcome,
+		completion: completion,
+		path:       lent.text(path),
+		progress:   lent.progress(config.Progress, config.ProgressSteps),
 	})
 	return lent
 }
@@ -1582,16 +1584,14 @@ func (receiver denseReceiver) saveBuffer(completion C.usearch_completion_t, aren
 		return lent.refuse(refusal)
 	}
 	monolith := pin(&lent.call, new(C.usearch_bytes_view_t))
-	progress, progressState := lent.progress(config.Progress)
 	C.usearch_dense_save_buffer(&C.usearch_dense_save_buffer_t{
-		index:          index,
-		executor:       executor,
-		outcome:        lent.outcome,
-		completion:     completion,
-		monolith:       monolith,
-		arena:          memory,
-		progress:       progress,
-		progress_state: progressState,
+		index:      index,
+		executor:   executor,
+		outcome:    lent.outcome,
+		completion: completion,
+		monolith:   monolith,
+		arena:      memory,
+		progress:   lent.progress(config.Progress, config.ProgressSteps),
 	})
 	view := lent.rewound(arena)
 	lent.result = func() Monolith { return Monolith{exported: view, raw: *monolith} }

@@ -619,6 +619,21 @@ pub const ProgressCallback = struct {
     }
 };
 
+/// How a long call reports its advance: a handler, its state, and how many reports it hears.
+/// Mirrors `usearch_progress_t`.
+pub const usearch_progress_t = extern struct {
+    /// The optional handler; null skips every report.
+    callback: ?ProgressFunction = null,
+    /// Opaque pointer forwarded into every `callback` call.
+    state: ?*anyopaque = null,
+    /// Reports a call makes at most, the last at completion; zero derives to ten.
+    steps: usize = 0,
+
+    pub fn of(progress: ProgressCallback, steps: usize) usearch_progress_t {
+        return .{ .callback = progress.callback, .state = progress.state, .steps = steps };
+    }
+};
+
 /// A per-key admission filter as the C interface carries it: a `usearch_predicate_t` and the
 /// state forwarded into it. Build one with `Predicate.of`; the default admits everything.
 pub const Predicate = struct {

@@ -239,6 +239,15 @@ pub type usearch_predicate_t = Option<unsafe extern "C" fn(usearch_key_t, *mut c
 /// Periodic advance report and the caller's chance to stop the call.
 pub type usearch_progress_callback_t = Option<unsafe extern "C" fn(usize, usize, *mut c_void) -> c_int>;
 
+/// Mirrors `usearch_progress_t`.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct usearch_progress_t {
+    pub callback: usearch_progress_callback_t,
+    pub state: *mut c_void,
+    pub steps: usize,
+}
+
 pub type usearch_completion_t = c_int;
 
 pub const usearch_completion_blocking_k: usearch_completion_t = 0;
@@ -1083,18 +1092,27 @@ unsafe extern "C" fn progress_trampoline(finished: usize, total: usize, state: *
     callbacks.guard(1, || c_int::from(handler(finished, total).is_break()))
 }
 
-/// Lends an optional handler as the callback and state pair every reporting verb takes, so the
+/// Lends an optional handler and its step count as the progress every reporting verb takes, so the
 /// trampoline is never paired with the wrong state; `None` lends nulls.
 pub(crate) fn lower_progress(
     handler: &mut Option<&mut ProgressCallback>,
+    steps: usize,
     callbacks: &Callbacks,
-) -> (usearch_progress_callback_t, *mut c_void) {
+) -> usearch_progress_t {
     match handler {
         Some(handler) => {
             callbacks.progress.set(ptr::from_mut(handler).cast());
-            (Some(progress_trampoline), callbacks.state())
+            usearch_progress_t {
+                callback: Some(progress_trampoline),
+                state: callbacks.state(),
+                steps,
+            }
         }
-        None => (None, ptr::null_mut()),
+        None => usearch_progress_t {
+            callback: None,
+            state: ptr::null_mut(),
+            steps,
+        },
     }
 }
 

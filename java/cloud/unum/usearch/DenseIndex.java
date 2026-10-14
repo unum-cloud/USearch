@@ -1527,8 +1527,11 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
         return value;
     }
 
-    private static final MemoryLayout PROGRESS = Library.POINTER.withName("progress");
-    private static final MemoryLayout PROGRESS_STATE = Library.POINTER.withName("progress_state");
+    private static final MemoryLayout PROGRESS = MemoryLayout.structLayout(
+                    Library.POINTER.withName("callback"),
+                    Library.POINTER.withName("state"),
+                    Library.SIZE.withName("steps"))
+            .withName("progress");
     private static final MemoryLayout STATS = Library.POINTER.withName("stats");
 
     /** {@code usearch_dense_metadata_t}. */
@@ -1574,8 +1577,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                 Library.BYTES_VIEW.withName(source),
                 Library.PLACEMENT.withName(placement),
                 Library.SIZE.withName("values_per_key"),
-                PROGRESS,
-                PROGRESS_STATE);
+                PROGRESS);
     }
 
     /** {@code usearch_dense_metadata_read_t} or its buffer twin, reading {@code source}. */
@@ -1625,7 +1627,6 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.ROWS_VIEW.withName("vectors"),
                     Library.SIZE.withName("expansion_factor"),
                     PROGRESS,
-                    PROGRESS_STATE,
                     STATS));
 
     static final Verb REFINE = new Verb(
@@ -1635,7 +1636,6 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.POINTER.withName("changed"),
                     Library.SIZE.withName("expansion_factor"),
                     PROGRESS,
-                    PROGRESS_STATE,
                     STATS));
 
     static final Verb HEALTH = new Verb(
@@ -1656,7 +1656,6 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.POINTER.withName("predicate"),
                     Library.POINTER.withName("predicate_state"),
                     PROGRESS,
-                    PROGRESS_STATE,
                     STATS));
 
     // The key follows the completion unpadded, since sixteen bytes align to one.
@@ -1678,11 +1677,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
     static final Verb MERGE = new Verb(
             "usearch_dense_merge",
             Library.opening(
-                    Library.padding(),
-                    Library.SIZE.withName("count"),
-                    Library.POINTER.withName("donors"),
-                    PROGRESS,
-                    PROGRESS_STATE));
+                    Library.padding(), Library.SIZE.withName("count"), Library.POINTER.withName("donors"), PROGRESS));
 
     static final Verb CURSOR_INIT = new Verb(
             "usearch_dense_cursor_init",
@@ -1723,8 +1718,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("wanted")));
 
     static final Verb SAVE = new Verb(
-            "usearch_dense_save",
-            Library.opening(Library.padding(), Library.BYTES_VIEW.withName("path"), PROGRESS, PROGRESS_STATE));
+            "usearch_dense_save", Library.opening(Library.padding(), Library.BYTES_VIEW.withName("path"), PROGRESS));
 
     static final Verb SAVE_BUFFER = new Verb(
             "usearch_dense_save_buffer",
@@ -1732,8 +1726,7 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.padding(),
                     Library.POINTER.withName("monolith"),
                     Library.POINTER.withName("arena"),
-                    PROGRESS,
-                    PROGRESS_STATE));
+                    PROGRESS));
 
     static final Verb METADATA_READ = new Verb("usearch_dense_metadata_read", reading("path"));
 
@@ -1752,7 +1745,6 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("wanted"),
                     Library.SIZE.withName("expansion_factor"),
                     PROGRESS,
-                    PROGRESS_STATE,
                     STATS));
 
     static final Verb ATTEND = new Verb(
@@ -1773,7 +1765,6 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     ValueLayout.JAVA_FLOAT.withName("score_scale"),
                     Library.padding(),
                     PROGRESS,
-                    PROGRESS_STATE,
                     STATS));
 
     static final Verb MAXSIM = new Verb(
@@ -1788,7 +1779,6 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
                     Library.SIZE.withName("wanted"),
                     Library.SIZE.withName("expansion_factor"),
                     PROGRESS,
-                    PROGRESS_STATE,
                     STATS));
 
     /** {@code usearch_value_lookup_t}. */

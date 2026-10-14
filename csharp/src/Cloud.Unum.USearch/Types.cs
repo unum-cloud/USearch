@@ -1624,6 +1624,18 @@ internal struct NativeNvmeOptions
     public nuint PathsCount;
 }
 
+/// <summary>How a long call reports its advance, laid out as <c>usearch_progress_t</c>.</summary>
+[StructLayout(LayoutKind.Sequential)]
+internal struct NativeProgress
+{
+    /// <summary>The optional handler; null skips every report.</summary>
+    public IntPtr Callback;
+    /// <summary>Opaque pointer forwarded into every handler call.</summary>
+    public IntPtr State;
+    /// <summary>Reports a call makes at most, the last at completion; zero derives to ten.</summary>
+    public nuint Steps;
+}
+
 /// <summary>The arguments of <c>usearch_executor_for_ram</c>.</summary>
 [StructLayout(LayoutKind.Sequential)]
 internal unsafe struct NativeExecutorForRam

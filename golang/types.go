@@ -551,12 +551,12 @@ func (call *call) predicate(predicate Predicate) (C.usearch_predicate_t, unsafe.
 	return C.usearch_go_admits(), call.callback(predicate)
 }
 
-// progress lends an optional handler as the callback and state pair a reporting verb takes.
-func (call *call) progress(progress ProgressCallback) (C.usearch_progress_callback_t, unsafe.Pointer) {
+// progress lends an optional handler and its report count as the struct a reporting verb takes.
+func (call *call) progress(progress ProgressCallback, steps uint) C.usearch_progress_t {
 	if progress == nil {
-		return nil, nil
+		return C.usearch_progress_t{}
 	}
-	return C.usearch_go_continues(), call.callback(progress)
+	return C.usearch_progress_t{callback: C.usearch_go_continues(), state: call.callback(progress), steps: C.size_t(steps)}
 }
 
 // callback lends a Go value to a C callback as an opaque handle rather than a Go pointer, since the
