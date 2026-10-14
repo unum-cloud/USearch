@@ -2,7 +2,7 @@
  *  @file include/usearch/utilities/vram_apple_device.hpp
  *  @author Ash Vardanian
  *  @date October 11, 2026
- *  @brief Host-side vocabulary for driving one Apple GPU - specs, queues, shared buffers,
+ *  @brief Host-side vocabulary for driving one Apple GPU - specs, streams, shared buffers,
  *      pipelines.
  *
  *  Metal's API is Objective-C, reached here through @c objc_msgSend cast to each call's exact
@@ -19,14 +19,14 @@
 #include <cstddef> // `std::size_t`
 #include <cstring> // `std::strcmp`, `std::strncpy`, `std::memcpy`
 
-#include <mutex>   // `std::unique_lock`, `std::adopt_lock` - the pipeline registry and the executor's hold
+#include <mutex>   // `std::mutex` - the pipeline registry, `std::unique_lock`, `std::adopt_lock` - the executor's hold
 #include <span>    // `std::span` - the device list an executor opens over
 #include <utility> // `std::exchange`, `std::move`
 
-#include <forkunion/types.hpp> // `fu::spin_mutex_t` - the pipeline registry and the executor's hold
+#include <forkunion/types.hpp> // `fu::spin_mutex_t` - the executor's hold
 
 #include "usearch/utilities/blocking_files.hpp" // `shared_library_t` - Metal opened at first use
-#include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer` - an executor's queues and the pipeline registry
+#include "usearch/utilities/ram_buffers.hpp"    // `growing_buffer` - an executor's streams and the pipeline registry
 #include "usearch/utilities/types.hpp"
 
 namespace unum::usearch::utilities {
@@ -134,14 +134,14 @@ struct metal_context_t {
     void* device = nullptr;
     void* queue = nullptr;
     gpu_class_t gpu_class = gpu_class_t::unknown_k;
-    fu::spin_mutex_t lock;
+    std::mutex lock;
     growing_buffer<metal_pipeline_t> pipelines {global_allocator};
 
-    /** Kernel @p name's pipeline from the library built out of @p source, built on first use;
-     *  @c contended_k while another thread holds the registry, @c device_error_k when it fails. */
+    /** Kernel @p name's pipeline from the library built out of @p source, built on first use; a
+     *  caller meeting another index's build sleeps until it ends, as a module load waits in the
+     *  CUDA and HIP drivers, and gets @c device_error_k when the build fails. */
     expected<void*> pipeline(char const* source, char const* name) noexcept {
-        if (!lock.lock_if_free()) return {nullptr, status_t::contended_k};
-        std::unique_lock guard {lock, std::adopt_lock};
+        std::lock_guard guard {lock};
         void* library = nullptr;
         for (metal_pipeline_t const& entry : pipelines) {
             if (entry.source != source) continue;
@@ -311,31 +311,31 @@ struct metal_shared_allocator_t {
 };
 
 /** Owned @c id<MTLCommandQueue> on one Apple GPU, the twin of @c cuda_stream_t; null rides the
- *  device's default queue, which its @ref metal_context_t keeps. Move-only, and released when it
- *  dies. */
-struct metal_queue_t {
+ *  device's default queue, which its @ref metal_context_t keeps, so the stream names its device.
+ *  Move-only, and released when it dies. */
+struct metal_stream_t {
 
-    /** The Apple ordinal this queue submits to. */
+    /** The Apple ordinal this stream submits to. */
     int device = 0;
 
     /** The default queue of Apple GPU 0. */
-    metal_queue_t() noexcept = default;
+    metal_stream_t() noexcept = default;
 
     /** Takes @p handle, owned and opened on @p device, or rides that device's default queue when
      *  null. */
-    explicit metal_queue_t(int device, void* handle = nullptr) noexcept : device(device), handle_(handle) {}
-    metal_queue_t(metal_queue_t&& other) noexcept
+    explicit metal_stream_t(int device, void* handle = nullptr) noexcept : device(device), handle_(handle) {}
+    metal_stream_t(metal_stream_t&& other) noexcept
         : device(other.device), handle_(std::exchange(other.handle_, nullptr)) {}
-    metal_queue_t(metal_queue_t const&) = delete;
-    metal_queue_t& operator=(metal_queue_t const&) = delete;
-    ~metal_queue_t() noexcept {
+    metal_stream_t(metal_stream_t const&) = delete;
+    metal_stream_t& operator=(metal_stream_t const&) = delete;
+    ~metal_stream_t() noexcept {
         if (handle_) metal_send<void>(handle_, "release");
     }
 
-    /** Another owner of the same queue, retained, so a context holds an executor's queue without
+    /** Another owner of the same queue, retained, so a context holds an executor's stream without
      *  borrowing it. */
-    metal_queue_t share() const noexcept {
-        return metal_queue_t {device, handle_ ? metal_send(handle_, "retain") : nullptr};
+    metal_stream_t share() const noexcept {
+        return metal_stream_t {device, handle_ ? metal_send(handle_, "retain") : nullptr};
     }
 
     /** The owned queue, or null for the device's default one. */
@@ -347,8 +347,9 @@ struct metal_queue_t {
 
 /** One command buffer being encoded on one queue: binds buffers and bytes, dispatches, and commits
  *  without waiting. Every call to a device runs through one of these, so encoders live on the
- *  caller's stack and any number of threads encode at once; a committed one stays retained, so its
- *  owner polls or awaits it, and a queue runs its command buffers in commit order. */
+ *  caller's stack and any number of threads encode at once; a committed one stays retained as
+ *  Apple's event, the twin of @c cuda_event_t, since a queue runs its command buffers in commit
+ *  order, so its landing means every earlier one's. */
 struct metal_launch_t {
     void* commands = nullptr;
     void* encoder = nullptr;
@@ -430,9 +431,14 @@ struct metal_launch_t {
 };
 
 /** Memory that one call at a time rewinds and refills for one Apple device: the Apple arm of
- *  @ref gpu_arena_t. Memory is unified, so host pages are the device's and an upload is a copy. */
+ *  @ref gpu_arena_t. Memory is unified, so host pages are the device's and an upload is a copy; it
+ *  still serves only the executor that made it, as every vendor's arena does. */
 struct metal_device_arena_t {
-    explicit metal_device_arena_t(int device) noexcept : device_(device) {}
+
+    /** Takes the device of the executor's @p stream; a template only because that @c stream_t is
+     *  declared after it. */
+    template <typename stream_type_>
+    explicit metal_device_arena_t(stream_type_ const& stream) noexcept : device_(stream.handle.device) {}
 
     /** Carves @p count values, or null when the arena cannot grow. */
     template <typename value_type_>
@@ -446,11 +452,15 @@ struct metal_device_arena_t {
     /** Rewinds the arena, so the previous call's outputs die. */
     void clear() noexcept { memory_.clear(); }
 
-    /** Copies @p bytes from @p source to @p destination in the arena. */
+    /** Copies @p bytes from @p source to @p destination in the arena; unified memory needs no
+     *  stream, so the copy is done when it returns. */
     status_t upload(void* destination, void const* source, std::size_t bytes) noexcept {
         std::memcpy(destination, source, bytes);
         return status_t::success_k;
     }
+
+    /** Every upload already landed, so there is nothing to wait for. */
+    status_t drain() noexcept { return status_t::success_k; }
 
     int device() const noexcept { return device_; }
 
@@ -459,17 +469,33 @@ struct metal_device_arena_t {
     int device_ = 0;
 };
 
-/** The queues a bulk verb submits to - one per device, which every shard there shares in order.
- *  Work is committed, never waited on, so one host thread drives every device, and the hold
- *  serializes callers as the CUDA executor's does. */
+/** The streams a bulk verb submits to and the scratch they walk with - one of each per device,
+ *  which every shard there shares in order. Work is committed, never waited on, so one host thread
+ *  drives every device, and the hold serializes callers as the CUDA executor's does. */
 struct metal_executor_t {
 
     /** Where a call names this executor, the C layer lands outputs in this arena. */
     using device_arena_t = metal_device_arena_t;
     inline static constexpr gpu_vendor_t vendor_k = gpu_vendor_t::apple_k;
 
+    /** One device's run of scratch: one shared buffer, sized by @ref reserve. */
+    using arena_t = metal_buffer_t;
+
     /** One call's hold on the executor, released when it dies. */
     using claim_t = std::unique_lock<fu::spin_mutex_t>;
+
+    /** One shard's stream and run. */
+    struct stream_t {
+
+        /** The ordering identity every launch on this device rides, naming the device. */
+        metal_stream_t handle;
+
+        /** The scratch a walk carves its state from, sized by @ref reserve. */
+        arena_t arena;
+
+        /** Takes @p handle, whose run waits for @ref reserve. */
+        explicit stream_t(metal_stream_t&& handle) noexcept : handle(std::move(handle)) {}
+    };
 
     metal_executor_t() = default;
     metal_executor_t(metal_executor_t&& other) noexcept { swap(other); }
@@ -485,44 +511,52 @@ struct metal_executor_t {
         return {claim_t {held_, std::adopt_lock}, status_t::success_k};
     }
 
-    /** Opens one queue per entry of @p devices. */
-    static expected<metal_executor_t> spawn(std::span<int const> devices) noexcept {
-        if (devices.empty()) return {{}, status_t::config_mismatch_k};
+    /** Takes over streams the caller already opened, owned and released here from now on. */
+    static expected<metal_executor_t> acquire(growing_buffer<stream_t>&& streams) noexcept {
+        if (streams.empty()) return {{}, status_t::config_mismatch_k};
         metal_executor_t executor;
-        if (failed(executor.streams_.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
+        executor.streams_ = std::move(streams);
+        return {std::move(executor), status_t::success_k};
+    }
+
+    /** Opens one stream per entry of @p devices. */
+    static expected<metal_executor_t> spawn(std::span<int const> devices) noexcept {
+        growing_buffer<stream_t> streams {global_allocator};
+        if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
         for (int const device : devices) {
             metal_context_t* const context = metal_context(device);
             if (!context) return {{}, status_t::device_error_k};
             void* const queue = metal_send(context->device, "newCommandQueue");
             if (!queue) return {{}, status_t::device_error_k};
-            executor.streams_.push_back_reserved(metal_queue_t {device, queue});
+            streams.push_back_reserved(stream_t {metal_stream_t {device, queue}});
         }
-        return {std::move(executor), status_t::success_k};
+        return acquire(std::move(streams));
     }
 
-    /** The twin of @ref spawn for a call that names no executor: every device's default queue, as
-     *  the CUDA executor takes the null stream. */
-    static expected<metal_executor_t> on_default_streams(std::span<int const> devices) noexcept {
-        if (devices.empty()) return {{}, status_t::config_mismatch_k};
-        metal_executor_t executor;
-        if (failed(executor.streams_.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
-        for (int const device : devices) {
-            if (!metal_context(device)) return {{}, status_t::device_error_k};
-            executor.streams_.push_back_reserved(metal_queue_t {device});
+    /** Claims @p bytes_per_stream of scratch on every stream, ahead of the fan-out that maps state
+     *  onto it; the old run lives on in whichever command buffer still binds it. */
+    status_t reserve(std::size_t bytes_per_stream) noexcept {
+        if (streams_.empty()) return status_t::uninitialized_k;
+        for (stream_t& opened : streams_) {
+            metal_context_t* const context = metal_context(opened.handle.device);
+            if (!context) return status_t::device_error_k;
+            opened.arena = metal_allocate(*context, bytes_per_stream);
+            if (bytes_per_stream && !opened.arena) return status_t::bad_alloc_k;
         }
-        return {std::move(executor), status_t::success_k};
+        return status_t::success_k;
     }
 
-    /** Waits for every command buffer committed to every queue - the fleet's completion: one empty
-     *  command buffer per queue, which completes only after every one committed before it. */
+    /** Waits for every command buffer committed to every stream - the fleet's completion: one empty
+     *  command buffer per stream, which completes only after every one committed before it. */
     status_t drain() noexcept {
         metal_api_t const& api = metal_api();
         constexpr std::size_t completed_k = 4; // `MTLCommandBufferStatusCompleted`
-        for (metal_queue_t const& queue : streams_) {
-            metal_context_t* const context = metal_context(queue.device);
+        for (stream_t const& opened : streams_) {
+            metal_stream_t const& stream = opened.handle;
+            metal_context_t* const context = metal_context(stream.device);
             if (!context) return status_t::device_error_k;
             void* const pool = api.autorelease_pool_push();
-            void* const commands = metal_send(queue.handle() ? queue.handle() : context->queue, "commandBuffer");
+            void* const commands = metal_send(stream.handle() ? stream.handle() : context->queue, "commandBuffer");
             std::size_t state = 0;
             if (commands) {
                 metal_send<void>(commands, "commit");
@@ -535,17 +569,17 @@ struct metal_executor_t {
         return status_t::success_k;
     }
 
-    /** The queue at @p index, in the order the devices were named. */
-    metal_queue_t& stream(std::size_t index) noexcept { return streams_[index]; }
+    /** The stream at @p index, in the order the devices were named. */
+    stream_t& stream(std::size_t index) noexcept { return streams_[index]; }
 
-    /** The Apple ordinal queue @p index submits to - what a caller pairs its shards against. */
-    int device(std::size_t index) const noexcept { return streams_[index].device; }
+    /** The Apple ordinal stream @p index submits to - what a caller pairs its shards against. */
+    int device(std::size_t index) const noexcept { return streams_[index].handle.device; }
 
-    /** Queues this executor drives, one per device. */
+    /** Streams this executor drives, one per device. */
     std::size_t size() const noexcept { return streams_.size(); }
 
   private:
-    growing_buffer<metal_queue_t> streams_ {global_allocator};
+    growing_buffer<stream_t> streams_ {global_allocator};
     fu::spin_mutex_t held_;
 };
 

@@ -211,6 +211,8 @@ function (usearch_gpu_bundle target vendor name source)
         )
         separate_arguments(device_flags_ UNIX_COMMAND "${CMAKE_CUDA_FLAGS}")
         set(host_only_ "-xcuda;--cuda-host-only;-nocudalib;--cuda-path=${CUDAToolkit_LIBRARY_ROOT}")
+        # Clang's CUDA mode adds the toolkit's `include` alone, while CUDA 13 keeps `cuda/atomic` in CCCL's own.
+        target_include_directories(${target} SYSTEM PRIVATE ${CUDAToolkit_INCLUDE_DIRS})
     else ()
         set(device_only_ "${CMAKE_CXX_COMPILER};-x;hip;--cuda-device-only;-c")
         set(host_only_ "-xhip;--cuda-host-only;-nogpulib")

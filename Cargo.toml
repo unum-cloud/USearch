@@ -26,7 +26,7 @@ path = "rust/lib.rs"
 
 [dependencies]
 # Pinned to the same revision as the submodule and CMake.
-numkong = { git = "https://github.com/ashvardanian/NumKong", rev = "215377db8fc434fe96e3d548d416670cbafc6198" }
+numkong = { git = "https://github.com/ashvardanian/NumKong", rev = "614ba065b306d65040f2b7cb46c7aa72176faed3" }
 
 # Which implementation of the C interface gets linked. Each is a whole implementation rather than
 # a knob on one, so they are mutually exclusive and `build.rs` refuses a pair rather than choosing.

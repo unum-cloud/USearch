@@ -12,8 +12,9 @@
  *  lists them, and placing an index there refuses.
  *
  *  Every vendor's device header provides the same surface: @c <vendor>_gpu_devices, an executor
- *  with static @c spawn and @c on_default_streams over vendor ordinals, @c device, @c vendor_k and
- *  @c device_arena_t, and that arena with @c allocate, @c contains, @c clear and @c upload.
+ *  with a static @c spawn over vendor ordinals, @c device, @c vendor_k and @c device_arena_t, and
+ *  that arena, made from the executor's first stream, with @c allocate, @c contains, @c clear,
+ *  @c upload and @c drain.
  */
 #pragma once
 
@@ -98,18 +99,19 @@ inline expected<gpu_executor_t> spawn_gpu_executor(std::span<gpu_device_t const>
     return result;
 }
 
-/** Device memory a C-layer call lands its outputs in, on the vendor and first device of the
- *  executor it was made for, or none for host-resident calls. */
+/** Device memory a C-layer call lands its outputs in, on the vendor and first stream of the
+ *  executor it was made for, or none for host-resident calls; it serves calls on that executor
+ *  alone, and dies before it. */
 struct gpu_arena_t {
     gpu_vendors_variant<gpu_device_arena_of> arena;
 
-    /** Places the arena on @p executor 's vendor and first device; none for no GPU. */
-    static gpu_arena_t on(gpu_executor_t const& executor) noexcept {
+    /** Places the arena on @p executor 's vendor and first stream; none for no GPU. */
+    static gpu_arena_t on(gpu_executor_t& executor) noexcept {
         gpu_arena_t placed;
         std::visit(
-            [&]<typename executor_type_>(executor_type_ const& typed) noexcept {
+            [&]<typename executor_type_>(executor_type_& typed) noexcept {
                 if constexpr (!std::is_same_v<executor_type_, std::monostate>)
-                    placed.arena.template emplace<typename executor_type_::device_arena_t>(typed.device(0));
+                    placed.arena.template emplace<typename executor_type_::device_arena_t>(typed.stream(0));
             },
             executor);
         return placed;
@@ -158,12 +160,24 @@ struct gpu_arena_t {
             arena);
     }
 
-    /** Synchronously copies @p bytes of host memory at @p source to @p destination in the arena. */
+    /** Queues a copy of @p bytes of host memory at @p source to @p destination in the arena on its
+     *  executor's first stream; @p source must stay alive until @ref drain. */
     status_t upload(void* destination, void const* source, std::size_t bytes) noexcept {
         return std::visit(
             [&]<typename arena_type_>(arena_type_& typed) noexcept {
                 if constexpr (std::is_same_v<arena_type_, std::monostate>) return status_t::device_error_k;
                 else return typed.upload(destination, source, bytes);
+            },
+            arena);
+    }
+
+    /** Waits once for every upload queued since the last @ref clear; none is ever queued without a
+     *  device. */
+    status_t drain() noexcept {
+        return std::visit(
+            []<typename arena_type_>(arena_type_& typed) noexcept {
+                if constexpr (std::is_same_v<arena_type_, std::monostate>) return status_t::success_k;
+                else return typed.drain();
             },
             arena);
     }
