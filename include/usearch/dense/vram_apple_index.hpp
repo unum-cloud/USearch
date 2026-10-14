@@ -312,6 +312,10 @@ struct vram_apple_index {
     /** Rows of the per-simdgroup candidate cache, as on CUDA. */
     inline static constexpr std::size_t cache_rows_k = 64;
 
+    /** Rows one checkpoint batch carries between a matrix and the caller: one slab, the row
+     *  granularity the RAM residency grows by. */
+    inline static constexpr std::size_t batch_rows_log2_k = 20;
+
     /** The host capability rows import into the shared staging at: the arm's own names only the
      *  GPU, and every Apple silicon host has NEON. */
     inline static constexpr nk_capability_t import_capability_k = nk_cap_serial_k | nk_cap_neon_k;
@@ -731,7 +735,8 @@ struct vram_apple_index {
         save_plan_t() noexcept = default;
         save_plan_t(vram_apple_index& index, columns_t columns, node_id_t id_shift, node_id_t visible) noexcept
             : columns(columns), id_shift(id_shift), visible(visible),
-              batch_rows(min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(20))), index_(&index) {}
+              batch_rows(min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(batch_rows_log2_k))),
+              index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
             : columns(other.columns), id_shift(other.id_shift), visible(other.visible), batch_rows(other.batch_rows),
               covered_vectors(other.covered_vectors), covered_neighbors(other.covered_neighbors),
@@ -848,8 +853,8 @@ struct vram_apple_index {
         load_plan_t() noexcept = default;
         load_plan_t(vram_apple_index& index, std::unique_lock<std::mutex>&& batch, node_id_t base,
                     std::size_t rows) noexcept
-            : base(base), rows(rows), batch_rows(min_of(rows, power_of_two<std::size_t>(20))), index_(&index),
-              batch_(std::move(batch)) {}
+            : base(base), rows(rows), batch_rows(min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k))),
+              index_(&index), batch_(std::move(batch)) {}
         load_plan_t(load_plan_t&& other) noexcept
             : columns(other.columns), source_range(other.source_range), base(other.base),
               rows(std::exchange(other.rows, 0)), batch_rows(other.batch_rows), covered_vectors(other.covered_vectors),
