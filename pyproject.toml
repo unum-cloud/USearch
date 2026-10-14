@@ -162,7 +162,7 @@ before-build = [
 [dependency-groups]
 lint = ["ruff>=0.15.8"]
 # NumKong is what `usearch.eval` computes the exact neighbors with.
-test = ["numkong>=7.8", "numpy>=1.21", "pytest>=8", "pytest-repeat>=0.9.4"]
+test = ["numkong>=8.0.0-rc.1", "numpy>=1.21", "pytest>=8", "pytest-repeat>=0.9.4"]
 # Free-threaded builds only report a race if several threads actually enter the extension at once.
 test-parallel = ["pytest-run-parallel>=0.7"]
 # The reference the recall checks score against, and the progress bar the sweeps in `eval` print.

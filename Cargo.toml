@@ -25,8 +25,11 @@ name = "usearch"
 path = "rust/lib.rs"
 
 [dependencies]
-# Pinned to the same revision as the submodule and CMake.
-numkong = { git = "https://github.com/ashvardanian/NumKong", rev = "614ba065b306d65040f2b7cb46c7aa72176faed3" }
+# CMake builds each crate's tree in place of downloading the revision the submodule pins.
+forkunion = { version = "4.0.0-rc.1", default-features = false }
+numkong = "8.0.0-rc.1"
+smashtable = "1.0.0-rc.1"
+stringzilla = { version = "6.0.0-rc.1", default-features = false }
 
 # Which implementation of the C interface gets linked. Each is a whole implementation rather than
 # a knob on one, so they are mutually exclusive and `build.rs` refuses a pair rather than choosing.

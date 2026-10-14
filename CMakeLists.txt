@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.28 FATAL_ERROR)
 project(
     usearch
-    VERSION 2.25.1
+    VERSION 3.0.0
     LANGUAGES C CXX
     DESCRIPTION "Billion-Scale Multi-Modal Search, Clustering, & Sparse Algebra Engine for CPUs, GPUs, & NVMe Devices"
     HOMEPAGE_URL "https://github.com/unum-cloud/USearch"

@@ -98,6 +98,12 @@ fn selected() -> Result<Implementation, String> {
     }
 }
 
+/// The tree a sibling crate reports through its `links` metadata.
+fn sibling_source(links: &str) -> Result<String, String> {
+    let variable = format!("DEP_{}_SOURCE", links.to_uppercase());
+    env::var(&variable).map_err(|_| format!("{variable} is unset: this `{links}` crate predates reporting its tree"))
+}
+
 /// Rebuilds when a directory's contents change, recursing because Cargo watches only what it is
 /// told and a nested source would otherwise go unnoticed.
 fn watch(directory: &Path) {
@@ -127,6 +133,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     for option in KNOWN_OPTIONS {
         let wanted = chosen.options.contains(option);
         engine.define(option, if wanted { "ON" } else { "OFF" });
+    }
+    // `FetchContent` builds each sibling crate's tree rather than downloading the pinned revision again.
+    for (variable, links) in [
+        ("FETCHCONTENT_SOURCE_DIR_FORKUNION", "forkunion"),
+        ("FETCHCONTENT_SOURCE_DIR_NUMKONG", "numkong"),
+        ("FETCHCONTENT_SOURCE_DIR_SMASHTABLE", "smashtable"),
+        ("FETCHCONTENT_SOURCE_DIR_STRINGZILLA", "stringzilla"),
+    ] {
+        engine.define(variable, sibling_source(links)?);
     }
 
     // `cmake-rs` has no WASI system name to hand CMake, so the checked-in toolchain names the SDK and the

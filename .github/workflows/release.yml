@@ -40,15 +40,15 @@ jobs:
           verbose: "true"
           version-file: "VERSION"
           update-version-in: |
-            package.json:"version": "(\d+\.\d+\.\d+)"
-            CITATION.cff:^version: (\d+\.\d+\.\d+)
-            Cargo.toml:^version = "(\d+\.\d+\.\d+)"
-            conanfile.py:version = "(\d+\.\d+\.\d+)"
-            java/README.md:usearchVersion = '(\d+\.\d+\.\d+)'
-            java/README.md:version: '(\d+\.\d+\.\d+)'
-            README.md:version = {(\d+\.\d+\.\d+)}
-            csharp/nuget/nuget-package.props:>(\d+\.\d+\.\d+)</Version>
-            CMakeLists.txt:VERSION (\d+\.\d+\.\d+)
+            package.json:"version": "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
+            CITATION.cff:^version: (\d+\.\d+\.\d+(?:-rc\.\d+)?)
+            Cargo.toml:^version = "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
+            conanfile.py:version = "(\d+\.\d+\.\d+(?:-rc\.\d+)?)"
+            java/README.md:usearchVersion = '(\d+\.\d+\.\d+(?:-rc\.\d+)?)'
+            java/README.md:version: '(\d+\.\d+\.\d+(?:-rc\.\d+)?)'
+            README.md:version = {(\d+\.\d+\.\d+(?:-rc\.\d+)?)}
+            csharp/nuget/nuget-package.props:>(\d+\.\d+\.\d+(?:-rc\.\d+)?)</Version>
+            CMakeLists.txt:VERSION (\d+\.\d+\.\d+(?:-rc\.\d+)?)
           update-major-version-in: |
             include/usearch/types.h:^#define USEARCH_VERSION_MAJOR (\d+)
           update-minor-version-in: |
