@@ -765,6 +765,268 @@ void test_walks_name_their_index(size_t const dimensions) {
     printf("Test: Walks Name Their Index - PASSED\n");
 }
 
+enum { neighborhood_rows_k = 200, neighborhood_dimensions_k = 16, sampled_wanted_k = 48, sampled_links_k = 3 };
+
+/** The integer identity a key wraps, as @c key_of wrapped it. */
+uint64_t value_of(usearch_key_t key) {
+    uint64_t value = 0;
+    for (unsigned byte_index = 0; byte_index != 8; ++byte_index)
+        value |= (uint64_t)key.bytes[15 - byte_index] << (byte_index * 8);
+    return value;
+}
+
+/** The Euclidean distance between two of @p rows. */
+double row_distance(float const* rows, size_t first, size_t second) {
+    double squared = 0;
+    for (size_t dimension = 0; dimension != neighborhood_dimensions_k; ++dimension) {
+        double const delta = (double)rows[first * neighborhood_dimensions_k + dimension] -
+                             (double)rows[second * neighborhood_dimensions_k + dimension];
+        squared += delta * delta;
+    }
+    return sqrt(squared);
+}
+
+/** A Euclidean index over @p rows, each under the key of its position but row 1, which shares row
+ *  0's key, so one key holds two entries. */
+usearch_dense_index_t create_neighborhood(float const* rows, usearch_executor_t executor) {
+    usearch_outcome_t outcome = {0};
+    usearch_dense_index_t index = NULL;
+    usearch_dense_init_ram(&(usearch_dense_init_ram_t) {.index = &index,
+                                                        .outcome = &outcome,
+                                                        .metric = usearch_dense_metric_euclidean_k,
+                                                        .quantization = usearch_scalar_bf16_k,
+                                                        .dimensions = neighborhood_dimensions_k,
+                                                        .connectivity = 8,
+                                                        .values_per_key = 2});
+    expect(!outcome.message, outcome.message);
+    usearch_key_t keys[neighborhood_rows_k];
+    for (size_t row = 0; row != neighborhood_rows_k; ++row) keys[row] = key_of(row == 1 ? 0 : row);
+    usearch_dense_reserve(&(usearch_dense_reserve_t) {.index = index,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .capacity = neighborhood_rows_k});
+    expect(!outcome.message, outcome.message);
+    usearch_dense_insert(&(usearch_dense_insert_t) {
+        .index = index,
+        .executor = executor,
+        .outcome = &outcome,
+        .count = neighborhood_rows_k,
+        .keys = {keys, sizeof(usearch_key_t)},
+        .vectors = {rows, neighborhood_dimensions_k * sizeof(float), neighborhood_dimensions_k, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+    return index;
+}
+
+/** One run of draws with their links, copied out of the arena every call rewinds. */
+typedef struct sampled_t {
+    size_t written;
+    usearch_key_t keys[sampled_wanted_k];
+    size_t offsets[sampled_wanted_k + 1];
+    usearch_key_t linked[sampled_wanted_k * sampled_links_k];
+    usearch_distance_t distances[sampled_wanted_k * sampled_links_k];
+} sampled_t;
+
+/** Draws up to @p wanted more of the sequence @p seed names, past the draws @p sampled holds, and
+ *  appends them; answers the outcome, which an implementation that cannot sample fails. */
+usearch_outcome_t sample_more(usearch_dense_index_t index, usearch_executor_t executor, usearch_arena_t arena,
+                              uint64_t seed, size_t wanted, sampled_t* sampled) {
+    usearch_outcome_t outcome = {0};
+    usearch_keys_view_t drawn = {0};
+    usearch_matches_tape_view_t links = {0};
+    size_t written = 0;
+    usearch_dense_sample(&(usearch_dense_sample_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .keys = &drawn,
+                                                    .links = &links,
+                                                    .written = &written,
+                                                    .arena = arena,
+                                                    .wanted = wanted,
+                                                    .offset = sampled->written,
+                                                    .links_per_draw = sampled_links_k,
+                                                    .seed = seed});
+    if (outcome.status != usearch_status_success_k) return outcome;
+    expect(written <= wanted, "A sample writes at most the draws wanted");
+    size_t const base = sampled->written;
+    for (size_t draw = 0; draw != written; ++draw) {
+        sampled->keys[base + draw] = drawn.data[draw];
+        sampled->offsets[base + draw + 1] = sampled->offsets[base] + links.offsets[draw + 1];
+    }
+    size_t const linked = links.offsets[written];
+    memcpy(sampled->linked + sampled->offsets[base], links.keys, linked * sizeof(usearch_key_t));
+    memcpy(sampled->distances + sampled->offsets[base], links.scores, linked * sizeof(usearch_distance_t));
+    sampled->written = base + written;
+    return outcome;
+}
+
+/** Whether two runs drew the same keys and links, their distances within a relative tolerance. */
+bool same_samples(sampled_t const* first, sampled_t const* second) {
+    size_t const links = first->offsets[first->written];
+    if (first->written != second->written ||
+        memcmp(first->keys, second->keys, first->written * sizeof(usearch_key_t)) != 0 ||
+        memcmp(first->offsets, second->offsets, (first->written + 1) * sizeof(size_t)) != 0 ||
+        memcmp(first->linked, second->linked, links * sizeof(usearch_key_t)) != 0)
+        return false;
+    for (size_t link = 0; link != links; ++link)
+        if (fabs(first->distances[link] - second->distances[link]) > 1e-6 * fabs(first->distances[link]) + 1e-12)
+            return false;
+    return true;
+}
+
+/** A sample extends one seeded sequence: two calls joined by @c offset draw what one call does, an
+ *  equal seed repeats it, every draw after the first links to earlier ones, and a radius around an
+ *  anchor bounds the region. An implementation that cannot sample says so, and the test skips. */
+void test_sample(void) {
+    printf("Test: Sample\n");
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t const executor = create_executor(0);
+    usearch_arena_t const arena = create_arena(executor);
+    float* const rows = create_vectors(neighborhood_rows_k, neighborhood_dimensions_k);
+    usearch_dense_index_t const index = create_neighborhood(rows, executor);
+
+    sampled_t once = {0}, joined = {0}, repeated = {0};
+    outcome = sample_more(index, executor, arena, 42, sampled_wanted_k, &once);
+    if (outcome.status == usearch_status_unsupported_k) {
+        printf("Test: Sample - SKIPPED: %s\n", outcome.message);
+        usearch_dense_free(index);
+        free(rows);
+        usearch_arena_free(arena);
+        usearch_executor_free(executor);
+        return;
+    }
+    expect(!outcome.message, outcome.message);
+    expect_eq(once.written, sampled_wanted_k, "A sample of the whole index draws all it wants");
+    outcome = sample_more(index, executor, arena, 42, 20, &joined);
+    expect(!outcome.message, outcome.message);
+    outcome = sample_more(index, executor, arena, 42, sampled_wanted_k - 20, &joined);
+    expect(!outcome.message, outcome.message);
+    expect(same_samples(&once, &joined), "Two calls joined by their offset must draw what one call does");
+    outcome = sample_more(index, executor, arena, 42, sampled_wanted_k, &repeated);
+    expect(!outcome.message, outcome.message);
+    expect(same_samples(&once, &repeated), "An equal seed must repeat the sequence");
+
+    for (size_t draw = 0; draw != once.written; ++draw) {
+        size_t const links = once.offsets[draw + 1] - once.offsets[draw];
+        expect(draw ? links >= 1 && links <= sampled_links_k : links == 0,
+               "Every draw after the first, and only those, links to earlier draws");
+        for (size_t link = once.offsets[draw]; link != once.offsets[draw + 1]; ++link) {
+            bool earlier = false;
+            for (size_t previous = 0; previous != draw; ++previous)
+                earlier = earlier ||
+                          memcmp(once.linked[link].bytes, once.keys[previous].bytes, sizeof(usearch_key_t)) == 0;
+            expect(earlier, "A link must name an earlier draw");
+        }
+    }
+
+    // The mean distance from row 0 splits the index, so its region is neither empty nor whole.
+    double radius = 0;
+    for (size_t row = 0; row != neighborhood_rows_k; ++row) radius += row_distance(rows, 0, row);
+    radius /= neighborhood_rows_k;
+    usearch_keys_view_t drawn = {0};
+    usearch_matches_tape_view_t links = {0};
+    size_t written = 0;
+    usearch_dense_sample(&(usearch_dense_sample_t) {
+        .index = index,
+        .executor = executor,
+        .outcome = &outcome,
+        .anchors_count = 1,
+        .anchors = {rows, neighborhood_dimensions_k * sizeof(float), neighborhood_dimensions_k, usearch_scalar_f32_k},
+        .keys = &drawn,
+        .links = &links,
+        .written = &written,
+        .arena = arena,
+        .wanted = neighborhood_rows_k,
+        .links_per_draw = 1,
+        .seed = 7,
+        .radius = radius});
+    expect(!outcome.message, outcome.message);
+    expect(written >= 1 && written < neighborhood_rows_k, "A radius must bound the region drawn from");
+    for (size_t draw = 0; draw != written; ++draw)
+        expect(row_distance(rows, 0, value_of(drawn.data[draw])) <= radius * (1 + 1e-6),
+               "No draw may lie outside the radius");
+
+    usearch_dense_free(index);
+    free(rows);
+    usearch_arena_free(arena);
+    usearch_executor_free(executor);
+    printf("Test: Sample - PASSED\n");
+}
+
+/** Pulls @p cursor to its end and frees it, counting in @p yielded how often each key's integer
+ *  identity came up; answers the entries pulled. */
+size_t pull_to_end(usearch_dense_index_t index, usearch_executor_t executor, usearch_arena_t arena,
+                   usearch_dense_cursor_t cursor, size_t* yielded) {
+    usearch_outcome_t outcome = {0};
+    size_t pulled = 0, written = 0;
+    do {
+        usearch_keys_view_t keys = {0};
+        usearch_dense_cursor_next(&(usearch_dense_cursor_next_t) {.index = index,
+                                                                  .executor = executor,
+                                                                  .outcome = &outcome,
+                                                                  .cursor = cursor,
+                                                                  .keys = &keys,
+                                                                  .written = &written,
+                                                                  .arena = arena,
+                                                                  .wanted = 64});
+        expect(!outcome.message, outcome.message);
+        for (size_t entry = 0; entry != written; ++entry) {
+            uint64_t const value = value_of(keys.data[entry]);
+            expect(value < neighborhood_rows_k, "A cursor yields only keys the index holds");
+            ++yielded[value];
+        }
+        pulled += written;
+    } while (written);
+    usearch_dense_cursor_free(cursor);
+    return pulled;
+}
+
+/** A cursor opened at a key steps to the entries that key's entries link to, once each and never
+ *  the key's own, and an absent key steps nowhere, while a plain scan still yields every row once.
+ *  An implementation that cannot step yet says so, and that half skips. */
+void test_cursor_steps(void) {
+    printf("Test: Cursor Steps\n");
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t const executor = create_executor(0);
+    usearch_arena_t const arena = create_arena(executor);
+    float* const rows = create_vectors(neighborhood_rows_k, neighborhood_dimensions_k);
+    usearch_dense_index_t const index = create_neighborhood(rows, executor);
+
+    size_t yielded[neighborhood_rows_k] = {0};
+    usearch_dense_cursor_t cursor = NULL;
+    usearch_dense_cursor_init(&(usearch_dense_cursor_init_t) {.cursor = &cursor, .index = index, .outcome = &outcome});
+    expect(!outcome.message, outcome.message);
+    expect_eq(pull_to_end(index, executor, arena, cursor, yielded), neighborhood_rows_k,
+              "A plain scan must yield every row");
+    for (size_t row = 0; row != neighborhood_rows_k; ++row)
+        expect(yielded[row] == (row == 0 ? 2u : row == 1 ? 0u : 1u), "A plain scan must yield every row once");
+
+    usearch_key_t const start = key_of(0);
+    usearch_dense_cursor_init(
+        &(usearch_dense_cursor_init_t) {.cursor = &cursor, .index = index, .outcome = &outcome, .start = &start});
+    if (outcome.status == usearch_status_unsupported_k)
+        printf("Test: Cursor Steps - SKIPPED the step: %s\n", outcome.message);
+    else {
+        expect(!outcome.message, outcome.message);
+        memset(yielded, 0, sizeof(yielded));
+        expect(pull_to_end(index, executor, arena, cursor, yielded) != 0, "A key's entries must link somewhere");
+        expect_eq(yielded[0], 0, "A step must never yield the start key's own entries");
+        for (size_t row = 0; row != neighborhood_rows_k; ++row)
+            expect(yielded[row] <= 1, "A step must yield each linked entry once");
+
+        usearch_key_t const absent = key_of(neighborhood_rows_k);
+        usearch_dense_cursor_init(
+            &(usearch_dense_cursor_init_t) {.cursor = &cursor, .index = index, .outcome = &outcome, .start = &absent});
+        expect(!outcome.message, outcome.message);
+        expect_eq(pull_to_end(index, executor, arena, cursor, yielded), 0, "An absent key must step nowhere");
+    }
+
+    usearch_dense_free(index);
+    free(rows);
+    usearch_arena_free(arena);
+    usearch_executor_free(executor);
+    printf("Test: Cursor Steps - PASSED\n");
+}
+
 /** A packed kind's row is as wide as its logical dimensions, so every product spans all of them -
  *  a row read at its storage width is either refused or scored over half its dimensions. */
 void test_multiply_packed(void) {
@@ -1672,6 +1934,8 @@ int main(int argc, char* argv[]) {
     if (selected("count_and_get")) test_count_and_get(dimension_counts[1]);
     if (selected("arenas")) test_arenas(dimension_counts[0]);
     if (selected("walks_name_their_index")) test_walks_name_their_index(dimension_counts[0]);
+    if (selected("sample")) test_sample();
+    if (selected("cursor_steps")) test_cursor_steps();
 #if USEARCH_DENSE_DTYPES >= 2
     if (selected("multiply_packed")) test_multiply_packed();
 #endif

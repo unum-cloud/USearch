@@ -586,6 +586,7 @@ const usearch_dense_cursor_init_t = extern struct {
     cursor: *?*anyopaque,
     index: ?*anyopaque,
     outcome: *Outcome,
+    start: ?*const Key,
 };
 
 const usearch_dense_cursor_next_t = extern struct {
@@ -1936,7 +1937,7 @@ pub const DenseCursor = struct {
     pub fn init(index: DenseIndex) Error!DenseCursor {
         var handle: ?*anyopaque = null;
         var outcome: Outcome = .{};
-        var arguments: usearch_dense_cursor_init_t = .{ .cursor = &handle, .index = index.handle, .outcome = &outcome };
+        var arguments: usearch_dense_cursor_init_t = .{ .cursor = &handle, .index = index.handle, .outcome = &outcome, .start = null };
         usearch_dense_cursor_init(&arguments);
         errdefer usearch_dense_cursor_free(handle);
         try outcome.check();

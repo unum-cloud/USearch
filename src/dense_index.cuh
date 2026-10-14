@@ -2530,7 +2530,8 @@ using deferred_arguments_t =
                  usearch_dense_search_t, usearch_dense_count_t, usearch_dense_get_t, usearch_dense_merge_t,
                  usearch_dense_cursor_next_t, usearch_dense_search_stream_next_t, usearch_dense_save_t,
                  usearch_dense_save_buffer_t, usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t,
-                 usearch_dense_describe_t, usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t>;
+                 usearch_dense_describe_t, usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t,
+                 usearch_dense_sample_t>;
 
 /** Where one slot of a deferred table stands. */
 enum class deferred_stage_t : unsigned char {
@@ -3587,6 +3588,9 @@ USEARCH_EXPORT void usearch_dense_search_stream_free(usearch_dense_search_stream
 USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
     *arguments->cursor = nullptr;
+    if (arguments->start)
+        return propagate_error(usearch_status_unsupported_k, outcome, "No residency steps through graph links yet"),
+               void();
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
             if constexpr (is_vram_index<variant_type_>)
@@ -3687,6 +3691,16 @@ USEARCH_EXPORT void usearch_dense_merge(usearch_dense_merge_t* arguments) {
     if (submitted<usearch_dense_merge>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
     propagate_error(usearch_status_unsupported_k, outcome, "No residency absorbs donor handles yet");
+}
+
+USEARCH_EXPORT void usearch_dense_sample(usearch_dense_sample_t* arguments) {
+    if (submitted<usearch_dense_sample>(arguments)) return;
+    call_outcome_t outcome(arguments->outcome, arguments->arena);
+    *arguments->keys = {};
+    *arguments->links = {};
+    *arguments->written = 0;
+    if (arguments->stats) *arguments->stats = {};
+    propagate_error(usearch_status_unsupported_k, outcome, "No residency samples yet");
 }
 
 #pragma endregion Cursors and Merging

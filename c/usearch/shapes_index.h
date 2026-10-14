@@ -745,6 +745,10 @@ typedef struct usearch_shapes_cursor_init_t {
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
     usearch_outcome_t* outcome;
+
+    /** The @b optional key to step from: the cursor then yields the entries that the key's entries
+     *  link to in the graph, once each and in link order; @c NULL scans every entry as stored. */
+    usearch_key_t const* start;
 } usearch_shapes_cursor_init_t;
 
 /** Opens a snapshot cursor over the current contents; see @c usearch_shapes_cursor_t. */
@@ -800,6 +804,75 @@ USEARCH_EXPORT void usearch_shapes_cursor_next(usearch_shapes_cursor_next_t* arg
 /** Releases the cursor; @c NULL is safe.
  *  Waits until every deferred call naming the handle is final. */
 USEARCH_EXPORT void usearch_shapes_cursor_free(usearch_shapes_cursor_t cursor);
+
+/** The arguments of @c usearch_shapes_sample. */
+typedef struct usearch_shapes_sample_t {
+
+    /** The handle to be sampled. */
+    usearch_shapes_index_t index;
+
+    /** The executor the draws run on; its kind must match the handle's residency. */
+    usearch_executor_t executor;
+
+    /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
+    usearch_outcome_t* outcome;
+
+    /** Blocking, the default, or deferred. */
+    usearch_completion_t completion;
+
+    /** The @b optional count of @c anchors; zero draws from the whole index. */
+    size_t anchors_count;
+
+    /** The shapes that bound the region around them, one anchor apiece, as points end to end
+     *  around @c anchors_count + 1 point offsets. @ref shapes_index_tape */
+    usearch_tape_view_t anchors;
+
+    /** Output for the identities drawn, inside @c arena. */
+    usearch_keys_view_t* keys;
+
+    /** Output for each draw's nearest earlier draws - their keys and distances, row @c i spanning
+     *  @c offsets[i] up to @c offsets[i+1] - inside @c arena. */
+    usearch_matches_tape_view_t* links;
+
+    /** Output for the draws written; fewer than @c wanted only once the region is exhausted. */
+    size_t* written;
+
+    /** Memory for @c keys and @c links, rewound by the call. */
+    usearch_arena_t arena;
+
+    /** The upper bound on draws this call writes. */
+    size_t wanted;
+
+    /** Draws already taken in this sequence, skipped so successive calls extend one sample. */
+    size_t offset;
+
+    /** Up to how many earlier draws each draw links to; one already keeps the sample connected. */
+    size_t links_per_draw;
+
+    /** The sequence: equal seeds, anchors and radius over an unchanged index draw equally. */
+    uint64_t seed;
+
+    /** The @b optional radius around the anchors; zero bounds nothing. */
+    usearch_distance_t radius;
+
+    /** The @b optional candidate-pool breadth of the walks behind the draws; zero derives. */
+    size_t expansion_factor;
+
+    /** The @b optional handler, called with draws written and @c wanted. */
+    usearch_progress_t progress;
+
+    /** The @b optional traversal telemetry; @c NULL skips reporting. */
+    usearch_shapes_traversal_stats_t* stats;
+} usearch_shapes_sample_t;
+
+/**
+ *  @brief Draws entries uniformly, across the index or around anchors, each linked to its nearest
+ *      earlier draws - so the sample is one connected component, ready to be laid out.
+ *
+ *  Links name earlier draws of the same sequence, a later call's reaching an earlier call's. They
+ *  are exact in a scan and approximate as any walk otherwise.
+ */
+USEARCH_EXPORT void usearch_shapes_sample(usearch_shapes_sample_t* arguments);
 
 /** The arguments of @c usearch_shapes_save. */
 typedef struct usearch_shapes_save_t {

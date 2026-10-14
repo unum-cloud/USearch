@@ -943,6 +943,7 @@ struct DenseCursorInitArguments(ImplicitlyCopyable):
     var cursor: Address
     var index: Address
     var outcome: Address
+    var start: Address
 
 
 @fieldwise_init
@@ -3124,7 +3125,10 @@ struct DenseCursor[origin: ImmOrigin]:
         created[unsafe_offset=0] = NULL_ADDRESS
         var outcome = stack_allocation[1, Outcome]()
         outcome[unsafe_offset=0] = Outcome()
-        _cross(DenseCursorInitArguments(Int(created), index, Int(outcome)), library.symbols().dense_cursor_init)
+        _cross(
+            DenseCursorInitArguments(Int(created), index, Int(outcome), NULL_ADDRESS),
+            library.symbols().dense_cursor_init,
+        )
         library._check(outcome.unsafe_origin_cast[MutAnyOrigin]()[unsafe_offset=0], "usearch_dense_cursor_init")
         self.library = library
         self.index = index

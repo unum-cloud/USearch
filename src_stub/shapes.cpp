@@ -24,7 +24,10 @@
  *  constant zero rather than a settling signal, and a caller must not read it as one. A view
  *  copies its checkpoint rather than mapping it, and every VRAM lifecycle verb refuses. Traversal
  *  statistics are plausible fiction: shaped correctly, invented numerically. A checkpoint is a
- *  binary blob of this file's own memory image, readable by nothing else.
+ *  binary blob of this file's own memory image, readable by nothing else. Keeping no edges, a
+ *  cursor opened at a key steps to its entries' exact nearest at the frozen connectivity, and a
+ *  sample links each draw to its exact nearest earlier draws - the lists a perfect graph would
+ *  hold, where the engine's are the ones it stored.
  */
 #include <cmath> // `std::sqrt`
 
@@ -84,11 +87,15 @@ struct shapes_cursor_t {
     /** The next entry to hand out. */
     std::size_t position;
 
-    /** The watermark captured at creation, which later insertions cannot raise. */
+    /** The creation watermark, which later insertions cannot raise, or the @c linked count. */
     std::size_t limit;
 
     /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
     std::atomic_flag pulling;
+
+    /** The entries a step from a key yields, in link order; empty for a scan, which yields them as
+     *  stored. */
+    std::vector<std::size_t> linked;
 };
 
 /** Whether this stand-in scores the kind, or rejects it rather than approximating it. */
@@ -632,9 +639,16 @@ void usearch_shapes_cursor_init(usearch_shapes_cursor_init_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->cursor = nullptr;
     usearch_shapes_index_handle_t& index = *arguments->index;
+    if (arguments->start && reject_metric(index, outcome)) return;
     std::shared_lock readers(index.mutex);
+    auto const score = [&](shapes_payload_t const& first, shapes_payload_t const& second) {
+        return distance(index, first, second);
+    };
+    std::vector<std::size_t> linked;
+    if (arguments->start) linked = linked_rows(index, *arguments->start, score);
+    std::size_t const limit = arguments->start ? linked.size() : index.entries.size();
     usearch_shapes_cursor_handle_t* const cursor = new (std::nothrow)
-        usearch_shapes_cursor_handle_t {&index, 0, index.entries.size(), {}};
+        usearch_shapes_cursor_handle_t {&index, 0, limit, {}, std::move(linked)};
     if (reject_if(!cursor, usearch_status_out_of_memory_k, "The cursor could not be allocated", outcome)) return;
     *arguments->cursor = cursor;
 }
@@ -660,7 +674,8 @@ void usearch_shapes_cursor_next(usearch_shapes_cursor_next_t* arguments) {
     std::shared_lock readers(index.mutex);
     std::size_t const written = std::min(arguments->wanted, cursor.limit - cursor.position);
     std::vector<std::size_t> rows(written);
-    for (std::size_t row = 0; row != written; ++row) rows[row] = cursor.position + row;
+    for (std::size_t row = 0; row != written; ++row)
+        rows[row] = cursor.linked.empty() ? cursor.position + row : cursor.linked[cursor.position + row];
     usearch_key_t* const keys = carve<usearch_key_t>(*arena, written, outcome);
     // A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
     if (keys && (!shapes || land_entries(index, rows, arguments->outputs_scalar, *arena, *shapes, outcome))) {
@@ -675,6 +690,41 @@ void usearch_shapes_cursor_next(usearch_shapes_cursor_next_t* arguments) {
 void usearch_shapes_cursor_free(usearch_shapes_cursor_t handle) {
     wait_for_calls_using(handle);
     delete handle;
+}
+
+void usearch_shapes_sample(usearch_shapes_sample_t* arguments) {
+    if (through_executor<usearch_shapes_sample>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
+    reset(arguments->stats);
+    *arguments->keys = {};
+    *arguments->links = {};
+    *arguments->written = 0;
+    usearch_shapes_index_handle_t& index = *arguments->index;
+    if (reject_metric(index, outcome)) return;
+    std::size_t const anchors_count = arguments->anchors_count;
+    usearch_tape_view_t const& anchors = arguments->anchors;
+    if (anchors_count && (reject_scalar(anchors.scalar, outcome) || reject_tape(anchors, anchors_count, outcome)))
+        return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
+                                                      {anchors.data, anchors.offsets}, outcome);
+    if (!arena) return;
+
+    std::vector<shapes_payload_t> anchor_shapes(anchors_count);
+    for (std::size_t anchor = 0; anchor != anchors_count; ++anchor) read_shape(anchors, anchor, anchor_shapes[anchor]);
+    auto const score = [&](shapes_payload_t const& first, shapes_payload_t const& second) {
+        return distance(index, first, second);
+    };
+    usearch_distance_t const radius = arguments->radius;
+    auto const within = [&](std::size_t row) {
+        if (!anchors_count || radius == 0) return true;
+        for (shapes_payload_t const& anchor : anchor_shapes)
+            if (score(anchor, index.entries[row].payload) <= radius) return true;
+        return false;
+    };
+
+    std::shared_lock readers(index.mutex);
+    std::vector<std::size_t> const order = drawing_order(index.entries.size(), arguments->seed, within);
+    land_sample(*arguments, std::span<shapes_entry_t const>(index.entries), order, score, *arena, outcome);
 }
 
 void usearch_shapes_save(usearch_shapes_save_t* arguments) {

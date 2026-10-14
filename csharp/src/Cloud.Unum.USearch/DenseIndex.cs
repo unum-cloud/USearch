@@ -2411,6 +2411,7 @@ internal unsafe struct NativeDenseCursorInit
     public IntPtr* Cursor;
     public IntPtr Index;
     public NativeOutcome* Outcome;
+    public Key* Start;
 }
 
 /// <summary>The arguments of <c>usearch_dense_cursor_next</c>.</summary>

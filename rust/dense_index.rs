@@ -246,6 +246,7 @@ pub struct usearch_dense_cursor_init_t {
     pub cursor: *mut usearch_dense_cursor_t,
     pub index: usearch_dense_index_t,
     pub outcome: *mut usearch_outcome_t,
+    pub start: *const usearch_key_t,
 }
 
 #[repr(C)]
@@ -1914,6 +1915,7 @@ pub trait DenseVerbs<'index>: Copy {
                 cursor: &mut cursor.handle,
                 index: cursor.handles.index,
                 outcome: &mut outcome,
+                start: ptr::null(),
             })
         };
         check(outcome).map(|()| cursor)

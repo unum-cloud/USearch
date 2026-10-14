@@ -40,7 +40,10 @@
  *  and NVMe lifecycle verb refuses. Traversal statistics are plausible fiction: shaped
  *  correctly, invented numerically, so assert that they move, never what they equal. A checkpoint
  *  is a binary blob of this file's own memory image - not SafeGraphs, not portable across builds,
- *  and readable by nothing but the stand-in that wrote it.
+ *  and readable by nothing but the stand-in that wrote it. Keeping no edges, a cursor opened at a
+ *  key steps to its entries' exact nearest at the frozen connectivity, and a sample links each draw
+ *  to its exact nearest earlier draws - the lists a perfect graph would hold, where the engine's
+ *  are the ones it stored.
  */
 #include <cmath> // `std::sqrt`, `std::exp`
 
@@ -105,11 +108,15 @@ struct dense_cursor_t {
     /** The next row to hand out. */
     std::size_t position;
 
-    /** The watermark captured at creation, which later insertions cannot raise. */
+    /** The creation watermark, which later insertions cannot raise, or the @c linked count. */
     std::size_t limit;
 
     /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
     std::atomic_flag pulling;
+
+    /** The rows a step from a key yields, in link order; empty for a scan, which yields rows as
+     *  stored. */
+    std::vector<std::size_t> linked;
 };
 
 struct dense_search_stream_t {
@@ -693,8 +700,14 @@ void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
     *arguments->cursor = nullptr;
     usearch_dense_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
+    auto const score = [&](dense_payload_t const& first, dense_payload_t const& second) {
+        return distance(index.options.metric, first, second);
+    };
+    std::vector<std::size_t> linked;
+    if (arguments->start) linked = linked_rows(index, *arguments->start, score);
+    std::size_t const limit = arguments->start ? linked.size() : index.entries.size();
     usearch_dense_cursor_handle_t* const cursor = new (std::nothrow)
-        usearch_dense_cursor_handle_t {&index, 0, index.entries.size(), {}};
+        usearch_dense_cursor_handle_t {&index, 0, limit, {}, std::move(linked)};
     if (reject_if(!cursor, usearch_status_out_of_memory_k, "The cursor could not be allocated", outcome)) return;
     *arguments->cursor = cursor;
 }
@@ -727,7 +740,8 @@ void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
     // A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
     if (keys && (rows || !vectors)) {
         for (std::size_t row = 0; row != written; ++row) {
-            dense_entry_t const& entry = index.entries[cursor.position + row];
+            std::size_t const position = cursor.position + row;
+            dense_entry_t const& entry = index.entries[cursor.linked.empty() ? position : cursor.linked[position]];
             keys[row] = entry.key;
             if (vectors) write_row(row_at<std::byte>(rows, row, row_bytes, row_bytes), scalar, entry.payload);
         }
@@ -742,6 +756,46 @@ void usearch_dense_cursor_next(usearch_dense_cursor_next_t* arguments) {
 void usearch_dense_cursor_free(usearch_dense_cursor_t handle) {
     wait_for_calls_using(handle);
     delete handle;
+}
+
+void usearch_dense_sample(usearch_dense_sample_t* arguments) {
+    if (through_executor<usearch_dense_sample>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
+    reset(arguments->stats);
+    *arguments->keys = {};
+    *arguments->links = {};
+    *arguments->written = 0;
+    usearch_dense_index_handle_t& index = *arguments->index;
+    if (reject_unfrozen(index, outcome)) return;
+    std::size_t const anchors_count = arguments->anchors_count;
+    usearch_rows_view_t const& anchors = arguments->anchors;
+    if (anchors_count && reject_view(anchors, anchors_count, index, outcome)) return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {anchors.data}, outcome);
+    if (!arena) return;
+
+    std::size_t const dimensions = index.options.dimensions;
+    std::size_t const anchor_bytes = anchors_count ? row_extent(anchors.scalar, dimensions) : 0;
+    std::vector<double> anchor_rows(anchors_count * dimensions);
+    for (std::size_t anchor = 0; anchor != anchors_count; ++anchor)
+        read_row(row_at<std::byte>(anchors.data, anchor, anchors.stride, anchor_bytes), anchors.scalar,
+                 std::span<double>(anchor_rows).subspan(anchor * dimensions, dimensions));
+    auto const score = [&](std::span<double const> first, std::span<double const> second) {
+        return distance(index.options.metric, first, second);
+    };
+    // Every kind ranks nearest-first, the inner one as `1 - dot`, so a radius bounds from above.
+    usearch_distance_t const radius = arguments->radius;
+    auto const within = [&](std::size_t row) {
+        if (!anchors_count || radius == 0) return true;
+        for (std::size_t anchor = 0; anchor != anchors_count; ++anchor)
+            if (score(std::span<double const>(anchor_rows).subspan(anchor * dimensions, dimensions),
+                      index.entries[row].payload) <= radius)
+                return true;
+        return false;
+    };
+
+    std::shared_lock readers(index.mutex);
+    std::vector<std::size_t> const order = drawing_order(index.entries.size(), arguments->seed, within);
+    land_sample(*arguments, std::span<dense_entry_t const>(index.entries), order, score, *arena, outcome);
 }
 
 void usearch_dense_search_stream_init(usearch_dense_search_stream_init_t* arguments) {

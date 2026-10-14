@@ -22,7 +22,10 @@
  *  so a load or view checks only that weights are named where the kind needs them, and a view
  *  copies its checkpoint rather than mapping it. Traversal statistics are plausible fiction:
  *  shaped correctly, invented numerically. A checkpoint is a binary blob of this file's own memory
- *  image, readable by nothing else.
+ *  image, readable by nothing else. Keeping no edges, a cursor opened at a key steps to its
+ *  entries' exact nearest at the frozen connectivity, and a sample links each draw to its exact
+ *  nearest earlier draws - the lists a perfect graph would hold, where the engine's are the ones it
+ *  stored.
  */
 
 #include <algorithm> // `std::stable_sort`, `std::min`, `std::max`
@@ -89,11 +92,15 @@ struct sequence_cursor_t {
     /** The next entry to hand out. */
     std::size_t position;
 
-    /** The watermark captured at creation, which later insertions cannot raise. */
+    /** The creation watermark, which later insertions cannot raise, or the @c linked count. */
     std::size_t limit;
 
     /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
     std::atomic_flag pulling;
+
+    /** The entries a step from a key yields, in link order; empty for a scan, which yields them as
+     *  stored. */
+    std::vector<std::size_t> linked;
 };
 
 /** Whether the kind scores without scoring parameters, and so refuses any weights. */
@@ -811,8 +818,13 @@ void usearch_sequence_cursor_init(usearch_sequence_cursor_init_t* arguments) {
     *arguments->cursor = nullptr;
     usearch_sequence_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
+    sequence_search_scratch_t scratch;
+    auto const score = [&](bytes_view_t first, bytes_view_t second) { return distance(index, first, second, scratch); };
+    std::vector<std::size_t> linked;
+    if (arguments->start) linked = linked_rows(index, *arguments->start, score);
+    std::size_t const limit = arguments->start ? linked.size() : index.entries.size();
     usearch_sequence_cursor_handle_t* const cursor = new (std::nothrow)
-        usearch_sequence_cursor_handle_t {&index, 0, index.entries.size(), {}};
+        usearch_sequence_cursor_handle_t {&index, 0, limit, {}, std::move(linked)};
     if (reject_if(!cursor, usearch_status_out_of_memory_k, "The cursor could not be allocated", outcome)) return;
     *arguments->cursor = cursor;
 }
@@ -836,7 +848,8 @@ void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments) {
     std::shared_lock readers(index.mutex);
     std::size_t const written = std::min(arguments->wanted, cursor.limit - cursor.position);
     std::vector<std::size_t> rows(written);
-    for (std::size_t row = 0; row != written; ++row) rows[row] = cursor.position + row;
+    for (std::size_t row = 0; row != written; ++row)
+        rows[row] = cursor.linked.empty() ? cursor.position + row : cursor.linked[cursor.position + row];
     usearch_key_t* const keys = carve<usearch_key_t>(*arena, written, outcome);
     // A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
     if (keys && (!arguments->sequences || land_entries(index, rows, *arena, *arguments->sequences, outcome))) {
@@ -851,6 +864,37 @@ void usearch_sequence_cursor_next(usearch_sequence_cursor_next_t* arguments) {
 void usearch_sequence_cursor_free(usearch_sequence_cursor_t handle) {
     wait_for_calls_using(handle);
     delete handle;
+}
+
+void usearch_sequence_sample(usearch_sequence_sample_t* arguments) {
+    if (through_executor<usearch_sequence_sample>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
+    reset(arguments->stats);
+    *arguments->keys = {};
+    *arguments->links = {};
+    *arguments->written = 0;
+    usearch_sequence_index_handle_t& index = *arguments->index;
+    std::size_t const anchors_count = arguments->anchors_count;
+    usearch_tape_view_t const& anchors = arguments->anchors;
+    if (anchors_count && (reject_tape(anchors, anchors_count, outcome) || reject_bytes(anchors, outcome))) return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
+                                                      {anchors.data, anchors.offsets}, outcome);
+    if (!arena) return;
+
+    sequence_search_scratch_t scratch;
+    auto const score = [&](bytes_view_t first, bytes_view_t second) { return distance(index, first, second, scratch); };
+    // Every kind ranks nearest-first, an alignment by its negated score, so a radius bounds above.
+    usearch_distance_t const radius = arguments->radius;
+    auto const within = [&](std::size_t row) {
+        if (!anchors_count || radius == 0) return true;
+        for (std::size_t anchor = 0; anchor != anchors_count; ++anchor)
+            if (score(viewed(anchors, anchor), index.entries[row].payload) <= radius) return true;
+        return false;
+    };
+
+    std::shared_lock readers(index.mutex);
+    std::vector<std::size_t> const order = drawing_order(index.entries.size(), arguments->seed, within);
+    land_sample(*arguments, std::span<sequence_entry_t const>(index.entries), order, score, *arena, outcome);
 }
 
 void usearch_sequence_save(usearch_sequence_save_t* arguments) {

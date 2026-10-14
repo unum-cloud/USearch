@@ -1844,7 +1844,7 @@ struct DenseCall {
     func cursor() throws(USearchError) -> Submission<DenseCursor> {
         let handle = try open()
         let cursor = landing.slots(usearch_dense_cursor_t?.none)
-        var arguments = usearch_dense_cursor_init_t(cursor: cursor, index: handle, outcome: landing.outcome)
+        var arguments = usearch_dense_cursor_init_t(cursor: cursor, index: handle, outcome: landing.outcome, start: nil)
         usearch_dense_cursor_init(&arguments)
         func read() throws(USearchError) -> DenseCursor {
             DenseCursor(raw: try created(cursor), index: index, executor: executor)

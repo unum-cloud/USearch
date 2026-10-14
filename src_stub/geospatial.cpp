@@ -19,7 +19,9 @@
  *  not read it as one. A view copies its checkpoint rather than mapping it, and every VRAM
  *  lifecycle verb refuses. Traversal statistics are plausible fiction: shaped correctly, invented
  *  numerically. A checkpoint is a binary blob of this file's own memory image, readable by nothing
- *  else.
+ *  else. Keeping no edges, a cursor opened at a key steps to its entries' exact nearest by chord at
+ *  the frozen connectivity, and a sample links each draw to its exact nearest earlier draws - the
+ *  lists a perfect graph would hold, where the engine's are the ones it stored.
  */
 #include <cmath> // `std::sqrt`, `std::sin`, `std::cos`, `std::isnan`
 
@@ -70,11 +72,15 @@ struct geospatial_cursor_t {
     /** The next entry to hand out. */
     std::size_t position;
 
-    /** The watermark captured at creation, which later insertions cannot raise. */
+    /** The creation watermark, which later insertions cannot raise, or the @c linked count. */
     std::size_t limit;
 
     /** Set while a pull runs, so an overlapping one is refused rather than racing it. */
     std::atomic_flag pulling;
+
+    /** The entries a step from a key yields, in link order; empty for a scan, which yields them as
+     *  stored. */
+    std::vector<std::size_t> linked;
 };
 
 /** Refuses any terrain, which this stand-in cannot test lines of sight over. */
@@ -178,6 +184,15 @@ static std::array<double, 2> interval_of(usearch_geospatial_observation_t const&
     double const begin = has_begin ? observation.begin_seconds : observation.end_seconds;
     double const end = has_end ? observation.end_seconds : observation.begin_seconds;
     return {begin, end};
+}
+
+/** The chord in metres between two observations' positions, whatever their times and views. */
+static double chord_between(usearch_geospatial_observation_t const& first,
+                            usearch_geospatial_observation_t const& second) {
+    placed_t const from = placed(first), to = placed(second);
+    std::array<double, 3> const offset {to.position[0] - from.position[0], to.position[1] - from.position[1],
+                                        to.position[2] - from.position[2]};
+    return std::sqrt(dot(offset, offset));
 }
 
 /** The chord in metres when @p entry matches @p query under @p relation and @p tolerance, or
@@ -604,8 +619,11 @@ void usearch_geospatial_cursor_init(usearch_geospatial_cursor_init_t* arguments)
     *arguments->cursor = nullptr;
     usearch_geospatial_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
+    std::vector<std::size_t> linked;
+    if (arguments->start) linked = linked_rows(index, *arguments->start, chord_between);
+    std::size_t const limit = arguments->start ? linked.size() : index.entries.size();
     usearch_geospatial_cursor_handle_t* const cursor = new (std::nothrow)
-        usearch_geospatial_cursor_handle_t {&index, 0, index.entries.size(), {}};
+        usearch_geospatial_cursor_handle_t {&index, 0, limit, {}, std::move(linked)};
     if (reject_if(!cursor, usearch_status_out_of_memory_k, "The cursor could not be allocated", outcome)) return;
     *arguments->cursor = cursor;
 }
@@ -636,7 +654,8 @@ void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments)
     // A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
     if (keys && (observations || !observations_output)) {
         for (std::size_t row = 0; row != written; ++row) {
-            geospatial_entry_t const& entry = index.entries[cursor.position + row];
+            std::size_t const position = cursor.position + row;
+            geospatial_entry_t const& entry = index.entries[cursor.linked.empty() ? position : cursor.linked[position]];
             keys[row] = entry.key;
             if (observations) observations[row] = entry.payload;
         }
@@ -651,6 +670,34 @@ void usearch_geospatial_cursor_next(usearch_geospatial_cursor_next_t* arguments)
 void usearch_geospatial_cursor_free(usearch_geospatial_cursor_t handle) {
     wait_for_calls_using(handle);
     delete handle;
+}
+
+void usearch_geospatial_sample(usearch_geospatial_sample_t* arguments) {
+    if (through_executor<usearch_geospatial_sample>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome, arguments->arena);
+    reset(arguments->stats);
+    *arguments->keys = {};
+    *arguments->links = {};
+    *arguments->written = 0;
+    usearch_geospatial_index_handle_t& index = *arguments->index;
+    std::size_t const anchors_count = arguments->anchors_count;
+    if (anchors_count && reject_observations(arguments->anchors, anchors_count, outcome)) return;
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {arguments->anchors},
+                                                      outcome);
+    if (!arena) return;
+
+    std::span<usearch_geospatial_observation_t const> const anchors {arguments->anchors, anchors_count};
+    usearch_distance_t const radius = arguments->radius;
+    auto const within = [&](std::size_t row) {
+        if (anchors.empty() || radius == 0) return true;
+        for (usearch_geospatial_observation_t const& anchor : anchors)
+            if (chord_between(anchor, index.entries[row].payload) <= radius) return true;
+        return false;
+    };
+
+    std::shared_lock readers(index.mutex);
+    std::vector<std::size_t> const order = drawing_order(index.entries.size(), arguments->seed, within);
+    land_sample(*arguments, std::span<geospatial_entry_t const>(index.entries), order, chord_between, *arena, outcome);
 }
 
 void usearch_geospatial_save(usearch_geospatial_save_t* arguments) {

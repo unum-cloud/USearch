@@ -1686,7 +1686,8 @@ public final class DenseIndex extends DenseVerbs implements AutoCloseable {
             MemoryLayout.structLayout(
                     Library.POINTER.withName("cursor"),
                     Library.POINTER.withName("index"),
-                    Library.POINTER.withName("outcome")));
+                    Library.POINTER.withName("outcome"),
+                    Library.POINTER.withName("start")));
 
     static final Verb CURSOR_NEXT = new Verb(
             "usearch_dense_cursor_next",
