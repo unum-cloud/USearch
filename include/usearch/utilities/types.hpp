@@ -981,6 +981,24 @@ struct dummy_predicate_t {
     }
 };
 
+/** Judges @p keys through @p predicate into @p verdicts, in one call when it takes a span of keys,
+ *  so a C handler behind an external store answers a whole quad at once, else key by key. */
+template <typename predicate_type_, typename key_type_, std::size_t extent_>
+inline void judge_keys(predicate_type_& predicate, std::span<key_type_, extent_> keys,
+                       std::span<admission_t, extent_> verdicts) noexcept {
+    if constexpr (requires { predicate(keys, verdicts); }) predicate(keys, verdicts);
+    else
+        for (std::size_t index = 0; index != keys.size(); ++index) verdicts[index] = predicate(keys[index]);
+}
+
+/** The verdict @p predicate gives one @p key, asking a batched predicate about a span of one. */
+template <typename predicate_type_, typename key_type_>
+inline admission_t judge_key(predicate_type_& predicate, key_type_ const& key) noexcept {
+    admission_t verdict = admission_t::reject_k;
+    judge_keys(predicate, std::span<key_type_ const, 1>(&key, 1), std::span<admission_t, 1>(&verdict, 1));
+    return verdict;
+}
+
 /** The compiled-out default progress watcher: always carries on, so an unwatched long
  *  verb runs to completion with no cancellation checks surviving inlining. */
 struct dummy_progress_t {

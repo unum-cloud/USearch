@@ -591,8 +591,10 @@ struct nvme_indexes {
 
             walk_demand_t absorb(std::span<scored_node_t const> scored, std::span<dot_result_t const>,
                                  std::span<key_t const> keys) noexcept {
+                std::array<admission_t, 4> verdicts;
+                judge_keys(predicate, keys, std::span(verdicts).first(keys.size()));
                 for (std::size_t lane = 0; lane != scored.size(); ++lane) {
-                    if (predicate(keys[lane]) != admission_t::admit_k) continue;
+                    if (verdicts[lane] != admission_t::admit_k) continue;
                     std::size_t const kept = pool.size();
                     // The slot `sorted_buffer::insert` picks, so the keys open the same one.
                     std::size_t const slot = static_cast<std::size_t>(
@@ -1386,7 +1388,8 @@ struct nvme_indexes {
                                       part.dimensions};
             };
             auto admits = [&]() noexcept {
-                if constexpr (filtered_k) return [&](node_id_t row) noexcept { return predicate(key_of(row)); };
+                if constexpr (filtered_k)
+                    return [&](node_id_t row) noexcept { return judge_key(predicate, key_of(row)); };
                 else return dummy_predicate_t {};
             }();
             if constexpr (tiles_chain_t::has_tiles_k)

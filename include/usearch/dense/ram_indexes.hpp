@@ -1792,10 +1792,9 @@ struct ram_indexes {
                 status_t scanned = status_t::success_k;
                 if constexpr (std::is_same_v<std::decay_t<predicate_type_>, dummy_predicate_t>)
                     scanned = one.index->scan_(block_queries, dummy_predicate_t {}, land, traversal, watermarks[shard]);
-                else {
-                    auto keyed = [&](node_id_t node) noexcept { return predicate(one.keys[node]); };
-                    scanned = one.index->scan_(block_queries, keyed, land, traversal, watermarks[shard]);
-                }
+                else
+                    scanned = one.index->scan_(block_queries, keyed_admission {predicate, one.keys}, land, traversal,
+                                               watermarks[shard]);
                 if (failed(scanned)) return scanned;
             }
             return status_t::success_k;
@@ -1837,7 +1836,7 @@ struct ram_indexes {
                     found = one.index->walk_(query_vector, dummy_fold_t {}, dummy_rescoring_t {}, traversal, config,
                                              watermarks[shard]);
                 else {
-                    auto keyed = [&](node_id_t node) noexcept { return predicate(one.keys[node]); };
+                    keyed_admission keyed {predicate, one.keys};
                     found = one.index->walk_if_(query_vector, keyed, traversal, config, watermarks[shard]);
                 }
                 if (!found) {
