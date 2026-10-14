@@ -1374,6 +1374,20 @@ check_requires_clauses() {
 
 # region Concurrency and Atomics
 
+# A const member that locks or writes hides a mutation behind its signature: such members are non-const, and a
+# const reader only loads, through `standard_atomic_ref<T const>`, the one `const_cast` this allows. The whole
+# file is judged, so touching one finishes its cleanup.
+check_mutable_and_const_cast() {
+    local hits
+    hits=$(sed -E 's/"([^"\\]|\\.)*"//g' "$staged_blob" | grep -nE '\bmutable\b|\bconst_cast\b' |
+        grep -vE '^[0-9]+:[[:space:]]*(//|/\*|\*)' |
+        grep -vF 'standard_atomic_ref(value_type_ const& word) noexcept : word_(const_cast<value_type_&>(word))' ||
+        true)
+    [ -z "$hits" ] || fail "$hits" \
+        "$file writes through const - make the member that locks or writes non-const; a const reader loads" \
+        "            through standard_atomic_ref<T const>, the only const_cast allowed:"
+}
+
 # Host threads managing GPUs in CUDA sources - fleets of NVLink-resident devices are
 # orchestrated with per-device non-blocking streams and events from one host thread: kernel
 # launches are already asynchronous, cross-device ordering is `cudaStreamWaitEvent`, and
@@ -1745,6 +1759,7 @@ judge_path() {
         check_call_chained_call
         check_gcc_atomics
         check_annotate_release_before_unlock
+        check_mutable_and_const_cast
         ;;&
     # CUDA translation units and the headers they compile into.
     *.cu | *.cuh)

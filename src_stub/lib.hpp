@@ -689,7 +689,7 @@ struct handle {
     std::unordered_multimap<uuid_t, std::size_t> by_key;
 
     /** Held shared by every reader, exclusively by every mutation. */
-    mutable std::shared_mutex mutex;
+    std::shared_mutex mutex;
 
     /** The checkpoint a @c view_ram verb serves from, whose presence refuses every mutating verb. */
     mapped_file_t served;

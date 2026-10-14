@@ -420,7 +420,7 @@ struct vram_apple_index {
     }
 
     /** Copies the stored row of @p node into @p destination with the fragment padding stripped. */
-    status_t vector(node_id_t node, nk::vector_span<scalar_t> destination) const noexcept {
+    status_t vector(node_id_t node, nk::vector_span<scalar_t> destination) noexcept {
         if (node >= size()) return status_t::config_mismatch_k;
         if (destination.size() != dimensions()) return status_t::config_mismatch_k;
         if (!destination.is_contiguous()) return status_t::unsupported_layout_k;
@@ -729,7 +729,7 @@ struct vram_apple_index {
         std::size_t covered_neighbors = 0;
 
         save_plan_t() noexcept = default;
-        save_plan_t(vram_apple_index const& index, columns_t columns, node_id_t id_shift, node_id_t visible) noexcept
+        save_plan_t(vram_apple_index& index, columns_t columns, node_id_t id_shift, node_id_t visible) noexcept
             : columns(columns), id_shift(id_shift), visible(visible),
               batch_rows(min_of(static_cast<std::size_t>(visible), power_of_two<std::size_t>(20))), index_(&index) {}
         save_plan_t(save_plan_t&& other) noexcept
@@ -806,13 +806,13 @@ struct vram_apple_index {
         }
 
       private:
-        vram_apple_index const* index_ = nullptr;
+        vram_apple_index* index_ = nullptr;
     };
 
     /** Opens a save into @p columns; @c concurrent_k refuses, since the storage cannot be probed
      *  for settlement. */
     expected<save_plan_t> plan_save(columns_t columns, synchronization_t synchronization,
-                                    node_id_t id_shift = 0) const noexcept {
+                                    node_id_t id_shift = 0) noexcept {
         if (synchronization == synchronization_t::concurrent_k) return {{}, status_t::config_mismatch_k};
         if (!dimensions_) return {{}, status_t::uninitialized_k};
         std::size_t const rows = size();
@@ -825,7 +825,7 @@ struct vram_apple_index {
 
     /** Serializes every row under the watermark into @p columns on the calling thread. */
     status_t save(columns_t columns, synchronization_t synchronization,
-                  nk::matrix_span<node_id_t> scratch = {}) const noexcept {
+                  nk::matrix_span<node_id_t> scratch = {}) noexcept {
         auto [plan, status] = plan_save(columns, synchronization);
         if (failed(status)) return status;
         for (typename save_plan_t::step_t const step : plan.steps())
@@ -1814,7 +1814,7 @@ struct vram_apple_index {
     void* derive_norms_pipeline_ = nullptr;
 
     /** Shared by every walk while its command buffer runs, taken alone by growth. */
-    mutable std::shared_mutex storage_;
+    std::shared_mutex storage_;
 
     /** Held by the one batch, load or refinement at a time. */
     std::mutex batch_;

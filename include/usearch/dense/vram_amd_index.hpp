@@ -2552,13 +2552,12 @@ struct vram_amd_index {
                        static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k,
                        vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
     }
-    status_t launch_merge_(amd_refine_t const& view, nk::matrix_view<u32_t> buckets,
-                           std::span<u32_t const> bucket_counts, hip_bitset_t touched,
-                           hip_stream_handle_t stream) noexcept {
+    status_t launch_merge_(amd_refine_t const& view, nk::matrix_span<u32_t> buckets, std::span<u32_t> bucket_counts,
+                           hip_bitset_t touched, hip_stream_handle_t stream) noexcept {
         amd_arguments_t arguments {};
         arguments.refine = view;
-        arguments.graph.bucket_ids = const_cast<u32_t*>(buckets.data());
-        arguments.graph.bucket_counts = const_cast<u32_t*>(bucket_counts.data());
+        arguments.graph.bucket_ids = buckets.data();
+        arguments.graph.bucket_counts = bucket_counts.data();
         arguments.graph.bucket_width = static_cast<u32_t>(buckets.extent(1));
         arguments.graph.touched = touched;
         return launch_(amd_kernel_t::merge_links_k, 0,

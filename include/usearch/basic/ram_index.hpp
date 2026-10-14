@@ -380,7 +380,7 @@ struct shared_mutex {
     }
 
     /** The wait-free probe the certified readers bracket their walks with. */
-    snapshot_t snapshot() const noexcept {
+    snapshot_t snapshot() noexcept {
         u64_t const observed = atomic_ref<u64_t const>(word).load(std::memory_order_acquire);
         annotate_acquire(&word);
         return {observed & generation_mask_k, static_cast<std::size_t>(observed & holders_mask_k),
