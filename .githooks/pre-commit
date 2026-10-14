@@ -1500,6 +1500,20 @@ check_workflow_names() {
         "            the Actions UI and branch protection both reference it by name:"
 }
 
+# CMake spells every target, source and flag it means at the call that means it. Deriving one by replacing, slicing or
+# matching out part of another string, or by editing a list in place, hides what the build compiles: pass each name as
+# an argument instead, under a keyword where several kinds travel together. Building a list with `list(APPEND)` and
+# testing a value with `if (... MATCHES ...)` stay free.
+check_cmake_string_surgery() {
+    local surgery
+    surgery=$(printf '%s\n' "$added" | grep -vE '^[[:space:]]*#' |
+        grep -iE '(^|[^A-Za-z0-9_])(string[[:space:]]*\([[:space:]]*(REPLACE|REGEX|SUBSTRING|STRIP|TOLOWER|TOUPPER)[[:space:]]|list[[:space:]]*\([[:space:]]*(TRANSFORM|FILTER|REMOVE_ITEM|REMOVE_AT|REMOVE_DUPLICATES|SUBLIST|POP_BACK|POP_FRONT|INSERT|JOIN|SORT|REVERSE)[[:space:]]|(get_filename_component|cmake_path)[[:space:]]*\()' ||
+        true)
+    [ -z "$surgery" ] || fail "$surgery" \
+        "$file derives a name or flag by editing a string or a list - spell each one out at its call and pass it as" \
+        "            an argument, as \`usearch_dense_dtype_sources(target BF16 a_bf16.cpp F16 a_f16.cpp)\` does:"
+}
+
 # The CPython bindings parse arguments and build results by hand: `PyArg_Parse*` and `Py_BuildValue` interpret a
 # format string at runtime, so a wrong specifier is a crash rather than a compile error, and their error paths are
 # the interpreter's rather than ours.
@@ -1779,6 +1793,7 @@ judge_path() {
         ;;
     python/*.c | python/*.h) check_cpython_format_shortcuts ;;
     .github/workflows/*.yml | .github/workflows/*.yaml) check_workflow_names ;;
+    CMakeLists.txt | */CMakeLists.txt | *.cmake) check_cmake_string_surgery ;;
     esac
     case "$file" in
     test/harness.hpp | test/main.cpp | test/dense_vram.cpp | test/dense/vram_nvidia.cu | test/dense/vram_amd.cpp | \
