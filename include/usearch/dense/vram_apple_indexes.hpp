@@ -569,18 +569,20 @@ struct vram_apple_indexes {
      *  resident part, and a shard left with no appended part only heals, so the reported reach
      *  covers every shard.
      *
-     *  A donor shard crosses through host columns as a checkpoint does. Every row lands and the
-     *  donor empties before the first refine. The donor keeps its shards, and an index never
-     *  reserved takes its geometry. Insertions and searches may not overlap on either index.
+     *  Every shard claims all the rows it takes before any lands. Both indexes sit in shared
+     *  buffers, so a donor shard crosses as one host copy per column with its edges rebased on the
+     *  host, and its keys copy straight from the donor's column. Every shard publishes only once
+     *  every row and key landed, the keys resolve once their rows are visible, and the donor
+     *  empties before the first refine. The donor keeps its shards, and an index never reserved
+     *  takes its geometry. Insertions and searches may not overlap on either index.
      *
      *  @param[inout] donor The index giving its rows up.
      *  @param[inout] executor The streams, driving every device of both indexes.
      *  @param[in] config The refine's knobs; zeros mean "derive from connectivity".
      *  @retval config_mismatch_k Another metric or geometry, a device the executor does not drive,
      *      or @p donor being this index.
-     *  @retval others A failure while landing leaves the donor shards appended so far in both
-     *      indexes, with nothing rolled back; one while refining leaves every row here, merely
-     *      less linked.
+     *  @retval others A failure while landing publishes nothing and leaves the donor whole; one
+     *      while refining leaves every row here, merely less linked.
      */
     expected<refine_result_t> absorb(vram_apple_indexes& donor, executor_t& executor,
                                      refine_config_t config = {}) noexcept {
@@ -605,42 +607,51 @@ struct vram_apple_indexes {
                 failed(reserved))
                 return {{}, reserved};
 
+        // Every shard claims all the rows it takes up front, so nothing publishes before every row
+        // and key landed, and a failure on the way releases every claim.
+        std::size_t const donors = donor.shards_.size();
+        growing_buffer<typename index_t::load_plan_t, forkunion_allocator_t> plans {allocator_};
         growing_buffer<iota_view<node_id_t>, forkunion_allocator_t> appended_parts {allocator_};
-        growing_buffer<byte_t, forkunion_allocator_t> staged {allocator_};
-        if (failed(appended_parts.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
-        for (shard_t const& one : shards_)
-            appended_parts.push_back_reserved(
-                {static_cast<node_id_t>(one.index->size()), static_cast<node_id_t>(one.index->size())});
-        for (std::size_t from = 0; from != donor.shards_.size(); ++from) {
-            index_t const& source = *donor.shards_[from].index;
-            std::size_t const into = from % shards, rows = source.size();
-            if (!rows) continue;
-            std::size_t const vectors_bytes = rows * source.packed_row_bytes();
-            std::size_t const neighbors_bytes = rows * connectivity() * sizeof(node_id_t);
-            std::size_t const norms_bytes = source.stores_norms() ? rows * sizeof(typename index_t::norms_t) : 0;
-            if (failed(staged.resize_uninitialized(vectors_bytes + neighbors_bytes + norms_bytes)))
-                return {{}, status_t::bad_alloc_k};
-            bytes_span_t const bytes = to_writable_span(staged);
-            typename index_t::columns_t const columns {bytes.first(vectors_bytes),
-                                                       bytes.subspan(vectors_bytes, neighbors_bytes),
-                                                       bytes.subspan(vectors_bytes + neighbors_bytes)};
-            if (status_t const saved = source.save(columns, synchronization_t::immutable_k); failed(saved))
-                return {{}, saved};
-            auto [plan, status] = shards_[into].index->plan_load({columns.vectors, columns.neighbors, columns.norms},
-                                                                 rows, {0, static_cast<node_id_t>(rows)});
+        if (failed(plans.reserve_exactly(shards)) || failed(appended_parts.reserve_exactly(shards)))
+            return {{}, status_t::bad_alloc_k};
+        std::size_t landing = 0;
+        for (std::size_t into = 0; into != shards; ++into) {
+            std::size_t rows = 0;
+            for (std::size_t from = into; from < donors; from += shards) rows += donor.shards_[from].index->size();
+            auto [plan, status] = shards_[into].index->plan_load(rows);
             if (failed(status)) return {{}, status};
-            for (typename index_t::load_plan_t::step_t const step : plan.steps())
-                if (status_t const loaded = plan.load(step); failed(loaded)) return {{}, loaded};
-            keys_column_t& keys = donor.shards_[from].keys;
-            if (status_t const landed = land_rows_(into, plan.base, rows,
-                                                   [&](std::size_t row) noexcept { return keys[row]; });
-                failed(landed))
-                return {{}, landed};
-            appended_parts[into].bound = static_cast<node_id_t>(plan.base + rows);
-            // An empty shard keeps its first part resident, so later parts still walk across.
-            if (!plan.base) appended_parts[into].first = appended_parts[into].bound;
-            if (status_t const finished = plan.finish(); failed(finished)) return {{}, finished};
+            appended_parts.push_back_reserved({plan.base, plan.base});
+            plans.push_back_reserved(std::move(plan));
+            if (status_t const covered = shards_[into].keys.cover(plans[into].base + rows); failed(covered))
+                return {{}, covered};
+            landing += rows;
         }
+        auto [seats, seat_status] = locators_of_key_.claim(landing);
+        if (failed(seat_status)) return {{}, seat_status};
+
+        // Both indexes sit in shared buffers, so each part crosses as one host copy per column,
+        // its keys column to column.
+        for (std::size_t from = 0; from != donors; ++from) {
+            std::size_t const into = from % shards;
+            shard_t const& part = donor.shards_[from];
+            node_id_t const part_rows = static_cast<node_id_t>(part.index->size());
+            if (!part_rows) continue;
+            iota_view<node_id_t>& appended = appended_parts[into];
+            typename index_t::load_plan_t::step_t step;
+            step.index_rows = {appended.bound, appended.bound + part_rows};
+            step.source_rows = {0, part_rows};
+            if (status_t const loaded = plans[into].load(step, *part.index, step.source_rows); failed(loaded))
+                return {{}, loaded};
+            for (node_id_t row : step.source_rows) shards_[into].keys[appended.bound + row] = part.keys[row];
+            appended.bound += part_rows;
+            // An empty shard keeps its first part resident, so later parts still walk across.
+            if (!appended.first) appended.first = appended.bound;
+        }
+        for (typename index_t::load_plan_t& plan : plans)
+            if (status_t const published = plan.finish(); failed(published)) return {{}, published};
+        for (std::size_t into = 0; into != shards; ++into)
+            for (node_id_t row = plans[into].base; row != plans[into].base + plans[into].rows; ++row)
+                locators_of_key_.insert(seats, shards_[into].keys[row], key_locator_t {into, row});
         if (status_t const cleared = donor.clear(); failed(cleared)) return {{}, cleared};
 
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};

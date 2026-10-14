@@ -615,20 +615,22 @@ struct vram_nvidia_indexes {
      *  resident part, and a shard left with no appended part only heals, so the reported reach
      *  covers every shard.
      *
-     *  A donor shard crosses through host columns, a save's bounce out and a load's bounce in, as a
-     *  checkpoint does. Every row lands and the donor empties before the first refine, and each
-     *  refine drains its device before the next shard's starts, as in @ref refine. The donor keeps
-     *  its shards, and an index never reserved takes its geometry. Insertions and searches may not
-     *  overlap on either index.
+     *  Each shard opens one load for every row it takes, and a donor shard crosses into it as one
+     *  device copy per column on the receiving shard's stream, its device keys beside them, or
+     *  through the load's bounce from another device. One drain lands every part, then every shard
+     *  publishes, and only then do the keys resolve. The donor empties before the first refine, and
+     *  each refine drains its device before the next shard's starts, as in @ref refine. The donor
+     *  keeps its shards, and an index never reserved takes its geometry. Insertions and searches
+     *  may not overlap on either index.
      *
      *  @param[inout] donor The index giving its rows up.
      *  @param[inout] executor The streams and their scratch, driving every device of both indexes.
      *  @param[in] config The refine's knobs; zeros mean "derive from connectivity".
      *  @retval config_mismatch_k Another metric or geometry, a device the executor does not drive,
      *      or @p donor being this index.
-     *  @retval others A failure while landing leaves the donor shards appended so far in both
-     *      indexes, with nothing rolled back; one while refining leaves every row here, merely
-     *      less linked.
+     *  @retval others A failure before publication publishes nothing and leaves the donor whole; a
+     *      device fault while publishing leaves the shards before it published, their keys
+     *      unresolved; one while refining leaves every row here, merely less linked.
      */
     expected<refine_result_t> absorb(vram_nvidia_indexes& donor, executor_t& executor,
                                      refine_config_t config = {}) noexcept {
@@ -653,54 +655,69 @@ struct vram_nvidia_indexes {
                 failed(reserved))
                 return {{}, reserved};
 
+        // Every shard claims all its rows first, so a failure before publication releases them all.
+        std::size_t const donors = donor.shards_.size();
+        growing_buffer<typename index_t::load_plan_t, forkunion_allocator_t> plans {allocator_};
         growing_buffer<iota_view<node_id_t>, forkunion_allocator_t> appended_parts {allocator_};
-        growing_buffer<byte_t, forkunion_allocator_t> staged {allocator_};
-        if (failed(appended_parts.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
-        for (shard_t const& one : shards_)
-            appended_parts.push_back_reserved(
-                {static_cast<node_id_t>(one.index->size()), static_cast<node_id_t>(one.index->size())});
-        for (std::size_t from = 0; from != donor.shards_.size(); ++from) {
-            index_t const& source = *donor.shards_[from].index;
-            std::size_t const into = from % shards, rows = source.size();
-            if (!rows) continue;
-            std::size_t const vectors_bytes = rows * source.packed_row_bytes();
-            std::size_t const neighbors_bytes = rows * connectivity() * sizeof(node_id_t);
-            std::size_t const norms_bytes = source.stores_norms() ? rows * sizeof(typename index_t::norms_t) : 0;
-            if (failed(staged.resize_uninitialized(vectors_bytes + neighbors_bytes + norms_bytes)))
-                return {{}, status_t::bad_alloc_k};
-            bytes_span_t const bytes = to_writable_span(staged);
-            typename index_t::columns_t const columns {bytes.first(vectors_bytes),
-                                                       bytes.subspan(vectors_bytes, neighbors_bytes),
-                                                       bytes.subspan(vectors_bytes + neighbors_bytes)};
-            if (cuda_set_device(source.device_specs().ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
-            if (status_t const saved = source.save(columns, synchronization_t::immutable_k, {},
-                                                   executor.stream(donor.stream_of_(executor, from)));
-                failed(saved))
-                return {{}, saved};
-
+        if (failed(plans.reserve_exactly(shards)) || failed(appended_parts.reserve_exactly(shards)))
+            return {{}, status_t::bad_alloc_k};
+        std::size_t landing = 0;
+        for (std::size_t into = 0; into != shards; ++into) {
             index_t& target = *shards_[into].index;
+            std::size_t rows = 0;
+            for (std::size_t from = into; from < donors; from += shards) rows += donor.shards_[from].index->size();
             if (cuda_set_device(target.device_specs().ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
-            auto [plan, status] = target.plan_load({columns.vectors, columns.neighbors, columns.norms}, rows,
-                                                   {0, static_cast<node_id_t>(rows)},
-                                                   executor.stream(stream_of_(executor, into)));
+            auto [plan, status] = target.plan_load(rows, executor.stream(stream_of_(executor, into)));
             if (failed(status)) return {{}, status};
-            for (typename index_t::load_plan_t::step_t const step : plan.steps())
-                if (status_t const loaded = plan.load(step); failed(loaded)) return {{}, loaded};
-            keys_column_t& keys = donor.shards_[from].keys;
-            if (status_t const landed = land_rows_(into, plan.base, rows, plan.stream,
-                                                   [&](std::size_t row) noexcept { return keys[row]; });
-                failed(landed))
-                return {{}, landed};
-            appended_parts[into].bound = static_cast<node_id_t>(plan.base + rows);
-            // An empty shard keeps its first part resident, so later parts still walk across.
-            if (!plan.base) appended_parts[into].first = appended_parts[into].bound;
-            if (status_t const finished = plan.finish(); failed(finished)) return {{}, finished};
+            appended_parts.push_back_reserved({plan.base, plan.base});
+            plans.push_back_reserved(std::move(plan));
+            if (status_t const covered = cover_keys_(shards_[into], plans[into].base + rows); failed(covered))
+                return {{}, covered};
+            landing += rows;
         }
+        auto [seats, seat_status] = locators_of_key_.claim(landing);
+        if (failed(seat_status)) return {{}, seat_status};
+
+        // A refused copy still waits for those queued before it, whose rows go to the next claim.
+        status_t queued = status_t::success_k;
+        for (std::size_t from = 0; from != donors && succeeded(queued); ++from) {
+            std::size_t const into = from % shards;
+            shard_t& one = shards_[into];
+            shard_t const& part = donor.shards_[from];
+            node_id_t const part_rows = static_cast<node_id_t>(part.index->size());
+            if (!part_rows) continue;
+            typename index_t::load_plan_t& plan = plans[into];
+            iota_view<node_id_t>& appended = appended_parts[into];
+            typename index_t::load_plan_t::step_t step;
+            step.index_rows = {appended.bound, appended.bound + part_rows};
+            step.source_rows = {0, part_rows};
+            queued = plan.load(step, *part.index, step.source_rows,
+                               executor.stream(donor.stream_of_(executor, from)).handle);
+            if (failed(queued)) continue;
+            for (node_id_t row : step.source_rows) one.keys[appended.bound + row] = part.keys[row];
+            // Another device's keys may not map here, so they cross from the host column.
+            if (part.index->device_specs().ordinal != one.index->device_specs().ordinal)
+                queued = upload_keys_(one, {appended.bound, appended.bound + part_rows}, plan.stream);
+            else if (cuda_copy_async(one.device_keys.base() + appended.bound, part.device_keys.base(),
+                                     part_rows * sizeof(key_t), plan.stream) != cuda_success_k)
+                queued = status_t::device_error_k;
+            appended.bound += part_rows;
+            // An empty shard keeps its first part resident, so later parts still walk across.
+            if (!appended.first) appended.first = appended.bound;
+        }
+        if (status_t const drained = executor.drain(); failed(queued) || failed(drained))
+            return {{}, failed(queued) ? queued : drained};
+        for (typename index_t::load_plan_t& plan : plans)
+            if (status_t const published = plan.finish(); failed(published)) return {{}, published};
+        for (std::size_t into = 0; into != shards; ++into)
+            for (node_id_t row = plans[into].base; row != plans[into].base + plans[into].rows; ++row)
+                locators_of_key_.insert(seats, shards_[into].keys[row], key_locator_t {into, row});
         if (status_t const cleared = donor.clear(); failed(cleared)) return {{}, cleared};
 
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
-        if (status_t const ready = reserve_traversals_(traversals, executor, 1,
-                                                       insert_config_t {config.expansion_factor});
+        // Twice a refine's walk, since every row first walks across into the other part alone.
+        u32_t const expansion = static_cast<u32_t>(shards_[0].index->non_zero_expansion_factor(config));
+        if (status_t const ready = reserve_traversals_(traversals, executor, 1, insert_config_t {2 * expansion});
             failed(ready))
             return {{}, ready};
         refine_result_t result;

@@ -918,6 +918,9 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
                                 graph.touched);
     else if constexpr (kernel == cuda_kernel_t::derive_norms_k)
         cuda_derive_norms<kit_t>(cuda_view<kit_t>(graph.storage), graph.first_id, graph.rows_count);
+    else if constexpr (kernel == cuda_kernel_t::rebase_links_k)
+        vram_rebase_links<cuda_warp_t>(graph.neighbors, graph.first_id, graph.rows_count, graph.connectivity,
+                                       graph.source_first, graph.source_bound, graph.shift);
     else if constexpr (kernel == cuda_kernel_t::mark_seeds_k)
         cuda_mark_seeds(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
     else if constexpr (kernel == cuda_kernel_t::reachability_sweep_k)

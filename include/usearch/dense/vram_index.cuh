@@ -1622,6 +1622,34 @@ __device__ __forceinline__ void vram_walk_one( //
     context.telemetry.template flush<warp_t, vram_traversal_t::searching_k>(view.telemetry, lane);
 }
 
+/** Moves rows @b [first_row,first_row+rows_count) of @p neighbors between ID spaces as the host's
+ *  @c rebase_neighbors and @c compact_neighbors do, one warp per row: an ID inside
+ *  @b [source_first,source_bound) lands at @p shift past its offset, the rest fold away, the
+ *  survivors pack to the front, and a row nothing survived in points at itself. */
+template <typename warp_type_>
+__device__ __forceinline__ void vram_rebase_links(u32_t* neighbors, u32_t first_row, u32_t rows_count,
+                                                  u32_t connectivity, u32_t source_first, u32_t source_bound,
+                                                  u32_t shift) noexcept {
+    vram_grid_warp_t const warp = vram_grid_warp<warp_type_>();
+    for (u32_t row = first_row + warp.index; row < first_row + rows_count; row += warp.count) {
+        u32_t* const slots = vram_row(neighbors, row, connectivity);
+        u32_t kept = 0;
+        for (u32_t base = 0; base < connectivity; base += warp_type_::width_k) { // Warp-uniform trip count.
+            u32_t const slot = base + warp.lane;
+            u32_t const id = slot < connectivity ? slots[slot] : node_id_unknown_k;
+            bool const inside = source_first <= id && id < source_bound;
+            // Every lane read its slot before the vote, and a survivor only moves down.
+            typename warp_type_::mask_t const survivors = warp_type_::ballot(inside);
+            if (inside)
+                slots[kept + warp_type_::count(survivors & warp_type_::below(warp.lane))] = id - source_first + shift;
+            kept += warp_type_::count(survivors);
+        }
+        for (u32_t slot = kept + warp.lane; slot < connectivity; slot += warp_type_::width_k)
+            slots[slot] = node_id_unknown_k;
+        if (!kept && warp.lane == 0) slots[0] = row;
+    }
+}
+
 /** A ranking of opaque keys as a sharded search lands it on a device: @c width keys of @c key_bytes
  *  bytes and as many scores, f64 or f32 by @c score_bytes, per query, rows @c keys_stride and
  *  @c scores_stride bytes apart, and each query's count of ranks held. */

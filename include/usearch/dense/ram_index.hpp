@@ -2168,13 +2168,15 @@ struct ram_index {
      *  @brief One load in flight: the rows claimed after the watermark and the storage
      *      chunks they span, filled by any number of threads; @ref finish publishes them.
      *
-     *  Demands sole ownership of an index whose geometry is already frozen. A source's IDs are
+     *  Demands sole ownership of an index whose geometry is already frozen. A step copies out of
+     *  columns, the plan's own or a part's, or out of another index's chunks. A source's IDs are
      *  local to the rows it delivers, so every chunk shifts them onto the appended range and folds
      *  every other ID onto the sentinel; norms land beside the vectors, or re-derive from them
-     *  where the source carries none. Repeated plans append, which is how several parts land in one
-     *  shard. The plan owns the claim its rows ride in: one that dies before @c finish releases
-     *  them, so the next plan appends at the same base and the rows it half-filled are never
-     *  published.
+     *  where the source carries none. Repeated plans append, and one plan takes several parts when
+     *  the caller slices its steps between them. The plan owns the claim its rows ride in: one that
+     *  dies before @c finish releases them, so the next plan appends at the same base and the rows
+     *  it half-filled are never published. Nothing a step writes is visible before @c finish, so a
+     *  caller holding plans on several indexes publishes all of them or none.
      */
     struct [[nodiscard]] load_plan_t {
 
@@ -2226,7 +2228,7 @@ struct ram_index {
             /** Where the rows land in the index, in its own ID space, from @c base. */
             iota_view<node_id_t> index_rows;
 
-            /** Where they come from in the caller's buffer, from its first row. */
+            /** Where they come from in the caller's columns or source index, from its first row. */
             iota_view<node_id_t> source_rows;
         };
 
@@ -2323,6 +2325,54 @@ struct ram_index {
             return status_t::success_k;
         }
 
+        /**
+         *  @brief The same copy out of @p source 's own chunks rather than columns, as an absorb
+         *      drives it, one donor shard's slice at a time, its step naming the rows in that
+         *      shard's row and ID spaces.
+         *
+         *  Both indexes keep padded rows of one geometry, so every run moves whole with its norms
+         *  and zero tails, and the neighbors rebase in this index's own chunk. The copy reads
+         *  @p source without locks, so nothing may insert into, refine or clear it while the step
+         *  runs.
+         *
+         *  @param[in] step The step to fill; its source rows address @p source.
+         *  @param[in] source The index the rows come from, of this one's geometry and norms.
+         *  @param[in] source_range The ID space the source's rows speak.
+         */
+        status_t load(step_t const& step, ram_index const& source, iota_view<node_id_t> source_range) noexcept {
+            if (!index_) return status_t::uninitialized_k;
+            iota_view<node_id_t> const range = step.index_rows;
+            geometry_t const frozen = index_->geometry();
+            if (range.empty() || range.size() != step.source_rows.size() || source.geometry() != frozen ||
+                source.stores_norms() != index_->stores_norms() || step.source_rows.bound > source.size())
+                return status_t::config_mismatch_k;
+            node_id_t const shift = range.first - step.source_rows.first + source_range.first;
+            if (shift + source_range.size() > base + rows) return status_t::config_mismatch_k;
+            std::size_t const connectivity = frozen.connectivity();
+            std::size_t const row_bytes = padded_row_values(frozen) * sizeof(scalar_t);
+
+            // The step sits in one chunk here, while the source's chunks start elsewhere.
+            for (node_id_t landing = range.first, reading = step.source_rows.first; landing != range.bound;) {
+                location_t const into = chunk_schedule_t::locate(landing), from = chunk_schedule_t::locate(reading);
+                node_id_t const run = static_cast<node_id_t>(
+                    min_of<std::size_t>(range.bound - landing, chunk_schedule_t::rows_in(from.chunk) - from.offset));
+                std::memcpy(index_->vectors_[into], source.vectors_[from], run * row_bytes);
+                if (index_->stores_norms())
+                    std::memcpy(&index_->norms_[into], &source.norms_[from], run * sizeof(vector_norms_t));
+                std::memcpy(index_->neighbors_[into], source.neighbors_[from], run * connectivity * sizeof(node_id_t));
+                landing += run;
+                reading += run;
+            }
+            atomic_ref<std::size_t>(covered_vectors).add(range.size(), std::memory_order_release);
+
+            std::span<node_id_t> const landed {index_->neighbors_[chunk_schedule_t::locate(range.first)],
+                                               range.size() * connectivity};
+            rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
+            compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
+            atomic_ref<std::size_t>(covered_neighbors).add(range.size(), std::memory_order_release);
+            return status_t::success_k;
+        }
+
         /** Publishes the appended rows once every chunk's vectors and neighbors landed: the claim
          *  consumed first, then identity, then the watermark last with a release. The identity
          *  releases too - a posted, order-free add could land after the watermark. A success
@@ -2381,8 +2431,9 @@ struct ram_index {
         return {std::move(plan), status};
     }
 
-    /** Opens a load of @p rows the caller sources per step - what a sharded plan drives, its parts
-     *  arriving one slice at a time rather than as one pair of columns. */
+    /** Opens a load of @p rows the caller sources per step - what a sharded plan or an absorb
+     *  drives, its parts arriving one slice at a time, from columns or another index, rather than
+     *  as one pair of columns. */
     expected<load_plan_t> plan_load(std::size_t rows) noexcept {
         if (!geometry()) return {{}, status_t::config_mismatch_k};
         node_id_t const visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);

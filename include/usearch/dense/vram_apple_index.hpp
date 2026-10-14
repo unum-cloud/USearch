@@ -805,8 +805,7 @@ struct vram_apple_index {
                 std::memcpy(norms_rows.data(), index_->norms_column_.host + rows.first * sizeof(norms_t),
                             norms_rows.size());
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(rows.size(), std::memory_order_acq_rel);
-            node_id_t const* const source = reinterpret_cast<node_id_t const*>(index_->neighbors_matrix_.host) +
-                                            static_cast<std::size_t>(rows.first) * connectivity;
+            node_id_t const* const source = index_->neighbor_rows_() + rows.first * connectivity;
             node_id_t* const landed = reinterpret_cast<node_id_t*>(neighbors_rows.data());
             for (std::size_t slot = 0; slot != rows.size() * connectivity; ++slot)
                 landed[slot] = source[slot] < visible ? static_cast<node_id_t>(source[slot] + id_shift)
@@ -941,13 +940,44 @@ struct vram_apple_index {
                 standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(range.size(), std::memory_order_acq_rel);
             }
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
-            std::span<node_id_t> const landed {reinterpret_cast<node_id_t*>(index_->neighbors_matrix_.host) +
-                                                   static_cast<std::size_t>(range.first) * connectivity,
+            std::span<node_id_t> const landed {index_->neighbor_rows_() + range.first * connectivity,
                                                range.size() * connectivity};
             std::memcpy(landed.data(), neighbors_rows.data(), neighbors_rows.size());
             rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
             standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(range.size(), std::memory_order_acq_rel);
+            return status_t::success_k;
+        }
+
+        /** Copies the step's rows out of @p source 's own storage rather than columns, as an absorb
+         *  drives it: both keep padded rows of one geometry in shared buffers, so every column
+         *  moves whole on the host, and the neighbors rebase from @p source_range onto the appended
+         *  range and compact. The source takes no rows until the copy returns. */
+        status_t load(step_t const& step, vram_apple_index const& source, iota_view<node_id_t> source_range) noexcept {
+            if (!index_) return status_t::uninitialized_k;
+            iota_view<node_id_t> const range = step.index_rows;
+            if (range.empty() || range.size() != step.source_rows.size() || step.source_rows.bound > source.size() ||
+                source.kernel() != index_->kernel() || source.dimensions() != index_->dimensions() ||
+                source.connectivity() != index_->connectivity())
+                return status_t::config_mismatch_k;
+            node_id_t const shift = range.first - step.source_rows.first + source_range.first;
+            if (shift + source_range.size() > base + rows) return status_t::config_mismatch_k;
+            std::size_t const row_bytes = index_->row_bytes(), connectivity = index_->connectivity();
+            std::size_t const into = range.first, from = step.source_rows.first, count = range.size();
+            std::shared_lock storage {source.storage_};
+            std::memcpy(index_->vectors_matrix_.host + into * row_bytes, source.vectors_matrix_.host + from * row_bytes,
+                        count * row_bytes);
+            if (index_->stores_norms()) {
+                std::memcpy(index_->norms_column_.host + into * sizeof(norms_t),
+                            source.norms_column_.host + from * sizeof(norms_t), count * sizeof(norms_t));
+                standard_atomic_ref<std::size_t> {covered_norms}.fetch_add(count, std::memory_order_acq_rel);
+            }
+            standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(count, std::memory_order_acq_rel);
+            std::span<node_id_t> const landed {index_->neighbor_rows_() + into * connectivity, count * connectivity};
+            std::memcpy(landed.data(), source.neighbor_rows_() + from * connectivity, landed.size_bytes());
+            rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
+            compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
+            standard_atomic_ref<std::size_t> {covered_neighbors}.fetch_add(count, std::memory_order_acq_rel);
             return status_t::success_k;
         }
 
@@ -1663,7 +1693,7 @@ struct vram_apple_index {
 
         // Exclusive pass: the walked rows land in the live matrix with plain stores.
         refine_result_t result;
-        u32_t* const live = reinterpret_cast<u32_t*>(neighbors_matrix_.host);
+        u32_t* const live = neighbor_rows_();
         u32_t const* const shadow = reinterpret_cast<u32_t const*>(context.staging_.host + ids_bytes);
         for (std::size_t offset = 0; offset != walk_count; ++offset) {
             std::size_t const node = node_ids.empty() ? nodes.first + offset : node_ids[offset];
@@ -1686,7 +1716,7 @@ struct vram_apple_index {
     void audit_(audit_t& audit) const noexcept {
         std::size_t const rows = size(), connectivity = this->connectivity();
         std::size_t const seed_count = min_of(connectivity, rows);
-        u32_t const* const neighbors = reinterpret_cast<u32_t const*>(neighbors_matrix_.host);
+        u32_t const* const neighbors = neighbor_rows_();
         std::memset(audit.reached.data(), 0, rows);
         std::memset(audit.frontier.data(), 0, rows);
         for (std::size_t seed = 0; seed != seed_count; ++seed) {
@@ -1723,7 +1753,7 @@ struct vram_apple_index {
         std::size_t const rows = size(), connectivity = this->connectivity();
         std::size_t const seed_count = min_of(connectivity, rows);
         std::size_t const spread = heal_spread(connectivity);
-        u32_t* const neighbors = reinterpret_cast<u32_t*>(neighbors_matrix_.host);
+        u32_t* const neighbors = neighbor_rows_();
         growing_buffer<u32_t> in_links {global_allocator};
         if (failed(in_links.resize(rows))) return 0;
         for (std::size_t row = 0; row != rows; ++row) {
@@ -1789,6 +1819,9 @@ struct vram_apple_index {
         u32_t const* const words = reinterpret_cast<u32_t const*>(counters_.host);
         return words[static_cast<u32_t>(metal_counter_t::published_k)];
     }
+
+    /** Row zero of the neighbors matrix, as the IDs its rows hold. */
+    node_id_t* neighbor_rows_() const noexcept { return reinterpret_cast<node_id_t*>(neighbors_matrix_.host); }
 
     /** Turns the watermark from @p first over @p rows once every batch claimed before has turned
      *  it. */
