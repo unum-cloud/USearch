@@ -12,8 +12,9 @@
  */
 #pragma once
 
-#include <cstddef> // `std::size_t`
-#include <utility> // `std::index_sequence` - every rung of one dtype
+#include <cstddef>     // `std::size_t`
+#include <type_traits> // `std::conditional_t` - a builder's frontier by its rung
+#include <utility>     // `std::index_sequence` - every rung of one dtype
 
 #include <numkong/types.h>       // `NUMKONG_ARCH_ROCM_`, which the two below test before including it
 #include <numkong/cast/simt.cuh> // `nk_cast_unit_simt_` - the import casts' device body
@@ -47,7 +48,7 @@ __device__ __forceinline__ vram_flat_view<kit_> amd_view(amd_flat_storage_t cons
             storage.kernel};
 }
 __device__ __forceinline__ vram_arena_shape_t amd_view(amd_arena_shape_t const& shape) noexcept {
-    return {shape.visited_slots, shape.visited_hash_shift, shape.tail_entries};
+    return {shape.visited_slots, shape.visited_hash_shift, shape.tail_entries, shape.cache_bytes};
 }
 template <vram_quads_kit kit_>
 __device__ __forceinline__ vram_build_view<kit_> amd_view(amd_build_t const& build) noexcept {
@@ -58,6 +59,7 @@ __device__ __forceinline__ vram_build_view<kit_> amd_view(amd_build_t const& bui
             build.first_id,
             build.arena,
             amd_view(build.arena_shape),
+            build.expansion,
             build.epoch_base,
             build.published_rows,
             build.telemetry,
@@ -74,14 +76,25 @@ __device__ __forceinline__ vram_search_view<kit_> amd_view(amd_search_t const& s
             search.arena,
             amd_view(search.arena_shape),
             search.epoch_base,
-            search.telemetry};
+            search.telemetry,
+            search.assigned_queries};
 }
 template <vram_quads_kit kit_>
 __device__ __forceinline__ vram_refine_view<kit_> amd_view(amd_refine_t const& refine) noexcept {
-    return {amd_view<kit_>(refine.storage), refine.shadow_neighbors, refine.end_id,
-            refine.scratch_bytes_per_warp,  refine.first_id,         refine.arena,
-            amd_view(refine.arena_shape),   refine.epoch_base,       refine.telemetry,
-            refine.assigned_rows,           refine.node_ids,         refine.sampling_bound};
+    return {amd_view<kit_>(refine.storage),
+            refine.shadow_neighbors,
+            refine.end_id,
+            refine.scratch_bytes_per_warp,
+            refine.first_id,
+            refine.arena,
+            amd_view(refine.arena_shape),
+            refine.expansion,
+            refine.epoch_base,
+            refine.telemetry,
+            refine.assigned_rows,
+            refine.node_ids,
+            refine.sampling_bound,
+            refine.first_guest};
 }
 template <vram_quads_kit kit_>
 __device__ __forceinline__ vram_search_sink<kit_> amd_view(amd_search_sink_t const& sink) noexcept {
@@ -95,6 +108,10 @@ template <vram_quads_kit kit_>
 __device__ __forceinline__ vram_indexer_rescoring<kit_> amd_view(amd_rescoring_t const& rescoring) noexcept {
     return {reinterpret_cast<typename kit_::fragment_t const*>(rescoring.heads), rescoring.weights,
             rescoring.heads_count, rescoring.row_fragments};
+}
+__device__ __forceinline__ vram_ranking_view amd_view(amd_ranking_t const& ranking) noexcept {
+    return {ranking.keys,          ranking.scores, ranking.counts,    ranking.keys_stride,
+            ranking.scores_stride, ranking.width,  ranking.key_bytes, ranking.score_bytes};
 }
 
 #pragma endregion Views
@@ -125,12 +142,19 @@ __device__ __forceinline__ void amd_insert(vram_build_view<kit_> const& view) {
     vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.storage.row_fragments};
     schedule_ schedule {schedule_states[warp], lane};
     vram_selection_scratch_t const selection = vram_selection_scratch_t::carve(cache, view.storage.connectivity);
+    using frontier_t = std::conditional_t<pool_slots_ == 0, vram_arena_frontier<hip_warp_t>,
+                                          vram_register_frontier<pool_slots_, hip_warp_t>>;
     while (true) {
         u32_t new_node_id = lane == 0 ? hip_warp_t::fetch_add_relaxed(*view.assigned_rows, 1u) : 0;
         new_node_id = view.first_id + hip_warp_t::shuffle(new_node_id, 0);
         if (new_node_id >= view.end_id) return;
 
-        vram_warp_context<vram_register_frontier<pool_slots_, hip_warp_t>> context;
+        vram_warp_context<frontier_t> context;
+        if constexpr (pool_slots_ == 0) {
+            context.frontier.tail_.entries_ = view.arena_shape.tail_span(view.arena, slice.warp_index);
+            context.frontier.tail_.capacity_ = view.arena_shape.tail_entries;
+            context.frontier.expansion_target_ = view.expansion;
+        }
         context.random_generator = vram_lane_generator<hip_warp_t>(new_node_id, lane);
         vram_visited_set<hip_warp_t> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                               view.epoch_base + (new_node_id - view.first_id) + 1};
@@ -157,6 +181,8 @@ __device__ __forceinline__ void amd_refine(vram_refine_view<kit_> const& view) {
     vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.storage.row_fragments};
     schedule_ schedule {schedule_states[warp], lane};
     vram_selection_scratch_t const selection = vram_selection_scratch_t::carve(cache, view.storage.connectivity);
+    using frontier_t = std::conditional_t<pool_slots_ == 0, vram_arena_frontier<hip_warp_t>,
+                                          vram_register_frontier<pool_slots_, hip_warp_t>>;
     while (true) {
         u32_t offset = lane == 0 ? hip_warp_t::fetch_add_relaxed(*view.assigned_rows, 1u) : 0;
         offset = hip_warp_t::shuffle(offset, 0);
@@ -164,7 +190,12 @@ __device__ __forceinline__ void amd_refine(vram_refine_view<kit_> const& view) {
         if (view.first_id + offset >= view.end_id) return;
         u32_t const node_id = view.node_ids ? view.node_ids[offset] : view.first_id + offset;
 
-        vram_warp_context<vram_register_frontier<pool_slots_, hip_warp_t>> context;
+        vram_warp_context<frontier_t> context;
+        if constexpr (pool_slots_ == 0) {
+            context.frontier.tail_.entries_ = view.arena_shape.tail_span(view.arena, slice.warp_index);
+            context.frontier.tail_.capacity_ = view.arena_shape.tail_entries;
+            context.frontier.expansion_target_ = view.expansion;
+        }
         context.random_generator = vram_lane_generator<hip_warp_t>(node_id, lane);
         vram_visited_set<hip_warp_t> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                               view.epoch_base + offset + 1};
@@ -178,7 +209,8 @@ __device__ __forceinline__ void amd_refine(vram_refine_view<kit_> const& view) {
 }
 
 /** One wavefront per query over the register frontier, each walk scored under @p rescorings and
- *  written out through @p sink. */
+ *  written out through @p sink; wavefronts take queries from the batch counter, as builders take
+ *  rows. */
 template <vram_quads_kit kit_, u32_t pool_slots_, typename sink_, typename rescoring_>
 __device__ __forceinline__ void amd_walk(vram_search_view<kit_> const& view, sink_ const& sink,
                                          rescoring_ const& rescorings) {
@@ -187,8 +219,10 @@ __device__ __forceinline__ void amd_walk(vram_search_view<kit_> const& view, sin
 
     vram_warp_slice_t const slice = vram_carve_slice<hip_warp_t>(view, dynamic_scratch);
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
-    for (u32_t query_index = slice.warp_index; query_index < view.queries_count;
-         query_index += gridDim.x * vram_warps_per_block_k) {
+    while (true) {
+        u32_t query_index = slice.lane == 0 ? hip_warp_t::fetch_add_relaxed(*view.assigned_queries, 1u) : 0;
+        query_index = hip_warp_t::shuffle(query_index, 0);
+        if (query_index >= view.queries_count) return;
         vram_visited_set<hip_warp_t> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                               view.epoch_base + query_index + 1};
         vram_walk_one<kit_, (pool_slots_ <= 4 ? 4u : 3u)>( //
@@ -210,8 +244,10 @@ __device__ __forceinline__ void amd_walk_wide(vram_search_view<kit_> const& view
     frontier.tail_.entries_ = view.arena_shape.tail_span(view.arena, slice.warp_index);
     frontier.tail_.capacity_ = view.arena_shape.tail_entries;
     frontier.expansion_target_ = view.expansion;
-    for (u32_t query_index = slice.warp_index; query_index < view.queries_count;
-         query_index += gridDim.x * vram_warps_per_block_k) {
+    while (true) {
+        u32_t query_index = slice.lane == 0 ? hip_warp_t::fetch_add_relaxed(*view.assigned_queries, 1u) : 0;
+        query_index = hip_warp_t::shuffle(query_index, 0);
+        if (query_index >= view.queries_count) return;
         vram_visited_set<hip_warp_t> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                               view.epoch_base + query_index + 1};
         vram_walk_one<kit_, 4u>(view, sink, rescorings, query_index, query_span, visited, frontier,
@@ -295,10 +331,14 @@ __device__ __forceinline__ void amd_mark_seeds(hip_bitset_t reached, hip_bitset_
     amd_bitset_insert(frontier, row);
 }
 
-/** One level of forward reachability from the frontier. */
+/** One level of forward reachability from the frontier; a level whose @p expanded_before reads zero
+ *  was queued past convergence and has nothing to expand. */
 __device__ __forceinline__ void amd_reachability_sweep(u32_t const* neighbors, u32_t rows_count, u32_t connectivity,
                                                        hip_bitset_t reached, hip_bitset_t frontier,
-                                                       hip_bitset_t next_frontier, u32_t* expanded) {
+                                                       hip_bitset_t next_frontier, u32_t* expanded,
+                                                       u32_t const* expanded_before) {
+    // The level before landed ahead of this launch, so every thread reads one settled word.
+    if (expanded_before && !*expanded_before) return;
     vram_grid_warp_t const warp = vram_grid_warp<hip_warp_t>();
     for (u32_t row = warp.index; row < rows_count; row += warp.count) {
         if (!amd_bitset_contains(frontier, row)) continue;
@@ -430,7 +470,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_warp_t::width_k) a
         amd_mark_seeds(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
     else if constexpr (kernel == amd_kernel_t::reachability_sweep_k)
         amd_reachability_sweep(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached, graph.frontier,
-                               graph.next_frontier, graph.counter);
+                               graph.next_frontier, graph.counter, graph.previous_counter);
     else if constexpr (kernel == amd_kernel_t::reachability_islands_k)
         amd_reachability_islands(graph.reached, graph.rows_count, graph.island_ids, graph.counter);
     else if constexpr (kernel == amd_kernel_t::reached_in_links_k)
@@ -449,24 +489,37 @@ __global__ void __launch_bounds__(vram_warps_per_block_k* hip_warp_t::width_k) a
         else if constexpr (dtype_ == nk_e2m3_k) nk_each_rmscast_e2m3_rocm_vectors_(arguments.rmscast);
         else if constexpr (dtype_ == nk_e3m2_k) nk_each_rmscast_e3m2_rocm_vectors_(arguments.rmscast);
     }
+    else if constexpr (kernel == amd_kernel_t::resolve_matches_k)
+        vram_resolve_matches<hip_warp_t>(arguments.matches.ids, arguments.matches.distances, arguments.matches.walked,
+                                         arguments.matches.keys, arguments.matches.queries_count,
+                                         amd_view(arguments.matches.ranking));
+    else if constexpr (kernel == amd_kernel_t::merge_matches_k)
+        vram_merge_matches<hip_warp_t>(amd_view(arguments.matches.gathered), arguments.matches.block_bytes,
+                                       arguments.matches.shards, arguments.matches.queries_count,
+                                       amd_view(arguments.matches.ranking));
     else
         amd_reconnect_island(graph.neighbors, graph.connectivity, graph.island_ids, graph.islands_count, graph.reached,
                              graph.rows_count, graph.seed_count, graph.in_links, graph.reconnected);
 }
 
 template <u32_t gpu_class_, u32_t dtype_, std::size_t... rungs_>
-__device__ void amd_instantiate_rungs(std::index_sequence<rungs_...>) {
+void amd_instantiate_rungs(std::index_sequence<rungs_...>) {
     (static_cast<void>(
          &amd_kernel<static_cast<u32_t>(amd_rungs[rungs_].kernel), gpu_class_, dtype_, amd_rungs[rungs_].slots>),
      ...);
 }
 
 /** Instantiates every kernel one dtype exports on one class; a class unit names it once per
- *  compiled dtype. */
+ *  compiled dtype. Host-side, since HIP-Clang refuses a kernel's address in device code, while a
+ *  host reference still makes the device pass emit it. Only the device pass takes the addresses:
+ *  on the host pass they would emit launch stubs and a fat-binary registration the library never
+ *  links, since it loads the class's code object itself. */
 template <gpu_class_t gpu_class_, nk_dtype_t dtype_>
-__device__ void amd_instantiate() {
+void amd_instantiate() {
+#if defined(__HIP_DEVICE_COMPILE__)
     amd_instantiate_rungs<static_cast<u32_t>(gpu_class_), static_cast<u32_t>(dtype_)>(
         std::make_index_sequence<sizeof(amd_rungs) / sizeof(amd_rungs[0])> {});
+#endif
 }
 
 #pragma endregion Kernels

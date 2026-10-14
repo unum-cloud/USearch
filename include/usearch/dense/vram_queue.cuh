@@ -83,6 +83,10 @@ template <typename warp_type_>
 __device__ __forceinline__ vram_scored_node_t shuffle_from(vram_scored_node_t value, u32_t source_lane) noexcept {
     return {warp_type_::shuffle(value.bits_, source_lane)};
 }
+template <typename warp_type_>
+__device__ __forceinline__ vram_scored_node_t shuffle_up(vram_scored_node_t value, u32_t delta) noexcept {
+    return {warp_type_::shuffle_up(value.bits_, delta)};
+}
 
 /** Full bitonic sort of one lane-wide entry vector, ascending by lane - fifteen shuffle-exchange
  *  stages on 32 lanes, twenty-one on 64, all in registers. */
@@ -165,6 +169,34 @@ struct vram_sorted_pool {
             }
         }
         return displaced;
+    }
+
+    /** The fold-merge's result for a batch of which only the @p admitted lanes can enter: each
+     *  takes its rank, ranks at and past it move up one, and the last rank drops. Raw entries never
+     *  tie, since the IDs of one walk are distinct, so the strict rank is exact; every slot index
+     *  stays compile-time, and both guards are warp-uniform. */
+    __device__ __forceinline__ void insert_each(vram_scored_node_t staged, typename warp_t::mask_t admitted,
+                                                u32_t lane) noexcept {
+        while (admitted) {
+            vram_scored_node_t const value = shuffle_from<warp_t>(staged, warp_t::first(admitted));
+            admitted &= admitted - 1;
+            u32_t rank = 0;
+#pragma unroll
+            for (u32_t slot = 0; slot != slots_; ++slot) rank += warp_t::count(warp_t::ballot(entries_[slot] < value));
+            if (rank == capacity_k) continue; // An earlier entry of this batch already pushed the worst below it.
+            // Highest slot first, so each slot's old last lane carries up before that slot
+            // is rewritten.
+#pragma unroll
+            for (u32_t slot = slots_; slot-- != 0;) {
+                if ((slot + 1) * width_k <= rank) break; // Lower slots keep their ranks.
+                vram_scored_node_t const carried = slot ? shuffle_from<warp_t>(entries_[slot - 1], width_k - 1)
+                                                        : vram_scored_node_t::sentinel();
+                vram_scored_node_t const shifted = shuffle_up<warp_t>(entries_[slot], 1);
+                u32_t const position = slot * width_k + lane;
+                if (position == rank) entries_[slot] = value;
+                else if (position > rank) entries_[slot] = lane ? shifted : carried;
+            }
+        }
     }
 
     /** The rank capacity - also the base of the traversal's hop budget. */
@@ -264,18 +296,21 @@ struct vram_register_frontier {
     vram_sorted_pool<slots_, warp_t> ranks_;
 
     __device__ __forceinline__ void reset(u32_t) noexcept { ranks_.clear(); }
+
+    /** A walk over full ranks ends at their radius, so a further walk needs no budget renewed. */
+    __device__ __forceinline__ void renew() noexcept {}
     __device__ __forceinline__ u32_t hops_budget() const noexcept { return ranks_.capacity() * 4; }
 
     /** Nothing to shed: the pool keeps the nearest of every union by construction. */
     __device__ __forceinline__ u32_t dropped() const noexcept { return 0; }
     __device__ __forceinline__ void push_batch(vram_scored_node_t staged, u32_t lane) noexcept {
-        // A full pool keeps the nearest of the union, so a batch with no entry inside the
-        // radius is a guaranteed no-op - one ballot skips the whole bitonic merge. Only
-        // the narrow pools take the gate: past them the extra live radius dependency
-        // costs the 3-block kernels their zero-spill budget.
-        if constexpr (slots_ <= 4)
-            if (ranks_.full() && !warp_t::ballot(staged.distance_bits() < ranks_.radius())) return;
-        ranks_.insert_batch(staged, lane);
+        // Only entries below the worst kept one can enter:
+        // a few take their ranks, a crowd takes the fold-merge.
+        constexpr u32_t few_k = 3;
+        vram_scored_node_t const worst = shuffle_from<warp_t>(ranks_.entries_[slots_ - 1], warp_t::width_k - 1);
+        typename warp_t::mask_t const admitted = warp_t::ballot(staged < worst);
+        if (warp_t::count(admitted) <= few_k) ranks_.insert_each(staged, admitted, lane);
+        else ranks_.insert_batch(staged, lane);
     }
 
     /** The nearest undiscovered-from candidate, already marked expanded - or the
@@ -305,6 +340,9 @@ struct vram_register_frontier {
     __device__ __forceinline__ void for_each_rank(u32_t count, u32_t lane, emit_type_&& emit) const noexcept {
         for (u32_t base = 0; base < count; base += warp_t::width_k) emit(base + lane, ranks_.rank_entry(base + lane));
     }
+
+    /** The ranks are the container itself, so nothing settles before a selection reads them. */
+    __device__ __forceinline__ void settle(u32_t) noexcept {}
 };
 
 /** The arena frontier: the de-capped twin - a register head (the exact nearest two lane-widths,
@@ -326,6 +364,9 @@ struct vram_arena_frontier {
         tail_.size_ = 0;
         expansions_ = 0;
     }
+
+    /** Grants a further walk over what this frontier holds its own expansion budget. */
+    __device__ __forceinline__ void renew() noexcept { expansions_ = 0; }
     __device__ __forceinline__ u32_t hops_budget() const noexcept { return expansion_target_ * 4; }
 
     /** Tail entries shed past the slice's capacity - the walk's one lossy step, receipted. */
@@ -355,6 +396,19 @@ struct vram_arena_frontier {
     __device__ __forceinline__ bool exhausted() const noexcept { return expansions_ >= expansion_target_; }
     __device__ __forceinline__ bool beyond_radius(vram_scored_node_t) const noexcept { return false; }
 
+    /** Folds the nearest two lane-widths of everything the walk saw into the head, which then
+     *  answers @c rank_entry for a selection; call once, after the walk, since the tail keeps its
+     *  copies. */
+    __device__ __forceinline__ void settle(u32_t lane) noexcept {
+        for_each_rank(head_.capacity_k, lane, [&](u32_t rank, vram_scored_node_t entry) noexcept {
+            if (rank < warp_t::width_k) head_.entries_[0] = entry;
+            else head_.entries_[1] = entry;
+        });
+    }
+    __device__ __forceinline__ vram_scored_node_t rank_entry(u32_t rank) const noexcept {
+        return head_.rank_entry(rank);
+    }
+
     /** Promotes the nearest unexpanded tail entries into the head. Every tail entry is farther
      *  than everything head-resident - that is the spill invariant - so a merge could never admit
      *  them: instead the drained head, all expanded by now, spills wholesale to the tail for the
@@ -380,16 +434,102 @@ struct vram_arena_frontier {
         head_.insert_batch(best, lane);
     }
 
+    /** Drops the tail entries that cannot rank among the nearest @p count of head and tail: a radix
+     *  select finds the count-th smallest distance key, eight bits a pass from the top, and every
+     *  tail entry at or below it stays, ties included, so the rounds still order them by full word.
+     *  Each lane tallies the digits whose low bits are its own index, by ballots, so the histogram
+     *  never leaves registers. */
+    __device__ __forceinline__ void keep_nearest(u32_t count, u32_t lane) noexcept {
+        constexpr u32_t lane_bits_k = warp_t::width_k == 64 ? 6 : 5;
+        constexpr u32_t high_bits_k = 8 - lane_bits_k;
+        constexpr u32_t bins_k = 1u << high_bits_k;
+        u32_t prefix = 0, prefix_mask = 0, rank = count;
+        for (u32_t pass = 0; pass != 4; ++pass) {
+            u32_t const shift = 24 - 8 * pass;
+            u32_t bins[bins_k] = {};
+            // The head's two slots tally as the first two batches,
+            // then the tail a warp-width at a time.
+            for (u32_t base = 0; base < 2 * warp_t::width_k + tail_.size_; base += warp_t::width_k) {
+                u32_t const index = base + lane - 2 * warp_t::width_k;
+                vram_scored_node_t const entry = base == 0                 ? head_.entries_[0]
+                                                 : base == warp_t::width_k ? head_.entries_[1]
+                                                 : index < tail_.size_     ? tail_.entries_[index]
+                                                                           : vram_scored_node_t::sentinel();
+                u32_t const key = entry.distance_bits(), digit = (key >> shift) & 0xFFu;
+                typename warp_t::mask_t own = warp_t::ballot(!(entry == vram_scored_node_t::sentinel()) &&
+                                                             (key & prefix_mask) == prefix);
+#pragma unroll
+                for (u32_t bit = 0; bit != lane_bits_k; ++bit) {
+                    typename warp_t::mask_t const set = warp_t::ballot((digit >> bit) & 1u);
+                    own &= (lane >> bit) & 1u ? set : ~set;
+                }
+                typename warp_t::mask_t high[high_bits_k];
+#pragma unroll
+                for (u32_t bit = 0; bit != high_bits_k; ++bit)
+                    high[bit] = warp_t::ballot((digit >> (lane_bits_k + bit)) & 1u);
+#pragma unroll
+                for (u32_t bin = 0; bin != bins_k; ++bin) {
+                    typename warp_t::mask_t matching = own;
+#pragma unroll
+                    for (u32_t bit = 0; bit != high_bits_k; ++bit)
+                        matching &= (bin >> bit) & 1u ? high[bit] : ~high[bit];
+                    bins[bin] += warp_t::count(matching);
+                }
+            }
+
+            // Digits ascend bin-major, lane-minor;
+            // the warp-uniform guard keeps every vote full-mask.
+            u32_t below = 0;
+            bool found = false;
+#pragma unroll
+            for (u32_t bin = 0; bin != bins_k; ++bin) {
+                u32_t inclusive = bins[bin];
+#pragma unroll
+                for (u32_t stride = 1; stride != warp_t::width_k; stride <<= 1) {
+                    u32_t const lower = warp_t::shuffle_up(inclusive, stride);
+                    if (lane >= stride) inclusive += lower;
+                }
+                u32_t const total = warp_t::shuffle(inclusive, warp_t::width_k - 1);
+                if (!found && below + total >= rank) {
+                    u32_t const owner = warp_t::first(warp_t::ballot(below + inclusive >= rank));
+                    below += warp_t::shuffle(inclusive - bins[bin], owner);
+                    prefix |= ((bin << lane_bits_k) | owner) << shift;
+                    found = true;
+                }
+                if (!found) below += total;
+            }
+            if (!found) return; // The walk saw fewer than count entries, so every one ranks.
+            prefix_mask |= 0xFFu << shift;
+            rank -= below;
+        }
+
+        // In place: a kept entry lands at or before its own slot,
+        // after the ballot over its batch's loads.
+        u32_t kept = 0;
+        for (u32_t base = 0; base < tail_.size_; base += warp_t::width_k) {
+            u32_t const index = base + lane;
+            vram_scored_node_t const entry = index < tail_.size_ ? tail_.entries_[index]
+                                                                 : vram_scored_node_t::sentinel();
+            bool const keep = !(entry == vram_scored_node_t::sentinel()) && entry.distance_bits() <= prefix;
+            typename warp_t::mask_t const keeping = warp_t::ballot(keep);
+            if (keep) tail_.entries_[kept + warp_t::count(keeping & warp_t::below(lane))] = entry;
+            kept += warp_t::count(keeping);
+        }
+        tail_.size_ = kept;
+        warp_t::sync();
+    }
+
     /** Hands @p emit the nearest @p count entries of everything the walk has seen - the last head
      *  generation plus every tail entry - ascending, a warp-width per call, rank @b base+lane on
      *  each lane; ranks past what the walk saw are sentinels. Each round folds every entry ranked
-     *  after the previous round's last into a fresh two-slot pool, so the ranks stream out with no
-     *  scratch and only as many rounds as @p count asks for. Single residency by construction:
-     *  promotion tombstones its tail slot, so the entries' words are distinct and every one ranks
-     *  exactly once. Call once, after the walk. */
+     *  after the previous round's last into a fresh two-slot pool; past one round the tail first
+     *  keeps only the entries that can rank, so the rounds scale with @p count, not the walk.
+     *  Single residency by construction: promotion tombstones its tail slot, so the entries' words
+     *  are distinct and every one ranks exactly once. Call once, after the walk. */
     template <typename emit_type_>
-    __device__ __forceinline__ void for_each_rank(u32_t count, u32_t lane, emit_type_&& emit) const noexcept {
+    __device__ __forceinline__ void for_each_rank(u32_t count, u32_t lane, emit_type_&& emit) noexcept {
         using round_t = vram_sorted_pool<2, warp_t>;
+        if (count > round_t::capacity_k) keep_nearest(count, lane);
         vram_scored_node_t last = vram_scored_node_t::sentinel();
         for (u32_t base = 0; base < count; base += round_t::capacity_k) {
             auto const unranked = [&](vram_scored_node_t entry) noexcept {
@@ -435,7 +575,8 @@ struct vram_visited_set {
 
     /** Packed @b {epoch,ID} slots: an entry is live only when its epoch matches
      *  this walk's, so "resetting" is bumping one register - the host zeroes the
-     *  arena once per launch batch, and epoch zero marks never-used. */
+     *  arena once per launch batch, and epoch zero marks never-used. 16-byte aligned,
+     *  since a probe loads the aligned pair of slots it lands in at once. */
     u64_t* slots_;
 
     /** One field carries the whole shape: the slot count is a power of two by
@@ -448,29 +589,43 @@ struct vram_visited_set {
      *  reports it. */
     u32_t saturations_ = 0;
 
+    /** Probe rounds a claim takes before it starves: each round reads one aligned pair of slots, so
+     *  a claim scans up to two slots a round, and saturation needs a fuller table than one slot a
+     *  round. */
     inline static constexpr u32_t probe_budget_k = 64;
 
     /** Marks @p node_id visited; @c true when it was fresh. A lane with nothing to claim passes the
      *  sentinel, which no walk visits. */
     __device__ __forceinline__ bool test_and_set(node_id_t node_id, u32_t lane) noexcept {
         bool const active = node_id != node_id_unknown_k;
+        // Warp-uniform: an idle call skips the matching votes, a ballot per distinct value on HIP.
+        if (!warp_t::any(active)) return false;
         typename warp_t::mask_t const peers = warp_t::match_any(active ? node_id : 0xFFFFFFFFu ^ lane);
         bool fresh = active && (peers & warp_t::below(lane)) == 0;
         bool probing = fresh;
         u64_t const claim = (static_cast<u64_t>(epoch_) << 32) | node_id;
         u32_t const mask = 0xFFFFFFFFu >> hash_shift_;
         u32_t slot = (node_id * 0x9E3779B9u) >> hash_shift_;
+        ulonglong2 const* const pairs = reinterpret_cast<ulonglong2 const*>(slots_);
         // The slice is warp-private, so the only contention is two lanes of THIS warp
         // landing on one empty slot in the same round - arbitrated in registers, no
         // atomics: the lowest rival lane stores, the warp barrier publishes the store,
         // and losers re-read the slot, see a foreign epoch-current ID, and probe on.
         for (u32_t round = 0; warp_t::any(probing) && round != probe_budget_k; ++round) {
-            u64_t const observed = probing ? slots_[slot] : 0;
+            // One 16-byte load covers the probed slot's aligned pair, so an even-slot collision
+            // resolves this round.
+            ulonglong2 const pair = probing ? pairs[slot >> 1] : ulonglong2 {};
+            u64_t const observed = slot & 1 ? pair.y : pair.x;
             bool claiming = false;
             if (probing) {
-                if (observed == claim) fresh = probing = false; // Already visited this walk.
-                else if (static_cast<u32_t>(observed >> 32) == epoch_) slot = (slot + 1) & mask;
-                else claiming = true; // Stale or never used.
+                // Visited this walk, or a stale or never-used slot to claim, then the same for the
+                // pair's odd slot.
+                if (observed == claim) fresh = probing = false;
+                else if (static_cast<u32_t>(observed >> 32) != epoch_) claiming = true;
+                else if (slot & 1) slot = (slot + 1) & mask;
+                else if (pair.y == claim) fresh = probing = false;
+                else if (static_cast<u32_t>(pair.y >> 32) != epoch_) slot |= 1, claiming = true;
+                else slot = (slot + 2) & mask;
             }
             typename warp_t::mask_t const rivals = warp_t::match_any(claiming ? slot : 0xFFFFFFFFu ^ lane);
             if (claiming && (rivals & warp_t::below(lane)) == 0) slots_[slot] = claim, probing = false;

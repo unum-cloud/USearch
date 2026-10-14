@@ -18,7 +18,7 @@
 
 #include <limits>      // `std::numeric_limits` - the running maximum's identity
 #include <numbers>     // `std::numbers::log2e_v` - the base-2 softmax
-#include <type_traits> // `std::is_same_v` - which rescoring a search walks under
+#include <type_traits> // `std::is_same_v`, `std::conditional_t` - a walk's rescoring, a builder's frontier
 #include <utility>     // `std::index_sequence` - every rung of one dtype
 
 #include <numkong/types.h>       // `NUMKONG_ARCH_CUDA_`, which the two below test before including it
@@ -58,7 +58,7 @@ using cuda_kit_t = typename cuda_kit_of<vector_dtype_, capability_>::type;
 
 /** The kernels' twin of a host-computed arena slice layout. */
 constexpr vram_arena_shape_t cuda_arena_shape(cuda_arena_shape_t shape) noexcept {
-    return {shape.visited_slots, shape.visited_hash_shift, shape.tail_entries};
+    return {shape.visited_slots, shape.visited_hash_shift, shape.tail_entries, shape.cache_bytes};
 }
 
 /** Whether @p bitset - a reachability audit's reached set or frontier, a refinement pass's touched
@@ -158,7 +158,7 @@ struct cuda_heads_rescoring {
  */
 template <vram_quads_kit kit_, vram_schedule schedule_, u32_t pool_slots_>
 __device__ __forceinline__ void cuda_insert(vram_build_view<kit_> const& view) {
-    // The dynamic slice hosts the query span while traversing, then the candidate cache while
+    // The scratch slice hosts the query span while traversing, then the candidate cache while
     // selecting; the exact visited set lives in the warp's arena slice, not in shared memory.
     extern __shared__ byte_t dynamic_scratch[];
     __shared__ typename kit_::norms_t cache_norms[vram_warps_per_block_k][vram_cache_rows_k];
@@ -171,12 +171,19 @@ __device__ __forceinline__ void cuda_insert(vram_build_view<kit_> const& view) {
     vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.storage.row_fragments};
     schedule_ schedule {schedule_states[warp], lane};
     vram_selection_scratch_t const selection = vram_selection_scratch_t::carve(cache, view.storage.connectivity);
+    using frontier_t = std::conditional_t<pool_slots_ == 0, vram_arena_frontier<cuda_warp_t>,
+                                          vram_register_frontier<pool_slots_, cuda_warp_t>>;
     while (true) {
         u32_t new_node_id = lane == 0 ? cuda_warp_t::fetch_add_relaxed(*view.assigned_rows, 1u) : 0;
         new_node_id = view.first_id + cuda_warp_t::shuffle(new_node_id, 0);
         if (new_node_id >= view.end_id) return;
 
-        vram_warp_context<vram_register_frontier<pool_slots_, cuda_warp_t>> context;
+        vram_warp_context<frontier_t> context;
+        if constexpr (pool_slots_ == 0) {
+            context.frontier.tail_.entries_ = view.arena_shape.tail_span(view.arena, slice.warp_index);
+            context.frontier.tail_.capacity_ = view.arena_shape.tail_entries;
+            context.frontier.expansion_target_ = view.expansion;
+        }
         context.random_generator = vram_lane_generator<cuda_warp_t>(new_node_id, lane);
         vram_visited_set<cuda_warp_t> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                                view.epoch_base + (new_node_id - view.first_id) + 1};
@@ -204,6 +211,8 @@ __device__ __forceinline__ void cuda_refine(vram_refine_view<kit_> const& view) 
     vram_vector_cache<typename kit_::fragment_t> const cache {query_span, view.storage.row_fragments};
     schedule_ schedule {schedule_states[warp], lane};
     vram_selection_scratch_t const selection = vram_selection_scratch_t::carve(cache, view.storage.connectivity);
+    using frontier_t = std::conditional_t<pool_slots_ == 0, vram_arena_frontier<cuda_warp_t>,
+                                          vram_register_frontier<pool_slots_, cuda_warp_t>>;
     while (true) {
         u32_t offset = lane == 0 ? cuda_warp_t::fetch_add_relaxed(*view.assigned_rows, 1u) : 0;
         offset = cuda_warp_t::shuffle(offset, 0);
@@ -211,7 +220,12 @@ __device__ __forceinline__ void cuda_refine(vram_refine_view<kit_> const& view) 
         if (view.first_id + offset >= view.end_id) return;
         u32_t const node_id = view.node_ids ? view.node_ids[offset] : view.first_id + offset;
 
-        vram_warp_context<vram_register_frontier<pool_slots_, cuda_warp_t>> context;
+        vram_warp_context<frontier_t> context;
+        if constexpr (pool_slots_ == 0) {
+            context.frontier.tail_.entries_ = view.arena_shape.tail_span(view.arena, slice.warp_index);
+            context.frontier.tail_.capacity_ = view.arena_shape.tail_entries;
+            context.frontier.expansion_target_ = view.expansion;
+        }
         context.random_generator = vram_lane_generator<cuda_warp_t>(node_id, lane);
         vram_visited_set<cuda_warp_t> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                                view.epoch_base + offset + 1};
@@ -485,7 +499,8 @@ struct cuda_attend_sink {
 };
 
 /** One warp per query over the register frontier - expansions within the ladder - each walk scored
- *  under @p rescorings and written out through @p sink. */
+ *  under @p rescorings and written out through @p sink; warps take queries from the batch counter,
+ *  as builders take rows. */
 template <vram_quads_kit kit_, u32_t pool_slots_, typename sink_, typename rescoring_>
 __device__ __forceinline__ void cuda_walk(vram_search_view<kit_> const& view, sink_ const& sink,
                                           rescoring_ const& rescorings) {
@@ -494,8 +509,10 @@ __device__ __forceinline__ void cuda_walk(vram_search_view<kit_> const& view, si
 
     vram_warp_slice_t const slice = vram_carve_slice<cuda_warp_t>(view, dynamic_scratch);
     typename kit_::fragment_t* const query_span = reinterpret_cast<typename kit_::fragment_t*>(slice.scratch);
-    for (u32_t query_index = slice.warp_index; query_index < view.queries_count;
-         query_index += gridDim.x * vram_warps_per_block_k) {
+    while (true) {
+        u32_t query_index = slice.lane == 0 ? cuda_warp_t::fetch_add_relaxed(*view.assigned_queries, 1u) : 0;
+        query_index = cuda_warp_t::shuffle(query_index, 0);
+        if (query_index >= view.queries_count) return;
         vram_visited_set<cuda_warp_t> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                                view.epoch_base + query_index + 1};
         vram_walk_one<kit_, (pool_slots_ <= 4 ? 4u : 3u)>( //
@@ -518,8 +535,10 @@ __device__ __forceinline__ void cuda_walk_wide(vram_search_view<kit_> const& vie
     frontier.tail_.entries_ = view.arena_shape.tail_span(view.arena, slice.warp_index);
     frontier.tail_.capacity_ = view.arena_shape.tail_entries;
     frontier.expansion_target_ = view.expansion;
-    for (u32_t query_index = slice.warp_index; query_index < view.queries_count;
-         query_index += gridDim.x * vram_warps_per_block_k) {
+    while (true) {
+        u32_t query_index = slice.lane == 0 ? cuda_warp_t::fetch_add_relaxed(*view.assigned_queries, 1u) : 0;
+        query_index = cuda_warp_t::shuffle(query_index, 0);
+        if (query_index >= view.queries_count) return;
         vram_visited_set<cuda_warp_t> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                                view.epoch_base + query_index + 1};
         vram_walk_one<kit_, 4u>(view, sink, rescorings, query_index, query_span, visited, frontier,
@@ -591,10 +610,14 @@ __device__ __forceinline__ void cuda_mark_seeds(cuda_bitset_t reached, cuda_bits
 /** One level of forward reachability: every row of @p frontier marks its targets reached, and the
  *  ones it reaches first join @p next_frontier. Only the frontier expands, so a level is the same
  *  set of rows however the warps interleave, and sweeping until a level expands nothing takes the
- *  landmarks' eccentricity in levels. */
+ *  landmarks' eccentricity in levels; a level whose @p expanded_before reads zero was queued past
+ *  convergence and has nothing to expand. */
 __device__ __forceinline__ void cuda_reachability_sweep(u32_t const* neighbors, u32_t rows_count, u32_t connectivity,
                                                         cuda_bitset_t reached, cuda_bitset_t frontier,
-                                                        cuda_bitset_t next_frontier, u32_t* expanded) {
+                                                        cuda_bitset_t next_frontier, u32_t* expanded,
+                                                        u32_t const* expanded_before) {
+    // The level before landed ahead of this launch, so every thread reads one settled word.
+    if (expanded_before && !*expanded_before) return;
     vram_grid_warp_t const warp = vram_grid_warp<cuda_warp_t>();
     for (u32_t row = warp.index; row < rows_count; row += warp.count) {
         if (!cuda_bitset_contains(frontier, row)) continue;
@@ -757,6 +780,7 @@ __device__ __forceinline__ vram_build_view<kit_> cuda_view(cuda_build_t const& b
             build.first_id,
             build.arena,
             cuda_arena_shape(build.arena_shape),
+            build.expansion,
             build.epoch_base,
             build.published_rows,
             build.telemetry,
@@ -773,7 +797,8 @@ __device__ __forceinline__ vram_search_view<kit_> cuda_view(cuda_search_t const&
             search.arena,
             cuda_arena_shape(search.arena_shape),
             search.epoch_base,
-            search.telemetry};
+            search.telemetry,
+            search.assigned_queries};
 }
 template <vram_quads_kit kit_>
 __device__ __forceinline__ vram_refine_view<kit_> cuda_view(cuda_refine_t const& refine) noexcept {
@@ -784,11 +809,13 @@ __device__ __forceinline__ vram_refine_view<kit_> cuda_view(cuda_refine_t const&
             refine.first_id,
             refine.arena,
             cuda_arena_shape(refine.arena_shape),
+            refine.expansion,
             refine.epoch_base,
             refine.telemetry,
             refine.assigned_rows,
             refine.node_ids,
-            refine.sampling_bound};
+            refine.sampling_bound,
+            refine.first_guest};
 }
 template <vram_quads_kit kit_>
 __device__ __forceinline__ vram_search_sink<kit_> cuda_view(cuda_search_sink_t const& sink) noexcept {
@@ -802,6 +829,10 @@ template <vram_quads_kit kit_>
 __device__ __forceinline__ vram_indexer_rescoring<kit_> cuda_view(cuda_rescoring_t const& rescoring) noexcept {
     return {reinterpret_cast<typename kit_::fragment_t const*>(rescoring.heads), rescoring.weights,
             rescoring.heads_count, rescoring.row_fragments};
+}
+__device__ __forceinline__ vram_ranking_view cuda_view(cuda_ranking_t const& ranking) noexcept {
+    return {ranking.keys,          ranking.scores, ranking.counts,    ranking.keys_stride,
+            ranking.scores_stride, ranking.width,  ranking.key_bytes, ranking.score_bytes};
 }
 
 #pragma endregion Views
@@ -821,7 +852,7 @@ __device__ __forceinline__ void cuda_walk_rung(vram_search_view<kit_> const& vie
 constexpr u32_t cuda_resident_blocks(cuda_kernel_t kernel, u32_t slots) noexcept {
     switch (kernel) {
     case cuda_kernel_t::insert_k:
-    case cuda_kernel_t::refine_k:
+    case cuda_kernel_t::refine_k: return cuda_insert_blocks_per_multiprocessor_k;
     case cuda_kernel_t::merge_links_k: return vram_resident_blocks_per_multiprocessor_k;
     case cuda_kernel_t::search_k:
     case cuda_kernel_t::search_indexer_k:
@@ -842,6 +873,10 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     using schedule_t = cuda_schedule_chain<static_cast<nk_capability_t>(capabilities_) * nk_cap_cuda_k>;
     constexpr cuda_kernel_t kernel = static_cast<cuda_kernel_t>(kernel_);
     cuda_graph_t const& graph = arguments.graph;
+    // Launched overlapping its predecessor's drain, so nothing is read before that predecessor
+    // lands; the successor's blocks may then seat as this grid's blocks retire.
+    if constexpr (cuda_overlaps_launches(static_cast<nk_capability_t>(capabilities_) * nk_cap_cuda_k))
+        asm volatile("griddepcontrol.wait;\n\tgriddepcontrol.launch_dependents;" ::: "memory");
     if constexpr (kernel == cuda_kernel_t::insert_k)
         cuda_insert<kit_t, schedule_t, slots_>(cuda_view<kit_t>(arguments.build));
     else if constexpr (kernel == cuda_kernel_t::refine_k)
@@ -887,7 +922,7 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
         cuda_mark_seeds(graph.reached, graph.frontier, graph.rows_count, graph.seed_count);
     else if constexpr (kernel == cuda_kernel_t::reachability_sweep_k)
         cuda_reachability_sweep(graph.neighbors, graph.rows_count, graph.connectivity, graph.reached, graph.frontier,
-                                graph.next_frontier, graph.counter);
+                                graph.next_frontier, graph.counter, graph.previous_counter);
     else if constexpr (kernel == cuda_kernel_t::reachability_islands_k)
         cuda_reachability_islands(graph.reached, graph.rows_count, graph.island_ids, graph.counter);
     else if constexpr (kernel == cuda_kernel_t::reached_in_links_k)
@@ -909,6 +944,14 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
         else if constexpr (dtype_ == nk_e2m3_k) nk_each_rmscast_e2m3_cuda_vectors_(arguments.rmscast);
         else if constexpr (dtype_ == nk_e3m2_k) nk_each_rmscast_e3m2_cuda_vectors_(arguments.rmscast);
     }
+    else if constexpr (kernel == cuda_kernel_t::resolve_matches_k)
+        vram_resolve_matches<cuda_warp_t>(arguments.matches.ids, arguments.matches.distances, arguments.matches.walked,
+                                          arguments.matches.keys, arguments.matches.queries_count,
+                                          cuda_view(arguments.matches.ranking));
+    else if constexpr (kernel == cuda_kernel_t::merge_matches_k)
+        vram_merge_matches<cuda_warp_t>(cuda_view(arguments.matches.gathered), arguments.matches.block_bytes,
+                                        arguments.matches.shards, arguments.matches.queries_count,
+                                        cuda_view(arguments.matches.ranking));
     else
         cuda_merge_attention(reinterpret_cast<byte_t*>(arguments.attend.outputs), arguments.attend.rows,
                              arguments.attend.columns, arguments.attend.shards);

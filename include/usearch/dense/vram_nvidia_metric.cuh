@@ -1328,6 +1328,18 @@ struct u1x8_ampere_quads_kit_t {
 
 #pragma region Schedules
 
+/** Lands the rows @p ids names in the leading rows of @p cache through each lane's registers, the
+ *  staging a cache outside shared memory takes, since the asynchronous copies write only there. */
+template <typename storage_, typename cache_>
+__device__ __forceinline__ void cuda_stage_rows_through_registers(storage_ const& storage, cache_ cache,
+                                                                  u32_t const* ids, u32_t rows, u32_t lane) noexcept {
+    for (u32_t word = lane; word < rows * storage.row_fragments; word += cuda_warp_t::width_k) {
+        u32_t const row = storage.row_of_word(word), fragment = storage.fragment_of_word(word, row);
+        cache.at(row, fragment) = storage.vector_for(ids[row], fragment);
+    }
+    cuda_warp_t::sync();
+}
+
 /**
  *  @brief The Ampere and Ada staging: every lane queues register-free @c cp.async copies of the
  *      fragments it strides over, one commit group per stage, so a consumer walking the rows in
@@ -1350,6 +1362,11 @@ struct ampere_cp_async_schedule_t {
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                                u32_t lane) noexcept {
         rows_per_stage_ = divide_round_up(rows, stages_k), landed_rows_ = 0;
+        if (!__isShared(cache.row(0))) {
+            cuda_stage_rows_through_registers(storage, cache, ids, rows, lane);
+            landed_rows_ = rows;
+            return;
+        }
         // Every stage commits, empty or not, so the groups a stage waits behind are a constant.
         for (u32_t stage = 0; stage != stages_k; ++stage) {
             u32_t const end_word = min_of((stage + 1) * rows_per_stage_, rows) * storage.row_fragments;
@@ -1423,6 +1440,11 @@ struct hopper_tma_schedule_t {
                                                u32_t lane) noexcept {
         u32_t const row_bytes = storage.row_fragments * sizeof(typename storage_::fragment_t);
         rows_per_stage_ = divide_round_up(rows, stages_k), landed_rows_ = 0;
+        if (!__isShared(cache.row(0))) {
+            cuda_stage_rows_through_registers(storage, cache, ids, rows, lane);
+            landed_rows_ = rows;
+            return;
+        }
         // The cache rows' earlier generic reads must precede the copies' asynchronous writes.
         asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
         if (lane == 0)

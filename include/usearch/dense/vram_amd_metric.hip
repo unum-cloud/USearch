@@ -1018,8 +1018,8 @@ struct rocm_registers_schedule_t {
     __device__ __forceinline__ rocm_registers_schedule_t(shared_t&, u32_t) noexcept {}
 
     template <typename storage_, typename cache_>
-    __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
-                                               u32_t lane) noexcept {
+    static __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids,
+                                                      u32_t rows, u32_t lane) noexcept {
         for (u32_t word = lane; word < rows * storage.row_fragments; word += hip_warp_t::width_k) {
             u32_t const row = storage.row_of_word(word), fragment = storage.fragment_of_word(word, row);
             cache.at(row, fragment) = storage.vector_for(ids[row], fragment);
@@ -1062,6 +1062,8 @@ struct hip_lds_schedule {
     template <typename storage_, typename cache_>
     __device__ __forceinline__ void stage_rows(storage_ const& storage, cache_ cache, u32_t const* ids, u32_t rows,
                                                u32_t lane) noexcept {
+        if (!__builtin_amdgcn_is_shared(cache.row(0)))
+            return rocm_registers_schedule_t::stage_rows(storage, cache, ids, rows, lane);
         constexpr u32_t units_per_fragment_k = sizeof(typename storage_::fragment_t) / lane_bytes_;
         u32_t const row_units = storage.row_fragments * units_per_fragment_k, units = rows * row_units;
         byte_t* const cache_bytes = reinterpret_cast<byte_t*>(cache.row(0));
@@ -1071,8 +1073,10 @@ struct hip_lds_schedule {
             u32_t const row = storage.row_of_word(unit / units_per_fragment_k);
             byte_t* const source = reinterpret_cast<byte_t*>(storage.vector_span_for(ids[row])) +
                                    (unit - row * row_units) * lane_bytes_;
+            // A size of dependent type defers the builtin's constant check to instantiation, where it is one.
             __builtin_amdgcn_global_load_lds(hip_global_pointer(source),
-                                             hip_shared_pointer(cache_bytes + base * lane_bytes_), lane_bytes_, 0, 0);
+                                             hip_shared_pointer(cache_bytes + base * lane_bytes_),
+                                             static_cast<decltype(storage.row_fragments)>(lane_bytes_), 0, 0);
         }
     }
 

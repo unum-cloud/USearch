@@ -27,27 +27,30 @@ constant constexpr uint metal_cache_rows_k = 64;
 constant constexpr uint metal_unknown_k = 0xFFFFFFFFu;
 constant constexpr ulong metal_sentinel_k = 0xFFFFFFFFFFFFFFFFul;
 constant constexpr ulong metal_expanded_bit_k = 1ul << 32;
+
+/** Probe rounds a visited claim takes before it starves, each reading one aligned pair of slots, as the CUDA and
+ *  HIP sets do. */
 constant constexpr uint metal_probe_budget_k = 64;
-constant constexpr uint metal_restarts_cap_k = 8;
 
 /** Rounds a back-linker sweeps its held neighbors before abandoning them, as the CUDA and HIP ones do. */
 constant constexpr uint metal_back_link_rounds_k = 256;
 
-/** The counters words: the batch's assigned rows, the index's published rows, then the telemetry. */
+/** The counters words: the batch's assigned rows, the index's published rows, the changed nodes and the attend's
+ *  miss word, then the telemetry, each tally a low and a high word. */
 enum metal_counter_t : uint {
     metal_assigned_k = 0,
-    metal_published_k,
-    metal_hops_k,
-    metal_scored_k,
-    metal_restarts_k,
-    metal_lock_attempts_k,
-    metal_lock_skips_k,
-    metal_reselections_k,
-    metal_locked_drops_k,
-    metal_saturations_k,
-    metal_changed_k,
-    metal_missed_k,
-    metal_tail_drops_k,
+    metal_published_k = 1,
+    metal_changed_k = 2,
+    metal_missed_k = 3,
+    metal_hops_k = 4,
+    metal_scored_k = 6,
+    metal_restarts_k = 8,
+    metal_lock_attempts_k = 10,
+    metal_lock_skips_k = 12,
+    metal_reselections_k = 14,
+    metal_locked_drops_k = 16,
+    metal_saturations_k = 18,
+    metal_tail_drops_k = 20,
 };
 
 /** Every scalar a launch carries, mirrored by @c metal_arguments_t on the host word for word. */
@@ -57,7 +60,7 @@ struct metal_arguments_t {
     uint sampling_bound, queries_count, count, epoch_base;
     uint visited_slots, hash_shift, cache_rows, slice_bytes;
     uint heads_count, row_fragments_magic, use_node_ids, expansion;
-    uint tail_entries;
+    uint tail_entries, first_guest;
 };
 
 struct metal_walk_t;
@@ -149,11 +152,38 @@ struct metal_pool {
 
     /** The frontier verbs of the CUDA register frontier. */
     void reset(thread metal_walk_t&) { clear(); }
+
+    /** A walk over full ranks ends at their radius, so a further walk needs no budget renewed. */
+    void renew() {}
     uint hops_budget() { return slots_ * warp_t::width_k * 4; }
     uint dropped() { return 0; }
+    /** The fold's result for a batch of which only the @p admitted lanes can enter, as the CUDA pool's
+     *  @c insert_each lands it: each takes its rank, ranks at and past it move up one, and the last rank drops. */
+    void insert_each(ulong staged, uint admitted, uint lane) {
+        while (admitted) {
+            ulong const value = warp_t::shuffle(staged, ctz(admitted));
+            admitted &= admitted - 1;
+            uint rank = 0;
+            for (uint slot = 0; slot != slots_; ++slot) rank += popcount(warp_t::ballot(entries[slot] < value));
+            if (rank == slots_ * warp_t::width_k) continue; // An earlier entry already pushed the worst below it.
+            // Highest slot first, so each slot's old last lane carries up before that slot is rewritten.
+            for (uint slot = slots_; slot-- != 0;) {
+                if ((slot + 1) * warp_t::width_k <= rank) break; // Lower slots keep their ranks.
+                ulong const carried = slot ? warp_t::shuffle(entries[slot - 1], warp_t::width_k - 1) : metal_sentinel_k;
+                ulong const shifted = warp_t::shuffle(entries[slot], lane ? lane - 1 : 0);
+                uint const position = slot * warp_t::width_k + lane;
+                if (position == rank) entries[slot] = value;
+                else if (position > rank) entries[slot] = lane ? shifted : carried;
+            }
+        }
+    }
     void push_batch(ulong staged, uint lane) {
-        if (slots_ <= 4 && full() && !warp_t::ballot(metal_distance_bits(staged) < radius())) return;
-        insert_batch(staged, lane);
+        // Only entries below the worst kept one can enter: a few take their ranks, a crowd takes the fold.
+        constexpr uint few_k = 3;
+        ulong const worst = warp_t::shuffle(entries[slots_ - 1], warp_t::width_k - 1);
+        uint const admitted = warp_t::ballot(staged < worst);
+        if (popcount(admitted) <= few_k) insert_each(staged, admitted, lane);
+        else insert_batch(staged, lane);
     }
     ulong pop_nearest(uint) {
         ulong const nearest = nearest_unexpanded();
@@ -168,6 +198,9 @@ struct metal_pool {
     void for_each_rank(uint count, uint lane, thread emit_type_& emit) {
         for (uint base = 0; base < count; base += warp_t::width_k) emit(base + lane, rank_entry(base + lane));
     }
+
+    /** The ranks are the pool itself, so nothing settles before a selection reads them. */
+    void settle(uint) {}
 };
 
 /** The arena frontier, the CUDA one line for line: a two-slot register head plus a spill tail in the simdgroup's
@@ -180,6 +213,9 @@ struct metal_arena_frontier {
     uint expansion_target, expansions;
 
     void reset(thread metal_walk_t& walk);
+
+    /** Grants a further walk over what this frontier holds its own expansion budget. */
+    void renew() { expansions = 0; }
     uint hops_budget() { return expansion_target * 4; }
     uint dropped() { return tail_dropped; }
 
@@ -237,11 +273,88 @@ struct metal_arena_frontier {
     bool exhausted() { return expansions >= expansion_target; }
     bool beyond_radius(ulong) { return false; }
 
+    /** Folds the nearest two lane-widths of everything the walk saw into the head, which then answers @c rank_entry
+     *  for a selection, as the CUDA arena frontier does; call once, after the walk. */
+    void settle(uint lane) {
+        auto keep = [&](uint rank, ulong entry) {
+            if (rank < warp_t::width_k) head.entries[0] = entry;
+            else head.entries[1] = entry;
+        };
+        for_each_rank(2 * warp_t::width_k, lane, keep);
+    }
+    ulong rank_entry(uint rank) { return head.rank_entry(rank); }
+
+    /** Drops the tail entries that cannot rank among the nearest @p count, as the CUDA arena frontier's
+     *  @c keep_nearest does: a radix select of the count-th smallest distance key, eight bits a pass from the top,
+     *  ties kept, each lane tallying by ballots the digits whose low five bits are its own index. */
+    void keep_nearest(uint count, uint lane) {
+        constexpr uint lane_bits_k = 5, high_bits_k = 3, bins_k = 8;
+        uint prefix = 0, prefix_mask = 0, rank = count;
+        for (uint pass = 0; pass != 4; ++pass) {
+            uint const shift = 24 - 8 * pass;
+            uint bins[bins_k] = {};
+            // The head's two slots tally as the first two batches, then the tail a simdgroup-width at a time.
+            for (uint base = 0; base < 2 * warp_t::width_k + tail_size; base += warp_t::width_k) {
+                uint const index = base + lane - 2 * warp_t::width_k;
+                ulong const entry = base == 0                 ? head.entries[0]
+                                    : base == warp_t::width_k ? head.entries[1]
+                                    : index < tail_size       ? tail[index]
+                                                              : metal_sentinel_k;
+                uint const key = metal_distance_bits(entry), digit = (key >> shift) & 0xFFu;
+                uint own = warp_t::ballot(entry != metal_sentinel_k && (key & prefix_mask) == prefix);
+                for (uint bit = 0; bit != lane_bits_k; ++bit) {
+                    uint const set = warp_t::ballot(((digit >> bit) & 1u) != 0);
+                    own &= (lane >> bit) & 1u ? set : ~set;
+                }
+                uint high[high_bits_k];
+                for (uint bit = 0; bit != high_bits_k; ++bit)
+                    high[bit] = warp_t::ballot(((digit >> (lane_bits_k + bit)) & 1u) != 0);
+                for (uint bin = 0; bin != bins_k; ++bin) {
+                    uint matching = own;
+                    for (uint bit = 0; bit != high_bits_k; ++bit)
+                        matching &= (bin >> bit) & 1u ? high[bit] : ~high[bit];
+                    bins[bin] += popcount(matching);
+                }
+            }
+            // Digits ascend bin-major, lane-minor; the uniform guard keeps every vote simdgroup-wide.
+            uint below = 0;
+            bool found = false;
+            for (uint bin = 0; bin != bins_k; ++bin) {
+                uint const inclusive = simd_prefix_inclusive_sum(bins[bin]);
+                uint const total = warp_t::shuffle(inclusive, warp_t::width_k - 1);
+                if (!found && below + total >= rank) {
+                    uint const owner = ctz(warp_t::ballot(below + inclusive >= rank));
+                    below += warp_t::shuffle(inclusive - bins[bin], owner);
+                    prefix |= ((bin << lane_bits_k) | owner) << shift;
+                    found = true;
+                }
+                if (!found) below += total;
+            }
+            if (!found) return; // The walk saw fewer than count entries, so every one ranks.
+            prefix_mask |= 0xFFu << shift;
+            rank -= below;
+        }
+        // In place: a kept entry lands at or before its own slot, after the ballot over its batch's loads.
+        uint kept = 0;
+        for (uint base = 0; base < tail_size; base += warp_t::width_k) {
+            uint const index = base + lane;
+            ulong const entry = index < tail_size ? tail[index] : metal_sentinel_k;
+            bool const keep = entry != metal_sentinel_k && metal_distance_bits(entry) <= prefix;
+            uint const keeping = warp_t::ballot(keep);
+            if (keep) tail[kept + popcount(keeping & warp_t::below(lane))] = entry;
+            kept += popcount(keeping);
+        }
+        tail_size = kept;
+        warp_t::sync();
+    }
+
     /** Hands @p emit the nearest @p count entries of the head and the tail ascending, as the CUDA arena frontier
-     *  does: each round folds every entry ranked after the previous round's last into a fresh two-slot pool. */
+     *  does: each round folds every entry ranked after the previous round's last into a fresh two-slot pool, and
+     *  past one round the tail first keeps only the entries that can rank. */
     template <typename emit_type_>
     void for_each_rank(uint count, uint lane, thread emit_type_& emit) {
         constexpr uint round_ranks_k = 2 * warp_t::width_k;
+        if (count > round_ranks_k) keep_nearest(count, lane);
         ulong last = metal_sentinel_k;
         for (uint base = 0; base < count; base += round_ranks_k) {
             auto const unranked = [&](ulong entry) { return base == 0 || last < entry ? entry : metal_sentinel_k; };
@@ -314,6 +427,9 @@ struct metal_walk_t {
     device dot_t* dots;
     device uint* selected_ids;
     device uint* kept_positions;
+
+    /** Each cached candidate's distance to the query, staged once so the selection reads memory, not the pool. */
+    device float* distances;
     device ulong* tail;
 
     uint row_fragments, lanes_per_row, steps_per_row, connectivity, metric, row_fragments_magic;
@@ -329,16 +445,24 @@ struct metal_walk_t {
     device uint* neighbors_for(uint node_id) { return metal_row(neighbors, node_id, connectivity); }
     device uint4* vector_for(uint node_id) { return metal_row(vectors, node_id, row_fragments); }
     device uint4* cache_row(uint row) { return cache + row * row_fragments; }
-    uint row_of_word(uint word) { return uint((ulong(word) * row_fragments_magic) >> 31); }
+
+    /** The row holding flattened @p word, exact for every word under 2^31: the reciprocal never undershoots, and
+     *  overshoots by at most one there. */
+    uint row_of_word(uint word) {
+        uint const row = uint((ulong(word) * row_fragments_magic) >> 31);
+        return row - uint(row * row_fragments > word);
+    }
 
     /** One SplitMix64 step, as @c splitmix64_t takes it. */
     ulong next_random() { return metal_mix_bits(random += 0x9E3779B97F4A7C15ul); }
 
     /** Marks @p node_id visited, answering whether it was fresh; equal IDs collapse to their lowest lane, and a
      *  saturated set reports a claim as visited, so the walk starves rather than loops. A lane with nothing to claim
-     *  passes the sentinel, which no walk visits. */
+     *  passes the sentinel, which no walk visits. The span is 16-byte aligned, since a probe loads an aligned pair. */
     bool test_and_set(uint node_id) {
         bool const active = node_id != metal_unknown_k;
+        // Simdgroup-uniform: an idle call skips the matching votes, a shuffle per lane on Metal.
+        if (!simd_any(active)) return false;
         uint const peers = warp_t::match_any(active ? node_id : (0xFFFFFFFFu ^ lane));
         bool fresh = active && (peers & warp_t::below(lane)) == 0;
         bool probing = fresh;
@@ -346,12 +470,17 @@ struct metal_walk_t {
         uint const mask = 0xFFFFFFFFu >> hash_shift;
         uint slot = (node_id * 0x9E3779B9u) >> hash_shift;
         for (uint round = 0; simd_any(probing) && round != metal_probe_budget_k; ++round) {
-            ulong const observed = probing ? visited[slot] : 0;
+            // One 16-byte load covers the probed slot's aligned pair, so an even-slot collision resolves this round.
+            ulong2 const pair = probing ? ((device ulong2 const*)visited)[slot >> 1] : ulong2(0);
+            ulong const observed = slot & 1 ? pair.y : pair.x;
             bool claiming = false;
             if (probing) {
                 if (observed == claim) fresh = probing = false;
-                else if (uint(observed >> 32) == epoch) slot = (slot + 1) & mask;
-                else claiming = true;
+                else if (uint(observed >> 32) != epoch) claiming = true;
+                else if (slot & 1) slot = (slot + 1) & mask;
+                else if (pair.y == claim) fresh = probing = false;
+                else if (uint(pair.y >> 32) != epoch) slot |= 1, claiming = true;
+                else slot = (slot + 2) & mask;
             }
             uint const rivals = warp_t::match_any(claiming ? slot : (0xFFFFFFFFu ^ lane));
             if (claiming && (rivals & warp_t::below(lane)) == 0) visited[slot] = claim, probing = false;
@@ -370,7 +499,8 @@ struct metal_walk_t {
         uint const rows_per_round = warp_t::width_k >> lanes_log2;
         uint const lane_in_row = lane & (lanes_per_row - 1);
         uint const subgroup = lane >> lanes_log2;
-        for (uint round = 0; round != lanes_per_row; ++round) {
+        // Simdgroup-uniform, so the reduction's shuffles stay legal: rounds past the batch own no row.
+        for (uint round = 0; round != lanes_per_row && round * rows_per_round < count; ++round) {
             uint const row = round * rows_per_round + subgroup;
             bool const live = row < count;
             uint const node_id = live ? batch_ids[row] : 0;
@@ -401,15 +531,34 @@ struct metal_walk_t {
         return popcount(fresh_mask);
     }
 
-    /** Draws one lane-wide batch of distinct, published landmarks below @p bound into @c ids, answering how many. */
-    uint sample_landmarks(uint bound) {
-        uint draw = uint((ulong(uint(next_random())) * bound) >> 32);
-        bool published = false;
-        for (uint attempt = 0; attempt != 4 && !published; ++attempt) {
-            published = warp_t::load_acquire(neighbors_for(draw)) != metal_unknown_k;
-            if (!published) draw = draw + 1 >= bound ? 0 : draw + 1;
+    /** Draws one lane-wide batch of distinct, published landmarks in @b [first,bound) into @c ids: over the first
+     *  few probes a lane meeting an unpublished row draws again, then each lane probes forward past unpublished and
+     *  visited rows for one lap of the range, as the CUDA and HIP samplers do; answers how many, zero once every
+     *  published row of the range is visited. */
+    uint sample_landmarks(uint first, uint bound) {
+        // Rows still inserting gather at the top of the range, which a redraw leaves far sooner than a lap.
+        constexpr uint redraws_k = 16;
+        uint const span = bound - first;
+        uint draw = first + uint((ulong(uint(next_random())) * span) >> 32);
+        bool fresh = false;
+        uint const saturated = saturations;
+        // The trip count is simdgroup-uniform, since every lane takes part in each collective claim, and a saturated
+        // set reports every claim visited, so the lap ends at its first saturation instead of probing the whole range.
+        uint const redraws = min(span, redraws_k);
+        for (ulong probes = 0; probes != ulong(redraws) + span && !simd_all(fresh) && saturations == saturated;
+             ++probes) {
+            bool const published = !fresh && warp_t::load_acquire(neighbors_for(draw)) != metal_unknown_k;
+            bool const claimed = test_and_set(published ? draw : metal_unknown_k);
+            if (!fresh && !claimed)
+                draw = !published && probes < redraws ? first + uint((ulong(uint(next_random())) * span) >> 32)
+                       : draw + 1 == bound            ? first
+                                                      : draw + 1;
+            fresh = fresh || claimed;
         }
-        return stage_fresh(published ? draw : metal_unknown_k);
+        uint const fresh_mask = warp_t::ballot(fresh);
+        if (fresh) ids[popcount(fresh_mask & warp_t::below(lane))] = draw;
+        warp_t::sync();
+        return popcount(fresh_mask);
     }
 };
 
@@ -459,15 +608,15 @@ inline void metal_score_into(thread metal_walk_t& walk, thread frontier_& pool, 
     fold.absorb(walk, count);
 }
 
-/** Continues a greedy best-first walk over whatever @p pool holds, seeding from landmarks below @p bound and never
- *  following a neighbor at or past @p first_invisible; read-only on the graph, a transiently locked candidate held
- *  through one other expansion and dropped if still locked then, as the CUDA and HIP walks do. */
+/** Continues a greedy best-first walk over whatever @p pool holds, seeding from landmarks in @b [first,bound) and
+ *  never following a neighbor at or past @p first_invisible; read-only on the graph, a transiently locked candidate
+ *  held through one other expansion and dropped if still locked then, as the CUDA and HIP walks do. */
 template <typename frontier_>
-inline void metal_search_ahead(thread metal_walk_t& walk, thread frontier_& pool, norms_t query_norms, uint bound,
-                               uint first_invisible, thread metal_fold_t& fold) {
-    // The caps bound one walk, while the telemetry adds up every walk the simdgroup takes.
+inline void metal_search_ahead(thread metal_walk_t& walk, thread frontier_& pool, norms_t query_norms, uint first,
+                               uint bound, uint first_invisible, thread metal_fold_t& fold) {
+    // The cap bounds one walk, while the telemetry adds up every walk the simdgroup takes.
     uint const hops_cap = pool.hops_budget();
-    uint hops = 0, restarts = 0;
+    uint hops = 0;
     // The one candidate held for its second look, and the hop it was held at; a drained pool moves that hop out of
     // reach, so the next iteration looks at once.
     ulong held = metal_sentinel_k;
@@ -475,8 +624,9 @@ inline void metal_search_ahead(thread metal_walk_t& walk, thread frontier_& pool
     bool seeding = true;
     while (true) {
         if (seeding) {
-            uint const count = walk.sample_landmarks(bound);
-            if (count) metal_score_into(walk, pool, query_norms, count, fold);
+            uint const count = walk.sample_landmarks(first, bound);
+            if (!count) break; // Every published row below the bound is already visited.
+            metal_score_into(walk, pool, query_norms, count, fold);
             seeding = false;
             continue;
         }
@@ -488,10 +638,11 @@ inline void metal_search_ahead(thread metal_walk_t& walk, thread frontier_& pool
                 held_at_hop = ~0u;
                 continue;
             }
-            // A drained frontier before an exhausted walk means nothing reachable from its seeds remains.
-            if (pool.exhausted() || restarts >= metal_restarts_cap_k || hops >= hops_cap) break;
+            // A drained frontier before an exhausted walk re-seeds at one hop of the budget, so a walk whose full tail
+            // drops every landmark still ends on the cap.
+            if (pool.exhausted() || hops >= hops_cap) break;
             seeding = true;
-            ++restarts, ++walk.restarts;
+            ++walk.restarts, ++hops;
             continue;
         }
         if (pool.beyond_radius(candidate) || hops >= hops_cap) break;
@@ -522,13 +673,17 @@ inline void metal_search_ahead(thread metal_walk_t& walk, thread frontier_& pool
 
 /** Greedy diversity selection over the pool's ascending prefix into @c selected_ids, backfilled with the nearest
  *  rejected candidates as the CUDA selection does; answers the kept count. */
-template <uint slots_>
-inline uint metal_select_diverse(thread metal_walk_t& walk, thread metal_pool<slots_>& pool) {
+template <typename frontier_>
+inline uint metal_select_diverse(thread metal_walk_t& walk, thread frontier_& pool) {
+    pool.settle(walk.lane);
     uint candidates = 0;
     for (uint base = 0; base < metal_cache_rows_k; base += warp_t::width_k) {
         ulong const entry = pool.rank_entry(base + walk.lane);
         uint const live = warp_t::ballot(entry != metal_sentinel_k);
-        if (entry != metal_sentinel_k) walk.ids[base + walk.lane] = metal_id_of(entry);
+        if (entry != metal_sentinel_k) {
+            walk.ids[base + walk.lane] = metal_id_of(entry);
+            walk.distances[base + walk.lane] = metal_distance_of(entry);
+        }
         candidates += popcount(live);
         if (live != 0xFFFFFFFFu) break;
     }
@@ -543,7 +698,7 @@ inline uint metal_select_diverse(thread metal_walk_t& walk, thread metal_pool<sl
 
     uint selected = 0;
     for (uint candidate = 0; candidate < candidates && selected < walk.connectivity; ++candidate) {
-        float const to_query = metal_distance_of(pool.rank_entry(candidate));
+        float const to_query = walk.distances[candidate];
         bool diverse = true;
         for (uint base = 0; base < selected && diverse; base += warp_t::width_k) {
             bool lane_diverse = true;
@@ -620,8 +775,12 @@ inline void metal_back_link(thread metal_walk_t& walk, uint new_node_id, norms_t
         for (uint pending_index = 0; pending_index != pending; ++pending_index) {
             uint const target = walk.selected_ids[pending_index];
             device uint* const row = walk.neighbors_for(target);
+            // A retry reads before it writes, so a held row's line is not hammered while its holder rewrites it.
             uint const first_value = warp_t::shuffle(
-                walk.lane == 0 ? warp_t::exchange_acquire(row, metal_unknown_k) : metal_unknown_k, 0);
+                walk.lane == 0 && (round == 0 || warp_t::load_acquire(row) != metal_unknown_k)
+                    ? warp_t::exchange_acquire(row, metal_unknown_k)
+                    : metal_unknown_k,
+                0);
             warp_t::fence();
             ++walk.lock_attempts;
             if (first_value == metal_unknown_k) {
@@ -741,11 +900,14 @@ inline void metal_back_link(thread metal_walk_t& walk, uint new_node_id, norms_t
     walk.lock_skips += pending;
 }
 
-/** Folds the walk's telemetry into the device counters, from its leader. */
+/** Folds the walk's telemetry into the device counters, from its leader; a tally carries into its high word, since
+ *  one batch's scored nodes outgrow 32 bits. */
 inline void metal_flush(thread metal_walk_t& walk) {
     if (walk.lane != 0) return;
     auto const add = [&](uint counter, uint value) {
-        if (value) atomic_fetch_add_explicit(walk.counters + counter, value, memory_order_relaxed);
+        if (!value) return;
+        uint const low = atomic_fetch_add_explicit(walk.counters + counter, value, memory_order_relaxed);
+        if (low + value < low) atomic_fetch_add_explicit(walk.counters + counter + 1, 1u, memory_order_relaxed);
     };
     add(metal_hops_k, walk.hops);
     add(metal_scored_k, walk.scored_count);
@@ -781,6 +943,7 @@ inline metal_walk_t metal_open(constant metal_arguments_t& arguments, device uin
     walk.dots = (device dot_t*)carve(warp_t::width_k * 4);
     walk.selected_ids = (device uint*)carve(metal_cache_rows_k * 4);
     walk.kept_positions = (device uint*)carve(metal_cache_rows_k * 4);
+    walk.distances = (device float*)carve(metal_cache_rows_k * 4);
     walk.tail = (device ulong*)carve(arguments.tail_entries * 8);
     walk.tail_entries = arguments.tail_entries, walk.expansion = arguments.expansion;
     walk.row_fragments = arguments.row_fragments, walk.lanes_per_row = arguments.lanes_per_row;
@@ -838,10 +1001,11 @@ inline void metal_insert(constant metal_arguments_t& arguments, device uint4* ve
         if (lane == 0 && walk.has_norms) norms[new_node_id] = new_norms;
         warp_t::sync();
 
-        metal_pool<slots_> pool;
-        pool.clear();
+        typename metal_frontier_of<slots_>::type pool;
+        pool.reset(walk);
         metal_fold_t fold {};
-        if (new_node_id != 0) metal_search_ahead(walk, pool, new_norms, new_node_id, arguments.end_id, fold);
+        if (new_node_id != 0) metal_search_ahead(walk, pool, new_norms, 0, new_node_id, arguments.end_id, fold);
+        walk.tail_drops += pool.dropped();
         uint const selected = metal_select_diverse(walk, pool);
         device uint* const own = walk.neighbors_for(new_node_id);
         for (uint slot = lane; slot < selected; slot += warp_t::width_k)
@@ -873,10 +1037,18 @@ inline void metal_refine(constant metal_arguments_t& arguments, device uint4* ve
         metal_stage_query(walk, walk.vector_for(node_id));
         norms_t const query_norms = walk.norm_for(node_id);
 
-        metal_pool<slots_> pool;
-        pool.clear();
+        typename metal_frontier_of<slots_>::type pool;
+        pool.reset(walk);
         metal_fold_t fold {};
         walk.test_and_set(node_id);
+        // A stitch walks the other part first, from landmarks there alone, as the CUDA and HIP refines do.
+        if (arguments.first_guest) {
+            bool const guest = node_id >= arguments.first_guest;
+            metal_search_ahead(walk, pool, query_norms, guest ? 0 : arguments.first_guest,
+                               guest ? arguments.first_guest : arguments.sampling_bound, arguments.sampling_bound,
+                               fold);
+            pool.renew();
+        }
         device uint* const own = walk.neighbors_for(node_id);
         uint const first_value = warp_t::shuffle(lane == 0 ? warp_t::load_acquire(own) : 0u, 0);
         if (first_value != metal_unknown_k && first_value != node_id)
@@ -888,7 +1060,8 @@ inline void metal_refine(constant metal_arguments_t& arguments, device uint4* ve
                 uint const count = walk.stage_fresh(seed != node_id ? seed : metal_unknown_k);
                 if (count) metal_score_into(walk, pool, query_norms, count, fold);
             }
-        metal_search_ahead(walk, pool, query_norms, arguments.sampling_bound, arguments.sampling_bound, fold);
+        metal_search_ahead(walk, pool, query_norms, 0, arguments.sampling_bound, arguments.sampling_bound, fold);
+        walk.tail_drops += pool.dropped();
         uint const selected = metal_select_diverse(walk, pool);
         device uint* const shadow_row = metal_row(shadow, node_id, walk.connectivity);
         for (uint slot = lane; slot < walk.connectivity; slot += warp_t::width_k)
@@ -898,17 +1071,20 @@ inline void metal_refine(constant metal_arguments_t& arguments, device uint4* ve
     metal_flush(walk);
 }
 
-/** One simdgroup walks one query at a time, landing its nearest IDs and distances, or under @p fold.keeps the pairs
- *  it scored and their count, ranked under indexer heads when the fold names any. Slot zero walks the arena frontier
- *  and ranks everything it kept. */
+/** One simdgroup walks one query at a time, assigning itself queries from the batch counter, landing its nearest IDs
+ *  and distances, or under @p fold.keeps the pairs it scored and their count, ranked under indexer heads when the
+ *  fold names any. Slot zero walks the arena frontier and ranks everything it kept. */
 template <uint slots_>
 inline void metal_search(constant metal_arguments_t& arguments, device uint4* vectors, device norms_t* norms,
                          device uint* neighbors, device uint4 const* queries, device uchar* arena,
                          device atomic_uint* counters, device uint* result_ids, device float* result_distances,
                          device dot_t* products, device uint* scored_counts, device uint4 const* heads,
-                         device float const* weights, bool keeps, uint slice, uint slices, uint lane) {
+                         device float const* weights, bool keeps, uint slice, uint lane) {
     metal_walk_t walk = metal_open(arguments, vectors, norms, neighbors, arena, counters, slice, lane);
-    for (uint query = slice; query < arguments.queries_count; query += slices) {
+    while (true) {
+        uint query = lane == 0 ? atomic_fetch_add_explicit(counters + metal_assigned_k, 1u, memory_order_relaxed) : 0;
+        query = warp_t::shuffle(query, 0);
+        if (query >= arguments.queries_count) break;
         walk.epoch = arguments.epoch_base + query + 1;
         walk.random = metal_lane_generator(query, lane);
         norms_t const query_norms = metal_stage_query(walk, metal_row(queries, query, walk.row_fragments));
@@ -926,7 +1102,7 @@ inline void metal_search(constant metal_arguments_t& arguments, device uint4* ve
             fold.weights = metal_row(weights, query, arguments.heads_count);
             fold.heads_count = arguments.heads_count;
         }
-        metal_search_ahead(walk, pool, query_norms, arguments.sampling_bound, arguments.sampling_bound, fold);
+        metal_search_ahead(walk, pool, query_norms, 0, arguments.sampling_bound, arguments.sampling_bound, fold);
         walk.tail_drops += pool.dropped();
         if (keeps) {
             for (uint slot = fold.written + lane; slot < arguments.count; slot += warp_t::width_k)
@@ -965,8 +1141,8 @@ inline void metal_search(constant metal_arguments_t& arguments, device uint4* ve
     }
 }
 
-/*  The entry points, one instantiation per pool width the host's ladder names: 2, 4, 8 and 16 slots of
- *  32 lanes, each under the name the host looks it up by. */
+/*  The entry points, one instantiation per rung the host's ladder names: 2, 4, 8 and 16 slots of 32 lanes, and
+ *  slot zero's arena frontier past the widest pool, each under the name the host looks it up by. */
 
 template <uint slots_>
 kernel void metal_insert_kernel(constant metal_arguments_t& arguments [[buffer(0)]],
@@ -980,6 +1156,11 @@ kernel void metal_insert_kernel(constant metal_arguments_t& arguments [[buffer(0
                          group * metal_simdgroups_k + simdgroup, lane);
 }
 
+template [[host_name("metal_insert_kernel_0")]] kernel void metal_insert_kernel<0>(constant metal_arguments_t&,
+                                                                                   device uint4*, device norms_t*,
+                                                                                   device uint*, device uint4 const*,
+                                                                                   device uchar*, device atomic_uint*,
+                                                                                   uint, uint, uint);
 template [[host_name("metal_insert_kernel_2")]] kernel void metal_insert_kernel<2>(constant metal_arguments_t&,
                                                                                    device uint4*, device norms_t*,
                                                                                    device uint*, device uint4 const*,
@@ -1013,6 +1194,11 @@ kernel void metal_refine_kernel(constant metal_arguments_t& arguments [[buffer(0
                          group * metal_simdgroups_k + simdgroup, lane);
 }
 
+template [[host_name("metal_refine_kernel_0")]] kernel void metal_refine_kernel<0>(constant metal_arguments_t&,
+                                                                                   device uint4*, device norms_t*,
+                                                                                   device uint*, device uint const*,
+                                                                                   device uchar*, device atomic_uint*,
+                                                                                   device uint*, uint, uint, uint);
 template [[host_name("metal_refine_kernel_2")]] kernel void metal_refine_kernel<2>(constant metal_arguments_t&,
                                                                                    device uint4*, device norms_t*,
                                                                                    device uint*, device uint const*,
@@ -1046,34 +1232,32 @@ kernel void metal_search_kernel(constant metal_arguments_t& arguments [[buffer(0
                                 device dot_t* products [[buffer(9)]], device uint* scored [[buffer(10)]],
                                 device uint4 const* heads [[buffer(11)]], device float const* weights [[buffer(12)]],
                                 constant uint& keeps [[buffer(13)]], uint group [[threadgroup_position_in_grid]],
-                                uint groups [[threadgroups_per_grid]],
                                 uint simdgroup [[simdgroup_index_in_threadgroup]],
                                 uint lane [[thread_index_in_simdgroup]]) {
     metal_search<slots_>(arguments, vectors, norms, neighbors, queries, arena, counters, ids, distances, products,
-                         scored, heads, weights, keeps != 0, group * metal_simdgroups_k + simdgroup,
-                         groups * metal_simdgroups_k, lane);
+                         scored, heads, weights, keeps != 0, group * metal_simdgroups_k + simdgroup, lane);
 }
 
 template [[host_name("metal_search_kernel_0")]] kernel void metal_search_kernel<0>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
     device atomic_uint*, device uint*, device float*, device dot_t*, device uint*, device uint4 const*,
-    device float const*, constant uint&, uint, uint, uint, uint);
+    device float const*, constant uint&, uint, uint, uint);
 template [[host_name("metal_search_kernel_2")]] kernel void metal_search_kernel<2>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
     device atomic_uint*, device uint*, device float*, device dot_t*, device uint*, device uint4 const*,
-    device float const*, constant uint&, uint, uint, uint, uint);
+    device float const*, constant uint&, uint, uint, uint);
 template [[host_name("metal_search_kernel_4")]] kernel void metal_search_kernel<4>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
     device atomic_uint*, device uint*, device float*, device dot_t*, device uint*, device uint4 const*,
-    device float const*, constant uint&, uint, uint, uint, uint);
+    device float const*, constant uint&, uint, uint, uint);
 template [[host_name("metal_search_kernel_8")]] kernel void metal_search_kernel<8>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
     device atomic_uint*, device uint*, device float*, device dot_t*, device uint*, device uint4 const*,
-    device float const*, constant uint&, uint, uint, uint, uint);
+    device float const*, constant uint&, uint, uint, uint);
 template [[host_name("metal_search_kernel_16")]] kernel void metal_search_kernel<16>(
     constant metal_arguments_t&, device uint4*, device norms_t*, device uint*, device uint4 const*, device uchar*,
     device atomic_uint*, device uint*, device float*, device dot_t*, device uint*, device uint4 const*,
-    device float const*, constant uint&, uint, uint, uint, uint);
+    device float const*, constant uint&, uint, uint, uint);
 
 #pragma endregion Kernels
 

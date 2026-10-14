@@ -22,44 +22,44 @@ us::dense::amd_code_object<us::dense::amd_capabilities_of(gpu_class_t::amd_cdna3
 }
 
 template struct specialized_index<vram_amd_indexes<nk_bf16_k, gpu_class_t::amd_cdna3_k>>;
-template __device__ void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_bf16_k>();
+template void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_bf16_k>();
 #if USEARCH_DENSE_DTYPES >= 2
 template struct specialized_index<vram_amd_indexes<nk_u1_k, gpu_class_t::amd_cdna3_k>>;
-template __device__ void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_u1_k>();
+template void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_u1_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 3
 template struct specialized_index<vram_amd_indexes<nk_i8_k, gpu_class_t::amd_cdna3_k>>;
-template __device__ void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_i8_k>();
+template void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_i8_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 4
 template struct specialized_index<vram_amd_indexes<nk_e4m3_k, gpu_class_t::amd_cdna3_k>>;
-template __device__ void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_e4m3_k>();
+template void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_e4m3_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 5
 template struct specialized_index<vram_amd_indexes<nk_f16_k, gpu_class_t::amd_cdna3_k>>;
-template __device__ void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_f16_k>();
+template void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_f16_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 6
 template struct specialized_index<vram_amd_indexes<nk_u8_k, gpu_class_t::amd_cdna3_k>>;
-template __device__ void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_u8_k>();
+template void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_u8_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 7
 template struct specialized_index<vram_amd_indexes<nk_e5m2_k, gpu_class_t::amd_cdna3_k>>;
-template __device__ void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_e5m2_k>();
+template void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_e5m2_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 8
 template struct specialized_index<vram_amd_indexes<nk_i4_k, gpu_class_t::amd_cdna3_k>>;
-template __device__ void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_i4_k>();
+template void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_i4_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 9
 template struct specialized_index<vram_amd_indexes<nk_u4_k, gpu_class_t::amd_cdna3_k>>;
-template __device__ void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_u4_k>();
+template void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_u4_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 10
 template struct specialized_index<vram_amd_indexes<nk_e3m2_k, gpu_class_t::amd_cdna3_k>>;
-template __device__ void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_e3m2_k>();
+template void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_e3m2_k>();
 #endif
 #if USEARCH_DENSE_DTYPES >= 11
 template struct specialized_index<vram_amd_indexes<nk_e2m3_k, gpu_class_t::amd_cdna3_k>>;
-template __device__ void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_e2m3_k>();
+template void us::dense::amd_instantiate<gpu_class_t::amd_cdna3_k, nk_e2m3_k>();
 #endif
