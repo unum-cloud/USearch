@@ -9,9 +9,10 @@ target_include_directories(usearch_test_header_only PRIVATE ${CMAKE_CURRENT_SOUR
 target_link_libraries(usearch_test_header_only PRIVATE fmt::fmt yyjson forkunion::header numkong::header)
 add_test(NAME usearch_test_header_only COMMAND usearch_test_header_only)
 
-# The dense suite lists the per-family test units, sharded per dtype so the instantiation grids build in parallel, and
-# keeps the shards of the dtypes `USEARCH_DENSE_DTYPES` compiles. Optimization level comes from the configuration:
-# measured on these shards, -O1 costs as much as -O3 and only slows the suite down.
+# The engine suite lists the dense per-family test units, sharded per dtype so the instantiation grids build in
+# parallel, and keeps the shards of the dtypes `USEARCH_DENSE_DTYPES` compiles; the sequence and shapes engines add one
+# unit each. Optimization level comes from the configuration: measured on these shards, -O1 costs as much as -O3 and
+# only slows the suite down.
 add_executable(
     usearch_test
     main.cpp
@@ -22,6 +23,9 @@ add_executable(
     dense/ram_indexes.cpp
     dense/ram_index_f32.cpp
     dense/nvme_indexes.cpp
+    sequence/ram_index.cpp
+    shapes/ram_index.cpp
+    geospatial/ram_index.cpp
 )
 usearch_dense_dtype_sources(
     usearch_test
@@ -41,7 +45,7 @@ usearch_setup_target(usearch_test HOST)
 # The capability names come from the C interface's own probes, compiled in rather than linking the whole library.
 target_sources(usearch_test PRIVATE ${PROJECT_SOURCE_DIR}/src/types.cpp)
 target_include_directories(usearch_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(usearch_test PRIVATE fmt::fmt yyjson forkunion::static)
+target_link_libraries(usearch_test PRIVATE fmt::fmt yyjson forkunion::static stringzilla::header)
 add_test(NAME usearch_test COMMAND usearch_test)
 
 # The header-only tier's witness: everything under `utilities/`, `basic/` & `geospatial/` compiles & runs from headers

@@ -30,14 +30,14 @@
 #include "usearch/utilities/ram_tables.hpp"
 #include "usearch/dense/types.hpp"
 #include "usearch/basic/ram_index.hpp"
-#include "usearch/geospatial/ram_index.hpp"
+#include "usearch/geospatial/ram_metric.hpp"
 
 using namespace unum::usearch;
 using namespace unum::usearch::utilities;
 
 /** The geospatial tier's witnesses: its metric, codec & index alias satisfy the basic concepts. */
-static_assert(basic::metric<geospatial::chord_metric_t, geospatial::earth_fixed_t, i64_t>);
-static_assert(basic::value_codec<geospatial::earth_fixed_codec_t, geospatial::earth_fixed_t>);
+static_assert(basic::metric<geospatial::chord_metric_t, geospatial::earth_observation_t, i64_t>);
+static_assert(basic::value_codec<geospatial::earth_observation_codec_t, geospatial::earth_observation_t>);
 static_assert(basic::selector<geospatial::surface_keep_octants_t, geospatial::ram_index_t, geospatial::chord_metric_t>);
 
 /** Hamming distance over eight-byte tags - the smallest metric the concept admits. */
@@ -186,7 +186,7 @@ int main() {
     std::unique_ptr<narrow_index_t> const index_ptr {new (std::nothrow) narrow_index_t};
     if (!index_ptr) return 1;
     narrow_index_t& index = *index_ptr;
-    if (failed(index.reserve(16).status) || index.capacity() != 16) return 1;
+    if (failed(index.reserve(16).status) || index.capacity() < 16 || !index.memory_usage()) return 1;
     std::array<std::array<char, 8>, 8> tags {};
     std::array<u64_t, 8> keys {};
     for (std::size_t tag = 0; tag != tags.size(); ++tag) tags[tag] = make_tag(tag), keys[tag] = 100 + tag;
@@ -203,6 +203,16 @@ int main() {
                    .status))
         return 1;
     if (index.size() != 9) return 1;
+
+    // A planned batch stepped on this thread, its context over another allocator than the index's.
+    std::array<std::array<char, 8>, 2> planned_tags {{make_tag(61), make_tag(62)}};
+    std::array<u64_t, 2> const planned_keys {300, 301};
+    narrow_index_t::traversal_context_over<std::allocator<char>> planned_context {11};
+    if (failed(narrow_index_t::reserve_traversal(planned_context, 2, {}))) return 1;
+    auto [plan, plan_status] = index.plan_insert(planned_tags.size());
+    if (failed(plan_status)) return 1;
+    plan.insert(0, planned_tags, planned_keys, metric, planned_context, basic::keep_closest_t {2});
+    if (plan.finish() != status_t::success_k || index.size() != 11 || !index.contains(301)) return 1;
 
     // All three search arms answer, ranked & settled-equal.
     auto const query = make_tag(0);
@@ -266,5 +276,11 @@ int main() {
         return 1;
     if (!wide_index.find(wide_keys[1]) || wide_index.find(wide_keys[1]).value != 1) return 1;
     if (failed(wide_index.search(make_tag(1), metric, wide_context).status)) return 1;
+
+    // Clearing forgets the nodes and keys and keeps the covered chunks.
+    std::size_t const wide_capacity = wide_index.capacity();
+    if (wide_index.clear() != status_t::success_k || wide_index.size() || wide_index.capacity() != wide_capacity)
+        return 1;
+    if (wide_index.contains(wide_keys[1]) || wide_index.get_allocator() != std::allocator<byte_t> {}) return 1;
     return 0;
 }

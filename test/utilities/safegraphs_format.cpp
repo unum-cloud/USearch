@@ -96,7 +96,7 @@ struct embeddings_fixture_t {
 
     /** A few prototypes on the unit sphere, each drawn many times with a small jitter,
      *  so the graph has clusters to navigate. */
-    static std::vector<embedding_t> make_values(std::size_t count, u64_t seed) {
+    static std::vector<embedding_t> make_values(std::size_t count, u64_t seed, typename index_t::allocator_t const&) {
         constexpr std::size_t prototypes_k = 6;
         splitmix64_t random_generator {seed};
         uniform_below<u32_t> coordinate_distribution {2001};

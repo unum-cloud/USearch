@@ -367,6 +367,7 @@ function (usearch_setup_target TARGET_NAME)
             ${TARGET_NAME}
             PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${USEARCH_SANITIZERS}>
                     -ffast-math
+                    -fno-finite-math-only
                     -fPIC
                     -Wall
                     -Wextra
@@ -382,8 +383,14 @@ function (usearch_setup_target TARGET_NAME)
 
     elseif (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
         target_compile_options(
-            ${TARGET_NAME} PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${USEARCH_SANITIZERS}> -ffast-math
-                                   -fPIC -pedantic -Wfatal-errors -fcolor-diagnostics>
+            ${TARGET_NAME}
+            PRIVATE $<$<COMPILE_LANGUAGE:C,CXX>:$<$<CONFIG:DEBUG>:${USEARCH_SANITIZERS}>
+                    -ffast-math
+                    -fno-finite-math-only
+                    -fPIC
+                    -pedantic
+                    -Wfatal-errors
+                    -fcolor-diagnostics>
         )
         target_link_options(${TARGET_NAME} PRIVATE $<$<CONFIG:DEBUG>:-g ${USEARCH_SANITIZERS}> -fPIC)
 
@@ -516,7 +523,7 @@ endforeach ()
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 usearch_sibling(
-    numkong numkong::header https://github.com/ashvardanian/NumKong 215377db8fc434fe96e3d548d416670cbafc6198
+    numkong numkong::header https://github.com/ashvardanian/NumKong 0604027604d3adc6c6cc955e28372735fb5f8220
 )
 usearch_sibling(
     forkunion forkunion::header https://github.com/ashvardanian/ForkUnion 075d14137420f204ff175acd2d29c22e163e241c

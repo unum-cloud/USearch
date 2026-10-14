@@ -185,7 +185,7 @@ endforeach ()
 # The type-erased implementations behind the C interface: the dispatch unit visits the arms through their explicitly
 # instantiated views and compiles at the baseline, since it inlines no kernel. Under CUDA the device arms join, so the C
 # libraries carry them too.
-add_library(usearch_punned OBJECT types.cpp sequence.cpp dense_index.cpp)
+add_library(usearch_punned OBJECT types.cpp dense_index.cpp)
 usearch_setup_target(usearch_punned)
 target_include_directories(usearch_punned PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_punned PRIVATE yyjson forkunion::static stringzilla::header)

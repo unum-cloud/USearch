@@ -499,6 +499,18 @@ std::size_t check_bioinformatics(settings_t const& settings);
 std::size_t check_meshes(settings_t const& settings);
 } // namespace basic
 
+namespace sequence {
+std::size_t check_sequence(settings_t const& settings);
+} // namespace sequence
+
+namespace shapes {
+std::size_t check_shapes(settings_t const& settings);
+} // namespace shapes
+
+namespace geospatial {
+std::size_t check_geospatial(settings_t const& settings);
+} // namespace geospatial
+
 } // namespace unum::usearch::test
 
 /** Teaches the expect verbs to print statuses by name - @c status_t is the most

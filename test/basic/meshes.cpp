@@ -187,11 +187,11 @@ struct meshes_fixture {
         return true;
     }
 
-    static meshes_handmade_t make_handmade() {
+    static meshes_handmade_t make_handmade(typename index_t::allocator_t const&) {
         return {{make_tetrahedron(1), make_tetrahedron(2), make_tetrahedron(3)}, {{{0, 1, 2}, {1, 0, 1}, {2, 1, 0}}}};
     }
 
-    static std::vector<mesh_t> make_values(std::size_t count, u64_t seed) {
+    static std::vector<mesh_t> make_values(std::size_t count, u64_t seed, typename index_t::allocator_t const&) {
         constexpr std::size_t prototypes_k = 8;
         constexpr std::size_t points_per_mesh_k = 24;
         constexpr std::size_t jittered_points_k = 4;
@@ -266,7 +266,8 @@ static std::size_t check_meshes_rigid_invariance() {
  *  every scenario's per-result audit. */
 static std::size_t check_meshes_kernel_parity(u64_t seed) {
     std::size_t failures = 0;
-    auto values = meshes_fixture_t::make_values(8, stream_key(seed, "kernel_parity"));
+    allocation_ledger_t ledger;
+    auto values = meshes_fixture_t::make_values(8, stream_key(seed, "kernel_parity"), counting_allocator_t {ledger});
     for (std::size_t pair = 0; pair + 1 < values.size(); pair += 2) {
         auto const& first = values[pair].spectrum;
         auto const& second = values[pair + 1].spectrum;

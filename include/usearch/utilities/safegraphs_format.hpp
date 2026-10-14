@@ -1132,7 +1132,7 @@ std::span<element_type_> safegraphs_typed_span_(std::span<byte_type_> segment, s
 /** Bytes a save of @p index under @p config writes; @c contended_k while a plan is open. */
 template <typename index_type_, typename codec_type_, typename allocator_type_ = std::allocator<byte_t>>
     requires interchange_value_codec<codec_type_>
-expected<std::size_t> safegraphs_storage_requirements(index_type_ const& index, codec_type_ const& codec,
+expected<std::size_t> safegraphs_storage_requirements(index_type_& index, codec_type_ const& codec,
                                                       save_config_t const& config, std::string_view metric,
                                                       allocator_type_ allocator = {}) noexcept {
     auto const [extents, measure_status] = index.columns_extents(codec);
@@ -1166,7 +1166,7 @@ expected<std::size_t> safegraphs_storage_requirements(index_type_ const& index, 
 template <typename index_type_, typename codec_type_, typename executor_type_,
           typename progress_type_ = dummy_progress_t, typename allocator_type_ = std::allocator<byte_t>>
     requires interchange_value_codec<codec_type_>
-status_t safegraphs_write_index(bytes_span_t monolith, index_type_ const& index, codec_type_ const& codec,
+status_t safegraphs_write_index(bytes_span_t monolith, index_type_& index, codec_type_ const& codec,
                                 executor_type_& executor, save_config_t const& config, std::string_view metric,
                                 progress_type_&& progress = {}, allocator_type_ allocator = {}) noexcept {
     using key_t = typename index_type_::key_t;

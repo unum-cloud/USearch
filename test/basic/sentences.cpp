@@ -110,11 +110,11 @@ struct sentences_fixture {
     }
     static bool value_equals(std::string const& first, std::string const& second) noexcept { return first == second; }
 
-    static sentences_handmade_t make_handmade() {
+    static sentences_handmade_t make_handmade(typename index_t::allocator_t const&) {
         return {{"kitten", "sitting", "sitten"}, {{{0, 3, 1}, {3, 0, 2}, {1, 2, 0}}}};
     }
 
-    static std::vector<std::string> make_values(std::size_t count, u64_t seed) {
+    static std::vector<std::string> make_values(std::size_t count, u64_t seed, typename index_t::allocator_t const&) {
         constexpr std::array<std::string_view, 12> vocabulary_k {"graph", "index",  "vector",  "search",
                                                                  "batch", "metric", "kernel",  "thread",
                                                                  "cache", "tensor", "payload", "cluster"};
@@ -172,7 +172,8 @@ static std::size_t check_sentences_transparent_search(u64_t seed) {
         auto metric = sentences_fixture_t::make_metric();
         sentences_fixture_t::index_t::traversal_context_t context {stream_key(seed, "transparent_search"),
                                                                    counting_allocator_t {ledger}};
-        auto values = sentences_fixture_t::make_values(16, stream_key(seed, "transparent_search", 1));
+        auto values = sentences_fixture_t::make_values(16, stream_key(seed, "transparent_search", 1),
+                                                       counting_allocator_t {ledger});
         std::string const copied_value = values[0];
         failures += expect(bool(index.reserve(values.size())));
         std::vector<u32_t> assigned_ids;
@@ -200,7 +201,8 @@ static std::size_t check_sentences_codec_poison(u64_t seed) {
         auto const codec = sentences_fixture_t::make_codec();
         sentences_fixture_t::index_t::traversal_context_t context {stream_key(seed, "codec_poison"),
                                                                    counting_allocator_t {ledger}};
-        auto values = sentences_fixture_t::make_values(8, stream_key(seed, "codec_poison", 1));
+        auto values = sentences_fixture_t::make_values(8, stream_key(seed, "codec_poison", 1),
+                                                       counting_allocator_t {ledger});
         failures += expect(bool(index.reserve(values.size())));
         std::vector<u32_t> assigned_ids;
         failures += basic_build<sentences_fixture_t>(index, metric, values, assigned_ids, context, keep_diverse_t {4});
@@ -215,7 +217,8 @@ static std::size_t check_sentences_codec_poison(u64_t seed) {
         failures += expect_eq(poisoned.load(columns.view(), codec), status_t::malformed_k);
 
         // The dead plan decoded every row but the last, so the IDs an insert now dispenses held its keys and rows.
-        auto fresh_values = sentences_fixture_t::make_values(2, stream_key(seed, "codec_poison", 2));
+        auto fresh_values = sentences_fixture_t::make_values(2, stream_key(seed, "codec_poison", 2),
+                                                             counting_allocator_t {ledger});
         std::array<u64_t, 2> const fresh_keys {sentences_fixture_t::make_key(values.size()),
                                                sentences_fixture_t::make_key(values.size() + 1)};
         auto const [inserted, insert_status] = poisoned.insert(std::span(fresh_values), std::span(fresh_keys), metric,
@@ -230,7 +233,7 @@ static std::size_t check_sentences_codec_poison(u64_t seed) {
 }
 
 /** A batch publishes whole: a two-value batch on an empty index parks in its second row's walk,
- *  which already admitted the first row through its wired flag, and no reader sees either row
+ *  which already admitted the first row through its `wired_k` bit, and no reader sees either row
  *  until the batch's turn. */
 static std::size_t check_sentences_whole_batch(u64_t seed) {
     using index_t = sentences_fixture_t::index_t;
@@ -240,7 +243,8 @@ static std::size_t check_sentences_whole_batch(u64_t seed) {
     {
         std::unique_ptr<index_t> const index_ptr = sentences_fixture_t::make_index(ledger);
         index_t& index = *index_ptr;
-        auto values = sentences_fixture_t::make_values(2, stream_key(seed, "whole_batch"));
+        auto values = sentences_fixture_t::make_values(2, stream_key(seed, "whole_batch"),
+                                                       counting_allocator_t {ledger});
         std::array<u64_t, 2> const keys {sentences_fixture_t::make_key(0), sentences_fixture_t::make_key(1)};
         failures += expect(bool(index.reserve(values.size())));
         std::atomic<bool> entered {false}, released {false};
@@ -309,7 +313,9 @@ static u64_t myers_levenshtein_distance(std::string_view first, std::string_view
 static std::size_t check_sentences_independent_oracle(u64_t seed) {
     std::size_t failures = 0;
     std::vector<u64_t> previous_row, current_row;
-    auto values = sentences_fixture_t::make_values(24, stream_key(seed, "independent_oracle"));
+    allocation_ledger_t ledger;
+    auto values = sentences_fixture_t::make_values(24, stream_key(seed, "independent_oracle"),
+                                                   counting_allocator_t {ledger});
     for (std::size_t pair = 0; pair + 1 < values.size(); pair += 2) {
         std::string_view const first = std::string_view {values[pair]}.substr(0, 64);
         std::string_view const second = std::string_view {values[pair + 1]}.substr(0, 64);

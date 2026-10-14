@@ -987,7 +987,7 @@ class growing_buffer {
  */
 template <std::size_t first_rows_log2_, std::size_t slab_rows_log2_>
 struct chunk_schedule {
-    static_assert(first_rows_log2_ <= slab_rows_log2_ && slab_rows_log2_ < 48);
+    static_assert(first_rows_log2_ <= slab_rows_log2_ && slab_rows_log2_ < address_bits_k);
 
     /** Rows in every mature slab-sized chunk, as a power-of-two exponent. */
     inline static constexpr std::size_t slab_rows_log2_k = slab_rows_log2_;
@@ -1032,6 +1032,11 @@ struct chunk_schedule {
     /** Chunks that hold the first @p rows rows. */
     static constexpr std::size_t chunks_for(std::size_t rows) noexcept { return rows ? locate(rows - 1).chunk + 1 : 0; }
 };
+
+/** The schedule spanning @p max_rows_ rows in about 2^12 chunks: 2^10-row chunks doubling up to
+ *  slabs as wide as that takes - at 2^32 rows, the dense index's @c chunk_schedule<10, 20>. */
+template <std::size_t max_rows_>
+using chunk_schedule_spanning = chunk_schedule<10, max_of<std::size_t>(std::bit_width(max_rows_), 10 + 12) - 12>;
 
 /**
  *  @brief Rows addressed by ID that never move: chunks on @p schedule_type_, a missing one allocated, zeroed and

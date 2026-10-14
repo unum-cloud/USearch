@@ -3,15 +3,22 @@
  *
  *  A shard of `include/usearch/dense/ram_indexes.hpp` keeps its keys in a `chunked_column` on the
  *  shard's own chunk schedule, and every claimer covers it to what the shard hosts after its claim,
- *  before dispensing. One shard whose rows and key chunks hold one row apiece; three adders claim a
- *  row each, cover the key column to the shard's capacity, dispense, store their key before the
- *  watermark turn and publish; a searcher reads every key below the watermark it acquired.
+ *  before dispensing. `basic::ram_index` from `include/usearch/basic/ram_index.hpp` is the second
+ *  user: its node records are a `chunked_column`, and `plan_insert` covers them only to its own
+ *  claim's end. One shard whose rows and key chunks hold one row apiece; three adders claim a row
+ *  each, cover the key column, dispense, store their key before the watermark turn and publish; a
+ *  searcher reads every key below the watermark it acquired. The third adder's cover may be refused
+ *  at any chunk, leaving the chunks before it published, and that adder then gives its claim back
+ *  with a release before dispensing anything, as both indexes do.
  *
  *  Every key slot an insert writes or a searcher reads lies in a chunk the key column published.
  *  The ID an adder dispenses may lie past its own claim, in a chunk only a later claimer covered,
  *  but that claimer dispensed first, and the dispenser's acquire-release carries its cover along.
+ *  A refused claim given back lowers later claims' ends, but only by rows nobody dispenses: of the
+ *  adders dispensed up to any one, the last to claim covered past that one's ID.
  *
  *  @verify pass sc,rc11,far
+ *  @verify pass sc,rc11,far cover_to=claim
  *  @verify fail sc cover=false: every claimer covers the key column to what the shard hosts after
  *      its claim; without the cover, an adder writes a key into a chunk never published
  *  @verify fail rc11 dispense_order=order_relaxed: the dispenser's acquire-release carries the
@@ -20,7 +27,7 @@
  */
 #define thread_count 4
 #define location_count 9
-#define history_depth 4
+#define history_depth 5
 #include "weak_memory.pml"
 #include "watermark_turn.pml"
 
@@ -35,6 +42,11 @@
 #define unset 0
 #define key_of(thread) (10 + (thread))
 
+// The values `cover_to` takes: what the shard hosts after the claim, as the sharded index covers
+// its keys, or the claim's own end, as `basic::ram_index` covers its records.
+#define hosted_rows 0
+#define claim 1
+
 // The knobs: the header's choices, each overridden by a `@verify` line that replays its counterexample.
 #ifndef cover
 #define cover true
@@ -42,15 +54,23 @@
 #ifndef dispense_order
 #define dispense_order order_acq_rel
 #endif
+#ifndef cover_to
+#define cover_to hosted_rows
+#endif
 
-// `chunked_column::cover`: every chunk below @p rows, published with a release unless a peer did
-inline cover_column(t, rows) {
+// `chunked_column::cover`: every chunk below @p rows, published with a release unless a peer did;
+// when @p may_refuse, an allocation may refuse at any chunk, leaving the chunks before it published
+inline cover_column(t, rows, may_refuse, refused) {
     byte covered;
     int chunk;
     bool published;
     do
     :: covered == rows -> break
     :: else ->
+        if
+        :: may_refuse -> refused = true; break
+        :: skip
+        fi;
         load(t, key_chunk(covered), order_acquire, chunk);
         if
         :: chunk == 0 -> compare_exchange(t, key_chunk(covered), order_release, chunk, 1, published)
@@ -73,16 +93,24 @@ inline land_row(t, id) {
     take_turn(t, last_visible_id, id, id + 1, order_release, watermark)
 }
 
-// the single-row insert: the claim, the cover to what the shard hosts after it, then the row
-proctype adder(byte t) {
+// the single-row insert: the claim, the cover to what the shard hosts after it or to the claim's
+// own end, then the row, or the claim given back once the cover was refused
+proctype adder(byte t; bool may_refuse) {
     int first, hosted, id;
+    bool refused;
     read_modify_write(t, claimed_rows, order_acquire, first, first + 1);
-    load(t, claimed_rows, order_acquire, hosted);
     if
-    :: cover -> cover_column(t, hosted)
+    :: cover_to == claim -> hosted = first + 1
+    :: else -> load(t, claimed_rows, order_acquire, hosted)
+    fi;
+    if
+    :: cover -> cover_column(t, hosted, may_refuse, refused)
     :: else
     fi;
-    land_row(t, id)
+    if
+    :: refused -> add_no_return(t, claimed_rows, order_release, 0 - 1)
+    :: else -> land_row(t, id)
+    fi
 }
 
 // the search merge: every ID below the watermark it acquired resolves through a published chunk
@@ -101,4 +129,4 @@ proctype searcher(byte t) {
     od
 }
 
-init { atomic { run adder(0); run adder(1); run adder(2); run searcher(3) } }
+init { atomic { run adder(0, false); run adder(1, false); run adder(2, true); run searcher(3) } }

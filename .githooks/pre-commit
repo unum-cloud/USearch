@@ -301,11 +301,16 @@ check_region_lengths() {
 # `include/usearch/<dir>/` opens exactly `unum::usearch::<dir>`; only `utilities/types.hpp` also opens the
 # parent and the sibling roots, to declare the `nk`, `fu`, `sz` & `st` aliases every directory shares.
 check_namespace_directories() {
-    local directory=${file%/*} allowed name misplaced="" modality=""
+    local directory=${file%/*} depth allowed name misplaced="" modality=""
     [ "$directory" = "$file" ] && directory=.
     allowed=" unum usearch ashvardanian numkong stringzilla forkunion smashtable "
     for name in $(printf '%s\n' "$directory" | tr '/' '\n'); do allowed="$allowed$name ${name##*_} "; done
-    for name in $(git ls-tree -d --name-only HEAD "$directory/" 2> /dev/null); do allowed="$allowed${name##*/} "; done
+    # Directories beside the file as the index holds them, so a commit may add one along with its first file.
+    depth=$(printf '%s\n' "$directory" | awk -F/ '{ print ($0 == "." ? 0 : NF) }')
+    for name in $(git ls-files -- "$directory/" | awk -F/ -v depth="$depth" 'NF > depth + 1 { print $(depth + 1) }' |
+        sort -u); do
+        allowed="$allowed$name "
+    done
     case "$file" in
     include/usearch/*/*)
         modality=${file#include/usearch/}

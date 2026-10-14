@@ -184,6 +184,24 @@ bytes_span_t bytes_of(value_type_* data, std::size_t count) noexcept {
     return std::as_writable_bytes(std::span {data, count});
 }
 
+/** The typed elements behind @p bytes, the inverse of @ref bytes_of and the one place a payload's
+ *  bytes are read back as its elements; a trailing partial element is left out. */
+template <typename element_type_>
+std::span<element_type_ const> elements_of(bytes_view_t bytes) noexcept {
+    return {reinterpret_cast<element_type_ const*>(bytes.data()), bytes.size() / sizeof(element_type_)};
+}
+
+/** The writable typed elements behind @p bytes, for a codec decoding straight into its slice. */
+template <typename element_type_>
+std::span<element_type_> elements_of(bytes_span_t bytes) noexcept {
+    return {reinterpret_cast<element_type_*>(bytes.data()), bytes.size() / sizeof(element_type_)};
+}
+
+/** The characters behind @p bytes, as the view every string type converts from. */
+inline std::string_view chars_of(bytes_view_t bytes) noexcept {
+    return {reinterpret_cast<char const*>(bytes.data()), bytes.size()};
+}
+
 /** The process-wide allocator, named rather than defaulted: a container takes this when
  *  no arena, memory domain or device owns its bytes, so every such placement is one grep
  *  away instead of hiding in an omitted argument. */
@@ -194,6 +212,10 @@ inline constexpr global_allocator_t global_allocator {};
 inline constexpr std::size_t default_alignment_k = USEARCH_DEFAULT_ALIGNMENT;
 static_assert(default_alignment_k >= 8 && (default_alignment_k & (default_alignment_k - 1)) == 0,
               "USEARCH_DEFAULT_ALIGNMENT must be a power of two, no narrower than a pointer pair");
+
+/** The user-space virtual address width of x86-64 and Arm64 under four-level paging, which bounds
+ *  how many records any one collection can ever place. */
+inline constexpr std::size_t address_bits_k = 48;
 
 /** How one step of a walk - a batch of landmarks or one expansion round - left it, in every tier. */
 enum class walk_step_t : u32_t {
