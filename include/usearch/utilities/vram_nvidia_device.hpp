@@ -414,7 +414,7 @@ struct cuda_device_specs_t {
     int ordinal = 0;
 
     /** Streaming-multiprocessor count - the launch-grid currency. */
-    int multiprocessor_count = 0;
+    u32_t multiprocessor_count = 0;
 
     /** Compute-capability major version - the hardware generation, e.g. 9 = Hopper. */
     int compute_major = 0;
@@ -436,9 +436,9 @@ struct cuda_device_specs_t {
         cuda_api_t const& api = cuda_api();
         int device = 0;
         cuda_device_specs_t specs {ordinal};
-        int shared_memory_per_block = 0;
+        int multiprocessors = 0, shared_memory_per_block = 0;
         if (!api || api.get_device(&device, ordinal) != cuda_success_k ||
-            api.get_device_attribute(&specs.multiprocessor_count, cuda_attribute_multiprocessor_count_k, device) !=
+            api.get_device_attribute(&multiprocessors, cuda_attribute_multiprocessor_count_k, device) !=
                 cuda_success_k ||
             api.get_device_attribute(&specs.compute_major, cuda_attribute_compute_capability_major_k, device) !=
                 cuda_success_k ||
@@ -448,6 +448,7 @@ struct cuda_device_specs_t {
                                      device) != cuda_success_k ||
             api.get_device_memory(&specs.vram_bytes, device) != cuda_success_k)
             return {{ordinal}, status_t::device_error_k};
+        specs.multiprocessor_count = static_cast<u32_t>(multiprocessors);
         specs.shared_memory_per_block_bytes = static_cast<std::size_t>(shared_memory_per_block);
         return {specs, status_t::success_k};
     }
@@ -832,23 +833,23 @@ struct cuda_landings_t {
     inline static constexpr std::size_t slots_per_pin_k = 64;
 
     /** Hands out a slot, a returned one first; null when pinning more fails. */
-    byte_t* take() noexcept {
+    void* take() noexcept {
         std::lock_guard<fu::spin_mutex_t> held {guard_};
         if (!returned_.empty()) return returned_.pop_back();
         if (failed(slots_.reserve_exactly(slot_bytes_k * slots_per_pin_k))) return nullptr;
-        return reinterpret_cast<byte_t*>(slots_.allocate(slot_bytes_k, slot_bytes_k));
+        return slots_.allocate(slot_bytes_k, slot_bytes_k);
     }
 
     /** Takes @p slot back for the next context; one the list cannot hold stays pinned until the
      *  stream dies. */
-    void give_back(byte_t* slot) noexcept {
+    void give_back(void* slot) noexcept {
         std::lock_guard<fu::spin_mutex_t> held {guard_};
         [[maybe_unused]] status_t const listed = returned_.push_back(slot);
     }
 
   private:
     growing_arena<cuda_pinned_allocator_t> slots_ {cuda_pinned_allocator_t {}};
-    growing_buffer<byte_t*> returned_ {global_allocator};
+    growing_buffer<void*> returned_ {global_allocator};
 
     /** Held across a take or a give-back, so contexts born and dying on several threads share
      *  the slots. */
@@ -1209,7 +1210,7 @@ inline std::span<gpu_device_t const> nvidia_gpu_devices() noexcept {
             if (failed(status) || specs.arch() < cuda_arch_ampere_k) continue;
             gpu_device_t& device = found.devices[found.count++];
             device = {gpu_vendor_t::nvidia_k, static_cast<u32_t>(ordinal), gpu_class_of(specs.arch()),
-                      static_cast<u32_t>(specs.multiprocessor_count), specs.vram_bytes};
+                      specs.multiprocessor_count, specs.vram_bytes};
             int handle = 0;
             if (api.get_device(&handle, ordinal) == cuda_success_k)
                 api.get_device_name(device.name, static_cast<int>(sizeof(device.name)), handle);

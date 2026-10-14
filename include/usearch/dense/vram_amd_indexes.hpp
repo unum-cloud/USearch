@@ -595,8 +595,8 @@ struct vram_amd_indexes {
 
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
         // A refine's default walk is twice the connectivity, not an insert's default pool.
-        u32_t const expansion = static_cast<u32_t>(shards_[0].index->non_zero_expansion_factor(config));
-        if (status_t const ready = reserve_traversals_(traversals, executor, 1, insert_config_t {expansion});
+        if (status_t const ready = reserve_traversals_(
+                traversals, executor, 1, insert_config_t {shards_[0].index->non_zero_expansion_factor(config)});
             failed(ready))
             return {{}, ready};
 
@@ -727,8 +727,8 @@ struct vram_amd_indexes {
 
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
         // Twice a refine's walk, since every row first walks across into the other part alone.
-        u32_t const expansion = static_cast<u32_t>(shards_[0].index->non_zero_expansion_factor(config));
-        if (status_t const ready = reserve_traversals_(traversals, executor, 1, insert_config_t {2 * expansion});
+        if (status_t const ready = reserve_traversals_(
+                traversals, executor, 1, insert_config_t {2 * shards_[0].index->non_zero_expansion_factor(config)});
             failed(ready))
             return {{}, ready};
         refine_result_t result;
@@ -2074,24 +2074,22 @@ struct vram_amd_indexes {
     expected<search_result_t> search_on_device_(batch_t& batch, rows_view_t queries, search_config_t config,
                                                 nk::matrix_span<key_t> keys, nk::matrix_span<score_type_> distances,
                                                 std::span<std::size_t> counts, heads_types_ const&... heads) noexcept {
-        using landing_t = hip_unique_ptr<byte_t, hip_device_allocator_t>;
-        std::size_t const queries_count = queries.rows, shards = shards_.size(), walked = config.count;
-        u32_t const width = static_cast<u32_t>(keys.extent(1));
-        // A shard's own ranking needs no more ranks than it walked or the caller keeps.
-        u32_t const block_width = min_of<u32_t>(config.count, width);
-        std::size_t const ids_bytes = queries_count * walked * sizeof(node_id_t);
-        std::size_t const walked_bytes = ids_bytes + queries_count * walked * sizeof(distance_t);
+        std::size_t const queries_count = queries.rows, shards = shards_.size();
+        // Every caller of `search_` counts as many matches as the keys are wide.
+        u32_t const width = config.count;
+        std::size_t const ids_bytes = queries_count * width * sizeof(node_id_t);
+        std::size_t const walked_bytes = ids_bytes + queries_count * width * sizeof(distance_t);
         std::size_t const counts_bytes = queries_count * sizeof(std::size_t);
-        std::size_t const scores_bytes = queries_count * block_width * sizeof(score_type_);
+        std::size_t const scores_bytes = queries_count * width * sizeof(score_type_);
         std::size_t const block_bytes = round_up_to_multiple<std::size_t>(
-            counts_bytes + scores_bytes + queries_count * block_width * sizeof(key_t), sizeof(std::size_t));
+            counts_bytes + scores_bytes + queries_count * width * sizeof(key_t), sizeof(std::size_t));
         auto ranking_of = [&](byte_t* block) noexcept {
             return amd_ranking_t {block + counts_bytes + scores_bytes,
                                   block + counts_bytes,
                                   reinterpret_cast<std::size_t*>(block),
-                                  block_width * sizeof(key_t),
-                                  block_width * sizeof(score_type_),
-                                  block_width,
+                                  width * sizeof(key_t),
+                                  width * sizeof(score_type_),
+                                  width,
                                   sizeof(key_t),
                                   sizeof(score_type_)};
         };
@@ -2107,7 +2105,7 @@ struct vram_amd_indexes {
         // Every shard lands its walks, then its own ranking, in device memory of the call on its
         // own stream, the first shard every shard's ranking; a single shard resolves straight
         // into the caller's.
-        growing_buffer<landing_t, forkunion_allocator_t> landings {allocator_};
+        growing_buffer<hip_unique_ptr<byte_t, hip_device_allocator_t>, forkunion_allocator_t> landings {allocator_};
         growing_buffer<std::size_t, forkunion_allocator_t> landed_counts {allocator_};
         if (failed(landings.reserve_exactly(shards)) || failed(landed_counts.resize(queries_count)))
             return {{}, status_t::bad_alloc_k};
@@ -2123,14 +2121,13 @@ struct vram_amd_indexes {
             node_id_t* const ids = reinterpret_cast<node_id_t*>(landing);
             distance_t* const walked_distances = reinterpret_cast<distance_t*>(landing + ids_bytes);
             expected<search_result_t> const found = shards_[shard].index->submit_search_(
-                queries, nk::matrix_span<node_id_t> {ids, queries_count, walked},
-                nk::matrix_span<distance_t> {walked_distances, queries_count, walked}, traversal, config, visible,
+                queries, nk::matrix_span<node_id_t> {ids, queries_count, width},
+                nk::matrix_span<distance_t> {walked_distances, queries_count, width}, traversal, config, visible,
                 heads...);
             if (!found) return found.status;
             byte_t* const block = landing + walked_bytes;
             if (status_t const resolved = shards_[shard].index->launch_resolve_matches_(
-                    ids, walked_distances, static_cast<u32_t>(walked),
-                    reinterpret_cast<byte_t const*>(shards_[shard].device_keys.base()),
+                    ids, walked_distances, width, reinterpret_cast<byte_t const*>(shards_[shard].device_keys.base()),
                     shards == 1 ? merged : ranking_of(block), static_cast<u32_t>(queries_count), traversal.stream());
                 failed(resolved) || blocks != 1)
                 return resolved;

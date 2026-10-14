@@ -3000,9 +3000,8 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                         return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"),
                                void();
                     for (std::size_t row = 0; row != count; ++row) counts[row] = 0;
-                    status_t landed = publish(*arena, counts, count);
-                    if (status_t const drained = arena->device_memory.drain(); succeeded(landed)) landed = drained;
-                    if (failed(landed)) return propagate_error(landed, outcome), void();
+                    if (status_t const landed = drained(*arena, publish(*arena, counts, count)); failed(landed))
+                        return propagate_error(landed, outcome), void();
                     *arguments->matches = {nullptr, nullptr, counts, 0};
                     return propagate_error(usearch_status_success_k, outcome, nullptr), void();
                 }
@@ -3022,11 +3021,10 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
                             return view.search(rows, executor, config, keys, distances, counts, predicate);
                         });
                 };
-                bool const walked = [&] {
-                    if constexpr (is_vram_index<variant_type_>) return search_with(dummy_predicate_t {});
-                    else return keyed.predicate.callback ? search_with(keyed) : search_with(dummy_predicate_t {});
-                }();
-                if (!walked) return;
+                if constexpr (is_vram_index<variant_type_>) {
+                    if (!search_with(dummy_predicate_t {})) return;
+                }
+                else if (!(keyed.predicate.callback ? search_with(keyed) : search_with(dummy_predicate_t {}))) return;
                 *arguments->matches = landing.view();
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
@@ -3080,9 +3078,7 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
                     return propagate_error(got, outcome, "Failed to export the rows"), void();
                 for (std::size_t row = 0; row != min_of(total, entries); ++row)
                     us::dense::export_row<nk_cap_any_k>(stored + row * stored_bytes, stored_dtype, target, row);
-                status_t landed = publish(*arena, rows, entries * row_bytes);
-                if (status_t const drained = arena->device_memory.drain(); succeeded(landed)) landed = drained;
-                if (failed(landed))
+                if (status_t const landed = drained(*arena, publish(*arena, rows, entries * row_bytes)); failed(landed))
                     return propagate_error(landed, outcome, "Failed to land the rows on the device"), void();
             }
             else if (status_t const got = view.get({&key, 1}, target, entries, {&total, 1}, *executor); failed(got))
@@ -3340,14 +3336,12 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                 }
                 std::size_t const written = offsets[count];
                 if (!written) keys = nullptr, scores = nullptr;
-                if constexpr (is_vram_index<variant_type_>) {
-                    status_t landed = publish(*arena, keys, written);
-                    if (succeeded(landed)) landed = publish(*arena, scores, written);
-                    if (succeeded(landed)) landed = publish(*arena, offsets, count + 1);
-                    if (status_t const drained = arena->device_memory.drain(); succeeded(landed)) landed = drained;
-                    if (failed(landed))
-                        return propagate_error(landed, outcome, "Failed to land the products on the device"), void();
-                }
+                status_t landed = publish(*arena, keys, written);
+                if (succeeded(landed)) landed = publish(*arena, scores, written);
+                if (succeeded(landed)) landed = publish(*arena, offsets, count + 1);
+                landed = drained(*arena, landed);
+                if (failed(landed))
+                    return propagate_error(landed, outcome, "Failed to land the products on the device"), void();
                 *arguments->products = {keys, scores, offsets};
                 if (arguments->written) *arguments->written = written;
                 if (arguments->required) *arguments->required = required;
@@ -3419,12 +3413,9 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                                           arguments->expansion_factor, arguments->progress, arguments->stats, outcome,
                                           sink))
                     return;
-                if constexpr (is_vram_index<variant_type_>) {
-                    status_t landed = publish(*arena, landing, count * row_bytes);
-                    if (status_t const drained = arena->device_memory.drain(); succeeded(landed)) landed = drained;
-                    if (failed(landed))
-                        return propagate_error(landed, outcome, "Failed to land the outputs on the device"), void();
-                }
+                if (status_t const landed = drained(*arena, publish(*arena, landing, count * row_bytes));
+                    failed(landed))
+                    return propagate_error(landed, outcome, "Failed to land the outputs on the device"), void();
                 *arguments->outputs = {landing, row_bytes, columns, outputs_scalar};
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
@@ -3462,8 +3453,7 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                             return view.maxsim(rows, rows_per_query, executor, config, keys, scores, counts);
                         }))
                     return;
-                if constexpr (is_vram_index<variant_type_>)
-                    if (!publish_matches(*arena, count, landing, outcome)) return;
+                if (!publish_matches(*arena, count, landing, outcome)) return;
                 *arguments->matches = landing.view();
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
@@ -3569,12 +3559,8 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
                 if (failed(saved)) return propagate_error(saved, outcome), void();
                 // A VRAM monolith is written on the host, then lands on the arena's device
                 // in one upload.
-                if constexpr (is_vram_index<variant_type_>) {
-                    status_t landed = publish(*arena, monolith, length);
-                    if (status_t const drained = arena->device_memory.drain(); succeeded(landed)) landed = drained;
-                    if (failed(landed))
-                        return propagate_error(landed, outcome, "Failed to land the monolith on the device"), void();
-                }
+                if (status_t const landed = drained(*arena, publish(*arena, monolith, length)); failed(landed))
+                    return propagate_error(landed, outcome, "Failed to land the monolith on the device"), void();
                 *arguments->monolith = {reinterpret_cast<uint8_t const*>(monolith), length};
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }

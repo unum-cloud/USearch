@@ -284,7 +284,7 @@ struct hip_device_specs_t {
     int ordinal = 0;
 
     /** Compute-unit count - the launch-grid currency. */
-    int multiprocessor_count = 0;
+    u32_t multiprocessor_count = 0;
 
     /** Total device-resident memory in bytes. */
     std::size_t vram_bytes = 0;
@@ -299,9 +299,9 @@ struct hip_device_specs_t {
     static expected<hip_device_specs_t> query(int ordinal) noexcept {
         hip_api_t const& runtime = hip_api();
         hip_device_specs_t specs {ordinal};
-        int device = 0, major = 0, minor = 0, shared_memory_per_block = 0;
+        int device = 0, major = 0, minor = 0, multiprocessors = 0, shared_memory_per_block = 0;
         if (!runtime || runtime.get_device(&device, ordinal) != hip_success_k ||
-            runtime.get_device_attribute(&specs.multiprocessor_count, hip_attribute_multiprocessor_count_k, ordinal) !=
+            runtime.get_device_attribute(&multiprocessors, hip_attribute_multiprocessor_count_k, ordinal) !=
                 hip_success_k ||
             runtime.get_device_attribute(&major, hip_attribute_compute_capability_major_k, ordinal) != hip_success_k ||
             runtime.get_device_attribute(&minor, hip_attribute_compute_capability_minor_k, ordinal) != hip_success_k ||
@@ -309,6 +309,7 @@ struct hip_device_specs_t {
                                          ordinal) != hip_success_k ||
             runtime.get_device_memory(&specs.vram_bytes, device) != hip_success_k)
             return {{ordinal}, status_t::device_error_k};
+        specs.multiprocessor_count = static_cast<u32_t>(multiprocessors);
         specs.shared_memory_per_block_bytes = static_cast<std::size_t>(shared_memory_per_block);
         specs.gpu_class = hip_gpu_class_of(major, minor);
         return {specs, status_t::success_k};
@@ -332,8 +333,8 @@ inline std::span<gpu_device_t const> amd_gpu_devices() noexcept {
             auto const [specs, status] = hip_device_specs_t::query(ordinal);
             if (failed(status) || specs.gpu_class == gpu_class_t::unknown_k) continue;
             gpu_device_t& device = found.devices[found.count++];
-            device = {gpu_vendor_t::amd_k, static_cast<u32_t>(ordinal), specs.gpu_class,
-                      static_cast<u32_t>(specs.multiprocessor_count), specs.vram_bytes};
+            device = {gpu_vendor_t::amd_k, static_cast<u32_t>(ordinal), specs.gpu_class, specs.multiprocessor_count,
+                      specs.vram_bytes};
             int handle = 0;
             if (runtime.get_device(&handle, ordinal) == hip_success_k)
                 runtime.get_device_name(device.name, static_cast<int>(sizeof(device.name)), handle);
@@ -719,23 +720,23 @@ struct hip_landings_t {
     inline static constexpr std::size_t slots_per_pin_k = 64;
 
     /** Hands out a slot, a returned one first; null when pinning more fails. */
-    byte_t* take() noexcept {
+    void* take() noexcept {
         std::lock_guard<fu::spin_mutex_t> held {guard_};
         if (!returned_.empty()) return returned_.pop_back();
         if (failed(slots_.reserve_exactly(slot_bytes_k * slots_per_pin_k))) return nullptr;
-        return reinterpret_cast<byte_t*>(slots_.allocate(slot_bytes_k, slot_bytes_k));
+        return slots_.allocate(slot_bytes_k, slot_bytes_k);
     }
 
     /** Takes @p slot back for the next context; one the list cannot hold stays pinned until the
      *  stream dies. */
-    void give_back(byte_t* slot) noexcept {
+    void give_back(void* slot) noexcept {
         std::lock_guard<fu::spin_mutex_t> held {guard_};
         [[maybe_unused]] status_t const listed = returned_.push_back(slot);
     }
 
   private:
     growing_arena<hip_pinned_allocator_t> slots_ {hip_pinned_allocator_t {}};
-    growing_buffer<byte_t*> returned_ {global_allocator};
+    growing_buffer<void*> returned_ {global_allocator};
 
     /** Held across a take or a give-back, so contexts born and dying on several threads share
      *  the slots. */

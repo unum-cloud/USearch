@@ -106,8 +106,7 @@ struct amd_arena_shape_t {
 
     /** A multiple of 16, as the kernels' twin rounds it. */
     constexpr std::size_t slice_bytes() const noexcept {
-        std::size_t const bytes = static_cast<std::size_t>(visited_slots) * sizeof(u64_t) +
-                                  static_cast<std::size_t>(tail_entries) * amd_scored_node_bytes_k + cache_bytes;
+        std::size_t const bytes = visited_slots * sizeof(u64_t) + tail_entries * amd_scored_node_bytes_k + cache_bytes;
         return (bytes + 15) & ~std::size_t {15};
     }
 };
@@ -543,15 +542,13 @@ struct hip_traversal_context {
     /** Gives a context's counters back to the landings of the stream they came from. */
     struct counters_return_t {
         hip_landings_t* landings = nullptr;
-        void operator()(host_counters_t* counters) const noexcept {
-            landings->give_back(reinterpret_cast<byte_t*>(counters));
-        }
+        void operator()(host_counters_t* counters) const noexcept { landings->give_back(counters); }
     };
     using host_counters_ptr_t = std::unique_ptr<host_counters_t, counters_return_t>;
 
     /** Zeroed counters in a slot of @p landings, or null when there are none or it cannot pin. */
     static host_counters_ptr_t take_counters_(hip_landings_t* landings) noexcept {
-        byte_t* const slot = landings ? landings->take() : nullptr;
+        void* const slot = landings ? landings->take() : nullptr;
         return {slot ? new (slot) host_counters_t {} : nullptr, counters_return_t {landings}};
     }
 
@@ -739,7 +736,7 @@ struct vram_amd_index {
 
     /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
     template <typename config_type_>
-    std::size_t non_zero_expansion_factor(config_type_ const& config) const noexcept {
+    small_size_t non_zero_expansion_factor(config_type_ const& config) const noexcept {
         return config.expansion_factor ? config.expansion_factor : connectivity() * 2;
     }
 
@@ -756,7 +753,7 @@ struct vram_amd_index {
     /** Device-side flat storage views - the audit surface for invariant checkers & tests. */
     amd_flat_storage_t storage() const noexcept {
         u32_t const fragments = row_fragments();
-        return {vectors_rows_(),  reinterpret_cast<byte_t*>(norms_column_.base()),
+        return {vectors_rows_(),  norms_column_.base(),
                 neighbor_rows_(), static_cast<u32_t>(connectivity()),
                 fragments,        lanes_per_row(),
                 steps_per_row(),  static_cast<u32_t>(((u64_t {1} << 31) + fragments - 1) / fragments),
@@ -775,7 +772,7 @@ struct vram_amd_index {
 
     /** The vector row's byte length, rounded up to whole fragments; the tail bytes stay zero so
      *  every dot-derived metric is unaffected. */
-    std::size_t row_bytes() const noexcept { return static_cast<std::size_t>(row_fragments()) * amd_fragment_bytes_k; }
+    std::size_t row_bytes() const noexcept { return row_fragments() * amd_fragment_bytes_k; }
 
     /** Lanes cooperating on one row: the smallest power of two covering its fragments, at most a
      *  warp. */
@@ -793,11 +790,9 @@ struct vram_amd_index {
     /** Bytes of one warp's dynamic-shared slice on the insertion path: the query span while
      *  traversing, then the candidate cache & re-selection spans. */
     u32_t insert_scratch_bytes_per_warp() const noexcept {
-        u32_t const selection_slots = min_of(static_cast<u32_t>(connectivity()), //
-                                             static_cast<u32_t>(vram_cache_rows_k));
-        u32_t const selection_bytes = selection_slots * static_cast<u32_t>(amd_scored_node_bytes_k + //
-                                                                           2 * sizeof(u32_t)) +
-                                      vram_cache_rows_k * static_cast<u32_t>(sizeof(f32_t));
+        u32_t const selection_slots = min_of(static_cast<u32_t>(connectivity()), vram_cache_rows_k);
+        u32_t const selection_bytes = selection_slots * (amd_scored_node_bytes_k + 2 * sizeof(u32_t)) +
+                                      vram_cache_rows_k * sizeof(f32_t);
         u32_t const cache_bytes = static_cast<u32_t>(row_bytes()) * vram_cache_rows_k;
         return max_of(static_cast<u32_t>(row_bytes()), cache_bytes + selection_bytes);
     }
@@ -807,7 +802,7 @@ struct vram_amd_index {
      *  kept-row indices. */
     u32_t merge_scratch_bytes_per_warp() const noexcept {
         u32_t const cache_bytes = static_cast<u32_t>(row_bytes()) * vram_cache_rows_k;
-        return cache_bytes + vram_cache_rows_k * static_cast<u32_t>(amd_scored_node_bytes_k + sizeof(u32_t));
+        return cache_bytes + vram_cache_rows_k * (amd_scored_node_bytes_k + sizeof(u32_t));
     }
 
     /** Whether a search, multiply or attend launch seats on this device: per warp, the query span
@@ -880,8 +875,7 @@ struct vram_amd_index {
         if (destination.size() != dimensions()) return status_t::config_mismatch_k;
         if (!destination.is_contiguous()) return status_t::unsupported_layout_k;
         std::size_t const scalar_row_bytes = packed_row_bytes();
-        return hip_api().copy_async(destination.byte_data(),
-                                    vectors_rows_() + static_cast<std::size_t>(node) * row_bytes(), scalar_row_bytes,
+        return hip_api().copy_async(destination.byte_data(), vectors_rows_() + node * row_bytes(), scalar_row_bytes,
                                     hip_copy_device_to_host_k, stream) == hip_success_k
                    ? status_t::success_k
                    : status_t::device_error_k;
@@ -1009,8 +1003,8 @@ struct vram_amd_index {
         };
         u32_t const pool_slots = pool_slots_for_(config.expansion_factor, 4);
         auto const arena_shape = build_arena_shape_(config.expansion_factor, pool_slots);
-        std::size_t const arena_warps = static_cast<std::size_t>(device_.multiprocessor_count) *
-                                        insert_blocks_per_multiprocessor_k * vram_warps_per_block_k;
+        std::size_t const arena_warps = device_.multiprocessor_count * insert_blocks_per_multiprocessor_k *
+                                        vram_warps_per_block_k;
         std::size_t const results_bytes = // A default single query's device landing.
             non_zero_expansion_factor(search_config_t {}) * (sizeof(node_id_t) + sizeof(distance_t));
         return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
@@ -1116,7 +1110,7 @@ struct vram_amd_index {
         // wider one sizes.
         u32_t const expansion = max_of<u32_t>(
             config.expansion_factor >= config.count ? config.expansion_factor : config.count * 2,
-            static_cast<u32_t>(non_zero_expansion_factor(config)));
+            non_zero_expansion_factor(config));
         bool const wide = expansion > vram_widest_pool_slots_k * wave_lanes();
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
         u32_t const pool_slots = pool_slots_for_(expansion, count_slots > 2 ? count_slots : 2);
@@ -1389,10 +1383,9 @@ struct vram_amd_index {
             heal.graph.islands_count = islands;
             heal.graph.seed_count = static_cast<u32_t>(min_of<std::size_t>(connectivity(), rows));
             heal.graph.reconnected = audit.reconnected;
-            if (status_t const counted = launch_(
-                    amd_kernel_t::reached_in_links_k, 0,
-                    static_cast<u32_t>(device_.multiprocessor_count) * search_blocks_per_multiprocessor_k, 0,
-                    context.stream(), heal);
+            if (status_t const counted = launch_(amd_kernel_t::reached_in_links_k, 0,
+                                                 device_.multiprocessor_count * search_blocks_per_multiprocessor_k, 0,
+                                                 context.stream(), heal);
                 failed(counted))
                 return {result, counted};
             if (status_t const launched = launch_(amd_kernel_t::reconnect_island_k, 0,
@@ -1551,19 +1544,15 @@ struct vram_amd_index {
             bytes_span_t const bounce_norms = to_writable_span(bounce).subspan(
                 batch_rows * (scalar_row_bytes + neighbors_row_bytes), norms_rows.size());
             // The columns land in disjoint stretches of the bounce, so one wait covers all three.
-            if (runtime.copy_2d_async(
-                    bounce.data(), scalar_row_bytes,
-                    index_->vectors_rows_() + static_cast<std::size_t>(rows.first) * index_->row_bytes(),
-                    index_->row_bytes(), scalar_row_bytes, rows.size(), hip_copy_device_to_host_k,
-                    stream) != hip_success_k ||
+            if (runtime.copy_2d_async(bounce.data(), scalar_row_bytes,
+                                      index_->vectors_rows_() + rows.first * index_->row_bytes(), index_->row_bytes(),
+                                      scalar_row_bytes, rows.size(), hip_copy_device_to_host_k,
+                                      stream) != hip_success_k ||
                 (!norms_rows.empty() &&
-                 runtime.copy_async(
-                     bounce_norms.data(),
-                     index_->norms_column_.base() + static_cast<std::size_t>(rows.first) * sizeof(norms_t),
-                     bounce_norms.size(), hip_copy_device_to_host_k, stream) != hip_success_k) ||
+                 runtime.copy_async(bounce_norms.data(), index_->norms_column_.base() + rows.first * sizeof(norms_t),
+                                    bounce_norms.size(), hip_copy_device_to_host_k, stream) != hip_success_k) ||
                 runtime.copy_async(
-                    bounce_neighbors.data(),
-                    index_->neighbors_matrix_.base() + static_cast<std::size_t>(rows.first) * neighbors_row_bytes,
+                    bounce_neighbors.data(), index_->neighbors_matrix_.base() + rows.first * neighbors_row_bytes,
                     rows.size() * neighbors_row_bytes, hip_copy_device_to_host_k, stream) != hip_success_k ||
                 runtime.stream_synchronize(stream) != hip_success_k)
                 return status_t::device_error_k;
@@ -1794,19 +1783,18 @@ struct vram_amd_index {
                 return status_t::bad_alloc_k;
             [[maybe_unused]] status_t const staged_vectors = copy_bytes(bytes_of(bounce.data(), vectors_rows.size()),
                                                                         vectors_rows);
-            if (hip_api().copy_2d_async(
-                    index_->vectors_rows_() + static_cast<std::size_t>(range.first) * index_->row_bytes(),
-                    index_->row_bytes(), bounce.data(), scalar_row_bytes, scalar_row_bytes, range.size(),
-                    hip_copy_host_to_device_k, stream) != hip_success_k)
+            if (hip_api().copy_2d_async(index_->vectors_rows_() + range.first * index_->row_bytes(),
+                                        index_->row_bytes(), bounce.data(), scalar_row_bytes, scalar_row_bytes,
+                                        range.size(), hip_copy_host_to_device_k, stream) != hip_success_k)
                 return index_->fail_(status_t::device_error_k);
             // Dot reserves no norms column, so a part's column has nowhere to land.
             if (index_->stores_norms() && !norms_rows.empty()) {
                 bytes_span_t const bounce_norms = to_writable_span(bounce).subspan(
                     batch_rows * (scalar_row_bytes + neighbors_row_bytes), norms_rows.size());
                 [[maybe_unused]] status_t const staged_norms = copy_bytes(bounce_norms, norms_rows);
-                if (hip_api().copy_async(
-                        index_->norms_column_.base() + static_cast<std::size_t>(range.first) * sizeof(norms_t),
-                        bounce_norms.data(), bounce_norms.size(), hip_copy_host_to_device_k, stream) != hip_success_k)
+                if (hip_api().copy_async(index_->norms_column_.base() + range.first * sizeof(norms_t),
+                                         bounce_norms.data(), bounce_norms.size(), hip_copy_host_to_device_k,
+                                         stream) != hip_success_k)
                     return index_->fail_(status_t::device_error_k);
                 // Tallied ahead of the drain: a failed one keeps the vectors short, which `finish`
                 // refuses.
@@ -1822,10 +1810,9 @@ struct vram_amd_index {
             rebase_neighbors(landed, source_range, shift, node_id_unknown_k);
             compact_neighbors(landed, connectivity, range.first, node_id_unknown_k);
             // One wait, before the next step refills the bounce.
-            if (hip_api().copy_async(
-                    index_->neighbors_matrix_.base() + static_cast<std::size_t>(range.first) * neighbors_row_bytes,
-                    bounce_neighbors.data(), range.size() * neighbors_row_bytes, hip_copy_host_to_device_k,
-                    stream) != hip_success_k ||
+            if (hip_api().copy_async(index_->neighbors_matrix_.base() + range.first * neighbors_row_bytes,
+                                     bounce_neighbors.data(), range.size() * neighbors_row_bytes,
+                                     hip_copy_host_to_device_k, stream) != hip_success_k ||
                 hip_api().stream_synchronize(stream) != hip_success_k)
                 return index_->fail_(status_t::device_error_k);
             standard_atomic_ref<std::size_t> {covered_vectors}.fetch_add(range.size(), std::memory_order_acq_rel);
@@ -1947,8 +1934,7 @@ struct vram_amd_index {
                 standard_atomic_ref<std::size_t> {covered_neighbors}.load(std::memory_order_acquire) != rows)
                 return status_t::config_mismatch_k;
             if (rows) {
-                u32_t const blocks = static_cast<u32_t>(index_->device_.multiprocessor_count) *
-                                     search_blocks_per_multiprocessor_k;
+                u32_t const blocks = index_->device_.multiprocessor_count * search_blocks_per_multiprocessor_k;
                 // One launch derives every row, so a load mixing carried and missing norms
                 // re-derives the carried.
                 if (index_->stores_norms() &&
@@ -2079,8 +2065,8 @@ struct vram_amd_index {
         // Every inserting warp owns an arena slice for its exact visited set.
         u32_t const pool_slots = pool_slots_for_(config.expansion_factor, 4);
         auto const arena_shape = build_arena_shape_(config.expansion_factor, pool_slots);
-        std::size_t const arena_warps = static_cast<std::size_t>(device_.multiprocessor_count) *
-                                        insert_blocks_per_multiprocessor_k * vram_warps_per_block_k;
+        std::size_t const arena_warps = device_.multiprocessor_count * insert_blocks_per_multiprocessor_k *
+                                        vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
         byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes());
         if (!arena) return {{}, status_t::bad_alloc_k};
@@ -2111,7 +2097,7 @@ struct vram_amd_index {
                                      static_cast<node_id_t>(first_id),
                                      arena,
                                      arena_shape,
-                                     static_cast<u32_t>(config.expansion_factor),
+                                     config.expansion_factor,
                                      epoch_base,
                                      published_rows_(),
                                      context.telemetry_.get(),
@@ -2430,8 +2416,8 @@ struct vram_amd_index {
         context.results.count_ = 0;
         if (!visible) return {{}, status_t::success_k}; // An empty index matches nothing, touches nothing.
         // Up to the expansion factor, defaulting to twice the connectivity, clipped to the graph.
-        u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
-        u32_t const count = min_of<u32_t>(expansion, static_cast<u32_t>(visible));
+        u32_t const expansion = non_zero_expansion_factor(config);
+        u32_t const count = min_of<u32_t>(expansion, visible);
         if (failed(context.results.entries_.reserve(std::size_t {count} * 2))) return {{}, status_t::bad_alloc_k};
         context.results.entries_.extend_uninitialized(std::size_t {count} * 2);
         node_id_t* const staged_ids = reinterpret_cast<node_id_t*>(context.results.entries_.data() + count);
@@ -2524,8 +2510,7 @@ struct vram_amd_index {
             return {{}, status_t::unsupported_layout_k};
         std::size_t const ids_bytes = rows_count * wanted * sizeof(node_id_t);
         std::size_t const products_bytes = rows_count * wanted * sizeof(dot_t);
-        auto const staged = stage_walk_(left, dummy_heads_t {}, context,
-                                        static_cast<u32_t>(non_zero_expansion_factor(config)), 2,
+        auto const staged = stage_walk_(left, dummy_heads_t {}, context, non_zero_expansion_factor(config), 2,
                                         ids_bytes + products_bytes + rows_count * sizeof(u32_t), visible);
         if (!staged) return {{}, staged.status};
         node_id_t* const device_ids = reinterpret_cast<node_id_t*>(staged.value.outputs);
@@ -2564,10 +2549,9 @@ struct vram_amd_index {
         std::size_t const outputs_bytes = rows_count * dimensions() * sizeof(f32_t);
         rows_view_t const first_heads {queries.data, rows_count / head_count, queries.columns,
                                        queries.stride * head_count, queries.dtype};
-        auto staged = stage_walk_(first_heads, attend_heads_t {queries, head_count}, context,
-                                  static_cast<u32_t>(non_zero_expansion_factor(config)), 2,
-                                  blocks * (outputs_bytes + rows_count * sizeof(softmax_state_t)) + exported_bytes,
-                                  visible);
+        auto staged = stage_walk_(
+            first_heads, attend_heads_t {queries, head_count}, context, non_zero_expansion_factor(config), 2,
+            blocks * (outputs_bytes + rows_count * sizeof(softmax_state_t)) + exported_bytes, visible);
         if (!staged) return {nullptr, staged.status};
         staged.value.view.scratch_bytes_per_warp += static_cast<u32_t>(scratch_bytes);
         if (hip_api().fill_async(context.missed_.get(), 0, sizeof(u32_t), context.stream()) != hip_success_k)
@@ -2627,13 +2611,13 @@ struct vram_amd_index {
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the pool sizes the
         // kernel carries, or walked exactly past them.
-        u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
+        u32_t const expansion = non_zero_expansion_factor(config);
         u32_t const pool_slots = pool_slots_for_(expansion, 4);
         // Walking across makes two walks into one visited set, so the slice is shaped for both.
         u32_t const walks = appended_base ? 2 : 1;
         auto const arena_shape = build_arena_shape_(expansion * walks, pool_slots * walks);
-        std::size_t const arena_warps = static_cast<std::size_t>(device_.multiprocessor_count) *
-                                        insert_blocks_per_multiprocessor_k * vram_warps_per_block_k;
+        std::size_t const arena_warps = device_.multiprocessor_count * insert_blocks_per_multiprocessor_k *
+                                        vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
         byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes());
         if (!arena) return {{}, status_t::bad_alloc_k};
@@ -2654,9 +2638,9 @@ struct vram_amd_index {
 
         amd_refine_t view {storage(), //
                            shadow_neighbors.data(),
-                           static_cast<u32_t>(nodes.bound),
+                           nodes.bound,
                            arena_shape.cache_bytes ? 0u : insert_scratch_bytes_per_warp(),
-                           static_cast<node_id_t>(nodes.first),
+                           nodes.first,
                            arena,
                            arena_shape,
                            expansion,
@@ -2682,7 +2666,7 @@ struct vram_amd_index {
         amd_arguments_t scatter {};
         scatter.graph.neighbors = shadow_neighbors.data();
         scatter.graph.rows_count = static_cast<u32_t>(nodes_count);
-        scatter.graph.first_id = static_cast<u32_t>(nodes.first);
+        scatter.graph.first_id = nodes.first;
         scatter.graph.walk_count = static_cast<u32_t>(walk_count);
         scatter.graph.node_ids = node_ids.data();
         scatter.graph.connectivity = static_cast<u32_t>(connectivity());
@@ -2690,10 +2674,9 @@ struct vram_amd_index {
         scatter.graph.bucket_ids = buckets.data();
         scatter.graph.bucket_counts = bucket_counts.data();
         scatter.graph.touched = touched;
-        if (status_t const launched = launch_(
-                amd_kernel_t::scatter_back_links_k, 0,
-                static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k, 0, stream,
-                scatter);
+        if (status_t const launched = launch_(amd_kernel_t::scatter_back_links_k, 0,
+                                              device_.multiprocessor_count * insert_blocks_per_multiprocessor_k, 0,
+                                              stream, scatter);
             failed(launched))
             return {{}, launched};
         amd_refine_t merge_view = view;
@@ -2804,7 +2787,7 @@ struct vram_amd_index {
         // Sweeps queue blind in runs of 1, 2, 4 ... 128, the cap's 255, each run read back once: a
         // sweep queued past convergence finds the one before it expanded nothing and leaves at
         // entry.
-        u32_t const grid = static_cast<u32_t>(device_.multiprocessor_count) * search_blocks_per_multiprocessor_k;
+        u32_t const grid = device_.multiprocessor_count * search_blocks_per_multiprocessor_k;
         u32_t expanded_rows[audit_sweeps_cap_k] = {};
         audit.sweeps = audit_sweeps_cap_k;
         for (std::size_t first = 1; first < audit_sweeps_cap_k && audit.sweeps == audit_sweeps_cap_k; first *= 2) {
@@ -2860,9 +2843,9 @@ struct vram_amd_index {
     /** Blocks a walk over @p queries launches: a warp per query up to the oversubscribed grid, so
      *  the arena carves a slice only for a warp that can take a query. */
     u32_t walk_blocks_(std::size_t queries) const noexcept {
-        return static_cast<u32_t>(min_of<std::size_t>(
-            divide_round_up<std::size_t>(queries, vram_warps_per_block_k),
-            static_cast<std::size_t>(device_.multiprocessor_count) * search_blocks_per_multiprocessor_k));
+        return static_cast<u32_t>(
+            min_of<std::size_t>(divide_round_up<std::size_t>(queries, vram_warps_per_block_k),
+                                device_.multiprocessor_count * search_blocks_per_multiprocessor_k));
     }
 
     /** Keeps @p failure as the status unless one is kept already; returns it for the caller's own
@@ -2985,7 +2968,7 @@ struct vram_amd_index {
      *  failure, since those rows can no longer be un-claimed. */
     status_t launch_insert_(amd_build_t const& build, u32_t pool_slots, hip_stream_handle_t stream) noexcept {
         amd_arguments_t arguments {};
-        u32_t const blocks = static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k;
+        u32_t const blocks = device_.multiprocessor_count * insert_blocks_per_multiprocessor_k;
         for (u32_t wave_first = build.first_id; wave_first != build.end_id;) {
             u32_t const wave_end = static_cast<u32_t>(
                 min_of<u64_t>(build.end_id, u64_t {wave_first} + max_of(wave_first, vram_admission_ramp_floor_k)));
@@ -3010,7 +2993,7 @@ struct vram_amd_index {
         amd_arguments_t arguments {};
         arguments.refine = view;
         return launch_(amd_kernel_t::refine_k, pool_slots,
-                       static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k,
+                       device_.multiprocessor_count * insert_blocks_per_multiprocessor_k,
                        vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
     }
     status_t launch_merge_back_links_(amd_refine_t const& view, nk::matrix_span<u32_t> buckets,
@@ -3023,7 +3006,7 @@ struct vram_amd_index {
         arguments.graph.bucket_width = static_cast<u32_t>(buckets.extent(1));
         arguments.graph.touched = touched;
         return launch_(amd_kernel_t::merge_back_links_k, 0,
-                       static_cast<u32_t>(device_.multiprocessor_count) * insert_blocks_per_multiprocessor_k,
+                       device_.multiprocessor_count * insert_blocks_per_multiprocessor_k,
                        vram_warps_per_block_k * view.scratch_bytes_per_warp, stream, arguments);
     }
     status_t launch_derive_norms_(u32_t first_row, u32_t rows, u32_t blocks, hip_stream_handle_t stream) noexcept {
@@ -3107,9 +3090,9 @@ struct vram_amd_index {
                                   reinterpret_cast<std::uintptr_t>(from) | reinterpret_cast<std::uintptr_t>(to),
                                   &arguments.cast.plan))
             return status_t::unsupported_k;
-        u32_t const blocks = static_cast<u32_t>(min_of<std::size_t>(
-            divide_round_up<std::size_t>(arguments.cast.plan.units, block_threads()),
-            static_cast<std::size_t>(device_.multiprocessor_count) * search_blocks_per_multiprocessor_k));
+        u32_t const blocks = static_cast<u32_t>(
+            min_of<std::size_t>(divide_round_up<std::size_t>(arguments.cast.plan.units, block_threads()),
+                                device_.multiprocessor_count * search_blocks_per_multiprocessor_k));
         return launch_(amd_kernel_t::cast_k, 0, blocks, 0, stream, arguments);
     }
 
@@ -3127,8 +3110,8 @@ struct vram_amd_index {
         rmscast.x_stride = from_stride;
         rmscast.y_stride = row_bytes();
         rmscast.epsilon = std::numeric_limits<f32_t>::min();
-        u32_t const blocks = static_cast<u32_t>(min_of<std::size_t>(
-            rows, static_cast<std::size_t>(device_.multiprocessor_count) * search_blocks_per_multiprocessor_k));
+        u32_t const blocks = static_cast<u32_t>(
+            min_of<std::size_t>(rows, device_.multiprocessor_count * search_blocks_per_multiprocessor_k));
         return launch_(amd_kernel_t::rmscast_k, 0, blocks, 0, stream, arguments);
     }
 

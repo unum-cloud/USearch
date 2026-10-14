@@ -843,6 +843,12 @@ inline status_t publish(usearch_arena_handle_t& arena, value_type_*& output, std
     return status_t::success_k;
 }
 
+/** Keeps the first failure of @p status, awaiting @p arena 's uploads either way. */
+inline status_t drained(usearch_arena_handle_t& arena, status_t status) noexcept {
+    status_t const waited = arena.device_memory.drain();
+    return failed(status) ? status : waited;
+}
+
 /**
  *  @brief A verb's outcome while it runs: the caller's reads deferred from the start, every step
  *      records into a private one, and the end lets go of the arena before the one final store.
@@ -908,7 +914,7 @@ inline bool publish_matches(usearch_arena_handle_t& arena, std::size_t count, ma
     status_t status = publish(arena, landing.counts, count);
     if (succeeded(status)) status = publish(arena, landing.keys, entries);
     if (succeeded(status)) status = publish(arena, landing.scores, entries);
-    if (status_t const drained = arena.device_memory.drain(); succeeded(status)) status = drained;
+    status = drained(arena, status);
     return succeeded(status) || propagate_error(status, outcome, "Failed to land the matches on the device");
 }
 

@@ -125,28 +125,30 @@ struct metal_arguments_t {
 /** The counter words a launch binds: the batch's assigned rows, the published rows, the changed
  *  nodes and the word an attend raises when a node has no value row, then the walks' telemetry,
  *  each tally a low and a high word, so a batch's totals outgrow 32 bits as on CUDA and HIP. */
-enum class metal_counter_t : u32_t {
-    assigned_k = 0,
-    published_k = 1,
-    changed_k = 2,
-    missed_k = 3,
-    hops_k = 4,
-    scored_k = 6,
-    restarts_k = 8,
-    lock_attempts_k = 10,
-    lock_skips_k = 12,
-    reselections_k = 14,
-    locked_drops_k = 16,
-    saturations_k = 18,
-    tail_drops_k = 20,
-    count_k = 24,
+enum metal_counter_t : u32_t {
+    metal_assigned_k = 0,
+    metal_published_k = 1,
+    metal_changed_k = 2,
+    metal_missed_k = 3,
+    metal_hops_k = 4,
+    metal_scored_k = 6,
+    metal_restarts_k = 8,
+    metal_lock_attempts_k = 10,
+    metal_lock_skips_k = 12,
+    metal_reselections_k = 14,
+    metal_locked_drops_k = 16,
+    metal_saturations_k = 18,
+    metal_tail_drops_k = 20,
+    metal_counter_words_k = 24,
 };
 
 /** The tally at @p counter in @p words: its low word joined with the high word it carries into. */
-inline u64_t metal_tally(u32_t const* words, metal_counter_t counter) noexcept {
-    u32_t const low = static_cast<u32_t>(counter);
-    return words[low] | u64_t {words[low + 1]} << 32;
+inline u64_t metal_tally(u32_t const* words, u32_t counter) noexcept {
+    return words[counter] | u64_t {words[counter + 1]} << 32;
 }
+
+/** The counter words @p counters holds, @c metal_counter_words_k of them. */
+inline u32_t* metal_words(metal_buffer_t const& counters) noexcept { return reinterpret_cast<u32_t*>(counters.host); }
 
 /** What a search launch lands: ranked distances, or every scored pair of a product. */
 enum class metal_output_t : bool { distances_k, products_k };
@@ -182,7 +184,7 @@ struct metal_traversal_context {
     /** Binds the context to @p stream's device; buffers wait for the first verb. */
     metal_traversal_context(allocator_t stream = {}) noexcept
         : stream_(std::move(stream)), context_(metal_context(stream_.device)), buffers_allocator_(stream_.device) {
-        if (context_) counters_ = buffers_allocator_.allocate(static_cast<std::size_t>(metal_counter_t::count_k) * 4);
+        if (context_) counters_ = buffers_allocator_.allocate(metal_counter_words_k * sizeof(u32_t));
     }
     metal_traversal_context(metal_traversal_context&&) noexcept = default;
     metal_traversal_context(metal_traversal_context const&) = delete;
@@ -203,26 +205,26 @@ struct metal_traversal_context {
 
     /** The telemetry of the last submission, zeroed when it was staged; read once it landed. */
     vram_telemetry_block_t spent() const noexcept {
-        u32_t const* const words = reinterpret_cast<u32_t const*>(counters_.host);
+        u32_t const* const words = metal_words(counters_);
         vram_telemetry_block_t block {};
-        block.hops = metal_tally(words, metal_counter_t::hops_k);
-        block.scored = metal_tally(words, metal_counter_t::scored_k);
-        block.restarts = metal_tally(words, metal_counter_t::restarts_k);
-        block.lock_attempts = metal_tally(words, metal_counter_t::lock_attempts_k);
-        block.lock_skips = metal_tally(words, metal_counter_t::lock_skips_k);
-        block.reselections = metal_tally(words, metal_counter_t::reselections_k);
-        block.locked_drops = metal_tally(words, metal_counter_t::locked_drops_k);
-        block.visited_saturations = metal_tally(words, metal_counter_t::saturations_k);
-        block.changed_nodes = words[static_cast<u32_t>(metal_counter_t::changed_k)];
-        block.tail_drops = metal_tally(words, metal_counter_t::tail_drops_k);
+        block.hops = metal_tally(words, metal_hops_k);
+        block.scored = metal_tally(words, metal_scored_k);
+        block.restarts = metal_tally(words, metal_restarts_k);
+        block.lock_attempts = metal_tally(words, metal_lock_attempts_k);
+        block.lock_skips = metal_tally(words, metal_lock_skips_k);
+        block.reselections = metal_tally(words, metal_reselections_k);
+        block.locked_drops = metal_tally(words, metal_locked_drops_k);
+        block.visited_saturations = metal_tally(words, metal_saturations_k);
+        block.changed_nodes = words[metal_changed_k];
+        block.tail_drops = metal_tally(words, metal_tail_drops_k);
         return block;
     }
 
     /** Whether the last attend met a node its value lookup had no row for, which refuses it; read
      *  once it landed. */
     bool missed() const noexcept {
-        u32_t const* const words = reinterpret_cast<u32_t const*>(counters_.host);
-        return words[static_cast<u32_t>(metal_counter_t::missed_k)] != 0;
+        u32_t const* const words = metal_words(counters_);
+        return words[metal_missed_k] != 0;
     }
 
   private:
@@ -363,7 +365,7 @@ struct vram_apple_index {
 
     /** The walk breadth @p config asks for, or twice the connectivity when it asks for none. */
     template <typename config_type_>
-    std::size_t non_zero_expansion_factor(config_type_ const& config) const noexcept {
+    small_size_t non_zero_expansion_factor(config_type_ const& config) const noexcept {
         return config.expansion_factor ? config.expansion_factor : connectivity() * 2;
     }
 
@@ -440,8 +442,7 @@ struct vram_apple_index {
         if (destination.size() != dimensions()) return status_t::config_mismatch_k;
         if (!destination.is_contiguous()) return status_t::unsupported_layout_k;
         std::shared_lock storage {storage_};
-        std::memcpy(destination.byte_data(), vectors_matrix_.host + static_cast<std::size_t>(node) * row_bytes(),
-                    packed_row_bytes());
+        std::memcpy(destination.byte_data(), vectors_matrix_.host + node * row_bytes(), packed_row_bytes());
         return status_t::success_k;
     }
 
@@ -507,7 +508,7 @@ struct vram_apple_index {
             metal_context_t* const context = metal_context(device_.ordinal);
             if (!context) return {0, status_t::device_error_k};
             if (status_t const loaded = load_pipelines_(); failed(loaded)) return {0, loaded};
-            counters_ = metal_allocate(*context, static_cast<std::size_t>(metal_counter_t::count_k) * 4);
+            counters_ = metal_allocate(*context, counters_bytes_k);
             if (!counters_) return {0, status_t::bad_alloc_k};
             dimensions_ = config.dimensions;
             connectivity_ = static_cast<std::size_t>(config.connectivity);
@@ -531,7 +532,7 @@ struct vram_apple_index {
     std::size_t traversal_memory_usage(std::size_t rows, insert_config_t config = {}) const noexcept {
         if (!dimensions_) return 0;
         u32_t const pool_slots = walk_slots_(config.expansion_factor, 4);
-        return static_cast<std::size_t>(metal_counter_t::count_k) * sizeof(u32_t) +
+        return counters_bytes_k +
                groups_for_(rows) * simdgroups_per_group_k *
                    walk_arena_shape_(config.expansion_factor, pool_slots, cache_rows_k).slice_bytes +
                rows * row_bytes() + widened_bytes_();
@@ -590,9 +591,9 @@ struct vram_apple_index {
         if (!dimensions_) return 0;
         u32_t const expansion = max_of<u32_t>(
             config.expansion_factor >= config.count ? config.expansion_factor : config.count * 2,
-            static_cast<u32_t>(non_zero_expansion_factor(config)));
+            non_zero_expansion_factor(config));
         u32_t const count_slots = divide_round_up<u32_t>(config.count, 32);
-        return static_cast<std::size_t>(metal_counter_t::count_k) * sizeof(u32_t) +
+        return counters_bytes_k +
                groups_for_(rows) * simdgroups_per_group_k *
                    walk_arena_shape_(expansion, walk_slots_(expansion, count_slots > 2 ? count_slots : 2)).slice_bytes +
                rows * (row_bytes() + config.count * (sizeof(node_id_t) + sizeof(distance_t)) + sizeof(u32_t)) +
@@ -895,8 +896,7 @@ struct vram_apple_index {
         ~load_plan_t() noexcept {
             if (!index_ || !rows) return;
             std::size_t const neighbors_row_bytes = index_->connectivity() * sizeof(u32_t);
-            std::memset(index_->neighbors_matrix_.host + static_cast<std::size_t>(base) * neighbors_row_bytes, 0xFF,
-                        rows * neighbors_row_bytes);
+            std::memset(index_->neighbors_matrix_.host + base * neighbors_row_bytes, 0xFF, rows * neighbors_row_bytes);
         }
 
         struct step_t {
@@ -1006,8 +1006,8 @@ struct vram_apple_index {
                     if (status_t const derived = index_->derive_norms_(base, rows); failed(derived))
                         return index_->fail_(derived);
                 index_->claimed_rows_ = base + rows;
-                u32_t* const counters = reinterpret_cast<u32_t*>(index_->counters_.host);
-                counters[static_cast<u32_t>(metal_counter_t::published_k)] = static_cast<u32_t>(base + rows);
+                u32_t* const words = metal_words(index_->counters_);
+                words[metal_published_k] = static_cast<u32_t>(base + rows);
                 batch_.unlock();
             }
             vram_apple_index* const index = std::exchange(index_, nullptr);
@@ -1128,15 +1128,12 @@ struct vram_apple_index {
         if (failed(launched)) return {{first_id, static_cast<node_id_t>(first_id)}, fail_(launched)};
         // Every wave's published rows and tallies fold into the batch's counters; their assigned
         // words are spent.
-        u32_t* const counters = reinterpret_cast<u32_t*>(counters_.host);
-        u32_t const published = static_cast<u32_t>(metal_counter_t::published_k);
+        u32_t* const counters = metal_words(counters_);
         for (std::size_t offset = rows_bytes; offset != rows_bytes + waves_bytes; offset += counters_bytes_k) {
             u32_t const* const wave = reinterpret_cast<u32_t const*>(context.staging_.host + offset);
-            counters[published] += wave[published];
-            for (u32_t word = static_cast<u32_t>(metal_counter_t::hops_k);
-                 word != static_cast<u32_t>(metal_counter_t::count_k); word += 2) {
-                metal_counter_t const tally = static_cast<metal_counter_t>(word);
-                u64_t const total = metal_tally(counters, tally) + metal_tally(wave, tally);
+            counters[metal_published_k] += wave[metal_published_k];
+            for (u32_t word = metal_hops_k; word != metal_counter_words_k; word += 2) {
+                u64_t const total = metal_tally(counters, word) + metal_tally(wave, word);
                 counters[word] = static_cast<u32_t>(total), counters[word + 1] = static_cast<u32_t>(total >> 32);
             }
         }
@@ -1144,11 +1141,11 @@ struct vram_apple_index {
         insert_result_t result;
         result.first_id = static_cast<node_id_t>(first_id);
         result.new_size = first_id + rows;
-        result.visited_members = metal_tally(counters, metal_counter_t::hops_k);
-        result.computed_distances = metal_tally(counters, metal_counter_t::scored_k);
-        result.restarts = metal_tally(counters, metal_counter_t::restarts_k);
-        result.unlinked_neighbors = metal_tally(counters, metal_counter_t::lock_skips_k);
-        result.visited_saturations = metal_tally(counters, metal_counter_t::saturations_k);
+        result.visited_members = metal_tally(counters, metal_hops_k);
+        result.computed_distances = metal_tally(counters, metal_scored_k);
+        result.restarts = metal_tally(counters, metal_restarts_k);
+        result.unlinked_neighbors = metal_tally(counters, metal_lock_skips_k);
+        result.visited_saturations = metal_tally(counters, metal_saturations_k);
         for (std::size_t row = 0; row != assigned_ids.size(); ++row)
             assigned_ids[row] = static_cast<node_id_t>(first_id + row);
         return {result, status_t::success_k};
@@ -1241,10 +1238,10 @@ struct vram_apple_index {
 
     /** Zeroes @p counters' assigned row and telemetry, keeping the published row. */
     static void reset_counters_(metal_buffer_t& counters) noexcept {
-        u32_t* const words = reinterpret_cast<u32_t*>(counters.host);
-        u32_t const published = words[static_cast<u32_t>(metal_counter_t::published_k)];
+        u32_t* const words = metal_words(counters);
+        u32_t const published = words[metal_published_k];
         std::memset(words, 0, counters.bytes);
-        words[static_cast<u32_t>(metal_counter_t::published_k)] = published;
+        words[metal_published_k] = published;
     }
 
     /** Binds the arguments, the two matrices and the norms column, the vectors standing in for an
@@ -1319,8 +1316,7 @@ struct vram_apple_index {
     }
 
     /** Bytes of one launch's counter words. */
-    inline static constexpr std::size_t counters_bytes_k = static_cast<std::size_t>(metal_counter_t::count_k) *
-                                                           sizeof(u32_t);
+    inline static constexpr std::size_t counters_bytes_k = metal_counter_words_k * sizeof(u32_t);
 
     /** The ID a wave starting at @p wave_first stops before: as wide as the IDs below it, never
      *  narrower than @c vram_admission_ramp_floor_k, and never past @p end_id. */
@@ -1505,7 +1501,7 @@ struct vram_apple_index {
         std::size_t const rows_count = left.rows;
         context.landing_ = {};
         if (!rows_count) return {{}, status_t::success_k};
-        u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
+        u32_t const expansion = non_zero_expansion_factor(config);
         u32_t const pool_slots = walk_slots_(expansion, 2);
         std::size_t const rows_bytes = rows_count * row_bytes();
         std::size_t const ids_bytes = rows_count * wanted * sizeof(node_id_t);
@@ -1553,8 +1549,8 @@ struct vram_apple_index {
         context.results.count_ = 0;
         if (!visible) return {{}, status_t::success_k};
         if (query_vector.size() != dimensions()) return {{}, status_t::config_mismatch_k};
-        u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
-        u32_t const count = min_of<u32_t>(expansion, static_cast<u32_t>(visible));
+        u32_t const expansion = non_zero_expansion_factor(config);
+        u32_t const count = min_of<u32_t>(expansion, visible);
         if (failed(context.results.entries_.reserve(std::size_t {count} * 2))) return {{}, status_t::bad_alloc_k};
         context.results.entries_.extend_uninitialized(std::size_t {count} * 2);
         node_id_t* const staged_ids = reinterpret_cast<node_id_t*>(context.results.entries_.data() + count);
@@ -1669,7 +1665,7 @@ struct vram_apple_index {
         if (status_t const staged = context.ensure_(context.staging_, ids_bytes + shadow_bytes, fresh); failed(staged))
             return {{}, staged};
         if (ids_bytes) std::memcpy(context.staging_.host, node_ids.data(), ids_bytes);
-        u32_t const expansion = static_cast<u32_t>(non_zero_expansion_factor(config));
+        u32_t const expansion = non_zero_expansion_factor(config);
         u32_t const pool_slots = walk_slots_(expansion, 4);
         // Walking across makes two walks into one visited set, so the slice is shaped for both.
         u32_t const walks = appended_base ? 2 : 1;
@@ -1715,11 +1711,11 @@ struct vram_apple_index {
             std::memcpy(row, picked, connectivity * sizeof(u32_t));
             ++result.changed_nodes;
         }
-        u32_t const* const counters = reinterpret_cast<u32_t const*>(counters_.host);
+        u32_t const* const counters = metal_words(counters_);
         result.visited_nodes = walk_count;
-        result.visited_members = metal_tally(counters, metal_counter_t::hops_k);
-        result.computed_distances = metal_tally(counters, metal_counter_t::scored_k);
-        result.restarts = metal_tally(counters, metal_counter_t::restarts_k);
+        result.visited_members = metal_tally(counters, metal_hops_k);
+        result.computed_distances = metal_tally(counters, metal_scored_k);
+        result.restarts = metal_tally(counters, metal_restarts_k);
         return {result, status_t::success_k};
     }
 
@@ -1828,8 +1824,8 @@ struct vram_apple_index {
 
     std::size_t claimed_() const noexcept { return claimed_rows_; }
     u32_t published_() const noexcept {
-        u32_t const* const words = reinterpret_cast<u32_t const*>(counters_.host);
-        return words[static_cast<u32_t>(metal_counter_t::published_k)];
+        u32_t const* const words = metal_words(counters_);
+        return words[metal_published_k];
     }
 
     /** Row zero of the neighbors matrix, as the IDs its rows hold. */

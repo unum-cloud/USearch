@@ -621,10 +621,10 @@ struct vram_visited_set {
                 // Visited this walk, or a stale or never-used slot to claim, then the same for the
                 // pair's odd slot.
                 if (observed == claim) fresh = probing = false;
-                else if (static_cast<u32_t>(observed >> 32) != epoch_) claiming = true;
+                else if ((observed >> 32) != epoch_) claiming = true;
                 else if (slot & 1) slot = (slot + 1) & mask;
                 else if (pair.y == claim) fresh = probing = false;
-                else if (static_cast<u32_t>(pair.y >> 32) != epoch_) slot |= 1, claiming = true;
+                else if ((pair.y >> 32) != epoch_) slot |= 1, claiming = true;
                 else slot = (slot + 2) & mask;
             }
             typename warp_t::mask_t const rivals = warp_t::match_any(claiming ? slot : 0xFFFFFFFFu ^ lane);
