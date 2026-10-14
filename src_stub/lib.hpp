@@ -219,9 +219,9 @@ using call_arguments_t = std::variant<
     usearch_dense_search_stream_next_t, usearch_dense_save_t, usearch_dense_save_buffer_t,
     usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t, usearch_dense_describe_t,
     usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t, usearch_sequence_load_ram_t,
-    usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t, usearch_sequence_refine_t,
-    usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t, usearch_sequence_merge_t,
-    usearch_sequence_cursor_next_t, usearch_sequence_save_t, usearch_sequence_metadata_read_t,
+    usearch_sequence_view_nvme_t, usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t,
+    usearch_sequence_refine_t, usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t,
+    usearch_sequence_merge_t, usearch_sequence_cursor_next_t, usearch_sequence_save_t, usearch_sequence_metadata_read_t,
     usearch_sequence_describe_t, usearch_matrix_load_ram_t, usearch_matrix_load_vram_t, usearch_matrix_reserve_t,
     usearch_matrix_clear_t, usearch_matrix_insert_t, usearch_matrix_refine_t, usearch_matrix_search_t,
     usearch_matrix_count_t, usearch_matrix_get_t, usearch_matrix_merge_t, usearch_matrix_cursor_next_t,
@@ -704,6 +704,9 @@ struct handle {
 
     /** The checkpoint a @c view_ram verb serves from, whose presence refuses every mutating verb. */
     mapped_file_t served;
+
+    /** The residency the handle answers as, so an NVMe view refuses a save as the engine's does. */
+    usearch_residency_t residency = usearch_residency_ram_k;
 
     /** Drops every row, which @c clear promises without touching the frozen options. */
     void reset() noexcept { entries.clear(), by_key.clear(); }

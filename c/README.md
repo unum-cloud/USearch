@@ -650,8 +650,8 @@ usearch_sequence_search(&(usearch_sequence_search_t) {.index = sequences,
                                                       .wanted = 3});
 ```
 
-The kinds are Levenshtein over bytes or UTF-8 code points, Needleman-Wunsch and Smith-Waterman with linear gaps, and their Gotoh forms with affine gaps.
-The alignment kinds take `usearch_sequence_weights_t`, a 256×256 substitution matrix with gap costs, which the Levenshtein kinds refuse.
+The kinds are Levenshtein over bytes or UTF-8 code points, Needleman-Wunsch and Smith-Waterman with linear gaps, their Gotoh forms with affine gaps, and overlap, the share of fixed-width windows one side misses of the other.
+The alignment kinds take `usearch_sequence_weights_t`, a 256×256 substitution matrix with gap costs, and the overlap kind takes `window_widths` in bytes, each refused by every other kind with `usearch_status_config_mismatch_k`.
 The local Smith-Waterman kinds only rank: each is served from an index built under its global counterpart, which the library picks.
 The verbs mirror the dense ones: `init_ram`, `load_ram`, `view_ram`, `reserve`, `clear`, `insert`, `refine`, `search` with a predicate, `get` and `cursor_next` writing tapes into an arena, `merge`, `save`, `metadata_read` and `describe`, while `count` also reports a key's total and largest byte lengths.
 A key already holding `values_per_key` entries rejects the whole insertion with `usearch_status_overflow_k`.

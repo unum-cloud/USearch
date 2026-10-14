@@ -69,6 +69,9 @@ struct sequence_index_options_t {
 
     /** Cost of extending an open gap; the linear kind ignores it. */
     us::utilities::i8_t gap_extend = 0;
+
+    /** Window widths in bytes the overlap kind compares at; empty under every other kind. */
+    std::vector<std::size_t> window_widths;
 };
 
 using sequence_payload_t = std::vector<std::byte>;
@@ -109,7 +112,7 @@ static bool alignment_metric(usearch_sequence_metric_t metric) {
 
 /** Whether the kind is one this build implements at all. */
 static bool known_metric(usearch_sequence_metric_t metric) {
-    return levenshtein_metric(metric) || alignment_metric(metric);
+    return levenshtein_metric(metric) || alignment_metric(metric) || metric == usearch_sequence_metric_overlap_k;
 }
 
 #pragma endregion Storage
@@ -236,10 +239,33 @@ struct sequence_search_scratch_t {
     std::vector<us::utilities::u32_t> entry_points;
     std::vector<std::size_t> unsigned_row;
     std::vector<us::utilities::i64_t> signed_row;
+    std::vector<std::string_view> query_windows;
 };
 
+/** Windows of @p width in a sequence of @p length bytes. */
+static std::size_t windows_in(std::size_t length, std::size_t width) { return length < width ? 0 : length - width + 1; }
+
+/** The overlap kind: the stored windows the query lacks, over whichever side has more windows. */
+static double window_overlap(bytes_view_t query, bytes_view_t stored, std::span<std::size_t const> widths,
+                             std::vector<std::string_view>& query_windows) {
+    std::string_view const query_text = chars_of(query), stored_text = chars_of(stored);
+    std::size_t query_count = 0, stored_count = 0, hits = 0;
+    for (std::size_t const width : widths) {
+        query_windows.clear();
+        for (std::size_t start = 0; start != windows_in(query_text.size(), width); ++start)
+            query_windows.push_back(query_text.substr(start, width));
+        std::sort(query_windows.begin(), query_windows.end());
+        for (std::size_t start = 0; start != windows_in(stored_text.size(), width); ++start)
+            hits += std::binary_search(query_windows.begin(), query_windows.end(), stored_text.substr(start, width));
+        query_count += query_windows.size();
+        stored_count += windows_in(stored_text.size(), width);
+    }
+    std::size_t const longer = std::max(query_count, stored_count);
+    return longer ? static_cast<double>(longer - hits) / static_cast<double>(longer) : 1.0;
+}
+
 /** Scores one pair under the frozen kind. The constructor and @c adopt refuse a kind
- *  this build does not know, so every enumerator reaching here is one of the six. */
+ *  this build does not know, so every enumerator reaching here is one of the seven. */
 static double distance(sequence_index_t const& index, bytes_view_t query, bytes_view_t stored,
                        sequence_search_scratch_t& scratch) {
     sequence_index_options_t const& parameters = index.options;
@@ -256,6 +282,8 @@ static double distance(sequence_index_t const& index, bytes_view_t query, bytes_
         return local_alignment(query, stored, parameters, parameters.gap_open, scratch.signed_row);
     case usearch_sequence_metric_smith_waterman_gotoh_k:
         return local_alignment(query, stored, parameters, parameters.gap_extend, scratch.signed_row);
+    case usearch_sequence_metric_overlap_k:
+        return window_overlap(query, stored, parameters.window_widths, scratch.query_windows);
     default: return levenshtein<std::byte>(query, stored, scratch.unsigned_row);
     }
 }
@@ -298,7 +326,7 @@ static bool land_entries(sequence_index_t const& index, std::span<std::size_t co
 static std::size_t search_tape(sequence_index_t& index, usearch_tape_view_t queries, std::size_t count,
                                ranked_landing_t const& landing, std::size_t expansion_factor,
                                usearch_sequence_traversal_stats_t* stats, usearch_predicate_t predicate,
-                               usearch_progress_callback_t progress, void* progress_state) {
+                               usearch_progress_t progress) {
     std::size_t const rows = index.entries.size();
     if (stats && expansion_factor) stats->computed_distances += expansion_factor * count;
 
@@ -315,7 +343,7 @@ static std::size_t search_tape(sequence_index_t& index, usearch_tape_view_t quer
             stats->computed_distances += ranked.size();
             stats->restarts += 1;
         }
-        if (!keep_going(progress, progress_state, query + 1, count)) return query + 1;
+        if (!keep_going(progress, query + 1, count)) return query + 1;
     }
     return count;
 }
@@ -350,6 +378,9 @@ struct sequence_checkpoint_prefix_t {
 
     /** Cost of extending an open gap. */
     us::utilities::i8_t gap_extend;
+
+    /** How many window widths follow the matrix, each a @c std::size_t. */
+    std::size_t window_widths_count;
 };
 
 /** The per-entry overhead of the blob: the key, then the byte length that follows it. */
@@ -361,10 +392,12 @@ static std::size_t payload_extent(sequence_index_t const& index, std::size_t row
     return extent;
 }
 
-static std::size_t substitution_bytes(sequence_index_t const& index) { return index.options.substitution.size(); }
+static std::size_t parameter_bytes(sequence_index_t const& index) {
+    return index.options.substitution.size() + index.options.window_widths.size() * sizeof(std::size_t);
+}
 
 static std::optional<std::size_t> serialized_bytes(sequence_index_t const& index, std::size_t rows) {
-    return blob_bytes(sizeof(sequence_checkpoint_prefix_t) + substitution_bytes(index), payload_extent(index, rows), 1);
+    return blob_bytes(sizeof(sequence_checkpoint_prefix_t) + parameter_bytes(index), payload_extent(index, rows), 1);
 }
 
 static void write_into(sequence_index_t const& index, std::size_t rows, bytes_span_t target) {
@@ -375,6 +408,7 @@ static void write_into(sequence_index_t const& index, std::size_t rows, bytes_sp
     prefix.metric = index.options.metric;
     prefix.gap_open = index.options.gap_open;
     prefix.gap_extend = index.options.gap_extend;
+    prefix.window_widths_count = index.options.window_widths.size();
     write_pod(target, prefix);
     bytes_span_t cursor = target.subspan(sizeof(prefix));
 
@@ -383,6 +417,10 @@ static void write_into(sequence_index_t const& index, std::size_t rows, bytes_sp
             cursor.first(index.options.substitution.size()),
             bytes_of(index.options.substitution.data(), index.options.substitution.size()));
         cursor = cursor.subspan(index.options.substitution.size());
+    }
+    for (std::size_t const width : index.options.window_widths) {
+        write_pod(cursor, width);
+        cursor = cursor.subspan(sizeof(width));
     }
     for (std::size_t row = 0; row != rows; ++row) {
         sequence_entry_t const& entry = index.entries[row];
@@ -403,7 +441,11 @@ static bool parse_prefix(sequence_checkpoint_prefix_t& prefix, bytes_view_t blob
         return false;
     prefix = read_pod<sequence_checkpoint_prefix_t>(blob);
     std::size_t const table = alignment_metric(prefix.metric) ? alphabet_k * alphabet_k : 0;
-    return fits_blob(blob, sizeof(sequence_checkpoint_prefix_t) + table, prefix.payload_bytes, 1, outcome);
+    if (reject_if(prefix.window_widths_count > blob.size() / sizeof(std::size_t), usearch_status_malformed_k,
+                  "The checkpoint lists more widths than it holds", outcome))
+        return false;
+    std::size_t const widths = prefix.window_widths_count * sizeof(std::size_t);
+    return fits_blob(blob, sizeof(sequence_checkpoint_prefix_t) + table + widths, prefix.payload_bytes, 1, outcome);
 }
 
 /** Adopts a checkpoint's configuration, answering whether its metric is one we know. The bound
@@ -441,6 +483,11 @@ static bool read_from(sequence_index_t& index, bytes_view_t blob, usearch_outcom
             cursor.first(index.options.substitution.size()));
         cursor = cursor.subspan(index.options.substitution.size());
     }
+    index.options.window_widths.resize(prefix.window_widths_count);
+    for (std::size_t& width : index.options.window_widths) {
+        width = read_pod<std::size_t>(cursor);
+        cursor = cursor.subspan(sizeof(width));
+    }
 
     sequence_payload_t payload;
     for (std::size_t row = 0; row != rows; ++row) {
@@ -471,8 +518,8 @@ static bool read_from(sequence_index_t& index, bytes_view_t blob, usearch_outcom
  *  needs them, so a binding pairing the wrong two learns at once. */
 static bool reject_weights(usearch_sequence_metric_t metric, usearch_sequence_weights_t const* weights,
                            usearch_outcome_t* outcome) {
-    if (reject_if(levenshtein_metric(metric) && weights, usearch_status_config_mismatch_k,
-                  "A Levenshtein kind takes no weights", outcome))
+    if (reject_if(!alignment_metric(metric) && weights, usearch_status_config_mismatch_k,
+                  "Only an alignment kind takes weights", outcome))
         return true;
     return reject_if(alignment_metric(metric) && (!weights || !weights->substitution_matrix),
                      usearch_status_config_mismatch_k, "An alignment kind needs a substitution matrix", outcome);
@@ -509,9 +556,18 @@ void usearch_sequence_init_ram(usearch_sequence_init_ram_t* arguments) {
                   outcome))
         return;
     if (reject_weights(metric, weights, outcome)) return;
+    std::span<std::size_t const> const widths {arguments->window_widths,
+                                               arguments->window_widths ? arguments->window_widths_count : 0};
+    if (reject_if((metric == usearch_sequence_metric_overlap_k) == widths.empty(), usearch_status_config_mismatch_k,
+                  "The overlap kind needs window widths, and only it takes any", outcome))
+        return;
+    if (reject_if(std::find(widths.begin(), widths.end(), 0u) != widths.end(), usearch_status_invalid_argument_k,
+                  "A window is empty", outcome))
+        return;
     usearch_sequence_index_handle_t* const index = new (std::nothrow) usearch_sequence_index_handle_t();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return;
     index->options.metric = metric;
+    index->options.window_widths.assign(widths.begin(), widths.end());
     index->options.connectivity = arguments->connectivity ? arguments->connectivity : us::utilities::connectivity_16_k;
     index->options.values_per_key = arguments->values_per_key;
     if (weights) {
@@ -528,7 +584,7 @@ void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments) {
     if (through_executor<usearch_sequence_load_ram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
-    if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
+    if (!keep_going(arguments->progress, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob;
     if (!read_file(arguments->path, blob, outcome)) return;
@@ -536,7 +592,7 @@ void usearch_sequence_load_ram(usearch_sequence_load_ram_t* arguments) {
         blob, arguments->weights, outcome);
     if (!index) return;
     index->options.values_per_key = arguments->values_per_key;
-    keep_going(arguments->progress, arguments->progress_state, 1, 1);
+    keep_going(arguments->progress, 1, 1);
     *arguments->index = index;
 }
 
@@ -550,6 +606,21 @@ void usearch_sequence_view_ram(usearch_sequence_view_ram_t* arguments) {
         served.view(), arguments->weights, outcome);
     if (!index) return;
     index->served = std::move(served);
+    *arguments->index = index;
+}
+
+void usearch_sequence_view_nvme(usearch_sequence_view_nvme_t* arguments) {
+    if (through_executor<usearch_sequence_view_nvme>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    mapped_file_t served = map_file(arguments->path, outcome);
+    if (!served) return;
+    // Serves the drives' checkpoint as the RAM view does, mirroring only the residency's refusals.
+    usearch_sequence_index_handle_t* const index = open_checkpoint<usearch_sequence_index_handle_t>(
+        served.view(), arguments->weights, outcome);
+    if (!index) return;
+    index->served = std::move(served);
+    index->residency = usearch_residency_nvme_k;
     *arguments->index = index;
 }
 
@@ -619,7 +690,7 @@ void usearch_sequence_insert(usearch_sequence_insert_t* arguments) {
         payload.assign(sequence.begin(), sequence.end());
         index.append(key_at(arguments->keys, row), payload);
         ++published;
-        if (!keep_going(arguments->progress, arguments->progress_state, published, count)) break;
+        if (!keep_going(arguments->progress, published, count)) break;
     }
     // This modality's batch is all-or-nothing, a cancellation included, so a stopped tape unwinds
     // to the watermark rather than leaving a prefix published.
@@ -646,7 +717,7 @@ void usearch_sequence_refine(usearch_sequence_refine_t* arguments) {
     // An exact scan keeps no edges, so a sweep re-selects nothing and the graph is always settled.
     // Cancelling is not an error here, the header having made a stopped sweep merely less improved.
     for (std::size_t row = 0; row != rows; ++row)
-        if (!keep_going(arguments->progress, arguments->progress_state, row + 1, rows)) break;
+        if (!keep_going(arguments->progress, row + 1, rows)) break;
     if (arguments->stats) arguments->stats->visited_members = rows;
 }
 
@@ -667,8 +738,7 @@ void usearch_sequence_search(usearch_sequence_search_t* arguments) {
 
     std::shared_lock readers(index.mutex);
     std::size_t const answered = search_tape(index, queries, count, landing, arguments->expansion_factor,
-                                             arguments->stats, arguments->predicate, arguments->progress,
-                                             arguments->progress_state);
+                                             arguments->stats, arguments->predicate, arguments->progress);
     if (reject_cancelled(answered, count, outcome)) return;
     *arguments->matches = landing.view();
 }
@@ -712,8 +782,7 @@ void usearch_sequence_merge(usearch_sequence_merge_t* arguments) {
 
     std::size_t const donors_count = arguments->count;
     usearch_sequence_index_t* const donors = arguments->donors;
-    usearch_progress_callback_t const progress = arguments->progress;
-    void* const progress_state = arguments->progress_state;
+    usearch_progress_t const progress = arguments->progress;
     std::size_t merged = 0;
     bool accommodated = true;
     while (accommodated && merged != donors_count) {
@@ -723,7 +792,7 @@ void usearch_sequence_merge(usearch_sequence_merge_t* arguments) {
         if (!accommodated) break;
         for (sequence_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
         ++merged;
-        if (!keep_going(progress, progress_state, merged, donors_count)) break;
+        if (!keep_going(progress, merged, donors_count)) break;
     }
     // Only an absorbed donor is consumed, and its slot is nulled as it goes, so a stopped merge
     // leaves the rest live handles the caller still owns and must free.
@@ -788,17 +857,20 @@ void usearch_sequence_save(usearch_sequence_save_t* arguments) {
     if (through_executor<usearch_sequence_save>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_sequence_index_handle_t& index = *arguments->index;
+    if (reject_if(index.residency == usearch_residency_nvme_k, usearch_status_unsupported_k,
+                  "An NVMe view already is its checkpoint", outcome))
+        return;
     std::shared_lock readers(index.mutex);
     std::size_t const rows = index.entries.size();
     std::optional<std::size_t> const length = serialized_bytes(index, rows);
     if (reject_if(!length, usearch_status_overflow_k, "The checkpoint would not fit an addressable buffer", outcome))
         return;
-    if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
+    if (!keep_going(arguments->progress, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob(*length);
     write_into(index, rows, blob);
     if (!write_file(arguments->path, blob, outcome)) return;
-    keep_going(arguments->progress, arguments->progress_state, 1, 1);
+    keep_going(arguments->progress, 1, 1);
 }
 
 void usearch_sequence_metadata_read(usearch_sequence_metadata_read_t* arguments) {
