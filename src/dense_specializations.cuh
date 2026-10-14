@@ -747,6 +747,9 @@ struct specialized_index {
     expected<insert_result_t> add(keys_view_t keys, rows_view_t rows, insertion_progress_t const& progress,
                                   executor_t& executor, insert_config_t config) noexcept;
     expected<refine_result_t> refine(executor_t& executor, refine_config_t config, shard_ticks_t& ticks) noexcept;
+
+    /** Moves every row of @p donor into the index, linked in across, and leaves @p donor empty. */
+    expected<refine_result_t> absorb(index_type_& donor, executor_t& executor) noexcept;
     expected<health_result_t> health(executor_t& executor) noexcept;
     expected<search_result_t> search(rows_view_t queries, executor_t& executor, search_config_t config,
                                      keys_span_t keys, scores_span_t distances, counts_span_t counts,
@@ -784,7 +787,10 @@ template <typename index_type_>
 status_t specialized_index<index_type_>::emplace(int device) noexcept
     requires is_vram_index<index_type_>
 {
-    return index.emplace(device);
+    // Init names devices and no executor yet, so a stream opened for the placement alone names
+    // the device.
+    auto [executor, status] = executor_t::spawn(std::span<int const> {&device, 1});
+    return failed(status) ? status : index.emplace(executor.stream(0));
 }
 template <typename index_type_>
 int specialized_index<index_type_>::device(std::size_t shard) const noexcept
@@ -864,6 +870,11 @@ expected<typename specialized_index<index_type_>::refine_result_t> specialized_i
     executor_t& executor, refine_config_t config, shard_ticks_t& ticks) noexcept {
     return index.refine(executor, config,
                         [&](std::size_t swept, std::size_t population) noexcept { return ticks(swept, population); });
+}
+template <typename index_type_>
+expected<typename specialized_index<index_type_>::refine_result_t> specialized_index<index_type_>::absorb(
+    index_type_& donor, executor_t& executor) noexcept {
+    return index.absorb(donor, executor);
 }
 template <typename index_type_>
 expected<typename specialized_index<index_type_>::health_result_t> specialized_index<index_type_>::health(

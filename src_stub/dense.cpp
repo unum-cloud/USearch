@@ -659,34 +659,34 @@ void usearch_dense_get(usearch_dense_get_t* arguments) {
     if (arguments->written) *arguments->written = rows.size();
 }
 
-void usearch_dense_merge(usearch_dense_merge_t* arguments) {
-    if (through_executor<usearch_dense_merge>(arguments)) return;
+void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
+    if (through_executor<usearch_dense_absorb>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     usearch_dense_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
 
     std::size_t const donors_count = arguments->count;
     usearch_dense_index_t* const donors = arguments->donors;
-    std::size_t merged = 0;
+    std::size_t absorbed = 0;
     bool accommodated = true;
-    while (accommodated && merged != donors_count) {
-        usearch_dense_index_handle_t& donor = *donors[merged];
+    while (accommodated && absorbed != donors_count) {
+        usearch_dense_index_handle_t& donor = *donors[absorbed];
         std::unique_lock writers(index.mutex);
         accommodated = index.accommodate(index.entries.size() + donor.entries.size());
         if (!accommodated) break;
         for (dense_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
-        ++merged;
-        if (!keep_going(arguments->progress, arguments->progress_state, merged, donors_count)) break;
+        ++absorbed;
+        if (!keep_going(arguments->progress, arguments->progress_state, absorbed, donors_count)) break;
     }
-    // Only an absorbed donor is consumed, and its slot is nulled as it goes, so a stopped merge
+    // Only an absorbed donor is consumed, and its slot is nulled as it goes, so a stopped absorb
     // leaves the rest live handles the caller still owns and must free.
-    for (std::size_t position = 0; position != merged; ++position) {
+    for (std::size_t position = 0; position != absorbed; ++position) {
         delete donors[position];
         donors[position] = nullptr;
     }
     if (reject_if(!accommodated, usearch_status_out_of_memory_k, "The donor's rows could not be accommodated", outcome))
         return;
-    reject_cancelled(merged, donors_count, outcome);
+    reject_cancelled(absorbed, donors_count, outcome);
 }
 
 void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {

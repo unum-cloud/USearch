@@ -40,11 +40,11 @@
  *
  *  @section dense_index_gpu_acceleration GPU Acceleration & Constraints
  *
- *  A VRAM handle builds and searches on the devices its placement names, one shard per device and
- *  never a replica, so capacity is what those devices host together: the geometry freezes at the
- *  first reservation, and rows grow only up to that. Planes stay device-resident and never
- *  migrate, so an index outgrowing its devices fails rather than paging to the host - the answer
- *  to a dataset past one accelerator is to name more of them.
+ *  A VRAM handle builds and searches on the devices its placement names, its shards spread over
+ *  them, several to a device when asked, and never replicated, so capacity is what those devices
+ *  host together: the geometry freezes at the first reservation, and rows grow only up to that.
+ *  Planes stay device-resident and never migrate, so an index outgrowing its devices fails rather
+ *  than paging to the host - the answer to a dataset past one accelerator is to name more of them.
  *
  *  Devices are named by USearch ordinal, a position in @c usearch_gpu_devices, so one binary drives
  *  NVIDIA, AMD and Apple GPUs alike. An index spans one vendor and one generation; Apple's unified
@@ -54,9 +54,9 @@
  *
  *  Inputs already on the executor's device in the right layout are read in place, pinned and
  *  managed host inputs upload directly, and only pageable host inputs pass through the executor's
- *  pinned bounce buffer. Outputs land in an arena on the executor's device, so until the devices
- *  hold an ID-to-key table and merge shards on the device, a VRAM search reports
- *  @c usearch_status_device_k, rather than routing device bytes through the host.
+ *  pinned bounce buffer. Outputs land in an arena on the executor's device, and a search's shards
+ *  merge their rankings on the first shard's device, so on NVIDIA and AMD no match routes through
+ *  the host, while Apple's host merge writes the unified memory both share.
  *
  *  @section dense_index_nvme_walks NVMe Walks & Mergers
  *
@@ -95,19 +95,20 @@
  *  Every verb this header declares is exported by the engine and by the stand-in alike, so a
  *  residency that lacks one answers @c usearch_status_unsupported_k rather than a missing symbol.
  *
- *  @c usearch_dense_insert, @c usearch_dense_count, @c usearch_dense_refine and the serialization
- *  family, except @c usearch_dense_save_buffer, answer on a RAM handle and on a VRAM one alike.
- *  @c usearch_dense_search answers on RAM and waits on device merges on VRAM. A search with a
- *  @c predicate is refused on VRAM with @c usearch_status_device_k even then, since a host predicate
- *  cannot narrow a device walk.
- *  @c usearch_dense_cursor_init answers on RAM, while VRAM rows are read back through a search.
- *  @c usearch_dense_get and @c usearch_dense_save_buffer answer on RAM but not on VRAM, waiting on
- *  device arenas, while @c usearch_dense_multiply and @c usearch_dense_maxsim stage on the arena's
- *  host pages and land their outputs where it lives.
- *  A search with @c usearch_traversal_scan_k answers on RAM and NVMe, waiting on device scans.
- *  @c usearch_dense_attend answers on both, resolving value rows through @c value_lookup, a host
- *  function on RAM and a device one on VRAM.
- *  @c usearch_dense_search_stream_init and @c usearch_dense_merge are unsupported on both.
+ *  @c usearch_dense_insert, @c usearch_dense_count, @c usearch_dense_refine,
+ *  @c usearch_dense_absorb and the serialization family answer on a RAM handle and on a VRAM one
+ *  alike, an absorb taking donors of the handle's own residency. @c usearch_dense_search answers on
+ *  both, a VRAM handle ranking its shards' matches on the arena's device, and so does
+ *  @c usearch_dense_attend, which resolves value rows through @c value_lookup, a host function on
+ *  RAM and a device one on VRAM. @c usearch_dense_get, @c usearch_dense_save_buffer,
+ *  @c usearch_dense_multiply and @c usearch_dense_maxsim stage on the arena's host pages and land
+ *  their outputs where it lives, through the stream of the call's own executor.
+ *
+ *  A VRAM handle refuses a search with a @c predicate with @c usearch_status_device_k, since a host
+ *  predicate cannot narrow a device walk, and one with @c usearch_traversal_scan_k with
+ *  @c usearch_status_unsupported_k until devices scan; RAM and NVMe answer both.
+ *  @c usearch_dense_cursor_init answers on RAM, while VRAM rows are read back by key or by search,
+ *  and @c usearch_dense_search_stream_init is unsupported on both.
  *
  *  An NVMe handle is a view that answers every read verb as a RAM handle does, the cursor and
  *  @c usearch_dense_health included, its rows read through the executor's engines. Every mutating
@@ -434,7 +435,8 @@ typedef struct usearch_dense_load_vram_buffer_t {
     /** Blocking, the default, or deferred. */
     usearch_completion_t completion;
 
-    /** Source holding one serialized monolith, in host or device memory. */
+    /** Source holding one serialized monolith, in host or device memory; a device one is copied
+     *  to the host first, so the call holds twice its bytes while it runs. */
     usearch_bytes_view_t buffer;
 
     /** The devices to place shards on; the monolith lands whole on the first. */
@@ -793,7 +795,7 @@ typedef struct usearch_dense_search_t {
 /**
  *  @brief Performs k-Nearest Neighbors Search for a run of queries, approximate by walking the
  *      graph or exact by scanning every row - the native batch operation, parallelized internally.
- *  @retval usearch_status_device_k A @c predicate on a VRAM handle, or a VRAM search before device merges.
+ *  @retval usearch_status_device_k A @c predicate on a VRAM handle.
  *  @retval usearch_status_unsupported_k A @c usearch_traversal_scan_k scan of a VRAM handle.
  *
  *  One query is a count of one. Never writes to the index, so any number may overlap with
@@ -816,7 +818,8 @@ typedef struct usearch_dense_search_t {
  *  so it must tolerate that.
  *
  *  A cancelled search reports @c usearch_status_cancelled_k and leaves @c matches @c NULL, since a
- *  query resolved before the stop is indistinguishable from one that never ran.
+ *  query resolved before the stop is indistinguishable from one that never ran. A zero @c wanted
+ *  succeeds without walking and lands only the counts, every one zero.
  *
  *  @code{.c}
  *  static usearch_admission_t admits_tenant(usearch_key_t key, void* state) {
@@ -832,7 +835,7 @@ typedef struct usearch_dense_search_t {
  *      .matches = &matches, .arena = arena, .wanted = 10,
  *      .predicate = admits_tenant, .predicate_state = &tenant});
  *  // Row 3's nearest key, valid until the next call given `arena`.
- *  usearch_key_t nearest = matches.keys[3 * matches.wanted];
+ *  usearch_key_t nearest = matches.keys[3 * matches.columns];
  *  @endcode
  */
 USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments);
@@ -907,13 +910,13 @@ typedef struct usearch_dense_get_t {
  */
 USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments);
 
-/** The arguments of @c usearch_dense_merge. */
-typedef struct usearch_dense_merge_t {
+/** The arguments of @c usearch_dense_absorb. */
+typedef struct usearch_dense_absorb_t {
 
     /** The handle absorbing the donors. */
     usearch_dense_index_t index;
 
-    /** The executor the merge fans out over, one donor per thread or stream. */
+    /** The executor each donor's landing and refinement fan out over, one donor after another. */
     usearch_executor_t executor;
 
     /** Output for the outcome, final once its status leaves @c usearch_status_deferred_k. */
@@ -933,17 +936,25 @@ typedef struct usearch_dense_merge_t {
 
     /** Opaque pointer forwarded into every @c progress call. */
     void* progress_state;
-} usearch_dense_merge_t;
+} usearch_dense_absorb_t;
 
 /**
- *  @brief Absorbs every handle in @c donors into @c index - cheaper than re-inserting their
- *      vectors one by one, linking across donors via landmark stitching. Donor handles are consumed
- *      and must not be used afterwards, not even for @c usearch_dense_free.
- *  @retval usearch_status_unsupported_k No residency absorbs donor handles yet.
+ *  @brief Absorbs every handle in @c donors into @c index, one after another, keeping their graphs
+ *      rather than re-inserting their vectors and linking each in by walks across. Donor handles
+ *      are consumed and must not be used afterwards, not even for @c usearch_dense_free.
+ *  @retval usearch_status_read_only_k @c index is an NVMe view.
+ *  @retval usearch_status_invalid_argument_k A @c NULL slot in @c donors, or @c NULL @c donors
+ *      for a nonzero @c count.
+ *  @retval usearch_status_config_mismatch_k A donor of another residency, scalar, class, metric or
+ *      geometry, a donor on a device the executor does not drive, or @c index itself.
+ *  @retval usearch_status_cancelled_k The handler stopped the call between donors.
  *
- *  Readers of @c index may keep searching throughout, since unpublished rows hide behind the
- *  watermark. Absorbing a group costs the wall clock of its largest source rather than the sum of
- *  them, because the executor advances the donors in parallel.
+ *  Each donor's rows append to @c index shard by shard with their edges rebased, then a refinement
+ *  of every shard that took them re-selects each of its rows across the appended part, so a group
+ *  costs one such refinement per donor. Readers of a RAM @c index may keep searching throughout,
+ *  since unpublished rows hide behind the watermark, while a VRAM one rewrites neighbors in place
+ *  and admits no overlapping search, as refinement does. A donor whose absorption fails stays a
+ *  live handle, though its rows may already have landed in @c index.
  *
  *  Cancellation stops @b between donors, which makes this the one verb where it is not
  *  all-or-nothing: donors already absorbed stay absorbed, and the rest stay live handles the
@@ -953,13 +964,13 @@ typedef struct usearch_dense_merge_t {
  *  @code{.c}
  *  usearch_dense_index_t shards[4] = {built_on_socket_0, built_on_socket_1, built_on_socket_2, built_on_socket_3};
  *  usearch_outcome_t outcome = {0};
- *  usearch_dense_merge(&(usearch_dense_merge_t){
+ *  usearch_dense_absorb(&(usearch_dense_absorb_t){
  *      .index = index, .executor = executor, .outcome = &outcome, .count = 4, .donors = shards,
  *      .progress = report_to_terminal, .progress_state = &ui});
  *  // Every entry of `shards` is consumed here; none of them may be freed afterwards.
  *  @endcode
  */
-USEARCH_EXPORT void usearch_dense_merge(usearch_dense_merge_t* arguments);
+USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments);
 
 /** The arguments of @c usearch_dense_cursor_init. */
 typedef struct usearch_dense_cursor_init_t {
@@ -1166,7 +1177,8 @@ typedef struct usearch_dense_save_buffer_t {
  *  The monolith holds every shard - rows in placement order, node IDs rebased - so it reads as one
  *  graph and loads into any shard count. It is the same shape the path-taking sibling writes into
  *  its own mapping, so the two produce identical bytes. A caller who needs the bytes in memory it
- *  already owns, such as a mapped file, saves to a path instead.
+ *  already owns, such as a mapped file, saves to a path instead. A VRAM handle's monolith lands in
+ *  device memory, written on the host first, so the call holds twice its bytes while it runs.
  *
  *  Writing to memory is not writing quickly. A terabyte monolith on a handful of cores runs for
  *  minutes, so this reports and cancels like its path-taking sibling, and a cancelled call leaves

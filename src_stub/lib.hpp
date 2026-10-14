@@ -204,7 +204,7 @@ using call_arguments_t = std::variant<
     usearch_dense_load_ram_t, usearch_dense_load_vram_t, usearch_dense_load_ram_buffer_t,
     usearch_dense_load_vram_buffer_t, usearch_dense_view_nvme_t, usearch_dense_reserve_t, usearch_dense_clear_t,
     usearch_dense_insert_t, usearch_dense_refine_t, usearch_dense_health_t, usearch_dense_search_t,
-    usearch_dense_count_t, usearch_dense_get_t, usearch_dense_merge_t, usearch_dense_cursor_next_t,
+    usearch_dense_count_t, usearch_dense_get_t, usearch_dense_absorb_t, usearch_dense_cursor_next_t,
     usearch_dense_search_stream_next_t, usearch_dense_save_t, usearch_dense_save_buffer_t,
     usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t, usearch_dense_describe_t,
     usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t, usearch_sequence_load_ram_t,

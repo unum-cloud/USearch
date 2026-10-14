@@ -29,11 +29,12 @@
 #include <span>               // `std::span` - key batches crossing the ABI
 #include <string_view>        // `std::string_view` - checkpoint paths
 #include <type_traits>        // `std::is_same_v` - the variant-membership audit
+#include <utility>            // `std::exchange` - nulling each donor slot an absorb consumes
 #include <variant>            // `std::variant`, `std::visit`
 
 #include <forkunion.h>            // `fu_topology_new` - the executor factories' discovery
 #include <forkunion/types.hpp>    // `fu::spin_mutex` - the ticks' lock
-#include <numkong/capabilities.h> // `nk_cpu_capabilities_enabled`
+#include <numkong/capabilities.h> // `nk_cpu_capabilities_enabled`, `nk_cpu_configure_thread`
 #include <numkong/cast.h>         // `nk_cast_best` - converting foreign scalar rows at the boundary
 
 #include "dense_specializations.cuh"
@@ -2527,7 +2528,7 @@ using deferred_arguments_t =
     std::variant<usearch_dense_load_ram_t, usearch_dense_load_vram_t, usearch_dense_load_ram_buffer_t,
                  usearch_dense_load_vram_buffer_t, usearch_dense_view_nvme_t, usearch_dense_reserve_t,
                  usearch_dense_clear_t, usearch_dense_insert_t, usearch_dense_refine_t, usearch_dense_health_t,
-                 usearch_dense_search_t, usearch_dense_count_t, usearch_dense_get_t, usearch_dense_merge_t,
+                 usearch_dense_search_t, usearch_dense_count_t, usearch_dense_get_t, usearch_dense_absorb_t,
                  usearch_dense_cursor_next_t, usearch_dense_search_stream_next_t, usearch_dense_save_t,
                  usearch_dense_save_buffer_t, usearch_dense_metadata_read_t, usearch_dense_metadata_read_buffer_t,
                  usearch_dense_describe_t, usearch_dense_multiply_t, usearch_dense_attend_t, usearch_dense_maxsim_t>;
@@ -2579,6 +2580,13 @@ struct usearch_executor_handle_t {
     std::variant<forkunion_executor_t, nvme_executor_t, gpu_executor_t> executor;
 };
 
+/** Requests AMX tile state alone, granted process-wide on Linux; more bits would rewrite FPCR. */
+static void request_tile_state() noexcept {
+    nk_capability_t available = 0;
+    if (nk_cpu_capabilities_enabled(&available) != nk_success_k || !(available & nk_cap_sapphireamx_k)) return;
+    [[maybe_unused]] nk_status_t const requested = nk_cpu_configure_thread(nk_cap_sapphireamx_k);
+}
+
 /** Discovers the topology and spawns @p threads over it into @p handle, answering @p handle, or null
  *  once the outcome records why not; one thread is the caller. */
 static usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, std::size_t threads,
@@ -2589,6 +2597,7 @@ static usearch_executor_t spawn_ram_executor(usearch_executor_handle_t& handle, 
     handle.topology.reset(topology);
     auto [spawned, status] = forkunion_executor_t::spawn(topology, threads);
     if (failed(status)) return propagate_error(status, outcome), nullptr;
+    request_tile_state();
     handle.executor = std::move(spawned);
     return &handle;
 }
@@ -2604,6 +2613,7 @@ static usearch_executor_t spawn_nvme_executor(usearch_executor_handle_t& handle,
     auto [spawned, status] = nvme_executor_t::spawn(topology, threads, config);
     if (failed(status))
         return propagate_error(status, outcome, "No I/O engine opened on the executor's threads"), nullptr;
+    request_tile_state();
     handle.executor = std::move(spawned);
     return &handle;
 }
@@ -2627,12 +2637,13 @@ static usearch_executor_t call_executor_for(multi_type_&, usearch_executor_handl
     return spawn_nvme_executor(call_executor, 1, config, outcome);
 }
 
-/** The executor a null handle runs VRAM work on: the default streams or queues of its devices. */
+/** The executor a null handle runs VRAM work on: streams or queues of its own on its devices, never
+ *  a legacy default stream, which would wait on every blocking stream of the process. */
 template <typename multi_type_>
     requires is_vram_index<multi_type_>
 static usearch_executor_t call_executor_for(multi_type_& variant, usearch_executor_handle_t& call_executor,
                                             usearch_outcome_t* outcome) noexcept {
-    // One default stream or queue per distinct device, which every shard there shares.
+    // One stream or queue per distinct device, which every shard there shares.
     specialized_index const shards {variant};
     growing_buffer<int> devices {global_allocator};
     if (failed(devices.reserve_exactly(shards.shards_count())))
@@ -2642,7 +2653,7 @@ static usearch_executor_t call_executor_for(multi_type_& variant, usearch_execut
         for (int const earlier : devices) opened |= earlier == shards.device(shard);
         if (!opened) devices.push_back_reserved(shards.device(shard));
     }
-    auto [built, status] = multi_type_::executor_t::on_default_streams(devices);
+    auto [built, status] = multi_type_::executor_t::spawn(devices);
     if (failed(status)) return propagate_error(status, outcome), nullptr;
     call_executor.executor = gpu_executor_t {std::move(built)};
     return &call_executor;
@@ -2700,8 +2711,12 @@ inline constexpr int host_device_k = -1;
 struct usearch_arena_handle_t {
     growing_arena<forkunion_allocator_t> memory {forkunion_allocator_t {no_memory_domain_k}};
 
-    /** Device memory on the first device of the executor the arena was made for, or none. */
+    /** Device memory on the first stream of the executor the arena was made for, or none. */
     gpu_arena_t device_memory;
+
+    /** The executor whose first stream the device memory rides, the only one whose calls it serves;
+     *  null for host pages, which serve any. */
+    usearch_executor_t executor = nullptr;
 
     /** The GPU ordinal the memory lives on, or @c host_device_k. */
     int device = host_device_k;
@@ -2738,14 +2753,20 @@ static int device_of(variant_type_& variant) noexcept {
 
 /** Holds @p arena for the call whose outcome is @p call and rewinds it, freeing the previous call's
  *  outputs, so an input of @p inputs still inside it is refused, as is an arena on another device
- *  than @p device. The call's @c call_outcome_t lets go of it before the final store. */
-static usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcome_t const* call, int device,
+ *  than @p device or device memory another @p executor made. The call's @c call_outcome_t lets go
+ *  of it before the final store. */
+static usearch_arena_handle_t* claim_arena(usearch_arena_t arena, usearch_outcome_t const* call,
+                                           usearch_executor_t executor, int device,
                                            std::initializer_list<void const*> inputs,
                                            usearch_outcome_t* outcome) noexcept {
     if (!arena)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The arena must not be null"), nullptr;
     if (arena->device != device)
         return propagate_error(usearch_status_device_k, outcome, "The arena lives where the call does not compute"),
+               nullptr;
+    if (arena->device_memory && arena->executor != executor)
+        return propagate_error(usearch_status_device_k, outcome,
+                               "A device arena serves calls on the executor that made it"),
                nullptr;
     if (!hold_arena(arena, call))
         return propagate_error(usearch_status_contended_k, outcome, "The arena serves another call"), nullptr;
@@ -2767,12 +2788,20 @@ static value_type_* carve(growing_arena<forkunion_allocator_t>& staging, std::si
     return reinterpret_cast<value_type_*>(staging.allocate(count * sizeof(value_type_), default_alignment_k));
 }
 
+/** Carves @p count values of @p value_type_ out of a claimed arena's @p device_memory, for outputs
+ *  the device writes in place. */
+template <typename value_type_>
+static value_type_* carve(gpu_arena_t& device_memory, std::size_t count) noexcept {
+    return device_memory.template allocate<value_type_>(count);
+}
+
 /** Hands out the @p count values @ref carve put at @p output in @p arena: in place on host pages,
- *  or re-pointed at one upload to its device. */
+ *  or re-pointed at one upload to its device queued on its executor's first stream, which the call
+ *  awaits once through @c gpu_arena_t::drain, the host pages it reads living until then. */
 template <typename value_type_>
 static status_t publish(usearch_arena_handle_t& arena, value_type_*& output, std::size_t count) noexcept {
     if (!arena.device_memory || !output || !count) return status_t::success_k;
-    value_type_* const landed = arena.device_memory.template allocate<value_type_>(count);
+    value_type_* const landed = carve<value_type_>(arena.device_memory, count);
     if (!landed) return status_t::bad_alloc_k;
     if (status_t const uploaded = arena.device_memory.upload(landed, output, count * sizeof(value_type_));
         failed(uploaded))
@@ -3047,28 +3076,30 @@ struct matches_landing_t {
     usearch_matches_view_t view() const noexcept { return {keys, scores, counts, wanted}; }
 };
 
-/** Carves @p count rows of @p wanted matches out of a claimed arena's host pages, @p staging; a
- *  zero @p wanted carves only the counts. False once @p outcome records why not. */
-static bool carve_matches(growing_arena<forkunion_allocator_t>& staging, std::size_t count, std::size_t wanted,
-                          matches_landing_t& landing, usearch_outcome_t* outcome) noexcept {
+/** Carves @p count rows of @p wanted matches out of a claimed arena's host pages or device memory,
+ *  @p memory; a zero @p wanted carves only the counts. False once @p outcome records why not. */
+template <typename memory_type_>
+static bool carve_matches(memory_type_& memory, std::size_t count, std::size_t wanted, matches_landing_t& landing,
+                          usearch_outcome_t* outcome) noexcept {
     landing.wanted = wanted;
-    landing.counts = carve<std::size_t>(staging, count);
+    landing.counts = carve<std::size_t>(memory, count);
     if (wanted) {
-        landing.keys = carve<usearch_key_t>(staging, count * wanted);
-        landing.scores = carve<usearch_distance_t>(staging, count * wanted);
+        landing.keys = carve<usearch_key_t>(memory, count * wanted);
+        landing.scores = carve<usearch_distance_t>(memory, count * wanted);
     }
     if (landing.counts && (!wanted || (landing.keys && landing.scores))) return true;
     return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena");
 }
 
 /** Hands out the @p count rows @ref carve_matches put in @p landing where @p arena hands outputs
- *  out. False once @p outcome records why not. */
+ *  out, awaiting the uploads once. False once @p outcome records why not. */
 static bool publish_matches(usearch_arena_handle_t& arena, std::size_t count, matches_landing_t& landing,
                             usearch_outcome_t* outcome) noexcept {
     std::size_t const entries = count * landing.wanted;
     status_t status = publish(arena, landing.counts, count);
     if (succeeded(status)) status = publish(arena, landing.keys, entries);
     if (succeeded(status)) status = publish(arena, landing.scores, entries);
+    if (status_t const drained = arena.device_memory.drain(); succeeded(status)) status = drained;
     return succeeded(status) || propagate_error(status, outcome, "Failed to land the matches on the device");
 }
 
@@ -3483,32 +3514,51 @@ USEARCH_EXPORT void usearch_dense_search(usearch_dense_search_t* arguments) {
     key_predicate_t keyed {arguments->predicate, arguments->predicate_state};
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if constexpr (is_vram_index<variant_type_>) {
-                if (arguments->traversal != usearch_traversal_walk_k)
-                    propagate_error(usearch_status_unsupported_k, outcome, "Scans run on RAM and NVMe handles");
-                else
-                    propagate_error(usearch_status_device_k, outcome,
-                                    keyed.callback ? "A host predicate cannot narrow a device walk"
-                                                   : "A VRAM search waits on device merges into a device arena");
-            }
+            if (is_vram_index<variant_type_> && arguments->traversal != usearch_traversal_walk_k)
+                propagate_error(usearch_status_unsupported_k, outcome, "Scans run on RAM and NVMe handles");
+            else if (is_vram_index<variant_type_> && keyed.callback)
+                propagate_error(usearch_status_device_k, outcome, "A host predicate cannot narrow a device walk");
             else {
-                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k,
+                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
+                                                                  arguments->executor, device_of(variant),
                                                                   {arguments->queries.data}, outcome);
                 if (!arena) return;
                 if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+                if (!wanted) {
+                    // No walk serves zero matches; the counts are zeros staged on the host.
+                    std::size_t* counts = carve<std::size_t>(arena->memory, count);
+                    if (!counts)
+                        return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"),
+                               void();
+                    for (std::size_t row = 0; row != count; ++row) counts[row] = 0;
+                    status_t landed = publish(*arena, counts, count);
+                    if (status_t const drained = arena->device_memory.drain(); succeeded(landed)) landed = drained;
+                    if (failed(landed)) return propagate_error(landed, outcome), void();
+                    *arguments->matches = {nullptr, nullptr, counts, 0};
+                    return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+                }
+                // A VRAM arena's matches are carved on its device, where the shards' rankings merge
+                // in place.
                 matches_landing_t landing;
-                if (!carve_matches(arena->memory, count, wanted, landing, outcome)) return;
+                if (!(arena->device_memory ? carve_matches(arena->device_memory, count, wanted, landing, outcome)
+                                           : carve_matches(arena->memory, count, wanted, landing, outcome)))
+                    return;
                 auto search_with = [&](auto&& predicate) noexcept {
                     return match_dense_rows(
                         variant, arguments->executor, count, arguments->queries, 1, landing,
                         arguments->expansion_factor, arguments->progress, arguments->progress_state, arguments->stats,
                         outcome,
                         [&](auto view, auto rows, auto& executor, auto config, auto keys, auto distances, auto counts) {
-                            config.traversal = static_cast<traversal_t>(arguments->traversal);
+                            if constexpr (!is_vram_index<variant_type_>)
+                                config.traversal = static_cast<traversal_t>(arguments->traversal);
                             return view.search(rows, executor, config, keys, distances, counts, predicate);
                         });
                 };
-                if (!(keyed.callback ? search_with(keyed) : search_with(dummy_predicate_t {}))) return;
+                bool const walked = [&] {
+                    if constexpr (is_vram_index<variant_type_>) return search_with(dummy_predicate_t {});
+                    else return keyed.callback ? search_with(keyed) : search_with(dummy_predicate_t {});
+                }();
+                if (!walked) return;
                 *arguments->matches = landing.view();
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
@@ -3525,40 +3575,53 @@ USEARCH_EXPORT void usearch_dense_get(usearch_dense_get_t* arguments) {
     if (arguments->written) *arguments->written = 0;
     std::visit(
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
-            if constexpr (is_vram_index<variant_type_>)
-                propagate_error(usearch_status_unsupported_k, outcome,
-                                "VRAM rows wait on device arenas, so a search reads them back");
-            else {
-                specialized_index view {variant};
-                std::size_t const dimensions = view.dimensions();
-                nk_dtype_t const target_dtype = rows_dtype_of(scalar, dimensions, outcome);
-                if (target_dtype == nk_dtype_unknown_k) return;
-                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k,
-                                                                  {}, outcome);
-                if (!arena) return;
-                usearch_executor_handle_t call_executor;
-                typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
-                                                                                 call_executor, outcome);
-                if (!executor) return;
-                // The single key rides the batched lookups, which size the landing first and fill
-                // it second.
-                std::size_t entries = 0;
-                if (status_t const counted = view.count({&key, 1}, {&entries, 1}, *executor); failed(counted))
-                    return propagate_error(counted, outcome), void();
-                if (!entries) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
-                std::size_t const row_bytes = us::dense::packed_bytes(target_dtype, dimensions);
-                std::byte* const rows = carve<std::byte>(arena->memory, entries * row_bytes);
-                if (!rows)
+            specialized_index view {variant};
+            std::size_t const dimensions = view.dimensions();
+            nk_dtype_t const target_dtype = rows_dtype_of(scalar, dimensions, outcome);
+            if (target_dtype == nk_dtype_unknown_k) return;
+            usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
+                                                              device_of(variant), {}, outcome);
+            if (!arena) return;
+            usearch_executor_handle_t call_executor;
+            typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
+                                                                             call_executor, outcome);
+            if (!executor) return;
+            // The single key rides the batched lookups, which size the landing first and fill it
+            // second.
+            std::size_t entries = 0;
+            if (status_t const counted = view.count({&key, 1}, {&entries, 1}, *executor); failed(counted))
+                return propagate_error(counted, outcome), void();
+            if (!entries) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
+            std::size_t const row_bytes = us::dense::packed_bytes(target_dtype, dimensions);
+            std::byte* rows = carve<std::byte>(arena->memory, entries * row_bytes);
+            if (!rows)
+                return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
+            std::size_t total = 0;
+            us::dense::rows_span_t const target {rows, entries, dimensions, row_bytes, target_dtype};
+            if constexpr (is_vram_index<variant_type_>) {
+                // A device exports its stored scalar alone, so rows cast on the host before they
+                // land.
+                nk_dtype_t const stored_dtype = variant_type_::vector_dtype_k;
+                std::size_t const stored_bytes = us::dense::packed_bytes(stored_dtype, dimensions);
+                std::byte* const stored = carve<std::byte>(arena->memory, entries * stored_bytes);
+                if (!stored)
                     return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
-                std::size_t total = 0;
-                if (status_t const got = view.get({&key, 1}, {rows, entries, dimensions, row_bytes, target_dtype},
+                if (status_t const got = view.get({&key, 1}, {stored, entries, dimensions, stored_bytes, stored_dtype},
                                                   entries, {&total, 1}, *executor);
                     failed(got))
                     return propagate_error(got, outcome, "Failed to export the rows"), void();
-                *arguments->vectors = {rows, row_bytes, dimensions, scalar};
-                if (arguments->written) *arguments->written = min_of(total, entries);
-                propagate_error(usearch_status_success_k, outcome, nullptr);
+                for (std::size_t row = 0; row != min_of(total, entries); ++row)
+                    us::dense::export_row<nk_cap_any_k>(stored + row * stored_bytes, stored_dtype, target, row);
+                status_t landed = publish(*arena, rows, entries * row_bytes);
+                if (status_t const drained = arena->device_memory.drain(); succeeded(landed)) landed = drained;
+                if (failed(landed))
+                    return propagate_error(landed, outcome, "Failed to land the rows on the device"), void();
             }
+            else if (status_t const got = view.get({&key, 1}, target, entries, {&total, 1}, *executor); failed(got))
+                return propagate_error(got, outcome, "Failed to export the rows"), void();
+            *arguments->vectors = {rows, row_bytes, dimensions, scalar};
+            if (arguments->written) *arguments->written = min_of(total, entries);
+            propagate_error(usearch_status_success_k, outcome, nullptr);
         },
         arguments->index->variants);
 }
@@ -3582,7 +3645,7 @@ USEARCH_EXPORT void usearch_dense_search_stream_free(usearch_dense_search_stream
 
 #pragma endregion Insertion and Search
 
-#pragma region Cursors and Merging
+#pragma region Cursors and Absorbing
 
 USEARCH_EXPORT void usearch_dense_cursor_init(usearch_dense_cursor_init_t* arguments) {
     call_outcome_t outcome(arguments->outcome);
@@ -3621,7 +3684,8 @@ USEARCH_EXPORT void usearch_dense_cursor_next(usearch_dense_cursor_next_t* argum
     if (arguments->index != arguments->cursor->opened_on)
         return propagate_error(usearch_status_invalid_argument_k, outcome, "The cursor was opened on another index"),
                void();
-    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k, {}, outcome);
+    usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, arguments->executor,
+                                                      host_device_k, {}, outcome);
     if (!arena) return;
     std::atomic_flag& busy = arguments->cursor->busy;
     if (busy.test_and_set(std::memory_order_acquire))
@@ -3683,13 +3747,44 @@ USEARCH_EXPORT void usearch_dense_cursor_free(usearch_dense_cursor_t cursor) {
     delete cursor;
 }
 
-USEARCH_EXPORT void usearch_dense_merge(usearch_dense_merge_t* arguments) {
-    if (submitted<usearch_dense_merge>(arguments)) return;
+USEARCH_EXPORT void usearch_dense_absorb(usearch_dense_absorb_t* arguments) {
+    if (submitted<usearch_dense_absorb>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    propagate_error(usearch_status_unsupported_k, outcome, "No residency absorbs donor handles yet");
+    if (arguments->count && !arguments->donors)
+        return propagate_error(usearch_status_invalid_argument_k, outcome, "The donors must name handles"), void();
+    visit_writable(*arguments->index, outcome, [&]<typename variant_type_>(variant_type_& variant) noexcept {
+        usearch_executor_handle_t call_executor;
+        typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor, call_executor,
+                                                                         outcome);
+        if (!executor) return;
+        for (std::size_t position = 0; position != arguments->count; ++position) {
+            usearch_dense_index_t& donor = arguments->donors[position];
+            if (!donor)
+                return propagate_error(usearch_status_invalid_argument_k, outcome, "A donor must not be null"), void();
+            // Ahead of the wait below, which a deferred absorb would spend on its own call.
+            if (donor == arguments->index)
+                return propagate_error(usearch_status_config_mismatch_k, outcome, "An index cannot absorb itself"),
+                       void();
+            // Every scalar, class and residency is an arm of its own, so a donor of another shape
+            // is another arm.
+            variant_type_* const typed = std::get_if<variant_type_>(&donor->variants);
+            if (!typed)
+                return propagate_error(usearch_status_config_mismatch_k, outcome,
+                                       "A donor must share the index's residency, scalar and class"),
+                       void();
+            finish_calls_using(donor);
+            status_t const absorbed = specialized_index {variant}.absorb(*typed, *executor).status;
+            if (failed(absorbed)) return propagate_error(absorbed, outcome), void();
+            delete std::exchange(donor, nullptr);
+            if (arguments->progress &&
+                arguments->progress(position + 1, arguments->count, arguments->progress_state) == usearch_cancel_k)
+                return propagate_error(usearch_status_cancelled_k, outcome, "The handler stopped the call"), void();
+        }
+        propagate_error(usearch_status_success_k, outcome, nullptr);
+    });
 }
 
-#pragma endregion Cursors and Merging
+#pragma endregion Cursors and Absorbing
 
 #pragma region Linear Algebra
 
@@ -3709,7 +3804,8 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                                 "A product is a dot, so the kind must be inner product");
             else {
                 usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
-                                                                  device_of(variant), {arguments->left.data}, outcome);
+                                                                  arguments->executor, device_of(variant),
+                                                                  {arguments->left.data}, outcome);
                 if (!arena) return;
                 if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
                 using key_t = typename variant_type_::key_t;
@@ -3764,11 +3860,14 @@ USEARCH_EXPORT void usearch_dense_multiply(usearch_dense_multiply_t* arguments) 
                 }
                 std::size_t const written = offsets[count];
                 if (!written) keys = nullptr, scores = nullptr;
-                status_t landed = publish(*arena, keys, written);
-                if (succeeded(landed)) landed = publish(*arena, scores, written);
-                if (succeeded(landed)) landed = publish(*arena, offsets, count + 1);
-                if (failed(landed))
-                    return propagate_error(landed, outcome, "Failed to land the products on the device"), void();
+                if constexpr (is_vram_index<variant_type_>) {
+                    status_t landed = publish(*arena, keys, written);
+                    if (succeeded(landed)) landed = publish(*arena, scores, written);
+                    if (succeeded(landed)) landed = publish(*arena, offsets, count + 1);
+                    if (status_t const drained = arena->device_memory.drain(); succeeded(landed)) landed = drained;
+                    if (failed(landed))
+                        return propagate_error(landed, outcome, "Failed to land the products on the device"), void();
+                }
                 *arguments->products = {keys, scores, offsets};
                 if (arguments->written) *arguments->written = written;
                 if (arguments->required) *arguments->required = required;
@@ -3812,8 +3911,8 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                 propagate_error(usearch_status_unsupported_k, outcome, "Device attention runs on NVIDIA alone");
             else {
                 usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
-                                                                  device_of(variant), {arguments->queries.data, carry},
-                                                                  outcome);
+                                                                  arguments->executor, device_of(variant),
+                                                                  {arguments->queries.data, carry}, outcome);
                 if (!arena) return;
                 if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
                 std::byte* landing = carve<std::byte>(arena->memory, count * row_bytes);
@@ -3841,8 +3940,12 @@ USEARCH_EXPORT void usearch_dense_attend(usearch_dense_attend_t* arguments) {
                                           arguments->expansion_factor, arguments->progress, arguments->progress_state,
                                           arguments->stats, outcome, sink))
                     return;
-                if (status_t const landed = publish(*arena, landing, count * row_bytes); failed(landed))
-                    return propagate_error(landed, outcome, "Failed to land the outputs on the device"), void();
+                if constexpr (is_vram_index<variant_type_>) {
+                    status_t landed = publish(*arena, landing, count * row_bytes);
+                    if (status_t const drained = arena->device_memory.drain(); succeeded(landed)) landed = drained;
+                    if (failed(landed))
+                        return propagate_error(landed, outcome, "Failed to land the outputs on the device"), void();
+                }
                 *arguments->outputs = {landing, row_bytes, columns, outputs_scalar};
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
@@ -3866,8 +3969,9 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                 propagate_error(usearch_status_config_mismatch_k, outcome,
                                 "Late interaction sums maxima over logits, so the kind must be inner product");
             else {
-                usearch_arena_handle_t* const arena = claim_arena(
-                    arguments->arena, arguments->outcome, device_of(variant), {arguments->queries.data}, outcome);
+                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
+                                                                  arguments->executor, device_of(variant),
+                                                                  {arguments->queries.data}, outcome);
                 if (!arena) return;
                 if (!count) return propagate_error(usearch_status_success_k, outcome, nullptr), void();
                 matches_landing_t landing;
@@ -3878,9 +3982,10 @@ USEARCH_EXPORT void usearch_dense_maxsim(usearch_dense_maxsim_t* arguments) {
                         outcome,
                         [&](auto view, auto rows, auto& executor, auto config, auto keys, auto scores, auto counts) {
                             return view.maxsim(rows, rows_per_query, executor, config, keys, scores, counts);
-                        }) ||
-                    !publish_matches(*arena, count, landing, outcome))
+                        }))
                     return;
+                if constexpr (is_vram_index<variant_type_>)
+                    if (!publish_matches(*arena, count, landing, outcome)) return;
                 *arguments->matches = landing.view();
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
@@ -3916,8 +4021,27 @@ USEARCH_EXPORT void usearch_dense_load_ram_buffer(usearch_dense_load_ram_buffer_
 USEARCH_EXPORT void usearch_dense_load_vram_buffer(usearch_dense_load_vram_buffer_t* arguments) {
     if (submitted<usearch_dense_load_vram_buffer>(arguments)) return;
     call_outcome_t outcome(arguments->outcome);
-    load_dense_index(as_bytes(arguments->buffer), arguments->vram, arguments->executor, arguments->progress,
-                     arguments->progress_state, arguments->index, outcome);
+    // The header parses on the host, so a monolith on an NVIDIA or AMD device, where a VRAM
+    // `usearch_dense_save_buffer` lands it, is read back first; Apple's unified memory is read in
+    // place.
+    bytes_view_t source = as_bytes(arguments->buffer);
+    growing_buffer<byte_t> staged {global_allocator};
+    int const nvidia = cuda_device_of(source.data()), amd = nvidia < 0 ? hip_device_of(source.data()) : -1;
+    if (nvidia >= 0 || amd >= 0) {
+        if (failed(staged.resize_uninitialized(source.size())))
+            return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to stage the buffer"), void();
+        bool const copied = nvidia >= 0 ? cuda_set_device(nvidia) == cuda_success_k &&
+                                              cuda_copy(staged.data(), source.data(), source.size()) == cuda_success_k
+                                        : hip_set_device(amd) == hip_success_k &&
+                                              hip_api().copy(staged.data(), source.data(), source.size(),
+                                                             hip_copy_device_to_host_k) == hip_success_k;
+        if (!copied)
+            return propagate_error(status_t::device_error_k, outcome, "Failed to read the buffer off its device"),
+                   void();
+        source = to_span(staged);
+    }
+    load_dense_index(source, arguments->vram, arguments->executor, arguments->progress, arguments->progress_state,
+                     arguments->index, outcome);
 }
 
 USEARCH_EXPORT void usearch_dense_save(usearch_dense_save_t* arguments) {
@@ -3950,11 +4074,9 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
         [&]<typename variant_type_>(variant_type_& variant) noexcept {
             if constexpr (is_nvme_index<variant_type_>)
                 propagate_error(usearch_status_unsupported_k, outcome, "An NVMe view already is its checkpoint");
-            else if constexpr (is_vram_index<variant_type_>)
-                propagate_error(usearch_status_unsupported_k, outcome, "VRAM monoliths wait on device arenas");
             else {
-                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, host_device_k,
-                                                                  {}, outcome);
+                usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome,
+                                                                  arguments->executor, device_of(variant), {}, outcome);
                 if (!arena) return;
                 usearch_executor_handle_t call_executor;
                 typename variant_type_::executor_t* const executor = executor_of(variant, arguments->executor,
@@ -3962,7 +4084,7 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
                 if (!executor) return;
                 auto const [length, status] = specialized_index {variant}.storage_requirements();
                 if (failed(status)) return propagate_error(status, outcome), void();
-                std::byte* const monolith = carve<std::byte>(arena->memory, length);
+                std::byte* monolith = carve<std::byte>(arena->memory, length);
                 if (!monolith)
                     return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to grow the arena"), void();
                 shard_ticks_t ticks {arguments->progress, arguments->progress_state,
@@ -3970,6 +4092,14 @@ USEARCH_EXPORT void usearch_dense_save_buffer(usearch_dense_save_buffer_t* argum
                 status_t const saved = specialized_index {variant}.save(
                     bytes_span_t {reinterpret_cast<byte_t*>(monolith), length}, *executor, ticks);
                 if (failed(saved)) return propagate_error(saved, outcome), void();
+                // A VRAM monolith is written on the host, then lands on the arena's device
+                // in one upload.
+                if constexpr (is_vram_index<variant_type_>) {
+                    status_t landed = publish(*arena, monolith, length);
+                    if (status_t const drained = arena->device_memory.drain(); succeeded(landed)) landed = drained;
+                    if (failed(landed))
+                        return propagate_error(landed, outcome, "Failed to land the monolith on the device"), void();
+                }
                 *arguments->monolith = {reinterpret_cast<uint8_t const*>(monolith), length};
                 propagate_error(usearch_status_success_k, outcome, nullptr);
             }
@@ -4017,12 +4147,13 @@ USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments) {
     *arguments->arena = nullptr;
     usearch_arena_t const arena = new (std::nothrow) usearch_arena_handle_t {};
     if (!arena) return propagate_error(usearch_status_out_of_memory_k, outcome, "Failed to allocate the arena"), void();
-    // A VRAM executor lands its outputs on its vendor's first device; every other executor computes
+    // A VRAM executor lands its outputs on its vendor's first stream; every other executor computes
     // on the host.
     if (arguments->executor)
-        if (gpu_executor_t const* const devices = std::get_if<gpu_executor_t>(&arguments->executor->executor)) {
+        if (gpu_executor_t* const devices = std::get_if<gpu_executor_t>(&arguments->executor->executor)) {
             arena->device_memory = gpu_arena_t::on(*devices);
             arena->device = arena->device_memory.device();
+            arena->executor = arguments->executor;
         }
     *arguments->arena = arena;
     propagate_error(usearch_status_success_k, outcome, nullptr);

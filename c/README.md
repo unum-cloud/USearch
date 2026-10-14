@@ -141,16 +141,17 @@ An application with its own ForkUnion pool lends it with `usearch_executor_on_po
 An executor's kind must match the residency of every handle it drives, and a mismatch reports `usearch_status_device_k`.
 
 A `NULL` executor is accepted by every verb and runs the call on the caller's own thread, final when it returns whatever its `completion`, which suits size lookups and other short calls.
+The exception is a VRAM verb that takes an arena: that arena must be a GPU arena on the index's first device, and it serves only calls on the executor that made it.
 A blocking call on an executor runs after every earlier call finishes and before any later one starts, so callers wanting real parallelism give each thread its own executor.
 `usearch_executor_drain` waits for everything submitted before it, then sets the executor's idle mood: `usearch_mood_parked_k` lets idle threads sleep, `usearch_mood_spinning_k` keeps them hot.
 A blocking verb or a drain called from inside a progress handler or predicate of a call on the same executor reports `usearch_status_contended_k` rather than waiting on itself.
-`usearch_executor_free` drains every call before it releases the threads, and arenas the executor made stay valid until freed.
+`usearch_executor_free` drains every call before it releases the threads; host arenas the executor made stay valid until freed, and GPU arenas it made must be freed before it.
 
 ## Arenas
 
 Every output whose length scales with the call lands in an arena: the matches of a search, every vector stored under one key, every pair a sparse product scored, a monolith, a cursor's batch.
 An arena is memory the library allocates and the caller passes to call after call, each of which rewinds it and writes views into it, growing only when the new outputs outsize everything it held.
-An executor makes it where it computes, and a `NULL` executor makes host pages for calls on the calling thread; it may outlive the executor that made it.
+An executor makes it where it computes, and a `NULL` executor makes host pages for calls on the calling thread; an arena of host pages may outlive the executor that made it.
 Nothing is allocated until a call writes into it, and it keeps its high-water mark, so a steady loop allocates once.
 Only fixed-size reports, such as stats, descriptions and `written` counts, stay fields the caller points at.
 Arenas keep the interface at one verb per operation, never a twin per output style.
@@ -180,6 +181,8 @@ Any verb may reuse any arena of its residency, so a search and a get can share o
 To keep one call's outputs alive past the next, pass the next call another arena.
 An arena serves one call at a time: a blocking call borrows it, a deferred call holds it until final, and a second call naming it meanwhile finishes `usearch_status_contended_k`.
 A `NULL` arena, or inputs pointing into the arena a call is about to rewind, refuse with `usearch_status_invalid_argument_k`, and a call that fails leaves its outputs `NULL`.
+A GPU arena grows, fills and frees on the first stream of the executor that made it, so it serves only calls on that executor, and any other executor, `NULL` included, is refused with `usearch_status_device_k`.
+Free a GPU arena before the executor that made it.
 
 ## Keys
 
@@ -208,7 +211,7 @@ The statuses worth branching on:
 - `usearch_status_read_only_k`: a mutating verb on a viewed handle.
 - `usearch_status_contended_k`: refused rather than waited for, like a full deferred table or an arena serving another call.
 - `usearch_status_cancelled_k`: a progress handler stopped the call, which published nothing.
-- `usearch_status_device_k`: an executor, arena or handle on another residency or device than the call needs.
+- `usearch_status_device_k`: an executor, arena or handle on another residency or device than the call needs, or a GPU arena named with another executor than the one that made it.
 - `usearch_status_invalid_argument_k`: a required pointer left `NULL`, inputs inside the arena the call rewinds, a name no table spells.
 
 The set describes the project's failures, not only this library's exits, so a binding validating before the call reports what the library would have.
@@ -233,8 +236,8 @@ Callers lend memory, never a way to allocate it: no allocator callback crosses t
 
 Every dense verb is exported for every residency, and the engine answers what a residency lacks with `usearch_status_unsupported_k`:
 
-- RAM answers every verb but `usearch_dense_view_ram`, `usearch_dense_search_stream_init` and `usearch_dense_merge`.
-- VRAM answers insertion, refinement, counting, `multiply`, `maxsim`, attention and the serialization family, while `get`, `save_buffer`, cursors and exact scans answer `usearch_status_unsupported_k`, and a search reports `usearch_status_device_k`, as [GPUs](#gpus) explains.
+- RAM answers every verb but `usearch_dense_view_ram` and `usearch_dense_search_stream_init`.
+- VRAM answers insertion, refinement, absorbing, counting, `get`, search, `multiply`, `maxsim`, attention and the serialization family, `save_buffer` included, while cursors and exact scans answer `usearch_status_unsupported_k`, as [GPUs](#gpus) explains.
 - NVMe answers every read verb as RAM does, refuses every mutating one with `usearch_status_read_only_k`, and refuses saving, since a view already is its checkpoint.
 
 ### GPUs
@@ -281,7 +284,7 @@ usearch_dense_insert(&(usearch_dense_insert_t) {.index = index,
 
 An arena lives where the executor that created it computes, so on a VRAM executor every output an arena holds is __device memory__.
 Feed it straight into your next kernel, or bring it back yourself, into the layout you want.
-Here the packed rows `get` returns land in a pinned host table with a wider row pitch, in one strided copy, once VRAM `get` lands in device arenas:
+Here the packed rows `get` returns land in a pinned host table with a wider row pitch, in one strided copy:
 
 ```c
 usearch_rows_view_t rows_on_device = {0};
@@ -306,9 +309,9 @@ cudaStreamSynchronize(stream);
 usearch_arena_free(arena);
 ```
 
-A search's matches land in its arena too, so on a VRAM executor they are device memory, and a VRAM search reports `usearch_status_device_k` until the devices merge their shards on their own.
+A search's matches land in its arena too, so on a VRAM executor they are device memory: every shard ranks its own rows and the first device merges those rankings into the arena, so on NVIDIA and AMD no match crosses through the host, while on Apple the host merges them in the unified memory both share.
 A device that runs out of memory for an arena reports `usearch_status_out_of_memory_k` rather than falling back to the host, so where an output lands never depends on how full a device is.
-Free a device arena once your own device work on its outputs has finished.
+Free a device arena once your own device work on its outputs has finished, and before the executor that made it.
 
 ## Serialization
 
@@ -500,11 +503,13 @@ do {
 
 Searches may run throughout on a RAM handle, while a VRAM handle rewrites neighbors in place and admits no overlapping search.
 
-### Merging & Splitting
+### Absorbing & Splitting
 
-`usearch_dense_merge` absorbs an array of donor handles into one index by landmark stitching, cheaper than re-inserting their rows, at the wall clock of the largest donor.
+`usearch_dense_absorb` moves an array of donor handles into one index, one donor after another, keeping their graphs rather than re-inserting their rows.
 Donors are consumed and nulled as they go, and cancellation stops between donors, so the array itself says which handles the caller still owns and must free.
-No residency absorbs donors yet, so the engine answers `usearch_status_unsupported_k` today, and splitting is not in the C library yet.
+Each donor's shards append to the index's as appended parts with their edges rebased, then a refinement of every shard that took one walks each of its rows across into the other part from landmarks drawn there and re-selects it, so a group costs one such refinement per donor, and its heal re-selects from the landmarks every row no earlier one links to.
+A donor must share the index's residency, scalar, class, metric and geometry, else the call answers `usearch_status_config_mismatch_k`, and an NVMe view answers `usearch_status_read_only_k`.
+A VRAM-built donor joins a RAM index through a save and a load, and splitting is not in the C library yet.
 
 ### Sparse Multiplication
 

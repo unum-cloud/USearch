@@ -70,7 +70,7 @@
  *    caller fields, and so does state the caller carries between calls, like attention's @c carry.
  *  - Executors make arenas. @c usearch_arena_init places one where its executor computes, host pages
  *    on its memory domains or the memory of its GPU, decided once; a @c NULL executor makes host
- *    pages for calls on the calling thread.
+ *    pages for calls on the calling thread. A GPU arena keeps the rule @ref usearch_arena_t notes.
  *  - A call rewinds the arena it is given, invalidating the previous call's outputs, and writes views
  *    into it. Any verb may reuse any arena of its residency, one call at a time.
  *  - Blocking calls borrow the arena; deferred calls hold it until final.
@@ -1004,7 +1004,8 @@ USEARCH_EXPORT void usearch_executor_drain(usearch_executor_drain_t* arguments);
  *  Waits until every deferred call naming the handle is final.
  *  Waits until every call running on the executor, blocking or deferred, is final.
  *  Never call it from inside a progress handler, a predicate, or a host function the executor
- *  runs, since it would drain itself. Arenas it made stay valid, each keeping its memory until freed.
+ *  runs, since it would drain itself. Host arenas it made stay valid, each keeping its memory
+ *  until freed; GPU arenas keep the rule @ref usearch_arena_t notes.
  */
 USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor);
 
@@ -1024,9 +1025,14 @@ USEARCH_EXPORT void usearch_executor_free(usearch_executor_t executor);
  *    @c usearch_status_invalid_argument_k.
  *  - An arena serves one call at a time; a second call naming it finishes
  *    @c usearch_status_contended_k, and a deferred one does so at submission.
- *  - A call on another residency or device than the arena's reports @c usearch_status_device_k.
+ *  - A call on another residency or device than the arena's, or a call naming a GPU arena with
+ *    another executor than the one that made it, @c NULL included, reports
+ *    @c usearch_status_device_k.
  *  - A blocking call borrows the arena until it returns, and a deferred one holds it until final.
  *  - A call that fails, is cancelled, or has nothing to report leaves its outputs @c NULL.
+ *
+ *  @note A GPU arena grows, fills and frees on the first stream of the executor that made it, so it
+ *      serves only calls on that executor, and must be freed before that executor is.
  */
 typedef struct usearch_arena_handle_t* usearch_arena_t;
 
@@ -1048,8 +1054,9 @@ typedef struct usearch_arena_init_t {
  *  @brief Creates an empty arena where @c executor computes, so its placement is decided once and
  *      GPU code keeps its outputs on the device without asking.
  *
- *  Nothing is allocated until a call writes into it. An arena may outlive the executor that made
- *  it: it keeps its own memory, and the device that memory lives on, until it is freed.
+ *  Nothing is allocated until a call writes into it. An arena of host pages may outlive the
+ *  executor that made it, keeping its own memory until it is freed; a GPU arena keeps the rule
+ *  @ref usearch_arena_t notes.
  */
 USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments);
 
@@ -1059,8 +1066,8 @@ USEARCH_EXPORT void usearch_arena_init(usearch_arena_init_t* arguments);
  *  @param[inout] arena The arena to be freed; invalid afterwards.
  *
  *  Waits until every deferred call naming the handle is final.
- *  Free it once the caller's own device work on its outputs has finished; device memory returns in
- *  order on the stream that last used it.
+ *  Free a GPU arena once the caller's own device work on its outputs has finished, keeping the
+ *  rule @ref usearch_arena_t notes.
  */
 USEARCH_EXPORT void usearch_arena_free(usearch_arena_t arena);
 
