@@ -184,12 +184,6 @@ inline bool reject_tape(usearch_tape_view_t tape, std::size_t count, usearch_out
     return false;
 }
 
-/** Ticks the caller's handler and answers whether to carry on; a null handler always does. */
-inline bool keep_going(usearch_progress_callback_t progress, void* progress_state, std::size_t completed,
-                       std::size_t total) {
-    return !progress || progress(completed, total, progress_state) == usearch_continue_k;
-}
-
 /** Ticks the caller's handler when @p completed closes one of its steps, and answers whether to
  *  carry on; a null handler always does. Every loop here advances a unit at a time, so the unit
  *  that crosses into a new step is the one that reports. */
@@ -227,10 +221,10 @@ using call_arguments_t = std::variant<
     usearch_shapes_search_t, usearch_shapes_count_t, usearch_shapes_get_t, usearch_shapes_merge_t,
     usearch_shapes_cursor_next_t, usearch_shapes_save_t, usearch_shapes_metadata_read_t, usearch_shapes_describe_t,
     usearch_geospatial_load_ram_t, usearch_geospatial_load_vram_t, usearch_geospatial_reserve_t,
-    usearch_geospatial_clear_t, usearch_geospatial_insert_t, usearch_geospatial_refine_t, usearch_geospatial_emplace_t,
-    usearch_geospatial_search_t, usearch_geospatial_within_t, usearch_geospatial_count_t, usearch_geospatial_get_t,
-    usearch_geospatial_merge_t, usearch_geospatial_cursor_next_t, usearch_geospatial_save_t,
-    usearch_geospatial_metadata_read_t, usearch_geospatial_describe_t>;
+    usearch_geospatial_clear_t, usearch_geospatial_insert_t, usearch_geospatial_refine_t, usearch_geospatial_search_t,
+    usearch_geospatial_within_t, usearch_geospatial_count_t, usearch_geospatial_get_t, usearch_geospatial_merge_t,
+    usearch_geospatial_cursor_next_t, usearch_geospatial_save_t, usearch_geospatial_metadata_read_t,
+    usearch_geospatial_describe_t>;
 
 /** A stand-in's executor: no threads, so every call it is given runs on the thread of a caller -
  *  the one that submits it blocking, drains the executor, waits on the call, or frees a handle it uses. */

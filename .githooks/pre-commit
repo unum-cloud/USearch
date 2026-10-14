@@ -367,8 +367,9 @@ check_rust_modules() {
 
 # A verb's argument struct reads in the order the call works: what it reads, what it writes, the arena
 # those outputs land in, then the knobs that shape the work and the handlers that observe it. So the
-# output views and `written`/`required` form one block right before `arena`, a plain `scalar` describes an
-# input and never follows it, and an `outputs_*` knob never precedes it.
+# output views, the arrays handed back through a double pointer, and `written`/`required` form one block
+# right before `arena`, a plain `scalar` describes an input and never follows it, and an `outputs_*` knob
+# never precedes it.
 check_verb_field_order() {
     local misordered
     misordered=$(< "$staged_blob" awk '
@@ -399,7 +400,8 @@ check_verb_field_order() {
             field_type = line; sub(/[A-Za-z0-9_]+$/, "", field_type); sub(/[[:space:]*]+$/, "", field_type)
             pointer = line ~ /\*[[:space:]]*[A-Za-z0-9_]+$/
             ++count; names[count] = field_name; types[count] = field_type
-            output[count] = pointer && (field_type ~ /_view_t$/ || field_type == "size_t")
+            output[count] = pointer && (field_type ~ /_view_t$/ || field_type == "size_t" ||
+                                        line ~ /\*\*[[:space:]]*[A-Za-z0-9_]+$/)
         }')
     [ -z "$misordered" ] || fail "$misordered" \
         "$file orders a verb's fields out of reads, writes, arena, knobs and observers:"

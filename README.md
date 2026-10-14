@@ -122,7 +122,7 @@ See the [C++ guide](include/usearch/dense/README.md) for the layers & the [C gui
 | __Dense Vectors__   | Equal-width numeric rows or packed bit sets         | Inner-Product, Angular, Euclidean, Hamming, & Jaccard                     | RAM, VRAM, & NVMe engines                |
 | __Sequences__       | Variable-length byte strings & UTF-8 text           | Levenshtein & overlap; declared global & local alignment                  | Experimental C++ engine & C interface    |
 | __Shapes__          | 3D point clouds of any size                         | Chamfer, Hausdorff, Wasserstein-Procrustes, & Gromov-Wasserstein          | Experimental C++ engine & C interface    |
-| __Geospatial Sets__ | WGS-84 points, point sets, & sampled paths          | Point proximity; declared Overlap, Shape, Coverage, & Route               | Experimental C++ engine & C interface    |
+| __Geospatial Sets__ | WGS-84 positions with accuracy, view, & time        | Nearness, line of sight, & view cones                                     | Experimental C++ engine & C interface    |
 
 The experimental C interfaces currently use a brute-force stand-in while their native engines & bindings develop.
 
@@ -200,13 +200,12 @@ Sequence search is useful when edit operations & local matches carry more meanin
 ## Geospatial Modality
 
 > [!WARNING]
-> Experimental: the C++ point index is ahead of the broader Geospatial C interface.
+> Experimental: the C interface is ahead of the C++ point index, & a brute-force stand-in answers it for now.
 
+The C interface searches observations: where a device was, how sure it was, which way it looked, how far it saw, & when - photos, video frames, drone footage, & sensor fixes.
+One graph answers nearness widened by both positions' uncertainty, lines of sight over a caller's terrain, & view cones holding the other side, each narrowed by time windows & predicates.
 The native index converts WGS-84 coordinates into Earth-Centered, Earth-Fixed positions stored as three centimeter-scale `i32` coordinates - __12 bytes per point__.
-Multiple points can share one key to represent sampled paths or geographic sets.
-Cheap chord distances guide candidate selection; ellipsoidal geodesic calculations refine those candidates where surface distance matters.
-Chord ordering on an ellipsoid need not match geodesic ordering, so the candidate stage remains approximate.
-The broader Overlap, Shape, Coverage, & Route calls are declared through the experimental C interface.
+Every ordering is the straight-line chord between two positions, which ranks as the great-circle arc does & reads 1 m short of the geodesic at 100 km, so callers wanting geodesics compute them for the reported matches.
 
 ## Getting Started
 
