@@ -6,12 +6,15 @@ None of it is a public header: the C libraries, the C test and every binding lin
 ## Files
 
 - `types.cpp` answers the library-wide probes of `types.h`: the version, the capability levels compiled and available, an outcome's status, and the spelling of every closed set in both directions.
+- `lib.hpp` holds what every modality's dispatch shares: the CPU classes, the executor and arena handles, the deferred table, and the outcome, progress and landing helpers.
 - `dense_index.cuh` implements `dense_index.h`: the variant grid over every compiled arm, the handle owning the chosen one, and every exported verb as one visit apiece.
 - `dense_index.cpp` compiles that header with the host compiler for every build, the VRAM arms joining the variant for each vendor built.
-- `dense_specializations.cuh` spells one arm: the scalar and capability tables, the CPU and GPU classes with the ForkUnion primitives they pair, and the `specialized_index` view every class unit instantiates.
+- `dense_specializations.cuh` spells one arm: the scalar and capability tables, the GPU classes, and the `specialized_index` view every class unit instantiates.
 - `dense/ram_variants_<class>.cpp`, `dense/nvme_variants_<class>.cpp` and `dense/vram_variants_<class>.{cu,hip,cpp}` are the class units, each instantiating `specialized_index` over its class's arms, one per storage dtype the class advances.
-- `sequence.cpp` instantiates the sequence checkpoint verbs over the default index, so they keep compiling until the sequence modality's entry points land.
-  So far `sequence_index.h`, `shapes_index.h` and `geospatial_index.h` are answered only by the brute-force stand-in in `src_stub/`.
+- `basic_specializations.cuh` spells the basic modalities' arms, `sequence_arm<cpu_class>` and `shapes_arm<scalar, cpu_class>`, and the fan-outs that insert and search through an executor.
+- `sequence_index.cpp` and `shapes_index.cpp` implement `sequence_index.h` and `shapes_index.h` as the dense unit does, one variant over the compiled arms and one visit per verb.
+- `basic/ram_variants_<class>.cpp` are their class units, each instantiating whichever sequence and shapes arms its class advances.
+  So far `geospatial_index.h` is answered only by the brute-force stand-in in `src_stub/`.
 
 ## From a Verb to an Engine Template
 
@@ -41,10 +44,11 @@ The arms are aliases over those templates, keyed by the storage dtype and the cl
 
 An arm's executor type is its residency, so `is_ram_index`, `is_nvme_index` and `is_vram_index` read it rather than a second tag that could disagree.
 The core verbs land on `specialized_index` members of the same names, `count`, `get`, `reserve`, `clear`, `refine`, `health`, `search`, `multiply`, `maxsim`, `attend`, `save` and `load`.
-`insert` becomes `add`, one plan with a step per chunk that publishes every row at once.
+`insert` becomes `add`, one plan with a step per slice that publishes every row at once.
 Rows reach every arm in the caller's scalar as a `dense::rows_view_t`, and each arm imports them into its stored scalar per thread, in scratch its executor already owns, so the C layer never stages a row.
 Scores land in the arena as the ABI's `double` straight from the engines, and row outputs export into the scalar the caller asks for.
-Progress callbacks tick once per chunk of 4096 rows, which also bounds each device batch's staging.
+A `usearch_progress_t` with a handler slices a batch into its `steps`, ten unless the caller asks otherwise, each handed to the engine whole and reported once; without a handler the call is one slice, and a GPU engine windows a large one through its own staging.
+`progress_ticks_t` keeps that rule in one place, also thinning the ticks of verbs that count their own units, a checkpoint's shards or a refinement's nodes.
 
 ## Dispatch over Capability Kits
 
@@ -78,12 +82,18 @@ The dispatch unit visits every arm yet compiles at the baseline instruction set.
   Nothing links `libamdhip64`: `hip_api` opens it at first use through entry points it declares itself, so host units need no ROCm headers.
 - `usearch_dense_vram_variants_apple` compiles the Apple arms as plain C++, their kernels compiled from embedded source at first use.
   Nothing links Metal, Foundation or `libobjc`: `metal_api` opens them at first use.
-- `usearch_punned` - `types.cpp`, `sequence.cpp` & the dense dispatch unit, `dense_index.cpp`.
+- `usearch_basic_ram_variants` collects the sequence and shapes class units, under the flags the dense rows computed for `intel_haswell`, `intel_skylake`, `aws_g2`, `apple_m2`, `alibaba_c930` and `wasm64_extended`.
+- `usearch_punned` - `types.cpp` & the dispatch units, `dense_index.cpp`, `sequence_index.cpp` and `shapes_index.cpp`.
 
 `USEARCH_PUNNED_LIBRARIES` and `USEARCH_PUNNED_OBJECTS` hand all of them to `usearch_shared`, `usearch_static` and `usearch_test_c`, and the static archive carries the yyjson, NumKong and ForkUnion objects too, so a binding links one library.
 `USEARCH_DENSE_DTYPES` trims every unit's arms from the front of `bf16`, `u1`, `i8`, `e4m3`, `f16`, `u8`, `e5m2`, `i4`, `u4`, `e3m2` and `e2m3`, keeping four by default.
 
 ## Executors & Arenas
+
+Scratch belongs to the executor, never to the call.
+Every buffer a verb only works through, imported rows, walk frontiers, tiles, softmax states, comes from where the verb runs: a thread's arena on a CPU, a slot's allocator on NVMe, a stream's staging on a GPU.
+The engine running there sizes and reuses it, and the executor rewinds it once per verb.
+A call's arena holds the outputs alone, the results that outlive the call, so neither the C layer nor an argument structure ever stages or allocates on a verb's behalf.
 
 `usearch_executor_handle_t` holds the topology a RAM or NVMe executor was spawned over, its deferred table, and one residency's executor.
 The executor is a `std::variant` of `forkunion_executor_t`, `nvme_executor_t` and, per GPU vendor built, `cuda_executor_t`, `hip_executor_t` or `metal_executor_t`, whose alternative is the kind tag.
@@ -119,3 +129,15 @@ The result is a read-only `dense::nvme_indexes` view, so every mutating verb ans
 Kernel paths take the first engine the host admits, from `io_uring` through Linux AIO to blocking reads.
 Transport identifiers such as `trtype:PCIe` need an SPDK build, `USEARCH_WITH_LINUX_SPDK`, with hugepages for PCIe controllers alone, and one executor never mixes them with kernel paths.
 The NVMe class units score with the same kits as the RAM ones, since the transport is the executor's runtime choice rather than a template parameter.
+
+## Sequences & Shapes
+
+A sequence or shapes handle holds one `basic::ram_index`, one shard on the heap, with every value owned by its node record: a `sz::string` of the sequence's bytes, or an `nk::shapes_packed` of the shape's points in `f16` or `f32`.
+Their ladders are shorter than dense's, since a class exists only where StringZilla's Levenshtein and overlap kits, or NumKong's shape kits, differ from its parent's: `sequence_rung_advances` and `shapes_rung_advances` compare them as `rung_advances` does.
+
+- `insert` builds the batch's values on every thread from the index's allocator, sizes every thread's context and metric, and only then plans the batch, so nothing fails after the dispense.
+- `search` lands each query's nearest from the walk's pool, filtered by the predicate a quad of keys at a time.
+- Overlap distances land as the share of missed windows, from zero to one, rather than the kernels' fixed point.
+- Checkpoints are one SafeGraphs monolith whose metric token is `levenshtein`, `levenshtein-utf8`, `overlap`, `chamfer`, `hausdorff`, `gromov_wasserstein` or `wasserstein_procrustes`, with `connectivity`, `window_widths` and `points` in the provenance.
+
+`view_ram`, `refine`, `merge`, `sample` and a cursor opened at a key answer `usearch_status_unsupported_k`, as do the four alignment kinds and a `.json` manifest, while `init_vram` and `load_vram` for shapes answer `usearch_status_device_k`.

@@ -38,10 +38,12 @@
 #include <vector>      // `std::vector`
 
 #include <fmt/format.h>
+
 #include <forkunion.hpp>
 
 #include "harness.hpp"
 #include "usearch/basic/ram_index.hpp"
+#include "usearch/basic/nvme_index.hpp"
 #include "usearch/utilities/safegraphs_format.hpp"
 
 namespace unum::usearch::test {
@@ -2982,6 +2984,103 @@ std::size_t test_basic_safegraphs_hostile(u64_t seed, std::string_view metric_to
         failures += expect_eq(safegraphs_write_index(target, index, codec, serial, clash, metric_token),
                               status_t::config_mismatch_k);
     }
+    failures += expect_eq(ledger.live_bytes.load(), 0);
+    return failures;
+}
+
+/**
+ *  @brief A monolith viewed from storage: @p count entries saved by a RAM index, then read through
+ *      @p nvme_index_type_ on a one-thread executor of blocking reads.
+ *
+ *  Every entry finds itself at distance zero, @c count finds every key once and an absent one
+ *  never, and @c get hands back every entry's own value.
+ *
+ *  @param[in] make_value Builds entry @c i on an allocator, as `make_value(i, allocator)`.
+ *  @param[in] make_metric Builds a row slot's metric, as @c nvme_index::search takes it.
+ *  @param[in] query_of Builds row @c i 's query from entry @c i, as @c nvme_index::search takes it.
+ *  @param[in] matches Whether a borrowed view holds entry @c i, as `matches(i, view)`.
+ */
+template <typename fixture_type_, typename nvme_index_type_, typename make_value_type_, typename make_metric_type_,
+          typename query_of_type_, typename matches_type_>
+std::size_t test_basic_nvme_view(u64_t seed, std::size_t count, std::string_view metric_token,
+                                 make_value_type_&& make_value, make_metric_type_&& make_metric,
+                                 query_of_type_&& query_of, matches_type_&& matches) {
+    using index_t = typename fixture_type_::index_t;
+    using node_id_t = typename index_t::node_id_t;
+    using context_t = typename index_t::traversal_context_t;
+    using key_t = typename index_t::key_t;
+    using distance_t = typename nvme_index_type_::distance_t;
+    using executor_t = typename nvme_index_type_::executor_t;
+    std::size_t failures = 0;
+    allocation_ledger_t ledger;
+    char path[64];
+    std::snprintf(path, sizeof(path), "/tmp/usearch-nvme-%08x.safegraphs",
+                  static_cast<unsigned>(stream_key(seed, "nvme") ^ reinterpret_cast<std::uintptr_t>(&ledger)));
+    {
+        std::unique_ptr<index_t> const index_ptr = fixture_type_::make_index(ledger);
+        index_t& index = *index_ptr;
+        std::vector<typename index_t::value_t> values;
+        for (std::size_t entry = 0; entry != count; ++entry)
+            values.push_back(make_value(entry, counting_allocator_t {ledger}));
+        auto metric = fixture_type_::make_metric();
+        context_t context {stream_key(seed, "nvme"), counting_allocator_t {ledger}};
+        std::vector<node_id_t> assigned_ids;
+        failures += expect(bool(index.reserve(count)));
+        failures += basic_build<fixture_type_>(index, metric, values, assigned_ids, context,
+                                               keep_diverse_t {basic_connectivity_k});
+        serial_executor_t serial;
+        failures += expect_eq(safegraphs_write_index(std::string_view {path}, index, fixture_type_::make_codec(),
+                                                     serial, save_config_t {}, metric_token),
+                              status_t::success_k);
+    }
+
+    fu_topology_t topology = nullptr;
+    failures += expect(fu_topology_new(&topology) == fu_success_k);
+    {
+        io_engine_config_t config;
+        config.queue_depth = 64;
+        auto [executor, spawn_status] = executor_t::spawn(topology, 1, config);
+        failures += expect_eq(spawn_status, status_t::success_k);
+        nvme_index_type_ viewed {forkunion_allocator_t {}};
+        failures += expect_eq(viewed.view(path, {}, metric_token, executor), status_t::success_k);
+        failures += expect_eq(viewed.size(), count);
+
+        // Pools as wide as the graph walk all of it, so every entry meets itself.
+        typename nvme_index_type_::search_config_t search_config;
+        search_config.expansion_factor = count;
+        std::vector<key_t> keys(count);
+        std::vector<distance_t> distances(count);
+        std::vector<std::size_t> counts(count);
+        auto const [found, search_status] = viewed.search(count, make_metric, query_of, executor, search_config,
+                                                          std::span<key_t> {keys}, std::span<distance_t> {distances},
+                                                          std::span<std::size_t> {counts});
+        failures += expect_eq(search_status, status_t::success_k);
+        failures += expect_eq(found.count, count);
+        for (std::size_t row = 0; row != count; ++row) {
+            failures += expect_eq(counts[row], 1u);
+            failures += basic_expect_distance<fixture_type_>(distances[row], distance_t {});
+        }
+
+        std::vector<key_t> asked(count + 1);
+        for (std::size_t entry = 0; entry != count; ++entry) asked[entry] = fixture_type_::make_key(entry);
+        asked[count] = fixture_type_::make_key(count * 2);
+        std::vector<std::size_t> entries(count + 1);
+        failures += expect_eq(viewed.count(std::span<key_t const> {asked}, entries, executor), status_t::success_k);
+        for (std::size_t entry = 0; entry != count; ++entry) failures += expect_eq(entries[entry], 1u);
+        failures += expect_eq(entries[count], 0u);
+
+        std::atomic<std::size_t> handed {0}, mismatched {0};
+        auto on_value = [&](std::size_t position, std::size_t rank, auto const& view) noexcept {
+            handed.fetch_add(1, std::memory_order_relaxed);
+            if (rank || !matches(position, view)) mismatched.fetch_add(1, std::memory_order_relaxed);
+        };
+        failures += expect_eq(viewed.get(std::span<key_t const> {asked}, 1, entries, executor, on_value),
+                              status_t::success_k);
+        failures += expect_eq(handed.load(), count);
+        failures += expect_eq(mismatched.load(), 0u);
+    }
+    fu_topology_delete(topology);
+    std::remove(path);
     failures += expect_eq(ledger.live_bytes.load(), 0);
     return failures;
 }

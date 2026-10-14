@@ -69,24 +69,6 @@
 
 namespace unum::usearch::dense {
 
-#if USEARCH_OS_WINDOWS_
-
-/** Whether @p path names a directory, which a relocation joins a part's file name onto. */
-inline bool nvme_is_directory_(char const* path) noexcept {
-    DWORD const attributes = ::GetFileAttributesA(path);
-    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_DIRECTORY);
-}
-
-#else
-
-/** Whether @p path names a directory, which a relocation joins a part's file name onto. */
-inline bool nvme_is_directory_(char const* path) noexcept {
-    struct stat description;
-    return ::stat(path, &description) == 0 && S_ISDIR(description.st_mode);
-}
-
-#endif
-
 template <typename indexes_type_>
 struct nvme_indexes_cursor;
 
@@ -349,8 +331,8 @@ struct nvme_indexes {
         walk_shape_t const shape = index_t::template walk_shape_<row_t>(
             to_span(media_), to_span(parts_), kernel_, executor.queue_depth(), executor.size(), rows_count, width,
             staged_rows_bytes(vector_dtype_, 1, queries.columns));
-        auto [call, call_status] = index_t::begin_call_(executor, to_span(media_), shape.scratch_bytes, shape.buffers,
-                                                        shape.buffer_bytes);
+        auto [call, call_status] = nvme_begin_call(executor, to_span(media_), shape.scratch_bytes, shape.buffers,
+                                                   shape.buffer_bytes);
         if (failed(call_status)) return {{}, call_status};
         scratch_allocator_t const scratch {executor.arena(0)};
         growing_buffer<key_t, scratch_allocator_t> row_keys {scratch};
@@ -366,7 +348,7 @@ struct nvme_indexes {
         dummy_predicate_t predicate;
         typename row_t::inputs_t const inputs {queries, kernel_,     nullptr,          &predicate,
                                                width,   ranked_keys, ranked_distances, to_writable_span(row_counts)};
-        expected<search_result_t> ranked = index_t::template run_walks_<row_t>(
+        expected<search_result_t> ranked = row_walker<index_t, row_t>::run_walks(
             to_span(media_), to_span(parts_), executor, shape, inputs, to_span(row_counts), latencies);
         if (!ranked) return ranked;
         ranked.value.count = reduce(ranked_keys, ranked_distances, to_span(row_counts), keys, scores, counts);
@@ -561,7 +543,7 @@ struct nvme_indexes {
 
   private:
     using arena_t = typename index_t::arena_t;
-    using call_t = typename index_t::call_t;
+    using call_t = nvme_call<executor_t>;
     using walk_shape_t = typename index_t::walk_shape_t;
     using scratch_allocator_t = typename index_t::scratch_allocator_t;
     using candidates_allocator_t = typename index_t::candidates_allocator_t;
@@ -962,8 +944,8 @@ struct nvme_indexes {
         std::size_t const scan_bytes = slice_t::reserved_bytes(depth * sizeof(scan_slot<reads_per_task_>)) +
                                        slice_t::reserved_bytes(depth * sizeof(u32_t)) +
                                        slice_t::reserved_bytes(depth * reads_per_task_ * sizeof(io_completion_t));
-        return index_t::begin_call_(executor, to_span(media_), scans * scan_bytes + scratch_bytes + default_alignment_k,
-                                    depth * reads_per_task_, staging_bytes_());
+        return nvme_begin_call(executor, to_span(media_), scans * scan_bytes + scratch_bytes + default_alignment_k,
+                               depth * reads_per_task_, staging_bytes_());
     }
 
     /**
@@ -1574,22 +1556,6 @@ struct nvme_indexes {
 
 #pragma region Opening
 
-    /** Writes @p directory and @p name joined by one separator into @p buffer, terminated for the
-     *  OS. */
-    static status_t join_path_(growing_buffer<char, forkunion_allocator_t>& buffer, std::string_view directory,
-                               std::string_view name) noexcept {
-        std::size_t const separators = directory.empty() || directory.ends_with('/') || directory.ends_with('\\') ? 0
-                                                                                                                  : 1;
-        std::size_t const length = directory.size() + separators + name.size();
-        if (failed(buffer.resize_uninitialized(length + 1))) return status_t::bad_alloc_k;
-        for (std::size_t position = 0; position != directory.size(); ++position) buffer[position] = directory[position];
-        if (separators) buffer[directory.size()] = '/';
-        for (std::size_t position = 0; position != name.size(); ++position)
-            buffer[directory.size() + separators + position] = name[position];
-        buffer[length] = '\0';
-        return status_t::success_k;
-    }
-
     /** The body of @ref view, into an empty catalog. */
     status_t view_(std::string_view checkpoint, std::span<std::string_view const> paths) noexcept {
         if (checkpoint.empty()) return status_t::invalid_argument_k;
@@ -1636,13 +1602,13 @@ struct nvme_indexes {
                                                                       entries[part].size()};
             status_t joined = status_t::success_k;
             if (paths.empty())
-                joined = entries[part].empty() ? join_path_(resolved, {}, checkpoint)
-                                               : join_path_(resolved, checkpoint_directory, relative);
+                joined = entries[part].empty() ? nvme_join_path_(resolved, {}, checkpoint)
+                                               : nvme_join_path_(resolved, checkpoint_directory, relative);
             else {
                 // The directory test runs on the terminated copy, which the OS reads.
-                joined = join_path_(resolved, {}, paths[part]);
+                joined = nvme_join_path_(resolved, {}, paths[part]);
                 if (succeeded(joined) && nvme_is_directory_(resolved.data()))
-                    joined = join_path_(resolved, paths[part], safegraphs_basename(relative));
+                    joined = nvme_join_path_(resolved, paths[part], safegraphs_basename(relative));
             }
             if (failed(joined)) return joined;
 

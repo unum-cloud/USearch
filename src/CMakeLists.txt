@@ -182,14 +182,32 @@ foreach (
     endif ()
 endforeach ()
 
-# The type-erased implementations behind the C interface: the dispatch unit visits the arms through their explicitly
-# instantiated views and compiles at the baseline, since it inlines no kernel. Under CUDA the device arms join, so the C
+# The sequence and shapes arms compile per CPU class with the flags the dense rows above computed, one unit set for both
+# modalities, each instantiating the arms whose StringZilla or NumKong kits advance at its class.
+add_library(usearch_basic_ram_variants OBJECT basic/ram_variants_serial.cpp)
+usearch_setup_target(usearch_basic_ram_variants)
+target_include_directories(usearch_basic_ram_variants PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_definitions(usearch_basic_ram_variants PRIVATE "USEARCH_ARCH_CUDA_=0")
+target_link_libraries(usearch_basic_ram_variants PRIVATE yyjson forkunion::static stringzilla::header)
+foreach (class_ intel_haswell intel_skylake aws_g2 apple_m2 alibaba_c930 wasm64_extended)
+    if (usearch_variant_${class_}_exists_)
+        target_sources(usearch_basic_ram_variants PRIVATE basic/ram_variants_${class_}.cpp)
+        set_source_files_properties(
+            basic/ram_variants_${class_}.cpp PROPERTIES COMPILE_OPTIONS "${usearch_variant_${class_}_flags_}"
+        )
+    endif ()
+endforeach ()
+
+# The type-erased implementations behind the C interface: the dispatch units visit the arms through their explicitly
+# instantiated views and compile at the baseline, since they inline no kernel. Under CUDA the device arms join, so the C
 # libraries carry them too.
-add_library(usearch_punned OBJECT types.cpp dense_index.cpp)
+add_library(usearch_punned OBJECT types.cpp dense_index.cpp sequence_index.cpp shapes_index.cpp geospatial_index.cpp)
 usearch_setup_target(usearch_punned)
 target_include_directories(usearch_punned PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(usearch_punned PRIVATE yyjson forkunion::static stringzilla::header)
-set(USEARCH_PUNNED_LIBRARIES usearch_punned usearch_dense_ram_variants usearch_dense_nvme_variants)
+set(USEARCH_PUNNED_LIBRARIES usearch_punned usearch_dense_ram_variants usearch_dense_nvme_variants
+                             usearch_basic_ram_variants
+)
 
 # Every NVIDIA or AMD unit with kernels compiles twice. Host-only, through Clang's CUDA or HIP mode, it names its
 # kernels from device code alone, so nothing registers with or links a GPU runtime, which opens at first use.

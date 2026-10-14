@@ -2,7 +2,7 @@
 
 This is the C 99 interface every other binding wraps: the headers in `c/usearch/`, compiled into `libusearch_shared` and `libusearch_static`.
 Building the library takes CMake 3.28 and a C++20 compiler, while calling it takes any C99 compiler.
-It exposes all four modalities: the engine implements dense indexes, while sequence, shape and geospatial indexes are answered today by a brute-force stand-in only.
+It exposes all four modalities: the engine implements dense, sequence and shape indexes, while geospatial indexes are answered today by a brute-force stand-in only.
 
 ## Installation
 
@@ -655,7 +655,8 @@ The alignment kinds take `usearch_sequence_weights_t`, a 256×256 substitution m
 The local Smith-Waterman kinds only rank: each is served from an index built under its global counterpart, which the library picks.
 The verbs mirror the dense ones: `init_ram`, `load_ram`, `view_ram`, `reserve`, `clear`, `insert`, `refine`, `search` with a predicate, `get` and `cursor_next` writing tapes into an arena, `merge`, `save`, `metadata_read` and `describe`, while `count` also reports a key's total and largest byte lengths.
 A key already holding `values_per_key` entries rejects the whole insertion with `usearch_status_overflow_k`.
-The engine does not export these verbs yet, so a program calling them links against the stand-in, which scores every kind by textbook dynamic programming, quadratic and unbanded, and reports alignment similarities negated.
+The engine serves the Levenshtein and overlap kinds, and answers the alignment kinds, `view_ram`, `refine`, `merge`, `sample` and a cursor opened at a key with `usearch_status_unsupported_k`.
+The stand-in serves every kind by textbook dynamic programming, quadratic and unbanded, and reports alignment similarities negated.
 
 ## Shape Indexes
 
@@ -685,60 +686,66 @@ Gromov-Wasserstein compares each side's internal distances.
 All four are invariant to rotation, reflection, translation and point order.
 A non-zero `points` freezes the count, rejecting insertions of any other with `usearch_status_shape_mismatch_k`.
 The verbs are the sequence ones plus `init_vram` and `load_vram`, where `get` and `cursor_next` convert to an `outputs_scalar` and return each shape in its inserted pose, and `count` reports a key's total and largest point counts.
-The engine does not export these verbs yet, so a program calling them links against the stand-in, which scores Chamfer and Hausdorff in the frame the points arrive in, refuses the two transport kinds with `usearch_status_unknown_kind_k`, refuses quantizations other than `f16` and `f32` with `usearch_status_unsupported_k`, and refuses every VRAM verb with `usearch_status_device_k`.
+The engine serves all four kinds in RAM over `f16` or `f32` points, refusing other quantizations, `view_ram`, `refine` and `merge` with `usearch_status_unsupported_k`, and both VRAM verbs with `usearch_status_device_k`.
+The stand-in scores Chamfer and Hausdorff in the frame the points arrive in, refuses the two transport kinds with `usearch_status_unknown_kind_k`, refuses quantizations other than `f16` and `f32` with `usearch_status_unsupported_k`, and refuses every VRAM verb with `usearch_status_device_k`.
 
 ## Geospatial Indexes
 
-A geospatial index searches observations on and above the Earth, in RAM or VRAM: where a device was, how sure it was, which way it looked, how far it saw, and when.
-Every entry is one `usearch_geospatial_observation_t` of eleven doubles in natural units, and a field the device did not record stays NaN, which only widens the tests that read it, so a missing value must never be written as zero:
+A geospatial index searches points, paths and rings on and above the WGS-84 ellipsoid, in space and time, in RAM or VRAM.
+Its `layout` fixes the axes every point carries: `surface_k` is latitude and longitude in degrees, `elevated_k` adds metres of altitude, `timed_k` adds seconds, and `elevated_timed_k` adds both.
+The enumerator is not the width, so size a point by its axes: two, three, three and four.
+Its `structure` says whether the order of points in one set means nothing, `cloud_k`, a track, `path_k`, or a closed boundary, `ring_k`:
 
 ```c
-usearch_geospatial_index_t photos = NULL;
-usearch_geospatial_init_ram(&(usearch_geospatial_init_ram_t) {.index = &photos, .outcome = &outcome});
+usearch_geospatial_index_t places = NULL;
+usearch_geospatial_init_ram(&(usearch_geospatial_init_ram_t) {.index = &places,
+                                                              .outcome = &outcome,
+                                                              .layout = usearch_geospatial_layout_surface_k,
+                                                              .structure = usearch_geospatial_structure_cloud_k});
 
-usearch_geospatial_observation_t const shot = {.latitude_degrees = 51.5308,
-                                               .longitude_degrees = -0.1238,
-                                               .altitude_metres = NAN,
-                                               .accuracy_metres = 5,
-                                               .heading_degrees = 10,
-                                               .pitch_degrees = NAN,
-                                               .heading_accuracy_degrees = NAN,
-                                               .field_of_view_degrees = 65,
-                                               .range_metres = 200,
-                                               .begin_seconds = NAN,
-                                               .end_seconds = NAN};
-usearch_geospatial_insert(&(usearch_geospatial_insert_t) {.index = photos,
+double const stops[3][2] = {{51.5308, -0.1238}, {51.5320, -0.1233}, {51.5033, -0.1196}};
+size_t const point_offsets[4] = {0, 1, 2, 3}; // three sets of one point each
+usearch_geospatial_insert(&(usearch_geospatial_insert_t) {.index = places,
                                                           .executor = executor,
                                                           .outcome = &outcome,
-                                                          .count = 1,
-                                                          .keys = {&photo_key, sizeof(usearch_key_t)},
-                                                          .observations = &shot});
+                                                          .count = 3,
+                                                          .keys = {stop_keys, sizeof(usearch_key_t)},
+                                                          .points = {stops, point_offsets, usearch_scalar_f64_k}});
 ```
 
-`usearch_geospatial_search` ranks the `wanted` nearest entries per query, and `usearch_geospatial_within` reports every entry inside a radius into an arena, however many there turn out to be.
-Both take a `relation`: `near_k` within the radius widened by three standard deviations of both accuracies, `visible_k` near with a clear line of sight over the handle's terrain, `sees_k` when the entry's view cone holds the query, and `seen_k` when the query's view cone holds the entry:
+Geospatial queries are converted into the index's geometry once and reused, which is what `usearch_geospatial_emplace` is for, and `usearch_geospatial_within` reports every entry inside a radius into an arena, however many there turn out to be:
 
 ```c
-usearch_geospatial_observation_t place = shot; // 140 m north-northeast of the camera, looking nowhere
-place.latitude_degrees = 51.5320, place.longitude_degrees = -0.1233;
-place.heading_degrees = NAN, place.field_of_view_degrees = NAN, place.range_metres = NAN;
-usearch_matches_tape_view_t seeing = {0}; // `seeing.offsets[1]` cameras, their distances in metres
-usearch_geospatial_within(&(usearch_geospatial_within_t) {.index = photos,
+usearch_geospatial_emplaced_t near_station = NULL;
+double const station[2] = {51.5308, -0.1238}; // latitude and longitude, in degrees
+usearch_geospatial_emplace(&(usearch_geospatial_emplace_t) {.emplaced = &near_station,
+                                                            .index = places,
+                                                            .executor = executor,
+                                                            .outcome = &outcome,
+                                                            .points = station,
+                                                            .point_count = 1});
+
+usearch_matches_tape_view_t nearby = {0}; // `nearby.offsets[1]` entries, their distances in metres
+usearch_geospatial_within(&(usearch_geospatial_within_t) {.index = places,
                                                           .executor = executor,
                                                           .outcome = &outcome,
                                                           .count = 1,
-                                                          .queries = &place,
-                                                          .relation = usearch_geospatial_relation_sees_k,
+                                                          .queries = &near_station,
+                                                          .mode = usearch_geospatial_mode_approach_k,
+                                                          .axes = usearch_geospatial_axes_horizontal_k,
                                                           .tolerance = {.metres = 500},
-                                                          .matches = &seeing,
+                                                          .matches = &nearby,
                                                           .arena = arena});
+usearch_geospatial_emplaced_free(near_station);
 ```
 
-`tolerance` carries the radius in metres, which a search may leave zero to rank by distance alone, and the slack in seconds that widens the query's time interval.
-Scores are chord metres between the two positions, altitude included, which rank as great-circle arcs do and read 1 m short of the geodesic at 100 km.
-A handle may test lines of sight over a `usearch_geospatial_terrain_t` given at its creation, a north-up grid of heights borrowed in place or filled by a callback, which no checkpoint carries, so every load and view names it again.
-`get` and `cursor_next` return observations within the rounding the index stores them at, and the remaining verbs are the shapes ones, with `count` reporting how many entries a key holds.
-The engine does not export these verbs yet, so a program calling them links against the stand-in, which tests every observation against every query, refuses every terrain and so the `visible_k` relation with `usearch_status_unsupported_k`, and refuses every VRAM verb with `usearch_status_device_k`.
+An emplaced query is not internally synchronized, so build one per thread, and the index it was emplaced against must outlive it.
+`usearch_geospatial_search` ranks the `wanted` best entries per query instead, under one `mode`: nearest `approach_k`, shared-ground `overlap_k`, whole-shape `shape_k`, one-way `coverage_k`, or order-respecting `route_k`, which needs paths.
+`axes` narrows the comparison to the ground track, three dimensions, or every axis with time, and `tolerance` carries the radius in metres and the time window in seconds.
+Scores are metres, except overlap, which counts query points and ranks largest first.
+`insert` takes optional per-point `deviations` in metres, `get` returns the degrees, metres and seconds inserted, and `cursor_next` exports the internal Earth-fixed integer centimetres, three per point, as `usearch_scalar_i32_k`.
+The remaining verbs are the shapes ones, with `count` reporting a key's total and longest point counts.
+The engine does not export these verbs yet, so a program calling them links against the stand-in, which converts onto a sphere rather than the ellipsoid, refuses `overlap_k` with `usearch_status_unknown_kind_k`, ignores deviations, and refuses every VRAM verb with `usearch_status_device_k`.
 
 ## What This Binding Does Not Expose
 

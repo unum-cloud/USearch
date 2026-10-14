@@ -1440,15 +1440,16 @@ check_annotate_release_before_unlock() {
 
 # region Build CI and Packaging
 
-# The dependency-free core: include/usearch/basic/ and its transitive utilities/ suppliers ship
-# as a standalone header-only library - standard-library & OS headers only, no submodules. The
-# supplier set is computed from the includes themselves, so a new supplier joins the checked set
-# the moment basic/ names it, and hardware wrappers like utilities/vram_nvidia_device.hpp or
-# utilities/ram_device.hpp - which legitimately include CUDA or ForkUnion - never enter it.
+# The dependency-free core: include/usearch/basic/ram_index.hpp and its transitive utilities/
+# suppliers ship as a standalone header-only library - standard-library & OS headers only, no
+# submodules. The supplier set is computed from the includes themselves, so a new supplier joins
+# the checked set the moment the RAM tier names it, and hardware wrappers like
+# utilities/ram_device.hpp or the NVMe tier's utilities/nvme_device.hpp - which legitimately
+# include CUDA or ForkUnion - never enter it.
 dependency_free_core_files() {
     local closure frontier next supplier fresh
     # Space-separated throughout: the membership probes below match " $file " against this list.
-    closure=$(ls include/usearch/basic/*.hpp 2>/dev/null | tr '\n' ' ')
+    closure="include/usearch/basic/ram_index.hpp"
     frontier=$closure
     while [ -n "$frontier" ]; do
         next=$(grep -h '#[[:space:]]*include[[:space:]]*"usearch/utilities/' $frontier 2>/dev/null |

@@ -6,11 +6,13 @@
  *
  *  Exercises the dense surface through the ABI every binding consumes: initialization and
  *  reservation, batch `add`, `search`, `multiply` and `attend`, retrieval by key, the arenas every
- *  output lands in, the contract of `usearch_outcome_t`, and deferred calls on an executor. A blocking call's outcome
- * is final once it returns; a deferred one is waited on or drained. Scoped to the verbs `src/` instantiates today - the
- * header runs ahead of the implementation, and a smoke test that cannot link proves nothing. The harness is
- * intentionally dependency-free so it can run in the same matrix as the C++ tests and on cross-compilation targets
- * where only the C runtime is available.
+ *  output lands in, the contract of `usearch_outcome_t`, and deferred calls on an executor. The
+ *  sequence, shapes and geospatial surfaces each get one checkpoint round trip. A blocking call's
+ *  outcome is final once it returns; a deferred one is waited on or drained. Scoped to the verbs
+ *  `src/` instantiates today - the header runs ahead of the implementation, and a smoke test that
+ *  cannot link proves nothing. The harness is intentionally dependency-free so it can run in the
+ *  same matrix as the C++ tests and on cross-compilation targets where only the C runtime is
+ *  available.
  *
  *  On startup we install a signal handler (see `install_crash_handlers`) that
  *  prints a native back-trace before re-raising, so CI logs pinpoint the
@@ -37,6 +39,9 @@
 #endif
 
 #include "usearch/dense_index.h"
+#include "usearch/geospatial_index.h"
+#include "usearch/sequence_index.h"
+#include "usearch/shapes_index.h"
 
 static void usearch_write_backtrace(int signal_number) {
     fprintf(stderr, "\n[usearch] Fatal signal %d. Back-trace:\n", signal_number);
@@ -1027,6 +1032,394 @@ void test_cursor_steps(void) {
     printf("Test: Cursor Steps - PASSED\n");
 }
 
+/** Sequences round-trip through a checkpoint: a stored query finds itself, then its one-edit
+ *  neighbor, and `get` hands the bytes back, before the save and after the load alike. The overlap
+ *  kind refuses to go without window widths. */
+void test_sequence_round_trip(void) {
+    printf("Test: Sequence Round Trip\n");
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t const executor = create_executor(0);
+    usearch_arena_t const arena = create_arena(executor);
+
+    usearch_sequence_index_t refused = NULL;
+    usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {.index = &refused,
+                                                              .outcome = &outcome,
+                                                              .metric = usearch_sequence_metric_overlap_k});
+    expect_eq(outcome.status, usearch_status_config_mismatch_k, "The overlap kind needs window widths");
+    expect(refused == NULL, "A refused initialization returns no handle");
+
+    char const bytes[] = "kittensittingmittenflask";
+    size_t const offsets[] = {0, 6, 13, 19, 24};
+    usearch_key_t const keys[] = {key_of(0), key_of(1), key_of(2), key_of(3)};
+    usearch_sequence_index_t index = NULL;
+    usearch_sequence_init_ram(&(usearch_sequence_init_ram_t) {.index = &index,
+                                                              .outcome = &outcome,
+                                                              .metric = usearch_sequence_metric_levenshtein_bytes_k});
+    expect(!outcome.message, outcome.message);
+    usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 4,
+                                                          .keys = {keys, sizeof(usearch_key_t)},
+                                                          .sequences = {bytes, offsets, usearch_scalar_u8_k}});
+    expect(!outcome.message, outcome.message);
+
+    char const path[] = "usearch-test-c-sequence.safegraphs";
+    usearch_bytes_view_t const path_view = {(uint8_t const*)path, sizeof(path) - 1};
+    for (int reloaded = 0; reloaded != 2; ++reloaded) {
+        usearch_matches_view_t matches = {0};
+        usearch_sequence_search(&(usearch_sequence_search_t) {.index = index,
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .count = 1,
+                                                              .queries = {bytes, offsets, usearch_scalar_u8_k},
+                                                              .matches = &matches,
+                                                              .arena = arena,
+                                                              .wanted = 2});
+        expect(!outcome.message, outcome.message);
+        expect(matches.counts[0] == 2 && value_of(matches.keys[0]) == 0 && matches.scores[0] == 0,
+               "A stored query finds itself first");
+        expect(value_of(matches.keys[1]) == 2 && matches.scores[1] == 1, "One substitution away comes second");
+
+        usearch_tape_view_t got = {0};
+        size_t written = 0;
+        usearch_sequence_get(&(usearch_sequence_get_t) {.index = index,
+                                                        .executor = executor,
+                                                        .outcome = &outcome,
+                                                        .key = key_of(1),
+                                                        .sequences = &got,
+                                                        .written = &written,
+                                                        .arena = arena});
+        expect(!outcome.message, outcome.message);
+        expect(written == 1 && got.offsets[1] - got.offsets[0] == 7 &&
+                   memcmp((uint8_t const*)got.data + got.offsets[0], "sitting", 7) == 0,
+               "Get hands the stored bytes back");
+        if (reloaded) break;
+
+        usearch_sequence_save(
+            &(usearch_sequence_save_t) {.index = index, .executor = executor, .outcome = &outcome, .path = path_view});
+        expect(!outcome.message, outcome.message);
+        usearch_sequence_free(index);
+        index = NULL;
+        usearch_sequence_load_ram(&(usearch_sequence_load_ram_t) {.index = &index,
+                                                                  .executor = executor,
+                                                                  .outcome = &outcome,
+                                                                  .path = path_view});
+        expect(!outcome.message, outcome.message);
+    }
+    usearch_sequence_index_description_t description = {0};
+    usearch_sequence_describe(&(usearch_sequence_describe_t) {.index = index,
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect(description.size == 4 && description.metadata.metric == usearch_sequence_metric_levenshtein_bytes_k,
+           "A loaded index describes the saved one");
+
+    // The same checkpoint served from storage answers reads as RAM does, refusing writes and saves.
+    usearch_executor_t storage = NULL;
+    usearch_executor_for_nvme(&(usearch_executor_for_nvme_t) {.executor = &storage, .outcome = &outcome, .threads = 1});
+    expect(!outcome.message, outcome.message);
+    usearch_sequence_index_t viewed = NULL;
+    usearch_sequence_view_nvme(&(
+        usearch_sequence_view_nvme_t) {.index = &viewed, .executor = storage, .outcome = &outcome, .path = path_view});
+    if (outcome.status == usearch_status_unsupported_k)
+        printf("Test: Sequence Round Trip - SKIPPED the NVMe view: %s\n", outcome.message);
+    else {
+        expect(!outcome.message, outcome.message);
+        usearch_matches_view_t viewed_matches = {0};
+        usearch_sequence_search(&(usearch_sequence_search_t) {.index = viewed,
+                                                              .executor = storage,
+                                                              .outcome = &outcome,
+                                                              .count = 1,
+                                                              .queries = {bytes, offsets, usearch_scalar_u8_k},
+                                                              .matches = &viewed_matches,
+                                                              .arena = arena,
+                                                              .wanted = 1});
+        expect(!outcome.message, outcome.message);
+        expect(viewed_matches.counts[0] == 1 && value_of(viewed_matches.keys[0]) == 0 && viewed_matches.scores[0] == 0,
+               "A view from storage finds a stored query at itself");
+        usearch_sequence_insert(&(usearch_sequence_insert_t) {.index = viewed,
+                                                              .executor = storage,
+                                                              .outcome = &outcome,
+                                                              .count = 1,
+                                                              .keys = {keys, sizeof(usearch_key_t)},
+                                                              .sequences = {bytes, offsets, usearch_scalar_u8_k}});
+        expect_eq(outcome.status, usearch_status_read_only_k, "A view from storage refuses every mutation");
+        usearch_sequence_save(
+            &(usearch_sequence_save_t) {.index = viewed, .executor = storage, .outcome = &outcome, .path = path_view});
+        expect_eq(outcome.status, usearch_status_unsupported_k, "A view from storage already is its checkpoint");
+        usearch_sequence_free(viewed);
+    }
+    usearch_executor_free(storage);
+    remove(path);
+
+    usearch_sequence_free(index);
+    usearch_arena_free(arena);
+    usearch_executor_free(executor);
+    printf("Test: Sequence Round Trip - PASSED\n");
+}
+
+/** Shapes round-trip the same way: a stored pose finds itself at zero, and `get` exports its points
+ *  back, before the save and after the load alike. A frozen point count refuses a shape of any
+ *  other. */
+void test_shapes_round_trip(void) {
+    printf("Test: Shapes Round Trip\n");
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t const executor = create_executor(0);
+    usearch_arena_t const arena = create_arena(executor);
+
+    float const points[] = {
+        0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, // a tetrahedron's corners
+        0, 0, 0, 2, 0, 0, 0, 2, 0, 0, 0, 2, // the same, twice the size
+        0, 0, 0, 1, 1, 0, 2, 3, 0, 4, 5, 1, // a bent chain
+    };
+    size_t const offsets[] = {0, 4, 8, 12};
+    usearch_key_t const keys[] = {key_of(0), key_of(1), key_of(2)};
+    usearch_shapes_index_t index = NULL;
+    usearch_shapes_init_ram(&(usearch_shapes_init_ram_t) {.index = &index,
+                                                          .outcome = &outcome,
+                                                          .metric = usearch_shapes_metric_chamfer_k,
+                                                          .quantization = usearch_scalar_f32_k,
+                                                          .points = 4});
+    expect(!outcome.message, outcome.message);
+
+    size_t const short_offsets[] = {0, 3};
+    usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = index,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .count = 1,
+                                                      .keys = {keys, sizeof(usearch_key_t)},
+                                                      .shapes = {points, short_offsets, usearch_scalar_f32_k}});
+    expect_eq(outcome.status, usearch_status_shape_mismatch_k, "A frozen point count refuses any other");
+    usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = index,
+                                                      .executor = executor,
+                                                      .outcome = &outcome,
+                                                      .count = 3,
+                                                      .keys = {keys, sizeof(usearch_key_t)},
+                                                      .shapes = {points, offsets, usearch_scalar_f32_k}});
+    expect(!outcome.message, outcome.message);
+
+    char const path[] = "usearch-test-c-shapes.safegraphs";
+    usearch_bytes_view_t const path_view = {(uint8_t const*)path, sizeof(path) - 1};
+    for (int reloaded = 0; reloaded != 2; ++reloaded) {
+        usearch_matches_view_t matches = {0};
+        usearch_shapes_search(&(usearch_shapes_search_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .count = 1,
+                                                          .queries = {points, offsets, usearch_scalar_f32_k},
+                                                          .matches = &matches,
+                                                          .arena = arena,
+                                                          .wanted = 1});
+        expect(!outcome.message, outcome.message);
+        expect(matches.counts[0] == 1 && value_of(matches.keys[0]) == 0 && fabs(matches.scores[0]) < 1e-5,
+               "A stored pose finds itself at zero");
+
+        usearch_tape_view_t got = {0};
+        size_t written = 0;
+        usearch_shapes_get(&(usearch_shapes_get_t) {.index = index,
+                                                    .executor = executor,
+                                                    .outcome = &outcome,
+                                                    .key = key_of(2),
+                                                    .shapes = &got,
+                                                    .written = &written,
+                                                    .arena = arena,
+                                                    .outputs_scalar = usearch_scalar_f32_k});
+        expect(!outcome.message, outcome.message);
+        expect(written == 1 && got.offsets[1] - got.offsets[0] == 4, "Get hands every point back");
+        float const* const exported = (float const*)got.data + got.offsets[0] * 3;
+        for (size_t coordinate = 0; coordinate != 12; ++coordinate)
+            expect(fabsf(exported[coordinate] - points[24 + coordinate]) < 1e-6f, "Get hands the stored pose back");
+        if (reloaded) break;
+
+        usearch_shapes_save(
+            &(usearch_shapes_save_t) {.index = index, .executor = executor, .outcome = &outcome, .path = path_view});
+        expect(!outcome.message, outcome.message);
+        usearch_shapes_free(index);
+        index = NULL;
+        usearch_shapes_load_ram(&(
+            usearch_shapes_load_ram_t) {.index = &index, .executor = executor, .outcome = &outcome, .path = path_view});
+        expect(!outcome.message, outcome.message);
+    }
+    usearch_shapes_index_description_t description = {0};
+    usearch_shapes_describe(&(usearch_shapes_describe_t) {.index = index,
+                                                          .executor = executor,
+                                                          .outcome = &outcome,
+                                                          .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect(description.size == 3 && description.total_points == 12 && description.metadata.points == 4,
+           "A loaded index describes the saved one");
+
+    // The same checkpoint served from storage answers reads as RAM does, refusing writes and saves.
+    usearch_executor_t storage = NULL;
+    usearch_executor_for_nvme(&(usearch_executor_for_nvme_t) {.executor = &storage, .outcome = &outcome, .threads = 1});
+    expect(!outcome.message, outcome.message);
+    usearch_shapes_index_t viewed = NULL;
+    usearch_shapes_view_nvme(
+        &(usearch_shapes_view_nvme_t) {.index = &viewed, .executor = storage, .outcome = &outcome, .path = path_view});
+    if (outcome.status == usearch_status_unsupported_k)
+        printf("Test: Shapes Round Trip - SKIPPED the NVMe view: %s\n", outcome.message);
+    else {
+        expect(!outcome.message, outcome.message);
+        usearch_matches_view_t viewed_matches = {0};
+        usearch_shapes_search(&(usearch_shapes_search_t) {.index = viewed,
+                                                          .executor = storage,
+                                                          .outcome = &outcome,
+                                                          .count = 1,
+                                                          .queries = {points, offsets, usearch_scalar_f32_k},
+                                                          .matches = &viewed_matches,
+                                                          .arena = arena,
+                                                          .wanted = 1});
+        expect(!outcome.message, outcome.message);
+        expect(viewed_matches.counts[0] == 1 && value_of(viewed_matches.keys[0]) == 0 &&
+                   fabs(viewed_matches.scores[0]) < 1e-5,
+               "A view from storage finds a stored pose at zero");
+        usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = viewed,
+                                                          .executor = storage,
+                                                          .outcome = &outcome,
+                                                          .count = 1,
+                                                          .keys = {keys, sizeof(usearch_key_t)},
+                                                          .shapes = {points, offsets, usearch_scalar_f32_k}});
+        expect_eq(outcome.status, usearch_status_read_only_k, "A view from storage refuses every mutation");
+        usearch_shapes_save(
+            &(usearch_shapes_save_t) {.index = viewed, .executor = storage, .outcome = &outcome, .path = path_view});
+        expect_eq(outcome.status, usearch_status_unsupported_k, "A view from storage already is its checkpoint");
+        usearch_shapes_free(viewed);
+    }
+    usearch_executor_free(storage);
+    remove(path);
+
+    usearch_shapes_free(index);
+    usearch_arena_free(arena);
+    usearch_executor_free(executor);
+    printf("Test: Shapes Round Trip - PASSED\n");
+}
+
+/** An observation of a position alone, every other field unrecorded. */
+usearch_geospatial_observation_t observed_at(double latitude_degrees, double longitude_degrees,
+                                             double altitude_metres) {
+    usearch_geospatial_observation_t const observation = {
+        latitude_degrees, longitude_degrees, altitude_metres, NAN, NAN, NAN, NAN, NAN, NAN, NAN, NAN};
+    return observation;
+}
+
+/** Geospatial round-trips the same way: an observation finds itself at zero metres and `get` hands
+ *  it back, before the save and after the load alike, while a ridge on the handle's terrain hides
+ *  what stands behind it. */
+void test_geospatial_round_trip(void) {
+    printf("Test: Geospatial Round Trip\n");
+    usearch_outcome_t outcome = {0};
+    usearch_executor_t const executor = create_executor(0);
+    usearch_arena_t const arena = create_arena(executor);
+
+    // Six rows about 56 m apart over flat ground, with a 100 m ridge along the third; every entry
+    // stands inside the grid, since one on its edge may round off it, and off the grid nothing
+    // blocks a sight line.
+    enum { terrain_rows = 6, terrain_columns = 3 };
+    float heights[terrain_rows * terrain_columns] = {0};
+    for (size_t column = 0; column != terrain_columns; ++column) heights[2 * terrain_columns + column] = 100;
+    usearch_geospatial_terrain_t const terrain = {.rows = terrain_rows,
+                                                  .columns = terrain_columns,
+                                                  .north_latitude_degrees = 51.5015,
+                                                  .west_longitude_degrees = -0.1005,
+                                                  .row_step_degrees = 0.0005,
+                                                  .column_step_degrees = 0.0005,
+                                                  .heights = heights};
+
+    // A viewer, one entry behind the ridge, one in the open on the terrain, and one in Paris.
+    usearch_geospatial_observation_t const observations[] = {observed_at(51.5, -0.1, 2), observed_at(51.501, -0.1, 2),
+                                                             observed_at(51.4995, -0.1, NAN),
+                                                             observed_at(48.8566, 2.3522, 35)};
+    usearch_key_t const keys[] = {key_of(0), key_of(1), key_of(2), key_of(3)};
+    usearch_geospatial_index_t index = NULL;
+    usearch_geospatial_init_ram(
+        &(usearch_geospatial_init_ram_t) {.index = &index, .outcome = &outcome, .terrain = terrain});
+    expect(!outcome.message, outcome.message);
+    usearch_geospatial_insert(&(usearch_geospatial_insert_t) {.index = index,
+                                                              .executor = executor,
+                                                              .outcome = &outcome,
+                                                              .count = 4,
+                                                              .keys = {keys, sizeof(usearch_key_t)},
+                                                              .observations = observations});
+    expect(!outcome.message, outcome.message);
+
+    char const path[] = "usearch-test-c-geospatial.safegraphs";
+    usearch_bytes_view_t const path_view = {(uint8_t const*)path, sizeof(path) - 1};
+    for (int reloaded = 0; reloaded != 2; ++reloaded) {
+        usearch_matches_view_t matches = {0};
+        usearch_geospatial_search(&(usearch_geospatial_search_t) {.index = index,
+                                                                  .executor = executor,
+                                                                  .outcome = &outcome,
+                                                                  .count = 1,
+                                                                  .queries = observations,
+                                                                  .relation = usearch_geospatial_relation_near_k,
+                                                                  .tolerance = {.metres = 500},
+                                                                  .matches = &matches,
+                                                                  .arena = arena,
+                                                                  .wanted = 4});
+        expect(!outcome.message, outcome.message);
+        expect(matches.counts[0] == 3 && value_of(matches.keys[0]) == 0 && matches.scores[0] < 0.01 &&
+                   value_of(matches.keys[1]) == 2 && value_of(matches.keys[2]) == 1,
+               "An observation finds itself at zero metres, nearest first, and the radius drops Paris");
+
+        usearch_geospatial_search(&(usearch_geospatial_search_t) {.index = index,
+                                                                  .executor = executor,
+                                                                  .outcome = &outcome,
+                                                                  .count = 1,
+                                                                  .queries = observations,
+                                                                  .relation = usearch_geospatial_relation_visible_k,
+                                                                  .tolerance = {.metres = 500},
+                                                                  .matches = &matches,
+                                                                  .arena = arena,
+                                                                  .wanted = 4});
+        expect(!outcome.message, outcome.message);
+        expect(matches.counts[0] == 2 && value_of(matches.keys[0]) == 0 && value_of(matches.keys[1]) == 2,
+               "The ridge hides the entry behind it");
+
+        usearch_geospatial_observation_t const* got = NULL;
+        size_t written = 0;
+        usearch_geospatial_get(&(usearch_geospatial_get_t) {.index = index,
+                                                            .executor = executor,
+                                                            .outcome = &outcome,
+                                                            .key = key_of(2),
+                                                            .observations = &got,
+                                                            .written = &written,
+                                                            .arena = arena});
+        expect(!outcome.message, outcome.message);
+        expect(written == 1 && fabs(got[0].latitude_degrees - 51.4995) < 1e-6 &&
+                   fabs(got[0].longitude_degrees + 0.1) < 1e-6 && fabs(got[0].altitude_metres) < 0.02 &&
+                   isnan(got[0].heading_degrees),
+               "Get hands the observation back, standing on the terrain");
+        if (reloaded) break;
+
+        usearch_geospatial_save(&(
+            usearch_geospatial_save_t) {.index = index, .executor = executor, .outcome = &outcome, .path = path_view});
+        expect(!outcome.message, outcome.message);
+        usearch_geospatial_free(index);
+        index = NULL;
+        usearch_geospatial_load_ram(&(usearch_geospatial_load_ram_t) {.index = &index,
+                                                                      .executor = executor,
+                                                                      .outcome = &outcome,
+                                                                      .path = path_view,
+                                                                      .terrain = terrain});
+        expect(!outcome.message, outcome.message);
+    }
+    usearch_geospatial_index_description_t description = {0};
+    usearch_geospatial_describe(&(usearch_geospatial_describe_t) {.index = index,
+                                                                  .executor = executor,
+                                                                  .outcome = &outcome,
+                                                                  .description = &description});
+    expect(!outcome.message, outcome.message);
+    expect(description.size == 4 && description.metadata.connectivity == 12, "A loaded index describes the saved one");
+    remove(path);
+
+    usearch_geospatial_free(index);
+    usearch_arena_free(arena);
+    usearch_executor_free(executor);
+    printf("Test: Geospatial Round Trip - PASSED\n");
+}
+
 /** A packed kind's row is as wide as its logical dimensions, so every product spans all of them -
  *  a row read at its storage width is either refused or scored over half its dimensions. */
 void test_multiply_packed(void) {
@@ -1936,6 +2329,9 @@ int main(int argc, char* argv[]) {
     if (selected("walks_name_their_index")) test_walks_name_their_index(dimension_counts[0]);
     if (selected("sample")) test_sample();
     if (selected("cursor_steps")) test_cursor_steps();
+    if (selected("sequence_round_trip")) test_sequence_round_trip();
+    if (selected("shapes_round_trip")) test_shapes_round_trip();
+    if (selected("geospatial_round_trip")) test_geospatial_round_trip();
 #if USEARCH_DENSE_DTYPES >= 2
     if (selected("multiply_packed")) test_multiply_packed();
 #endif

@@ -396,6 +396,40 @@ std::size_t check_shapes_packing(u64_t seed) {
     return failures;
 }
 
+/** A saved monolith read back from storage, every cloud a ragged row of points the view locates
+ *  through its directory and each round packs again. */
+std::size_t check_shapes_nvme(u64_t seed) {
+    using fixture_t = chamfer_fixture_t;
+    using scalar_t = fixture_t::scalar_t;
+    using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
+    using metric_t = shapes_metric<fixture_t::kit_t, scratch_t>;
+    using query_t = nk::shapes_packed<scalar_t, std::allocator_traits<scratch_t>::rebind_alloc<char>>;
+    using nvme_index_t =
+        us::basic::nvme_index<codec<scalar_t>, us::utilities::uuid_t, fixture_t::distance_t, blocking_files_engine<>>;
+    std::vector<std::vector<scalar_t>> const clouds = make_clouds<scalar_t>(32, stream_key(seed, "nvme"));
+
+    auto make_cloud = [&](std::size_t entry, counting_allocator_t const& allocator) {
+        return fixture_t::pack(clouds[entry], allocator);
+    };
+    auto make_metric = [](scratch_t const& allocator, std::size_t staging) noexcept {
+        metric_t metric {fixture_t::kernel_k, allocator};
+        status_t const ready = metric.init(staging);
+        return expected<metric_t> {std::move(metric), ready};
+    };
+    auto query_of = [&](std::size_t row, scratch_t const& allocator) noexcept {
+        std::array<std::span<scalar_t const>, 1> const query_clouds {clouds[row]};
+        auto [packed, packed_status] = query_t::make(query_clouds, allocator, 0);
+        return expected<query_t> {std::move(packed), status_of(packed_status)};
+    };
+    auto matches = [&](std::size_t entry, nk::matrix_view<scalar_t> const& view) noexcept {
+        std::vector<scalar_t> const& cloud = clouds[entry];
+        return view.extent(0) * 3 == cloud.size() &&
+               std::memcmp(view.data(), cloud.data(), cloud.size() * sizeof(scalar_t)) == 0;
+    };
+    return test_basic_nvme_view<fixture_t, nvme_index_t>(seed, clouds.size(), "chamfer", make_cloud, make_metric,
+                                                         query_of, matches);
+}
+
 std::size_t check_shapes(settings_t const& settings) {
     std::size_t failures = 0;
     failures += test_basic_scenarios<chamfer_fixture_t>(settings.seed);
@@ -410,6 +444,7 @@ std::size_t check_shapes(settings_t const& settings) {
     failures += check_shapes_codec<procrustes_fixture_t>(settings.seed);
     failures += check_shapes_packing<chamfer_fixture_t>(settings.seed);
     failures += check_shapes_packing<procrustes_fixture_t>(settings.seed);
+    failures += check_shapes_nvme(settings.seed);
     return report("shapes", failures);
 }
 

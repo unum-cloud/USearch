@@ -533,7 +533,7 @@ usearch_sibling(
     7826f358a51df3871fba5cc825ebab3e1163174a
 )
 usearch_sibling(
-    smashtable smashtable::header https://github.com/ashvardanian/SmashTable a7df2585228a444755ce85ac4b1a86dc425a3cee
+    smashtable smashtable::header https://github.com/ashvardanian/SmashTable e5404d996b2800fe92df8e966038f1953b0875a0
 )
 
 # Recorded without headers - each sibling owns its own - so `usearch::header` names nothing a consumer cannot resolve.

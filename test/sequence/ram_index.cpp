@@ -301,6 +301,39 @@ std::size_t check_overlap_kit(u64_t seed) {
     return failures;
 }
 
+/** A saved monolith read back from storage, its strings ragged rows the view locates through its
+ *  directory: generated strings, the empty one, and one crossing a 4 KiB block. */
+std::size_t check_sequence_nvme(u64_t seed) {
+    using scratch_t = arena_allocator<byte_t, forkunion_allocator_t>;
+    using metric_t = levenshtein_metric<sz_cap_any_k, sz_levenshtein_bytes_k, scratch_t>;
+    using nvme_index_t = us::basic::nvme_index<codec_t, us::utilities::uuid_t, i64_t, blocking_files_engine<>>;
+    std::vector<std::string> texts;
+    {
+        allocation_ledger_t ledger;
+        for (sequence_value_t const& value : generate_values(30, stream_key(seed, "nvme"), levenshtein_alphabet_k,
+                                                             levenshtein_symbols_k, counting_allocator_t {ledger}))
+            texts.emplace_back(std::string_view {value});
+    }
+    texts.emplace_back();
+    std::string& crossing = texts.emplace_back(5000, 'a');
+    crossing[4096] = 'b';
+
+    auto make_text = [&](std::size_t entry, counting_allocator_t const& allocator) {
+        return make_value(texts[entry], allocator);
+    };
+    auto make_metric = [](scratch_t const& allocator, std::size_t staging) noexcept {
+        metric_t metric {allocator};
+        status_t const ready = metric.init(staging);
+        return expected<metric_t> {std::move(metric), ready};
+    };
+    auto query_of = [&](std::size_t row, scratch_t const&) noexcept {
+        return expected<std::string_view> {texts[row], status_t::success_k};
+    };
+    auto matches = [&](std::size_t entry, std::string_view view) noexcept { return view == texts[entry]; };
+    return test_basic_nvme_view<levenshtein_bytes_fixture_t, nvme_index_t>(seed, texts.size(), "levenshtein", make_text,
+                                                                           make_metric, query_of, matches);
+}
+
 std::size_t check_sequence(settings_t const& settings) {
     std::size_t failures = 0;
     failures += test_basic_scenarios<levenshtein_bytes_fixture_t>(settings.seed);
@@ -318,6 +351,7 @@ std::size_t check_sequence(settings_t const& settings) {
     failures += check_levenshtein_kit<sz_cap_any_k, sz_levenshtein_runes_k>(settings.seed);
     failures += check_overlap_kit<sz_cap_serial_k>(settings.seed);
     failures += check_overlap_kit<sz_cap_any_k>(settings.seed);
+    failures += check_sequence_nvme(settings.seed);
     return report("sequence", failures);
 }
 

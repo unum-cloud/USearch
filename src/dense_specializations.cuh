@@ -2,28 +2,21 @@
  *  @file src/dense_specializations.cuh
  *  @author Ash Vardanian
  *  @date August 14, 2026
- *  @brief What one dense arm is spelled with and compiled through: the scalar and capability
- *      tables, the CPU and GPU classes with their waiters, and the
- *      @c specialized_index view every class unit instantiates.
+ *  @brief What one dense arm is spelled with and compiled through: the GPU classes, the residency
+ *      aliases, and the @c specialized_index view every class unit instantiates.
  *
  *  Every class unit includes this to instantiate its arms; @c dense_index.cuh adds the variant
- *  grid, the handle and the exported C entry points on top of it.
+ *  grid, the handle and the exported C entry points on top of it. The scalar tables, the CPU
+ *  classes and the call scaffolding every modality shares come from @c lib.hpp.
  */
 #pragma once
 
-#include <cassert> // `assert` - the CPU casts never refuse
 #include <cstddef> // `std::size_t`
 
 #include <array>       // `std::array` - the value lookup's batch
-#include <atomic>      // `std::atomic_ref` - the outcome's status word
 #include <bit>         // `std::bit_cast` - the C key struct & `us::utilities::uuid_t` share sixteen bytes
-#include <mutex>       // `std::lock_guard` over the ticks' lock
 #include <span>        // `std::span` - the search verbs' landing matrices
 #include <string_view> // `std::string_view` - kernel tokens & checkpoint paths
-#include <type_traits> // `std::is_same_v` - the residency discrimination
-
-#include <forkunion/capabilities.hpp> // `fu::x86_pause_t`, `fu::arm64_wfet_t` & waiter kin
-#include <forkunion/types.hpp>        // `fu::spin_mutex_t` - the ticks' lock
 
 #include "usearch/dense_index.h"
 #include "usearch/dense/nvme_indexes.hpp"
@@ -38,6 +31,8 @@
 #include "usearch/dense/vram_apple_indexes.hpp"
 #endif
 
+#include "lib.hpp"
+
 /** How many storage dtypes the arms cover, from the front of the ladder bf16, u1, i8, e4m3, f16,
  *  u8, e5m2, i4, u4, e3m2, e2m3. CMake passes it, so only builds that bypass CMake take this
  *  default. */
@@ -48,39 +43,7 @@
 #error "USEARCH_DENSE_DTYPES must be an integer from 1 to 11"
 #endif
 
-using namespace unum::usearch;
-using namespace unum::usearch::utilities;
-namespace us = unum::usearch;
-namespace nk = ashvardanian::numkong;
-namespace fu = ashvardanian::forkunion;
-
 #pragma region Scaffolding
-
-/** The C scalar vocabulary beside NumKong's - independent enumerations, so both crossings read
- *  one table. */
-struct scalar_dtype_pair_t {
-    usearch_scalar_t scalar;
-    nk_dtype_t dtype;
-};
-inline constexpr scalar_dtype_pair_t scalar_dtype_pairs_k[] = {
-    {usearch_scalar_f64_k, nk_f64_k},   {usearch_scalar_f32_k, nk_f32_k},   {usearch_scalar_bf16_k, nk_bf16_k},
-    {usearch_scalar_f16_k, nk_f16_k},   {usearch_scalar_e5m2_k, nk_e5m2_k}, {usearch_scalar_e4m3_k, nk_e4m3_k},
-    {usearch_scalar_e3m2_k, nk_e3m2_k}, {usearch_scalar_e2m3_k, nk_e2m3_k}, {usearch_scalar_i8_k, nk_i8_k},
-    {usearch_scalar_i4x2_k, nk_i4_k},   {usearch_scalar_i32_k, nk_i32_k},   {usearch_scalar_u8_k, nk_u8_k},
-    {usearch_scalar_u4x2_k, nk_u4_k},   {usearch_scalar_u1x8_k, nk_u1_k},
-};
-
-inline nk_dtype_t nk_dtype_of(usearch_scalar_t scalar) noexcept {
-    for (scalar_dtype_pair_t const& pair : scalar_dtype_pairs_k)
-        if (pair.scalar == scalar) return pair.dtype;
-    return nk_dtype_unknown_k;
-}
-
-inline usearch_scalar_t usearch_scalar_of(nk_dtype_t dtype) noexcept {
-    for (scalar_dtype_pair_t const& pair : scalar_dtype_pairs_k)
-        if (pair.dtype == dtype) return pair.scalar;
-    return usearch_scalar_unknown_k;
-}
 
 /** A kernel kind lifted back onto the C metric vocabulary. */
 inline usearch_dense_metric_t usearch_metric_of(nk_kernel_kind_t kernel) noexcept {
@@ -93,338 +56,6 @@ inline usearch_dense_metric_t usearch_metric_of(nk_kernel_kind_t kernel) noexcep
     default: return usearch_dense_metric_unknown_k;
     }
 }
-
-/** Reports a handler hears when the caller leaves @c usearch_progress_t::steps zero, a tenth of the
- *  call apart. */
-inline constexpr std::size_t default_progress_steps_k = 10;
-
-/** Codenames of the dispatchable CPU tiers, composed into the capability string once. */
-struct numkong_capability_name_t {
-    nk_capability_t bit;
-    char const* name;
-};
-inline constexpr numkong_capability_name_t numkong_capability_names_k[] = {
-    {nk_cap_serial_k, "serial"},
-    {nk_cap_neon_k, "neon"},
-    {nk_cap_neonsdot_k, "neonsdot"},
-    {nk_cap_neonbfdot_k, "neonbfdot"},
-    {nk_cap_neonfhm_k, "neonfhm"},
-    {nk_cap_neonfp8_k, "neonfp8"},
-    {nk_cap_sme_k, "sme"},
-    {nk_cap_smebi32_k, "smebi32"},
-    {nk_cap_haswell_k, "haswell"},
-    {nk_cap_skylake_k, "skylake"},
-    {nk_cap_icelake_k, "icelake"},
-    {nk_cap_genoa_k, "genoa"},
-    {nk_cap_sapphire_k, "sapphire"},
-    {nk_cap_sapphireamx_k, "sapphireamx"},
-    {nk_cap_graniteamx_k, "graniteamx"},
-    {nk_cap_alder_k, "alder"},
-    {nk_cap_sierra_k, "sierra"},
-    {nk_cap_diamond_k, "diamond"},
-    {nk_cap_rvv_k, "rvv"},
-    {nk_cap_rvvbb_k, "rvvbb"},
-    {nk_cap_v128_k, "v128"},
-    {nk_cap_v128relaxed_k, "v128relaxed"},
-};
-
-#pragma region CPU Classes
-
-/** Lowers one CPU class onto NumKong's compute mask - cumulative within a platform, so the chains
- *  pick their best row per dtype under it. */
-constexpr nk_capability_t numkong_capabilities_of(cpu_class_t cpu_class) noexcept {
-    switch (cpu_class) {
-    case cpu_class_t::intel_haswell_k: return nk_cap_serial_k | nk_cap_haswell_k;
-    case cpu_class_t::intel_sierra_k:
-        return numkong_capabilities_of(cpu_class_t::intel_haswell_k) | nk_cap_alder_k | nk_cap_sierra_k;
-    case cpu_class_t::intel_skylake_k: return numkong_capabilities_of(cpu_class_t::intel_haswell_k) | nk_cap_skylake_k;
-    case cpu_class_t::intel_icelake_k: return numkong_capabilities_of(cpu_class_t::intel_skylake_k) | nk_cap_icelake_k;
-    case cpu_class_t::amd_genoa_k: return numkong_capabilities_of(cpu_class_t::intel_icelake_k) | nk_cap_genoa_k;
-    case cpu_class_t::intel_sapphire_k:
-        return numkong_capabilities_of(cpu_class_t::amd_genoa_k) | nk_cap_sapphire_k | nk_cap_sapphireamx_k;
-    case cpu_class_t::intel_granite_k:
-        return numkong_capabilities_of(cpu_class_t::intel_sapphire_k) | nk_cap_graniteamx_k;
-    case cpu_class_t::intel_diamond_k:
-        return numkong_capabilities_of(cpu_class_t::intel_granite_k) | nk_cap_alder_k | nk_cap_sierra_k |
-               nk_cap_diamond_k;
-    case cpu_class_t::aws_g2_k: return nk_cap_serial_k | nk_cap_neon_k;
-    case cpu_class_t::apple_m2_k:
-    case cpu_class_t::aws_g5_k:
-        return numkong_capabilities_of(cpu_class_t::aws_g2_k) | nk_cap_neonsdot_k | nk_cap_neonbfdot_k |
-               nk_cap_neonfhm_k;
-    case cpu_class_t::apple_m4_k:
-        return numkong_capabilities_of(cpu_class_t::apple_m2_k) | nk_cap_sme_k | nk_cap_smebi32_k;
-    case cpu_class_t::nvidia_vera_k: return numkong_capabilities_of(cpu_class_t::aws_g5_k) | nk_cap_neonfp8_k;
-    case cpu_class_t::alibaba_c930_k: return nk_cap_serial_k | nk_cap_rvv_k | nk_cap_rvvbb_k;
-    case cpu_class_t::wasm32_v128_k: return nk_cap_serial_k | nk_cap_v128_k;
-    case cpu_class_t::wasm64_extended_k:
-        return numkong_capabilities_of(cpu_class_t::wasm32_v128_k) | nk_cap_v128relaxed_k;
-    default: return nk_cap_serial_k;
-    }
-}
-
-/** The class a refused rung degrades to - the next one down its own lineage, which is the class an
- *  arm must be distinct from to earn instantiation. On x86 the AVX-512 P-cores and the AVX-VNNI
- *  E-cores share the Haswell floor. */
-constexpr cpu_class_t parent_class_of(cpu_class_t cpu_class) noexcept {
-    switch (cpu_class) {
-    case cpu_class_t::intel_diamond_k: return cpu_class_t::intel_granite_k;
-    case cpu_class_t::intel_granite_k: return cpu_class_t::intel_sapphire_k;
-    case cpu_class_t::intel_sapphire_k: return cpu_class_t::amd_genoa_k;
-    case cpu_class_t::amd_genoa_k: return cpu_class_t::intel_icelake_k;
-    case cpu_class_t::intel_icelake_k: return cpu_class_t::intel_skylake_k;
-    case cpu_class_t::intel_skylake_k: return cpu_class_t::intel_haswell_k;
-    case cpu_class_t::intel_sierra_k: return cpu_class_t::intel_haswell_k;
-    case cpu_class_t::nvidia_vera_k: return cpu_class_t::aws_g5_k;
-    case cpu_class_t::aws_g5_k: return cpu_class_t::apple_m2_k;
-    case cpu_class_t::apple_m4_k: return cpu_class_t::apple_m2_k;
-    case cpu_class_t::apple_m2_k: return cpu_class_t::aws_g2_k;
-    case cpu_class_t::wasm64_extended_k: return cpu_class_t::wasm32_v128_k;
-    default: return cpu_class_t::serial_k;
-    }
-}
-
-/** The wait instruction one CPU class pairs: x86 spins PAUSE, the WAITPKG Xeons and the monitored
- *  Arm & RISC-V classes arm TPAUSE, WFET & WRS, everything else yields - as does any class whose
- *  @c FORKUNION_TARGET_<BIT> is off in the probe list. */
-template <cpu_class_t cpu_class_>
-struct waiter_for_cpu_class {
-    using type = fu::standard_yield_t;
-};
-#if FORKUNION_TARGET_X86_PAUSE
-template <>
-struct waiter_for_cpu_class<cpu_class_t::intel_haswell_k> {
-    using type = fu::x86_pause_t;
-};
-template <>
-struct waiter_for_cpu_class<cpu_class_t::intel_skylake_k> {
-    using type = fu::x86_pause_t;
-};
-template <>
-struct waiter_for_cpu_class<cpu_class_t::intel_icelake_k> {
-    using type = fu::x86_pause_t;
-};
-template <>
-struct waiter_for_cpu_class<cpu_class_t::amd_genoa_k> {
-    using type = fu::x86_pause_t;
-};
-template <>
-struct waiter_for_cpu_class<cpu_class_t::intel_sapphire_k> {
-    using type = fu::x86_pause_t;
-};
-template <>
-struct waiter_for_cpu_class<cpu_class_t::intel_granite_k> {
-    using type = fu::x86_pause_t;
-};
-#endif
-#if FORKUNION_TARGET_X86_TPAUSE
-template <>
-struct waiter_for_cpu_class<cpu_class_t::intel_sierra_k> {
-    using type = fu::x86_tpause_t;
-};
-template <>
-struct waiter_for_cpu_class<cpu_class_t::intel_diamond_k> {
-    using type = fu::x86_tpause_t;
-};
-#endif
-#if FORKUNION_TARGET_ARM64_YIELD
-template <>
-struct waiter_for_cpu_class<cpu_class_t::aws_g2_k> {
-    using type = fu::arm64_yield_t;
-};
-template <>
-struct waiter_for_cpu_class<cpu_class_t::apple_m2_k> {
-    using type = fu::arm64_yield_t;
-};
-template <>
-struct waiter_for_cpu_class<cpu_class_t::apple_m4_k> {
-    using type = fu::arm64_yield_t;
-};
-#endif
-#if FORKUNION_TARGET_ARM64_WFET
-template <>
-struct waiter_for_cpu_class<cpu_class_t::aws_g5_k> {
-    using type = fu::arm64_wfet_t;
-};
-template <>
-struct waiter_for_cpu_class<cpu_class_t::nvidia_vera_k> {
-    using type = fu::arm64_wfet_t;
-};
-#endif
-#if FORKUNION_TARGET_RISC5_WRS
-template <>
-struct waiter_for_cpu_class<cpu_class_t::alibaba_c930_k> {
-    using type = fu::risc5_wrs_t;
-};
-#endif
-
-/** The waiter a CPU class pairs, spelled short for the arms' explicit instantiations. */
-template <cpu_class_t cpu_class_>
-using waiter_of = typename waiter_for_cpu_class<cpu_class_>::type;
-
-/** The atomic reference one CPU class pairs: single-instruction LSE read-modify-writes under RCpc
- *  acquiring loads on the Armv8.3+ classes, conditional adds on the CMPCCXADD Xeons, @c amocas on
- *  Zacas RISC-V - the floors, the older classes, and any class whose @c FORKUNION_TARGET_<BIT> is off in
- *  the probe list take the standard one. */
-template <cpu_class_t cpu_class_>
-struct atomic_ref_for_cpu_class {
-    template <typename value_type_>
-    using type = fu::standard_atomic_ref<value_type_>;
-};
-#if FORKUNION_TARGET_X86_CMPCCXADD
-template <>
-struct atomic_ref_for_cpu_class<cpu_class_t::intel_sierra_k> {
-    template <typename value_type_>
-    using type = fu::x86_cmpccxadd_atomic_ref<value_type_>;
-};
-template <>
-struct atomic_ref_for_cpu_class<cpu_class_t::intel_diamond_k> {
-    template <typename value_type_>
-    using type = fu::x86_cmpccxadd_atomic_ref<value_type_>;
-};
-#endif
-#if FORKUNION_TARGET_ARM64_RCPC
-template <>
-struct atomic_ref_for_cpu_class<cpu_class_t::apple_m2_k> {
-    template <typename value_type_>
-    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
-};
-template <>
-struct atomic_ref_for_cpu_class<cpu_class_t::apple_m4_k> {
-    template <typename value_type_>
-    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
-};
-template <>
-struct atomic_ref_for_cpu_class<cpu_class_t::aws_g5_k> {
-    template <typename value_type_>
-    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
-};
-template <>
-struct atomic_ref_for_cpu_class<cpu_class_t::nvidia_vera_k> {
-    template <typename value_type_>
-    using type = fu::arm64_rcpc_atomic_ref<value_type_>;
-};
-#elif FORKUNION_TARGET_ARM64_LSE
-template <>
-struct atomic_ref_for_cpu_class<cpu_class_t::apple_m2_k> {
-    template <typename value_type_>
-    using type = fu::arm64_lse_atomic_ref<value_type_>;
-};
-template <>
-struct atomic_ref_for_cpu_class<cpu_class_t::apple_m4_k> {
-    template <typename value_type_>
-    using type = fu::arm64_lse_atomic_ref<value_type_>;
-};
-template <>
-struct atomic_ref_for_cpu_class<cpu_class_t::aws_g5_k> {
-    template <typename value_type_>
-    using type = fu::arm64_lse_atomic_ref<value_type_>;
-};
-template <>
-struct atomic_ref_for_cpu_class<cpu_class_t::nvidia_vera_k> {
-    template <typename value_type_>
-    using type = fu::arm64_lse_atomic_ref<value_type_>;
-};
-#endif
-#if FORKUNION_TARGET_RISC5_ZACAS
-template <>
-struct atomic_ref_for_cpu_class<cpu_class_t::alibaba_c930_k> {
-    template <typename value_type_>
-    using type = fu::risc5_zacas_atomic_ref<value_type_>;
-};
-#endif
-
-/** The cache hints one CPU class pairs: the x86 classes demote with CLDEMOTE and the Arm classes
- *  prefetch with PRFM, all in hint or reserved-NOP space, so no class gains a bit to confirm. */
-template <cpu_class_t cpu_class_>
-struct cache_hints_for_cpu_class {
-    using type = fu::standard_cache_hints_t;
-};
-#if FORKUNION_TARGET_X86_CLDEMOTE
-template <>
-struct cache_hints_for_cpu_class<cpu_class_t::intel_haswell_k> {
-    using type = fu::x86_cache_hints_t;
-};
-template <>
-struct cache_hints_for_cpu_class<cpu_class_t::intel_skylake_k> {
-    using type = fu::x86_cache_hints_t;
-};
-template <>
-struct cache_hints_for_cpu_class<cpu_class_t::intel_icelake_k> {
-    using type = fu::x86_cache_hints_t;
-};
-template <>
-struct cache_hints_for_cpu_class<cpu_class_t::amd_genoa_k> {
-    using type = fu::x86_cache_hints_t;
-};
-template <>
-struct cache_hints_for_cpu_class<cpu_class_t::intel_sapphire_k> {
-    using type = fu::x86_cache_hints_t;
-};
-template <>
-struct cache_hints_for_cpu_class<cpu_class_t::intel_granite_k> {
-    using type = fu::x86_cache_hints_t;
-};
-template <>
-struct cache_hints_for_cpu_class<cpu_class_t::intel_sierra_k> {
-    using type = fu::x86_cache_hints_t;
-};
-template <>
-struct cache_hints_for_cpu_class<cpu_class_t::intel_diamond_k> {
-    using type = fu::x86_cache_hints_t;
-};
-#endif
-#if FORKUNION_TARGET_ARM64_PRFM
-template <>
-struct cache_hints_for_cpu_class<cpu_class_t::aws_g2_k> {
-    using type = fu::arm64_prefetch_cache_hints_t;
-};
-template <>
-struct cache_hints_for_cpu_class<cpu_class_t::apple_m2_k> {
-    using type = fu::arm64_prefetch_cache_hints_t;
-};
-template <>
-struct cache_hints_for_cpu_class<cpu_class_t::apple_m4_k> {
-    using type = fu::arm64_prefetch_cache_hints_t;
-};
-template <>
-struct cache_hints_for_cpu_class<cpu_class_t::aws_g5_k> {
-    using type = fu::arm64_prefetch_cache_hints_t;
-};
-template <>
-struct cache_hints_for_cpu_class<cpu_class_t::nvidia_vera_k> {
-    using type = fu::arm64_prefetch_cache_hints_t;
-};
-#endif
-
-/** The spin hints every core of an architecture carries - PAUSE, YIELD, Zihintpause: the runtime
- *  confirms nothing about them, and a class differing by one alone earns no rung. */
-inline constexpr fu::capabilities_t baseline_hints_k = fu::capability_x86_pause_k | fu::capability_arm64_yield_k |
-                                                       fu::capability_risc5_pause_k;
-
-/** Lowers one CPU class onto ForkUnion's mask - the bits the runtime must confirm before the
- *  class's waiter and atomic reference are trusted, read off the two types themselves. */
-template <cpu_class_t cpu_class_>
-constexpr fu::capabilities_t forkunion_capabilities_of() noexcept {
-    constexpr fu::capabilities_t waits_k = waiter_of<cpu_class_>::capability_k;
-    constexpr fu::capabilities_t atomics_k = atomic_ref_for_cpu_class<cpu_class_>::template type<u32_t>::capabilities_k;
-    return static_cast<fu::capabilities_t>((waits_k | atomics_k) & ~baseline_hints_k);
-}
-
-/** Whether every compute bit one CPU class lowers onto is present in @p available. */
-inline bool numkong_admits(nk_capability_t available, cpu_class_t cpu_class) noexcept {
-    nk_capability_t const wanted = numkong_capabilities_of(cpu_class);
-    return (available & wanted) == wanted;
-}
-
-/** Whether the runtime confirms every ForkUnion bit one CPU class needs. */
-template <cpu_class_t cpu_class_>
-inline bool forkunion_admits() noexcept {
-    constexpr fu::capabilities_t wanted = forkunion_capabilities_of<cpu_class_>();
-    return (fu::runtime_capabilities() & wanted) == wanted;
-}
-
-#pragma endregion CPU Classes
 
 /** Codenames of the GPU classes a VRAM alternative dispatches onto. */
 struct gpu_class_name_t {
@@ -472,81 +103,9 @@ constexpr nk_capability_t numkong_capabilities_of(gpu_class_t gpu_class) noexcep
     return nk_cap_serial_k;
 }
 
-/** Marks @p outcome as running; no waiter watches for this store, so it is relaxed. */
-inline void propagate_pending(usearch_outcome_t* outcome) noexcept {
-    outcome->message = nullptr;
-    std::atomic_ref<usearch_status_t> {outcome->status}.store(usearch_status_deferred_k, std::memory_order_relaxed);
-}
-
-/** The one final write to @p outcome: the message, then the status every waiter acquires. The call
- *  touches nothing it was passed after this, and the message is null exactly on success. */
-inline bool propagate_error(usearch_status_t status, usearch_outcome_t* outcome, char const* message) noexcept {
-    bool const succeeded = status == usearch_status_success_k;
-    outcome->message = succeeded ? nullptr : message;
-    std::atomic_ref<usearch_status_t> final_status {outcome->status};
-    final_status.store(status, std::memory_order_release);
-    final_status.notify_all();
-    return succeeded;
-}
-
-/** The engine-side overload: the C++ mirror shares the ABI's values, so crossing is a cast, and an
- *  unnamed @p message falls back to the status's own static text. */
-inline bool propagate_error(status_t status, usearch_outcome_t* outcome, char const* message = nullptr) noexcept {
-    return propagate_error(static_cast<usearch_status_t>(status), outcome,
-                           message ? message : status_to_string(status));
-}
-
-/** Adds one fan-out's telemetry into the caller's stats - accumulating, so chunked verbs report
- *  the whole call rather than the last chunk. */
-template <typename result_type_>
-inline void accumulate_stats(usearch_dense_traversal_stats_t* stats, result_type_ const& result) noexcept {
-    if (!stats) return;
-    stats->visited_members += result.visited_members;
-    stats->computed_distances += result.computed_distances;
-    stats->restarts += result.restarts;
-}
-
-/** Whether a result carries traversal telemetry - one probe both crossings read. */
-template <typename value_type_>
-concept carries_telemetry = requires(value_type_ const& value) { value.visited_members; };
-
-/** The one crossing for a fallible step: folds telemetry into @p stats when the payload carries
- *  any, finishes @p outcome only on failure, and answers whether @c .value is readable. */
-template <typename value_type_>
-inline bool crossed(expected<value_type_> const& result, usearch_dense_traversal_stats_t* stats,
-                    usearch_outcome_t* outcome, char const* message = nullptr) noexcept {
-    if constexpr (carries_telemetry<value_type_>) accumulate_stats(stats, result.value);
-    return result || propagate_error(result.status, outcome, message);
-}
-
-/** The C key struct and the engine's @c utilities::uuid_t share sixteen bytes - one bit cast in. */
-inline us::utilities::uuid_t uuid_of(usearch_key_t key) noexcept { return std::bit_cast<us::utilities::uuid_t>(key); }
-
 #pragma endregion Scaffolding
 
 #pragma region Specialized Index
-
-/** Residency discrimination off the alternative's own executor type - no second tag exists to
- *  disagree with the variant. */
-template <typename multi_type_>
-inline constexpr bool is_ram_index = std::is_same_v<typename multi_type_::executor_t, forkunion_executor_t>;
-
-/** Whether an executor drives GPUs: every vendor's names the vendor it drives. */
-template <typename executor_type_>
-inline constexpr bool is_gpu_executor = requires { executor_type_::vendor_k; };
-
-template <typename multi_type_>
-inline constexpr bool is_vram_index = is_gpu_executor<typename multi_type_::executor_t>;
-
-/** The vendor a VRAM arm's devices belong to, and @c unknown_k for every other residency. */
-template <typename multi_type_>
-constexpr gpu_vendor_t gpu_vendor_of_index() noexcept {
-    if constexpr (is_vram_index<multi_type_>) return multi_type_::vendor_k;
-    else return gpu_vendor_t::unknown_k;
-}
-
-template <typename multi_type_>
-inline constexpr bool is_nvme_index = std::is_same_v<typename multi_type_::executor_t, nvme_executor_t>;
 
 /** One RAM alternative: the CPU class alone names the rung, lowering onto its NumKong mask, its waiter,
  *  its atomic reference and its cache hints. */
@@ -581,24 +140,6 @@ using vram_amd_indexes =
 template <nk_dtype_t dtype_>
 using vram_apple_indexes = us::dense::vram_apple_indexes<us::utilities::uuid_t, dtype_>;
 #endif
-
-/** The C predicate lifted onto the index's key vocabulary, judging every quad the walk scores in
- *  one call through buffers of the C types. */
-struct key_predicate_t {
-    usearch_predicate_t predicate;
-
-    void operator()(std::span<us::utilities::uuid_t const> keys, std::span<admission_t> admissions) const noexcept {
-        if (keys.empty()) return;
-        std::array<usearch_key_t, 4> c_keys;
-        std::array<usearch_admission_t, 4> c_admissions;
-        assert(keys.size() <= c_keys.size() && "Walks judge a quad at a time");
-        for (std::size_t index = 0; index != keys.size(); ++index)
-            c_keys[index] = std::bit_cast<usearch_key_t>(keys[index]);
-        predicate.callback(c_keys.data(), c_admissions.data(), keys.size(), predicate.state);
-        for (std::size_t index = 0; index != keys.size(); ++index)
-            admissions[index] = static_cast<admission_t>(c_admissions[index]);
-    }
-};
 
 /** The C value lookup lifted onto the index's key vocabulary: one callback per scored batch, a NULL row
  *  answering an empty view that refuses the call. */
@@ -653,52 +194,6 @@ struct us::dense::cuda_value_lookup_of<nvidia_attend_lookup_t::device_lookup_k> 
     using type = nvidia_attend_lookup_t;
 };
 #endif
-
-/** One call's reports: the C handler, serialized for the executor's threads, which the contract
- *  promises it never sees concurrently, thinned to the caller's steps, and the slice a batch verb
- *  hands its engine whole. */
-struct progress_ticks_t {
-    usearch_progress_t progress;
-    std::size_t total;
-    std::size_t done = 0;   // Counted under the mutex that already serializes the handler.
-    std::size_t closed = 0; // The last step a forwarded tick closed.
-    fu::spin_mutex_t mutex;
-
-    progress_ticks_t(usearch_progress_t progress, std::size_t total) noexcept : progress(progress), total(total) {}
-
-    /** Units each slice of a batch spans: a step's share with a handler, the whole batch
-     *  without. */
-    std::size_t slice() const noexcept {
-        return progress.callback ? divide_round_up<std::size_t>(total, steps_()) : total;
-    }
-
-    continuation_t operator()(std::size_t) noexcept {
-        if (!progress.callback) return continuation_t::continue_k;
-        std::lock_guard guard {mutex};
-        return forward_(++done, total);
-    }
-
-    /** The sibling for verbs that count their own units and know their own population - a
-     *  refinement ticks the nodes visited so far, which no counter here could derive. */
-    continuation_t operator()(std::size_t finished, std::size_t population) noexcept {
-        if (!progress.callback) return continuation_t::continue_k;
-        std::lock_guard guard {mutex};
-        return forward_(finished, population);
-    }
-
-  private:
-    std::size_t steps_() const noexcept { return progress.steps ? progress.steps : default_progress_steps_k; }
-
-    /** Hands the C handler a tick that closes a new step, or the last one; the caller holds the
-     *  mutex. */
-    continuation_t forward_(std::size_t finished, std::size_t population) noexcept {
-        std::size_t const step = finished >= population ? steps_() : finished / divide_round_up(population, steps_());
-        if (step <= closed) return continuation_t::continue_k;
-        closed = step;
-        return progress.callback(finished, population, progress.state) == usearch_cancel_k ? continuation_t::cancel_k
-                                                                                           : continuation_t::continue_k;
-    }
-};
 
 /** One arm's verbs, fixed to the C layer's callback types and wrapped as non-template members of a
  *  view over the index: an explicit instantiation compiles exactly these bodies in the arm's unit,

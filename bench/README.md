@@ -30,7 +30,13 @@ The algebra family measures the graph products `multiply` and the graph attentio
 - `usearch_bench_dense_vram_indexes_algebra` builds one `dense::vram_nvidia_indexes` with a shard per `USEARCH_DEVICES` ordinal and isolates the same verbs across GPUs, the shards' attention merged on the first device.
 - `usearch_bench_dense_nvme_indexes_algebra` views the same saved parts as one `dense::nvme_indexes` and isolates the same verbs answered from storage, with the reads and bytes each row costs.
 
-Each search binary prints a `Machine` block, an `Insertions` block and a `Queries` block to standard output and nothing else, so a run is its transcript; the `nvme` one prints a `Storage` block in place of `Insertions`.
+The sequence and shapes binaries drive one RAM index through the C interface, as users do, holding the file's last `--queries` entries out of it, and judge the hits against an exact scan of `--oracle-queries`.
+A hit counts when its distance is within the exact k-th, so edit distances, where many entries tie, are not undercounted.
+
+- `usearch_bench_sequence_ram_index_search` reads `--base-texts`, one entry per line, under `levenshtein`, `levenshtein-utf8` or `overlap` with `--window-widths`.
+- `usearch_bench_shapes_ram_index_search` reads `--base-points`, a `.fbin` or `.f16bin` of 3 columns stored in that scalar, cut by `--base-counts`, an `.ibin` of points per shape, under `chamfer`, `hausdorff`, `gromov_wasserstein` or `wasserstein_procrustes`.
+
+Each dense search binary prints a `Machine` block, an `Insertions` block and a `Queries` block to standard output and nothing else, so a run is its transcript; the `nvme` one prints a `Storage` block in place of `Insertions`.
 The `Insertions` block reports the wall time, the throughput in IPS, the distances computed with the shares spent in refinement, the visited members and the restarts.
 The `Queries` block reports the throughput in QPS, the latency, the distances and members per query, and the judgment.
 

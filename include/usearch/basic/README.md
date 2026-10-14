@@ -1,7 +1,7 @@
 # Baseline Indexes
 
 The readable reference tier: a graph index over arbitrary payloads, scored by any batched metric you write, under keys you choose.
-It needs the standard library and the OS headers only, so together with `utilities/` it ships as a standalone header-only library.
+Its RAM tier needs the standard library and the OS headers only, so together with `utilities/` it ships as a standalone header-only library.
 The sequence, shapes and geospatial modalities are instantiations of it: `sequence::ram_index` over StringZilla strings, `shapes::ram_index` over NumKong shape packs, and `geospatial::ram_index` over Earth-fixed positions.
 Specialized optimizations, like lock-free readers and SIMD kernel kits, belong to the dense family instead.
 
@@ -102,3 +102,13 @@ Payloads are arbitrary objects, so `save` and `load` take a codec that encodes e
 - `load(input, value)` decodes it into a pre-constructed record.
 
 `save` fills five caller-placed columns sized from `columns_extents`, while searches keep running, and `load` reads them back into an empty index, publishing everything at once.
+
+## Storage
+
+`basic::nvme_index` serves the SafeGraphs checkpoints a RAM index saved from block storage, read-only, through the same storage walk as the dense tier.
+A view keeps each part's column offsets and, for every ragged column, an Elias-Fano directory of its row starts at a few bits per row, so every row costs one covering read.
+It reaches ForkUnion through `utilities/nvme_device.hpp` and SmashTable for the directories.
+
+- `view(path, paths, metric, executor)` opens a monolith or a manifest, building the directories on the executor's threads.
+- `search(count, make_metric, query_of, executor, config, keys, distances, counts)` keeps one metric per row slot, built by the caller's factory on the slot's arena, and hands it every landed value as the codec's borrowed `view`.
+- `count`, `contains` and `get` scan the key columns, and `get` reads the value rows of the keys it found.

@@ -412,6 +412,8 @@ constexpr char const* status_to_string(status_t status) noexcept {
  *  on @c success_k. */
 template <typename value_type_>
 struct [[nodiscard]] expected {
+    using value_t = value_type_;
+
     value_type_ value;
     status_t status;
 

@@ -122,9 +122,9 @@ See the [C++ guide](include/usearch/dense/README.md) for the layers & the [C gui
 | __Dense Vectors__   | Equal-width numeric rows or packed bit sets         | Inner-Product, Angular, Euclidean, Hamming, & Jaccard                     | RAM, VRAM, & NVMe engines                |
 | __Sequences__       | Variable-length byte strings & UTF-8 text           | Levenshtein & overlap; declared global & local alignment                  | Experimental C++ engine & C interface    |
 | __Shapes__          | 3D point clouds of any size                         | Chamfer, Hausdorff, Wasserstein-Procrustes, & Gromov-Wasserstein          | Experimental C++ engine & C interface    |
-| __Geospatial Sets__ | WGS-84 positions with accuracy, view, & time        | Nearness, line of sight, & view cones                                     | Experimental C++ engine & C interface    |
+| __Geospatial Sets__ | WGS-84 points, point sets, & sampled paths          | Point proximity; declared Overlap, Shape, Coverage, & Route               | Experimental C++ engine & C interface    |
 
-The experimental C interfaces currently use a brute-force stand-in while their native engines & bindings develop.
+The experimental geospatial C interface currently uses a brute-force stand-in while its native engine & bindings develop.
 
 ## Dense Modality
 
@@ -190,22 +190,22 @@ Construction & maintenance have their own cost, & neither arbitrary data nor arb
 ## Sequence Modality
 
 > [!WARNING]
-> Experimental: the native C++ engine & declared C interface currently cover different parts of the sequence surface.
+> Experimental: the C interface declares alignment kinds the native engine does not serve yet.
 
-The C++ RAM index works with variable-length byte sequences, using [StringZilla][stringzilla] for Levenshtein & overlap kernels.
-The declared C surface also covers UTF-8 code points, Needleman-Wunsch global alignment, Smith-Waterman local alignment, & Gotoh affine gaps.
-Those broader C calls currently use the stand-in engine.
+The C++ RAM index works with variable-length byte sequences & UTF-8 text, using [StringZilla][stringzilla] for Levenshtein & overlap kernels, & the C interface exports it.
+The declared C surface also covers Needleman-Wunsch global alignment, Smith-Waterman local alignment, & Gotoh affine gaps, which the engine refuses for now.
 Sequence search is useful when edit operations & local matches carry more meaning than a dense embedding's geometry.
 
 ## Geospatial Modality
 
 > [!WARNING]
-> Experimental: the C interface is ahead of the C++ point index, & a brute-force stand-in answers it for now.
+> Experimental: the C++ point index is ahead of the broader Geospatial C interface.
 
-The C interface searches observations: where a device was, how sure it was, which way it looked, how far it saw, & when - photos, video frames, drone footage, & sensor fixes.
-One graph answers nearness widened by both positions' uncertainty, lines of sight over a caller's terrain, & view cones holding the other side, each narrowed by time windows & predicates.
 The native index converts WGS-84 coordinates into Earth-Centered, Earth-Fixed positions stored as three centimeter-scale `i32` coordinates - __12 bytes per point__.
-Every ordering is the straight-line chord between two positions, which ranks as the great-circle arc does & reads 1 m short of the geodesic at 100 km, so callers wanting geodesics compute them for the reported matches.
+Multiple points can share one key to represent sampled paths or geographic sets.
+Cheap chord distances guide candidate selection; ellipsoidal geodesic calculations refine those candidates where surface distance matters.
+Chord ordering on an ellipsoid need not match geodesic ordering, so the candidate stage remains approximate.
+The broader Overlap, Shape, Coverage, & Route calls are declared through the experimental C interface.
 
 ## Getting Started
 
@@ -230,7 +230,7 @@ The C++ core also exposes lower-level kits & custom folds.
 
 ✓ indicates a binding surface; engine availability still depends on residency, as detailed in the [C guide](c/README.md).
 ¹ Merge & Streams expose the declared API, but their C engine verbs currently report unsupported.
-² The experimental non-Dense C calls currently use the stand-in engine.
+² The experimental sequence & shape C calls run the RAM engines, & the geospatial ones the stand-in.
 Kotlin & Scala consume the Java surface directly & match its column.
 
 Most calls name an Index, an Executor for scheduling, & an Arena for outputs whose size grows with the input.
