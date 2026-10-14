@@ -205,7 +205,7 @@ extern PyTypeObject DenseBatchType;
 extern PyTypeObject DenseSearchStreamType;
 
 extern PyTypeObject SequenceIndexType;
-extern PyTypeObject MatrixIndexType;
+extern PyTypeObject ShapesIndexType;
 extern PyTypeObject GeospatialIndexType;
 
 /** The layouts of the struct sequences, which `lib.c` readies through their own initializer. */

@@ -383,6 +383,7 @@ class On[IndexT]:
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> None: ...
     def refine(
@@ -390,6 +391,7 @@ class On[IndexT]:
         *,
         expansion_factor: int = 0,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> int: ...
     def health(self: On[DenseIndex]) -> DenseReachability: ...
@@ -405,6 +407,7 @@ class On[IndexT]:
         dtype: Scalar | None = None,
         predicate: Callable[[Key], bool] | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> Matches: ...
     def count(self: On[DenseIndex], key: _KeyLike, /) -> int: ...
@@ -419,6 +422,7 @@ class On[IndexT]:
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> DenseProducts: ...
     def attend(
@@ -437,6 +441,7 @@ class On[IndexT]:
         outputs_dtype: Scalar | None = None,
         carry: _Tensor | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> DenseVectors: ...
     def maxsim(
@@ -450,11 +455,18 @@ class On[IndexT]:
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> Matches: ...
-    def merge(self: On[DenseIndex], *donors: DenseIndex, progress: _Progress | None = None) -> None: ...
-    def save(self: On[DenseIndex], path: _PathLike, /, *, progress: _Progress | None = None) -> None: ...
-    def save_buffer(self: On[DenseIndex], arena: Arena, /, *, progress: _Progress | None = None) -> Monolith: ...
+    def merge(
+        self: On[DenseIndex], *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> None: ...
+    def save(
+        self: On[DenseIndex], path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> None: ...
+    def save_buffer(
+        self: On[DenseIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
+    ) -> Monolith: ...
     def cursor(self: On[DenseIndex]) -> DenseCursor:
         """Calls `usearch_dense_cursor_init`."""
         ...
@@ -485,6 +497,7 @@ class DeferredOn[IndexT]:
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> Deferred[None]: ...
     def refine(
@@ -492,6 +505,7 @@ class DeferredOn[IndexT]:
         *,
         expansion_factor: int = 0,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> Deferred[int]: ...
     def health(self: DeferredOn[DenseIndex]) -> Deferred[DenseReachability]: ...
@@ -507,6 +521,7 @@ class DeferredOn[IndexT]:
         dtype: Scalar | None = None,
         predicate: Callable[[Key], bool] | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> Deferred[Matches]: ...
     def count(self: DeferredOn[DenseIndex], key: _KeyLike, /) -> Deferred[int]: ...
@@ -523,6 +538,7 @@ class DeferredOn[IndexT]:
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> Deferred[DenseProducts]: ...
     def attend(
@@ -541,6 +557,7 @@ class DeferredOn[IndexT]:
         outputs_dtype: Scalar | None = None,
         carry: _Tensor | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> Deferred[DenseVectors]: ...
     def maxsim(
@@ -554,16 +571,17 @@ class DeferredOn[IndexT]:
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> Deferred[Matches]: ...
     def merge(
-        self: DeferredOn[DenseIndex], *donors: DenseIndex, progress: _Progress | None = None
+        self: DeferredOn[DenseIndex], *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0
     ) -> Deferred[None]: ...
     def save(
-        self: DeferredOn[DenseIndex], path: _PathLike, /, *, progress: _Progress | None = None
+        self: DeferredOn[DenseIndex], path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0
     ) -> Deferred[None]: ...
     def save_buffer(
-        self: DeferredOn[DenseIndex], arena: Arena, /, *, progress: _Progress | None = None
+        self: DeferredOn[DenseIndex], arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0
     ) -> Deferred[Monolith]: ...
     def __repr__(self) -> str: ...
 
@@ -771,6 +789,7 @@ class DenseIndex:
         executor: Executor | None = None,
         values_per_key: int = 0,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
     ) -> DenseIndex:
         """Copies a checkpoint into a new, mutable index in host memory. Calls `usearch_dense_load_ram`."""
         ...
@@ -785,6 +804,7 @@ class DenseIndex:
         executor: Executor | None = None,
         values_per_key: int = 0,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
     ) -> DenseIndex:
         """Copies a monolith out of a buffer into host memory. Calls `usearch_dense_load_ram_buffer`."""
         ...
@@ -799,6 +819,7 @@ class DenseIndex:
         executor: Executor | None = None,
         values_per_key: int = 0,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
     ) -> DenseIndex:
         """Copies a checkpoint into a new, mutable index on CUDA devices. Calls `usearch_dense_load_vram`."""
         ...
@@ -813,6 +834,7 @@ class DenseIndex:
         executor: Executor | None = None,
         values_per_key: int = 0,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
     ) -> DenseIndex:
         """Copies a monolith out of a buffer onto CUDA devices. Calls `usearch_dense_load_vram_buffer`."""
         ...
@@ -868,13 +890,19 @@ class DenseIndex:
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> None:
         """Inserts a batch of vectors under their keys, all or nothing. Calls `usearch_dense_insert`."""
         ...
 
     def refine(
-        self, *, expansion_factor: int = 0, progress: _Progress | None = None, stats: DenseTraversalStats | None = None
+        self,
+        *,
+        expansion_factor: int = 0,
+        progress: _Progress | None = None,
+        progress_steps: int = 0,
+        stats: DenseTraversalStats | None = None,
     ) -> int:
         """Re-selects every entry's neighbors, answering how many changed. Calls `usearch_dense_refine`."""
         ...
@@ -895,6 +923,7 @@ class DenseIndex:
         dtype: Scalar | None = None,
         predicate: Callable[[Key], bool] | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> Matches:
         """Finds the `wanted` nearest entries for every query row. Calls `usearch_dense_search`."""
@@ -918,6 +947,7 @@ class DenseIndex:
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> DenseProducts:
         """Every pair the walk scored, an approximate sparse product. Calls `usearch_dense_multiply`."""
@@ -939,6 +969,7 @@ class DenseIndex:
         outputs_dtype: Scalar | None = None,
         carry: _Tensor | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> DenseVectors:
         """Softmax attention folded into the walk. Calls `usearch_dense_attend`."""
@@ -955,20 +986,21 @@ class DenseIndex:
         expansion_factor: int = 0,
         dtype: Scalar | None = None,
         progress: _Progress | None = None,
+        progress_steps: int = 0,
         stats: DenseTraversalStats | None = None,
     ) -> Matches:
         """Late-interaction scoring of multi-row queries. Calls `usearch_dense_maxsim`."""
         ...
 
-    def merge(self, *donors: DenseIndex, progress: _Progress | None = None) -> None:
+    def merge(self, *donors: DenseIndex, progress: _Progress | None = None, progress_steps: int = 0) -> None:
         """Absorbs and consumes every donor. Calls `usearch_dense_merge`."""
         ...
 
-    def save(self, path: _PathLike, /, *, progress: _Progress | None = None) -> None:
+    def save(self, path: _PathLike, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> None:
         """Writes a checkpoint in the layout the extension picks. Calls `usearch_dense_save`."""
         ...
 
-    def save_buffer(self, arena: Arena, /, *, progress: _Progress | None = None) -> Monolith:
+    def save_buffer(self, arena: Arena, /, *, progress: _Progress | None = None, progress_steps: int = 0) -> Monolith:
         """Serializes one monolith into an arena. Calls `usearch_dense_save_buffer`."""
         ...
 
@@ -1028,8 +1060,8 @@ class SequenceIndex:
     def __init__(self) -> NoReturn: ...
 
 @final
-class MatrixIndex:
-    """Similarity search over rank-2 tensors."""
+class ShapesIndex:
+    """Similarity search over 3D point clouds."""
 
     def __init__(self) -> NoReturn: ...
 

@@ -18,7 +18,7 @@ for CPUs, GPUs &amp; NVMe SSDs
 </p>
 
 <p align="center">
-Dense Vectors • Sequences • Matrices • Geospatial Sets
+Dense Vectors • Sequences • Shapes • Geospatial Sets
 <br/>
 <a href="include/usearch/dense/README.md">C++</a> •
 <a href="c/README.md">C</a> •
@@ -51,7 +51,7 @@ x86 • Arm • RISC-V • WebAssembly • CUDA • ROCm • Metal
 USearch is a widely deployed open-source search engine, powering Vector Search in [ClickHouse][clickhouse-code], [ScyllaDB](https://github.com/scylladb/vector-store), [DuckDB][duckdb-docs] & [YugabyteDB][yugabyte-code].
 
 - ✅ __One Vector Index, Three Goals__ - Search, Sparse Matrix Multiplications, & Flash Attention folded into the graph walk.
-- ✅ __Many Modalities__ - Dense Vectors, Sequences, Matrices, & Geospatial Sets, with experimental engines beyond Dense.
+- ✅ __Many Modalities__ - Dense Vectors, Sequences, Shapes, & Geospatial Sets, with experimental engines beyond Dense.
 - ✅ __Three Residencies__ - RAM, VRAM, & NVMe, exchanging portable [SafeGraphs](docs/format.md) files.
 - ✅ __128-bit Keys__ - Built around UUIDs for large-scale systems, with several vectors allowed under one key.
 - ✅ __Atomic Visibility__ - RAM insertion batches publish complete rows & keys behind each shard's watermark.
@@ -117,12 +117,12 @@ See the [C++ guide](include/usearch/dense/README.md) for the layers & the [C gui
 
 ### Modalities
 
-| Modality            | Inputs                                              | Similarities & Distances                                     | Status                                   |
-| :------------------ | :-------------------------------------------------- | :----------------------------------------------------------- | :--------------------------------------- |
-| __Dense Vectors__   | Equal-width numeric rows or packed bit sets         | Inner-Product, Angular, Euclidean, Hamming, & Jaccard        | RAM, VRAM, & NVMe engines                |
-| __Sequences__       | Variable-length byte strings; declared UTF-8 inputs | Levenshtein & overlap; declared global & local alignment     | Experimental C++ engine & C interface    |
-| __Matrices__        | Point clouds & matrices with several rows per entry | Declared Chamfer, Hausdorff, Gromov-Wasserstein, & alignment | Experimental C interface; engine planned |
-| __Geospatial Sets__ | WGS-84 points, point sets, & sampled paths          | Point proximity; declared Overlap, Shape, Coverage, & Route  | Experimental C++ engine & C interface    |
+| Modality            | Inputs                                              | Similarities & Distances                                                  | Status                                   |
+| :------------------ | :-------------------------------------------------- | :------------------------------------------------------------------------ | :--------------------------------------- |
+| __Dense Vectors__   | Equal-width numeric rows or packed bit sets         | Inner-Product, Angular, Euclidean, Hamming, & Jaccard                     | RAM, VRAM, & NVMe engines                |
+| __Sequences__       | Variable-length byte strings & UTF-8 text           | Levenshtein & overlap; declared global & local alignment                  | Experimental C++ engine & C interface    |
+| __Shapes__          | 3D point clouds of any size                         | Chamfer, Hausdorff, Wasserstein-Procrustes, & Gromov-Wasserstein          | Experimental C++ engine & C interface    |
+| __Geospatial Sets__ | WGS-84 points, point sets, & sampled paths          | Point proximity; declared Overlap, Shape, Coverage, & Route               | Experimental C++ engine & C interface    |
 
 The experimental C interfaces currently use a brute-force stand-in while their native engines & bindings develop.
 
@@ -227,7 +227,7 @@ The C++ core also exposes lower-level kits & custom folds.
 | Filtered Search with Predicates   |   ✓   |   ✓    |   ✓   |   -   |   ✓   |   ✓   |   -   |   ✓   |   ✓   |   ✓   |    -    |
 | Deferred Calls                    |   ✓   |   ✓    |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |    -    |
 | Merge & Streams ¹                 |   ✓   |   ✓    |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |   ✓   |    -    |
-| Sequence, Matrix & Geospatial ²   |   ✓   |   -    |   -   |   -   |   -   |   -   |   -   |   -   |   -   |   -   |    -    |
+| Sequence, Shapes & Geospatial ²   |   ✓   |   -    |   -   |   -   |   -   |   -   |   -   |   -   |   -   |   -   |    -    |
 
 ✓ indicates a binding surface; engine availability still depends on residency, as detailed in the [C guide](c/README.md).
 ¹ Merge & Streams expose the declared API, but their C engine verbs currently report unsupported.

@@ -377,8 +377,8 @@ typedef struct usearch_matrix_view_t {
  *      than entries around them, borrowed as an input or written into an arena as an output.
  *
  *  Entry @c i spans elements @c offsets[i] up to @c offsets[i+1], so the last offset closes the
- *  final entry. What an element is belongs to the modality: a byte of a sequence, a row of a
- *  matrix, a point of a set.
+ *  final entry. What an element is belongs to the modality: a byte of a sequence, a point of a
+ *  shape or of a geospatial set.
  */
 typedef struct usearch_tape_view_t {
 
@@ -390,8 +390,8 @@ typedef struct usearch_tape_view_t {
     size_t const* offsets;
 
     /** The scalar type the elements hold: @c u8 for sequences, @c f64 degrees for geospatial inputs
-     *  and @c i32 Earth-fixed centimetres for their cursor, and any kind for matrix rows, converted on
-     *  the way in where it differs from storage. */
+     *  and @c i32 Earth-fixed centimetres for their cursor, and any kind for shape points,
+     *  converted on the way in where it differs from storage. */
     usearch_scalar_t scalar;
 } usearch_tape_view_t;
 

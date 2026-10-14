@@ -138,7 +138,7 @@ Other Modalities
 
 .. autoclass:: usearch.SequenceIndex
 
-.. autoclass:: usearch.MatrixIndex
+.. autoclass:: usearch.ShapesIndex
 
 .. autoclass:: usearch.GeospatialIndex
 

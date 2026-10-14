@@ -2,27 +2,29 @@
  *  @file src_stub/shapes.cpp
  *  @author Ash Vardanian
  *  @date September 5, 2026
- *  @brief A brute-force stand-in for the @c usearch_matrix_* C ABI, scoring every stored matrix
+ *  @brief A brute-force stand-in for the @c usearch_shapes_* C ABI, scoring every stored shape
  *      against every query so a binding can be exercised without the engine.
  *
- *  One entry is a rank-2 tensor whose height varies and whose width is frozen index-wide, so
- *  batches arrive as a tape - every entry's rows end to end, with Apache Arrow offsets counting
- *  rows around them - rather than a strided run. That pairing is what this stand-in is for: a
- *  binding that counts its offsets in scalars or bytes instead of rows, or that derives a height
- *  from a stride, fails here immediately.
+ *  One entry is a 3D point cloud whose point count varies, so batches arrive as a tape - every
+ *  entry's points end to end, with Apache Arrow offsets counting points around them - rather than
+ *  a strided run. That pairing is what this stand-in is for: a binding that counts its offsets in
+ *  scalars or bytes instead of points, or that derives a point count from a stride, fails here
+ *  immediately.
  *
- *  @section matrix_stub_blind_spots What It Cannot Tell You
+ *  @section shapes_stub_blind_spots What It Cannot Tell You
  *
  *  Search is an exact scan, so recall is trivially perfect and ties fall in insertion order.
- *  Only the two row-to-row kinds are implemented - Chamfer and Hausdorff - and the transport and
- *  superposition kinds are @b rejected rather than approximated by them, so a binding asking for
- *  Gromov-Wasserstein learns that here instead of receiving a plausible wrong number. Rows are
- *  stored as @c double and @c quantization is ignored, so @c get and @c cursor_next convert from
- *  @c f64 rather than from whatever the index froze. Refinement keeps no edges to re-select, so
- *  its @c changed is a constant zero rather than a settling signal, and a caller must not read it
- *  as one. A view copies its checkpoint rather than mapping it, and every VRAM lifecycle verb
- *  refuses. Traversal statistics are plausible fiction: shaped correctly, invented numerically. A
- *  checkpoint is a binary blob of this file's own memory image, readable by nothing else.
+ *  Only the two point-to-point kinds are implemented - Chamfer and Hausdorff - and both are scored
+ *  in the frame the points arrived in, with no principal axes and no flips, so a rotated copy
+ *  scores apart here where the engine scores it zero. The transport kinds are @b rejected rather
+ *  than approximated, so a binding asking for Gromov-Wasserstein learns that here instead of
+ *  receiving a plausible wrong number. Points are stored as @c double and @c quantization is
+ *  checked but not applied, so @c get and @c cursor_next convert from @c f64 rather than from
+ *  whatever the index froze. Refinement keeps no edges to re-select, so its @c changed is a
+ *  constant zero rather than a settling signal, and a caller must not read it as one. A view
+ *  copies its checkpoint rather than mapping it, and every VRAM lifecycle verb refuses. Traversal
+ *  statistics are plausible fiction: shaped correctly, invented numerically. A checkpoint is a
+ *  binary blob of this file's own memory image, readable by nothing else.
  */
 #include <cmath> // `std::sqrt`
 
@@ -46,25 +48,24 @@ namespace stub {
 
 #pragma region Storage
 
-using matrix_payload_t = std::vector<double>;
-using matrix_entry_t = entry<matrix_payload_t>;
+constexpr std::size_t coordinates_k = 3;
 
-static_assert(std::is_nothrow_move_constructible_v<matrix_entry_t>, "reallocation must move rows, never copy them");
+using shapes_payload_t = std::vector<double>;
+using shapes_entry_t = entry<shapes_payload_t>;
+
+static_assert(std::is_nothrow_move_constructible_v<shapes_entry_t>, "reallocation must move rows, never copy them");
 
 /** What a handle froze at construction, or adopted from a checkpoint. */
-struct matrix_index_options_t {
+struct shapes_index_options_t {
 
     /** What entries are compared by. */
-    usearch_matrix_metric_t metric;
+    usearch_shapes_metric_t metric;
 
-    /** The scalar kind rows were frozen at, which metadata reports back. */
+    /** The scalar kind points were frozen at, which metadata reports back. */
     usearch_scalar_t quantization;
 
-    /** The frozen row width shared by every entry. */
-    std::size_t columns;
-
-    /** The frozen row count, or zero where heights are ragged. */
-    std::size_t rows;
+    /** The frozen point count, or zero for any count. */
+    std::size_t points;
 
     /** The connections-per-node bound the handle was built with. */
     std::size_t connectivity;
@@ -73,12 +74,12 @@ struct matrix_index_options_t {
     std::size_t values_per_key;
 };
 
-using matrix_index_t = handle<matrix_payload_t, matrix_index_options_t>;
+using shapes_index_t = handle<shapes_payload_t, shapes_index_options_t>;
 
-struct matrix_cursor_t {
+struct shapes_cursor_t {
 
     /** The handle the cursor was opened on, only ever compared with the one each pull passes. */
-    matrix_index_t const* opened_on;
+    shapes_index_t const* opened_on;
 
     /** The next entry to hand out. */
     std::size_t position;
@@ -90,102 +91,93 @@ struct matrix_cursor_t {
     std::atomic_flag pulling;
 };
 
-/** Whether the width is frozen; a zeroed one makes every derived extent zero. */
-static bool reject_unfrozen(matrix_index_t const& index, usearch_outcome_t* outcome) {
-    return reject_if(!index.options.columns, usearch_status_uninitialized_k, "The geometry was never frozen", outcome);
-}
-
 /** Whether this stand-in scores the kind, or rejects it rather than approximating it. */
-static bool reject_metric(matrix_index_t const& index, usearch_outcome_t* outcome) {
-    bool const scored = index.options.metric == usearch_matrix_metric_chamfer_k ||
-                        index.options.metric == usearch_matrix_metric_hausdorff_k;
+static bool reject_metric(shapes_index_t const& index, usearch_outcome_t* outcome) {
+    bool const scored = index.options.metric == usearch_shapes_metric_chamfer_k ||
+                        index.options.metric == usearch_shapes_metric_hausdorff_k;
     return reject_if(!scored, usearch_status_unknown_kind_k, "The stand-in implements chamfer and hausdorff only",
                      outcome);
 }
 
-/** The height of a stored entry, which its payload's extent and the frozen width fix. */
-static std::size_t rows_of(matrix_index_t const& index, matrix_entry_t const& entry) {
-    return entry.payload.size() / index.options.columns;
-}
+/** The point count of a stored entry, which its payload's extent fixes. */
+static std::size_t points_of(shapes_entry_t const& entry) { return entry.payload.size() / coordinates_k; }
 
 #pragma endregion Storage
 
 #pragma region Scoring
 
-static double row_distance(std::span<double const> first, std::span<double const> second) {
+static double point_distance(std::span<double const> first, std::span<double const> second) {
     double squared = 0;
-    for (std::size_t column = 0; column != first.size(); ++column) {
-        double const delta = first[column] - second[column];
+    for (std::size_t axis = 0; axis != coordinates_k; ++axis) {
+        double const delta = first[axis] - second[axis];
         squared += delta * delta;
     }
     return std::sqrt(squared);
 }
 
-/** Every row of @p from finds its nearest partner in @p onto; the two kinds differ only
+/** Every point of @p from finds its nearest partner in @p onto; the two kinds differ only
  *  in how those distances are aggregated, so both come off this one sweep. */
-static void nearest_partners(std::span<double const> from, std::span<double const> onto, std::size_t columns,
-                             double& summed, double& worst) {
+static void nearest_partners(std::span<double const> from, std::span<double const> onto, double& summed,
+                             double& worst) {
     summed = 0, worst = 0;
-    std::size_t const from_rows = from.size() / columns, onto_rows = onto.size() / columns;
-    if (!onto_rows) return;
-    for (std::size_t row = 0; row != from_rows; ++row) {
+    std::size_t const from_points = from.size() / coordinates_k, onto_points = onto.size() / coordinates_k;
+    if (!onto_points) return;
+    for (std::size_t point = 0; point != from_points; ++point) {
         double nearest = std::numeric_limits<double>::infinity();
-        for (std::size_t partner = 0; partner != onto_rows; ++partner)
-            nearest = std::min(
-                nearest, row_distance(from.subspan(row * columns, columns), onto.subspan(partner * columns, columns)));
+        for (std::size_t partner = 0; partner != onto_points; ++partner)
+            nearest = std::min(nearest, point_distance(from.subspan(point * coordinates_k, coordinates_k),
+                                                       onto.subspan(partner * coordinates_k, coordinates_k)));
         summed += nearest;
         worst = std::max(worst, nearest);
     }
-    if (from_rows) summed /= static_cast<double>(from_rows);
+    if (from_points) summed /= static_cast<double>(from_points);
 }
 
-/** Scores one pair under the frozen kind. @c usearch_matrix_init_ram refuses a kind this
+/** Scores one pair under the frozen kind. @c usearch_shapes_init_ram refuses a kind this
  *  build does not implement, so only the two best-partner kinds reach here. */
-static double distance(matrix_index_t const& index, std::span<double const> query, std::span<double const> stored) {
-    std::size_t const columns = index.options.columns;
+static double distance(shapes_index_t const& index, std::span<double const> query, std::span<double const> stored) {
     double forward_mean = 0, forward_worst = 0, reverse_mean = 0, reverse_worst = 0;
-    nearest_partners(query, stored, columns, forward_mean, forward_worst);
-    nearest_partners(stored, query, columns, reverse_mean, reverse_worst);
-    if (index.options.metric == usearch_matrix_metric_chamfer_k) return forward_mean + reverse_mean;
+    nearest_partners(query, stored, forward_mean, forward_worst);
+    nearest_partners(stored, query, reverse_mean, reverse_worst);
+    if (index.options.metric == usearch_shapes_metric_chamfer_k) return (forward_mean + reverse_mean) / 2;
     return std::max(forward_worst, reverse_worst);
 }
 
-/** Whether the kind is one this build implements. The transport and superposition kinds
- *  need a solver and an SVD, which a brute-force stand-in deliberately does not carry. */
-static bool known_metric(usearch_matrix_metric_t metric) {
-    return metric == usearch_matrix_metric_chamfer_k || metric == usearch_matrix_metric_hausdorff_k;
+/** Whether the kind is one this build implements. The transport kinds need a solver and
+ *  an SVD, which a brute-force stand-in deliberately does not carry. */
+static bool known_metric(usearch_shapes_metric_t metric) {
+    return metric == usearch_shapes_metric_chamfer_k || metric == usearch_shapes_metric_hausdorff_k;
 }
 
-/** Widens entry @p entry of a tape into doubles, sized by its own row count. */
-static void read_matrix(usearch_tape_view_t tape, std::size_t entry, std::size_t columns, std::vector<double>& values) {
-    std::size_t const first_row = tape.offsets[entry], row_count = tape.offsets[entry + 1] - first_row;
-    values.resize(row_count * columns);
-    std::size_t const row_bytes = row_extent(tape.scalar, columns);
-    for (std::size_t row = 0; row != row_count; ++row)
-        read_row(row_at<std::byte>(tape.data, first_row + row, row_bytes, row_bytes), tape.scalar,
-                 std::span<double>(values).subspan(row * columns, columns));
+/** Widens entry @p entry of a tape into doubles, sized by its own point count. */
+static void read_shape(usearch_tape_view_t tape, std::size_t entry, std::vector<double>& values) {
+    std::size_t const first_point = tape.offsets[entry], point_count = tape.offsets[entry + 1] - first_point;
+    values.resize(point_count * coordinates_k);
+    std::size_t const point_bytes = row_extent(tape.scalar, coordinates_k);
+    for (std::size_t point = 0; point != point_count; ++point)
+        read_row(row_at<std::byte>(tape.data, first_point + point, point_bytes, point_bytes), tape.scalar,
+                 std::span<double>(values).subspan(point * coordinates_k, coordinates_k));
 }
 
-/** The output twin of @c read_matrix: lands the entries at @p rows into @p arena as one tape of
- *  @p scalar_kind rows, writing @p tape only once every row landed, and answers false once
+/** The output twin of @c read_shape: lands the entries at @p rows into @p arena as one tape of
+ *  @p scalar_kind points, writing @p tape only once every point landed, and answers false once
  *  @p outcome records why not. */
-static bool land_entries(matrix_index_t const& index, std::span<std::size_t const> rows, usearch_scalar_t scalar_kind,
+static bool land_entries(shapes_index_t const& index, std::span<std::size_t const> rows, usearch_scalar_t scalar_kind,
                          usearch_arena_handle_t& arena, usearch_tape_view_t& tape, usearch_outcome_t* outcome) {
-    std::size_t const columns = index.options.columns;
-    std::size_t const row_bytes = row_extent(scalar_kind, columns);
-    std::size_t total_rows = 0;
-    for (std::size_t row : rows) total_rows += rows_of(index, index.entries[row]);
+    std::size_t const point_bytes = row_extent(scalar_kind, coordinates_k);
+    std::size_t total_points = 0;
+    for (std::size_t row : rows) total_points += points_of(index.entries[row]);
     std::size_t* const offsets = carve<std::size_t>(arena, rows.size() + 1, outcome);
-    std::byte* const landing = offsets ? carve<std::byte>(arena, total_rows * row_bytes, outcome) : nullptr;
+    std::byte* const landing = offsets ? carve<std::byte>(arena, total_points * point_bytes, outcome) : nullptr;
     if (!landing) return false;
     offsets[0] = 0;
     for (std::size_t found = 0; found != rows.size(); ++found) {
-        matrix_entry_t const& entry = index.entries[rows[found]];
-        std::size_t const height = rows_of(index, entry);
-        for (std::size_t line = 0; line != height; ++line)
-            write_row(row_at<std::byte>(landing, offsets[found] + line, row_bytes, row_bytes), scalar_kind,
-                      std::span<double const>(entry.payload).subspan(line * columns, columns));
-        offsets[found + 1] = offsets[found] + height;
+        shapes_entry_t const& entry = index.entries[rows[found]];
+        std::size_t const points = points_of(entry);
+        for (std::size_t point = 0; point != points; ++point)
+            write_row(row_at<std::byte>(landing, offsets[found] + point, point_bytes, point_bytes), scalar_kind,
+                      std::span<double const>(entry.payload).subspan(point * coordinates_k, coordinates_k));
+        offsets[found + 1] = offsets[found] + points;
     }
     tape = {landing, offsets, scalar_kind};
     return true;
@@ -195,28 +187,27 @@ static bool land_entries(matrix_index_t const& index, std::span<std::size_t cons
  *  @brief The body of a search, filtered when @p predicate is set.
  *  @return Queries answered, short of @p count exactly when the handler cancelled.
  */
-static std::size_t search_tape(matrix_index_t& index, usearch_tape_view_t queries, std::size_t count,
+static std::size_t search_tape(shapes_index_t& index, usearch_tape_view_t queries, std::size_t count,
                                ranked_landing_t const& landing, std::size_t expansion_factor,
-                               usearch_matrix_traversal_stats_t* stats, usearch_predicate_t predicate,
-                               usearch_progress_callback_t progress, void* progress_state) {
+                               usearch_shapes_traversal_stats_t* stats, usearch_predicate_t predicate,
+                               usearch_progress_t progress) {
     std::size_t const rows = index.entries.size();
-    std::size_t const columns = index.options.columns;
     if (stats && expansion_factor) stats->computed_distances += expansion_factor * count;
 
-    std::vector<double> query_matrix;
+    std::vector<double> query_shape;
     std::vector<match_t> ranked;
     for (std::size_t query = 0; query != count; ++query) {
-        read_matrix(queries, query, columns, query_matrix);
-        rank<matrix_payload_t>(
-            std::span<matrix_entry_t const>(index.entries).first(rows), predicate,
-            [&](matrix_payload_t const& payload) { return distance(index, query_matrix, payload); }, ranked);
+        read_shape(queries, query, query_shape);
+        rank<shapes_payload_t>(
+            std::span<shapes_entry_t const>(index.entries).first(rows), predicate,
+            [&](shapes_payload_t const& payload) { return distance(index, query_shape, payload); }, ranked);
         landing.write(query, ranked);
         if (stats) {
             stats->visited_members += rows;
             stats->computed_distances += ranked.size();
             stats->restarts += 1;
         }
-        if (!keep_going(progress, progress_state, query + 1, count)) return query + 1;
+        if (!keep_going(progress, query + 1, count)) return query + 1;
     }
     return count;
 }
@@ -227,13 +218,10 @@ static std::size_t search_tape(matrix_index_t& index, usearch_tape_view_t querie
 
 /** What @c load needs before it can read an entry. The blob is this file's own memory
  *  image rather than a format: no magic, no version, and nothing else reads it back. */
-struct matrix_checkpoint_prefix_t {
+struct shapes_checkpoint_prefix_t {
 
-    /** The frozen row width shared by every entry. */
-    std::size_t columns;
-
-    /** The frozen row count, or zero where heights are ragged. */
-    std::size_t rows;
+    /** The frozen point count, or zero for any count. */
+    std::size_t points;
 
     /** The connections-per-node bound the handle was built with. */
     std::size_t connectivity;
@@ -241,34 +229,33 @@ struct matrix_checkpoint_prefix_t {
     /** How many entries follow the prefix. */
     std::size_t entries;
 
-    /** Bytes of entry payload that follow, keys and row counts included. */
+    /** Bytes of entry payload that follow, keys and point counts included. */
     std::size_t payload_bytes;
 
     /** What entries are compared by. */
-    usearch_matrix_metric_t metric;
+    usearch_shapes_metric_t metric;
 
-    /** The scalar kind the rows were frozen at, which metadata reports back. */
+    /** The scalar kind the points were frozen at, which metadata reports back. */
     usearch_scalar_t quantization;
 };
 
-/** The per-entry overhead of the blob: the key, then the row count that follows it. */
+/** The per-entry overhead of the blob: the key, then the point count that follows it. */
 constexpr std::size_t record_overhead_k = sizeof(usearch_key_t) + sizeof(us::utilities::u64_t);
 
-static std::size_t payload_extent(matrix_index_t const& index, std::size_t rows) {
+static std::size_t payload_extent(shapes_index_t const& index, std::size_t rows) {
     std::size_t extent = 0;
     for (std::size_t row = 0; row != rows; ++row)
         extent += record_overhead_k + index.entries[row].payload.size() * sizeof(double);
     return extent;
 }
 
-static std::optional<std::size_t> serialized_bytes(matrix_index_t const& index, std::size_t rows) {
-    return blob_bytes(sizeof(matrix_checkpoint_prefix_t), payload_extent(index, rows), 1);
+static std::optional<std::size_t> serialized_bytes(shapes_index_t const& index, std::size_t rows) {
+    return blob_bytes(sizeof(shapes_checkpoint_prefix_t), payload_extent(index, rows), 1);
 }
 
-static void write_into(matrix_index_t const& index, std::size_t rows, bytes_span_t target) {
-    matrix_checkpoint_prefix_t prefix {};
-    prefix.columns = index.options.columns;
-    prefix.rows = index.options.rows;
+static void write_into(shapes_index_t const& index, std::size_t rows, bytes_span_t target) {
+    shapes_checkpoint_prefix_t prefix {};
+    prefix.points = index.options.points;
     prefix.connectivity = index.options.connectivity;
     prefix.entries = rows;
     prefix.payload_bytes = payload_extent(index, rows);
@@ -278,13 +265,13 @@ static void write_into(matrix_index_t const& index, std::size_t rows, bytes_span
 
     bytes_span_t cursor = target.subspan(sizeof(prefix));
     for (std::size_t row = 0; row != rows; ++row) {
-        matrix_entry_t const& entry = index.entries[row];
-        std::size_t const row_count = rows_of(index, entry);
+        shapes_entry_t const& entry = index.entries[row];
+        std::size_t const point_count = points_of(entry);
         std::size_t const payload_bytes = entry.payload.size() * sizeof(double);
         write_pod(cursor, entry.key);
         cursor = cursor.subspan(sizeof(usearch_key_t));
-        write_pod(cursor, row_count);
-        cursor = cursor.subspan(sizeof(row_count));
+        write_pod(cursor, point_count);
+        cursor = cursor.subspan(sizeof(point_count));
         [[maybe_unused]] status_t const copied = copy_bytes(cursor.first(payload_bytes),
                                                             bytes_of(entry.payload.data(), entry.payload.size()));
         cursor = cursor.subspan(payload_bytes);
@@ -292,20 +279,19 @@ static void write_into(matrix_index_t const& index, std::size_t rows, bytes_span
 }
 
 /** Reads the prefix and checks the blob is long enough for what it claims. */
-static bool parse_prefix(matrix_checkpoint_prefix_t& prefix, bytes_view_t blob, usearch_outcome_t* outcome) {
-    if (reject_if(blob.size() < sizeof(matrix_checkpoint_prefix_t), usearch_status_malformed_k,
+static bool parse_prefix(shapes_checkpoint_prefix_t& prefix, bytes_view_t blob, usearch_outcome_t* outcome) {
+    if (reject_if(blob.size() < sizeof(shapes_checkpoint_prefix_t), usearch_status_malformed_k,
                   "The checkpoint ends early", outcome))
         return false;
-    prefix = read_pod<matrix_checkpoint_prefix_t>(blob);
-    return fits_blob(blob, sizeof(matrix_checkpoint_prefix_t), prefix.payload_bytes, 1, outcome);
+    prefix = read_pod<shapes_checkpoint_prefix_t>(blob);
+    return fits_blob(blob, sizeof(shapes_checkpoint_prefix_t), prefix.payload_bytes, 1, outcome);
 }
 
 /** Adopts a checkpoint's configuration, answering whether its metric is one we implement. The
  *  bound on entries per key is the loader's to choose, since no checkpoint records it. */
-static bool adopt(matrix_index_options_t& options, matrix_checkpoint_prefix_t const& prefix) {
+static bool adopt(shapes_index_options_t& options, shapes_checkpoint_prefix_t const& prefix) {
     if (!known_metric(prefix.metric)) return false;
-    options.columns = prefix.columns;
-    options.rows = prefix.rows;
+    options.points = prefix.points;
     options.connectivity = prefix.connectivity;
     options.metric = prefix.metric;
     options.quantization = prefix.quantization;
@@ -313,8 +299,8 @@ static bool adopt(matrix_index_options_t& options, matrix_checkpoint_prefix_t co
 }
 
 /** Fills a fresh @p index from a checkpoint, which no other thread can see yet. */
-static bool read_from(matrix_index_t& index, bytes_view_t blob, usearch_outcome_t* outcome) {
-    matrix_checkpoint_prefix_t prefix {};
+static bool read_from(shapes_index_t& index, bytes_view_t blob, usearch_outcome_t* outcome) {
+    shapes_checkpoint_prefix_t prefix {};
     if (!parse_prefix(prefix, blob, outcome)) return false;
     std::size_t const entries = prefix.entries;
     index.reset();
@@ -327,8 +313,8 @@ static bool read_from(matrix_index_t& index, bytes_view_t blob, usearch_outcome_
         return false;
     }
 
-    bytes_view_t cursor = blob.subspan(sizeof(matrix_checkpoint_prefix_t));
-    matrix_payload_t payload;
+    bytes_view_t cursor = blob.subspan(sizeof(shapes_checkpoint_prefix_t));
+    shapes_payload_t payload;
     for (std::size_t entry_index = 0; entry_index != entries; ++entry_index) {
         if (cursor.size() < record_overhead_k) {
             index.reset();
@@ -336,12 +322,12 @@ static bool read_from(matrix_index_t& index, bytes_view_t blob, usearch_outcome_
             return false;
         }
         usearch_key_t key;
-        std::size_t row_count = 0;
+        std::size_t point_count = 0;
         key = read_pod<usearch_key_t>(cursor);
         cursor = cursor.subspan(sizeof(usearch_key_t));
-        row_count = read_pod<std::size_t>(cursor);
-        cursor = cursor.subspan(sizeof(row_count));
-        std::size_t const scalars = row_count * prefix.columns;
+        point_count = read_pod<std::size_t>(cursor);
+        cursor = cursor.subspan(sizeof(point_count));
+        std::size_t const scalars = point_count * coordinates_k;
         if (cursor.size() < scalars * sizeof(double)) {
             index.reset();
             propagate_error(usearch_status_malformed_k, outcome, "The checkpoint ends inside an entry");
@@ -372,131 +358,142 @@ static index_type_* open_checkpoint(bytes_view_t blob, usearch_outcome_t* outcom
 } // namespace usearch
 } // namespace unum
 
-struct usearch_matrix_index_handle_t : matrix_index_t {};
-struct usearch_matrix_cursor_handle_t : matrix_cursor_t {};
+struct usearch_shapes_index_handle_t : shapes_index_t {};
+struct usearch_shapes_cursor_handle_t : shapes_cursor_t {};
 
 extern "C" {
 
-void usearch_matrix_init_ram(usearch_matrix_init_ram_t* arguments) {
+void usearch_shapes_init_ram(usearch_shapes_init_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     if (reject_if(!known_metric(arguments->metric), usearch_status_unknown_kind_k,
                   "The stand-in implements chamfer and hausdorff only", outcome))
         return;
-    usearch_matrix_index_handle_t* const index = new (std::nothrow) usearch_matrix_index_handle_t();
+    if (reject_if(arguments->quantization != usearch_scalar_f16_k && arguments->quantization != usearch_scalar_f32_k,
+                  usearch_status_unsupported_k, "Points are stored as f16 or f32 only", outcome))
+        return;
+    usearch_shapes_index_handle_t* const index = new (std::nothrow) usearch_shapes_index_handle_t();
     if (reject_if(!index, usearch_status_out_of_memory_k, "The handle could not be allocated", outcome)) return;
-    index->options = {arguments->metric,
-                      arguments->quantization,
-                      arguments->columns,
-                      arguments->rows,
+    index->options = {arguments->metric, arguments->quantization, arguments->points,
                       arguments->connectivity ? arguments->connectivity : us::utilities::connectivity_16_k,
                       arguments->values_per_key};
     *arguments->index = index;
 }
 
-void usearch_matrix_init_vram(usearch_matrix_init_vram_t* arguments) {
+void usearch_shapes_init_vram(usearch_shapes_init_vram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
-void usearch_matrix_load_ram(usearch_matrix_load_ram_t* arguments) {
-    if (through_executor<usearch_matrix_load_ram>(arguments)) return;
+void usearch_shapes_load_ram(usearch_shapes_load_ram_t* arguments) {
+    if (through_executor<usearch_shapes_load_ram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
-    if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
+    if (!keep_going(arguments->progress, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob;
     if (!read_file(arguments->path, blob, outcome)) return;
-    usearch_matrix_index_handle_t* const index = open_checkpoint<usearch_matrix_index_handle_t>(blob, outcome);
+    usearch_shapes_index_handle_t* const index = open_checkpoint<usearch_shapes_index_handle_t>(blob, outcome);
     if (!index) return;
     index->options.values_per_key = arguments->values_per_key;
-    keep_going(arguments->progress, arguments->progress_state, 1, 1);
+    keep_going(arguments->progress, 1, 1);
     *arguments->index = index;
 }
 
-void usearch_matrix_load_vram(usearch_matrix_load_vram_t* arguments) {
-    if (through_executor<usearch_matrix_load_vram>(arguments)) return;
+void usearch_shapes_load_vram(usearch_shapes_load_vram_t* arguments) {
+    if (through_executor<usearch_shapes_load_vram>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     propagate_error(usearch_status_device_k, outcome, "This build carries no GPU backends");
 }
 
-void usearch_matrix_view_ram(usearch_matrix_view_ram_t* arguments) {
+void usearch_shapes_view_ram(usearch_shapes_view_ram_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->index = nullptr;
     mapped_file_t served = map_file(arguments->path, outcome);
     if (!served) return;
     // Rows are still copied out of the mapping, so only the view's refusals are mirrored, not its zero cost.
-    usearch_matrix_index_handle_t* const index = open_checkpoint<usearch_matrix_index_handle_t>(served.view(), outcome);
+    usearch_shapes_index_handle_t* const index = open_checkpoint<usearch_shapes_index_handle_t>(served.view(), outcome);
     if (!index) return;
     index->served = std::move(served);
     *arguments->index = index;
 }
 
-void usearch_matrix_free(usearch_matrix_index_t handle) {
+void usearch_shapes_view_nvme(usearch_shapes_view_nvme_t* arguments) {
+    if (through_executor<usearch_shapes_view_nvme>(arguments)) return;
+    deferred_outcome_t outcome(arguments->outcome);
+    *arguments->index = nullptr;
+    mapped_file_t served = map_file(arguments->path, outcome);
+    if (!served) return;
+    // Serves the drives' checkpoint as the RAM view does, mirroring only the residency's refusals.
+    usearch_shapes_index_handle_t* const index = open_checkpoint<usearch_shapes_index_handle_t>(served.view(), outcome);
+    if (!index) return;
+    index->served = std::move(served);
+    index->residency = usearch_residency_nvme_k;
+    *arguments->index = index;
+}
+
+void usearch_shapes_free(usearch_shapes_index_t handle) {
     wait_for_calls_using(handle);
     delete handle;
 }
 
-void usearch_matrix_reserve(usearch_matrix_reserve_t* arguments) {
-    if (through_executor<usearch_matrix_reserve>(arguments)) return;
+void usearch_shapes_reserve(usearch_shapes_reserve_t* arguments) {
+    if (through_executor<usearch_shapes_reserve>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
-    usearch_matrix_index_handle_t& index = *arguments->index;
+    usearch_shapes_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
     std::unique_lock writers(index.mutex);
     reject_if(!index.accommodate(arguments->entries), usearch_status_out_of_memory_k,
               "The capacity could not be reserved", outcome);
 }
 
-void usearch_matrix_clear(usearch_matrix_clear_t* arguments) {
-    if (through_executor<usearch_matrix_clear>(arguments)) return;
+void usearch_shapes_clear(usearch_shapes_clear_t* arguments) {
+    if (through_executor<usearch_shapes_clear>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
-    usearch_matrix_index_handle_t& index = *arguments->index;
+    usearch_shapes_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
     std::unique_lock writers(index.mutex);
     index.reset();
 }
 
-void usearch_matrix_describe(usearch_matrix_describe_t* arguments) {
-    if (through_executor<usearch_matrix_describe>(arguments)) return;
+void usearch_shapes_describe(usearch_shapes_describe_t* arguments) {
+    if (through_executor<usearch_shapes_describe>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->description = {};
-    usearch_matrix_index_handle_t& index = *arguments->index;
+    usearch_shapes_index_handle_t& index = *arguments->index;
     // Held shared like every other reader, so a size taken beside an insertion is not a data race.
     std::shared_lock readers(index.mutex);
-    std::size_t total_rows = 0;
-    for (matrix_entry_t const& entry : index.entries) total_rows += rows_of(index, entry);
-    matrix_index_options_t const& options = index.options;
+    std::size_t total_points = 0;
+    for (shapes_entry_t const& entry : index.entries) total_points += points_of(entry);
+    shapes_index_options_t const& options = index.options;
     *arguments->description = {
-        {options.metric, options.quantization, options.columns, options.rows, options.connectivity},
+        {options.metric, options.quantization, options.points, options.connectivity},
         index.entries.size(),
         index.entries.capacity(),
-        total_rows,
+        total_points,
         payload_extent(index, index.entries.size()),
         "serial",
     };
 }
 
-void usearch_matrix_insert(usearch_matrix_insert_t* arguments) {
-    if (through_executor<usearch_matrix_insert>(arguments)) return;
+void usearch_shapes_insert(usearch_shapes_insert_t* arguments) {
+    if (through_executor<usearch_shapes_insert>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
-    usearch_matrix_traversal_stats_t* const stats = arguments->stats;
+    usearch_shapes_traversal_stats_t* const stats = arguments->stats;
     reset(stats);
-    usearch_matrix_index_handle_t& index = *arguments->index;
+    usearch_shapes_index_handle_t& index = *arguments->index;
     std::size_t const count = arguments->count;
-    usearch_tape_view_t const& matrices = arguments->matrices;
+    usearch_tape_view_t const& shapes = arguments->shapes;
     if (reject_read_only(index, outcome)) return;
-    if (reject_unfrozen(index, outcome)) return;
-    if (reject_scalar(matrices.scalar, outcome)) return;
+    if (reject_scalar(shapes.scalar, outcome)) return;
     if (reject_keys(arguments->keys, outcome)) return;
-    if (reject_tape(matrices, count, outcome)) return;
-    // A frozen height is what lets row `i` of one entry pair with row `i` of another, so an
-    // entry of any other height is rejected rather than stored.
-    if (index.options.rows)
+    if (reject_tape(shapes, count, outcome)) return;
+    if (index.options.points)
         for (std::size_t row = 0; row != count; ++row)
-            if (reject_if(matrices.offsets[row + 1] - matrices.offsets[row] != index.options.rows,
-                          usearch_status_shape_mismatch_k, "The index froze a row count this entry does not match",
+            if (reject_if(shapes.offsets[row + 1] - shapes.offsets[row] != index.options.points,
+                          usearch_status_shape_mismatch_k, "The index froze a point count this entry does not match",
                           outcome))
                 return;
 
@@ -507,13 +504,13 @@ void usearch_matrix_insert(usearch_matrix_insert_t* arguments) {
         return;
 
     std::size_t const watermark = index.entries.size();
-    matrix_payload_t payload;
+    shapes_payload_t payload;
     std::size_t published = 0;
     for (std::size_t row = 0; row != count; ++row) {
-        read_matrix(matrices, row, index.options.columns, payload);
+        read_shape(shapes, row, payload);
         index.append(key_at(arguments->keys, row), payload);
         ++published;
-        if (!keep_going(arguments->progress, arguments->progress_state, published, count)) break;
+        if (!keep_going(arguments->progress, published, count)) break;
     }
     // This modality's batch is all-or-nothing, a cancellation included, so a stopped tape unwinds
     // to the watermark rather than leaving a prefix published.
@@ -528,31 +525,30 @@ void usearch_matrix_insert(usearch_matrix_insert_t* arguments) {
     }
 }
 
-void usearch_matrix_refine(usearch_matrix_refine_t* arguments) {
-    if (through_executor<usearch_matrix_refine>(arguments)) return;
+void usearch_shapes_refine(usearch_shapes_refine_t* arguments) {
+    if (through_executor<usearch_shapes_refine>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     reset(arguments->stats);
     if (arguments->changed) *arguments->changed = 0;
-    usearch_matrix_index_handle_t& index = *arguments->index;
+    usearch_shapes_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
     std::shared_lock readers(index.mutex);
     std::size_t const rows = index.entries.size();
     // An exact scan keeps no edges, so a sweep re-selects nothing and the graph is always settled.
     // Cancelling is not an error here, the header having made a stopped sweep merely less improved.
     for (std::size_t row = 0; row != rows; ++row)
-        if (!keep_going(arguments->progress, arguments->progress_state, row + 1, rows)) break;
+        if (!keep_going(arguments->progress, row + 1, rows)) break;
     if (arguments->stats) arguments->stats->visited_members = rows;
 }
 
-void usearch_matrix_search(usearch_matrix_search_t* arguments) {
-    if (through_executor<usearch_matrix_search>(arguments)) return;
+void usearch_shapes_search(usearch_shapes_search_t* arguments) {
+    if (through_executor<usearch_shapes_search>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     reset(arguments->stats);
     *arguments->matches = {};
-    usearch_matrix_index_handle_t& index = *arguments->index;
+    usearch_shapes_index_handle_t& index = *arguments->index;
     std::size_t const count = arguments->count;
     usearch_tape_view_t const& queries = arguments->queries;
-    if (reject_unfrozen(index, outcome)) return;
     if (reject_scalar(queries.scalar, outcome)) return;
     if (reject_metric(index, outcome)) return;
     if (reject_tape(queries, count, outcome)) return;
@@ -563,64 +559,62 @@ void usearch_matrix_search(usearch_matrix_search_t* arguments) {
 
     std::shared_lock readers(index.mutex);
     std::size_t const answered = search_tape(index, queries, count, landing, arguments->expansion_factor,
-                                             arguments->stats, arguments->predicate, arguments->progress,
-                                             arguments->progress_state);
+                                             arguments->stats, arguments->predicate, arguments->progress);
     if (reject_cancelled(answered, count, outcome)) return;
     *arguments->matches = landing.view();
 }
 
-void usearch_matrix_count(usearch_matrix_count_t* arguments) {
-    if (through_executor<usearch_matrix_count>(arguments)) return;
+void usearch_shapes_count(usearch_shapes_count_t* arguments) {
+    if (through_executor<usearch_shapes_count>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->key_stats = {};
-    usearch_matrix_index_handle_t& index = *arguments->index;
+    usearch_shapes_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
     auto const range = index.by_key.equal_range(keyed(arguments->key));
-    std::size_t entries = 0, total_rows = 0, largest_rows = 0;
+    std::size_t entries = 0, total_points = 0, largest_points = 0;
     for (auto position = range.first; position != range.second; ++position, ++entries) {
-        std::size_t const height = rows_of(index, index.entries[position->second]);
-        total_rows += height;
-        largest_rows = std::max(largest_rows, height);
+        std::size_t const points = points_of(index.entries[position->second]);
+        total_points += points;
+        largest_points = std::max(largest_points, points);
     }
-    *arguments->key_stats = {entries, total_rows, largest_rows};
+    *arguments->key_stats = {entries, total_points, largest_points};
 }
 
-void usearch_matrix_get(usearch_matrix_get_t* arguments) {
-    if (through_executor<usearch_matrix_get>(arguments)) return;
+void usearch_shapes_get(usearch_shapes_get_t* arguments) {
+    if (through_executor<usearch_shapes_get>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
-    *arguments->matrices = {};
+    *arguments->shapes = {};
     if (arguments->written) *arguments->written = 0;
-    usearch_matrix_index_handle_t& index = *arguments->index;
+    usearch_shapes_index_handle_t& index = *arguments->index;
     if (reject_scalar(arguments->outputs_scalar, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
     std::shared_lock readers(index.mutex);
     std::vector<std::size_t> const rows = rows_under(index, arguments->key);
     if (rows.empty()) return;
-    if (!land_entries(index, rows, arguments->outputs_scalar, *arena, *arguments->matrices, outcome)) return;
+    if (!land_entries(index, rows, arguments->outputs_scalar, *arena, *arguments->shapes, outcome)) return;
     if (arguments->written) *arguments->written = rows.size();
 }
 
-void usearch_matrix_merge(usearch_matrix_merge_t* arguments) {
-    if (through_executor<usearch_matrix_merge>(arguments)) return;
+void usearch_shapes_merge(usearch_shapes_merge_t* arguments) {
+    if (through_executor<usearch_shapes_merge>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
-    usearch_matrix_index_handle_t& index = *arguments->index;
+    usearch_shapes_index_handle_t& index = *arguments->index;
     if (reject_read_only(index, outcome)) return;
 
     std::size_t const donors_count = arguments->count;
-    usearch_matrix_index_t* const donors = arguments->donors;
-    usearch_progress_callback_t const progress = arguments->progress;
-    void* const progress_state = arguments->progress_state;
+    usearch_shapes_index_t* const donors = arguments->donors;
+    usearch_progress_t const progress = arguments->progress;
     std::size_t merged = 0;
     bool accommodated = true;
     while (accommodated && merged != donors_count) {
-        usearch_matrix_index_handle_t& donor = *donors[merged];
+        usearch_shapes_index_handle_t& donor = *donors[merged];
         std::unique_lock writers(index.mutex);
         accommodated = index.accommodate(index.entries.size() + donor.entries.size());
         if (!accommodated) break;
-        for (matrix_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
+        for (shapes_entry_t const& entry : donor.entries) index.append(entry.key, entry.payload);
         ++merged;
-        if (!keep_going(progress, progress_state, merged, donors_count)) break;
+        if (!keep_going(progress, merged, donors_count)) break;
     }
     // Only an absorbed donor is consumed, and its slot is nulled as it goes, so a stopped merge
     // leaves the rest live handles the caller still owns and must free.
@@ -634,30 +628,30 @@ void usearch_matrix_merge(usearch_matrix_merge_t* arguments) {
     reject_cancelled(merged, donors_count, outcome);
 }
 
-void usearch_matrix_cursor_init(usearch_matrix_cursor_init_t* arguments) {
+void usearch_shapes_cursor_init(usearch_shapes_cursor_init_t* arguments) {
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->cursor = nullptr;
-    usearch_matrix_index_handle_t& index = *arguments->index;
+    usearch_shapes_index_handle_t& index = *arguments->index;
     std::shared_lock readers(index.mutex);
-    usearch_matrix_cursor_handle_t* const cursor = new (std::nothrow)
-        usearch_matrix_cursor_handle_t {&index, 0, index.entries.size(), {}};
+    usearch_shapes_cursor_handle_t* const cursor = new (std::nothrow)
+        usearch_shapes_cursor_handle_t {&index, 0, index.entries.size(), {}};
     if (reject_if(!cursor, usearch_status_out_of_memory_k, "The cursor could not be allocated", outcome)) return;
     *arguments->cursor = cursor;
 }
 
-void usearch_matrix_cursor_next(usearch_matrix_cursor_next_t* arguments) {
-    if (through_executor<usearch_matrix_cursor_next>(arguments)) return;
+void usearch_shapes_cursor_next(usearch_shapes_cursor_next_t* arguments) {
+    if (through_executor<usearch_shapes_cursor_next>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome, arguments->arena);
     *arguments->written = 0;
     *arguments->keys = {};
-    usearch_tape_view_t* const matrices = arguments->matrices;
-    if (matrices) *matrices = {};
-    usearch_matrix_cursor_handle_t& cursor = *arguments->cursor;
+    usearch_tape_view_t* const shapes = arguments->shapes;
+    if (shapes) *shapes = {};
+    usearch_shapes_cursor_handle_t& cursor = *arguments->cursor;
     if (reject_if(arguments->index != cursor.opened_on, usearch_status_invalid_argument_k,
                   "The cursor was opened on another index", outcome))
         return;
-    usearch_matrix_index_handle_t& index = *arguments->index;
-    if (matrices && reject_scalar(arguments->outputs_scalar, outcome)) return;
+    usearch_shapes_index_handle_t& index = *arguments->index;
+    if (shapes && reject_scalar(arguments->outputs_scalar, outcome)) return;
     usearch_arena_handle_t* const arena = claim_arena(arguments->arena, arguments->outcome, {}, outcome);
     if (!arena) return;
     if (reject_if(cursor.pulling.test_and_set(std::memory_order_acquire), usearch_status_contended_k,
@@ -669,7 +663,7 @@ void usearch_matrix_cursor_next(usearch_matrix_cursor_next_t* arguments) {
     for (std::size_t row = 0; row != written; ++row) rows[row] = cursor.position + row;
     usearch_key_t* const keys = carve<usearch_key_t>(*arena, written, outcome);
     // A batch the arena could not hold leaves the cursor where it was, so the next pull retries it.
-    if (keys && (!matrices || land_entries(index, rows, arguments->outputs_scalar, *arena, *matrices, outcome))) {
+    if (keys && (!shapes || land_entries(index, rows, arguments->outputs_scalar, *arena, *shapes, outcome))) {
         for (std::size_t row = 0; row != written; ++row) keys[row] = index.entries[rows[row]].key;
         cursor.position += written;
         *arguments->keys = {keys, sizeof(usearch_key_t)};
@@ -678,41 +672,44 @@ void usearch_matrix_cursor_next(usearch_matrix_cursor_next_t* arguments) {
     cursor.pulling.clear(std::memory_order_release);
 }
 
-void usearch_matrix_cursor_free(usearch_matrix_cursor_t handle) {
+void usearch_shapes_cursor_free(usearch_shapes_cursor_t handle) {
     wait_for_calls_using(handle);
     delete handle;
 }
 
-void usearch_matrix_save(usearch_matrix_save_t* arguments) {
-    if (through_executor<usearch_matrix_save>(arguments)) return;
+void usearch_shapes_save(usearch_shapes_save_t* arguments) {
+    if (through_executor<usearch_shapes_save>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
-    usearch_matrix_index_handle_t& index = *arguments->index;
+    usearch_shapes_index_handle_t& index = *arguments->index;
+    if (reject_if(index.residency == usearch_residency_nvme_k, usearch_status_unsupported_k,
+                  "An NVMe view already is its checkpoint", outcome))
+        return;
     std::shared_lock readers(index.mutex);
     std::size_t const rows = index.entries.size();
     std::optional<std::size_t> const length = serialized_bytes(index, rows);
     if (reject_if(!length, usearch_status_overflow_k, "The checkpoint would not fit an addressable buffer", outcome))
         return;
-    if (!keep_going(arguments->progress, arguments->progress_state, 0, 1))
+    if (!keep_going(arguments->progress, 0, 1))
         return propagate_error(usearch_status_cancelled_k, outcome, "The caller's handler stopped the checkpoint");
     std::vector<std::byte> blob(*length);
     write_into(index, rows, blob);
     if (!write_file(arguments->path, blob, outcome)) return;
-    keep_going(arguments->progress, arguments->progress_state, 1, 1);
+    keep_going(arguments->progress, 1, 1);
 }
 
-void usearch_matrix_metadata_read(usearch_matrix_metadata_read_t* arguments) {
-    if (through_executor<usearch_matrix_metadata_read>(arguments)) return;
+void usearch_shapes_metadata_read(usearch_shapes_metadata_read_t* arguments) {
+    if (through_executor<usearch_shapes_metadata_read>(arguments)) return;
     deferred_outcome_t outcome(arguments->outcome);
     *arguments->metadata = {};
     std::vector<std::byte> blob;
     if (!read_file(arguments->path, blob, outcome)) return;
-    matrix_checkpoint_prefix_t prefix {};
+    shapes_checkpoint_prefix_t prefix {};
     if (!parse_prefix(prefix, blob, outcome)) return;
-    matrix_index_options_t options {};
+    shapes_index_options_t options {};
     if (reject_if(!adopt(options, prefix), usearch_status_unknown_kind_k,
                   "The checkpoint names a metric this build lacks", outcome))
         return;
-    *arguments->metadata = {options.metric, options.quantization, options.columns, options.rows, options.connectivity};
+    *arguments->metadata = {options.metric, options.quantization, options.points, options.connectivity};
 }
 
 } // extern "C"

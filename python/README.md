@@ -7,7 +7,7 @@ They expose dense indexes; the other modalities are declared and raise `NotImple
 
 - `usearch.DenseIndex` searches equidimensional dense embeddings, and is the one instantiated today.
 - `usearch.SequenceIndex` searches variable-length sequences.
-- `usearch.MatrixIndex` searches rank-2 tensors.
+- `usearch.ShapesIndex` searches 3D point clouds of any size.
 - `usearch.GeospatialIndex` searches space and time.
 
 ## Installation

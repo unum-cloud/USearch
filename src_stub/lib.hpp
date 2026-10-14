@@ -222,15 +222,15 @@ using call_arguments_t = std::variant<
     usearch_sequence_view_nvme_t, usearch_sequence_reserve_t, usearch_sequence_clear_t, usearch_sequence_insert_t,
     usearch_sequence_refine_t, usearch_sequence_search_t, usearch_sequence_count_t, usearch_sequence_get_t,
     usearch_sequence_merge_t, usearch_sequence_cursor_next_t, usearch_sequence_save_t, usearch_sequence_metadata_read_t,
-    usearch_sequence_describe_t, usearch_matrix_load_ram_t, usearch_matrix_load_vram_t, usearch_matrix_reserve_t,
-    usearch_matrix_clear_t, usearch_matrix_insert_t, usearch_matrix_refine_t, usearch_matrix_search_t,
-    usearch_matrix_count_t, usearch_matrix_get_t, usearch_matrix_merge_t, usearch_matrix_cursor_next_t,
-    usearch_matrix_save_t, usearch_matrix_metadata_read_t, usearch_matrix_describe_t, usearch_geospatial_load_ram_t,
-    usearch_geospatial_load_vram_t, usearch_geospatial_reserve_t, usearch_geospatial_clear_t,
-    usearch_geospatial_insert_t, usearch_geospatial_refine_t, usearch_geospatial_emplace_t, usearch_geospatial_search_t,
-    usearch_geospatial_within_t, usearch_geospatial_count_t, usearch_geospatial_get_t, usearch_geospatial_merge_t,
-    usearch_geospatial_cursor_next_t, usearch_geospatial_save_t, usearch_geospatial_metadata_read_t,
-    usearch_geospatial_describe_t>;
+    usearch_sequence_describe_t, usearch_shapes_load_ram_t, usearch_shapes_load_vram_t, usearch_shapes_view_nvme_t,
+    usearch_shapes_reserve_t, usearch_shapes_clear_t, usearch_shapes_insert_t, usearch_shapes_refine_t,
+    usearch_shapes_search_t, usearch_shapes_count_t, usearch_shapes_get_t, usearch_shapes_merge_t,
+    usearch_shapes_cursor_next_t, usearch_shapes_save_t, usearch_shapes_metadata_read_t, usearch_shapes_describe_t,
+    usearch_geospatial_load_ram_t, usearch_geospatial_load_vram_t, usearch_geospatial_reserve_t,
+    usearch_geospatial_clear_t, usearch_geospatial_insert_t, usearch_geospatial_refine_t, usearch_geospatial_emplace_t,
+    usearch_geospatial_search_t, usearch_geospatial_within_t, usearch_geospatial_count_t, usearch_geospatial_get_t,
+    usearch_geospatial_merge_t, usearch_geospatial_cursor_next_t, usearch_geospatial_save_t,
+    usearch_geospatial_metadata_read_t, usearch_geospatial_describe_t>;
 
 /** A stand-in's executor: no threads, so every call it is given runs on the thread of a caller -
  *  the one that submits it blocking, drains the executor, waits on the call, or frees a handle it uses. */

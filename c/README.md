@@ -2,7 +2,7 @@
 
 This is the C 99 interface every other binding wraps: the headers in `c/usearch/`, compiled into `libusearch_shared` and `libusearch_static`.
 Building the library takes CMake 3.28 and a C++20 compiler, while calling it takes any C99 compiler.
-It exposes all four modalities: the engine implements dense indexes, while sequence, matrix and geospatial indexes are answered today by a brute-force stand-in only.
+It exposes all four modalities: the engine implements dense indexes, while sequence, shape and geospatial indexes are answered today by a brute-force stand-in only.
 
 ## Installation
 
@@ -657,33 +657,35 @@ The verbs mirror the dense ones: `init_ram`, `load_ram`, `view_ram`, `reserve`, 
 A key already holding `values_per_key` entries rejects the whole insertion with `usearch_status_overflow_k`.
 The engine does not export these verbs yet, so a program calling them links against the stand-in, which scores every kind by textbook dynamic programming, quadratic and unbanded, and reports alignment similarities negated.
 
-## Matrix Indexes
+## Shape Indexes
 
-A matrix index searches sets of equidimensional rows whose count varies per entry, like molecular conformers or point clouds, in RAM or VRAM.
-Its tape is rows end to end with row offsets, `columns` is frozen index-wide, and a non-zero `rows` freezes the height too, rejecting insertions of any other:
+A shape index searches 3D point clouds of any size, like molecules, conformers and protein backbones, in RAM or VRAM.
+Its tape is points end to end, `x`, `y` and `z` interleaved, with offsets that count points rather than scalars:
 
 ```c
-usearch_matrix_index_t conformers = NULL;
-usearch_matrix_init_ram(&(usearch_matrix_init_ram_t) {.index = &conformers,
+usearch_shapes_index_t conformers = NULL;
+usearch_shapes_init_ram(&(usearch_shapes_init_ram_t) {.index = &conformers,
                                                       .outcome = &outcome,
-                                                      .metric = usearch_matrix_metric_hausdorff_k,
-                                                      .quantization = usearch_scalar_f16_k,
-                                                      .columns = 3});
+                                                      .metric = usearch_shapes_metric_wasserstein_procrustes_k,
+                                                      .quantization = usearch_scalar_f16_k});
 
 float const atoms[5][3] = {{0, 0, 0}, {1.1f, 0, 0}, {0, 0, 0}, {1.5f, 0, 0}, {0, 1.5f, 0}};
-size_t const row_offsets[3] = {0, 2, 5}; // a 2-atom and a 3-atom entry
-usearch_matrix_insert(&(usearch_matrix_insert_t) {.index = conformers,
+size_t const point_offsets[3] = {0, 2, 5}; // a 2-atom and a 3-atom entry
+usearch_shapes_insert(&(usearch_shapes_insert_t) {.index = conformers,
                                                   .executor = executor,
                                                   .outcome = &outcome,
                                                   .count = 2,
                                                   .keys = {molecules, sizeof(usearch_key_t)},
-                                                  .matrices = {atoms, row_offsets, usearch_scalar_f32_k}});
+                                                  .shapes = {atoms, point_offsets, usearch_scalar_f32_k}});
 ```
 
-Chamfer and Hausdorff pair every row with its best partner on the other side; Gromov-Wasserstein compares each side's internal geometry, invariant to rotation, translation and row order.
-Kabsch and Umeyama report the residual after superposing one set onto the other, so they need a fixed `rows`, and Umeyama only ranks, served from a symmetric counterpart.
-The verbs are the sequence ones plus `init_vram` and `load_vram`, with `get` and `cursor_next` converting rows to an `outputs_scalar` and `count` reporting a key's total and tallest row counts.
-The engine does not export these verbs yet, so a program calling them links against the stand-in, which scores Chamfer and Hausdorff, refuses the other three kinds with `usearch_status_unknown_kind_k`, ignores `quantization`, and refuses every VRAM verb with `usearch_status_device_k`.
+Chamfer and Hausdorff pair every point with its nearest partner after aligning the principal axes under all eight sign flips, keeping the best.
+Wasserstein-Procrustes pairs points by an exact transport plan, alternated with the best rotation or reflection.
+Gromov-Wasserstein compares each side's internal distances.
+All four are invariant to rotation, reflection, translation and point order.
+A non-zero `points` freezes the count, rejecting insertions of any other with `usearch_status_shape_mismatch_k`.
+The verbs are the sequence ones plus `init_vram` and `load_vram`, where `get` and `cursor_next` convert to an `outputs_scalar` and return each shape in its inserted pose, and `count` reports a key's total and largest point counts.
+The engine does not export these verbs yet, so a program calling them links against the stand-in, which scores Chamfer and Hausdorff in the frame the points arrive in, refuses the two transport kinds with `usearch_status_unknown_kind_k`, refuses quantizations other than `f16` and `f32` with `usearch_status_unsupported_k`, and refuses every VRAM verb with `usearch_status_device_k`.
 
 ## Geospatial Indexes
 
@@ -740,7 +742,7 @@ An emplaced query is not internally synchronized, so build one per thread, and t
 `axes` narrows the comparison to the ground track, three dimensions, or every axis with time, and `tolerance` carries the radius in metres and the time window in seconds.
 Scores are metres, except overlap, which counts query points and ranks largest first.
 `insert` takes optional per-point `deviations` in metres, `get` returns the degrees, metres and seconds inserted, and `cursor_next` exports the internal Earth-fixed integer centimetres, three per point, as `usearch_scalar_i32_k`.
-The remaining verbs are the matrix ones, with `count` reporting a key's total and longest point counts.
+The remaining verbs are the shapes ones, with `count` reporting a key's total and longest point counts.
 The engine does not export these verbs yet, so a program calling them links against the stand-in, which converts onto a sphere rather than the ellipsoid, refuses `overlap_k` with `usearch_status_unknown_kind_k`, ignores deviations, and refuses every VRAM verb with `usearch_status_device_k`.
 
 ## What This Binding Does Not Expose
