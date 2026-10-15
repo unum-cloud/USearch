@@ -493,33 +493,37 @@ struct metal_walk_t {
     }
 
     /** Scores @p count rows of @p batch_ids against @p query, a sub-group of @c lanes_per_row lanes per row, landing
-     *  each row's node in @c scored and its dot in @c dots; answers this lane's node, or the sentinel past @p count. */
+     *  each row's node in @c scored and its dot in @c dots; answers this lane's node, or the sentinel past @p count.
+     *  A lane whose row lies past the batch re-reads the batch's first row instead of taking a guard, and each lane
+     *  finalizes its own row, so the metric's epilogue runs once per lane. */
     ulong score_batch(device uint4 const* query_row, norms_t query_norms, device uint const* batch_ids, uint count) {
         uint const lanes_log2 = ctz(lanes_per_row);
         uint const rows_per_round = warp_t::width_k >> lanes_log2;
         uint const lane_in_row = lane & (lanes_per_row - 1);
         uint const subgroup = lane >> lanes_log2;
+        bool const live = lane < count;
+        // Requested before the rows, so the two round trips overlap.
+        norms_t const target_norms = live ? norm_for(batch_ids[lane]) : norms_t(0);
+        device uint4 const* const query = query_row + lane_in_row;
         // Simdgroup-uniform, so the reduction's shuffles stay legal: rounds past the batch own no row.
         for (uint round = 0; round != lanes_per_row && round * rows_per_round < count; ++round) {
             uint const row = round * rows_per_round + subgroup;
-            bool const live = row < count;
-            uint const node_id = live ? batch_ids[row] : 0;
-            device uint4 const* const stored = vector_for(node_id);
+            device uint4 const* const stored = vector_for(batch_ids[row < count ? row : 0]) + lane_in_row;
             dot_t accumulator = dot_t(0);
             for (uint step = 0; step != steps_per_row; ++step) {
-                uint const fragment_index = lane_in_row + (step << lanes_log2);
-                if (live && fragment_index < row_fragments)
-                    accumulator = kit_t::accumulate_dot(stored[fragment_index], query_row[fragment_index], accumulator);
+                uint const offset = step << lanes_log2;
+                if (lane_in_row + offset < row_fragments)
+                    accumulator = kit_t::accumulate_dot(stored[offset], query[offset], accumulator);
             }
             for (uint offset = lanes_per_row >> 1; offset; offset >>= 1)
                 accumulator += warp_t::shuffle_xor(accumulator, offset);
-            if (live && lane_in_row == 0) {
-                scored[row] = metal_make(kit_t::distance(metric, accumulator, query_norms, norm_for(node_id)), node_id);
-                dots[row] = accumulator;
-            }
+            if (row < count && lane_in_row == 0) dots[row] = accumulator;
         }
         warp_t::sync();
-        return lane < count ? scored[lane] : metal_sentinel_k;
+        if (!live) return metal_sentinel_k;
+        ulong const staged = metal_make(kit_t::distance(metric, dots[lane], query_norms, target_norms), batch_ids[lane]);
+        scored[lane] = staged;
+        return staged;
     }
 
     /** Stages the fresh IDs of one lane-wide read into @c ids, answering how many; lanes pass the sentinel for none. */

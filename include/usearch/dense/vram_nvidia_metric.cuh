@@ -14,7 +14,9 @@
  *
  *  Kits stay pure arithmetic. How a warp's candidate rows reach shared memory is a separate
  *  @b schedule, picked under the same ceiling: @c cp.async commit groups through Ada, whole-row
- *  Tensor Memory Accelerator copies from Hopper on.
+ *  Tensor Memory Accelerator copies from Hopper on. The schedule also names how many fragments a
+ *  walking lane loads at once: one through Hopper, two from Blackwell on, whose 256-bit loads
+ *  serve the random row gathers better.
  *
  *  Fragments are 16 bytes of scalars held in registers, and metrics with precomputable norms
  *  finalize "through the dot". Row geometry - how many fragments span one vector, how many lanes
@@ -1349,6 +1351,7 @@ __device__ __forceinline__ void cuda_stage_rows_through_registers(storage_ const
  */
 struct ampere_cp_async_schedule_t {
     inline static constexpr u32_t stages_k = 2;
+    inline static constexpr u32_t fragments_per_load_k = 1;
 
     /** Nothing shared: the commit groups live in each lane's own pipeline. */
     struct shared_t {};
@@ -1406,10 +1409,13 @@ struct ampere_cp_async_schedule_t {
  *      copies hold no registers and every lane waits on the barrier, not on its own copies.
  *
  *  A row is one contiguous span of whole 16-byte fragments, so no tensor map is needed and no row
- *  length is capped. Each barrier advances one phase per staging that fills its stage.
+ *  length is capped. Each barrier advances one phase per staging that fills its stage. A walking
+ *  lane loads @p fragments_per_load_ adjacent fragments at once.
  */
-struct hopper_tma_schedule_t {
+template <u32_t fragments_per_load_>
+struct cuda_tma_schedule {
     inline static constexpr u32_t stages_k = 2;
+    inline static constexpr u32_t fragments_per_load_k = fragments_per_load_;
 
     /** One barrier per stage, in the warp's static shared memory. */
     struct shared_t {
@@ -1425,8 +1431,7 @@ struct hopper_tma_schedule_t {
     /** Bit @b s is the parity of the phase stage @b s is filling. */
     u32_t phases_ = 0;
 
-    __device__ __forceinline__ hopper_tma_schedule_t(shared_t& shared, u32_t lane) noexcept
-        : barriers_(shared.barriers) {
+    __device__ __forceinline__ cuda_tma_schedule(shared_t& shared, u32_t lane) noexcept : barriers_(shared.barriers) {
         if (lane == 0) {
             for (u32_t stage = 0; stage != stages_k; ++stage)
                 asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" ::"r"(barrier_(stage)), "r"(1u) : "memory");
@@ -1486,6 +1491,9 @@ struct hopper_tma_schedule_t {
         return cuda_shared_address(barriers_ + stage);
     }
 };
+
+using hopper_tma_schedule_t = cuda_tma_schedule<1>;
+using blackwell_tma_schedule_t = cuda_tma_schedule<2>;
 
 #pragma endregion Schedules
 
@@ -1595,12 +1603,13 @@ struct quads_chain<nk::u1x8_t, caps_> {
 };
 
 /** The staging schedule under @p caps_: whole-row Tensor Memory Accelerator copies on every class
- *  that has one, Hopper on, and the @c cp.async ring below. */
+ *  that has one, Hopper on, paired-fragment loads from Blackwell on, and the @c cp.async ring
+ *  below. */
 template <nk_capability_t caps_>
-using cuda_schedule_chain = typename first_available_kit<                                      //
-    ampere_cp_async_schedule_t,                                                                //
-    chain_layer<(caps_ & (nk_cap_hopper_k | nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0, //
-                hopper_tma_schedule_t>                                                         //
+using cuda_schedule_chain = typename first_available_kit<                                               //
+    ampere_cp_async_schedule_t,                                                                         //
+    chain_layer<(caps_ & (nk_cap_blackwell_k | nk_cap_blackwellrtx_k)) != 0, blackwell_tma_schedule_t>, //
+    chain_layer<(caps_ & nk_cap_hopper_k) != 0, hopper_tma_schedule_t>                                  //
     >::type;
 
 #pragma endregion Chains

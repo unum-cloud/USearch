@@ -342,81 +342,102 @@ struct vram_multiply_fold {
  *      @p gathered.
  *
  *  A sub-warp of @c lanes_per_row lanes owns one row, re-reading the query from its span each step,
- *  so no register budget caps the dimensions. Plain loads are safe: every staged ID came through an
- *  acquiring slot-0 read.
+ *  so no register budget caps the dimensions. A lane whose row lies past the batch re-reads the
+ *  batch's first row instead of taking a guard, since guards around each gather slot would split
+ *  the slots' dot chains, which the float kits need interleaved. Each lane finalizes its own row,
+ *  so the metric's epilogue runs once per lane. Plain loads are safe: every staged ID came through
+ *  an acquiring slot-0 read.
+ *
+ *  Each lane loads @p fragments_per_load_ adjacent fragments a step, the schedule's load width: the
+ *  lanes per row shrink while one step still spans the row, and the steps shrink past it. A wider
+ *  load needs every row aligned to it, so rows of another stride score one fragment at a time.
  *
  *  @return This lane's scored entry, or the sentinel on lanes past @p gathered_count.
  */
-template <vram_quads_kit kit_, u32_t resident_blocks_ = vram_resident_blocks_per_multiprocessor_k>
+template <vram_quads_kit kit_, u32_t resident_blocks_ = vram_resident_blocks_per_multiprocessor_k,
+          u32_t fragments_per_load_ = 1>
 __device__ __forceinline__ vram_scored_node_t vram_score_batch( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
     typename kit_::norms_t query_state, u32_t const* batch_ids, u32_t gathered_count, vram_gathered<kit_>& gathered,
     u32_t lane) noexcept {
 
     using warp_t = typename kit_::warp_t;
-    using norms_t = typename kit_::norms_t;
-    // 128 concurrent random gathers saturate the memory path, so the window is 128 over the
-    // resident warps.
-    constexpr u32_t gathers_in_flight_k = min_of(vram_max_gathers_in_flight_k,
-                                                 128u / (vram_warps_per_block_k * resident_blocks_));
-    u32_t const lanes_log2 = 31 - __clz(storage.lanes_per_row);
-    u32_t const rows_per_gather = warp_t::width_k >> lanes_log2;
-    u32_t const lane_in_row = lane & (storage.lanes_per_row - 1);
-    u32_t const subwarp = lane >> lanes_log2;
-    bool const leader = lane_in_row == 0;
+    using fragment_t = typename kit_::fragment_t;
+    using dot_t = typename kit_::dot_t;
+    if constexpr (fragments_per_load_ != 1)
+        if (storage.row_fragments % fragments_per_load_ != 0)
+            return vram_score_batch<kit_, resident_blocks_>(storage, query_span, query_state, batch_ids, gathered_count,
+                                                            gathered, lane);
 
-    // Row groups are independent; tiling them keeps at most `gathers_in_flight_k` loads live per lane.
+    // Aligned to its own size, so the compiler issues each lane's load as one request.
+    struct alignas(sizeof(fragment_t) * fragments_per_load_) load_t {
+        fragment_t fragments[fragments_per_load_];
+    };
+    // 128 concurrent random gathers of a fragment saturate the memory path, so the window is 128
+    // fragments over the resident warps, which a wider load fills with fewer gathers.
+    constexpr u32_t gathers_in_flight_k =
+        min_of(vram_max_gathers_in_flight_k, 128u / (vram_warps_per_block_k * resident_blocks_)) / fragments_per_load_;
+    u32_t const lanes_per_row = storage.lanes_per_row >= storage.row_fragments
+                                    ? storage.lanes_per_row / fragments_per_load_
+                                    : storage.lanes_per_row;
+    u32_t const steps_per_row = divide_round_up(storage.steps_per_row, fragments_per_load_);
+    u32_t const row_loads = storage.row_fragments / fragments_per_load_;
+    u32_t const lanes_log2 = 31 - __clz(lanes_per_row);
+    u32_t const rows_per_gather = warp_t::width_k >> lanes_log2;
+    u32_t const lane_in_row = lane & (lanes_per_row - 1);
+    u32_t const subwarp = lane >> lanes_log2;
+    u32_t const live_slots = divide_round_up(gathered_count * lanes_per_row, warp_t::width_k);
+    bool const live = lane < gathered_count;
+    // Requested before the rows, so the two round trips overlap.
+    typename kit_::norms_t const target_state = live ? storage.norm_for(batch_ids[lane]) : typename kit_::norms_t {};
+    fragment_t const* const query = query_span + lane_in_row * fragments_per_load_;
+
+    // Slot groups are independent; tiling keeps at most `gathers_in_flight_k` loads live per lane.
 #pragma unroll 1
-    for (u32_t group_base = 0; group_base < storage.lanes_per_row && group_base * rows_per_gather < gathered_count;
-         group_base += gathers_in_flight_k) {
-        // Defined on every lane, or the skipped lanes' stale norms ride every walk loop
-        // in local memory.
-        norms_t batch_norms[gathers_in_flight_k] {};
+    for (u32_t first_slot = 0; first_slot < live_slots; first_slot += gathers_in_flight_k) {
+        fragment_t const* rows[gathers_in_flight_k];
 #pragma unroll
         for (u32_t slot = 0; slot != gathers_in_flight_k; ++slot) {
-            u32_t const row = (group_base + slot) * rows_per_gather + subwarp;
-            if (leader && group_base + slot < storage.lanes_per_row && row < gathered_count)
-                batch_norms[slot] = storage.norm_for(batch_ids[row]);
+            u32_t const row = (first_slot + slot) * rows_per_gather + subwarp;
+            rows[slot] = storage.vector_span_for(batch_ids[row < gathered_count ? row : 0]) +
+                         lane_in_row * fragments_per_load_;
         }
-        typename kit_::dot_t accumulators[gathers_in_flight_k];
+        dot_t accumulators[gathers_in_flight_k];
 #pragma unroll
         for (u32_t slot = 0; slot != gathers_in_flight_k; ++slot) accumulators[slot] = {};
 #pragma unroll 1
-        for (u32_t step = 0; step != storage.steps_per_row; ++step) {
-            u32_t const fragment_index = lane_in_row + (step << lanes_log2);
-            bool const in_row = fragment_index < storage.row_fragments;
-            typename kit_::fragment_t const query_value = in_row ? query_span[fragment_index]
-                                                                 : typename kit_::fragment_t {};
-            typename kit_::fragment_t loaded[gathers_in_flight_k];
+        for (u32_t step = 0; step != steps_per_row; ++step) {
+            if (lane_in_row + (step << lanes_log2) < row_loads) {
+                u32_t const offset = (step << lanes_log2) * fragments_per_load_;
+                load_t loaded[gathers_in_flight_k];
 #pragma unroll
-            for (u32_t slot = 0; slot != gathers_in_flight_k; ++slot) {
-                u32_t const row = (group_base + slot) * rows_per_gather + subwarp;
-                if (in_row && group_base + slot < storage.lanes_per_row && row < gathered_count)
-                    loaded[slot] = storage.vector_for(batch_ids[row], fragment_index);
-            }
+                for (u32_t slot = 0; slot != gathers_in_flight_k; ++slot)
+                    loaded[slot] = *reinterpret_cast<load_t const*>(rows[slot] + offset);
 #pragma unroll
-            for (u32_t slot = 0; slot != gathers_in_flight_k; ++slot) {
-                u32_t const row = (group_base + slot) * rows_per_gather + subwarp;
-                if (in_row && group_base + slot < storage.lanes_per_row && row < gathered_count)
-                    accumulators[slot] = kit_::accumulate_dot(loaded[slot], query_value, accumulators[slot]);
+                for (u32_t fragment = 0; fragment != fragments_per_load_; ++fragment) {
+                    fragment_t const query_value = query[offset + fragment];
+#pragma unroll
+                    for (u32_t slot = 0; slot != gathers_in_flight_k; ++slot)
+                        accumulators[slot] = kit_::accumulate_dot(loaded[slot].fragments[fragment], query_value,
+                                                                  accumulators[slot]);
+                }
             }
         }
 #pragma unroll
         for (u32_t slot = 0; slot != gathers_in_flight_k; ++slot) {
-            // Warp-uniform, so the reduction's full-mask shuffles stay legal:
-            // slots past the batch own no row.
-            if ((group_base + slot) * rows_per_gather >= gathered_count) break;
-            typename kit_::dot_t const dot = vram_reduce<warp_t>(accumulators[slot], storage.lanes_per_row);
-            u32_t const row = (group_base + slot) * rows_per_gather + subwarp;
-            if (leader && group_base + slot < storage.lanes_per_row && row < gathered_count) {
-                distance_t const distance = kit_::distance(storage.kernel, dot, query_state, batch_norms[slot]);
-                gathered.scored[row] = vram_scored_node_t::make(distance, batch_ids[row]);
-                gathered.dots[row] = dot;
-            }
+            // Warp-uniform, so the reduction's full-mask shuffles stay legal.
+            if (first_slot + slot >= live_slots) break;
+            dot_t const dot = vram_reduce<warp_t>(accumulators[slot], lanes_per_row);
+            u32_t const row = (first_slot + slot) * rows_per_gather + subwarp;
+            if (lane_in_row == 0 && row < gathered_count) gathered.dots[row] = dot;
         }
     }
     warp_t::sync();
-    return lane < gathered_count ? gathered.scored[lane] : vram_scored_node_t::sentinel();
+    if (!live) return vram_scored_node_t::sentinel();
+    vram_scored_node_t const scored = vram_scored_node_t::make(
+        kit_::distance(storage.kernel, gathered.dots[lane], query_state, target_state), batch_ids[lane]);
+    gathered.scored[lane] = scored;
+    return scored;
 }
 
 /** The plain walk's rescoring: none, so every batch lands as the kit scored it. */
@@ -478,8 +499,8 @@ struct vram_indexer_rescoring {
 
 /** Scores one gathered batch against the query, lets @p rescoring rewrite the scores, folds it into the pool, and
  *  hands it to @p fold - whose answer says whether the walk goes on. */
-template <vram_quads_kit kit_, u32_t resident_blocks_ = vram_resident_blocks_per_multiprocessor_k, typename frontier_,
-          typename fold_, typename rescoring_ = vram_no_rescoring>
+template <vram_quads_kit kit_, u32_t resident_blocks_ = vram_resident_blocks_per_multiprocessor_k,
+          u32_t fragments_per_load_ = 1, typename frontier_, typename fold_, typename rescoring_ = vram_no_rescoring>
 __device__ __forceinline__ walk_demand_t vram_score_into_frontier( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
     typename kit_::norms_t query_state, vram_gathered<kit_>& gathered, u32_t gathered_count,
@@ -495,7 +516,7 @@ __device__ __forceinline__ walk_demand_t vram_score_into_frontier( //
         context.telemetry.local_scored += warp_t::count(local_mask);
         context.telemetry.remote_scored += gathered_count - warp_t::count(local_mask);
     }
-    vram_scored_node_t staged = vram_score_batch<kit_, resident_blocks_>( //
+    vram_scored_node_t staged = vram_score_batch<kit_, resident_blocks_, fragments_per_load_>( //
         storage, query_span, query_state, gathered.ids, gathered_count, gathered, lane);
     // Even a call that changes nothing reorders the register-capped wide walk, so the plain walk makes none.
     if constexpr (!std::is_same_v<rescoring_, vram_no_rescoring>)
@@ -562,8 +583,9 @@ __device__ __forceinline__ u32_t vram_sample_landmarks( //
  *  expansion and dropped if still locked then, and no neighbor at or past @p first_invisible_id
  *  followed, since a batch's back-links splice its IDs into visible rows before the host turns its
  *  watermark. */
-template <vram_quads_kit kit_, u32_t resident_blocks_ = vram_resident_blocks_per_multiprocessor_k, typename frontier_,
-          typename fold_ = dummy_fold_t, typename rescoring_ = vram_no_rescoring>
+template <vram_quads_kit kit_, u32_t resident_blocks_ = vram_resident_blocks_per_multiprocessor_k,
+          u32_t fragments_per_load_ = 1, typename frontier_, typename fold_ = dummy_fold_t,
+          typename rescoring_ = vram_no_rescoring>
 __device__ __forceinline__ void vram_search_ahead( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
     typename kit_::norms_t query_state, node_id_t sampling_first, node_id_t sampling_bound,
@@ -586,7 +608,7 @@ __device__ __forceinline__ void vram_search_ahead( //
             u32_t const gathered_count = vram_sample_landmarks<kit_>( //
                 storage, sampling_first, sampling_bound, visited, context.random_generator, gathered.ids, lane);
             if (!gathered_count) break; // Every published row of the range is already visited.
-            if (vram_score_into_frontier<kit_, resident_blocks_>( //
+            if (vram_score_into_frontier<kit_, resident_blocks_, fragments_per_load_>( //
                     storage, query_span, query_state, gathered, gathered_count, context, lane, fold, rescoring) ==
                 walk_demand_t::sated_k)
                 return;
@@ -638,7 +660,7 @@ __device__ __forceinline__ void vram_search_ahead( //
             if (fresh) gathered.ids[ordinal] = neighbor_id;
             warp_t::sync();
             u32_t const gathered_count = warp_t::count(fresh_mask);
-            if (gathered_count && vram_score_into_frontier<kit_, resident_blocks_>( //
+            if (gathered_count && vram_score_into_frontier<kit_, resident_blocks_, fragments_per_load_>( //
                                       storage, query_span, query_state, gathered, gathered_count, context, lane, fold,
                                       rescoring) == walk_demand_t::sated_k)
                 return;
@@ -653,7 +675,7 @@ __device__ __forceinline__ void vram_search_ahead( //
                 if (wide_fresh) gathered.ids[wide_ordinal] = wide_id;
                 warp_t::sync();
                 u32_t const wide_count = warp_t::count(wide_mask);
-                if (wide_count && vram_score_into_frontier<kit_, resident_blocks_>( //
+                if (wide_count && vram_score_into_frontier<kit_, resident_blocks_, fragments_per_load_>( //
                                       storage, query_span, query_state, gathered, wide_count, context, lane, fold,
                                       rescoring) == walk_demand_t::sated_k)
                     return;
@@ -665,8 +687,9 @@ __device__ __forceinline__ void vram_search_ahead( //
 
 /** Greedy best-first walk from random published landmarks toward the query: a fresh frontier
  *  handed to @ref vram_search_ahead. */
-template <vram_quads_kit kit_, u32_t resident_blocks_ = vram_resident_blocks_per_multiprocessor_k, typename frontier_,
-          typename fold_ = dummy_fold_t, typename rescoring_ = vram_no_rescoring>
+template <vram_quads_kit kit_, u32_t resident_blocks_ = vram_resident_blocks_per_multiprocessor_k,
+          u32_t fragments_per_load_ = 1, typename frontier_, typename fold_ = dummy_fold_t,
+          typename rescoring_ = vram_no_rescoring>
 __device__ __forceinline__ void vram_search_around( //
     vram_flat_view<kit_> const& storage, typename kit_::fragment_t const* query_span,
     typename kit_::norms_t query_state, node_id_t sampling_bound, node_id_t first_invisible_id,
@@ -674,7 +697,7 @@ __device__ __forceinline__ void vram_search_around( //
     vram_warp_context<frontier_>& context, u32_t lane, fold_&& fold = fold_ {},
     rescoring_ const& rescoring = rescoring_ {}) noexcept {
     context.frontier.reset(lane);
-    vram_search_ahead<kit_, resident_blocks_>( //
+    vram_search_ahead<kit_, resident_blocks_, fragments_per_load_>( //
         storage, query_span, query_state, 0, sampling_bound, first_invisible_id, visited, gathered, context, lane, fold,
         rescoring);
 }
@@ -1593,7 +1616,8 @@ struct vram_multiply_sink {
 /** One query's full walk: stages the query into its shared span, walks the graph under the fold the
  *  sink opens and the query's slice of @p rescorings, and lets the sink close the query. Safe against
  *  concurrent insertions: the walk gates on every slot-0 word and never writes the graph. */
-template <vram_quads_kit kit_, u32_t resident_blocks_, typename sink_, typename rescoring_, typename frontier_>
+template <vram_quads_kit kit_, u32_t resident_blocks_, u32_t fragments_per_load_ = 1, typename sink_,
+          typename rescoring_, typename frontier_>
 __device__ __forceinline__ void vram_walk_one( //
     vram_search_view<kit_> const& view, sink_ const& sink, rescoring_ const& rescorings, u32_t query_index,
     typename kit_::fragment_t* query_span, vram_visited_set<typename kit_::warp_t>& visited, frontier_ frontier,
@@ -1618,7 +1642,7 @@ __device__ __forceinline__ void vram_walk_one( //
     context.scratch = reinterpret_cast<byte_t*>(query_span + view.storage.row_fragments);
     typename sink_::fold_t fold = sink.open(query_index, context, lane);
     rescoring_ const rescoring = rescorings.for_query(query_index, context);
-    vram_search_around<kit_, resident_blocks_>( //
+    vram_search_around<kit_, resident_blocks_, fragments_per_load_>( //
         view.storage, query_span, query_state, view.sampling_bound, view.sampling_bound, visited, gathered, context,
         lane, fold, rescoring);
     sink.close(fold, context, query_index, lane);

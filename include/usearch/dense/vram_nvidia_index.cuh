@@ -499,9 +499,9 @@ struct cuda_attend_sink {
 };
 
 /** One warp per query over the register frontier - expansions within the ladder - each walk scored
- *  under @p rescorings and written out through @p sink; warps take queries from the batch counter,
- *  as builders take rows. */
-template <vram_quads_kit kit_, u32_t pool_slots_, typename sink_, typename rescoring_>
+ *  under @p rescorings at the schedule's load width and written out through @p sink; warps take
+ *  queries from the batch counter, as builders take rows. */
+template <vram_quads_kit kit_, vram_schedule schedule_, u32_t pool_slots_, typename sink_, typename rescoring_>
 __device__ __forceinline__ void cuda_walk(vram_search_view<kit_> const& view, sink_ const& sink,
                                           rescoring_ const& rescorings) {
     extern __shared__ byte_t dynamic_scratch[];
@@ -515,7 +515,7 @@ __device__ __forceinline__ void cuda_walk(vram_search_view<kit_> const& view, si
         if (query_index >= view.queries_count) return;
         vram_visited_set<cuda_warp_t> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                                view.epoch_base + query_index + 1};
-        vram_walk_one<kit_, (pool_slots_ <= 4 ? 4u : 3u)>( //
+        vram_walk_one<kit_, (pool_slots_ <= 4 ? 4u : 3u), schedule_::fragments_per_load_k>( //
             view, sink, rescorings, query_index, query_span, visited,
             vram_register_frontier<pool_slots_, cuda_warp_t> {}, gathered[slice.warp], slice.lane);
     }
@@ -523,7 +523,7 @@ __device__ __forceinline__ void cuda_walk(vram_search_view<kit_> const& view, si
 
 /** One warp per query past the register ladder's width: the same walk over the arena frontier,
  *  whose budget is the requested expansion itself, ranking everything it kept at the end. */
-template <vram_quads_kit kit_, typename sink_, typename rescoring_>
+template <vram_quads_kit kit_, vram_schedule schedule_, typename sink_, typename rescoring_>
 __device__ __forceinline__ void cuda_walk_wide(vram_search_view<kit_> const& view, sink_ const& sink,
                                                rescoring_ const& rescorings) {
     extern __shared__ byte_t dynamic_scratch[];
@@ -541,8 +541,8 @@ __device__ __forceinline__ void cuda_walk_wide(vram_search_view<kit_> const& vie
         if (query_index >= view.queries_count) return;
         vram_visited_set<cuda_warp_t> visited {slice.visited_slots, view.arena_shape.visited_hash_shift,
                                                view.epoch_base + query_index + 1};
-        vram_walk_one<kit_, 4u>(view, sink, rescorings, query_index, query_span, visited, frontier,
-                                gathered[slice.warp], slice.lane);
+        vram_walk_one<kit_, 4u, schedule_::fragments_per_load_k>(view, sink, rescorings, query_index, query_span,
+                                                                 visited, frontier, gathered[slice.warp], slice.lane);
     }
 }
 
@@ -840,11 +840,11 @@ __device__ __forceinline__ vram_ranking_view cuda_view(cuda_ranking_t const& ran
 #pragma region Kernels
 
 /** Runs one walk family on its rung, the arena frontier at slot zero. */
-template <vram_quads_kit kit_, u32_t slots_, typename sink_, typename rescoring_>
+template <vram_quads_kit kit_, vram_schedule schedule_, u32_t slots_, typename sink_, typename rescoring_>
 __device__ __forceinline__ void cuda_walk_rung(vram_search_view<kit_> const& view, sink_ const& sink,
                                                rescoring_ const& rescorings) {
-    if constexpr (slots_ == 0) cuda_walk_wide<kit_>(view, sink, rescorings);
-    else cuda_walk<kit_, slots_>(view, sink, rescorings);
+    if constexpr (slots_ == 0) cuda_walk_wide<kit_, schedule_>(view, sink, rescorings);
+    else cuda_walk<kit_, schedule_, slots_>(view, sink, rescorings);
 }
 
 /** Blocks of each kernel resident per multiprocessor, the register budget its launch bounds set:
@@ -856,7 +856,8 @@ constexpr u32_t cuda_resident_blocks(cuda_kernel_t kernel, u32_t slots) noexcept
     case cuda_kernel_t::merge_back_links_k: return vram_resident_blocks_per_multiprocessor_k;
     case cuda_kernel_t::search_k:
     case cuda_kernel_t::search_indexer_k:
-    case cuda_kernel_t::multiply_k:
+    case cuda_kernel_t::multiply_k: return slots <= 8 ? 4 : 3;
+    // The attend fold carries per-head state, which spills at 8 slots under four blocks' budget.
     case cuda_kernel_t::attend_k: return slots <= 4 ? 4 : 3;
     default: return 1;
     }
@@ -882,27 +883,28 @@ __global__ void __launch_bounds__(vram_warps_per_block_k * 32,
     else if constexpr (kernel == cuda_kernel_t::refine_k)
         cuda_refine<kit_t, schedule_t, slots_>(cuda_view<kit_t>(arguments.refine));
     else if constexpr (kernel == cuda_kernel_t::search_k)
-        cuda_walk_rung<kit_t, slots_>(cuda_view<kit_t>(arguments.search), cuda_view<kit_t>(arguments.search_sink),
-                                      vram_no_rescoring {});
+        cuda_walk_rung<kit_t, schedule_t, slots_>(cuda_view<kit_t>(arguments.search),
+                                                  cuda_view<kit_t>(arguments.search_sink), vram_no_rescoring {});
     else if constexpr (kernel == cuda_kernel_t::search_indexer_k) {
         // Only the floating dtypes take indexer heads; others export a plain walk never launched.
         if constexpr (floating_scalar<typename kit_t::scalar_t>)
-            cuda_walk_rung<kit_t, slots_>(cuda_view<kit_t>(arguments.search), cuda_view<kit_t>(arguments.search_sink),
-                                          cuda_view<kit_t>(arguments.rescoring));
+            cuda_walk_rung<kit_t, schedule_t, slots_>(cuda_view<kit_t>(arguments.search),
+                                                      cuda_view<kit_t>(arguments.search_sink),
+                                                      cuda_view<kit_t>(arguments.rescoring));
         else
-            cuda_walk_rung<kit_t, slots_>(cuda_view<kit_t>(arguments.search), cuda_view<kit_t>(arguments.search_sink),
-                                          vram_no_rescoring {});
+            cuda_walk_rung<kit_t, schedule_t, slots_>(cuda_view<kit_t>(arguments.search),
+                                                      cuda_view<kit_t>(arguments.search_sink), vram_no_rescoring {});
     }
     else if constexpr (kernel == cuda_kernel_t::multiply_k)
-        cuda_walk_rung<kit_t, slots_>(cuda_view<kit_t>(arguments.search), cuda_view<kit_t>(arguments.multiply_sink),
-                                      vram_no_rescoring {});
+        cuda_walk_rung<kit_t, schedule_t, slots_>(cuda_view<kit_t>(arguments.search),
+                                                  cuda_view<kit_t>(arguments.multiply_sink), vram_no_rescoring {});
     else if constexpr (kernel == cuda_kernel_t::attend_k) {
         using value_lookup_t = typename cuda_value_lookup_of<lookup_>::type;
         cuda_attend_t const& attend = arguments.attend;
         cuda_rescoring_t const& heads = arguments.rescoring;
         value_lookup_t value_lookup;
         std::memcpy(&value_lookup, attend.value_lookup, sizeof(value_lookup_t));
-        cuda_walk_rung<kit_t, slots_>(
+        cuda_walk_rung<kit_t, schedule_t, slots_>(
             cuda_view<kit_t>(arguments.search),
             cuda_attend_sink<kit_t, value_lookup_t> {value_lookup, attend.outputs, attend.states, attend.missed,
                                                      attend.logit_scale, attend.heads_count, attend.columns},
