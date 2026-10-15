@@ -1310,16 +1310,19 @@ struct ram_index {
 
         /** An unbound plan - a refused audit's answer; it owns bitsets, so it names an allocator. */
         explicit health_plan_t(bitset_allocator_t const& allocator) noexcept
-            : reached_(allocator), expanded_(allocator) {}
+            : reached_(allocator), linked_once_(allocator), linked_twice_(allocator), expanded_(allocator) {}
         health_plan_t(ram_index const& index, node_id_t visible, std::size_t seed_count, growing_bitset_t&& reached,
+                      growing_bitset_t&& linked_once, growing_bitset_t&& linked_twice,
                       growing_bitset_t&& expanded) noexcept
             : visible(visible), seed_count(seed_count), index_(&index), reached_(std::move(reached)),
+              linked_once_(std::move(linked_once)), linked_twice_(std::move(linked_twice)),
               expanded_(std::move(expanded)) {
             restart_sweep();
         }
         health_plan_t(health_plan_t&& other) noexcept
             : visible(other.visible), seed_count(other.seed_count), index_(std::exchange(other.index_, nullptr)),
-              reached_(std::move(other.reached_)), expanded_(std::move(other.expanded_)),
+              reached_(std::move(other.reached_)), linked_once_(std::move(other.linked_once_)),
+              linked_twice_(std::move(other.linked_twice_)), expanded_(std::move(other.expanded_)),
               expanded_in_level_(other.expanded_in_level_), sweeps_(other.sweeps_) {}
         health_plan_t(health_plan_t const&) = delete;
         health_plan_t& operator=(health_plan_t const&) = delete;
@@ -1344,6 +1347,8 @@ struct ram_index {
         /** Clears the bitsets and re-marks the seeds: the next @ref sweep starts level one. */
         void restart_sweep() noexcept {
             for (u1x64_t& lanes : reached_) lanes = 0;
+            for (u1x64_t& lanes : linked_once_) lanes = 0;
+            for (u1x64_t& lanes : linked_twice_) lanes = 0;
             for (u1x64_t& lanes : expanded_) lanes = 0;
             for (std::size_t seed = 0; seed != seed_count; ++seed)
                 insert_(reached_, static_cast<node_id_t>(seed * static_cast<std::size_t>(visible) / seed_count));
@@ -1376,7 +1381,12 @@ struct ram_index {
                     node_id_t const target =
                         slot ? atomic_ref<node_id_t const>(row[slot]).load(std::memory_order_relaxed) : first_value;
                     if (target == node_id_unknown_k) break;
-                    if (target < visible && target != node_id) insert_(reached_, target);
+                    if (target >= visible || target == node_id) continue;
+                    // The first reached in-link reaches the target and a second may give one up to
+                    // a reconnection; a seed is reached before anything links to it, so links count
+                    // apart.
+                    if (!insert_(linked_once_, target)) insert_(reached_, target);
+                    else if (!contains_(linked_twice_, target)) insert_(linked_twice_, target);
                 }
             }
             atomic_ref<std::size_t>(expanded_in_level_).fetch_add(expanded_count, std::memory_order_relaxed);
@@ -1410,6 +1420,15 @@ struct ram_index {
         /** Whether @p node_id was reached - readable by any thread between levels. */
         bool reached(node_id_t node_id) const noexcept { return contains_(reached_, node_id); }
 
+        /** Takes one of @p node_id 's reached in-links for a reconnection, answering whether
+         *  another remains; a refusal leaves it untouched, so no row loses the last link it is
+         *  reached by. */
+        bool release_link(node_id_t node_id) noexcept {
+            u1x64_t const lane = u1x64_t {1} << (node_id % lanes_k);
+            return atomic_ref<u1x64_t>(linked_twice_[node_id / lanes_k]).fetch_and(~lane, std::memory_order_relaxed) &
+                   lane;
+        }
+
         /** The report: the reached population and the levels it took. @c internal_k when a level
          *  is still pending, since the count would then be a lower bound. */
         expected<health_result_t> finish() const noexcept {
@@ -1427,9 +1446,11 @@ struct ram_index {
             u1x64_t const lanes = atomic_ref<u1x64_t const>(words[node_id / lanes_k]).load(std::memory_order_relaxed);
             return (lanes >> (node_id % lanes_k)) & 1u;
         }
-        static void insert_(growing_bitset_t& words, node_id_t node_id) noexcept {
-            atomic_ref<u1x64_t>(words[node_id / lanes_k])
-                .fetch_or(u1x64_t {1} << (node_id % lanes_k), std::memory_order_relaxed);
+
+        /** Sets @p node_id 's bit and answers whether it was already set. */
+        static bool insert_(growing_bitset_t& words, node_id_t node_id) noexcept {
+            u1x64_t const lane = u1x64_t {1} << (node_id % lanes_k);
+            return atomic_ref<u1x64_t>(words[node_id / lanes_k]).fetch_or(lane, std::memory_order_relaxed) & lane;
         }
         static void insert_exclusive_(growing_bitset_t& words, node_id_t node_id) noexcept {
             words[node_id / lanes_k] |= u1x64_t {1} << (node_id % lanes_k);
@@ -1440,6 +1461,12 @@ struct ram_index {
 
         /** One bit per published node: reached by the sweep. */
         growing_bitset_t reached_;
+
+        /** One bit per published node: linked from at least one reached row. */
+        growing_bitset_t linked_once_;
+
+        /** One bit per published node: linked from at least two reached rows. */
+        growing_bitset_t linked_twice_;
 
         /** One bit per published node: its neighbors already swept. */
         growing_bitset_t expanded_;
@@ -1462,11 +1489,13 @@ struct ram_index {
         // An empty graph is audited, not refused: no words to sweep, no steps, zero reached.
         bitset_allocator_t const allocator {context.allocator_};
         std::size_t const words = divide_round_up<std::size_t>(visible, health_plan_t::lanes_k);
-        growing_bitset_t reached {allocator}, expanded {allocator};
-        if (failed(reached.resize(words)) || failed(expanded.resize(words)))
+        growing_bitset_t reached {allocator}, linked_once {allocator}, linked_twice {allocator}, expanded {allocator};
+        if (failed(reached.resize(words)) || failed(linked_once.resize(words)) || failed(linked_twice.resize(words)) ||
+            failed(expanded.resize(words)))
             return {health_plan_t {allocator}, status_t::bad_alloc_k};
         std::size_t const seed_count = min_of<std::size_t>(connectivity(), visible);
-        return {health_plan_t {*this, visible, seed_count, std::move(reached), std::move(expanded)},
+        return {health_plan_t {*this, visible, seed_count, std::move(reached), std::move(linked_once),
+                               std::move(linked_twice), std::move(expanded)},
                 status_t::success_k};
     }
 
@@ -1649,11 +1678,13 @@ struct ram_index {
                         break;
                     }
                 }
-                // No free slot: a tail slot spread by ID, never one a sibling island landed in this round.
-                for (small_size_t attempt = 0; landing == connectivity && attempt != spread; ++attempt) {
+                // No free slot: a tail slot spread by ID, never one a sibling island landed in this
+                // round, nor a resident's last reached in-link.
+                for (small_size_t attempt = 0; !present && landing == connectivity && attempt != spread; ++attempt) {
                     small_size_t const slot = connectivity - 1 - static_cast<small_size_t>((island + attempt) % spread);
                     node_id_t const resident = target_neighbors.load_slot(slot);
-                    if (resident < audit.visible && audit.reached(resident)) landing = slot;
+                    if (resident < audit.visible && audit.reached(resident) && audit.release_link(resident))
+                        landing = slot;
                 }
                 if (landing == connectivity) {
                     target_neighbors.unlock(displaced);

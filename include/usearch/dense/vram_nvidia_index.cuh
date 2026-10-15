@@ -685,7 +685,7 @@ __device__ __forceinline__ void cuda_reconnect_island(u32_t* neighbors, u32_t co
             if (claim(slot, resident)) return true;
         }
         for (u32_t attempt = 0; attempt != spread; ++attempt) {
-            u32_t const landing = connectivity - 1 - (island_index + attempt) % spread;
+            u32_t const landing = connectivity - 1 - (island + attempt) % spread;
             u32_t const resident = cuda_atomic_ref<u32_t>(target_row[landing]).load(relaxed_k);
             if (resident == island) return true;
             if (resident != node_id_unknown_k && !cuda_bitset_contains(reached, resident))

@@ -1318,40 +1318,45 @@ __device__ __forceinline__ void vram_refine_one( //
 
     // The walk across runs first, with landmarks from the other part alone: the live graph links no
     // part to the other, so the walk stays there, and its nearest would lose to the own neighbors.
-    if (view.appended_base) {
-        bool const appended = node_id >= view.appended_base;
+    // Both walks share one call site, so the walk inlines once and keeps a plain refine's
+    // registers.
+    bool const appended = node_id >= view.appended_base;
+    node_id_t sampling_first = appended ? 0 : view.appended_base;
+    node_id_t sampling_bound = appended ? view.appended_base : view.sampling_bound;
+#pragma unroll 1
+    for (u32_t walk_number = view.appended_base ? 0 : 1; walk_number != 2; ++walk_number) {
+        if (walk_number) {
+            context.frontier.renew();
+            sampling_first = 0, sampling_bound = view.sampling_bound;
+            // Seed the frontier with the current neighbors, staged like a traversal expansion minus
+            // the hop bookkeeping.
+            vram_neighbors_ref<warp_t> const own_neighbors {storage.neighbors_for(node_id), storage.connectivity};
+            node_id_t first_value = node_id_unknown_k;
+            if (lane == 0) first_value = own_neighbors.peek_first();
+            first_value = warp_t::shuffle(first_value, 0);
+            if (first_value != node_id_unknown_k && first_value != node_id)
+                for (u32_t slot_base = 0; slot_base < storage.connectivity; slot_base += warp_t::width_k) {
+                    u32_t const slot = slot_base + lane;
+                    node_id_t const seed_id = slot == 0                     ? first_value
+                                              : slot < storage.connectivity ? own_neighbors.load_slot(slot)
+                                                                            : node_id_unknown_k;
+                    bool const fresh = visited.test_and_set(seed_id != node_id ? seed_id : node_id_unknown_k, lane);
+                    typename warp_t::mask_t const fresh_mask = warp_t::ballot(fresh);
+                    u32_t const ordinal = warp_t::count(fresh_mask & warp_t::below(lane));
+                    if (fresh) gathered.ids[ordinal] = seed_id;
+                    warp_t::sync();
+                    u32_t const gathered_count = warp_t::count(fresh_mask);
+                    if (gathered_count)
+                        vram_score_into_frontier<kit_>( //
+                            storage, query_span, query_state, gathered, gathered_count, context, lane, dummy_fold_t {});
+                }
+        }
         vram_search_ahead<kit_>( //
-            storage, query_span, query_state, appended ? 0 : view.appended_base,
-            appended ? view.appended_base : view.sampling_bound, view.sampling_bound, visited, gathered, context, lane);
-        context.frontier.renew();
+            storage, query_span, query_state, sampling_first, sampling_bound, view.sampling_bound, visited, gathered,
+            context, lane);
     }
 
-    // Seed the frontier with the current neighbors, staged like a traversal expansion minus the hop bookkeeping.
-    vram_neighbors_ref<warp_t> const own_neighbors {storage.neighbors_for(node_id), storage.connectivity};
-    node_id_t first_value = node_id_unknown_k;
-    if (lane == 0) first_value = own_neighbors.peek_first();
-    first_value = warp_t::shuffle(first_value, 0);
-    if (first_value != node_id_unknown_k && first_value != node_id)
-        for (u32_t slot_base = 0; slot_base < storage.connectivity; slot_base += warp_t::width_k) {
-            u32_t const slot = slot_base + lane;
-            node_id_t const seed_id = slot == 0                     ? first_value
-                                      : slot < storage.connectivity ? own_neighbors.load_slot(slot)
-                                                                    : node_id_unknown_k;
-            bool const fresh = visited.test_and_set(seed_id != node_id ? seed_id : node_id_unknown_k, lane);
-            typename warp_t::mask_t const fresh_mask = warp_t::ballot(fresh);
-            u32_t const ordinal = warp_t::count(fresh_mask & warp_t::below(lane));
-            if (fresh) gathered.ids[ordinal] = seed_id;
-            warp_t::sync();
-            u32_t const gathered_count = warp_t::count(fresh_mask);
-            if (gathered_count)
-                vram_score_into_frontier<kit_>( //
-                    storage, query_span, query_state, gathered, gathered_count, context, lane, dummy_fold_t {});
-        }
-
-    // Walk the graph past the seeds, then re-select the neighbors from the whole pool.
-    vram_search_ahead<kit_>( //
-        storage, query_span, query_state, 0, view.sampling_bound, view.sampling_bound, visited, gathered, context,
-        lane);
+    // Re-select the neighbors from the whole pool.
     u32_t const selected_count = vram_select_diverse<kit_>( //
         storage, cache, schedule, cache_norms, gathered.ids, selection, context, lane);
 

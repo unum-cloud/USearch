@@ -1713,7 +1713,7 @@ enum class nvme_rewrite_phase_t : u8_t {
     /** Applies one bucket of spilled back-links. */
     back_link_k,
 
-    /** Sweeps reachability, then links islands back in. */
+    /** Counts every row's in-links, then links the rows nothing links to back in. */
     heal_k,
 
     /** Nothing left but @ref nvme_rewrite_plan::finish. */
@@ -1747,7 +1747,10 @@ struct [[nodiscard]] nvme_rewrite_result_t {
      *  and build. */
     std::size_t cut_edges = 0;
 
-    /** The re-selections, the block builds and the heal, counted as a RAM refine counts them. */
+    /** The re-selections, the block builds and the heal, counted as a RAM refine counts them, but
+     *  for the heal of the target: its @c islands_found are the rows nothing links to, and no sweep
+     *  runs on it, so @c reachable_nodes and @c sweeps stay zero; @c health on the committed view
+     *  measures them. */
     refine_result_t graph;
 
     /** Neighbors rows the walks and the heal read. */
@@ -1756,7 +1759,8 @@ struct [[nodiscard]] nvme_rewrite_result_t {
     /** Value rows the walks, the selections and the back-links read. */
     nvme_reads_t value_reads;
 
-    /** Runs of whole rows the copies and the batches scanned, and the spills read back. */
+    /** Runs of whole rows the copies, the batches and the heal scanned, and the spills read
+     *  back. */
     nvme_reads_t scan_reads;
 
     /** Bytes the target parts and the spills received. */
@@ -1837,8 +1841,8 @@ expected<nvme_rewrite_plan<indexes_type_>> plan_refine(indexes_type_ const& sour
                                                        nvme_rewrite_config_t const& config = {}) noexcept;
 
 /** Builds one graph over every row of the parts at @p sources, their neighbors ignored, in
- *  contiguous blocks the workspace holds as a RAM index, then links the later blocks across as a
- *  merge does. */
+ *  contiguous blocks the workspace holds as a RAM index, each healed there before it is written,
+ *  then links the later blocks across as a merge does. */
 template <typename indexes_type_>
 expected<nvme_rewrite_plan<indexes_type_>> plan_build(std::span<std::string_view const> sources,
                                                       std::string_view target, bytes_span_t workspace,
@@ -2021,8 +2025,8 @@ struct [[nodiscard]] nvme_rewrite_plan {
     /** Slices each batch of a back-link step carves. */
     inline static constexpr std::size_t back_link_batch_slices_k = 9;
 
-    /** Slices a heal carves. */
-    inline static constexpr std::size_t heal_slices_k = 4;
+    /** Slices a heal carves: the in-link counts, a target row and the landings. */
+    inline static constexpr std::size_t heal_slices_k = 3;
 
     /** Slices a block build carves beside its RAM index. */
     inline static constexpr std::size_t build_slices_k = 4;
@@ -2446,10 +2450,11 @@ struct [[nodiscard]] nvme_rewrite_plan {
      *  gathered columns of a split by keys. */
     std::size_t copy_slices_() const noexcept { return fences_.empty() ? 4 : 10; }
 
-    /** Bytes a heal of a part of @p rows rows carves: two bits per row, two neighbors rows, and the
-     *  padding of its slices. */
+    /** Bytes a heal of a part of @p rows rows carves at least: two bits per row, one neighbors
+     *  row, one landing, and the padding of its slices; the rest of the workspace holds more
+     *  landings. */
     std::size_t heal_bytes_(std::size_t rows) const noexcept {
-        return 2 * divide_round_up<std::size_t>(rows, 64) * sizeof(u64_t) + 2 * neighbors_row_bytes_() +
+        return divide_round_up<std::size_t>(rows, 32) * sizeof(u64_t) + neighbors_row_bytes_() + sizeof(u64_t) +
                heal_slices_k * default_alignment_k;
     }
 
@@ -3064,7 +3069,7 @@ struct [[nodiscard]] nvme_rewrite_plan {
     }
 
     /** Builds target rows @p step.nodes in a RAM index inside the workspace from their value rows,
-     *  and writes their neighbors, every edge inside the block. */
+     *  heals it there, and writes their neighbors, every edge inside the block. */
     status_t build_(step_t const& step, executor_t& executor) noexcept {
         target_t& target = targets_[step.part];
         std::size_t const count = step.nodes.size(), first = step.nodes.first;
@@ -3092,22 +3097,42 @@ struct [[nodiscard]] nvme_rewrite_plan {
         if (status_t const ready = traversals_(index, executor, traversals); failed(ready)) return ready;
         typename ram_index_t::insert_config_t const config {static_cast<u32_t>(expansion_factor_)};
         status_t refusal = status_t::success_k;
+        auto refuse = [&](status_t status) noexcept {
+            status_t unset = status_t::success_k;
+            if (failed(status))
+                std::atomic_ref<status_t>(refusal).compare_exchange_strong(unset, status, std::memory_order_relaxed);
+        };
         // One row per task, as a RAM group inserts, so the threads interleave from the first row.
         auto insert = [&](std::size_t row, std::size_t thread, std::size_t) noexcept {
             vectors_view_t const inserted_row {reinterpret_cast<scalar_t const*>(values + row * value_row_bytes_),
                                                std::size_t {1}, dimensions_};
-            auto const inserted = index.insert(inserted_row,
-                                               typename ram_index_t::node_ids_span_t {nodes + row, std::size_t {1}},
-                                               traversals[thread], config);
-            status_t unset = status_t::success_k;
-            if (failed(inserted.status))
-                std::atomic_ref<status_t>(refusal).compare_exchange_strong(unset, inserted.status,
-                                                                           std::memory_order_relaxed);
+            refuse(index
+                       .insert(inserted_row, typename ram_index_t::node_ids_span_t {nodes + row, std::size_t {1}},
+                               traversals[thread], config)
+                       .status);
         };
         if (status_t const fanned = executor.for_tasks(count, insert); failed(fanned)) return fanned;
         if (failed(refusal)) return refusal;
+        // In RAM a block's orphan clusters cost DRAM sweeps to find; once written, only `health`
+        // finds them.
+        auto [healing, heal_status] = index.plan_refine({}, traversals[0], {static_cast<u32_t>(expansion_factor_)});
+        if (failed(heal_status)) return heal_status;
+        do {
+            auto const steps = healing.steps();
+            auto heal = [&](std::size_t position, std::size_t thread, std::size_t) noexcept {
+                refuse(healing.run(steps[position], traversals[thread]));
+            };
+            if (status_t const fanned = executor.for_tasks(steps.size(), heal); failed(fanned)) return fanned;
+            if (failed(refusal)) return refusal;
+        } while (healing.advance());
+        auto const [healed, healed_status] = healing.finish();
+        if (failed(healed_status)) return healed_status;
+        // The heal walked the same traversals, so their counters already hold its telemetry.
         absorb_traversals_(traversals);
-        result_.graph.visited_nodes += count;
+        result_.graph.visited_nodes += count + healed.visited_nodes;
+        result_.graph.changed_nodes += healed.changed_nodes;
+        result_.graph.islands_found += healed.islands_found;
+        result_.graph.islands_reconnected += healed.islands_reconnected;
         for (std::size_t row = 0; row != count; ++row) rows[nodes[row]] = static_cast<node_id_t>(row);
         bytes_span_t const out {reinterpret_cast<byte_t*>(staging), count * neighbors_row_bytes_()};
         return write_ram_rows_(
@@ -3447,76 +3472,121 @@ struct [[nodiscard]] nvme_rewrite_plan {
 
 #pragma region Heal
 
-    /** Heals target part @p step.part: sweeps reachability from the landmarks every audit seeds
-     *  from, then links every island into the row of its first reached neighbor, or of the landmark
-     *  covering it, and sweeps again while the islands shrink. */
+    /** Heals target part @p step.part: one sequential pass of its neighbors column counts every
+     *  row's in-links, then each row nothing links to is read and lands, in target order, in the
+     *  row of its first neighbor something links to, or of the landmark covering it. A cluster
+     *  linking only to itself stays, for @c health to report. */
     status_t heal_(step_t const& step, executor_t& executor) noexcept {
         target_t& target = targets_[step.part];
         nvme_part_t const& part = part_of_(target);
-        std::size_t const nodes = target.view.size(), connectivity = connectivity_;
-        std::size_t const words = divide_round_up<std::size_t>(nodes, 64), row_bytes = neighbors_row_bytes_();
+        std::size_t const nodes = target.view.size(), connectivity = connectivity_, row_bytes = neighbors_row_bytes_();
+        std::size_t const run_rows = target.view.scan_run_rows_(0, row_bytes);
+        std::size_t const seeds = min_of<std::size_t>(connectivity, nodes), spread = heal_spread(connectivity);
+        std::size_t const words = divide_round_up<std::size_t>(nodes, 32);
         bytes_span_t space = workspace_;
-        auto* const current = carve_<u64_t>(space, words);
-        auto* const next = carve_<u64_t>(space, words);
-        auto* const island_row = carve_<node_id_t>(space, connectivity);
+        // Two bits per row: the first in-link sets the low one, the second the high one.
+        auto* const in_links = carve_<u64_t>(space, words);
         auto* const target_row = carve_<node_id_t>(space, connectivity);
-        if (!current || !next || !island_row || !target_row) return status_t::bad_alloc_k;
-        auto reached = [&](std::size_t node) noexcept { return (current[node / 64] >> (node % 64)) & 1u; };
-        auto read_row = [&](std::size_t node, node_id_t* row) noexcept {
-            result_.neighbor_reads += nvme_reads_t {1, row_bytes};
-            return target.file.read_at(part.neighbors_begin + node * row_bytes,
-                                       {reinterpret_cast<byte_t*>(row), row_bytes});
+        std::size_t const capacity = carvable_(space, sizeof(u64_t));
+        auto* const landings = carve_<u64_t>(space, capacity);
+        if (!in_links || !target_row || !capacity || !landings) return status_t::bad_alloc_k;
+        std::memset(in_links, 0, words * sizeof(u64_t));
+        auto links_of = [&](std::size_t node) noexcept {
+            return static_cast<unsigned>(in_links[node / 32] >> (node % 32 * 2)) & 3u;
         };
-        std::size_t const seeds = min_of<std::size_t>(connectivity, nodes);
-        std::size_t const spread = heal_spread(connectivity);
-        std::size_t islands_before = nodes + 1;
-        for (std::size_t round = 0;; ++round) {
-            health_result_t audited;
-            {
-                auto [call, call_status] = target.view.begin_scans_(executor, 1);
-                if (failed(call_status)) return call_status;
-                auto const [swept, status] = target.view.audit_part_(0, {current, words}, {next, words}, executor);
-                if (failed(status)) return status;
-                audited = swept;
+        auto [call, call_status] = target.view.begin_scans_(executor, 1);
+        if (failed(call_status)) return call_status;
+
+        auto whole_run = [&](std::size_t task, u64_t& progress) noexcept -> std::array<extent_t, 1> {
+            if (progress++) return {};
+            std::size_t const first = task * run_rows;
+            return {
+                extent_t {0, part.neighbors_begin + first * row_bytes, min_of(run_rows, nodes - first) * row_bytes}};
+        };
+        auto count_links = [&](std::size_t, std::size_t task, auto const& extents, auto const& landed) noexcept {
+            auto const* const neighbors = reinterpret_cast<node_id_t const*>(landed[0]);
+            for (std::size_t slot = 0; slot != extents[0].bytes / sizeof(node_id_t); ++slot) {
+                std::size_t const neighbor = neighbors[slot];
+                if (neighbor >= nodes || neighbor == task * run_rows + slot / connectivity) continue;
+                std::atomic_ref<u64_t> const word {in_links[neighbor / 32]};
+                u64_t const once = u64_t {1} << (neighbor % 32 * 2);
+                if (word.fetch_or(once, std::memory_order_relaxed) & once)
+                    word.fetch_or(once << 1, std::memory_order_relaxed);
             }
-            result_.graph.sweeps += audited.sweeps;
-            std::size_t const islands = nodes - audited.reachable_nodes;
-            if (!round) result_.graph.islands_found += islands;
-            // A round that frees no island frees none on the next either, since the links it needs
-            // stay unreached.
-            if (!islands || islands >= islands_before) {
-                result_.graph.reachable_nodes += audited.reachable_nodes;
-                return status_t::success_k;
-            }
-            islands_before = islands;
-            for (std::size_t island = 0; island != nodes; ++island) {
-                if (reached(island)) continue;
-                if (status_t const read = read_row(island, island_row); failed(read)) return read;
-                std::size_t linked = nodes;
-                for (std::size_t slot = 0; slot != connectivity && linked == nodes; ++slot)
-                    if (island_row[slot] < nodes && island_row[slot] != island && reached(island_row[slot]))
-                        linked = island_row[slot];
-                if (linked == nodes) linked = island * seeds / nodes * nodes / seeds;
-                if (linked == island) continue;
-                if (status_t const read = read_row(linked, target_row); failed(read)) return read;
-                if (holds_({target_row, connectivity}, static_cast<node_id_t>(island))) continue;
-                std::size_t landing = 0;
-                while (landing != connectivity && target_row[landing] < nodes) ++landing;
-                // A full row gives up a tail slot spread by the island's ID, never one a sibling
-                // island landed in this round, so islands sharing a row heal together.
-                for (std::size_t attempt = 0; landing == connectivity && attempt != spread; ++attempt) {
-                    std::size_t const slot = connectivity - 1 - (island + attempt) % spread;
-                    if (reached(target_row[slot])) landing = slot;
+        };
+        auto const [scanned, scan_status] = target.view.scan_reads_(executor, divide_round_up(nodes, run_rows),
+                                                                    whole_run, count_links);
+        result_.scan_reads += scanned;
+        if (failed(scan_status)) return scan_status;
+
+        for (std::size_t from = 0; from != nodes;) {
+            // The rows from `from` on whose islands the landings hold.
+            std::size_t bound = from, islands = 0;
+            for (; bound != nodes && islands != capacity; ++bound) islands += !links_of(bound);
+            result_.graph.islands_found += islands;
+            alignas(default_alignment_k) std::size_t taken = 0;
+            auto island_rows = [&](std::size_t task, u64_t& progress) noexcept -> std::array<extent_t, 1> {
+                std::size_t const task_first = from + task * run_rows;
+                std::size_t row = task_first + progress, end = min_of(task_first + run_rows, bound);
+                while (row != end && links_of(row)) ++row;
+                if (row == end) return {};
+                progress = row + 1 - task_first;
+                return {extent_t {0, part.neighbors_begin + row * row_bytes, row_bytes}};
+            };
+            auto pick_targets = [&](std::size_t, std::size_t, auto const& extents, auto const& landed) noexcept {
+                std::size_t const island = static_cast<std::size_t>((extents[0].begin - part.neighbors_begin) /
+                                                                    row_bytes);
+                auto const* const neighbors = reinterpret_cast<node_id_t const*>(landed[0]);
+                std::size_t linked = island * seeds / nodes * nodes / seeds;
+                for (std::size_t slot = 0; slot != connectivity; ++slot)
+                    if (neighbors[slot] < nodes && neighbors[slot] != island && links_of(neighbors[slot])) {
+                        linked = neighbors[slot];
+                        break;
+                    }
+                if (linked == island) return;
+                landings[std::atomic_ref<std::size_t>(taken).fetch_add(1, std::memory_order_relaxed)] =
+                    static_cast<u64_t>(linked) << 32 | island;
+            };
+            auto const [read, pick_status] = target.view.scan_reads_(executor, divide_round_up(bound - from, run_rows),
+                                                                     island_rows, pick_targets);
+            result_.neighbor_reads += read;
+            if (failed(pick_status)) return pick_status;
+
+            // In target order, so every target row is read and written once, near-sequentially.
+            partial_sort(std::span<u64_t> {landings, taken}, taken);
+            for (std::size_t position = 0; position != taken;) {
+                std::size_t const linked = static_cast<std::size_t>(landings[position] >> 32);
+                result_.neighbor_reads += nvme_reads_t {1, row_bytes};
+                if (status_t const fetched = target.file.read_at(part.neighbors_begin + linked * row_bytes,
+                                                                 {reinterpret_cast<byte_t*>(target_row), row_bytes});
+                    failed(fetched))
+                    return fetched;
+                for (; position != taken && landings[position] >> 32 == linked; ++position) {
+                    std::size_t const island = static_cast<u32_t>(landings[position]);
+                    std::size_t landing = 0;
+                    while (landing != connectivity && target_row[landing] < nodes) ++landing;
+                    // A full row gives up a tail slot spread by the island's ID whose resident
+                    // keeps another in-link; an island landed before counts none, so its slot
+                    // stays.
+                    for (std::size_t attempt = 0; landing == connectivity && attempt != spread; ++attempt) {
+                        std::size_t const slot = connectivity - 1 - (island + attempt) % spread;
+                        std::size_t const resident = target_row[slot];
+                        if (links_of(resident) != 3u) continue;
+                        in_links[resident / 32] &= ~(u64_t {2} << (resident % 32 * 2));
+                        landing = slot;
+                    }
+                    if (landing == connectivity) continue;
+                    target_row[landing] = static_cast<node_id_t>(island);
+                    ++result_.graph.islands_reconnected;
                 }
-                if (landing == connectivity) continue;
-                target_row[landing] = static_cast<node_id_t>(island);
                 if (status_t const wrote = write_rows_(target, part.neighbors_begin, row_bytes, linked, 1,
                                                        reinterpret_cast<byte_t const*>(target_row));
                     failed(wrote))
                     return wrote;
-                ++result_.graph.islands_reconnected;
             }
+            from = bound;
         }
+        return status_t::success_k;
     }
 
 #pragma endregion Heal

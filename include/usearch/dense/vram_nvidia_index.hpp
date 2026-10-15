@@ -1360,58 +1360,60 @@ struct vram_nvidia_index {
     expected<refine_result_t> refine(iota_view<node_id_t> nodes, traversal_context_t& context,
                                      refine_config_t config = {}, node_id_t appended_base = 0) noexcept {
         std::size_t const rows = size();
+        if (!rows) return {{}, status_t::success_k};
+        if (!context) return {{}, status_t::config_mismatch_k};
+        auto [scratch, carve_status] = carve_scratch_(context, scratch_use_t::refine_k);
+        if (failed(carve_status)) return {{}, carve_status};
+        // Zeroed once, so every pass adds up, and read once the last audit landed them all.
+        if (cuda_fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream()) !=
+            cuda_success_k)
+            return {{}, status_t::device_error_k};
         refine_result_t result;
-        auto add_walks = [&](refine_result_t const& walked) noexcept {
-            result.visited_nodes += walked.visited_nodes;
-            result.changed_nodes += walked.changed_nodes;
-            result.visited_members += walked.visited_members;
-            result.computed_distances += walked.computed_distances;
-            result.restarts += walked.restarts;
-        };
         node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
         if (nodes.first < bound) {
-            auto const [walked, status] = refine_pass_(context, config, {nodes.first, bound}, {},
-                                                       appended_base < rows ? appended_base : 0);
-            if (failed(status)) return {result, status};
-            add_walks(walked);
+            if (status_t const queued = refine_pass_(context, scratch, config, {nodes.first, bound}, {},
+                                                     appended_base < rows ? appended_base : 0);
+                failed(queued))
+                return {result, queued};
+            result.visited_nodes = bound - nodes.first;
         }
-        if (!rows) return {result, status_t::success_k};
 
-        auto [audit, reserve_status] = reserve_audit_(context, rows);
-        if (failed(reserve_status)) return {result, reserve_status};
-        u32_t islands = 0;
-        auto survey = [&]() noexcept {
-            auto const [unreached, audit_status] = audit_(context, audit);
-            islands = unreached;
-            result.sweeps += audit.sweeps;
-            return audit_status;
-        };
-        if (status_t const audited = survey(); failed(audited)) return {result, audited};
+        auto [islands, audit_status] = audit_(context, scratch, result.visited_nodes);
+        if (failed(audit_status)) return {result, audit_status};
         result.islands_found = islands;
-        for (u32_t islands_before = islands; islands;) {
-            // The island IDs replace the range: offsets below their count index them.
-            auto const [healed, healed_status] = refine_pass_(context, config, {0, islands},
-                                                              {audit.island_ids, islands});
-            if (failed(healed_status)) return {result, healed_status};
-            add_walks(healed);
-            if (status_t const audited = survey(); failed(audited)) return {result, audited};
-            if (!islands) break;
+        result.sweeps = scratch.sweeps;
+        for (u32_t islands_before = islands; islands; islands_before = islands) {
+            // The island IDs replace the range: offsets below their count index them. Only island
+            // rows change, and no reached row points at one, so the audit before stands.
+            if (status_t const queued = refine_pass_(context, scratch, config, {0, islands},
+                                                     {scratch.island_ids, islands});
+                failed(queued))
+                return {result, queued};
+            result.visited_nodes += islands;
             // The reached in-links first, so no reconnection takes the last link a reached node is
             // found through.
-            if (cuda_fill_async(audit.in_links, 0, rows * sizeof(u32_t), context.stream()) != cuda_success_k)
+            if (cuda_fill_async(scratch.in_links, 0, rows * sizeof(u32_t), context.stream()) != cuda_success_k)
                 return {result, status_t::device_error_k};
-            if (status_t const launched = launch_reconnect_islands_(audit, islands, rows, context.stream());
+            if (status_t const launched = launch_reconnect_islands_(scratch, islands, rows, context.stream());
                 failed(launched))
                 return {result, launched};
-            if (status_t const audited = survey(); failed(audited)) return {result, audited};
+            auto const [left, left_status] = audit_(context, scratch, islands);
+            if (failed(left_status)) return {result, left_status};
+            result.sweeps += scratch.sweeps;
+            islands = left;
             // A round that frees no island frees none on the next either, since the picks it needs
             // are unreached.
             if (islands >= islands_before) break;
-            islands_before = islands;
         }
-        auto const [reconnected, read_status] = read_counter_(audit.reconnected, context.stream());
-        if (failed(read_status)) return {result, read_status};
-        result.islands_reconnected = reconnected;
+        vram_telemetry_block_t spent = {};
+        if (cuda_copy_async(&spent, context.telemetry_.get(), sizeof(spent), context.stream()) != cuda_success_k ||
+            cuda_api().stream_synchronize(context.stream()) != cuda_success_k)
+            return {result, status_t::device_error_k};
+        result.changed_nodes = spent.changed_nodes;
+        result.visited_members = spent.hops;
+        result.computed_distances = spent.scored;
+        result.restarts = spent.restarts;
+        result.islands_reconnected = scratch.reconnections;
         result.reachable_nodes = rows - islands;
         return {result, status_t::success_k};
     }
@@ -1422,11 +1424,28 @@ struct vram_nvidia_index {
     expected<health_result_t> health(traversal_context_t& context) noexcept {
         std::size_t const rows = size();
         if (!rows) return {{}, status_t::success_k};
-        auto [audit, reserve_status] = reserve_audit_(context, 0);
-        if (failed(reserve_status)) return {{}, reserve_status};
-        auto const [unreached, audit_status] = audit_(context, audit);
+        auto [scratch, carve_status] = carve_scratch_(context, scratch_use_t::audit_k);
+        if (failed(carve_status)) return {{}, carve_status};
+        auto const [unreached, audit_status] = audit_(context, scratch, 0);
         if (failed(audit_status)) return {{}, audit_status};
-        return {{rows, rows - unreached, audit.sweeps}, status_t::success_k};
+        return {{rows, rows - unreached, scratch.sweeps}, status_t::success_k};
+    }
+
+    /** The bytes an executor's run must hold before a context carved over it can refine the rows
+     *  published now under @p config, @p walks walks of a row sharing one visited set: the
+     *  context's counters, the walks' arena, and the scratch the refine carves once. */
+    std::size_t traversal_memory_usage(refine_config_t config, u32_t walks = 1) const noexcept {
+        if (!dimensions() || !device_.multiprocessor_count) return 0;
+        auto aligned = [](std::size_t bytes) noexcept {
+            return divide_round_up<std::size_t>(bytes, default_alignment_k) * default_alignment_k;
+        };
+        u32_t const expansion = non_zero_expansion_factor(config);
+        cuda_arena_shape_t const arena_shape = build_arena_shape_(expansion * walks,
+                                                                  pool_slots_for_(expansion, 4) * walks);
+        std::size_t const arena_warps = device_.multiprocessor_count * insert_blocks_per_multiprocessor_k *
+                                        vram_warps_per_block_k;
+        return aligned(sizeof(vram_telemetry_block_t)) + 2 * aligned(sizeof(u32_t)) +
+               aligned(arena_warps * arena_shape.slice_bytes()) + aligned(scratch_bytes_(scratch_use_t::refine_k));
     }
 
 #pragma endregion Refinement
@@ -2575,6 +2594,48 @@ struct vram_nvidia_index {
 
 #pragma region Refinement
 
+    /** Sweeps an audit numbers from one and stops below: every row joins one frontier at most, so
+     *  the levels are bounded by the landmarks' eccentricity, capped defensively. */
+    inline static constexpr std::size_t audit_sweeps_cap_k = 256;
+
+    /** Device scratch one @c refine carves once and its passes and audits reuse, or the audit share
+     *  one @c health carves: the reached set and two frontiers, every sweep's expanded counter, the
+     *  unreached, reconnected and claim counters an audit reads back together, then for a refine
+     *  the passes' buffers and the unreached rows' IDs and in-link counts. */
+    struct refine_scratch_t {
+        typename traversal_context_t::bytes_ptr_t bytes;
+
+        /** The reached set and the two frontiers, one bit per row each. */
+        u32_t* reached = nullptr;
+        u32_t* frontier = nullptr;
+        u32_t* next_frontier = nullptr;
+
+        /** Rows each sweep expanded, at the sweep's number, @b [audit_sweeps_cap_k]. */
+        u32_t* expanded = nullptr;
+        u32_t* unreached = nullptr;
+        u32_t* reconnected = nullptr;
+
+        /** The walk's and the merge's claim counters, the last pass's completion oracle. */
+        u32_t* claims = nullptr;
+
+        /** The reverse buckets' fill counters, then the bitset of rows the merge re-selects. */
+        u32_t* bucket_counts = nullptr;
+        u32_t* touched = nullptr;
+        u32_t* island_ids = nullptr;
+        u32_t* in_links = nullptr;
+
+        /** The shadow neighbors the walks land and the reverse buckets, @b [rows,connectivity]
+         *  each. */
+        u32_t* shadow_neighbors = nullptr;
+        u32_t* buckets = nullptr;
+        std::size_t words = 0;
+
+        /** Levels the last audit swept to convergence, and the links every reconnection wrote by
+         *  then. */
+        std::size_t sweeps = 0;
+        std::size_t reconnections = 0;
+    };
+
     /** What one refinement pass hands its launches: the walked rows, the pass-local buffers, and
      *  the walk's arena, which the kernel side turns into its refine views. */
     struct refine_launch_t {
@@ -2616,44 +2677,24 @@ struct vram_nvidia_index {
         u32_t appended_base = 0;
     };
 
-    /** The three-pass refinement engine behind @c refine(): the walk covers @p nodes, or under a
-     *  device-resident @p node_ids the listed IDs with @p nodes spanning the array's offsets, each
-     *  node first walking across into the other part when @p appended_base is nonzero; the
-     *  back-link passes re-select the walked rows and the rows they pick, and leave every other row
-     *  as it was. */
-    expected<refine_result_t> refine_pass_(traversal_context_t& context, refine_config_t config,
-                                           iota_view<node_id_t> nodes, std::span<u32_t const> node_ids,
-                                           node_id_t appended_base = 0) noexcept {
+    /** Queues one pass of the three-pass refinement engine behind @c refine() into its carved
+     *  @p scratch: the walk covers @p nodes, or under a device-resident @p node_ids the listed IDs
+     *  with @p nodes spanning the array's offsets, each node first walking across into the other
+     *  part when @p appended_base is nonzero; the back-link passes re-select the walked rows and
+     *  the rows they pick, and leave every other row as it was. Nothing waits: the audit after it
+     *  lands the pass and checks its claims. */
+    status_t refine_pass_(traversal_context_t& context, refine_scratch_t const& scratch, refine_config_t config,
+                          iota_view<node_id_t> nodes, std::span<u32_t const> node_ids,
+                          node_id_t appended_base = 0) noexcept {
+        if (status_t const kept = status(); failed(kept)) return kept;
         std::size_t const nodes_count = size();
-        if (!nodes_count) return {{}, status_t::success_k};
-        if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
-        if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
-        if (status_t const kept = status(); failed(kept)) return {{}, kept};
-        // IDs at or past the published count are unwalkable; an ID array is bounded by its own
-        // length.
-        if (node_ids.empty()) nodes.bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, nodes_count));
-        if (nodes.first >= nodes.bound) return {{}, status_t::success_k};
         std::size_t const walk_count = nodes.size();
         cuda_stream_handle_t const stream = context.stream();
-        cuda_api_t const& api = cuda_api();
-        // Pass-local buffers no reader observes: the shadow neighbors, the reverse buckets, their
-        // counters, the bitset of rows the merge re-selects, and the walk's and the merge's claim
-        // counters; the bucket width is the connectivity.
-        std::size_t const shadow_bytes = nodes_count * connectivity() * sizeof(u32_t);
-        std::size_t const counters_bytes = (nodes_count + divide_round_up<std::size_t>(nodes_count, 32) + 2) *
-                                           sizeof(u32_t);
-        u32_t const bucket_width = static_cast<u32_t>(connectivity());
-        auto shadow = cuda_make_unique(context.allocator_, shadow_bytes * 2 + counters_bytes);
-        if (!shadow) return {{}, status_t::bad_alloc_k};
-        nk::matrix_span<u32_t> const shadow_neighbors {reinterpret_cast<u32_t*>(shadow.get()), nodes_count,
-                                                       connectivity()};
-        nk::matrix_span<u32_t> const buckets {reinterpret_cast<u32_t*>(shadow.get() + shadow_bytes), nodes_count,
-                                              bucket_width};
-        std::span<u32_t> const counters {reinterpret_cast<u32_t*>(shadow.get() + shadow_bytes * 2),
-                                         counters_bytes / sizeof(u32_t)};
-        std::span<u32_t> const bucket_counts = counters.first(nodes_count);
-        if (cuda_fill_async(counters.data(), 0, counters.size_bytes(), stream) != cuda_success_k)
-            return {{}, status_t::device_error_k};
+        // The claims, the reverse buckets' counters and the bitset of rows the merge re-selects lie
+        // back to back.
+        if (cuda_fill_async(scratch.claims, 0, (2 + nodes_count + scratch.words) * sizeof(u32_t), stream) !=
+            cuda_success_k)
+            return status_t::device_error_k;
 
         // Twice the connectivity by default, like every CPU walk, rounded up to the pool sizes the
         // kernel carries, or walked exactly past them.
@@ -2666,176 +2707,144 @@ struct vram_nvidia_index {
                                         vram_warps_per_block_k;
         std::size_t const arena_bytes_before = context.arena_bytes_;
         byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes());
-        if (!arena) return {{}, status_t::bad_alloc_k};
+        if (!arena) return status_t::bad_alloc_k;
         // Only a fresh allocation or a wrapped 32-bit epoch space warrants zeroing, never a warm
         // arena.
         if (context.arena_bytes_ != arena_bytes_before || context.epoch_floor_ + walk_count > 0xFFFFFFFEull) {
             if (cuda_fill_async(arena, 0, context.arena_bytes_, stream) != cuda_success_k) {
                 context.arena_bytes_ = 0; // Spent: a retry must re-zero, never walk epoch garbage.
-                return {{}, status_t::device_error_k};
+                return status_t::device_error_k;
             }
             context.epoch_floor_ = 0;
         }
         u32_t const epoch_base = static_cast<u32_t>(context.epoch_floor_);
         context.epoch_floor_ += walk_count;
-        if (cuda_fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), stream) != cuda_success_k)
-            return {{}, status_t::device_error_k};
 
         refine_launch_t launch;
         launch.nodes = nodes;
         launch.node_ids = node_ids.data();
         launch.nodes_count = static_cast<u32_t>(nodes_count);
-        launch.shadow_neighbors = shadow_neighbors.data();
-        launch.buckets = buckets.data();
-        launch.bucket_counts = bucket_counts.data();
-        launch.touched = counters.subspan(nodes_count).data();
-        launch.claims = counters.last(2).data();
-        launch.bucket_width = bucket_width;
+        launch.shadow_neighbors = scratch.shadow_neighbors;
+        launch.buckets = scratch.buckets;
+        launch.bucket_counts = scratch.bucket_counts;
+        launch.touched = scratch.touched;
+        launch.claims = scratch.claims;
+        launch.bucket_width = static_cast<u32_t>(connectivity());
         launch.arena = arena;
         launch.arena_shape = arena_shape;
         launch.expansion = expansion;
         launch.epoch_base = epoch_base;
         launch.pool_slots = pool_slots;
         launch.appended_base = appended_base;
-        // A walk short of the whole graph starts from the live neighbors copied into the shadow
+        // A range short of the whole graph starts from the live neighbors copied into the shadow
         // verbatim, so a row it never rewrites but one of its picks lands in merges its own
-        // neighbors with the new reverse links.
-        if (!node_ids.empty() || walk_count != nodes_count)
-            if (cuda_copy_async(shadow_neighbors.data(), neighbors_matrix_.base(), shadow_bytes, stream) !=
-                cuda_success_k)
-                return {{}, status_t::device_error_k};
-        if (status_t const launched = launch_refine_(launch, context); failed(launched)) return {{}, launched};
+        // neighbors with the new reverse links; islands scatter nothing, so only their own rows
+        // merge.
+        if (node_ids.empty() && walk_count != nodes_count)
+            if (cuda_copy_async(scratch.shadow_neighbors, neighbors_matrix_.base(),
+                                nodes_count * connectivity() * sizeof(u32_t), stream) != cuda_success_k)
+                return status_t::device_error_k;
+        if (status_t const launched = launch_refine_(launch, context); failed(launched)) return launched;
 
         // Scatter the walked rows' shadow neighbors in reverse, then merge each touched node's
         // forward & reverse candidates into its final live row. A heal round over island IDs
         // re-selects the islands' own rows alone: re-judging the rows they pick would drop the
         // links that reconnected earlier islands.
-        if (status_t const launched = launch_back_links_(launch, context); failed(launched)) return {{}, launched};
-        // The claim counts are the completion oracle: every offset claimed means every row landed.
-        u32_t claimed[2] = {};
-        vram_telemetry_block_t spent = {};
-        if (cuda_copy_async(claimed, launch.claims, sizeof(claimed), stream) != cuda_success_k ||
-            cuda_copy_async(&spent, context.telemetry_.get(), sizeof(spent), stream) != cuda_success_k ||
-            api.stream_synchronize(stream) != cuda_success_k || claimed[0] < walk_count || claimed[1] < nodes_count)
-            return {{}, status_t::device_error_k};
-        refine_result_t result;
-        result.visited_nodes = walk_count;
-        result.changed_nodes = spent.changed_nodes;
-        result.visited_members = spent.hops;
-        result.computed_distances = spent.scored;
-        result.restarts = spent.restarts;
-        return {result, status_t::success_k};
+        return launch_back_links_(launch, context);
     }
 
-    /** Sweeps an audit numbers from one and stops below: every row joins one frontier at most, so
-     *  the levels are bounded by the landmarks' eccentricity, capped defensively. */
-    inline static constexpr std::size_t audit_sweeps_cap_k = 256;
+    /** Which share of the scratch a carve covers: the audit's alone, or the whole of a refine's. */
+    enum class scratch_use_t : bool { audit_k, refine_k };
 
-    /** Device scratch one reachability audit sweeps in, reused across a heal's rounds - one
-     *  allocation carved into the reached set and two frontiers, every sweep's expanded counter,
-     *  the unreached and reconnected counters, and the unreached rows' IDs and their in-link
-     *  counts when a caller collects them. */
-    struct audit_t {
-        typename traversal_context_t::bytes_ptr_t bytes;
+    /** Bytes of the scratch over the rows published now: the audit share, and for @c refine_k the
+     *  passes' buffers and the islands' IDs and in-links too. */
+    std::size_t scratch_bytes_(scratch_use_t use) const noexcept {
+        std::size_t const rows = size(), words = divide_round_up<std::size_t>(rows, 32);
+        std::size_t const passes_words = use == scratch_use_t::refine_k ? rows * (3 + 2 * connectivity()) + words : 0;
+        return (words * 3 + audit_sweeps_cap_k + 4 + passes_words) * sizeof(u32_t);
+    }
 
-        /** The reached set and the two frontiers, one bit per row each. */
-        u32_t* reached = nullptr;
-        u32_t* frontier = nullptr;
-        u32_t* next_frontier = nullptr;
-
-        /** Rows each sweep expanded, at the sweep's number, @b [audit_sweeps_cap_k]. */
-        u32_t* expanded = nullptr;
-        u32_t* unreached = nullptr;
-        u32_t* reconnected = nullptr;
-        u32_t* island_ids = nullptr;
-        u32_t* in_links = nullptr;
-        std::size_t words = 0;
-
-        /** Levels the last audit swept to convergence. */
-        std::size_t sweeps = 0;
-    };
-
-    /** Allocates an audit over the rows published now, with room for @p island_slots unreached IDs
-     *  and as many in-link counts, the reconnected counter zeroed. */
-    expected<audit_t> reserve_audit_(traversal_context_t& context, std::size_t island_slots) noexcept {
-        audit_t audit {typename traversal_context_t::bytes_ptr_t {
+    /** Carves the scratch over the rows published now, for @c refine_k the whole of a refine's,
+     *  otherwise the audit share alone, the reconnected counter zeroed. */
+    expected<refine_scratch_t> carve_scratch_(traversal_context_t& context, scratch_use_t use) noexcept {
+        refine_scratch_t scratch {typename traversal_context_t::bytes_ptr_t {
             nullptr, cuda_deleter<typename traversal_context_t::allocator_t> {context.allocator_, 0}}};
-        audit.words = divide_round_up<std::size_t>(size(), 32);
-        std::size_t const bytes = (audit.words * 3 + audit_sweeps_cap_k + 2 + island_slots * 2) * sizeof(u32_t);
-        audit.bytes.reset(context.allocator_.allocate(bytes));
-        audit.bytes.get_deleter().count = bytes;
-        if (!audit.bytes) return {std::move(audit), status_t::bad_alloc_k};
-        audit.reached = reinterpret_cast<u32_t*>(audit.bytes.get());
-        audit.frontier = audit.reached + audit.words;
-        audit.next_frontier = audit.frontier + audit.words;
-        audit.expanded = audit.next_frontier + audit.words;
-        audit.unreached = audit.expanded + audit_sweeps_cap_k;
-        audit.reconnected = audit.unreached + 1;
-        audit.island_ids = island_slots ? audit.reconnected + 1 : nullptr;
-        audit.in_links = island_slots ? audit.island_ids + island_slots : nullptr;
-        if (cuda_fill_async(audit.reconnected, 0, sizeof(u32_t), context.stream()) != cuda_success_k)
-            return {std::move(audit), status_t::device_error_k};
-        return {std::move(audit), status_t::success_k};
+        if (!vectors_matrix_.reserved_bytes()) return {std::move(scratch), status_t::uninitialized_k};
+        if (context.device() != device_.ordinal) return {std::move(scratch), status_t::config_mismatch_k};
+        std::size_t const rows = size(), bytes = scratch_bytes_(use);
+        scratch.bytes.reset(context.allocator_.allocate(bytes));
+        scratch.bytes.get_deleter().count = bytes;
+        if (!scratch.bytes) return {std::move(scratch), status_t::bad_alloc_k};
+        scratch.words = divide_round_up<std::size_t>(rows, 32);
+        scratch.reached = reinterpret_cast<u32_t*>(scratch.bytes.get());
+        scratch.frontier = scratch.reached + scratch.words;
+        scratch.next_frontier = scratch.frontier + scratch.words;
+        scratch.expanded = scratch.next_frontier + scratch.words;
+        scratch.unreached = scratch.expanded + audit_sweeps_cap_k;
+        scratch.reconnected = scratch.unreached + 1;
+        scratch.claims = scratch.reconnected + 1;
+        if (use == scratch_use_t::refine_k) {
+            scratch.bucket_counts = scratch.claims + 2;
+            scratch.touched = scratch.bucket_counts + rows;
+            scratch.island_ids = scratch.touched + scratch.words;
+            scratch.in_links = scratch.island_ids + rows;
+            scratch.shadow_neighbors = scratch.in_links + rows;
+            scratch.buckets = scratch.shadow_neighbors + rows * connectivity();
+        }
+        if (cuda_fill_async(scratch.reconnected, 0, sizeof(u32_t), context.stream()) != cuda_success_k)
+            return {std::move(scratch), status_t::device_error_k};
+        return {std::move(scratch), status_t::success_k};
     }
 
     /** Sweeps reachability to convergence from as many stride-spread landmarks as one search
      *  draws - the connectivity - then counts the rows it never reached, collecting their IDs
-     *  when @p audit has room for them. */
-    expected<u32_t> audit_(traversal_context_t& context, audit_t& audit) noexcept {
+     *  when @p scratch has room for them. Waits once, reading every counter back together, which
+     *  also lands a pass queued before it over @p walked rows and checks that pass's claims. */
+    expected<u32_t> audit_(traversal_context_t& context, refine_scratch_t& scratch, std::size_t walked) noexcept {
         std::size_t const rows = size();
-        if (!vectors_matrix_.reserved_bytes()) return {0, status_t::uninitialized_k};
-        if (context.device() != device_.ordinal) return {0, status_t::config_mismatch_k};
         cuda_stream_handle_t const stream = context.stream();
         std::size_t const seed_count = min_of<std::size_t>(connectivity(), rows);
         // The bitsets, the sweeps' expanded counters and the unreached counter lie back to back.
-        if (cuda_fill_async(audit.reached, 0, (audit.words * 3 + audit_sweeps_cap_k + 1) * sizeof(u32_t), stream) !=
+        if (cuda_fill_async(scratch.reached, 0, (scratch.words * 3 + audit_sweeps_cap_k + 1) * sizeof(u32_t), stream) !=
             cuda_success_k)
             return {0, status_t::device_error_k};
-        u32_t* frontier = audit.frontier;
-        u32_t* next_frontier = audit.next_frontier;
-        if (status_t const launched = launch_audit_seeds_(audit.reached, frontier, rows, seed_count, stream);
+        u32_t* frontier = scratch.frontier;
+        u32_t* next_frontier = scratch.next_frontier;
+        if (status_t const launched = launch_audit_seeds_(scratch.reached, frontier, rows, seed_count, stream);
             failed(launched))
             return {0, launched};
 
-        // Sweeps queue blind in runs of 1, 2, 4 ... 128, the cap's 255, each run read back once: a
-        // sweep queued past convergence finds the one before it expanded nothing and leaves at
-        // entry.
-        u32_t expanded_rows[audit_sweeps_cap_k] = {};
-        audit.sweeps = audit_sweeps_cap_k;
-        for (std::size_t first = 1; first < audit_sweeps_cap_k && audit.sweeps == audit_sweeps_cap_k; first *= 2) {
-            for (std::size_t sweep_number = first; sweep_number != first * 2; ++sweep_number) {
-                u32_t const* const expanded_before = sweep_number == 1 ? nullptr : audit.expanded + sweep_number - 1;
-                if (cuda_fill_async(next_frontier, 0, audit.words * sizeof(u32_t), stream) != cuda_success_k)
-                    return {0, status_t::device_error_k};
-                if (status_t const launched = launch_audit_sweep_(audit.reached, frontier, next_frontier,
-                                                                  audit.expanded + sweep_number, expanded_before, rows,
-                                                                  stream);
-                    failed(launched))
-                    return {0, launched};
-                std::swap(frontier, next_frontier);
-            }
-            if (cuda_copy_async(expanded_rows + first, audit.expanded + first, first * sizeof(u32_t), stream) !=
-                    cuda_success_k ||
-                cuda_api().stream_synchronize(stream) != cuda_success_k)
+        // Every sweep up to the cap queues blind: one queued past convergence finds the one before
+        // it expanded nothing and leaves at entry.
+        for (std::size_t sweep_number = 1; sweep_number != audit_sweeps_cap_k; ++sweep_number) {
+            u32_t const* const expanded_before = sweep_number == 1 ? nullptr : scratch.expanded + sweep_number - 1;
+            if (cuda_fill_async(next_frontier, 0, scratch.words * sizeof(u32_t), stream) != cuda_success_k)
                 return {0, status_t::device_error_k};
-            for (std::size_t sweep_number = first; sweep_number != first * 2 && audit.sweeps == audit_sweeps_cap_k;
-                 ++sweep_number)
-                if (!expanded_rows[sweep_number]) audit.sweeps = sweep_number;
+            if (status_t const launched = launch_audit_sweep_(scratch.reached, frontier, next_frontier,
+                                                              scratch.expanded + sweep_number, expanded_before, rows,
+                                                              stream);
+                failed(launched))
+                return {0, launched};
+            std::swap(frontier, next_frontier);
         }
-        if (status_t const launched = launch_audit_islands_(audit.reached, rows, audit.island_ids, audit.unreached,
-                                                            stream);
+        if (status_t const launched = launch_audit_islands_(scratch.reached, rows, scratch.island_ids,
+                                                            scratch.unreached, stream);
             failed(launched))
             return {0, launched};
-        return read_counter_(audit.unreached, stream);
-    }
-
-    /** One device counter read back once the stream drains. */
-    static expected<u32_t> read_counter_(u32_t const* counter, cuda_stream_handle_t stream) noexcept {
-        u32_t value = 0;
-        if (cuda_copy_async(&value, counter, sizeof(u32_t), stream) != cuda_success_k ||
+        // The expanded, unreached, reconnected and claim counters lie back to back.
+        u32_t counters[audit_sweeps_cap_k + 4] = {};
+        if (cuda_copy_async(counters, scratch.expanded, sizeof(counters), stream) != cuda_success_k ||
             cuda_api().stream_synchronize(stream) != cuda_success_k)
             return {0, status_t::device_error_k};
-        return {value, status_t::success_k};
+        // The claim counts are the completion oracle: every offset claimed means every row landed.
+        u32_t const* const claimed = counters + audit_sweeps_cap_k + 2;
+        if (walked && (claimed[0] < walked || claimed[1] < rows)) return {0, status_t::device_error_k};
+        scratch.sweeps = audit_sweeps_cap_k;
+        for (std::size_t sweep_number = 1; sweep_number != audit_sweeps_cap_k && scratch.sweeps == audit_sweeps_cap_k;
+             ++sweep_number)
+            if (!counters[sweep_number]) scratch.sweeps = sweep_number;
+        scratch.reconnections = counters[audit_sweeps_cap_k + 1];
+        return {counters[audit_sweeps_cap_k], status_t::success_k};
     }
 
 #pragma endregion Refinement
@@ -3231,19 +3240,19 @@ struct vram_nvidia_index {
 
     /** Counts the reached in-links of every row, then reconnects the audit's @p islands islands
      *  into reached picks or their landmarks. */
-    status_t launch_reconnect_islands_(audit_t const& audit, u32_t islands, std::size_t rows,
+    status_t launch_reconnect_islands_(refine_scratch_t const& scratch, u32_t islands, std::size_t rows,
                                        cuda_stream_handle_t stream) noexcept {
         cuda_arguments_t arguments {};
         cuda_graph_t& graph = arguments.graph;
         graph.neighbors = neighbor_rows_();
         graph.rows_count = static_cast<u32_t>(rows);
         graph.connectivity = static_cast<u32_t>(connectivity());
-        graph.reached = {audit.reached};
-        graph.in_links = audit.in_links;
-        graph.island_ids = audit.island_ids;
+        graph.reached = {scratch.reached};
+        graph.in_links = scratch.in_links;
+        graph.island_ids = scratch.island_ids;
         graph.islands_count = islands;
         graph.seed_count = static_cast<u32_t>(min_of<std::size_t>(connectivity(), rows));
-        graph.reconnected = audit.reconnected;
+        graph.reconnected = scratch.reconnected;
         if (status_t const counted = launch_(kernel_function_(cuda_kernel_t::reached_in_links_k, 0),
                                              device_.multiprocessor_count * search_blocks_per_multiprocessor_k, 0,
                                              stream, arguments);

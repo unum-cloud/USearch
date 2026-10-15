@@ -560,7 +560,7 @@ struct vram_apple_indexes {
         std::size_t const published = size();
         for (std::size_t shard = 0; shard != shards; ++shard) {
             auto const [part, status] = shards_[shard].index->refine({0, node_id_unknown_k}, traversals[shard], config);
-            combine_refinement_(result, part);
+            result += part;
             if (failed(status)) return {result, status};
             if (on_visited(result.visited_nodes, published) == continuation_t::cancel_k)
                 return {result, status_t::cancelled_k};
@@ -673,7 +673,7 @@ struct vram_apple_indexes {
             iota_view<node_id_t> const nodes = appended.empty() ? appended
                                                                 : iota_view<node_id_t> {0, node_id_unknown_k};
             auto const [part, status] = one.refine(nodes, traversals[shard], config, appended.first);
-            combine_refinement_(result, part);
+            result += part;
             if (failed(status)) return {result, status};
         }
         return {result, status_t::success_k};
@@ -696,7 +696,7 @@ struct vram_apple_indexes {
         for (std::size_t shard = 0; shard != shards; ++shard) {
             auto const [shard_health, status] = shards_[shard].index->health(traversals[shard]);
             if (failed(status)) return {{}, status};
-            combine_health_(result, shard_health);
+            result += shard_health;
         }
         return {result, status_t::success_k};
     }
@@ -1618,31 +1618,6 @@ struct vram_apple_indexes {
         for (std::size_t row = first; row != first + rows; ++row)
             locators_of_key_.insert(seats, one.keys[row], key_locator_t {shard, static_cast<node_id_t>(row)});
         return status_t::success_k;
-    }
-
-    /** Folds one shard's sweep into the group's; every counter is a population or a spend, so all
-     *  of them add. */
-    static void combine_refinement_(refine_result_t& into, refine_result_t const& one) noexcept {
-        into.visited_nodes += one.visited_nodes;
-        into.changed_nodes += one.changed_nodes;
-        into.islands_found += one.islands_found;
-        into.islands_reconnected += one.islands_reconnected;
-        into.reachable_nodes += one.reachable_nodes;
-        into.sweeps = max_of(into.sweeps, one.sweeps);
-        into.visited_members += one.visited_members;
-        into.computed_distances += one.computed_distances;
-        into.computed_distances_in_refines += one.computed_distances_in_refines;
-        into.computed_distances_in_reverse_refines += one.computed_distances_in_reverse_refines;
-        into.restarts += one.restarts;
-        into.saturated_walks += one.saturated_walks;
-    }
-
-    /** Folds one shard's audit into the group's: populations add, and the depth is the deepest
-     *  shard's, since a searcher waits for the last one. */
-    static void combine_health_(health_result_t& into, health_result_t const& one) noexcept {
-        into.audited_nodes += one.audited_nodes;
-        into.reachable_nodes += one.reachable_nodes;
-        into.sweeps = max_of(into.sweeps, one.sweeps);
     }
 
 #pragma region Search

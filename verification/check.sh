@@ -118,7 +118,7 @@ verify_client() {
         local verdict
         limited "${GENMC_SECONDS:-300}" "$genmc" --"$memory" --check-liveness --disable-estimation --unroll="$unroll" \
             --program-entry-function="$entry" -- -std=c++23 -I"$shadow" -I"$harness" -I../include -I"$harness/../include" \
-            "$client" >"$dir/genmc.out" 2>&1
+            -I"$harness/../c" "$client" >"$dir/genmc.out" 2>&1
         case $? in
         0) if grep -q "complete executions explored: 0" "$dir/genmc.out"; then verdict=broken; else verdict=pass; fi ;;
         42) if grep -q "Liveness violation" "$dir/genmc.out"; then verdict=stuck; else verdict=fail; fi ;;

@@ -1301,7 +1301,9 @@ std::size_t test_nvme_rewrites_split_keys(u64_t seed) {
 }
 
 /** A part thinned to one neighbor per row recalls poorly; refining all its rows by walks, in a
- *  workspace too small for a RAM index, recalls better and reaches every row. */
+ *  workspace too small for a RAM index, recalls better and links back every row nothing links to.
+ *  The thinning leaves mutual nearest pairs linking only each other, which the heal leaves for
+ *  @c health to report, so not every row is reachable. */
 template <typename nvme_type_, nk_kernel_kind_t kernel_>
 std::size_t test_nvme_rewrites_refine(u64_t seed) {
     std::size_t const dimensions = dense_dimensions_for<typename nvme_type_::scalar_t>(dense_values_k);
@@ -1341,6 +1343,7 @@ std::size_t test_nvme_rewrites_refine(u64_t seed) {
     fixture.failures += expect_eq(refined.rows, rewrite_rows_k);
     fixture.failures += expect_eq(refined.graph.visited_nodes, rewrite_rows_k);
     fixture.failures += expect(refined.graph.changed_nodes > 0);
+    fixture.failures += expect_eq(refined.graph.islands_reconnected, refined.graph.islands_found);
     if (failed(status)) return fixture.failures;
 
     nvme_type_ viewed = fixture.view(target.manifest.data());
@@ -1350,7 +1353,6 @@ std::size_t test_nvme_rewrites_refine(u64_t seed) {
         ++fixture.failures;
     }
     fixture.expect_keys(viewed);
-    fixture.expect_reachable(viewed);
     return fixture.failures;
 }
 

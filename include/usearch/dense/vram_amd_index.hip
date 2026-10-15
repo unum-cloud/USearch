@@ -686,7 +686,7 @@ __device__ __forceinline__ void amd_reconnect_island(u32_t* neighbors, u32_t con
             if (claim(slot, resident)) return true;
         }
         for (u32_t attempt = 0; attempt != spread; ++attempt) {
-            u32_t const landing = connectivity - 1 - (island_index + attempt) % spread;
+            u32_t const landing = connectivity - 1 - (island + attempt) % spread;
             u32_t const resident = hip_warp_t::load_relaxed(target_row[landing]);
             if (resident == island) return true;
             if (resident != node_id_unknown_k && !amd_bitset_contains(reached, resident)) continue;

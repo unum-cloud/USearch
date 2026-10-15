@@ -594,11 +594,7 @@ struct vram_nvidia_indexes {
         std::lock_guard const mutating {mutating_, std::adopt_lock};
 
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
-        // A refine's default walk is twice the connectivity, not an insert's default pool.
-        if (status_t const ready = reserve_traversals_(
-                traversals, executor, 1, insert_config_t {shards_[0].index->non_zero_expansion_factor(config)});
-            failed(ready))
-            return {{}, ready};
+        if (status_t const ready = reserve_traversals_(traversals, executor, config); failed(ready)) return {{}, ready};
 
         refine_result_t result;
         std::size_t const published = size();
@@ -606,7 +602,7 @@ struct vram_nvidia_indexes {
             index_t& one = *shards_[shard].index;
             if (cuda_set_device(one.device_specs().ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
             auto const [part, status] = one.refine({0, node_id_unknown_k}, traversals[shard], config);
-            combine_refinement_(result, part);
+            result += part;
             if (failed(status)) return {result, status};
             if (on_visited(result.visited_nodes, published) == continuation_t::cancel_k)
                 return {result, status_t::cancelled_k};
@@ -725,10 +721,9 @@ struct vram_nvidia_indexes {
         if (status_t const cleared = donor.clear(); failed(cleared)) return {{}, cleared};
 
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
-        // Twice a refine's walk, since every row first walks across into the other part alone.
-        if (status_t const ready = reserve_traversals_(
-                traversals, executor, 1, insert_config_t {2 * shards_[0].index->non_zero_expansion_factor(config)});
-            failed(ready))
+        // Two walks into one visited set, since every row first walks across into the other part
+        // alone.
+        if (status_t const ready = reserve_traversals_(traversals, executor, config, 2u); failed(ready))
             return {{}, ready};
         refine_result_t result;
         for (std::size_t shard = 0; shard != shards; ++shard) {
@@ -739,7 +734,7 @@ struct vram_nvidia_indexes {
             iota_view<node_id_t> const nodes = appended.empty() ? appended
                                                                 : iota_view<node_id_t> {0, node_id_unknown_k};
             auto const [part, status] = one.refine(nodes, traversals[shard], config, appended.first);
-            combine_refinement_(result, part);
+            result += part;
             if (failed(status)) return {result, status};
         }
         return {result, status_t::success_k};
@@ -768,7 +763,7 @@ struct vram_nvidia_indexes {
             if (cuda_set_device(one.device_specs().ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
             auto const [shard_health, status] = one.health(traversals[shard]);
             if (failed(status)) return {{}, status};
-            combine_health_(result, shard_health);
+            result += shard_health;
         }
         return {result, status_t::success_k};
     }
@@ -1808,15 +1803,15 @@ struct vram_nvidia_indexes {
     }
 
     /** Builds one traversal context per shard over its device's stream and run, so a fan-out never
-     *  allocates and never shares scratch; @p rows, and any indexer @p heads a search stages, size
-     *  them for the widest walk, and every stream holds a context for each shard it serves. */
-    template <typename traversal_config_type_, typename... heads_types_>
+     *  allocates and never shares scratch; @p usage, the arguments of a shard's
+     *  @c traversal_memory_usage, sizes them for the widest shard, and every stream holds a context
+     *  for each shard it serves. */
+    template <typename... usage_types_>
     status_t reserve_traversals_(growing_buffer<traversal_context_t, forkunion_allocator_t>& traversals,
-                                 executor_t& executor, std::size_t rows, traversal_config_type_ config,
-                                 heads_types_ const&... heads) noexcept {
+                                 executor_t& executor, usage_types_ const&... usage) noexcept {
         std::size_t bytes_per_shard = 0, shards_per_stream = 0;
         for (shard_t const& one : shards_)
-            bytes_per_shard = max_of(bytes_per_shard, one.index->traversal_memory_usage(rows, config, heads...));
+            bytes_per_shard = max_of(bytes_per_shard, one.index->traversal_memory_usage(usage...));
         for (std::size_t stream = 0; stream != executor.size(); ++stream) {
             std::size_t served = 0;
             for (std::size_t shard = 0; shard != shards_.size(); ++shard)
@@ -1882,31 +1877,6 @@ struct vram_nvidia_indexes {
     }
 
 #pragma endregion Insertion
-
-    /** Folds one shard's sweep into the group's; every counter is a population or a spend, so all
-     *  of them add. */
-    static void combine_refinement_(refine_result_t& into, refine_result_t const& one) noexcept {
-        into.visited_nodes += one.visited_nodes;
-        into.changed_nodes += one.changed_nodes;
-        into.islands_found += one.islands_found;
-        into.islands_reconnected += one.islands_reconnected;
-        into.reachable_nodes += one.reachable_nodes;
-        into.sweeps = max_of(into.sweeps, one.sweeps);
-        into.visited_members += one.visited_members;
-        into.computed_distances += one.computed_distances;
-        into.computed_distances_in_refines += one.computed_distances_in_refines;
-        into.computed_distances_in_reverse_refines += one.computed_distances_in_reverse_refines;
-        into.restarts += one.restarts;
-        into.saturated_walks += one.saturated_walks;
-    }
-
-    /** Folds one shard's audit into the group's: populations add, and the depth is the deepest
-     *  shard's, since a searcher waits for the last one. */
-    static void combine_health_(health_result_t& into, health_result_t const& one) noexcept {
-        into.audited_nodes += one.audited_nodes;
-        into.reachable_nodes += one.reachable_nodes;
-        into.sweeps = max_of(into.sweeps, one.sweeps);
-    }
 
 #pragma region Search
 

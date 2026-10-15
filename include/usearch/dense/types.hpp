@@ -168,6 +168,33 @@ struct [[nodiscard]] refine_result_t {
     std::size_t saturated_walks = 0;
 };
 
+/** Folds another shard's audit in: populations add, and the depth is the deepest shard's, since a
+ *  searcher waits for the last one. */
+inline health_result_t& operator+=(health_result_t& into, health_result_t const& other) noexcept {
+    into.audited_nodes += other.audited_nodes;
+    into.reachable_nodes += other.reachable_nodes;
+    into.sweeps = max_of(into.sweeps, other.sweeps);
+    return into;
+}
+
+/** Folds another pass or shard in: every count is a population or a spend and adds, but the audit
+ *  depth, which is the deepest one's. */
+inline refine_result_t& operator+=(refine_result_t& into, refine_result_t const& other) noexcept {
+    into.visited_nodes += other.visited_nodes;
+    into.changed_nodes += other.changed_nodes;
+    into.islands_found += other.islands_found;
+    into.islands_reconnected += other.islands_reconnected;
+    into.reachable_nodes += other.reachable_nodes;
+    into.sweeps = max_of(into.sweeps, other.sweeps);
+    into.visited_members += other.visited_members;
+    into.computed_distances += other.computed_distances;
+    into.computed_distances_in_refines += other.computed_distances_in_refines;
+    into.computed_distances_in_reverse_refines += other.computed_distances_in_reverse_refines;
+    into.restarts += other.restarts;
+    into.saturated_walks += other.saturated_walks;
+    return into;
+}
+
 /** The tail slots of a full row a heal may give up to islands, which spread over them by ID so
  *  islands sharing a row land apart: the farther half, keeping the nearer half that carries search
  *  and slot 0, and nothing in a single-neighbor row. */

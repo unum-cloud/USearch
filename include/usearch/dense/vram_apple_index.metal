@@ -1041,26 +1041,30 @@ inline void metal_refine(constant metal_arguments_t& arguments, device uint4* ve
         pool.reset(walk);
         metal_fold_t fold {};
         walk.test_and_set(node_id);
-        // The walk across runs first, from the other part's landmarks alone, as the CUDA and HIP refines do.
-        if (arguments.appended_base) {
-            bool const appended = node_id >= arguments.appended_base;
-            metal_search_ahead(walk, pool, query_norms, appended ? 0 : arguments.appended_base,
-                               appended ? arguments.appended_base : arguments.sampling_bound, arguments.sampling_bound,
-                               fold);
-            pool.renew();
-        }
-        device uint* const own = walk.neighbors_for(node_id);
-        uint const first_value = warp_t::shuffle(lane == 0 ? warp_t::load_acquire(own) : 0u, 0);
-        if (first_value != metal_unknown_k && first_value != node_id)
-            for (uint slot_base = 0; slot_base < walk.connectivity; slot_base += warp_t::width_k) {
-                uint const slot = slot_base + lane;
-                uint const seed = slot == 0                  ? first_value
-                                  : slot < walk.connectivity ? warp_t::load_acquire(own + slot)
-                                                             : metal_unknown_k;
-                uint const count = walk.stage_fresh(seed != node_id ? seed : metal_unknown_k);
-                if (count) metal_score_into(walk, pool, query_norms, count, fold);
+        // The walk across runs first, from the other part's landmarks alone, as the CUDA and HIP refines do,
+        // and both walks share one call site, so the walk inlines once.
+        bool const appended = node_id >= arguments.appended_base;
+        uint sampling_first = appended ? 0 : arguments.appended_base;
+        uint sampling_bound = appended ? arguments.appended_base : arguments.sampling_bound;
+#pragma unroll 1
+        for (uint walk_number = arguments.appended_base ? 0 : 1; walk_number != 2; ++walk_number) {
+            if (walk_number) {
+                pool.renew();
+                sampling_first = 0, sampling_bound = arguments.sampling_bound;
+                device uint* const own = walk.neighbors_for(node_id);
+                uint const first_value = warp_t::shuffle(lane == 0 ? warp_t::load_acquire(own) : 0u, 0);
+                if (first_value != metal_unknown_k && first_value != node_id)
+                    for (uint slot_base = 0; slot_base < walk.connectivity; slot_base += warp_t::width_k) {
+                        uint const slot = slot_base + lane;
+                        uint const seed = slot == 0                  ? first_value
+                                          : slot < walk.connectivity ? warp_t::load_acquire(own + slot)
+                                                                     : metal_unknown_k;
+                        uint const count = walk.stage_fresh(seed != node_id ? seed : metal_unknown_k);
+                        if (count) metal_score_into(walk, pool, query_norms, count, fold);
+                    }
             }
-        metal_search_ahead(walk, pool, query_norms, 0, arguments.sampling_bound, arguments.sampling_bound, fold);
+            metal_search_ahead(walk, pool, query_norms, sampling_first, sampling_bound, arguments.sampling_bound, fold);
+        }
         walk.tail_drops += pool.dropped();
         uint const selected = metal_select_diverse(walk, pool);
         device uint* const shadow_row = metal_row(shadow, node_id, walk.connectivity);

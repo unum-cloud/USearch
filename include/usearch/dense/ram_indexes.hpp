@@ -783,7 +783,7 @@ struct ram_indexes {
         for (typename index_t::health_plan_t const& plan : plans) {
             auto const [shard_health, status] = plan.finish();
             if (failed(status)) return {{}, status};
-            combine_health_(result, shard_health);
+            result += shard_health;
         }
         return {result, status_t::success_k};
     }
@@ -1796,24 +1796,8 @@ struct ram_indexes {
         }
 
         refine_result_t result;
-        for (typename index_t::refine_plan_t const& plan : plans) combine_refinement_(result, plan.finish().value);
+        for (typename index_t::refine_plan_t const& plan : plans) result += plan.finish().value;
         return {result, failed(outcome) ? outcome : cancelled ? status_t::cancelled_k : status_t::success_k};
-    }
-
-    /** Folds one shard's pass into the index's: counts add, and the depth is the deepest shard's. */
-    static void combine_refinement_(refine_result_t& into, refine_result_t const& one) noexcept {
-        into.visited_nodes += one.visited_nodes;
-        into.changed_nodes += one.changed_nodes;
-        into.islands_found += one.islands_found;
-        into.islands_reconnected += one.islands_reconnected;
-        into.reachable_nodes += one.reachable_nodes;
-        into.sweeps = max_of(into.sweeps, one.sweeps);
-        into.visited_members += one.visited_members;
-        into.computed_distances += one.computed_distances;
-        into.computed_distances_in_refines += one.computed_distances_in_refines;
-        into.computed_distances_in_reverse_refines += one.computed_distances_in_reverse_refines;
-        into.restarts += one.restarts;
-        into.saturated_walks += one.saturated_walks;
     }
 
     /** Sizes what an audit runs on: one context per thread, one cursor per shard. The reservation
@@ -1845,14 +1829,6 @@ struct ram_indexes {
             for (plan_type_& plan : plans) expanded += plan.advance_level();
         }
         return status_t::success_k;
-    }
-
-    /** Folds one shard's audit into the index's: populations add, and the depth is the deepest
-     *  shard's, since a searcher waits for the last one. */
-    static void combine_health_(health_result_t& into, health_result_t const& one) noexcept {
-        into.audited_nodes += one.audited_nodes;
-        into.reachable_nodes += one.reachable_nodes;
-        into.sweeps = max_of(into.sweeps, one.sweeps);
     }
 
 #pragma endregion Health

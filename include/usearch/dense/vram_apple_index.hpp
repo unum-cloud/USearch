@@ -153,6 +153,25 @@ inline u32_t* metal_words(metal_buffer_t const& counters) noexcept { return rein
 /** What a search launch lands: ranked distances, or every scored pair of a product. */
 enum class metal_output_t : bool { distances_k, products_k };
 
+/** One context's reachability audit on the host, grown to the widest index it audited and kept, so
+ *  a heal's rounds and later calls allocate nothing. */
+struct metal_audit_t {
+
+    /** The reached set and the two frontiers, a byte per row each. */
+    growing_buffer<u8_t> reached {global_allocator};
+    growing_buffer<u8_t> frontier {global_allocator};
+    growing_buffer<u8_t> next_frontier {global_allocator};
+
+    /** The rows the last audit never reached. */
+    growing_buffer<u32_t> islands {global_allocator};
+
+    /** The reached rows pointing at each row, counted before a reconnection takes any. */
+    growing_buffer<u32_t> in_links {global_allocator};
+
+    /** Levels the last audit swept to convergence. */
+    std::size_t sweeps = 0;
+};
+
 /** One caller's scratch for driving an Apple index: the walks' arena, the staging of one batch, the
  *  telemetry counters and the single-query landing. Two contexts on one index share only the
  *  storage. */
@@ -244,6 +263,9 @@ struct metal_traversal_context {
     metal_buffer_t arena_;
     metal_buffer_t staging_;
     landing_t landing_;
+
+    /** The host-side audit a refine heals by and a health check reports, grown like the staging. */
+    metal_audit_t audit_;
 
     /** The last command buffer submitted through this context; its stream runs them in commit
      *  order, so this one landing means every earlier one did. */
@@ -689,44 +711,33 @@ struct vram_apple_index {
         std::unique_lock batch {batch_};
         std::size_t const rows = size();
         refine_result_t result;
-        auto add_walks = [&](refine_result_t const& walked) noexcept {
-            result.visited_nodes += walked.visited_nodes;
-            result.changed_nodes += walked.changed_nodes;
-            result.visited_members += walked.visited_members;
-            result.computed_distances += walked.computed_distances;
-            result.restarts += walked.restarts;
-        };
         node_id_t const bound = static_cast<node_id_t>(min_of<std::size_t>(nodes.bound, rows));
         if (nodes.first < bound) {
             auto const [walked, status] = refine_pass_(context, config, {nodes.first, bound}, {},
                                                        appended_base < rows ? appended_base : 0);
             if (failed(status)) return {result, status};
-            add_walks(walked);
+            result += walked;
         }
         if (!rows) return {result, status_t::success_k};
 
-        audit_t audit;
-        if (failed(audit.reached.resize(rows)) || failed(audit.frontier.resize(rows)) ||
-            failed(audit.next_frontier.resize(rows)) || failed(audit.islands.reserve_exactly(rows)))
-            return {result, status_t::bad_alloc_k};
-        audit_(audit);
+        metal_audit_t& audit = context.audit_;
+        if (status_t const audited = audit_(audit); failed(audited)) return {result, audited};
         result.sweeps += audit.sweeps;
         result.islands_found = audit.islands.size();
-        for (std::size_t islands_before = audit.islands.size(); !audit.islands.empty();) {
+        for (std::size_t islands_before = audit.islands.size(); !audit.islands.empty();
+             islands_before = audit.islands.size()) {
+            // Only island rows change, and no reached row points at one, so the audit before
+            // stands.
             auto const [healed, healed_status] = refine_pass_(
                 context, config, {0, static_cast<node_id_t>(audit.islands.size())}, to_span(audit.islands));
             if (failed(healed_status)) return {result, healed_status};
-            add_walks(healed);
-            audit_(audit);
-            result.sweeps += audit.sweeps;
-            if (audit.islands.empty()) break;
+            result += healed;
             result.islands_reconnected += reconnect_(audit);
-            audit_(audit);
+            if (status_t const audited = audit_(audit); failed(audited)) return {result, audited};
             result.sweeps += audit.sweeps;
             // A round that frees no island frees none on the next either, since the picks it needs
             // are unreached.
             if (audit.islands.size() >= islands_before) break;
-            islands_before = audit.islands.size();
         }
         result.reachable_nodes = rows - audit.islands.size();
         return {result, status_t::success_k};
@@ -734,15 +745,12 @@ struct vram_apple_index {
 
     /** Measures forward reachability from as many stride-spread landmarks as one search draws, on
      *  the host. */
-    expected<health_result_t> health(traversal_context_t&) noexcept {
+    expected<health_result_t> health(traversal_context_t& context) noexcept {
         std::size_t const rows = size();
         if (!rows) return {{}, status_t::success_k};
-        audit_t audit;
-        if (failed(audit.reached.resize(rows)) || failed(audit.frontier.resize(rows)) ||
-            failed(audit.next_frontier.resize(rows)) || failed(audit.islands.reserve_exactly(rows)))
-            return {{}, status_t::bad_alloc_k};
+        metal_audit_t& audit = context.audit_;
         std::shared_lock storage {storage_};
-        audit_(audit);
+        if (status_t const audited = audit_(audit); failed(audited)) return {{}, audited};
         return {{rows, rows - audit.islands.size(), audit.sweeps}, status_t::success_k};
     }
 
@@ -1065,15 +1073,6 @@ struct vram_apple_index {
     friend struct vram_apple_indexes;
 
   private:
-
-    /** The reachability audit's host state, reused across a heal's rounds. */
-    struct audit_t {
-        growing_buffer<u8_t> reached {global_allocator};
-        growing_buffer<u8_t> frontier {global_allocator};
-        growing_buffer<u8_t> next_frontier {global_allocator};
-        growing_buffer<u32_t> islands {global_allocator};
-        std::size_t sweeps = 0;
-    };
 
 #pragma region Batches
 
@@ -1720,10 +1719,17 @@ struct vram_apple_index {
     }
 
     /** Sweeps forward reachability on the host from as many stride-spread landmarks as one search
-     *  draws, collecting the rows it never reached into @c islands. */
-    void audit_(audit_t& audit) const noexcept {
+     *  draws, collecting the rows it never reached into @c islands; @p audit grows to the rows
+     *  published now and keeps its capacity for later rounds and calls. */
+    status_t audit_(metal_audit_t& audit) const noexcept {
         std::size_t const rows = size(), connectivity = this->connectivity();
         std::size_t const seed_count = min_of(connectivity, rows);
+        for (growing_buffer<u8_t>* marks : {&audit.reached, &audit.frontier, &audit.next_frontier}) {
+            if (failed(marks->reserve_exactly(rows))) return status_t::bad_alloc_k;
+            marks->clear();
+            marks->extend_uninitialized(rows);
+        }
+        if (failed(audit.islands.reserve_exactly(rows))) return status_t::bad_alloc_k;
         u32_t const* const neighbors = neighbor_rows_();
         std::memset(audit.reached.data(), 0, rows);
         std::memset(audit.frontier.data(), 0, rows);
@@ -1751,19 +1757,23 @@ struct vram_apple_index {
         audit.islands.clear();
         for (std::size_t row = 0; row != rows; ++row)
             if (!audit.reached[row]) audit.islands.push_back_reserved(static_cast<u32_t>(row));
+        return status_t::success_k;
     }
 
     /** Reconnects each island into the first of its reached picks with room for it, or into the
      *  landmark covering its ID: a free slot when one is left, otherwise a landing spread across
-     *  the tail that never evicts a sibling island nor a reached resident left with no other
-     *  reached in-link. Answers the links written. */
-    std::size_t reconnect_(audit_t& audit) noexcept {
+     *  the tail by its ID that never evicts a sibling island nor a reached resident left with no
+     *  other reached in-link. Answers the links written. */
+    std::size_t reconnect_(metal_audit_t& audit) noexcept {
         std::size_t const rows = size(), connectivity = this->connectivity();
         std::size_t const seed_count = min_of(connectivity, rows);
         std::size_t const spread = heal_spread(connectivity);
         u32_t* const neighbors = neighbor_rows_();
-        growing_buffer<u32_t> in_links {global_allocator};
-        if (failed(in_links.resize(rows))) return 0;
+        growing_buffer<u32_t>& in_links = audit.in_links;
+        if (failed(in_links.reserve_exactly(rows))) return 0;
+        in_links.clear();
+        in_links.extend_uninitialized(rows);
+        std::memset(in_links.data(), 0, rows * sizeof(u32_t));
         for (std::size_t row = 0; row != rows; ++row) {
             if (!audit.reached[row]) continue;
             for (std::size_t slot = 0; slot != connectivity; ++slot) {
@@ -1772,8 +1782,7 @@ struct vram_apple_index {
             }
         }
         std::size_t reconnected = 0;
-        for (std::size_t island_index = 0; island_index != audit.islands.size(); ++island_index) {
-            u32_t const island = audit.islands[island_index];
+        for (u32_t const island : audit.islands) {
             auto const land = [&](u32_t target) noexcept {
                 u32_t* const target_row = neighbors + static_cast<std::size_t>(target) * connectivity;
                 for (std::size_t slot = 0; slot != connectivity; ++slot) {
@@ -1783,7 +1792,7 @@ struct vram_apple_index {
                     return true;
                 }
                 for (std::size_t attempt = 0; attempt != spread; ++attempt) {
-                    std::size_t const landing = connectivity - 1 - (island_index + attempt) % spread;
+                    std::size_t const landing = connectivity - 1 - (island + attempt) % spread;
                     u32_t const resident = target_row[landing];
                     if (resident == island) return true;
                     if (resident != node_id_unknown_k && (resident >= rows || !audit.reached[resident])) continue;
