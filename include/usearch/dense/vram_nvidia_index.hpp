@@ -637,9 +637,9 @@ struct cuda_traversal_context {
  *  whole batch at a time; see @ref dense_vram_nvidia_index_concurrency. The first successful
  *  @c reserve freezes the geometry and the virtual-address ceiling; physical slabs map on demand,
  *  and fresh neighbors are sentinel-filled before any ID covering them can be assigned. The storage
- *  grows only while @c claiming_ is held, and the claim counter, the filled extent, the watermark
- *  and the kept status are the only mutable host state; the published-row count is device memory no
- *  host thread dereferences.
+ *  grows only under the one claim the claim word admits at a time, and the claim word, the filled
+ *  extent, the watermark and the kept status are the only mutable host state; the published-row
+ *  count is device memory no host thread dereferences.
  */
 template <                                                                      //
     nk_dtype_t vector_dtype_ = nk_i8_k,                                         //
@@ -689,8 +689,8 @@ struct vram_nvidia_index {
      *  reports. */
     inline static constexpr nk_capability_t picked_quads_capability_k = kit_traits_t::picked_k;
 
-    /** The scored node's 32-bit ID space, less the sentinel. */
-    inline static constexpr std::size_t max_node_count_k = (std::size_t {1} << 32) - 1u;
+    /** The scored node's 32-bit ID space, less the sentinel, which marks a closed claim word. */
+    inline static constexpr std::size_t max_node_count_k = (std::size_t {1} << 32) - 2u;
 
     /** Default visited-set slot count; the scratch slice must also fit the candidate cache. */
     inline static constexpr u32_t default_visited_capacity_k = 2048;
@@ -1068,10 +1068,11 @@ struct vram_nvidia_index {
         std::size_t computed_distances_in_reverse_refines = 0;
     };
 
-    /** Inserts @p new_rows under the contiguous ID range @b [first_id,first_id+rows) after every
-     *  row claimed before, every transfer and the launch riding the context's stream, then drains
-     *  that stream, turns the watermark over the range once every earlier batch has, and reports
-     *  telemetry. */
+    /** Inserts @p new_rows under the contiguous ID range @b [first_id,first_id+rows) claimed from
+     *  the watermark, every transfer and the launch riding the context's stream, then drains that
+     *  stream, turns the watermark over the range, and reports telemetry. One batch or load holds
+     *  the claim word at a time, so another one in flight, or a closed word, answers
+     *  @c contended_k. */
     expected<insert_result_t> insert(rows_view_t new_rows, node_ids_span_t assigned_ids, traversal_context_t& context,
                                      insert_config_t config = {}) noexcept {
         // Zeroed per call rather than per launch, so the launches of a sharded plan on one context
@@ -1080,8 +1081,15 @@ struct vram_nvidia_index {
             cuda_fill_async(context.telemetry_.get(), 0, sizeof(vram_telemetry_block_t), context.stream()) !=
                 cuda_success_k)
             return {{}, status_t::device_error_k};
-        expected<insert_result_t> inserted = submit_insert_(new_rows, assigned_ids, context, config);
-        if (!inserted || !new_rows.rows) return inserted;
+        if (!new_rows.rows) return {{claimed_(), static_cast<node_id_t>(claimed_())}, status_t::success_k};
+        if (status_t const kept = status(); failed(kept)) return {{}, kept};
+        auto const [first_id, claim_status] = claim_(new_rows.rows);
+        if (failed(claim_status)) return {{}, claim_status};
+        expected<insert_result_t> inserted = submit_insert_(new_rows, first_id, assigned_ids, context, config);
+        if (!inserted) {
+            unclaim_(first_id, new_rows.rows);
+            return inserted;
+        }
         if (status_t const drained = context.drain(); failed(drained))
             return {{inserted.value.new_size, inserted.value.first_id}, fail_(drained)};
         if (status_t const published = publish_(inserted.value.first_id, new_rows.rows); failed(published))
@@ -1706,30 +1714,30 @@ struct vram_nvidia_index {
 
         load_plan_t() noexcept = default;
 
-        /** The index appended to at @p base on @p stream, and the claim held meanwhile - unowned
-         *  for a plan of no rows; only @ref plan_load calls it. */
+        /** The index appended to at @p base on @p stream, under the claim over its rows or a claim
+         *  word its caller closed; only @ref plan_load calls it. */
         load_plan_t(vram_nvidia_index& index, columns_view_t columns, iota_view<node_id_t> source_range,
-                    cuda_executor_t::stream_t const& stream, std::unique_lock<fu::spin_mutex_t>&& claiming,
-                    node_id_t base, std::size_t rows) noexcept
+                    cuda_executor_t::stream_t const& stream, node_id_t base, std::size_t rows) noexcept
             : columns(columns), source_range(source_range), stream(stream.handle),
               bounce(cuda_pinned_allocator_t {stream}), base(base), rows(rows),
-              batch_rows(min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k))), index_(&index),
-              claiming_(std::move(claiming)) {}
+              batch_rows(min_of(rows, power_of_two<std::size_t>(batch_rows_log2_k))), index_(&index) {}
         load_plan_t(load_plan_t&& other) noexcept
             : columns(other.columns), source_range(other.source_range), stream(other.stream),
               bounce(std::move(other.bounce)), base(other.base), rows(std::exchange(other.rows, 0)),
               batch_rows(other.batch_rows), covered_vectors(other.covered_vectors),
               covered_neighbors(other.covered_neighbors), covered_norms(other.covered_norms),
-              index_(std::exchange(other.index_, nullptr)), claiming_(std::move(other.claiming_)) {}
+              index_(std::exchange(other.index_, nullptr)) {}
         load_plan_t& operator=(load_plan_t&&) = delete;
         // The tallies are this plan's own: a copy would tally into a twin `finish` never reads.
         load_plan_t(load_plan_t const&) = delete;
         load_plan_t& operator=(load_plan_t const&) = delete;
 
-        /** The lock's own death drops the claim, unless @c finish already did. */
+        /** An unfinished plan gives its claim back. */
         ~load_plan_t() noexcept {
-            // Still under the claim, which every reader of the filled extent holds.
-            if (index_ && rows) index_->filled_rows_ = min_of(index_->filled_rows_, static_cast<std::size_t>(base));
+            if (!index_ || !rows) return;
+            // Under the claim or the closed word, which every reader of the filled extent holds.
+            index_->filled_rows_ = min_of(index_->filled_rows_, static_cast<std::size_t>(base));
+            index_->unclaim_(base, rows);
         }
 
         /** One step of the plan: one bounce-sized batch of the appended rows. */
@@ -1962,8 +1970,6 @@ struct vram_nvidia_index {
                                          stream) != cuda_success_k ||
                     api.stream_synchronize(stream) != cuda_success_k)
                     return index_->fail_(status_t::device_error_k);
-                standard_atomic_ref<std::size_t>(index_->claimed_rows_).store(base + rows, std::memory_order_release);
-                claiming_.unlock();
             }
             vram_nvidia_index* const index = std::exchange(index_, nullptr);
             return rows ? index->publish_(base, rows) : status_t::success_k;
@@ -1974,18 +1980,15 @@ struct vram_nvidia_index {
         /** The index appended to; null in the empty plan a refused @ref plan_load returns, and once
          *  @c finish published. */
         vram_nvidia_index* index_ = nullptr;
-
-        /** The claim held from planning to publication, dropped by its own death otherwise. */
-        std::unique_lock<fu::spin_mutex_t> claiming_;
     };
 
     /**
-     *  @brief Opens a load of @p rows from @p columns past every claimed one on @p stream: takes
-     *      the claim and grows the storage to hold them - the fresh neighbor rows arrive
-     *      sentinel-filled - leaving the bounce to the first step.
+     *  @brief Opens a load of @p rows from @p columns at the watermark on @p stream: claims them,
+     *      or lands them under the claim word its caller closed, and grows the storage to hold them
+     *      - the fresh neighbor rows arrive sentinel-filled - leaving the bounce to the first step.
      *
-     *  Refuses an unreserved index, a kept failure, columns shorter than the rows, a claim already
-     *  held, and rows past the ID space.
+     *  Refuses an unreserved index, a kept failure, columns shorter than the rows, a batch or load
+     *  in flight, and rows past the ID space.
      *
      *  @param[in] columns Where the rows come from, every column but an empty norms one sized for
      *      @p rows.
@@ -2014,15 +2017,19 @@ struct vram_nvidia_index {
         if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (!rows)
-            return {load_plan_t {*this, {}, {}, stream, {}, static_cast<node_id_t>(claimed_()), 0},
-                    status_t::success_k};
-        if (!claiming_.lock_if_free()) return {{}, status_t::contended_k};
-        std::unique_lock<fu::spin_mutex_t> claiming {claiming_, std::adopt_lock};
-        // Read under the claim: a batch claiming between an earlier read and the claim would
-        // overlap the loaded rows, and `finish` would then lower the claim beneath it.
-        node_id_t const base = static_cast<node_id_t>(claimed_());
-        if (rows > max_node_count_k - base) return {{}, status_t::overflow_k};
-        load_plan_t plan {*this, {}, {}, stream, std::move(claiming), base, rows};
+            return {load_plan_t {*this, {}, {}, stream, static_cast<node_id_t>(claimed_()), 0}, status_t::success_k};
+        // A closed word is the caller's, who refines or absorbs around the load; an open one is
+        // claimed like a batch's, so no batch lands beside it.
+        bool const claiming = standard_atomic_ref<std::size_t const>(claimed_rows_).load(std::memory_order_acquire) !=
+                              node_id_unknown_k;
+        node_id_t base = static_cast<node_id_t>(size());
+        if (claiming) {
+            auto const [first_id, claim_status] = claim_(rows);
+            if (failed(claim_status)) return {{}, claim_status};
+            base = first_id;
+        }
+        else if (rows > max_node_count_k - base) return {{}, status_t::overflow_k};
+        load_plan_t plan {*this, {}, {}, stream, base, rows};
         if (status_t const grown = grow_rows_(base + rows, stream.handle); failed(grown)) return {{}, grown};
         return {std::move(plan), status_t::success_k};
     }
@@ -2049,22 +2056,20 @@ struct vram_nvidia_index {
 
 #pragma region Insertion
 
-    /** The submission half of @c insert: claims, stages, launches, and returns with the IDs, which
-     *  are dense and known at claim time, the rows invisible until the caller drains and publishes
-     *  them. Back-to-back submissions on one context are serialized by its stream and add into its
+    /** The submission half of @c insert: stages, grows and launches @p new_rows at @p first_id, and
+     *  returns with their IDs, the rows invisible until the caller drains and publishes them. The
+     *  caller holds the claim over them, and gives it back on a refusal, since nothing launched.
+     *  Back-to-back submissions on one context are serialized by its stream and add into its
      *  telemetry, which the caller zeroes; across devices they overlap freely. */
-    expected<insert_result_t> submit_insert_(rows_view_t new_rows, node_ids_span_t assigned_ids,
+    expected<insert_result_t> submit_insert_(rows_view_t new_rows, node_id_t first_id, node_ids_span_t assigned_ids,
                                              traversal_context_t& context, insert_config_t config) noexcept {
         std::size_t const rows = new_rows.rows;
-        if (!rows) return {{claimed_(), static_cast<node_id_t>(claimed_())}, status_t::success_k};
         if (!vectors_matrix_.reserved_bytes()) return {{}, status_t::uninitialized_k};
         if (status_t const refusal = rows_refusal_(new_rows); failed(refusal)) return {{}, refusal};
         if (assigned_ids.size() && assigned_ids.size() != rows) return {{}, status_t::config_mismatch_k};
         if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         cuda_stream_handle_t const stream = context.stream();
-        // Every fallible preparation precedes the claim: a claimed range that never publishes would
-        // starve every later batch's admission ramp.
         std::size_t const import_bytes = import_bytes_(rows, new_rows.dtype);
         byte_t* const staging = context.ensure_staging(rows * row_bytes() + import_bytes);
         if (!staging) return {{}, status_t::bad_alloc_k};
@@ -2084,11 +2089,8 @@ struct vram_nvidia_index {
         byte_t* const arena = context.ensure_arena(arena_warps * arena_shape.slice_bytes());
         if (!arena) return {{}, status_t::bad_alloc_k};
 
-        // Grow, claim and launch while holding the claiming mutex: the claim is stored only once
-        // the launch is accepted, so a rejected grid, which publishes nothing, is un-claimed
-        // exactly.
-        std::unique_lock claiming {claiming_};
-        std::size_t const first_id = standard_atomic_ref<std::size_t>(claimed_rows_).load(std::memory_order_relaxed);
+        // The claim admits no other grower, and a rejected grid publishes nothing, so the caller
+        // un-claims it exactly.
         std::size_t const total_rows = first_id + rows;
         status_t claimed = grow_rows_(total_rows, stream);
         if (claimed == status_t::success_k) {
@@ -2107,7 +2109,7 @@ struct vram_nvidia_index {
                                       staging,
                                       static_cast<u32_t>(total_rows),
                                       arena_shape.cache_bytes ? 0u : insert_scratch_bytes_per_warp(),
-                                      static_cast<node_id_t>(first_id),
+                                      first_id,
                                       arena,
                                       arena_shape,
                                       config.expansion_factor,
@@ -2119,14 +2121,11 @@ struct vram_nvidia_index {
             // reversible.
             if (claimed == status_t::success_k && failed(launch_insert_(build, pool_slots, context)))
                 claimed = status_t::device_error_k;
-            if (claimed == status_t::success_k)
-                standard_atomic_ref<std::size_t>(claimed_rows_).store(total_rows, std::memory_order_release);
         }
-        claiming.unlock();
         if (claimed != status_t::success_k) return {{}, claimed};
 
         insert_result_t result;
-        result.first_id = static_cast<node_id_t>(first_id);
+        result.first_id = first_id;
         for (std::size_t row = 0; row != assigned_ids.size(); ++row)
             assigned_ids[row] = static_cast<node_id_t>(first_id + row);
         result.new_size = total_rows;
@@ -2878,9 +2877,50 @@ struct vram_nvidia_index {
         return failure;
     }
 
-    /** Rows claimed by batches and loads, visible or not: where the next claim starts. */
+    /** Rows claimed by batches and loads, visible or not; a closed word holds none past the
+     *  watermark. */
     std::size_t claimed_() const noexcept {
-        return standard_atomic_ref<std::size_t const>(claimed_rows_).load(std::memory_order_acquire);
+        std::size_t const claimed =
+            standard_atomic_ref<std::size_t const>(claimed_rows_).load(std::memory_order_acquire);
+        return claimed == node_id_unknown_k ? size() : claimed;
+    }
+
+    /** Claims @p rows from the watermark: one compare-exchange that succeeds only on an open word
+     *  with no batch or load in flight, so its holder alone grows, launches and publishes them. */
+    expected<node_id_t> claim_(std::size_t rows) noexcept {
+        std::size_t first = size();
+        if (rows > max_node_count_k - first) return {{}, status_t::overflow_k};
+        if (!standard_atomic_ref<std::size_t>(claimed_rows_)
+                 .compare_exchange_strong(first, first + rows, std::memory_order_acq_rel, std::memory_order_relaxed))
+            return {{}, status_t::contended_k};
+        return {static_cast<node_id_t>(first), status_t::success_k};
+    }
+
+    /** Gives back the claim over @p rows from @p first, which launched nothing; a word that moved
+     *  on, closed by a caller around a load, stays as it is. */
+    void unclaim_(std::size_t first, std::size_t rows) noexcept {
+        std::size_t claimed = first + rows;
+        standard_atomic_ref<std::size_t>(claimed_rows_)
+            .compare_exchange_strong(claimed, first, std::memory_order_release, std::memory_order_relaxed);
+    }
+
+    /** Closes the claim word at the watermark, so every claim refuses until @ref reopen_; refused
+     *  while a batch or load is in flight. */
+    status_t close_() noexcept {
+        std::size_t visible = size();
+        return standard_atomic_ref<std::size_t>(claimed_rows_)
+                       .compare_exchange_strong(visible, node_id_unknown_k, std::memory_order_acq_rel,
+                                                std::memory_order_relaxed)
+                   ? status_t::success_k
+                   : status_t::contended_k;
+    }
+
+    /** Reopens a closed claim word at the watermark, past every row a load published meanwhile; an
+     *  open one stays as it is. */
+    void reopen_() noexcept {
+        std::size_t closed = node_id_unknown_k;
+        standard_atomic_ref<std::size_t>(claimed_rows_)
+            .compare_exchange_strong(closed, size(), std::memory_order_acq_rel, std::memory_order_relaxed);
     }
 
     /** Turns the watermark from @p first over @p rows drained rows once every batch claimed before
@@ -2924,7 +2964,7 @@ struct vram_nvidia_index {
     /** Maps up to @p rows and sentinel-fills on @p stream every mapped neighbor row no fill reached
      *  yet - always ahead of any launch that could assign new_node_ids into them - zeroing the
      *  published count with the first fill. A refused fill advances nothing, so the next grow
-     *  retries it. Callers hold @c claiming_, or run exclusively like @c load. */
+     *  retries it. Callers hold the claim over the rows, or the closed claim word. */
     status_t grow_rows_(std::size_t rows, cuda_stream_handle_t stream) noexcept {
         if (status_t const mapped = map_rows_(rows); failed(mapped)) return mapped;
         if (rows <= filled_rows_) return status_t::success_k;
@@ -3374,13 +3414,12 @@ struct vram_nvidia_index {
     /** The neighbors matrix, on the same terms. */
     neighbors_matrix_allocator_t neighbors_matrix_;
 
-    /** Held by the one batch growing and claiming at a time. */
-    fu::spin_mutex_t claiming_;
-
-    /** Each batch's dense ID range, release-published once its launch is accepted. */
+    /** The claim word: past the watermark by the rows of the one batch or load in flight, claimed
+     *  from the watermark by one compare-exchange, or the sentinel while a refine, an absorb, a
+     *  load or a save of the sharded index holds it closed. */
     std::size_t claimed_rows_ = 0;
 
-    /** Mapped rows whose neighbors a grow sentinel-filled, read and advanced under @c claiming_
+    /** Mapped rows whose neighbors a grow sentinel-filled, read and advanced by the claim's holder
      *  alone; a reservation maps past it and the next claim fills the rest. */
     std::size_t filled_rows_ = 0;
 

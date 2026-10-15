@@ -3,7 +3,9 @@
  *  dispensed from `next_dispensed_id_`, rows written and unlocked below it, the hole-free
  *  `last_visible_id_` watermark advanced in dispensed order, and the readers that rest on the
  *  watermark: a traversal, a cursor, and a concurrent save with its settlement probe, beside a
- *  refinement that relocks published rows.
+ *  refinement that relocks published rows. The dispenser closes for a load or a refinement: one
+ *  compare-exchange from the watermark to `node_id_unknown_k`, refused while a batch sits between
+ *  its dispense and its turn, after which every dispense refuses until the closer reopens it.
  *
  *  A row is slot zero, which locks and publishes it, and one tail slot. Every scenario beside this
  *  file defines its shape, `named_rows` for the key column `on_assigned` writes, `appended_rows`
@@ -32,6 +34,9 @@
 #define named(id) (30 + (id))
 #define refined(id) (40 + (id))
 #define id_of(word) ((word) % 10)
+
+// The closed dispenser: the all-ones ID in silicon, past every count here.
+#define closed_id 15
 
 // The knobs: the header's choices, each overridden by a `@verify` line that replays its counterexample.
 #ifndef watermark_order
@@ -67,10 +72,18 @@
 #ifndef refresh_order
 #define refresh_order order_acquire
 #endif
+#ifndef dispenser_closes
+#define dispenser_closes true
+#endif
+#ifndef refine_closes
+#define refine_closes true
+#endif
 
 bool editing[rows];      // the rows under their locks
 byte published_at[rows]; // the history index of each row's publication
 byte dispensed_at[rows]; // the history index of each ID's dispense, which its hosting chunk precedes
+bool taken[rows];        // the IDs a dispense or a load took
+bool linked;             // the inserter appended its back-link into row 0
 
 // a traversal's read of slot zero below the watermark it acquired, and of the key column behind it
 inline read_published(t, id, seen) {
@@ -109,14 +122,8 @@ inline unlock(t, id, first) {
     }
 }
 
-// `insert` of one row: identity, the key in `on_assigned`, the walk, the publication, the back-link, the turn
-inline insert(t) {
-    int id, first_invisible, seen, displaced, watermark;
-    // identity, one ID per node, chaining the hosting chunk's growth through the dispenser
-    atomic {
-        read_modify_write(t, next_dispensed_id, order_acq_rel, id, id + 1);
-        dispensed_at[id] = newest_write(next_dispensed_id)
-    };
+// the rest of `insert` once its ID is dispensed
+inline insert_dispensed(t, id, first_invisible, seen, displaced, watermark) {
     if
     :: named_rows && key_before_turn -> store(t, key(id), order_relaxed, named(id))
     :: else
@@ -140,13 +147,38 @@ inline insert(t) {
         :: else
         fi;
         lock(t, 0, displaced);
-        store(t, row_tail(0), order_relaxed, edited(id));
+        atomic {
+            store(t, row_tail(0), order_relaxed, edited(id));
+            linked = true
+        };
         unlock(t, 0, edited(id))
     :: else
     fi;
     take_turn(t, last_visible_id, id, id + 1, watermark_order, watermark);
     if
     :: named_rows && !key_before_turn -> store(t, key(id), order_relaxed, named(id))
+    :: else
+    fi
+}
+
+// `insert` of one row: identity, the key in `on_assigned`, the walk, the publication, the back-link,
+// the turn; a closed dispenser refuses it before anything is written
+inline insert(t) {
+    int id, first_invisible, seen, displaced, watermark;
+    // identity, one ID per node, chaining the hosting chunk's growth through the dispenser: the
+    // compare-exchange loop of `dispense_` as the one step its last try is
+    atomic {
+        read_modify_write_if(t, next_dispensed_id, order_acq_rel, id != closed_id, id, id + 1);
+        if
+        :: id != closed_id ->
+            assert(!taken[id]);
+            taken[id] = true;
+            dispensed_at[id] = newest_write(next_dispensed_id)
+        :: else
+        fi
+    };
+    if
+    :: id != closed_id -> insert_dispensed(t, id, first_invisible, seen, displaced, watermark)
     :: else
     fi
 }
@@ -186,10 +218,27 @@ inline land_row(t, id) {
     }
 }
 
-// the load path's `finish`: the dispenser bumped without a return, then the watermark released
-inline finish_load(t) {
-    add_no_return(t, next_dispensed_id, appender_order, 2);
-    store(t, last_visible_id, watermark_order, 2)
+// the load path's `finish` of the rows from `base` to `bound`: an open dispenser moved past them by
+// one compare-exchange from `base`, a closed one left closed, then the watermark released, which
+// wakes the turns armed on it as every store to it does
+inline finish_load(t, base, bound, expected, moved) {
+    expected = base;
+    compare_exchange(t, next_dispensed_id, appender_order, expected, bound, moved);
+    end_turn(t, last_visible_id, watermark_order, bound)
+}
+
+// `close_`: the watermark acquired, then one compare-exchange from it to the closed state, refused
+// while a batch sits between its dispense and its turn
+inline close_dispenser(t, visible, closed) {
+    load(t, last_visible_id, order_acquire, visible);
+    compare_exchange(t, next_dispensed_id, order_acq_rel, visible, closed_id, closed)
+}
+
+// `reopen_`: from the closed state to the watermark acquired, past every row a load published meanwhile
+inline reopen_dispenser(t, visible, expected, reopened) {
+    load(t, last_visible_id, order_acquire, visible);
+    expected = closed_id;
+    compare_exchange(t, next_dispensed_id, order_acq_rel, expected, visible, reopened)
 }
 
 // `refine_one_` on row 0, without its walk, which writes nothing: the lock, the tail rewritten
@@ -231,13 +280,13 @@ inline save(t) {
     byte covered_rows;
     int visible, dispensed, allocated, again;
     int lock_copy_0, tail_copy_0, second_copy, lock_copy_1, tail_copy_1;
-    // plan_save: the watermark, refused while an insert is mid-flight
+    // plan_save: the watermark, refused while an insert is mid-flight; a closed dispenser has none
     load(t, last_visible_id, order_acquire, visible);
     load(t, next_dispensed_id, order_acquire, dispensed);
     load(t, last_allocated_id, order_acquire, allocated);
-    assert(!appended_rows || visible == 0 || dispensed == visible);
+    assert(!appended_rows || visible == 0 || dispensed == visible || dispensed == closed_id);
     if
-    :: visible != dispensed -> goto contended
+    :: visible != dispensed && dispensed != closed_id -> goto contended
     :: else
     fi;
     // the copies, each tallied on this plan alone
@@ -259,7 +308,7 @@ inline save(t) {
     fi;
     load(t, next_dispensed_id, order_relaxed, again);
     if
-    :: again != dispensed -> goto contended
+    :: again != visible && again != closed_id -> goto contended
     :: else
     fi;
     load(t, last_allocated_id, order_relaxed, again);

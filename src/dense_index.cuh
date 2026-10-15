@@ -3659,7 +3659,7 @@ USEARCH_EXPORT void usearch_executor_for_vram(usearch_executor_for_vram_t* argum
             return propagate_error(usearch_status_device_k, outcome, "A device ordinal is past the listing"), void();
         devices[shard] = listed[ordinal];
     }
-    auto [spawned, status] = spawn_gpu_executor(devices);
+    auto [spawned, status] = spawn_gpu_executor(devices, arguments->scratch_limit);
     if (status == status_t::config_mismatch_k)
         return propagate_error(status, outcome, "One executor drives one GPU vendor"), void();
     if (failed(status)) return propagate_error(status, outcome), void();

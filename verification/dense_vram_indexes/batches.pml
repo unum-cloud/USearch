@@ -1,16 +1,17 @@
 /**
- *  @brief Two batches and a searcher over the shards: the mutation gate, keys before the turn, and
- *      a commit across the shards inside one sequence word.
+ *  @brief Two batches and a searcher over the shards: claims in shard order, keys before the turn,
+ *      and a commit across the shards inside one sequence word.
  *
- *  `insert` takes the executor's hold and then `mutating_`, so two batches never interleave their
- *  claims, and the gate serializes the key columns' covers along with them, so the batches admit
- *  no rows against the key columns. Searches bound on each shard's watermark, which a batch turns
- *  on every shard inside one commit of a counted sequence word, as on the RAM shards.
+ *  `plan_insert` claims every shard's share in shard order, each claim refused while another batch
+ *  is in flight on the shard, so a shard holds one batch from its claim to its turn, and so does its
+ *  key column's cover; a refused claim gives the earlier shares back. Searches bound on each
+ *  shard's watermark, which a batch turns on every shard inside one commit of a counted sequence
+ *  word, as on the RAM shards.
  *
  *  @verify pass sc,rc11
- *  @verify fail sc gate=false: `mutating_` serializes the batches' claims; without it, the
- *      mutators interleave their claims, and one writes its key over a row the other's claim
- *      confirmed
+ *  @verify pass sc quiescent_claim=false: the sharded layer holds even with claims side by side,
+ *      exact as compare-exchanges make them; a claim refuses a second batch for the shard's own
+ *      growth and key cover, which `dense_vram_index_claims.pml` shows
  *  @verify fail sc,rc11 key_before_turn=false: each key lands before the shard's claim and the
  *      commit; after the commit, the searcher reads an unset key under every memory model
  *  @verify fail rc11 watermark_order=order_relaxed: the turn's release carries more than the keys,
@@ -21,7 +22,7 @@
  *      commit's two turns holds one shard's part
  */
 #define thread_count 3
-#define location_count 8
+#define location_count 7
 #define history_depth 5
 #define mutators 2
 #include "protocol.pml"

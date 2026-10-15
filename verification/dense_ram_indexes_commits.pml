@@ -9,7 +9,26 @@
  *  re-reads the word, and retries while the low part is not zero or the word moved. An accepted
  *  snapshot holds each commit on both shards or on neither, and every ID below it has its key.
  *
+ *  A closer stands for a refine, an absorb, a clear or a checkpoint load of the sharded index: it
+ *  closes every shard's dispenser in shard order, each by one compare-exchange from the shard's
+ *  watermark, which refuses while a commit sits between its dispense and its turn there, reopens
+ *  the shards it closed when one refuses, and reopens every shard at the end, the last shard
+ *  first. A commit's dispense refuses on a closed shard. The closed shards are always a prefix of
+ *  the placement order, since the closer closes upward and reopens downward, so a commit refused
+ *  on a shard met it closed at the first one and dispensed nothing in that step; holding them all,
+ *  the closer finds no commit in flight on any shard, and once everyone is done every dispenser is
+ *  open and level with its watermark.
+ *
  *  @verify pass sc,rc11
+ *  @verify pass sc,rc11 closer=true
+ *  @verify pass sc,rc11 commits=2 closer=true
+ *  @verify fail sc closer=true close_in_shard_order=false: the closer and the dispenses walk the
+ *      shards in one order; closing the last shard first, the closer holds it while a commit that
+ *      already dispensed on the first shard reaches it, and the commit is refused with a range it
+ *      can neither publish nor give back
+ *  @verify fail sc closer=true reopen_in_reverse=false: the closer reopens the last shard first;
+ *      reopening in placement order, it opens the first shard while still holding the second, and a
+ *      commit dispensing on the first is refused on the second with that range stranded
  *  @verify pass sc,rc11 counted_sequence=false
  *  @verify pass sc,rc11 commits=2
  *  @verify fail sc,rc11 commits=2 counted_sequence=false: a parity word made odd before the stores
@@ -77,14 +96,28 @@
 #ifndef size_order
 #define size_order order_acquire
 #endif
+#ifndef closer
+#define closer false
+#endif
+#ifndef close_in_shard_order
+#define close_in_shard_order true
+#endif
+#ifndef reopen_in_reverse
+#define reopen_in_reverse true
+#endif
 
 // the word's step after the turns: the counted word's carry into its high part, or the parity's
 #define sequence_unit (counted_sequence -> 4 : 2)
 
 byte dispensed[shards];              // each shard's `next_dispensed_id_`, a ghost, since no plan reads it
+bool closed[shards];                 // each shard's dispenser holds the closed state
+bool dispensing;                     // the dispensing mutex is held
+byte done;                           // the commits and the closer, once finished
 bool commit_dispensed[commits];      // the commit has its IDs
 byte commit_part[commits * shards];  // the ID each commit landed on each shard
+bool commit_got[commits * shards];   // the commit dispensed its range on the shard
 #define part(commit, shard) commit_part[(commit) * shards + (shard)]
+#define got(commit, shard) commit_got[(commit) * shards + (shard)]
 
 inline dispense(shard, id) {
     id = dispensed[shard];
@@ -96,19 +129,35 @@ inline dispense(shard, id) {
 proctype committer(byte t) {
     byte shard;
     int id, watermark, sequence;
+    bool refused;
+    // every shard's range under the mutex, so no two commits cross between the shards; a closed
+    // shard refuses its dispense, and every shard takes one row, so only the first can refuse
     if
-    :: dispensing_mutex ->
-        // every shard's range in one step, so no two commits cross between the shards
-        atomic {
-            for (shard : 0 .. shards - 1) {
-                dispense(shard, id);
-                part(t, shard) = id
-            }
-        }
+    :: dispensing_mutex -> atomic { !dispensing -> dispensing = true }
+    :: else
+    fi;
+    shard = 0;
+    do
+    :: shard == shards -> break
     :: else ->
-        for (shard : 0 .. shards - 1) {
-            atomic { dispense(shard, id); part(t, shard) = id }
-        }
+        atomic {
+            if
+            :: closed[shard] -> assert(shard == 0); refused = true
+            :: else -> dispense(shard, id); part(t, shard) = id; got(t, shard) = true
+            fi
+        };
+        if
+        :: refused -> break
+        :: else -> shard++
+        fi
+    od;
+    if
+    :: dispensing_mutex -> dispensing = false
+    :: else
+    fi;
+    if
+    :: refused -> goto finished
+    :: else
     fi;
     commit_dispensed[t] = true;
     for (shard : 0 .. shards - 1) {
@@ -128,7 +177,53 @@ proctype committer(byte t) {
     if
     :: commit_sequence -> read_modify_write(t, sequence_word, closing_order, sequence, sequence + sequence_unit - 1)
     :: else
-    fi
+    fi;
+finished:
+    done++
+}
+
+// `close_` on every shard in turn, a refusal reopening those already closed; holding every shard,
+// no commit sits between its dispense and its turn on any; then every shard reopens, the last first
+proctype closing() {
+    byte index, shard, commit;
+    bool refused;
+    index = 0;
+    do
+    :: index == shards || refused -> break
+    :: else ->
+        shard = (close_in_shard_order -> index : shards - 1 - index);
+        atomic {
+            if
+            :: dispensed[shard] == newest_value(last_visible_id(shard)) -> closed[shard] = true
+            :: else -> refused = true
+            fi
+        };
+        index++
+    od;
+    if
+    :: !refused ->
+        atomic {
+            for (commit : 0 .. commits - 1) {
+                for (shard : 0 .. shards - 1) {
+                    assert(!got(commit, shard) || newest_value(last_visible_id(shard)) > part(commit, shard))
+                }
+            }
+        }
+    :: else
+    fi;
+    for (index : 0 .. shards - 1) {
+        closed[(reopen_in_reverse -> shards - 1 - index : index)] = false
+    };
+    done++
+}
+
+// once everyone is done: every dispenser open and level with its watermark
+proctype checker() {
+    byte shard;
+    (done == commits + 1);
+    for (shard : 0 .. shards - 1) {
+        assert(!closed[shard] && dispensed[shard] == newest_value(last_visible_id(shard)))
+    }
 }
 
 // a search over both shards: the word acquired, the shards' watermarks snapshotted, the word
@@ -168,6 +263,10 @@ init {
         :: commits == 2 -> run committer(1)
         :: else
         fi;
-        run searcher(2)
+        run searcher(2);
+        if
+        :: closer -> run closing(); run checker()
+        :: else
+        fi
     }
 }

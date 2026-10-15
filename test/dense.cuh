@@ -2312,8 +2312,9 @@ std::size_t test_dense_indexes_attend(u64_t seed) {
 
 #pragma region Races
 
-/** Concurrent construction on ForkUnion's default flat pool: distinct slices per thread,
- *  one traversal context each, then ID-uniqueness and sampled self-recall checks. */
+/** Concurrent construction on ForkUnion's default flat pool: distinct slices per thread, one
+ *  traversal context each, then ID-uniqueness and sampled self-recall checks. A device index admits
+ *  one batch at a time and answers the overlapping ones with @c contended_k, which retry. */
 template <typename index_type_, nk_kernel_kind_t kernel_, typename make_index_type_>
 std::size_t dense_expect_concurrent_build(make_index_type_ const& make_index, allocation_ledger_t& ledger, u64_t seed) {
     using scalar_t = typename index_type_::scalar_t;
@@ -2338,9 +2339,13 @@ std::size_t dense_expect_concurrent_build(make_index_type_ const& make_index, al
 
     pool.for_threads([&](std::size_t thread) noexcept {
         if (thread >= writer_threads_count) return;
-        auto const [result, status] = index.insert( //
-            threads.slices[thread].view(), {assigned_ids.data() + thread * dense_thread_nodes_k, dense_thread_nodes_k},
-            threads.contexts[thread]);
+        status_t status = status_t::contended_k;
+        while (status == status_t::contended_k)
+            status = index
+                         .insert(threads.slices[thread].view(),
+                                 {assigned_ids.data() + thread * dense_thread_nodes_k, dense_thread_nodes_k},
+                                 threads.contexts[thread])
+                         .status;
         if (status != status_t::success_k) thread_failures.fetch_add(1);
         assert_no_locks_held();
     });
@@ -2412,7 +2417,9 @@ std::size_t dense_expect_concurrent_search(make_index_type_ const& make_index, a
 
     pool.for_threads([&](std::size_t thread) noexcept {
         if (thread != 0 && thread <= writer_threads_count) {
-            auto const [result, status] = index.insert(threads.slices[thread].view(), {}, threads.contexts[thread]);
+            status_t status = status_t::contended_k;
+            while (status == status_t::contended_k)
+                status = index.insert(threads.slices[thread].view(), {}, threads.contexts[thread]).status;
             if (status != status_t::success_k) thread_failures.fetch_add(1);
             writer_lanes_remaining.fetch_sub(1, std::memory_order_release);
             assert_no_locks_held();

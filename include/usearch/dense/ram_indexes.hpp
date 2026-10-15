@@ -202,18 +202,15 @@ struct ram_indexes {
         return shards_.push_back(shard_t {std::move(shard), std::move(keys)});
     }
 
-    /** Empties every shard in place, keeping its memory domain, geometry and capacity. Demands
-     *  the same quiescence as @ref reserve. */
+    /** Empties every shard in place, keeping its memory domain, geometry and capacity. Closes every
+     *  shard's dispenser first, so a batch in flight refuses it with @c contended_k; the shards are
+     *  rebuilt, so no insertion, search or other call may arrive meanwhile. */
     status_t clear() noexcept {
-        reserve_capacity_t const geometry {capacity(), static_cast<connectivity_t>(connectivity()), dimensions()};
-        for (shard_t& one : shards_) {
-            std::unique_ptr<index_t> fresh = build_(one.index->vectors_allocator_.memory_domain);
-            if (!fresh) return status_t::bad_alloc_k;
-            one.index = std::move(fresh);
-        }
-        locators_of_key_.clear();
-        atomic_ref<std::size_t>(routed_rows_).store(0, std::memory_order_relaxed);
-        return geometry.capacity ? reserve(geometry).status : status_t::success_k;
+        if (status_t const closed = close_shards_(); failed(closed)) return closed;
+        status_t const cleared = clear_();
+        // A shard the rebuild failed to replace is still closed.
+        reopen_shards_();
+        return cleared;
     }
 
 #pragma endregion Placement
@@ -286,8 +283,9 @@ struct ram_indexes {
      *      single-threaded sibling of the batched form, taking a context where it takes an executor.
      *
      *  Safe to call concurrently with itself, with the batched form, and with searches: the shard
-     *  is chosen by one relaxed read-modify-write, and everything past the capacity claim is a
-     *  step that cannot fail.
+     *  is chosen by one relaxed read-modify-write, and everything past the dispense is a step that
+     *  cannot fail. A refine, an absorb or a load holding the shard's dispenser closed answers
+     *  @c contended_k.
      *
      *  @param[in] key The caller's identity for the row; several rows may share one.
      *  @param[in] new_vector The row, in the shards' stored scalar type.
@@ -336,10 +334,12 @@ struct ram_indexes {
         // The key lands before publication, so a reachable node always reads one.
         node_id_t assigned = 0;
         vectors_view_t const row {new_vector.data(), 1u, new_vector.size()};
-        one.index->insert(std::move(claim), row, {}, traversal, config, [&](node_id_t assigned_id) noexcept {
-            assigned = assigned_id;
-            one.keys[assigned_id] = key;
-        });
+        status_t const inserted = one.index->insert(std::move(claim), row, {}, traversal, config,
+                                                    [&](node_id_t assigned_id) noexcept {
+                                                        assigned = assigned_id;
+                                                        one.keys[assigned_id] = key;
+                                                    });
+        if (failed(inserted)) return {result, inserted};
         locators_of_key_.insert(seats, key, key_locator_t {shard, assigned});
 
         result.visited_members = traversal.visited_members - visited_before;
@@ -379,7 +379,7 @@ struct ram_indexes {
         if (dimensions() && new_rows.columns != dimensions()) return {result, status_t::config_mismatch_k};
         auto [plan, status] = plan_insert(new_rows.rows, executor, config);
         if (failed(status)) return {result, status};
-        plan.insert(0, keys, new_rows);
+        if (status_t const landed = plan.insert(0, keys, new_rows); failed(landed)) return {result, landed};
         return plan.finish();
     }
 
@@ -412,22 +412,39 @@ struct ram_indexes {
         /**
          *  @brief Lands rows @p first_row onward of the plan, one per row of @p rows under its key
          *      in @p keys, fanned out over the executor's threads, each imported into the stored
-         *      scalar as it lands; cannot fail.
+         *      scalar as it lands; fails only before its rows are dispensed.
          *
          *  The first step dispenses every shard's range under the dispensing mutex, so no two
          *  batches' ranges cross order between the shards. Rows outside the plan or of another
          *  width land nothing, and @ref finish refuses until every row landed. One caller at a
          *  time, like the executor.
+         *
+         *  @retval contended_k A refine, an absorb or a load holds a shard's dispenser closed;
+         *      nothing was dispensed, so a later step may retry and a dropped plan releases its
+         *      claims.
+         *  @retval config_mismatch_k Rows outside the plan or of another width.
          */
-        void insert(std::size_t first_row, nk::vector_view<key_t> keys, rows_view_t rows) noexcept {
+        status_t insert(std::size_t first_row, nk::vector_view<key_t> keys, rows_view_t rows) noexcept {
             std::size_t const count = rows.rows;
-            if (!owner_ || !count || keys.size() != count || first_row > rows_ || count > rows_ - first_row ||
+            if (!owner_) return status_t::uninitialized_k;
+            if (!count) return status_t::success_k;
+            if (keys.size() != count || first_row > rows_ || count > rows_ - first_row ||
                 rows.columns != owner_->dimensions())
-                return;
+                return status_t::config_mismatch_k;
             if (ranges_.empty()) {
                 std::lock_guard<fu::spin_mutex_t> const dispensing {owner_->dispensing_};
-                for (std::size_t shard = 0; shard != claims_.size(); ++shard)
-                    ranges_.push_back_reserved(owner_->shards_[shard].index->dispense_(std::move(claims_[shard])));
+                for (std::size_t shard = 0; shard != claims_.size(); ++shard) {
+                    index_t& one = *owner_->shards_[shard].index;
+                    auto const [range, dispense_status] = one.dispense_(std::move(claims_[shard]));
+                    if (failed(dispense_status)) {
+                        // Closers go in shard order too, so every earlier range is empty.
+                        for ([[maybe_unused]] iota_view<node_id_t> const before : ranges_)
+                            assert(before.empty() && "A refused batch dispensed rows on an earlier shard");
+                        ranges_.clear();
+                        return dispense_status;
+                    }
+                    ranges_.push_back_reserved(range);
+                }
             }
             // The key lands before the walk, so a row reachable once published always reads one.
             auto land_row = [&](std::size_t task, std::size_t thread) noexcept {
@@ -438,6 +455,7 @@ struct ram_indexes {
             };
             drain_in_order_(count, land_row);
             landed_rows_ += count;
+            return status_t::success_k;
         }
 
         /**
@@ -607,9 +625,11 @@ struct ram_indexes {
      *  @brief Re-selects the neighbors of every published node across the shards, then heals whatever that strands -
      *      every shard's @c refine_plan_t drained over the threads, phase by phase.
      *
-     *  Every thread pulls steps from its home shard first and steals from the rest in the tail, so a pass costs one
-     *  sweep of the graph however the shards are filled. Re-selection claims no identity and moves no watermark, so
-     *  searches run throughout and a stopped pass leaves the graph correct. Insertions may not overlap.
+     *  Every thread pulls steps from its home shard first and steals from the rest in the tail, so
+     *  a pass costs one sweep of the graph however the shards are filled. Re-selection claims no
+     *  identity and moves no watermark, so searches run throughout and a stopped pass leaves the
+     *  graph correct. Every shard's dispenser stays closed for the pass, so a batch in flight
+     *  refuses it with @c contended_k, and an insertion arriving meanwhile is refused.
      *
      *  @param[inout] executor The threads and their scratch.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
@@ -625,7 +645,10 @@ struct ram_indexes {
         auto const every_node = [&](std::size_t shard, traversal_context_t& traversal) noexcept {
             return shards_[shard].index->plan_refine({0, node_id_unknown_k}, traversal, config);
         };
-        return refine_shards_(executor, config, every_node, on_visited);
+        if (status_t const closed = close_shards_(); failed(closed)) return {{}, closed};
+        expected<refine_result_t> const refined = refine_shards_(executor, config, every_node, on_visited);
+        reopen_shards_();
+        return refined;
     }
 
     /**
@@ -641,15 +664,18 @@ struct ram_indexes {
      *  drained over the threads at once. A shard empty beforehand keeps the first part landing in
      *  it as its resident part, and a shard left with no appended part only heals.
      *
-     *  Searches of this index run throughout, and insertions into it may not overlap. The donor
-     *  must stay quiescent for the whole call: the copy reads its chunks and keys without locks,
-     *  and emptying it rebuilds its shards, so nothing may insert into, refine or search it. The
-     *  donor keeps its shards, and an index never reserved takes its geometry.
+     *  Searches of this index run throughout. Both indexes' dispensers stay closed for the call, so
+     *  a batch in flight on either refuses it with @c contended_k, and an insertion into this index
+     *  arriving meanwhile is refused. The donor must stay quiescent besides: the copy reads its
+     *  chunks and keys without locks, and emptying it rebuilds its shards, so nothing may search it
+     *  or start an insertion into it. The donor keeps its shards, and an index never reserved takes
+     *  its geometry.
      *
      *  @param[inout] donor The index giving its rows up.
      *  @param[inout] executor The threads and their scratch.
      *  @param[in] config The refine's knobs; zeros mean "derive from connectivity".
      *  @retval config_mismatch_k Another metric or geometry, or @p donor being this index.
+     *  @retval contended_k A batch in flight on either index, or another refine, absorb or load.
      *  @retval others A failure before publication leaves both indexes as they were, but for spare
      *      capacity: grown chunks, key slots and locator seats. One while emptying the donor may
      *      leave its later shards holding rows that also landed here, and one while refining
@@ -658,94 +684,22 @@ struct ram_indexes {
     expected<refine_result_t> absorb(ram_indexes& donor, executor_t& executor, refine_config_t config = {}) noexcept {
         if (shards_.empty()) return {{}, status_t::uninitialized_k};
         if (&donor == this || donor.kernel_ != kernel_) return {{}, status_t::config_mismatch_k};
-        std::size_t const incoming = donor.size(), shards = shards_.size();
+        std::size_t const incoming = donor.size();
         if (!incoming) return {{}, status_t::success_k};
         if (capacity() && (donor.dimensions() != dimensions() || donor.connectivity() != connectivity()))
             return {{}, status_t::config_mismatch_k};
         auto [executor_claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
-        if (!capacity())
-            if (status_t const reserved =
-                    reserve({incoming, static_cast<connectivity_t>(donor.connectivity()), donor.dimensions()}).status;
-                failed(reserved))
-                return {{}, reserved};
-
-        // Every receiving shard claims all the rows it takes up front, so nothing publishes before
-        // every row and key landed, and a failure on the way releases every claim.
-        std::size_t const donors = donor.shards_.size();
-        growing_buffer<typename index_t::load_plan_t, forkunion_allocator_t> plans {allocator_};
-        growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
-        growing_buffer<iota_view<node_id_t>, forkunion_allocator_t> appended_parts {allocator_};
-        if (failed(plans.reserve_exactly(shards)) || failed(cursors.resize(shards)) ||
-            failed(appended_parts.reserve_exactly(shards)))
-            return {{}, status_t::bad_alloc_k};
-        std::size_t landing_rows = 0;
-        for (std::size_t into = 0; into != shards; ++into) {
-            std::size_t rows = 0;
-            for (std::size_t from = into; from < donors; from += shards) rows += donor.shards_[from].index->size();
-            auto [plan, status] = shards_[into].index->plan_load(rows);
-            if (failed(status)) return {{}, status};
-            appended_parts.push_back_reserved({plan.base, plan.base});
-            plans.push_back_reserved(std::move(plan));
-            if (status_t const covered = shards_[into].keys.cover(plans[into].base + rows); failed(covered))
-                return {{}, covered};
-            landing_rows += rows;
+        if (status_t const closed = close_shards_(); failed(closed)) return {{}, closed};
+        if (status_t const closed = donor.close_shards_(); failed(closed)) {
+            reopen_shards_();
+            return {{}, closed};
         }
-        auto [seats, seat_status] = locators_of_key_.claim(landing_rows);
-        if (failed(seat_status)) return {{}, seat_status};
-        for (std::size_t from = 0; from != donors; ++from) {
-            iota_view<node_id_t>& appended = appended_parts[from % shards];
-            appended.bound += static_cast<node_id_t>(donor.shards_[from].index->size());
-            // An empty shard keeps its first part resident, so later parts still walk across.
-            if (!appended.first) appended.first = appended.bound;
-        }
-
-        // A step is one storage chunk of a receiving shard, which the donor parts landing there
-        // fill in turn, each with its keys; a chunk may straddle several parts.
-        auto land_chunk = [&](std::size_t into, typename index_t::load_plan_t::step_t const& chunk, std::size_t,
-                              nk::matrix_span<node_id_t>) noexcept -> status_t {
-            iota_view<node_id_t> landing {plans[into].base, plans[into].base};
-            for (std::size_t from = into; from < donors && landing.bound < chunk.index_rows.bound; from += shards) {
-                shard_t const& part = donor.shards_[from];
-                iota_view<node_id_t> const source_range {0, static_cast<node_id_t>(part.index->size())};
-                landing = {landing.bound, landing.bound + source_range.bound};
-                typename index_t::load_plan_t::step_t step = chunk;
-                step.index_rows = {max_of(chunk.index_rows.first, landing.first),
-                                   min_of(chunk.index_rows.bound, landing.bound)};
-                if (step.index_rows.first >= step.index_rows.bound) continue;
-                step.source_rows = {step.index_rows.first - landing.first, step.index_rows.bound - landing.first};
-                if (status_t const loaded = plans[into].load(step, *part.index, source_range); failed(loaded))
-                    return loaded;
-                for (node_id_t row : step.index_rows) shards_[into].keys[row] = part.keys[row - landing.first];
-            }
-            return status_t::success_k;
-        };
-        if (status_t const landed = drain_steps_(plans, to_writable_span(cursors), executor, 0, land_chunk);
-            failed(landed))
-            return {{}, landed};
-
-        // Every step landed, so no plan refuses; the bracket shows a search every shard's rows or
-        // none, and the keys resolve only once their rows are visible.
-        status_t published = status_t::success_k;
-        atomic_ref<u64_t> const sequence {commit_sequence_};
-        sequence.add(1, std::memory_order_release);
-        for (typename index_t::load_plan_t& plan : plans)
-            if (succeeded(published)) published = plan.finish();
-        sequence.add((u64_t {1} << 32) - 1, std::memory_order_release);
-        if (failed(published)) return {{}, published};
-        for (std::size_t into = 0; into != shards; ++into)
-            for (node_id_t row = plans[into].base; row != plans[into].base + plans[into].rows; ++row)
-                locators_of_key_.insert(seats, shards_[into].keys[row], key_locator_t {into, row});
-        if (status_t const cleared = donor.clear(); failed(cleared)) return {{}, cleared};
-        // A shard that took an appended part refines every row across its appended base; one that
-        // took none only heals.
-        auto const across_plan = [&](std::size_t shard, traversal_context_t& traversal) noexcept {
-            iota_view<node_id_t> const appended = appended_parts[shard];
-            iota_view<node_id_t> const nodes = appended.empty() ? appended
-                                                                : iota_view<node_id_t> {0, node_id_unknown_k};
-            return shards_[shard].index->plan_refine(nodes, traversal, config, appended.first);
-        };
-        return refine_shards_(executor, config, across_plan, dummy_progress_t {});
+        expected<refine_result_t> const absorbed = absorb_(donor, executor, config);
+        // Emptied donor shards come back open, so only an earlier failure leaves them closed.
+        donor.reopen_shards_();
+        reopen_shards_();
+        return absorbed;
     }
 
 #pragma endregion Refinement
@@ -1331,7 +1285,9 @@ struct ram_indexes {
      *      the flat steps their rows arrive in - one per part's share of one storage chunk.
      *
      *  A shard takes its parts in order, so a plan appends them at one base and @ref finish
-     *  publishes every shard at once. A dying plan releases every claim and publishes nothing.
+     *  publishes every shard at once. Every shard's dispenser stays closed from planning until the
+     *  plan finishes or dies, so no insertion lands beside it. A dying plan releases every claim
+     *  and publishes nothing.
      */
     struct [[nodiscard]] load_plan_t {
         /** @brief One step of one shard: where it lands, which part it reads, and that part's own
@@ -1358,9 +1314,12 @@ struct ram_indexes {
         load_plan_t& operator=(load_plan_t&&) = delete;
         load_plan_t(load_plan_t const&) = delete;
         load_plan_t& operator=(load_plan_t const&) = delete;
-        /** @brief Every member is RAII: the mappings die with the plan, and the shard plans
-         *      release the rows they claimed unless @c finish published them. */
-        ~load_plan_t() noexcept = default;
+
+        /** The mappings die with the plan, and the shard plans release the rows they claimed unless
+         *  @c finish published them; an unfinished plan reopens the dispensers. */
+        ~load_plan_t() noexcept {
+            if (owner_) owner_->reopen_shards_();
+        }
 
         /** @brief Rows the checkpoint lands across every shard - what its headers said. */
         std::size_t rows() const noexcept {
@@ -1435,7 +1394,7 @@ struct ram_indexes {
             for (std::size_t shard = 0; shard != plans_.size(); ++shard)
                 if (on_loaded(shard) == continuation_t::cancel_k) return status_t::cancelled_k;
             atomic_ref<std::size_t>(owner_->routed_rows_).store(rows(), std::memory_order_relaxed);
-            owner_ = nullptr;
+            std::exchange(owner_, nullptr)->reopen_shards_();
             return status_t::success_k;
         }
 
@@ -1470,8 +1429,8 @@ struct ram_indexes {
      *  The index must be empty; the plan reports the rows it will land through @c rows().
      */
     expected<load_plan_t> plan_load(std::string_view path, load_config_t const& config) noexcept {
-        if (status_t const ready = loadable_(); failed(ready)) return {{}, ready};
         load_plan_t plan {allocator_};
+        if (status_t const ready = loadable_(plan); failed(ready)) return {{}, ready};
         if (status_t const listed = catalog_(path, plan.mappings_, plan.parts_); failed(listed)) return {{}, listed};
         if (status_t const opened = open_load_(plan, config); failed(opened)) return {{}, opened};
         return {std::move(plan), status_t::success_k};
@@ -1480,8 +1439,8 @@ struct ram_indexes {
     /** @brief Opens a load of one monolith held in @p monolith - the implementation the path form
      *      maps for. */
     expected<load_plan_t> plan_load(bytes_view_t monolith, load_config_t const& config) noexcept {
-        if (status_t const ready = loadable_(); failed(ready)) return {{}, ready};
         load_plan_t plan {allocator_};
+        if (status_t const ready = loadable_(plan); failed(ready)) return {{}, ready};
         if (status_t const listed = catalog_monolith_(monolith, plan.parts_); failed(listed)) return {{}, listed};
         if (status_t const opened = open_load_(plan, config); failed(opened)) return {{}, opened};
         return {std::move(plan), status_t::success_k};
@@ -1672,6 +1631,37 @@ struct ram_indexes {
         }
     };
 
+    /** Rebuilds every shard empty on its memory domain and regrows it to the capacity it had. */
+    status_t clear_() noexcept {
+        reserve_capacity_t const geometry {capacity(), static_cast<connectivity_t>(connectivity()), dimensions()};
+        for (shard_t& one : shards_) {
+            std::unique_ptr<index_t> fresh = build_(one.index->vectors_allocator_.memory_domain);
+            if (!fresh) return status_t::bad_alloc_k;
+            one.index = std::move(fresh);
+        }
+        locators_of_key_.clear();
+        atomic_ref<std::size_t>(routed_rows_).store(0, std::memory_order_relaxed);
+        return geometry.capacity ? reserve(geometry).status : status_t::success_k;
+    }
+
+    /** Closes every shard's dispenser in shard order, or none: a shard with a batch in flight
+     *  reopens the ones before it and answers @c contended_k. A batch dispenses in the same order,
+     *  so one refused by a closed shard has dispensed only empty ranges on the shards before it. */
+    status_t close_shards_() noexcept {
+        for (std::size_t shard = 0; shard != shards_.size(); ++shard)
+            if (status_t const closed = shards_[shard].index->close_(); failed(closed)) {
+                while (shard) shards_[--shard].index->reopen_();
+                return closed;
+            }
+        return status_t::success_k;
+    }
+
+    /** Reopens every closed shard's dispenser at its watermark, the last shard first, so a batch
+     *  taking the shards in order finds shard zero closed until every later one reopened. */
+    void reopen_shards_() noexcept {
+        for (std::size_t shard = shards_.size(); shard;) shards_[--shard].index->reopen_();
+    }
+
     /** One unreserved shard placed on @p memory_domain; null when the allocation fails. */
     std::unique_ptr<index_t> build_(fu_memory_domain_id_t memory_domain) const noexcept {
         forkunion_allocator_t const allocator {memory_domain};
@@ -1737,6 +1727,95 @@ struct ram_indexes {
 #pragma endregion Insertion
 
 #pragma region Health
+
+    /** The landing and the closing refine of @ref absorb, under both indexes' closed dispensers
+     *  and the executor's claim the caller holds. */
+    expected<refine_result_t> absorb_(ram_indexes& donor, executor_t& executor, refine_config_t config) noexcept {
+        std::size_t const shards = shards_.size();
+        if (!capacity())
+            if (status_t const reserved = reserve({donor.size(), static_cast<connectivity_t>(donor.connectivity()),
+                                                   donor.dimensions()})
+                                              .status;
+                failed(reserved))
+                return {{}, reserved};
+
+        // Every receiving shard claims all the rows it takes up front, so nothing publishes before
+        // every row and key landed, and a failure on the way releases every claim.
+        std::size_t const donors = donor.shards_.size();
+        growing_buffer<typename index_t::load_plan_t, forkunion_allocator_t> plans {allocator_};
+        growing_buffer<std::size_t, forkunion_allocator_t> cursors {allocator_};
+        growing_buffer<iota_view<node_id_t>, forkunion_allocator_t> appended_parts {allocator_};
+        if (failed(plans.reserve_exactly(shards)) || failed(cursors.resize(shards)) ||
+            failed(appended_parts.reserve_exactly(shards)))
+            return {{}, status_t::bad_alloc_k};
+        std::size_t landing_rows = 0;
+        for (std::size_t into = 0; into != shards; ++into) {
+            std::size_t rows = 0;
+            for (std::size_t from = into; from < donors; from += shards) rows += donor.shards_[from].index->size();
+            auto [plan, status] = shards_[into].index->plan_load(rows);
+            if (failed(status)) return {{}, status};
+            appended_parts.push_back_reserved({plan.base, plan.base});
+            plans.push_back_reserved(std::move(plan));
+            if (status_t const covered = shards_[into].keys.cover(plans[into].base + rows); failed(covered))
+                return {{}, covered};
+            landing_rows += rows;
+        }
+        auto [seats, seat_status] = locators_of_key_.claim(landing_rows);
+        if (failed(seat_status)) return {{}, seat_status};
+        for (std::size_t from = 0; from != donors; ++from) {
+            iota_view<node_id_t>& appended = appended_parts[from % shards];
+            appended.bound += static_cast<node_id_t>(donor.shards_[from].index->size());
+            // An empty shard keeps its first part resident, so later parts still walk across.
+            if (!appended.first) appended.first = appended.bound;
+        }
+
+        // A step is one storage chunk of a receiving shard, which the donor parts landing there
+        // fill in turn, each with its keys; a chunk may straddle several parts.
+        auto land_chunk = [&](std::size_t into, typename index_t::load_plan_t::step_t const& chunk, std::size_t,
+                              nk::matrix_span<node_id_t>) noexcept -> status_t {
+            iota_view<node_id_t> landing {plans[into].base, plans[into].base};
+            for (std::size_t from = into; from < donors && landing.bound < chunk.index_rows.bound; from += shards) {
+                shard_t const& part = donor.shards_[from];
+                iota_view<node_id_t> const source_range {0, static_cast<node_id_t>(part.index->size())};
+                landing = {landing.bound, landing.bound + source_range.bound};
+                typename index_t::load_plan_t::step_t step = chunk;
+                step.index_rows = {max_of(chunk.index_rows.first, landing.first),
+                                   min_of(chunk.index_rows.bound, landing.bound)};
+                if (step.index_rows.first >= step.index_rows.bound) continue;
+                step.source_rows = {step.index_rows.first - landing.first, step.index_rows.bound - landing.first};
+                if (status_t const loaded = plans[into].load(step, *part.index, source_range); failed(loaded))
+                    return loaded;
+                for (node_id_t row : step.index_rows) shards_[into].keys[row] = part.keys[row - landing.first];
+            }
+            return status_t::success_k;
+        };
+        if (status_t const landed = drain_steps_(plans, to_writable_span(cursors), executor, 0, land_chunk);
+            failed(landed))
+            return {{}, landed};
+
+        // Every step landed, so no plan refuses; the bracket shows a search every shard's rows or
+        // none, and the keys resolve only once their rows are visible.
+        status_t published = status_t::success_k;
+        atomic_ref<u64_t> const sequence {commit_sequence_};
+        sequence.add(1, std::memory_order_release);
+        for (typename index_t::load_plan_t& plan : plans)
+            if (succeeded(published)) published = plan.finish();
+        sequence.add((u64_t {1} << 32) - 1, std::memory_order_release);
+        if (failed(published)) return {{}, published};
+        for (std::size_t into = 0; into != shards; ++into)
+            for (node_id_t row = plans[into].base; row != plans[into].base + plans[into].rows; ++row)
+                locators_of_key_.insert(seats, shards_[into].keys[row], key_locator_t {into, row});
+        if (status_t const cleared = donor.clear_(); failed(cleared)) return {{}, cleared};
+        // A shard that took an appended part refines every row across its appended base; one that
+        // took none only heals.
+        auto const across_plan = [&](std::size_t shard, traversal_context_t& traversal) noexcept {
+            iota_view<node_id_t> const appended = appended_parts[shard];
+            iota_view<node_id_t> const nodes = appended.empty() ? appended
+                                                                : iota_view<node_id_t> {0, node_id_unknown_k};
+            return shards_[shard].index->plan_refine(nodes, traversal, config, appended.first);
+        };
+        return refine_shards_(executor, config, across_plan, dummy_progress_t {});
+    }
 
     /** Drains the @c refine_plan_t that @p plan_of (s, traversal) opens on every shard @c s over
      *  the threads, phase by phase, under the claim the caller holds; @p on_visited answers as in
@@ -2048,9 +2127,12 @@ struct ram_indexes {
         return config.validate();
     }
 
-    /** Whether the index can take a checkpoint: placed, and holding nothing yet. */
-    status_t loadable_() const noexcept {
+    /** Whether the index can take a checkpoint: placed, and holding nothing yet once every shard's
+     *  dispenser is closed for @p plan, whose death reopens them. */
+    status_t loadable_(load_plan_t& plan) noexcept {
         if (shards_.empty()) return status_t::uninitialized_k;
+        if (status_t const closed = close_shards_(); failed(closed)) return closed;
+        plan.owner_ = this;
         return size() ? status_t::config_mismatch_k : status_t::success_k;
     }
 
@@ -2409,10 +2491,7 @@ struct ram_indexes {
         std::size_t const wanted = max_of(config.capacity, widest * shards);
         if (capacity() && (dimensions != this->dimensions() || connectivity != this->connectivity()))
             return status_t::config_mismatch_k;
-        if (!capacity() && !wanted) {
-            plan.owner_ = this;
-            return status_t::success_k;
-        }
+        if (!capacity() && !wanted) return status_t::success_k;
         if (status_t const reserved = reserve({wanted, connectivity, dimensions}).status; failed(reserved))
             return reserved;
 
@@ -2444,7 +2523,6 @@ struct ram_indexes {
                 first_row = bound_row;
             }
         }
-        plan.owner_ = this;
         return status_t::success_k;
     }
 

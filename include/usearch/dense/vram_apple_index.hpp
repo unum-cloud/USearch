@@ -12,9 +12,9 @@
  *  exclusive hold that every walk shares while its command buffer runs.
  *
  *  Metal promises no forward progress between command buffers, while an insert's admission ramp
- *  waits on rows earlier batches publish, so batches run one at a time; searches overlap them
- *  freely. The kernels compile from the embedded source at the first @c reserve, once per storage
- *  dtype and device.
+ *  waits on rows earlier batches publish, so the claim word admits one batch or load at a time and
+ *  refuses another with @c contended_k; searches overlap them freely. The kernels compile from the
+ *  embedded source at the first @c reserve, once per storage dtype and device.
  */
 #pragma once
 
@@ -23,7 +23,7 @@
 
 #include <atomic>       // `std::memory_order`
 #include <bit>          // `std::bit_ceil`, `std::bit_width`, `std::countr_zero`, `std::has_single_bit`
-#include <mutex>        // `std::unique_lock` - the batch hold
+#include <mutex>        // `std::unique_lock` - the growth hold
 #include <shared_mutex> // `std::shared_mutex` - walks share the storage, growth takes it alone
 #include <span>         // `std::span`
 #include <utility>      // `std::exchange`
@@ -332,6 +332,8 @@ struct vram_apple_index {
     static_assert(sizeof(norms_t) == 8, "The kernels address norms as two 32-bit words");
 
     inline static constexpr synchronization_t synchronization_ceiling_k = synchronization_t::concurrent_k;
+
+    /** The 32-bit ID space, less the sentinel, which also marks a closed claim word. */
     inline static constexpr std::size_t max_node_count_k = 0xFFFFFFFEu;
 
     /** Fragment bytes - the kits read rows sixteen bytes at a time, and rows pad to whole
@@ -470,7 +472,7 @@ struct vram_apple_index {
 
     /** Whether every claimed ID is published; call it with no batch in flight. */
     status_t validate() const noexcept {
-        return published_() == claimed_rows_ ? status_t::success_k : status_t::device_error_k;
+        return published_() == claimed_() ? status_t::success_k : status_t::device_error_k;
     }
 
     /** The serialized extents. */
@@ -574,12 +576,21 @@ struct vram_apple_index {
         std::size_t computed_distances_in_reverse_refines = 0;
     };
 
-    /** Inserts @p new_rows under the next contiguous IDs, waits for the device, publishes them
-     *  once every earlier batch has, and reports telemetry. */
+    /** Inserts @p new_rows under the contiguous IDs claimed from the watermark, waits for the
+     *  device, publishes them, and reports telemetry. One batch or load holds the claim word at a
+     *  time, so another one in flight, or a closed word, answers @c contended_k. */
     expected<insert_result_t> insert(rows_view_t new_rows, node_ids_span_t assigned_ids, traversal_context_t& context,
                                      insert_config_t config = {}) noexcept {
-        expected<insert_result_t> inserted = submit_insert_(new_rows, assigned_ids, context, config);
-        if (!inserted || !new_rows.rows) return inserted;
+        if (!new_rows.rows) return {{claimed_(), static_cast<node_id_t>(claimed_())}, status_t::success_k};
+        if (status_t const kept = status(); failed(kept)) return {{}, kept};
+        auto const [first_id, claim_status] = claim_(new_rows.rows);
+        if (failed(claim_status)) return {{}, claim_status};
+        expected<insert_result_t> inserted = submit_insert_(new_rows, first_id, assigned_ids, context, config);
+        if (!inserted) {
+            // A refusal that kept no failure launched nothing.
+            if (succeeded(status())) unclaim_(first_id, new_rows.rows);
+            return inserted;
+        }
         if (status_t const published = publish_(inserted.value.first_id, new_rows.rows); failed(published))
             return {{inserted.value.new_size, inserted.value.first_id}, published};
         return inserted;
@@ -873,8 +884,10 @@ struct vram_apple_index {
         return plan.finish();
     }
 
-    /** One load in flight: the rows it appends past every claimed one, holding the batch hold for
-     *  its whole life; @ref finish derives the norms no step carried and publishes. */
+    /** One load in flight: the rows it appends at the watermark, under its own claim or a claim
+     *  word its caller closed, holding the growth hold for its whole life, since growth would
+     *  relocate the storage its steps write; @ref finish derives the norms no step carried and
+     *  publishes. */
     struct [[nodiscard]] load_plan_t {
         columns_view_t columns {};
         iota_view<node_id_t> source_range {};
@@ -900,11 +913,12 @@ struct vram_apple_index {
         load_plan_t& operator=(load_plan_t const&) = delete;
 
         /** An unfinished plan turns its rows back to sentinels under the hold, since the next claim
-         *  lands on them without growing. */
+         *  lands on them without growing, and gives its claim back. */
         ~load_plan_t() noexcept {
             if (!index_ || !rows) return;
             std::size_t const neighbors_row_bytes = index_->connectivity() * sizeof(u32_t);
             std::memset(index_->neighbors_matrix_.host + base * neighbors_row_bytes, 0xFF, rows * neighbors_row_bytes);
+            index_->unclaim_(base, rows);
         }
 
         struct step_t {
@@ -1013,7 +1027,6 @@ struct vram_apple_index {
                     standard_atomic_ref<std::size_t> {covered_norms}.load(std::memory_order_acquire) != rows)
                     if (status_t const derived = index_->derive_norms_(base, rows); failed(derived))
                         return index_->fail_(derived);
-                index_->claimed_rows_ = base + rows;
                 u32_t* const words = metal_words(index_->counters_);
                 words[metal_published_k] = static_cast<u32_t>(base + rows);
                 batch_.unlock();
@@ -1027,7 +1040,8 @@ struct vram_apple_index {
         std::unique_lock<std::mutex> batch_;
     };
 
-    /** Opens a load of @p rows from @p columns past every claimed one. */
+    /** Opens a load of @p rows from @p columns at the watermark: claims them, or lands them under
+     *  the claim word its caller closed; a batch or load in flight refuses it. */
     expected<load_plan_t> plan_load(columns_view_t columns, std::size_t rows,
                                     iota_view<node_id_t> source_range) noexcept {
         if (!dimensions_) return {{}, status_t::uninitialized_k};
@@ -1047,12 +1061,24 @@ struct vram_apple_index {
     expected<load_plan_t> plan_load(std::size_t rows) noexcept {
         if (!dimensions_) return {{}, status_t::uninitialized_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
-        if (!rows) return {load_plan_t {*this, {}, static_cast<node_id_t>(claimed_rows_), 0}, status_t::success_k};
+        if (!rows) return {load_plan_t {*this, {}, static_cast<node_id_t>(claimed_()), 0}, status_t::success_k};
         std::unique_lock batch {batch_, std::try_to_lock};
         if (!batch.owns_lock()) return {{}, status_t::contended_k};
-        node_id_t const base = static_cast<node_id_t>(claimed_rows_);
-        if (rows > max_node_count_k - base) return {{}, status_t::overflow_k};
-        if (status_t const grown = grow_rows_(base + rows); failed(grown)) return {{}, grown};
+        // A closed word is the caller's, who refines or absorbs around the load; an open one is
+        // claimed like a batch's, so no batch lands beside it.
+        bool const claiming = standard_atomic_ref<std::size_t const>(claimed_rows_).load(std::memory_order_acquire) !=
+                              node_id_unknown_k;
+        node_id_t base = static_cast<node_id_t>(size());
+        if (claiming) {
+            auto const [first_id, claim_status] = claim_(rows);
+            if (failed(claim_status)) return {{}, claim_status};
+            base = first_id;
+        }
+        else if (rows > max_node_count_k - base) return {{}, status_t::overflow_k};
+        if (status_t const grown = grow_rows_(base + rows); failed(grown)) {
+            unclaim_(base, rows);
+            return {{}, grown};
+        }
         return {load_plan_t {*this, std::move(batch), base, rows}, status_t::success_k};
     }
 
@@ -1076,23 +1102,24 @@ struct vram_apple_index {
 
 #pragma region Batches
 
-    /** The device half of @c insert: claims the next rows, stages and runs the batch, and returns
-     *  with the IDs, the rows invisible until the caller publishes them - which the sharded twin
-     *  does for every step at once. */
-    expected<insert_result_t> submit_insert_(rows_view_t new_rows, node_ids_span_t assigned_ids,
+    /** The device half of @c insert: stages and runs @p new_rows at @p first_id, and returns with
+     *  their IDs, the rows invisible until the caller publishes them - which the sharded twin does
+     *  for every step at once. The caller holds the claim over them; a refusal before the launch
+     *  keeps no failure, one after it keeps the failure. */
+    expected<insert_result_t> submit_insert_(rows_view_t new_rows, node_id_t first_id, node_ids_span_t assigned_ids,
                                              traversal_context_t& context, insert_config_t config) noexcept {
         std::size_t const rows = new_rows.rows;
-        if (!rows) return {{claimed_rows_, static_cast<node_id_t>(claimed_rows_)}, status_t::success_k};
         if (!dimensions_) return {{}, status_t::uninitialized_k};
         if (assigned_ids.size() && assigned_ids.size() != rows) return {{}, status_t::config_mismatch_k};
         if (context.device() != device_.ordinal || !context) return {{}, status_t::config_mismatch_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (status_t const refusal = rows_refusal_(new_rows); failed(refusal)) return {{}, refusal};
 
-        std::unique_lock batch {batch_};
-        std::size_t const first_id = claimed_rows_;
-        if (rows > max_node_count_k - first_id) return {{}, status_t::overflow_k};
-        if (status_t const grown = grow_rows_(first_id + rows); failed(grown)) return {{}, grown};
+        // Growth relocates the storage, so it runs under the hold a reserve takes too.
+        {
+            std::unique_lock batch {batch_};
+            if (status_t const grown = grow_rows_(first_id + rows); failed(grown)) return {{}, grown};
+        }
         // Past the staged rows, every wave counts into its own words, zeroed here, then the row an
         // import widens through.
         std::size_t const rows_bytes = rows * row_bytes();
@@ -1115,9 +1142,8 @@ struct vram_apple_index {
         arguments.end_id = static_cast<u32_t>(first_id + rows);
         arguments.expansion = config.expansion_factor;
         reset_counters_(counters_);
-        claimed_rows_ = first_id + rows;
 
-        // Batches run one at a time, so the batch drains under its hold before the next claims.
+        // The claim admits one batch at a time, so the batch drains before the next claims.
         status_t launched = status_t::success_k;
         {
             std::shared_lock storage {storage_};
@@ -1138,7 +1164,7 @@ struct vram_apple_index {
         }
 
         insert_result_t result;
-        result.first_id = static_cast<node_id_t>(first_id);
+        result.first_id = first_id;
         result.new_size = first_id + rows;
         result.visited_members = metal_tally(counters, metal_hops_k);
         result.computed_distances = metal_tally(counters, metal_scored_k);
@@ -1831,7 +1857,51 @@ struct vram_apple_index {
         return failure;
     }
 
-    std::size_t claimed_() const noexcept { return claimed_rows_; }
+    /** Rows claimed by batches and loads, visible or not; a closed word holds none past the
+     *  watermark. */
+    std::size_t claimed_() const noexcept {
+        std::size_t const claimed =
+            standard_atomic_ref<std::size_t const>(claimed_rows_).load(std::memory_order_acquire);
+        return claimed == node_id_unknown_k ? size() : claimed;
+    }
+
+    /** Claims @p rows from the watermark: one compare-exchange that succeeds only on an open word
+     *  with no batch or load in flight, so its holder alone runs and publishes them. */
+    expected<node_id_t> claim_(std::size_t rows) noexcept {
+        std::size_t first = size();
+        if (rows > max_node_count_k - first) return {{}, status_t::overflow_k};
+        if (!standard_atomic_ref<std::size_t>(claimed_rows_)
+                 .compare_exchange_strong(first, first + rows, std::memory_order_acq_rel, std::memory_order_relaxed))
+            return {{}, status_t::contended_k};
+        return {static_cast<node_id_t>(first), status_t::success_k};
+    }
+
+    /** Gives back the claim over @p rows from @p first, which launched nothing; a word that moved
+     *  on, closed by a caller around a load, stays as it is. */
+    void unclaim_(std::size_t first, std::size_t rows) noexcept {
+        std::size_t claimed = first + rows;
+        standard_atomic_ref<std::size_t>(claimed_rows_)
+            .compare_exchange_strong(claimed, first, std::memory_order_release, std::memory_order_relaxed);
+    }
+
+    /** Closes the claim word at the watermark, so every claim refuses until @ref reopen_; refused
+     *  while a batch or load is in flight. */
+    status_t close_() noexcept {
+        std::size_t visible = size();
+        return standard_atomic_ref<std::size_t>(claimed_rows_)
+                       .compare_exchange_strong(visible, node_id_unknown_k, std::memory_order_acq_rel,
+                                                std::memory_order_relaxed)
+                   ? status_t::success_k
+                   : status_t::contended_k;
+    }
+
+    /** Reopens a closed claim word at the watermark, past every row a load published meanwhile; an
+     *  open one stays as it is. */
+    void reopen_() noexcept {
+        std::size_t closed = node_id_unknown_k;
+        standard_atomic_ref<std::size_t>(claimed_rows_)
+            .compare_exchange_strong(closed, size(), std::memory_order_acq_rel, std::memory_order_relaxed);
+    }
     u32_t published_() const noexcept {
         u32_t const* const words = metal_words(counters_);
         return words[metal_published_k];
@@ -1911,9 +1981,13 @@ struct vram_apple_index {
     /** Shared by every walk while its command buffer runs, taken alone by growth. */
     std::shared_mutex storage_;
 
-    /** Held by the one batch, load or refinement at a time. */
+    /** Held around every growth, a load's whole life and a refinement, whose host writes into the
+     *  storage a growth would relocate. */
     std::mutex batch_;
 
+    /** The claim word: past the watermark by the rows of the one batch or load in flight, claimed
+     *  from the watermark by one compare-exchange, or the sentinel while a refine, an absorb, a
+     *  load or a save of the sharded index holds it closed. */
     std::size_t claimed_rows_ = 0;
     std::size_t last_visible_id_ = 0;
     status_t status_ = status_t::success_k;

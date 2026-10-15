@@ -74,10 +74,11 @@ inline std::span<gpu_device_t const> gpu_devices() noexcept {
 }
 
 /** Spawns the executor of the one vendor every device in @p devices belongs to, one stream per
- *  distinct device over their vendor ordinals, which every shard there shares:
- *  @c config_mismatch_k when they span vendors, @c device_error_k when none is named or their
- *  runtime refuses. */
-inline expected<gpu_executor_t> spawn_gpu_executor(std::span<gpu_device_t const> devices) noexcept {
+ *  distinct device over their vendor ordinals, which every shard there shares, its scratch capped
+ *  at @p scratch_limit bytes per stream, zero for no ceiling: @c config_mismatch_k when they span
+ *  vendors, @c device_error_k when none is named or their runtime refuses. */
+inline expected<gpu_executor_t> spawn_gpu_executor(std::span<gpu_device_t const> devices,
+                                                   std::size_t scratch_limit = 0) noexcept {
     if (devices.empty()) return {{}, status_t::device_error_k};
     growing_buffer<int> ordinals {global_allocator};
     if (failed(ordinals.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
@@ -91,7 +92,7 @@ inline expected<gpu_executor_t> spawn_gpu_executor(std::span<gpu_device_t const>
     expected<gpu_executor_t> result {{}, status_t::device_error_k};
     for_each_gpu_vendor([&]<typename executor_type_>(std::type_identity<executor_type_>) noexcept {
         if (executor_type_::vendor_k != devices[0].vendor) return false;
-        auto [spawned, status] = executor_type_::spawn(to_span(ordinals));
+        auto [spawned, status] = executor_type_::spawn(to_span(ordinals), scratch_limit);
         if (succeeded(status)) result.value = std::move(spawned);
         result.status = status;
         return true;

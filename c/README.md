@@ -125,6 +125,7 @@ Every `*_free` waits until each deferred call naming its handle is final, so a h
 
 An executor owns the threads or device streams that run calls, the traversal scratch they walk with, and the pinned bounce buffer staging passes through.
 One executor serves any number of indexes, of any quantization and metric, since its scratch is sized from geometry, grown to the widest asked of it, and kept between calls.
+A VRAM executor's `scratch_limit` caps that growth per stream, and a call needing more, a refinement's scratch included, reports `usearch_status_out_of_memory_k`.
 Calls on one executor start in submission order, while a handle admits any number of concurrent callers: the executor orders, never the index.
 
 ```c
@@ -209,7 +210,7 @@ The statuses worth branching on:
 
 - `usearch_status_unsupported_k`: the verb is declared but this residency or build does not implement it, so no retry can help.
 - `usearch_status_read_only_k`: a mutating verb on a viewed handle.
-- `usearch_status_contended_k`: refused rather than waited for, like a full deferred table or an arena serving another call.
+- `usearch_status_contended_k`: refused rather than waited for, like a full deferred table, an arena serving another call, an insertion meeting a refinement, absorption or clear of its index, or a second VRAM insertion beside the first.
 - `usearch_status_cancelled_k`: a progress handler stopped the call, which published nothing.
 - `usearch_status_device_k`: an executor, arena or handle on another residency or device than the call needs, or a GPU arena named with another executor than the one that made it.
 - `usearch_status_invalid_argument_k`: a required pointer left `NULL`, inputs inside the arena the call rewinds, a name no table spells.
@@ -512,6 +513,8 @@ do {
 ```
 
 Searches may run throughout on a RAM handle, while a VRAM handle rewrites neighbors in place and admits no overlapping search.
+Insertions never overlap a refinement: one in flight refuses it with `usearch_status_contended_k`, one arriving meanwhile is refused the same way and lands nothing, and so on VRAM is a save, which holds the handle the same way for its own duration.
+Nothing waits, so a service schedules refinements between its insertion bursts and retries a refused call.
 
 ### Absorbing & Splitting
 
@@ -519,6 +522,7 @@ Searches may run throughout on a RAM handle, while a VRAM handle rewrites neighb
 Donors are consumed and nulled as they go, and cancellation stops between donors, so the array itself says which handles the caller still owns and must free.
 Each donor's shards append to the index's as appended parts with their edges rebased, then a refinement of every shard that took one walks each of its rows across into the other part from landmarks drawn there and re-selects it, so a group costs one such refinement per donor, and its heal re-selects from the landmarks every row no earlier one links to.
 A donor must share the index's residency, scalar, class, metric and geometry, else the call answers `usearch_status_config_mismatch_k`, and an NVMe view answers `usearch_status_read_only_k`.
+An insertion in flight on the index or on the next donor refuses the call with `usearch_status_contended_k`, leaving that donor and the rest live, and an insertion into the index arriving meanwhile is refused the same way, while nothing may search a donor or start an insertion into it.
 A VRAM-built donor joins a RAM index through a save and a load, and splitting is not in the C library yet.
 
 ### Sparse Multiplication

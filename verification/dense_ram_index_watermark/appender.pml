@@ -1,16 +1,15 @@
 /**
- *  @brief The load path's `finish`: one release no-return add on `next_dispensed_id_` before the
- *      watermark's release store, beside a searcher and a save.
+ *  @brief The load path's `finish`: one compare-exchange moving `next_dispensed_id_` from the
+ *      load's base past its rows, before the watermark's release store, beside a searcher and a save.
  *
- *  The loader lands both rows relaxed, bumps the dispenser and releases the watermark. A saver that
+ *  The loader lands both rows relaxed, moves the dispenser and releases the watermark. A saver that
  *  acquired the watermark must read the dispenser level with it.
  *
  *  @verify pass sc,rc11,far
- *  @verify fail far appender_order=order_relaxed: the dispenser's add releases; relaxed, it is still
- *      carried under the C++ model, but under far memory it is posted and may be in flight when the
- *      watermark lands, so the plan reports contention on a settled index
- *  @verify fail sc spends_plan=false: a successful `finish` spends the plan; a second one moves the
- *      dispenser again and leaves the watermark, and the saver finds the dispenser past it for good
+ *  @verify pass far appender_order=order_relaxed: a compare-exchange is never posted, so even a
+ *      relaxed one lands before the watermark's release store that carries it
+ *  @verify pass sc spends_plan=false: a second `finish` finds the dispenser past the load's base,
+ *      so its compare-exchange moves nothing
  */
 #define thread_count 3
 #define location_count 7
@@ -21,11 +20,13 @@
 #include "protocol.pml"
 
 proctype loader(byte t) {
+    int expected;
+    bool moved;
     land_row(t, 0);
     land_row(t, 1);
-    finish_load(t);
+    finish_load(t, 0, 2, expected, moved);
     if
-    :: !spends_plan -> finish_load(t)
+    :: !spends_plan -> finish_load(t, 0, 2, expected, moved)
     :: else
     fi;
     landed(t)

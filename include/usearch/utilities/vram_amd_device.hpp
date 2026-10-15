@@ -907,7 +907,10 @@ struct hip_executor_t {
     hip_executor_t& operator=(hip_executor_t const&) = delete;
 
     /** Exchanges the stream tables; @c held_ stays, as a move with a call in flight is misuse. */
-    void swap(hip_executor_t& other) noexcept { std::swap(streams_, other.streams_); }
+    void swap(hip_executor_t& other) noexcept {
+        std::swap(streams_, other.streams_);
+        std::swap(scratch_limit_, other.scratch_limit_);
+    }
 
     /** Claims the executor for one call; a second concurrent caller gets @c contended_k. */
     expected<claim_t> claim() noexcept {
@@ -924,8 +927,8 @@ struct hip_executor_t {
     }
 
     /** Opens one stream per entry of @p devices, binding each first, since a stream is born on the
-     *  current device. */
-    static expected<hip_executor_t> spawn(std::span<int const> devices) noexcept {
+     *  current device; their scratch never grows past @p scratch_limit bytes, zero for none. */
+    static expected<hip_executor_t> spawn(std::span<int const> devices, std::size_t scratch_limit = 0) noexcept {
         growing_buffer<stream_t> streams {global_allocator};
         if (failed(streams.reserve_exactly(devices.size()))) return {{}, status_t::bad_alloc_k};
         for (int device : devices) {
@@ -935,13 +938,17 @@ struct hip_executor_t {
             if (!opened.handle || !opened.event) return {{}, status_t::device_error_k};
             streams.push_back_reserved(std::move(opened));
         }
-        return acquire(std::move(streams));
+        auto [executor, status] = acquire(std::move(streams));
+        executor.scratch_limit_ = scratch_limit;
+        return {std::move(executor), status};
     }
 
     /** Claims @p bytes_per_stream of scratch on every stream, ahead of the fan-out that maps state
-     *  onto it; the old run frees in stream order behind whatever still rides it. */
+     *  onto it, refusing more than the ceiling with @c bad_alloc_k; the old run frees in stream
+     *  order behind whatever still rides it. */
     status_t reserve(std::size_t bytes_per_stream) noexcept {
         if (streams_.empty()) return status_t::uninitialized_k;
+        if (scratch_limit_ && bytes_per_stream > scratch_limit_) return status_t::bad_alloc_k;
         for (stream_t& opened : streams_) {
             opened.arena.clear();
             if (failed(opened.arena.reserve_exactly(bytes_per_stream))) return status_t::bad_alloc_k;
@@ -976,6 +983,9 @@ struct hip_executor_t {
 
     /** Held by the one caller driving the streams; never swapped. */
     fu::spin_mutex_t held_;
+
+    /** The ceiling on every stream's scratch bytes; zero lets scratch grow as geometry asks. */
+    std::size_t scratch_limit_ = 0;
 };
 
 /** The @c std::unique_ptr deleter carrying the allocator and the element count. */

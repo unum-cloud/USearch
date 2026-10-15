@@ -368,10 +368,13 @@ expected<typename specialized_index<index_type_>::insert_result_t> specialized_i
     if (failed(status)) return {{}, status};
     for (std::size_t landed = 0; landed != count;) {
         std::size_t const taking = min_of(chunk, count - landed);
-        if constexpr (is_ram_index<index_type_>)
-            plan.insert(landed, keys[nk::range(landed, landed + taking)], rows.slice(landed, taking));
-        else if (failed(plan.insert(landed, keys[nk::range(landed, landed + taking)], rows.slice(landed, taking))))
-            break;
+        if (status_t const stepped = plan.insert(landed, keys[nk::range(landed, landed + taking)],
+                                                 rows.slice(landed, taking));
+            failed(stepped)) {
+            // A refused RAM step dispensed nothing, so the dropped plan releases every claim.
+            if constexpr (is_ram_index<index_type_>) return {{}, stepped};
+            else break;
+        }
         landed += taking;
         // Every row is claimed before the first report and none can be withdrawn, so a cancel
         // goes unheard.

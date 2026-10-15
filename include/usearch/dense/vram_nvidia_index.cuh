@@ -37,7 +37,8 @@ namespace unum::usearch::dense {
 
 static_assert(sizeof(vram_scored_node_t) == cuda_scored_node_bytes_k);
 static_assert(sizeof(cuda_arena_shape_t) == sizeof(vram_arena_shape_t));
-static_assert(vram_nvidia_index<>::max_node_count_k == vram_scored_node_t::id_capacity_k);
+// Every dispensable ID fits a scored node's ID field, the sentinel the claim word closes on aside.
+static_assert(vram_nvidia_index<>::max_node_count_k <= vram_scored_node_t::id_capacity_k);
 
 /** The quads kit @c quads_chain picks for @p vector_dtype_ under @p capability_, checked
  *  against the host-visible half the face sizes its launches by. */

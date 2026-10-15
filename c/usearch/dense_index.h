@@ -80,10 +80,17 @@
  *  searches read only entries published behind the visibility watermark and never write to the
  *  graph, while insertions synchronize through per-node locks and publish in order. A VRAM handle
  *  is driven through the streams of its executor - calls on distinct executors overlap, host
- *  threading adds nothing. A viewed handle admits arbitrarily many concurrent searches, having
- *  nothing to mutate. Serialization is the one exception: saving demands a mutation-free window,
- *  though concurrent readers keep searching throughout. Per-call outputs - stats, counts, the
+ *  threading adds nothing - and admits one insertion at a time. A viewed handle admits arbitrarily
+ *  many concurrent searches, having nothing to mutate. Per-call outputs - stats, counts, the
  *  outcome - belong to their call and must not be shared between calls that are not final.
+ *
+ *  Refinement, absorption and clearing hold the handle closed to insertions for their whole call,
+ *  and so does a save of a VRAM handle. None of them waits: one meeting an insertion in flight
+ *  reports @c usearch_status_contended_k and leaves the handle as it was, an insertion arriving
+ *  while one runs reports the same and lands nothing, and so does a second VRAM insertion beside
+ *  the first. The caller retries, typically once its own insertions drained. A RAM save settles
+ *  optimistically instead, reporting @c usearch_status_contended_k when an insertion was in flight
+ *  or published under it, and concurrent readers keep searching throughout every save.
  *
  *  The executor, not the handle, is what orders: a handle admits any number of concurrent
  *  callers, while calls on one executor run in the order they were submitted. Callers wanting
@@ -548,8 +555,9 @@ typedef struct usearch_dense_clear_t {
     usearch_completion_t completion;
 } usearch_dense_clear_t;
 
-/** Erases all entries, keeping the reserved capacity and frozen geometry. Never invoked
- *  concurrently with any other verb on the same handle. */
+/** Erases all entries, keeping the reserved capacity and frozen geometry. On a RAM handle an
+ *  insertion in flight refuses it with @c usearch_status_contended_k; no other verb may start on
+ *  the same handle while it runs. */
 USEARCH_EXPORT void usearch_dense_clear(usearch_dense_clear_t* arguments);
 
 /** Traversal telemetry, shared by every verb that walks the graph - a pure output, fully
@@ -606,6 +614,8 @@ typedef struct usearch_dense_insert_t {
  *      a count of one. Overlaps safely with concurrent searches on the same handle.
  *  @ref dense_index_concurrency
  *  @retval usearch_status_read_only_k The handle is a view.
+ *  @retval usearch_status_contended_k A refinement, absorption or clear holds the handle, or on
+ *      VRAM a save or another insertion does; nothing landed.
  *
  *  An insertion is all-or-nothing per call, with or without a handler, and its rows become visible
  *  at once on RAM and VRAM handles alike, so a concurrent search sees every row of the call or none
@@ -680,9 +690,10 @@ typedef struct usearch_dense_refine_t {
  *
  *  On a RAM handle searches may run throughout: re-selection publishes one node at a time and never
  *  removes a node, so a concurrent walk sees either the old neighbors or the new ones. On a VRAM
- *  handle the merge writes neighbors in place, so searches may not overlap. Insertions may not
- *  overlap either: a viewed handle refuses with @c usearch_status_read_only_k, like every other
- *  mutating verb.
+ *  handle the merge writes neighbors in place, so searches may not overlap. Insertions never
+ *  overlap: one in flight refuses the call with @c usearch_status_contended_k, and one arriving
+ *  meanwhile is refused the same way, as is a VRAM save. A viewed handle refuses with
+ *  @c usearch_status_read_only_k, like every other mutating verb.
  */
 USEARCH_EXPORT void usearch_dense_refine(usearch_dense_refine_t* arguments);
 
@@ -925,13 +936,17 @@ typedef struct usearch_dense_absorb_t {
  *  @retval usearch_status_config_mismatch_k A donor of another residency, scalar, class, metric or
  *      geometry, a donor on a device the executor does not drive, or @c index itself.
  *  @retval usearch_status_cancelled_k The handler stopped the call between donors.
+ *  @retval usearch_status_contended_k An insertion in flight on @c index or on the next donor, or
+ *      on VRAM a save of either; that donor and every later one stay live handles.
  *
  *  Each donor's rows append to @c index shard by shard with their edges rebased, then a refinement
  *  of every shard that took them re-selects each of its rows across the appended part, so a group
  *  costs one such refinement per donor. Readers of a RAM @c index may keep searching throughout,
  *  since unpublished rows hide behind the watermark, while a VRAM one rewrites neighbors in place
- *  and admits no overlapping search, as refinement does. A donor whose absorption fails stays a
- *  live handle, though its rows may already have landed in @c index.
+ *  and admits no overlapping search, as refinement does. Insertions into @c index arriving
+ *  meanwhile are refused with @c usearch_status_contended_k, while nothing may search a donor or
+ *  start an insertion into it. A donor whose absorption fails stays a live handle, though its rows
+ *  may already have landed in @c index.
  *
  *  Cancellation stops @b between donors, which makes this the one verb where it is not
  *  all-or-nothing: donors already absorbed stay absorbed, and the rest stay live handles the
@@ -1180,8 +1195,11 @@ typedef struct usearch_dense_save_t {
 
 /**
  *  @brief Saves a mutable index under @c path in the layout its extension picks - one monolith,
- *      or a manifest beside its shards. Demands a mutation-free window; concurrent readers keep
- *      searching throughout. @ref dense_index_serialization
+ *      or a manifest beside its shards; concurrent readers keep searching throughout.
+ *      @ref dense_index_serialization
+ *  @retval usearch_status_contended_k A RAM save meeting an insertion in flight or one publishing
+ *      under it, or a VRAM save meeting an insertion, refinement, absorption or another save in
+ *      flight; an insertion arriving while a VRAM save runs is refused the same way.
  *
  *  A cancelled or failed monolith save leaves a file without its header, which every reader
  *  rejects; a cancelled manifest save leaves the parts it already wrote and no manifest, so the

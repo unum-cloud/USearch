@@ -13,9 +13,11 @@
  *  consolidated monolith, or one per shard beside a manifest - written positionally with every
  *  header last, so a failed save reads as absent.
  *
- *  Beyond the executor's claim, the insertion gate admits one mutating batch at a time, a shard's
- *  kept failure refuses every later mutation, and the commit sequence word lets a reader spanning
- *  the shards see each batch whole or not at all.
+ *  Beyond the executor's claim, each shard's claim word admits one batch or load at a time and
+ *  closes around a refine, an absorb, a checkpoint load or a save, which refuse with
+ *  @c contended_k while a batch is in flight; a shard's kept failure refuses every later mutation,
+ *  and the commit sequence word lets a reader spanning the shards see each batch whole or not at
+ *  all.
  *
  *  Plain host C++ like the shard's own face: the attend gather launches through the shard's
  *  declarations, which the kernel side defines.
@@ -155,8 +157,7 @@ struct vram_nvidia_indexes {
     /** Every member is RAII, so the shards die with the index and nothing leaks. */
     ~vram_nvidia_indexes() noexcept = default;
 
-    /** Exchanges two indexes whole; a move implies the caller holds both exclusively, so the
-     *  insertion gate is not swapped along with the state it guards. */
+    /** Exchanges two indexes whole; a move implies the caller holds both exclusively. */
     void swap(vram_nvidia_indexes& other) noexcept {
         std::swap(kernel_, other.kernel_);
         std::swap(shards_, other.shards_);
@@ -275,9 +276,10 @@ struct vram_nvidia_indexes {
     /**
      *  @brief One batch in flight across the shards.
      *
-     *  The executor and the insertion gate are held for the plan's whole life, one context per
-     *  shard carved for the whole batch, every shard's storage and key columns grown to the rows it
-     *  takes, and the locator seats claimed, so a step fails only on its devices.
+     *  The executor and every shard's claim over the rows it takes are held for the plan's whole
+     *  life, one context per shard carved for the whole batch, every shard's storage and key
+     *  columns grown to the rows it takes, and the locator seats claimed, so a step fails only on
+     *  its devices.
      *
      *  Row @c t of the batch lands on shard @c (rotation+t) mod S. Steps run one after another on
      *  one host thread, each writing its rows' keys and launching the rows as deferred inserts;
@@ -295,14 +297,13 @@ struct vram_nvidia_indexes {
         insert_plan_t(insert_plan_t&& other) noexcept
             : traversals_(std::move(other.traversals_)), shares_(std::move(other.shares_)), seats_(other.seats_),
               config_(other.config_), rows_(other.rows_), rotation_(other.rotation_), status_(other.status_),
-              streams_(std::move(other.streams_)), mutating_(std::move(other.mutating_)),
-              owner_(std::exchange(other.owner_, nullptr)) {}
+              streams_(std::move(other.streams_)), owner_(std::exchange(other.owner_, nullptr)) {}
         insert_plan_t& operator=(insert_plan_t&&) = delete;
         insert_plan_t(insert_plan_t const&) = delete;
         insert_plan_t& operator=(insert_plan_t const&) = delete;
 
-        /** An unfinished plan drains what it launched and keeps @c cancelled_k on every shard
-         *  holding it. */
+        /** An unfinished plan drains what it launched, keeps @c cancelled_k on every shard holding
+         *  it, and gives back every claim that launched nothing. */
         ~insert_plan_t() noexcept {
             if (owner_) [[maybe_unused]]
                 status_t const abandoned = abandon_(status_t::cancelled_k);
@@ -362,7 +363,7 @@ struct vram_nvidia_indexes {
                 return {result, abandon_(status)};
             }
 
-            // Batches run one at a time under the gate, so no turn waits inside the commit.
+            // Every shard's claim admits this batch alone, so no turn waits inside the commit.
             standard_atomic_ref<u64_t>(owner.commit_sequence_).fetch_add(1, std::memory_order_release);
             for (std::size_t shard = 0; shard != shares_.size(); ++shard)
                 if (share_t const& share = shares_[shard]; share.launched)
@@ -418,21 +419,23 @@ struct vram_nvidia_indexes {
                 failed(uploaded))
                 return uploaded;
             expected<insert_result_t> const inserted = one.index->submit_insert_(
-                {rows.row(first), taking, rows.columns, rows.stride * shards, rows.dtype}, {}, traversal, config_);
+                {rows.row(first), taking, rows.columns, rows.stride * shards, rows.dtype}, first_node, {}, traversal,
+                config_);
             if (!inserted) return inserted.status;
             share.launched += taking;
-            // A first ID other than the part's next one names a claimer outside the gate.
-            return inserted.value.first_id == first_node ? status_t::success_k : status_t::contended_k;
+            return status_t::success_k;
         }
 
-        /** Drains every context and keeps @p failure on every shard holding launched rows, spending
-         *  the plan. */
+        /** Drains every context, keeps @p failure on every shard holding launched rows, and gives
+         *  back every claim that launched none, spending the plan. */
         status_t abandon_(status_t failure) noexcept {
             for (traversal_context_t& traversal : traversals_) [[maybe_unused]]
                 status_t const drained = traversal.drain();
             for (std::size_t shard = 0; shard != shares_.size(); ++shard)
                 if (shares_[shard].launched) [[maybe_unused]]
                     status_t const kept = owner_->shards_[shard].index->fail_(failure);
+                else if (shares_[shard].rows)
+                    owner_->shards_[shard].index->unclaim_(shares_[shard].first_id, shares_[shard].rows);
             owner_ = nullptr;
             return failure;
         }
@@ -461,9 +464,6 @@ struct vram_nvidia_indexes {
         /** The executor's hold, kept for the plan's whole life, one caller at a time. */
         typename executor_t::claim_t streams_;
 
-        /** The insertion gate, held so batches never interleave their claims. */
-        std::unique_lock<fu::spin_mutex_t> mutating_;
-
         /** The index inserted into; null in the empty plan a refused @ref plan_insert returns, and
          *  once spent. */
         vram_nvidia_indexes* owner_ = nullptr;
@@ -472,9 +472,12 @@ struct vram_nvidia_indexes {
     };
 
     /**
-     *  @brief Opens a batch of @p rows: takes the executor and the insertion gate, carves one
-     *      context per shard, grows every shard's storage and key columns to the rows it takes, and
-     *      claims the locator seats.
+     *  @brief Opens a batch of @p rows: takes the executor, carves one context per shard, claims
+     *      every shard's rows from its watermark, grows every shard's storage and key columns to
+     *      them, and claims the locator seats.
+     *
+     *  A shard with a batch, load, refine, absorb or save in flight refuses its claim, and the
+     *  whole plan with @c contended_k.
      *
      *  @param[in] rows Rows in the batch; the plan's steps launch each exactly once, in any order.
      *  @param[inout] executor The streams and their scratch, paired positionally with the shards.
@@ -490,13 +493,10 @@ struct vram_nvidia_indexes {
             plan.owner_ = this;
             return {std::move(plan), status_t::success_k};
         }
-        // Two holds: the executor's guards the scratch, the index's keeps batches from interleaving
-        // claims.
+        // The executor's hold guards the scratch; the shards' claims keep other mutations off.
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
         plan.streams_ = std::move(claim);
-        if (!mutating_.lock_if_free()) return {{}, status_t::contended_k};
-        plan.mutating_ = std::unique_lock<fu::spin_mutex_t> {mutating_, std::adopt_lock};
 
         std::size_t const shards = shards_.size();
         if (status_t const readied = reserve_traversals_(plan.traversals_, executor,
@@ -511,19 +511,33 @@ struct vram_nvidia_indexes {
                          shards;
         if (failed(plan.shares_.reserve_exactly(shards))) return {{}, status_t::bad_alloc_k};
         for (std::size_t shard = 0; shard != shards; ++shard) {
-            shard_t& one = shards_[shard];
-            std::size_t const first_id = one.index->claimed_();
             std::size_t const taking = rows_from_(rows, first_row_of_shard_(shard, shards, plan.rotation_), shards);
-            plan.shares_.push_back_reserved({static_cast<node_id_t>(first_id), taking, 0});
-            if (!taking) continue;
+            node_id_t first_id = 0;
+            if (taking) {
+                auto const [claimed_id, claim_status] = shards_[shard].index->claim_(taking);
+                if (failed(claim_status)) {
+                    for (std::size_t earlier = 0; earlier != shard; ++earlier)
+                        if (plan.shares_[earlier].rows)
+                            shards_[earlier].index->unclaim_(plan.shares_[earlier].first_id,
+                                                             plan.shares_[earlier].rows);
+                    return {{}, claim_status};
+                }
+                first_id = claimed_id;
+            }
+            plan.shares_.push_back_reserved({first_id, taking, 0});
+        }
+        // Every claim taken, a refusal from here on dies with the plan, which gives them back.
+        plan.owner_ = this;
+        for (std::size_t shard = 0; shard != shards; ++shard) {
+            shard_t& one = shards_[shard];
+            std::size_t const claimed_rows = plan.shares_[shard].first_id + plan.shares_[shard].rows;
+            if (!plan.shares_[shard].rows) continue;
             if (cuda_set_device(one.index->device_specs().ordinal) != cuda_success_k)
                 return {{}, status_t::device_error_k};
-            reserve_capacity_t const grown {first_id + taking, static_cast<connectivity_t>(connectivity()),
-                                            dimensions()};
+            reserve_capacity_t const grown {claimed_rows, static_cast<connectivity_t>(connectivity()), dimensions()};
             if (status_t const reserved = one.index->reserve(grown).status; failed(reserved)) return {{}, reserved};
-            if (status_t const covered = cover_keys_(one, first_id + taking); failed(covered)) return {{}, covered};
+            if (status_t const covered = cover_keys_(one, claimed_rows); failed(covered)) return {{}, covered};
         }
-        plan.owner_ = this;
         return {std::move(plan), status_t::success_k};
     }
 
@@ -535,8 +549,8 @@ struct vram_nvidia_indexes {
      *  Node IDs never cross this boundary: they are shard-local, and which shard a row landed in
      *  is the index's business. The keys are what the caller gets its rows back by.
      *
-     *  A shard failing past its claim keeps that failure; a first ID other than the predicted one
-     *  names a claimer outside this index and refuses the call as @c contended_k.
+     *  A shard failing past its claim keeps that failure; a shard with a batch, load, refine,
+     *  absorb or save in flight refuses the call as @c contended_k.
      *
      *  @param[in] keys One caller identity per row; several rows may share one.
      *  @param[in] new_rows The batch, one row per entry, in any scalar NumKong casts, imported on
@@ -574,7 +588,9 @@ struct vram_nvidia_indexes {
      *
      *  A shard's pass owns its device and drains its stream before returning, so the shards run one
      *  after another. A stopped pass leaves the graph correct and merely less improved, and the
-     *  next call sweeps again toward the same fixed point. Insertions and searches may not overlap.
+     *  next call sweeps again toward the same fixed point. Every shard's claim word stays closed
+     *  for the pass, so a batch, load or save in flight refuses it with @c contended_k, and one
+     *  arriving meanwhile is refused; searches may not overlap.
      *
      *  @param[inout] executor The streams and their scratch, one per shard.
      *  @param[in] config Optional tuning knobs; zeros mean "derive from connectivity".
@@ -590,24 +606,27 @@ struct vram_nvidia_indexes {
         if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
-        if (!mutating_.lock_if_free()) return {{}, status_t::contended_k};
-        std::lock_guard const mutating {mutating_, std::adopt_lock};
-
         growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
         if (status_t const ready = reserve_traversals_(traversals, executor, config); failed(ready)) return {{}, ready};
+        if (status_t const closed = close_shards_(); failed(closed)) return {{}, closed};
 
         refine_result_t result;
+        status_t status = status_t::success_k;
         std::size_t const published = size();
-        for (std::size_t shard = 0; shard != shards; ++shard) {
+        for (std::size_t shard = 0; shard != shards && succeeded(status); ++shard) {
             index_t& one = *shards_[shard].index;
-            if (cuda_set_device(one.device_specs().ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
-            auto const [part, status] = one.refine({0, node_id_unknown_k}, traversals[shard], config);
+            if (cuda_set_device(one.device_specs().ordinal) != cuda_success_k) {
+                status = status_t::device_error_k;
+                break;
+            }
+            auto const [part, refine_status] = one.refine({0, node_id_unknown_k}, traversals[shard], config);
             result += part;
-            if (failed(status)) return {result, status};
-            if (on_visited(result.visited_nodes, published) == continuation_t::cancel_k)
-                return {result, status_t::cancelled_k};
+            status = refine_status;
+            if (succeeded(status) && on_visited(result.visited_nodes, published) == continuation_t::cancel_k)
+                status = status_t::cancelled_k;
         }
-        return {result, status_t::success_k};
+        reopen_shards_();
+        return {result, status};
     }
 
     /**
@@ -626,14 +645,19 @@ struct vram_nvidia_indexes {
      *  through the load's bounce from another device. One drain lands every part, then every shard
      *  publishes, and only then do the keys resolve. The donor empties before the first refine, and
      *  each refine drains its device before the next shard's starts, as in @ref refine. The donor
-     *  keeps its shards, and an index never reserved takes its geometry. Insertions and searches
-     *  may not overlap on either index.
+     *  keeps its shards, and an index never reserved takes its geometry. Both indexes' claim words
+     *  stay closed for the call, so a batch, load or save in flight on either refuses it with
+     *  @c contended_k, and an insertion into this index arriving meanwhile is refused. Searches may
+     *  not overlap on either index, and nothing may start an insertion into the donor, whose shards
+     *  emptying rebuilds.
      *
      *  @param[inout] donor The index giving its rows up.
      *  @param[inout] executor The streams and their scratch, driving every device of both indexes.
      *  @param[in] config The refine's knobs; zeros mean "derive from connectivity".
      *  @retval config_mismatch_k Another metric or geometry, a device the executor does not drive,
      *      or @p donor being this index.
+     *  @retval contended_k A batch, load or save in flight on either index, or another refine or
+     *      absorb.
      *  @retval others A failure before publication publishes nothing and leaves the donor whole; a
      *      device fault while publishing leaves the shards before it published, their keys
      *      unresolved; one while refining leaves every row here, merely less linked.
@@ -643,101 +667,23 @@ struct vram_nvidia_indexes {
         if (&donor == this || donor.kernel_ != kernel_) return {{}, status_t::config_mismatch_k};
         if (status_t const kept = status(); failed(kept)) return {{}, kept};
         if (status_t const kept = donor.status(); failed(kept)) return {{}, kept};
-        std::size_t const incoming = donor.size(), shards = shards_.size();
-        if (!incoming) return {{}, status_t::success_k};
+        if (!donor.size()) return {{}, status_t::success_k};
         if (capacity() && (donor.dimensions() != dimensions() || donor.connectivity() != connectivity()))
             return {{}, status_t::config_mismatch_k};
         if (status_t const paired = pairs_with_(executor); failed(paired)) return {{}, paired};
         if (status_t const paired = donor.pairs_with_(executor); failed(paired)) return {{}, paired};
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
-        if (!mutating_.lock_if_free()) return {{}, status_t::contended_k};
-        std::lock_guard const mutating {mutating_, std::adopt_lock};
-        if (!donor.mutating_.lock_if_free()) return {{}, status_t::contended_k};
-        std::lock_guard const donating {donor.mutating_, std::adopt_lock};
-        if (!capacity())
-            if (status_t const reserved =
-                    reserve({incoming, static_cast<connectivity_t>(donor.connectivity()), donor.dimensions()}).status;
-                failed(reserved))
-                return {{}, reserved};
-
-        // Every shard claims all its rows first, so a failure before publication releases them all.
-        std::size_t const donors = donor.shards_.size();
-        growing_buffer<typename index_t::load_plan_t, forkunion_allocator_t> plans {allocator_};
-        growing_buffer<iota_view<node_id_t>, forkunion_allocator_t> appended_parts {allocator_};
-        if (failed(plans.reserve_exactly(shards)) || failed(appended_parts.reserve_exactly(shards)))
-            return {{}, status_t::bad_alloc_k};
-        std::size_t landing = 0;
-        for (std::size_t into = 0; into != shards; ++into) {
-            index_t& target = *shards_[into].index;
-            std::size_t rows = 0;
-            for (std::size_t from = into; from < donors; from += shards) rows += donor.shards_[from].index->size();
-            if (cuda_set_device(target.device_specs().ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
-            auto [plan, status] = target.plan_load(rows, executor.stream(stream_of_(executor, into)));
-            if (failed(status)) return {{}, status};
-            appended_parts.push_back_reserved({plan.base, plan.base});
-            plans.push_back_reserved(std::move(plan));
-            if (status_t const covered = cover_keys_(shards_[into], plans[into].base + rows); failed(covered))
-                return {{}, covered};
-            landing += rows;
+        if (status_t const closed = close_shards_(); failed(closed)) return {{}, closed};
+        if (status_t const closed = donor.close_shards_(); failed(closed)) {
+            reopen_shards_();
+            return {{}, closed};
         }
-        auto [seats, seat_status] = locators_of_key_.claim(landing);
-        if (failed(seat_status)) return {{}, seat_status};
-
-        // A refused copy still waits for those queued before it, whose rows go to the next claim.
-        status_t queued = status_t::success_k;
-        for (std::size_t from = 0; from != donors && succeeded(queued); ++from) {
-            std::size_t const into = from % shards;
-            shard_t& one = shards_[into];
-            shard_t const& part = donor.shards_[from];
-            node_id_t const part_rows = static_cast<node_id_t>(part.index->size());
-            if (!part_rows) continue;
-            typename index_t::load_plan_t& plan = plans[into];
-            iota_view<node_id_t>& appended = appended_parts[into];
-            typename index_t::load_plan_t::step_t step;
-            step.index_rows = {appended.bound, appended.bound + part_rows};
-            step.source_rows = {0, part_rows};
-            queued = plan.load(step, *part.index, step.source_rows,
-                               executor.stream(donor.stream_of_(executor, from)).handle);
-            if (failed(queued)) continue;
-            for (node_id_t row : step.source_rows) one.keys[appended.bound + row] = part.keys[row];
-            // Another device's keys may not map here, so they cross from the host column.
-            if (part.index->device_specs().ordinal != one.index->device_specs().ordinal)
-                queued = upload_keys_(one, {appended.bound, appended.bound + part_rows}, plan.stream);
-            else if (cuda_copy_async(one.device_keys.base() + appended.bound, part.device_keys.base(),
-                                     part_rows * sizeof(key_t), plan.stream) != cuda_success_k)
-                queued = status_t::device_error_k;
-            appended.bound += part_rows;
-            // An empty shard keeps its first part resident, so later parts still walk across.
-            if (!appended.first) appended.first = appended.bound;
-        }
-        if (status_t const drained = executor.drain(); failed(queued) || failed(drained))
-            return {{}, failed(queued) ? queued : drained};
-        for (typename index_t::load_plan_t& plan : plans)
-            if (status_t const published = plan.finish(); failed(published)) return {{}, published};
-        for (std::size_t into = 0; into != shards; ++into)
-            for (node_id_t row = plans[into].base; row != plans[into].base + plans[into].rows; ++row)
-                locators_of_key_.insert(seats, shards_[into].keys[row], key_locator_t {into, row});
-        if (status_t const cleared = donor.clear(); failed(cleared)) return {{}, cleared};
-
-        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
-        // Two walks into one visited set, since every row first walks across into the other part
-        // alone.
-        if (status_t const ready = reserve_traversals_(traversals, executor, config, 2u); failed(ready))
-            return {{}, ready};
-        refine_result_t result;
-        for (std::size_t shard = 0; shard != shards; ++shard) {
-            index_t& one = *shards_[shard].index;
-            if (cuda_set_device(one.device_specs().ordinal) != cuda_success_k)
-                return {result, status_t::device_error_k};
-            iota_view<node_id_t> const appended = appended_parts[shard];
-            iota_view<node_id_t> const nodes = appended.empty() ? appended
-                                                                : iota_view<node_id_t> {0, node_id_unknown_k};
-            auto const [part, status] = one.refine(nodes, traversals[shard], config, appended.first);
-            result += part;
-            if (failed(status)) return {result, status};
-        }
-        return {result, status_t::success_k};
+        expected<refine_result_t> const absorbed = absorb_(donor, executor, config);
+        // Emptied donor shards come back open, so only an earlier failure leaves them closed.
+        donor.reopen_shards_();
+        reopen_shards_();
+        return absorbed;
     }
 
     /**
@@ -1205,8 +1151,10 @@ struct vram_nvidia_indexes {
      *      headers, and the manifest.
      *
      *  Steps are flat and each names its shard, so a caller walks them round-robin from one host
-     *  thread; @ref steps_of names one shard's own run. A dying plan drops its mappings and its
-     *  shard plans, leaving parts no header commits.
+     *  thread; @ref steps_of names one shard's own run. Every shard's claim word stays closed from
+     *  planning until the plan finishes or dies, so no batch, load, refine or other save tears the
+     *  rows it copies. A dying plan drops its mappings and its shard plans, leaving parts no header
+     *  commits.
      */
     struct [[nodiscard]] save_plan_t {
         /** @brief One step of one shard: its shard, and that shard's own step. */
@@ -1229,9 +1177,14 @@ struct vram_nvidia_indexes {
         save_plan_t& operator=(save_plan_t&&) = delete;
         save_plan_t(save_plan_t const&) = delete;
         save_plan_t& operator=(save_plan_t const&) = delete;
-        /** @brief Every member is RAII: the mappings, the shard plans and the executor's hold all
-         *      die with the plan. */
-        ~save_plan_t() noexcept = default;
+
+        /** The mappings, the shard plans and the executor's hold die with the plan; an unfinished
+         *  one reopens the claim words once its shard plans are gone. */
+        ~save_plan_t() noexcept {
+            if (!owner_) return;
+            plans_.clear();
+            owner_->reopen_shards_();
+        }
 
         /** @brief Step @p position of the plan; an empty one past the last. */
         step_t operator[](std::size_t position) const noexcept {
@@ -1315,7 +1268,7 @@ struct vram_nvidia_indexes {
                 if (!mappings_.empty())
                     if (status_t const flushed = mappings_[0].sync(); failed(flushed)) return flushed;
             }
-            owner_ = nullptr;
+            std::exchange(owner_, nullptr)->reopen_shards_();
             return status_t::success_k;
         }
 
@@ -1377,6 +1330,9 @@ struct vram_nvidia_indexes {
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
         plan.streams_ = std::move(claim);
+        // The device storage cannot be probed, so the save closes every claim word.
+        if (status_t const closed = close_shards_(); failed(closed)) return {{}, closed};
+        plan.owner_ = this;
         if (status_t const kept = keep_path_(plan.path_, path); failed(kept)) return {{}, kept};
         if (config.layout == checkpoint_layout_t::distributed_k) {
             if (status_t const opened = open_save_parts_(plan, config, executor); failed(opened)) return {{}, opened};
@@ -1403,6 +1359,8 @@ struct vram_nvidia_indexes {
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return {{}, claim_status};
         plan.streams_ = std::move(claim);
+        if (status_t const closed = close_shards_(); failed(closed)) return {{}, closed};
+        plan.owner_ = this;
         if (status_t const opened = open_save_monolith_(plan, monolith, config, executor); failed(opened))
             return {{}, opened};
         return {std::move(plan), status_t::success_k};
@@ -1413,9 +1371,9 @@ struct vram_nvidia_indexes {
      *      own device's stream, and the flat steps their rows arrive in - one per part's share of
      *      one batch.
      *
-     *  Holds the insertion gate and the executor for its whole life, so a batch in flight refuses
-     *  the load and the load refuses a batch. A dying plan releases every claim and publishes
-     *  nothing.
+     *  Holds every shard's claim word closed and the executor for its whole life, so a batch in
+     *  flight refuses the load and the load refuses a batch. A dying plan releases every claim and
+     *  publishes nothing.
      */
     struct [[nodiscard]] load_plan_t {
         /** @brief One step of one shard: where it lands, which part it reads, and that part's own
@@ -1438,14 +1396,18 @@ struct vram_nvidia_indexes {
         load_plan_t(load_plan_t&& other) noexcept
             : mappings_(std::move(other.mappings_)), parts_(std::move(other.parts_)),
               landings_(std::move(other.landings_)), plans_(std::move(other.plans_)), steps_(std::move(other.steps_)),
-              streams_(std::move(other.streams_)), mutating_(std::move(other.mutating_)),
-              owner_(std::exchange(other.owner_, nullptr)) {}
+              streams_(std::move(other.streams_)), owner_(std::exchange(other.owner_, nullptr)) {}
         load_plan_t& operator=(load_plan_t&&) = delete;
         load_plan_t(load_plan_t const&) = delete;
         load_plan_t& operator=(load_plan_t const&) = delete;
-        /** @brief Every member is RAII: the mappings and both holds die with the plan, and the
-         *      shard plans release the rows they claimed unless @c finish published them. */
-        ~load_plan_t() noexcept = default;
+
+        /** The mappings and the executor's hold die with the plan; an unfinished one rolls its
+         *  shard plans back under the closed claim words, then reopens them. */
+        ~load_plan_t() noexcept {
+            if (!owner_) return;
+            plans_.clear();
+            owner_->reopen_shards_();
+        }
 
         /** @brief Rows the checkpoint lands across every shard - what its headers said. */
         std::size_t rows() const noexcept {
@@ -1524,7 +1486,7 @@ struct vram_nvidia_indexes {
             for (std::size_t shard = 0; shard != plans_.size(); ++shard)
                 if (on_loaded(shard) == continuation_t::cancel_k) return status_t::cancelled_k;
             owner_->routed_rows_ = rows();
-            owner_ = nullptr;
+            std::exchange(owner_, nullptr)->reopen_shards_();
             return status_t::success_k;
         }
 
@@ -1542,8 +1504,6 @@ struct vram_nvidia_indexes {
         growing_buffer<step_t, forkunion_allocator_t> steps_;
         /** @brief The executor's hold, kept for the plan's whole life - one caller at a time. */
         typename executor_t::claim_t streams_;
-        /** @brief The insertion gate, held so no batch interleaves with the restore. */
-        std::unique_lock<fu::spin_mutex_t> mutating_;
         /** @brief The index being restored; null in the empty plan a refused @ref plan_load
          *      returns, and once @c finish published. */
         vram_nvidia_indexes* owner_ = nullptr;
@@ -1787,6 +1747,97 @@ struct vram_nvidia_indexes {
             ++total;
         });
         return total;
+    }
+
+    /** The landing and the closing refines of @ref absorb, under both indexes' closed claim words
+     *  and the executor's hold the caller keeps. */
+    expected<refine_result_t> absorb_(vram_nvidia_indexes& donor, executor_t& executor,
+                                      refine_config_t config) noexcept {
+        std::size_t const shards = shards_.size();
+        if (!capacity())
+            if (status_t const reserved = reserve({donor.size(), static_cast<connectivity_t>(donor.connectivity()),
+                                                   donor.dimensions()})
+                                              .status;
+                failed(reserved))
+                return {{}, reserved};
+
+        // Every shard claims all its rows first, so a failure before publication releases them all.
+        std::size_t const donors = donor.shards_.size();
+        growing_buffer<typename index_t::load_plan_t, forkunion_allocator_t> plans {allocator_};
+        growing_buffer<iota_view<node_id_t>, forkunion_allocator_t> appended_parts {allocator_};
+        if (failed(plans.reserve_exactly(shards)) || failed(appended_parts.reserve_exactly(shards)))
+            return {{}, status_t::bad_alloc_k};
+        std::size_t landing = 0;
+        for (std::size_t into = 0; into != shards; ++into) {
+            index_t& target = *shards_[into].index;
+            std::size_t rows = 0;
+            for (std::size_t from = into; from < donors; from += shards) rows += donor.shards_[from].index->size();
+            if (cuda_set_device(target.device_specs().ordinal) != cuda_success_k) return {{}, status_t::device_error_k};
+            auto [plan, status] = target.plan_load(rows, executor.stream(stream_of_(executor, into)));
+            if (failed(status)) return {{}, status};
+            appended_parts.push_back_reserved({plan.base, plan.base});
+            plans.push_back_reserved(std::move(plan));
+            if (status_t const covered = cover_keys_(shards_[into], plans[into].base + rows); failed(covered))
+                return {{}, covered};
+            landing += rows;
+        }
+        auto [seats, seat_status] = locators_of_key_.claim(landing);
+        if (failed(seat_status)) return {{}, seat_status};
+
+        // A refused copy still waits for those queued before it, whose rows go to the next claim.
+        status_t queued = status_t::success_k;
+        for (std::size_t from = 0; from != donors && succeeded(queued); ++from) {
+            std::size_t const into = from % shards;
+            shard_t& one = shards_[into];
+            shard_t const& part = donor.shards_[from];
+            node_id_t const part_rows = static_cast<node_id_t>(part.index->size());
+            if (!part_rows) continue;
+            typename index_t::load_plan_t& plan = plans[into];
+            iota_view<node_id_t>& appended = appended_parts[into];
+            typename index_t::load_plan_t::step_t step;
+            step.index_rows = {appended.bound, appended.bound + part_rows};
+            step.source_rows = {0, part_rows};
+            queued = plan.load(step, *part.index, step.source_rows,
+                               executor.stream(donor.stream_of_(executor, from)).handle);
+            if (failed(queued)) continue;
+            for (node_id_t row : step.source_rows) one.keys[appended.bound + row] = part.keys[row];
+            // Another device's keys may not map here, so they cross from the host column.
+            if (part.index->device_specs().ordinal != one.index->device_specs().ordinal)
+                queued = upload_keys_(one, {appended.bound, appended.bound + part_rows}, plan.stream);
+            else if (cuda_copy_async(one.device_keys.base() + appended.bound, part.device_keys.base(),
+                                     part_rows * sizeof(key_t), plan.stream) != cuda_success_k)
+                queued = status_t::device_error_k;
+            appended.bound += part_rows;
+            // An empty shard keeps its first part resident, so later parts still walk across.
+            if (!appended.first) appended.first = appended.bound;
+        }
+        if (status_t const drained = executor.drain(); failed(queued) || failed(drained))
+            return {{}, failed(queued) ? queued : drained};
+        for (typename index_t::load_plan_t& plan : plans)
+            if (status_t const published = plan.finish(); failed(published)) return {{}, published};
+        for (std::size_t into = 0; into != shards; ++into)
+            for (node_id_t row = plans[into].base; row != plans[into].base + plans[into].rows; ++row)
+                locators_of_key_.insert(seats, shards_[into].keys[row], key_locator_t {into, row});
+        if (status_t const cleared = donor.clear(); failed(cleared)) return {{}, cleared};
+
+        growing_buffer<traversal_context_t, forkunion_allocator_t> traversals {allocator_};
+        // Two walks into one visited set, since every row first walks across into the other part
+        // alone.
+        if (status_t const ready = reserve_traversals_(traversals, executor, config, 2u); failed(ready))
+            return {{}, ready};
+        refine_result_t result;
+        for (std::size_t shard = 0; shard != shards; ++shard) {
+            index_t& one = *shards_[shard].index;
+            if (cuda_set_device(one.device_specs().ordinal) != cuda_success_k)
+                return {result, status_t::device_error_k};
+            iota_view<node_id_t> const appended = appended_parts[shard];
+            iota_view<node_id_t> const nodes = appended.empty() ? appended
+                                                                : iota_view<node_id_t> {0, node_id_unknown_k};
+            auto const [part, status] = one.refine(nodes, traversals[shard], config, appended.first);
+            result += part;
+            if (failed(status)) return {result, status};
+        }
+        return {result, status_t::success_k};
     }
 
 #pragma region Insertion
@@ -2318,7 +2369,6 @@ struct vram_nvidia_indexes {
                                                          shard_rows[shard], config, executor);
                 failed(opened))
                 return opened;
-        plan.owner_ = this;
         return status_t::success_k;
     }
 
@@ -2350,7 +2400,6 @@ struct vram_nvidia_indexes {
                 failed(opened))
                 return opened;
         }
-        plan.owner_ = this;
         return status_t::success_k;
     }
 
@@ -2440,15 +2489,33 @@ struct vram_nvidia_indexes {
         return status_t::success_k;
     }
 
-    /** Takes the two holds a load runs under - the executor's streams and the insertion gate - and
-     *  checks emptiness beneath them, where no batch can land before the load does. */
+    /** Takes the executor's streams and closes every shard's claim word for @p plan, whose death
+     *  reopens them, and checks emptiness beneath them, where no batch can land before the load
+     *  does. */
     status_t gate_load_(load_plan_t& plan, executor_t& executor) noexcept {
         auto [claim, claim_status] = executor.claim();
         if (failed(claim_status)) return claim_status;
         plan.streams_ = std::move(claim);
-        if (!mutating_.lock_if_free()) return status_t::contended_k;
-        plan.mutating_ = std::unique_lock<fu::spin_mutex_t> {mutating_, std::adopt_lock};
+        if (status_t const closed = close_shards_(); failed(closed)) return closed;
+        plan.owner_ = this;
         return size() ? status_t::config_mismatch_k : status_t::success_k;
+    }
+
+    /** Closes every shard's claim word in shard order, or none: a shard with a batch or load in
+     *  flight reopens the ones before it and answers @c contended_k. */
+    status_t close_shards_() noexcept {
+        for (std::size_t shard = 0; shard != shards_.size(); ++shard)
+            if (status_t const closed = shards_[shard].index->close_(); failed(closed)) {
+                while (shard) shards_[--shard].index->reopen_();
+                return closed;
+            }
+        return status_t::success_k;
+    }
+
+    /** Reopens every closed shard's claim word at its watermark, the last shard first, so a batch
+     *  taking the shards in order finds shard zero closed until every later one reopened. */
+    void reopen_shards_() noexcept {
+        for (std::size_t shard = shards_.size(); shard;) shards_[--shard].index->reopen_();
     }
 
     /**
@@ -2493,10 +2560,7 @@ struct vram_nvidia_indexes {
         std::size_t const wanted = max_of(config.capacity, widest * shards);
         if (capacity() && (dimensions != this->dimensions() || connectivity != this->connectivity()))
             return status_t::config_mismatch_k;
-        if (!capacity() && !wanted) {
-            plan.owner_ = this;
-            return status_t::success_k;
-        }
+        if (!capacity() && !wanted) return status_t::success_k;
         if (status_t const reserved = reserve({wanted, connectivity, dimensions}).status; failed(reserved))
             return reserved;
 
@@ -2530,7 +2594,6 @@ struct vram_nvidia_indexes {
                 first_row = bound_row;
             }
         }
-        plan.owner_ = this;
         return status_t::success_k;
     }
 
@@ -2553,9 +2616,6 @@ struct vram_nvidia_indexes {
 
     /** Rows routed so far - the next batch's rotation base. */
     std::size_t routed_rows_ = 0;
-
-    /** Held by the one batch of mutating work at a time; a refused hold is @c contended_k. */
-    fu::spin_mutex_t mutating_;
 
     /** Commits in flight in the low half, commits landed in the high half: a reader spanning the
      *  shards retries its snapshot while one is in flight or one landed under it. */

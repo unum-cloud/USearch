@@ -26,10 +26,11 @@ proctype step(byte t; byte row) {
 
 // the load path's `finish` behind the fan-out: the tally acquired, and when whole, the publication
 proctype finisher(byte t) {
-    int tally;
+    int tally, expected;
+    bool moved;
     load(t, covered, order_acquire, tally);
     if
-    :: tally == 2 -> finish_load(t)
+    :: tally == 2 -> finish_load(t, 0, 2, expected, moved)
     :: else
     fi
 }

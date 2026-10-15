@@ -917,8 +917,8 @@ typedef struct usearch_executor_for_vram_t {
      *  own. */
     void* const* streams;
 
-    /** The @b optional ceiling on scratch bytes per stream; zero lets scratch grow as geometry
-     *  asks. */
+    /** The @b optional ceiling on scratch bytes per stream, a refinement's included, past which a
+     *  call reports @c usearch_status_out_of_memory_k; zero lets scratch grow as geometry asks. */
     size_t scratch_limit;
 
     /** Deferred calls it tracks at once, sizing its deferred table; zero takes a default. */

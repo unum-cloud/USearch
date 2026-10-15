@@ -1,41 +1,42 @@
 /**
- *  @brief The CUDA index's host side: the claim under its spin mutex, the flat matrices grown before
- *      it, the watermark each batch turns after its drain as a search's bound, and the admission ramp.
+ *  @brief The CUDA index's host side: the claim as one compare-exchange from the watermark, the flat
+ *      matrices grown by the claim holder alone, the watermark each batch turns after its drain as a
+ *      search's bound, the closed dispenser, and the admission ramp.
  *
- *  From `include/usearch/dense/vram_nvidia_index.cuh`: one claim per batch under `claiming_`, a
- *  `fu::spin_mutex_t`, IDs dense from `claimed_rows_`, the flat matrices grown under the mutex and
- *  sentinel-filled before any launch, the claim stored only once the launch is accepted, the
- *  device's admission ramp on `published_rows`, a counter in device memory no host thread
- *  dereferences, and the watermark `last_visible_id_` turned once per batch.
+ *  From `include/usearch/dense/vram_nvidia_index.cuh`: `claimed_rows_` holds the rows claimed, or
+ *  `node_id_unknown_k` while closed, and a claim is one compare-exchange of it from the watermark
+ *  to the watermark past the batch, so it succeeds only when no batch is in flight and the
+ *  dispenser is open, and answers `contended_k` otherwise. The holder then grows the flat matrices,
+ *  sentinel-filled before any launch, launches, and un-claims a rejected grid by storing the old
+ *  claim back with a release. The device's admission ramp counts on `published_rows`, a counter in
+ *  device memory no host thread dereferences, and the watermark `last_visible_id_` turns once per
+ *  batch.
  *
- *  Two inserters each submit one batch of two rows: the mutex, a relaxed read of the claim,
- *  `grow_rows_` when the flat matrices are short, the launch, which carries the host's view to the device
- *  and is accepted or rejected, the release store of the claim on acceptance alone, the release
- *  unlock; then an accepted batch drains and takes its turn, `publish_`: a wait until the watermark
- *  reaches its first ID, then a release store of its end. The first inserter's drain may fail
- *  instead: `fail_` keeps the failure in `status_` with an `acq_rel` exchange, and its rows stay
- *  invisible; `publish_` acquires `status_` on every turn of its wait and returns a kept failure
- *  rather than wait for a batch that never turns. A loader runs `plan_load` and `finish`:
- *  `lock_if_free`, `contended_k` when the claim is held, else the growth, the rows landed, the
- *  relaxed restore of `published_rows`, the release store of the claim, the unlock, and the turn;
- *  or it dies before `finish`. A searcher takes its bound from `size()`, an acquire load of the
- *  watermark, reads the flat matrices' extent the way `submit_search_`'s kernel touches them, reads every
- *  row below the bound, and walks row 0's tail. The device serves the accepted batches one row at
- *  a time in any order, each row through the ramp: a relaxed load of `published_rows`, a wait
- *  while `id >= published + max(published, floor)`, one relaxed no-return add, and maybe a
- *  back-link appending the row into row 0's tail slot while it is empty, whatever batch row 0
- *  belongs to. The floor is one and a batch is two rows, so a batch served ahead of the one claimed
- *  before it waits on that one's adds. The flat matrices' extent is `capacity()`, which the header
- *  derives from their committed bytes and reads outside the claim: the one grower release-stores
- *  each flat matrix's extent and `committed_bytes()` acquires it; the model folds the vectors, norms
- *  and neighbors into one word with the same orders.
+ *  Two inserters each submit one batch of two rows: the watermark acquired, the claim, `grow_rows_`
+ *  when the flat matrices are short, the launch, which carries the host's view to the device and
+ *  is accepted or rejected, the un-claim of a rejected one; then an accepted batch drains and takes
+ *  its turn, `publish_`: a wait until the watermark reaches its first ID, then a release store of
+ *  its end. The first inserter's drain may fail instead: `fail_` keeps the failure in `status_`
+ *  with an `acq_rel` exchange, and its rows stay invisible. A loader runs `plan_load` and `finish`
+ *  on a dispenser it finds open, claiming its rows like a batch and holding the claim until the
+ *  turn, or as the sharded index drives it, closing the dispenser first and appending at the
+ *  watermark, then reopening it; or it dies before `finish`, giving back what it took. A searcher
+ *  takes its bound from `size()`, an acquire load of the watermark, reads the flat matrices' extent
+ *  the way `submit_search_`'s kernel touches them, reads every row below the bound, and walks row
+ *  0's tail. The device serves the accepted batches one row at a time in any order, each row
+ *  through the ramp: a relaxed load of `published_rows`, a wait while
+ *  `id >= published + max(published, floor)`, one relaxed no-return add, and maybe a back-link
+ *  appending the row into row 0's tail slot while it is empty. The flat matrices' extent is
+ *  `capacity()`, which the header derives from their committed bytes and reads outside the claim:
+ *  the one grower release-stores each flat matrix's extent and `committed_bytes()` acquires it; the
+ *  model folds the vectors, norms and neighbors into one word with the same orders.
  *
- *  The bound a searcher acquired lies inside the flat matrices it sees mapped, and so does every ID the
- *  device is assigned. Every row below the bound landed, and a row the walk reads landed in a
- *  batch that turned. One grower and one claim holder run at a time, every batch and load ends,
- *  the loader's verdict names the claim's state, and the claimed ranges are disjoint and lie
- *  inside the flat matrices when each claim is stored. `far` is not run: the posted add is x86's, and the
- *  ramp's add runs on the GPU.
+ *  The bound a searcher acquired lies inside the flat matrices it sees mapped, and so does every ID
+ *  the device is assigned. Every row below the bound landed, and a row the walk reads landed in a
+ *  batch that turned. One claim holder and so one grower run at a time, every batch and load ends,
+ *  the claimed ranges are disjoint, every launch lies inside the flat matrices, and once everyone
+ *  is done the claim is open and level with the watermark unless a failure was kept. `far` is not
+ *  run: the posted add is x86's, and the ramp's add runs on the GPU.
  *
  *  @verify pass sc,rc11
  *  @verify fail rc11 watermark_order=order_relaxed: the turn's release store pairs with the acquire
@@ -43,52 +44,47 @@
  *      searcher reads a bound past their extent
  *  @verify fail rc11 size_order=order_relaxed: `size()` acquires the watermark the turn released;
  *      relaxed, the searcher reads a bound past the flat matrices' extent
- *  @verify fail sc claiming_mutex=false: `claiming_` keeps the growers and the claims apart;
- *      without it, two batches claim the same IDs
- *  @verify stuck sc unclaim_on_rejection=false: the claim is stored only once the launch is
- *      accepted, so a rejected grid claims nothing; stored either way, the next batch's ramp waits
- *      for rows nobody publishes
- *  @verify fail sc base_under_claim=false: `plan_load` reads its base under the claim; read from
- *      `size()` before `lock_if_free`, a batch claimed between the two lines overlaps the loaded
- *      rows, and `finish` could lower the claim beneath it
- *  @verify stuck sc unlock_on_abandon=false: the load plan spends like its host twin, and one that
- *      dies before `finish` drops the claim mutex it holds; kept, the inserters spin behind it
- *      forever
- *  @verify fail sc drain_before_turn=false: a batch turns the watermark only after its drain and
- *      in claim order, so every row under a search's bound landed; turned first, the searcher reads
- *      a row still in flight
+ *  @verify fail sc quiescent_claim=false: a claim compares against the watermark, so it succeeds
+ *      only with no batch in flight, which leaves the growth to one holder with no mutex; compared
+ *      against the claim it last read, two batches claim side by side and grow the flat matrices at
+ *      once
+ *  @verify fail sc unclaim_on_rejection=false: a rejected grid stores its claim back, since it
+ *      publishes nothing; kept, the claim stays past the watermark for good, and every later batch,
+ *      load and closer is refused
+ *  @verify fail sc unclaim_on_abandon=false: a load plan dying before `finish` gives back the claim
+ *      it took on an open dispenser; kept, the claim stays past the watermark for good
+ *  @verify fail sc drain_before_turn=false: a batch turns the watermark only after its drain, so
+ *      every row under a search's bound landed; turned first, the searcher reads a row still in
+ *      flight
  *  @verify fail sc neighbor_filter=false: the walk follows no ID at or past the bound, since an
  *      in-flight batch's back-links name its rows inside visible ones; unfiltered, it reads a row
  *      whose batch has not turned
- *  @verify stuck sc failure_ends_wait=false: `publish_` ends a turn's wait on the failure an earlier
- *      batch kept; waiting on, the batch claimed after one whose drain failed waits forever for a
- *      turn that never comes
  */
 #define thread_count 5
-#define location_count 7
-#define history_depth 10
+#define location_count 6
+#define history_depth 7
 #define device_thread 4 // the thread every launch hands the host's view to
 #include "weak_memory.pml"
 
 // The words, by the index member each stands for; the flat matrices' extent stands for `capacity()`, and
 // row 0's tail for the slot a back-link appends into, zero while it names no row.
-#define claiming 0
-#define claimed_rows 1
-#define mapped_rows 2
-#define published_rows 3
-#define last_visible_id 4
-#define row_zero_tail 5
-#define status 6
+#define claimed_rows 0
+#define mapped_rows 1
+#define published_rows 2
+#define last_visible_id 3
+#define row_zero_tail 4
+#define status 5
 
 // The statuses `status_` keeps: none, or the first failure that left claimed rows unpublished.
 #define success 0
 #define device_error 1
 
-// The sizes.
+// The sizes, and the closed claim: the all-ones ID in silicon, past every count here.
 #define rows_per_batch 2
 #define rows_per_load 2
 #define ramp_floor 1
 #define claimable_rows 6
+#define closed_rows 15
 
 // The knobs: the header's choices, each overridden by a `@verify` line that replays its counterexample.
 #ifndef watermark_order
@@ -97,17 +93,14 @@
 #ifndef size_order
 #define size_order order_acquire
 #endif
-#ifndef claiming_mutex
-#define claiming_mutex true
+#ifndef quiescent_claim
+#define quiescent_claim true
 #endif
 #ifndef unclaim_on_rejection
 #define unclaim_on_rejection true
 #endif
-#ifndef base_under_claim
-#define base_under_claim true
-#endif
-#ifndef unlock_on_abandon
-#define unlock_on_abandon true
+#ifndef unclaim_on_abandon
+#define unclaim_on_abandon true
 #endif
 #ifndef drain_before_turn
 #define drain_before_turn true
@@ -115,49 +108,19 @@
 #ifndef neighbor_filter
 #define neighbor_filter true
 #endif
-#ifndef failure_ends_wait
-#define failure_ends_wait true
-#endif
 
-byte inserters_done;
+byte done;          // the inserters and the loader, once finished
 byte growing;       // threads inside grow_rows_
-byte claim_holders; // threads holding claiming_
-byte contended;     // loads refused by a held claim
-bool claimed[3];    // per inserter and the loader, whether its range was claimed
+byte holders;       // threads holding a claim or the closed dispenser
+bool claimed[3];    // per inserter and the loader, whether it holds a range
 int range_first[3]; // per inserter and the loader, its range's first ID
 bool pending[2];    // per inserter, an accepted batch the device has rows left to serve
 byte served[2];     // per inserter, the rows of its batch the device published
 int refused[2];     // per inserter, the count its ramp last refused a row on; -1 when none
 bool filled[claimable_rows]; // per row, its payload and links written, by the device or the loader
 
-// spin_mutex::lock: a non-writing spin until the word looks free, then the acquire exchange
-inline lock_claiming(t, observed) {
-    do
-    :: (newest_value(claiming) == 0);
-       atomic {
-           read_modify_write(t, claiming, order_acquire, observed, 1);
-           if
-           :: observed == 0 ->
-               claim_holders++;
-               assert(memory != sc || claim_holders == 1)
-           :: else
-           fi
-       };
-       if
-       :: observed == 0 -> break
-       :: else
-       fi
-    od
-}
-inline unlock_claiming(t) {
-    atomic {
-        claim_holders--;
-        store(t, claiming, order_release, 0)
-    }
-}
-
 // grow_rows_: the flat matrices' extent through `capacity()`, an acquire, committed and sentinel-filled
-// when short, and a stream synchronize before the claim may advance
+// when short, and a stream synchronize before the launch
 inline grow(t, rows, mapped) {
     atomic {
         growing++;
@@ -173,70 +136,94 @@ inline grow(t, rows, mapped) {
     }
 }
 
-// a claim of `rows` IDs from `first`: inside the flat matrices, and apart from every range claimed before
-inline claim_range(who, first, rows) {
-    assert(newest_value(mapped_rows) >= first + rows);
+// a range of `rows` IDs from `first` taken by `who`: apart from every range held, one holder at a time
+inline take_range(who, first, rows) {
+    assert(memory != sc || holders == 0);
     assert(!claimed[0] || first >= range_first[0] + rows_per_batch || first + rows <= range_first[0]);
     assert(!claimed[1] || first >= range_first[1] + rows_per_batch || first + rows <= range_first[1]);
     assert(!claimed[2] || first >= range_first[2] + rows_per_load || first + rows <= range_first[2]);
+    holders++;
     claimed[who] = true;
     range_first[who] = first
 }
 
-// publish_: a wait until the watermark reaches `from`, then the release store of `to`; a failure
-// an earlier batch kept ends the wait first, since that batch never turns
-inline publish(t, from, to, watermark, kept) {
+// a range given back, by its un-claim or its turn
+inline drop_range(who) {
+    holders--;
+    claimed[who] = false
+}
+
+// publish_: a wait until the watermark reaches `from`, then the release store of `to`, which gives
+// the range of `who` back; a failure an earlier batch kept ends the wait first, since that batch
+// never turns
+inline publish(t, who, from, to, watermark, kept) {
     do
     :: load(t, last_visible_id, order_acquire, watermark);
         if
-        :: watermark == from -> store(t, last_visible_id, watermark_order, to); break
+        :: watermark == from ->
+            atomic {
+                store(t, last_visible_id, watermark_order, to);
+                drop_range(who)
+            };
+            break
         :: else ->
             load(t, status, order_acquire, kept);
             if
-            :: failure_ends_wait && kept != success -> break
-            :: else -> (newest_value(last_visible_id) != watermark || failure_ends_wait && newest_value(status) != success)
+            :: kept != success -> break
+            :: else -> (newest_value(last_visible_id) != watermark || newest_value(status) != success)
             fi
         fi
     od
 }
 
 proctype inserter(byte t) {
-    bool accepted;
-    int observed, first_id, total, mapped, watermark, kept;
+    bool accepted, succeeded;
+    int expected, first_id, total, mapped, watermark, kept;
+    // the claim: from the watermark acquired, or from the claim as last read, never from a closed one
     if
-    :: claiming_mutex -> lock_claiming(t, observed)
+    :: quiescent_claim -> load(t, last_visible_id, order_acquire, first_id)
+    :: else -> load(t, claimed_rows, order_relaxed, first_id)
+    fi;
+    if
+    :: first_id == closed_rows -> goto finished
     :: else
     fi;
+    total = first_id + rows_per_batch;
+    expected = first_id;
     atomic {
-        load(t, claimed_rows, order_relaxed, first_id);
-        total = first_id + rows_per_batch
+        compare_exchange(t, claimed_rows, order_acq_rel, expected, total, succeeded);
+        if
+        :: succeeded -> take_range(t, first_id, rows_per_batch)
+        :: else
+        fi
     };
+    if
+    :: !succeeded -> goto finished
+    :: else
+    fi;
     grow(t, total, mapped);
     // the launch: everything the host thread wrote or acquired is visible to the grid it launches
-    atomic { merge_view(t, device_thread) };
-    // the launch's verdict: accepted, the claim is stored and the grid publishes; rejected, it is un-claimed exactly
+    atomic {
+        assert(newest_value(mapped_rows) >= total);
+        merge_view(t, device_thread)
+    };
+    // the launch's verdict: accepted, the grid publishes; rejected, the claim is stored back
     if
     :: true ->
         atomic {
-            claim_range(t, first_id, rows_per_batch);
-            store(t, claimed_rows, order_release, total);
             pending[t] = true;
             refused[t] = -1;
             accepted = true
         }
     :: true ->
         if
-        :: !unclaim_on_rejection ->
+        :: unclaim_on_rejection ->
             atomic {
-                claim_range(t, first_id, rows_per_batch);
-                store(t, claimed_rows, order_release, total)
+                store(t, claimed_rows, order_release, first_id);
+                drop_range(t)
             }
         :: else
         fi
-    fi;
-    if
-    :: claiming_mutex -> unlock_claiming(t)
-    :: else
     fi;
     // the blocking insert: the drain, every row landed, then the turn; the first inserter's drain may
     // fail instead, keeping its failure and leaving its rows invisible
@@ -244,69 +231,67 @@ proctype inserter(byte t) {
     :: accepted && drain_before_turn ->
         (!pending[t]);
         if
-        :: true -> publish(t, first_id, total, watermark, kept)
+        :: true -> publish(t, t + 0, first_id, total, watermark, kept)
         :: t == 0 -> read_modify_write(t, status, order_acq_rel, kept, device_error)
         fi
     :: accepted && !drain_before_turn ->
-        publish(t, first_id, total, watermark, kept);
+        publish(t, t + 0, first_id, total, watermark, kept);
         (!pending[t])
     :: else
     fi;
-    inserters_done++
+finished:
+    done++
 }
 
-// plan_load and finish: the claim if free, the growth, the rows landed, the restored count, the
-// claim's release, and the turn once the mutex is dropped
+// plan_load and finish: on an open dispenser the rows claimed like a batch, or the dispenser closed
+// as the sharded index does; then the growth, the rows landed, the restored count, the turn, and the
+// reopening of a closed dispenser; or the plan dies before `finish` and gives back what it took
 proctype loader(byte t) {
-    int observed, base, total, mapped, watermark, kept;
-    if
-    :: !base_under_claim -> load(t, claimed_rows, order_acquire, base)
-    :: else
-    fi;
+    bool closing, succeeded, reopened;
+    int expected, base, total, mapped, watermark, kept;
+    load(t, last_visible_id, order_acquire, base);
+    total = base + rows_per_load;
+    expected = base;
     atomic {
-        read_modify_write(t, claiming, order_acquire, observed, 1);
         if
-        :: observed != 0 ->
-            contended++;
-            assert(memory != sc || claim_holders == 1)
-        :: else ->
-            assert(memory != sc || claim_holders == 0);
-            claim_holders++
+        :: closing = false; compare_exchange(t, claimed_rows, order_acq_rel, expected, total, succeeded)
+        :: closing = true; compare_exchange(t, claimed_rows, order_acq_rel, expected, closed_rows, succeeded)
+        fi;
+        if
+        :: succeeded -> take_range(2, base, rows_per_load)
+        :: else
         fi
     };
     if
-    :: observed != 0
-    :: else ->
+    :: !succeeded -> goto finished
+    :: else
+    fi;
+    grow(t, total, mapped);
+    if
+    :: true ->
         atomic {
-            if
-            :: base_under_claim -> load(t, claimed_rows, order_acquire, base)
-            :: else
-            fi;
-            total = base + rows_per_load
+            filled[base] = true;
+            filled[base + 1] = true
         };
-        grow(t, total, mapped);
-        // the plan's verdict: finished, the rows are claimed and restored; dead before `finish`,
-        // the flat matrices stay grown and nothing is claimed, so the next batch reuses the base
-        if
-        :: true ->
-            atomic {
-                claim_range(2, base, rows_per_load);
-                filled[base] = true;
-                filled[base + 1] = true
-            };
-            store(t, published_rows, order_relaxed, total);
-            store(t, claimed_rows, order_release, total)
-        :: true -> skip
-        fi;
-        if
-        :: unlock_on_abandon -> unlock_claiming(t)
-        :: else
-        fi;
-        if
-        :: claimed[2] -> publish(t, base, total, watermark, kept)
-        :: else
-        fi
-    fi
+        store(t, published_rows, order_relaxed, total);
+        publish(t, 2, base, total, watermark, kept)
+    :: closing -> drop_range(2)
+    :: !closing && unclaim_on_abandon ->
+        atomic {
+            store(t, claimed_rows, order_release, base);
+            drop_range(2)
+        }
+    :: !closing && !unclaim_on_abandon -> goto finished
+    fi;
+    if
+    :: closing ->
+        load(t, last_visible_id, order_acquire, watermark);
+        expected = closed_rows;
+        compare_exchange(t, claimed_rows, order_acq_rel, expected, watermark, reopened)
+    :: else
+    fi;
+finished:
+    done++
 }
 
 // submit_search_: the bound is size(), every row below it is read, and the walk follows row 0's
@@ -370,8 +355,15 @@ proctype device(byte t) {
     do
     :: serve_row(t, 0, published, id, mapped)
     :: serve_row(t, 1, published, id, mapped)
-    :: (inserters_done == 2 && !pending[0] && !pending[1]) -> break
+    :: (done == 3 && !pending[0] && !pending[1]) -> break
     od
 }
 
-init { atomic { run inserter(0); run inserter(1); run searcher(2); run loader(3); run device(device_thread) } }
+// once everyone is done: the claim open and level with the watermark, unless a failure was kept
+proctype checker() {
+    (done == 3);
+    assert(memory != sc || newest_value(status) != success ||
+           newest_value(claimed_rows) == newest_value(last_visible_id))
+}
+
+init { atomic { run inserter(0); run inserter(1); run searcher(2); run loader(3); run device(device_thread); run checker() } }

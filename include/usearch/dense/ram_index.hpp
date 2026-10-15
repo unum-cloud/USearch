@@ -56,12 +56,17 @@ struct ram_cursor;
  *
  *  Construction and traversal run simultaneously. Every node's neighbors carry that node's own
  *  lock in their leading slot, placing locks at the start of independent cache lines; the rest
- *  of the book-keeping is a handful of atomics, none of them compare-and-swap.
+ *  of the book-keeping is a handful of atomics.
  *
- *  A batch publishes whole: one add dispenses its rows' IDs as one range, and one watermark turn
- *  makes every row visible, so a reader sees all of a batch or none of it. The turns run in
- *  dispensed order, so the publication gap is bounded by the batches in flight, and a small batch
- *  waits behind an earlier, larger batch's wiring before its turn.
+ *  A batch publishes whole: one compare-exchange dispenses its rows' IDs as one range, and one
+ *  watermark turn makes every row visible, so a reader sees all of a batch or none of it. The
+ *  turns run in dispensed order, so the publication gap is bounded by the batches in flight, and
+ *  a small batch waits behind an earlier, larger batch's wiring before its turn.
+ *
+ *  The sharded index closes the dispenser around its refines and loads: closing succeeds only
+ *  once every dispensed ID is published, and a dispense meeting a closed dispenser answers
+ *  @c contended_k, so no batch wires beside a load landing at the watermark or a refine
+ *  rewriting rows.
  *
  *  @section dense_ram_index_persistence Persistence
  *
@@ -720,10 +725,10 @@ struct ram_index {
     /** A row's chunk and its offset within that chunk. */
     using location_t = typename chunk_schedule_t::location_t;
 
-    /** Ceiling on dispensable node IDs: the all-ones ID is the sentinel and must never be
-     *  claimed, so the final chunk holds one row that stays forever unclaimed.
-     *  @ref dense_ram_index_growth */
-    inline static constexpr std::size_t max_node_count_k = (u64_t(1) << 32) - 1u;
+    /** Ceiling on dispensable node IDs: the all-ones ID is the sentinel and marks a closed
+     *  dispenser, so no count reaches it and the final chunk holds two rows that stay forever
+     *  unclaimed. @ref dense_ram_index_growth */
+    inline static constexpr std::size_t max_node_count_k = (u64_t(1) << 32) - 2u;
 
     /** Upper bound on the chunk count: every chunk before the one the first undispensable ID lands in.
      *  @ref dense_ram_index_growth */
@@ -1087,10 +1092,10 @@ struct ram_index {
     /**
      *  @brief Inserts a batch of @p new_vectors, reporting each one's assigned node ID.
      *
-     *  One add dispenses the batch's IDs; every row lands its payload, walks the graph for candidates
-     *  and is wired, then one watermark turn publishes them all. All fallible scratch allocations
-     *  happen before the dispense; once IDs are dispensed, this thread must roll forward to
-     *  publication. @ref dense_ram_index_concurrency
+     *  One compare-exchange dispenses the batch's IDs; every row lands its payload, walks the graph
+     *  for candidates and is wired, then one watermark turn publishes them all. All fallible
+     *  scratch allocations happen before the dispense; once IDs are dispensed, this thread must
+     *  roll forward to publication. @ref dense_ram_index_concurrency
      *
      *  @param[in] new_vectors The batch to insert, one row per vector, in the frozen geometry.
      *  @param[out] assigned_ids Either empty, or one slot per incoming vector receiving its node
@@ -1128,7 +1133,9 @@ struct ram_index {
         // forward to publishing every ID it claims.
         auto [batch_claim, status] = claim(incoming_vectors_count);
         if (failed(status)) return {{size()}, status};
-        insert(std::move(batch_claim), new_vectors, assigned_ids, context, config);
+        if (status_t const inserted = insert(std::move(batch_claim), new_vectors, assigned_ids, context, config);
+            failed(inserted))
+            return {{size()}, inserted};
 
         insert_result_t result;
         result.new_size = size();
@@ -1232,23 +1239,29 @@ struct ram_index {
 
     /**
      *  @brief Inserts against capacity @p claim already obtained and scratch already reserved - the
-     *      half of an insertion that cannot fail, so a batch spanning several indexes commits or is
-     *      refused as a whole. Consumes @p claim; telemetry accrues in @p context.
+     *      half of an insertion that fails only on a closed dispenser, before dispensing any ID, so
+     *      a batch spanning several indexes commits or is refused as a whole. Consumes @p claim
+     *      unless refused; telemetry accrues in @p context.
      *
-     *  One add dispenses the claim's IDs, every row is wired, and one watermark turn publishes them
-     *  together. @p on_assigned fires per row with the assigned node ID, before the walk and before
-     *  publication - so an outer layer's per-ID state, like a key column, is written ahead of the
-     *  watermark turn and no reachable node can be observed without it.
+     *  One compare-exchange dispenses the claim's IDs, every row is wired, and one watermark turn
+     *  publishes them together. @p on_assigned fires per row with the assigned node ID, before the
+     *  walk and before publication - so an outer layer's per-ID state, like a key column, is
+     *  written ahead of the watermark turn and no reachable node can be observed without it.
+     *
+     *  @retval contended_k The dispenser is closed by a refine or a load; the claim's death
+     *      releases its rows.
      */
     template <typename callback_type_ = dummy_callback_t>
-    void insert(capacity_claim_t&& claim, vectors_view_t new_vectors, node_ids_span_t assigned_ids,
-                traversal_context_t& context, insert_config_t config = {}, callback_type_&& on_assigned = {}) noexcept {
+    status_t insert(capacity_claim_t&& claim, vectors_view_t new_vectors, node_ids_span_t assigned_ids,
+                    traversal_context_t& context, insert_config_t config = {},
+                    callback_type_&& on_assigned = {}) noexcept {
         assert(claim.rows() == new_vectors.extent(0) && "A claim holds exactly its batch's rows");
         // An empty range takes no turn: its first ID opens the next range too, which may publish first.
-        if (!claim) return;
+        if (!claim) return status_t::success_k;
         bool const report_assigned_ids = assigned_ids.size() != 0;
         rows_view_t const new_rows = new_vectors;
-        iota_view<node_id_t> const range = dispense_(std::move(claim));
+        auto const [range, dispense_status] = dispense_(std::move(claim));
+        if (failed(dispense_status)) return dispense_status;
         for (node_id_t const new_node_id : range) {
             std::size_t const row = new_node_id - range.first;
             if (report_assigned_ids) assigned_ids[row] = new_node_id;
@@ -1257,6 +1270,7 @@ struct ram_index {
         }
         await_turn_(range);
         publish_(range);
+        return status_t::success_k;
     }
 
 #pragma endregion Insertion
@@ -2030,7 +2044,7 @@ struct ram_index {
         /** Rows under the watermark at planning. */
         node_id_t visible = 0;
 
-        /** The dispenser at planning; equal to @c visible, else no plan was made. */
+        /** The dispenser at planning; equal to @c visible or closed, else no plan was made. */
         node_id_t dispensed = 0;
 
         /** The allocation counter at planning - the growth sensor the probe re-reads. */
@@ -2168,10 +2182,12 @@ struct ram_index {
                 // Orders the staged reads before the re-reads below; pairs with the release fence
                 // heading `back_link_neighbors`, so an overlapped row edit surfaces here.
                 std::atomic_thread_fence(std::memory_order_acquire);
+                // Closed holds no batch: a refine moves no counter, a load the watermark.
+                node_id_t const dispensed_now =
+                    atomic_ref<node_id_t const>(index_->next_dispensed_id_).load(std::memory_order_relaxed);
                 bool const settled =
                     atomic_ref<node_id_t const>(index_->last_visible_id_).load(std::memory_order_relaxed) == visible &&
-                    atomic_ref<node_id_t const>(index_->next_dispensed_id_).load(std::memory_order_relaxed) ==
-                        dispensed &&
+                    (dispensed_now == visible || dispensed_now == node_id_unknown_k) &&
                     atomic_ref<node_id_t const>(index_->last_allocated_id_).load(std::memory_order_relaxed) ==
                         allocated;
                 if (!settled) return status_t::contended_k;
@@ -2207,7 +2223,7 @@ struct ram_index {
         plan.visible = atomic_ref<node_id_t const>(last_visible_id_).load(std::memory_order_acquire);
         plan.dispensed = atomic_ref<node_id_t const>(next_dispensed_id_).load(std::memory_order_acquire);
         plan.allocated = atomic_ref<node_id_t const>(last_allocated_id_).load(std::memory_order_acquire);
-        if (plan.visible != plan.dispensed) return {{}, status_t::contended_k};
+        if (plan.dispensed != plan.visible && plan.dispensed != node_id_unknown_k) return {{}, status_t::contended_k};
         std::size_t const rows = static_cast<std::size_t>(plan.visible);
         if (columns.vectors.size() < rows * stored_row_values(frozen) * sizeof(scalar_t) ||
             columns.neighbors.size() < rows * frozen.connectivity() * sizeof(node_id_t) ||
@@ -2437,8 +2453,9 @@ struct ram_index {
 
         /** Publishes the appended rows once every chunk's vectors and neighbors landed: the claim
          *  consumed first, then identity, then the watermark last with a release. The identity
-         *  releases too - a posted, order-free add could land after the watermark. A success
-         *  spends the plan; a refusal leaves it whole, so the missing steps can still land. */
+         *  releases too, and moves only an open dispenser: a closed one stays closed for its closer
+         *  to reopen past the rows. A success spends the plan; a refusal leaves it whole, so the
+         *  missing steps can still land. */
         status_t finish() noexcept {
             if (!index_) return status_t::uninitialized_k;
             if (atomic_ref<std::size_t>(covered_vectors).load(std::memory_order_acquire) != rows ||
@@ -2446,8 +2463,10 @@ struct ram_index {
                 return status_t::config_mismatch_k;
             if (rows) {
                 claim_.consume();
+                node_id_t dispensed = base;
                 atomic_ref<node_id_t>(index_->next_dispensed_id_)
-                    .add(static_cast<node_id_t>(rows), std::memory_order_release);
+                    .compare_exchange_strong(dispensed, static_cast<node_id_t>(base + rows), std::memory_order_release,
+                                             std::memory_order_relaxed);
                 atomic_ref<node_id_t>(index_->last_visible_id_)
                     .store(static_cast<node_id_t>(base + rows), std::memory_order_release);
             }
@@ -2471,7 +2490,8 @@ struct ram_index {
      *      and chunks grow only on a genuine deficit.
      *
      *  Refuses an unfrozen geometry, columns shorter than the rows, an insert mid-flight, and rows
-     *  past the ID space.
+     *  past the ID space. The sharded index closes the dispenser first, so no insert arrives before
+     *  @c finish; a direct caller keeps insertions out itself.
      *
      *  @param[in] columns Where the rows come from, every column but an empty norms one sized for
      *      @p rows.
@@ -2500,8 +2520,8 @@ struct ram_index {
         if (!geometry()) return {{}, status_t::config_mismatch_k};
         node_id_t const visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
         if (!rows) return {load_plan_t {*this, {}, {}, visible, {}}, status_t::success_k};
-        if (visible != atomic_ref<node_id_t>(next_dispensed_id_).load(std::memory_order_acquire))
-            return {{}, status_t::contended_k};
+        node_id_t const dispensed = atomic_ref<node_id_t>(next_dispensed_id_).load(std::memory_order_acquire);
+        if (dispensed != visible && dispensed != node_id_unknown_k) return {{}, status_t::contended_k};
         if (rows > max_node_count_k - visible) return {{}, status_t::overflow_k};
         auto [capacity_claim, status] = claim(rows);
         if (failed(status)) return {{}, status};
@@ -3027,15 +3047,41 @@ struct ram_index {
         }
     }
 
-    /** Dispenses one range of IDs for every row @p claim holds with one add, and consumes the claim;
-     *  a batch publishes that range whole. Every ID it hands out must be published, so nothing after
-     *  it may fail. */
-    iota_view<node_id_t> dispense_(capacity_claim_t&& claim) noexcept {
+    /** Dispenses one range of IDs for every row @p claim holds with one compare-exchange, and
+     *  consumes the claim; a batch publishes that range whole. Every ID it hands out must be
+     *  published, so nothing after it may fail. A closed dispenser answers @c contended_k and
+     *  leaves the claim whole. */
+    expected<iota_view<node_id_t>> dispense_(capacity_claim_t&& claim) noexcept {
         node_id_t const rows = static_cast<node_id_t>(claim.rows());
-        claim.consume();
         // The `acq_rel` order chains the hosting chunks' growth through the all-RMW dispenser to this thread.
-        node_id_t const first = atomic_ref<node_id_t>(next_dispensed_id_).fetch_add(rows, std::memory_order_acq_rel);
-        return {first, static_cast<node_id_t>(first + rows)};
+        atomic_ref<node_id_t> const dispenser {next_dispensed_id_};
+        node_id_t first = dispenser.load(std::memory_order_acquire);
+        while (first != node_id_unknown_k &&
+               !dispenser.compare_exchange_weak(first, static_cast<node_id_t>(first + rows), std::memory_order_acq_rel,
+                                                std::memory_order_acquire)) {}
+        if (first == node_id_unknown_k) return {{}, status_t::contended_k};
+        claim.consume();
+        return {{first, static_cast<node_id_t>(first + rows)}, status_t::success_k};
+    }
+
+    /** Closes the dispenser at the watermark: one compare-exchange that succeeds only while every
+     *  dispensed ID is published, after which every dispense refuses until @ref reopen_. */
+    status_t close_() noexcept {
+        node_id_t visible = atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire);
+        return atomic_ref<node_id_t>(next_dispensed_id_)
+                       .compare_exchange_strong(visible, node_id_unknown_k, std::memory_order_acq_rel,
+                                                std::memory_order_relaxed)
+                   ? status_t::success_k
+                   : status_t::contended_k;
+    }
+
+    /** Reopens a closed dispenser at the watermark, past every row a load published meanwhile; an
+     *  open one stays as it is. */
+    void reopen_() noexcept {
+        node_id_t closed = node_id_unknown_k;
+        atomic_ref<node_id_t>(next_dispensed_id_)
+            .compare_exchange_strong(closed, atomic_ref<node_id_t>(last_visible_id_).load(std::memory_order_acquire),
+                                     std::memory_order_acq_rel, std::memory_order_relaxed);
     }
 
     /**
@@ -3818,8 +3864,9 @@ struct ram_index {
      *  the chunks; typically incremented in batches. */
     alignas(default_alignment_k) node_id_t last_allocated_id_ {0};
 
-    /** The ID dispenser: the first identifier of the next batch's range. One add per batch moves
-     *  it past every row of that batch, so a batch's IDs are contiguous. @ref dense_ram_index_concurrency */
+    /** The ID dispenser: the first identifier of the next batch's range, or the sentinel while a
+     *  refine or a load holds it closed. One compare-exchange per batch moves it past every row of
+     *  that batch, so a batch's IDs are contiguous. @ref dense_ram_index_concurrency */
     alignas(default_alignment_k) node_id_t next_dispensed_id_ {0};
 
     /** The visibility watermark: every ID strictly below it is published, its vector, norms &
